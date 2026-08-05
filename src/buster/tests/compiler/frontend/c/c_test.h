@@ -8,7 +8,8 @@
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL CType* c_type_from_id(CParseResult* parse, CTypeId id);
 BUSTER_F_DECL CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name);
-BUSTER_F_DECL bool c_test_constant_initializer_u64_slots(void);
-BUSTER_F_DECL bool c_test_promoted_member_scratch(void);
+BUSTER_F_DECL u64 c_test_ir_initializer_slot_count(IrType* type);
+BUSTER_F_DECL bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool* restored_pointer_out,
+                                                           bool* old_tag_restored_out, bool* grown_tag_preserved_out);
 BUSTER_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments);
 #endif

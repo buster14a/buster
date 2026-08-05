@@ -1200,6 +1200,66 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     if (c_static_local.has_object)
     {
         BUSTER_TEST(arguments, c_static_local.object.sections[OBJECT_SECTION_READ_ONLY_DATA].data.length != 0);
+        bool mutable_zero_found = false;
+        bool tls_zero_found = false;
+        bool const_zero_found = false;
+        bool empty_string_found = false;
+        bool tls_empty_string_found = false;
+        bool const_empty_string_found = false;
+        bool mutable_scalar_zero_found = false;
+        bool tls_scalar_zero_found = false;
+        bool const_scalar_zero_found = false;
+        bool mutable_pointer_zero_found = false;
+        bool tls_pointer_zero_found = false;
+        bool const_pointer_zero_found = false;
+        bool nonzero_found = false;
+        for (u32 symbol_index = 0; symbol_index < c_static_local.object.symbol_count; symbol_index += 1)
+        {
+            ObjectSymbol* symbol = c_static_local.object.symbols + symbol_index;
+            if (symbol->kind != OBJECT_SYMBOL_DATA)
+            {
+                continue;
+            }
+            mutable_zero_found |= string_starts_with_sequence(symbol->name, S8(".L.static_zero_aggregate_sum.mutable_zero.")) &&
+                                  symbol->section == OBJECT_SECTION_ZERO;
+            tls_zero_found |= string_starts_with_sequence(symbol->name, S8(".L.static_zero_aggregate_sum.tls_zero.")) &&
+                              symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+            const_zero_found |= string_starts_with_sequence(symbol->name, S8(".L.static_zero_aggregate_sum.const_zero.")) &&
+                                symbol->section == OBJECT_SECTION_READ_ONLY_DATA;
+            empty_string_found |= string_starts_with_sequence(symbol->name, S8(".L.static_zero_aggregate_sum.empty_string.")) &&
+                                  symbol->section == OBJECT_SECTION_ZERO;
+            tls_empty_string_found |= string_starts_with_sequence(symbol->name, S8(".L.static_zero_aggregate_sum.tls_empty_string.")) &&
+                                      symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+            const_empty_string_found |= string_starts_with_sequence(symbol->name, S8(".L.static_zero_aggregate_sum.const_empty_string.")) &&
+                                        symbol->section == OBJECT_SECTION_READ_ONLY_DATA;
+            mutable_scalar_zero_found |= string_starts_with_sequence(symbol->name, S8(".L.static_zero_aggregate_sum.mutable_scalar_zero.")) &&
+                                         symbol->section == OBJECT_SECTION_ZERO;
+            tls_scalar_zero_found |= string_starts_with_sequence(symbol->name, S8(".L.static_zero_aggregate_sum.tls_scalar_zero.")) &&
+                                     symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+            const_scalar_zero_found |= string_starts_with_sequence(symbol->name, S8(".L.static_zero_aggregate_sum.const_scalar_zero.")) &&
+                                       symbol->section == OBJECT_SECTION_READ_ONLY_DATA;
+            mutable_pointer_zero_found |= string_starts_with_sequence(symbol->name, S8(".L.static_zero_aggregate_sum.mutable_pointer_zero.")) &&
+                                          symbol->section == OBJECT_SECTION_ZERO;
+            tls_pointer_zero_found |= string_starts_with_sequence(symbol->name, S8(".L.static_zero_aggregate_sum.tls_pointer_zero.")) &&
+                                      symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+            const_pointer_zero_found |= string_starts_with_sequence(symbol->name, S8(".L.static_zero_aggregate_sum.const_pointer_zero.")) &&
+                                        symbol->section == OBJECT_SECTION_READ_ONLY_DATA;
+            nonzero_found |= string_starts_with_sequence(symbol->name, S8(".L.static_zero_aggregate_sum.nonzero.")) &&
+                             symbol->section == OBJECT_SECTION_DATA;
+        }
+        BUSTER_TEST(arguments, mutable_zero_found);
+        BUSTER_TEST(arguments, tls_zero_found);
+        BUSTER_TEST(arguments, const_zero_found);
+        BUSTER_TEST(arguments, empty_string_found);
+        BUSTER_TEST(arguments, tls_empty_string_found);
+        BUSTER_TEST(arguments, const_empty_string_found);
+        BUSTER_TEST(arguments, mutable_scalar_zero_found);
+        BUSTER_TEST(arguments, tls_scalar_zero_found);
+        BUSTER_TEST(arguments, const_scalar_zero_found);
+        BUSTER_TEST(arguments, mutable_pointer_zero_found);
+        BUSTER_TEST(arguments, tls_pointer_zero_found);
+        BUSTER_TEST(arguments, const_pointer_zero_found);
+        BUSTER_TEST(arguments, nonzero_found);
     }
     if (c_static_local.error == COMPILER_DRIVER_ERROR_NONE)
     {

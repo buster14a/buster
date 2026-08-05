@@ -3858,6 +3858,8 @@ struct CTypeParseMachine
     CTypeParseFrame* frames;
     CTypeMutation* mutations;
     CParseExpressionTypeTask* expression_tasks;
+    CTypeId* incomplete_array_chain;
+    u32 incomplete_array_chain_capacity;
     Arena* scratch_arena;
     CParsePromotedMemberWork* promoted_member_work;
     bool* promoted_member_visited;
@@ -3943,15 +3945,16 @@ BUSTER_GLOBAL_LOCAL bool c_type_parse_record_mutation(CTypeParseMachine* machine
 
 BUSTER_GLOBAL_LOCAL void c_type_parse_rollback(CTypeParseMachine* machine, CParseResult* result, CParseResult checkpoint, u32 mutation_mark)
 {
+    CType* checkpoint_types = checkpoint.types;
+    *result = checkpoint;
     while (machine->mutation_count > mutation_mark)
     {
         CTypeMutation mutation = machine->mutations[--machine->mutation_count];
-        if (mutation.id.value < checkpoint.type_count)
+        if (checkpoint_types && mutation.id.value < checkpoint.type_count)
         {
-            result->types[mutation.id.value] = mutation.previous;
+            checkpoint_types[mutation.id.value] = mutation.previous;
         }
     }
-    *result = checkpoint;
 }
 
 BUSTER_GLOBAL_LOCAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 frame_start);
@@ -6054,6 +6057,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_named_label_at(CPreprocessResult preprocess, u32 b
 
 BUSTER_GLOBAL_LOCAL bool c_ir_tokens_are_string_literals(CPreprocessResult preprocess, u32 start, u32 end);
 
+typedef struct CParseInitializerContinuation CParseInitializerContinuation;
+
 typedef enum CIrStringEncoding
 {
     C_IR_STRING_ENCODING_ORDINARY,
@@ -6070,16 +6075,110 @@ struct CIrDecodedString
     u64 element_count;
     u32 element_width;
     CTypeKind element_kind;
+    CIrStringEncoding encoding;
 };
 
 BUSTER_GLOBAL_LOCAL bool c_ir_decode_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
                                                                      CIrDecodedString* decoded_out);
 
+BUSTER_GLOBAL_LOCAL bool c_parse_arena_can_allocate(Arena* arena, u64 size, u64 alignment)
+{
+    if (!arena || !alignment || !arena->granularity || alignment - 1 > UINT64_MAX - arena->position)
+    {
+        return false;
+    }
+    u64 position = (arena->position + alignment - 1) & ~(alignment - 1);
+    if (position > arena->reserved_size || size > arena->reserved_size - position)
+    {
+        return false;
+    }
+    u64 end = position + size;
+    u64 granularity = arena->granularity;
+    if (granularity - 1 > UINT64_MAX - end)
+    {
+        return false;
+    }
+    u64 committed_end = (end + granularity - 1) & ~(granularity - 1);
+    return committed_end <= arena->reserved_size;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_result_reserve_types(CParseResult* result, u32 additional)
+{
+    if (!result || !additional || additional <= result->type_capacity - BUSTER_MIN(result->type_count, result->type_capacity))
+    {
+        return result != 0;
+    }
+    u64 required = (u64)result->type_count + additional;
+    if (required > UINT32_MAX || !result->arena)
+    {
+        return false;
+    }
+    u32 capacity = result->type_capacity ? result->type_capacity : 1;
+    while ((u64)capacity < required)
+    {
+        if (capacity > UINT32_MAX / 2)
+        {
+            capacity = (u32)required;
+            break;
+        }
+        capacity *= 2;
+    }
+    u64 allocation_size = (u64)capacity * (u64)sizeof(CType);
+    if (!c_parse_arena_can_allocate(result->arena, allocation_size, BUSTER_ALIGN_OF(CType)))
+    {
+        return false;
+    }
+    CType* types = (CType*)arena_allocate_bytes(result->arena, allocation_size, BUSTER_ALIGN_OF(CType));
+    if (result->types && result->type_count)
+    {
+        memcpy(types, result->types, sizeof(*types) * result->type_count);
+    }
+    result->types = types;
+    result->type_capacity = capacity;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_result_reserve_array_bounds(CParseResult* result, u32 additional)
+{
+    if (!result || !additional || additional <= result->array_bound_capacity - BUSTER_MIN(result->array_bound_count, result->array_bound_capacity))
+    {
+        return result != 0;
+    }
+    u64 required = (u64)result->array_bound_count + additional;
+    if (required > UINT32_MAX || !result->arena)
+    {
+        return false;
+    }
+    u32 capacity = result->array_bound_capacity ? result->array_bound_capacity : 1;
+    while ((u64)capacity < required)
+    {
+        if (capacity > UINT32_MAX / 2)
+        {
+            capacity = (u32)required;
+            break;
+        }
+        capacity *= 2;
+    }
+    u64 allocation_size = (u64)capacity * (u64)sizeof(CArrayBound);
+    if (!c_parse_arena_can_allocate(result->arena, allocation_size, BUSTER_ALIGN_OF(CArrayBound)))
+    {
+        return false;
+    }
+    CArrayBound* bounds = (CArrayBound*)arena_allocate_bytes(result->arena, allocation_size, BUSTER_ALIGN_OF(CArrayBound));
+    if (result->array_bounds && result->array_bound_count)
+    {
+        memcpy(bounds, result->array_bounds, sizeof(*bounds) * result->array_bound_count);
+    }
+    result->array_bounds = bounds;
+    result->array_bound_capacity = capacity;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_string_literal_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 end)
 {
     CIrDecodedString decoded = {0};
     if (!c_ir_decode_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, &decoded) || decoded.element_count == UINT64_MAX ||
-        result->array_bound_count >= result->array_bound_capacity)
+        !c_parse_result_reserve_array_bounds(result, 1))
     {
         return C_TYPE_ID_INVALID;
     }
@@ -6112,23 +6211,96 @@ struct CParseInitializerInferenceFrame
 };
 
 typedef struct CParseInitializerInferenceDesignator CParseInitializerInferenceDesignator;
+struct CParseInitializerContinuation
+{
+    CTypeId type;
+    u64 next_index;
+};
+
 struct CParseInitializerInferenceDesignator
 {
     CTypeId value_type;
     u32 value_start;
     u64 selected;
+    CParseInitializerContinuation* continuations;
+    u32 continuation_count;
     bool has_designator;
 };
+
+BUSTER_GLOBAL_LOCAL bool c_parse_initializer_member_is_slot(CMember* member)
+{
+    return member && !(member->is_bit_field && !member->name.length);
+}
+
+BUSTER_GLOBAL_LOCAL u32 c_parse_initializer_member_count(CParseResult* result, CType* type)
+{
+    if (!result || !type || (type->kind != C_TYPE_STRUCT && type->kind != C_TYPE_UNION))
+    {
+        return 0;
+    }
+    u32 count = 0;
+    for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
+    {
+        count += c_parse_initializer_member_is_slot(result->members + type->member_start + field_index);
+    }
+    return type->kind == C_TYPE_UNION ? (count != 0) : count;
+}
+
+BUSTER_GLOBAL_LOCAL u32 c_parse_initializer_member_slot(CParseResult* result, CType* type, u32 field_index)
+{
+    if (!result || !type || field_index >= type->member_count ||
+        !c_parse_initializer_member_is_slot(result->members + type->member_start + field_index))
+    {
+        return UINT32_MAX;
+    }
+    if (type->kind == C_TYPE_UNION)
+    {
+        return 0;
+    }
+    u32 slot = 0;
+    for (u32 index = 0; index < field_index; index += 1)
+    {
+        slot += c_parse_initializer_member_is_slot(result->members + type->member_start + index);
+    }
+    return slot;
+}
+
+BUSTER_GLOBAL_LOCAL CMember* c_parse_initializer_member_at(CParseResult* result, CType* type, u32 slot)
+{
+    if (!result || !type || (type->kind != C_TYPE_STRUCT && type->kind != C_TYPE_UNION))
+    {
+        return 0;
+    }
+    u32 current = 0;
+    for (u32 field_index = 0; field_index < type->member_count; field_index += 1)
+    {
+        CMember* member = result->members + type->member_start + field_index;
+        if (!c_parse_initializer_member_is_slot(member))
+        {
+            continue;
+        }
+        if (current++ == slot || type->kind == C_TYPE_UNION)
+        {
+            return member;
+        }
+    }
+    return 0;
+}
 
 struct CParsePromotedMemberWork
 {
     CTypeId type;
     u32 root_field;
+    u32 depth;
 };
 
 BUSTER_GLOBAL_LOCAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, CParseResult* result, CTypeId root, String8 name, CTypeId* type_out,
-                                                      u32* root_field_out)
+                                                      u32* root_field_out, bool* ambiguous_out)
 {
+    if (ambiguous_out)
+    {
+        *ambiguous_out = false;
+    }
     u32 capacity = machine->promoted_member_capacity;
     if (!capacity || result->type_count > capacity || !machine->promoted_member_work || !machine->promoted_member_visited)
     {
@@ -6140,7 +6312,9 @@ BUSTER_GLOBAL_LOCAL bool c_parse_promoted_member_type(CTypeParseMachine* machine
     u32 work_count = 1;
     u32 work_index = 0;
     bool found = false;
-    work[0] = (CParsePromotedMemberWork){.type = root, .root_field = UINT32_MAX};
+    bool ambiguous = false;
+    u32 found_depth = UINT32_MAX;
+    work[0] = (CParsePromotedMemberWork){.type = root, .root_field = UINT32_MAX, .depth = 0};
     while (work_index < work_count)
     {
         CParsePromotedMemberWork current = work[work_index++];
@@ -6154,6 +6328,10 @@ BUSTER_GLOBAL_LOCAL bool c_parse_promoted_member_type(CTypeParseMachine* machine
             continue;
         }
         visited[type_id.value] = true;
+        if (found && current.depth > found_depth)
+        {
+            break;
+        }
         CType* type = result->types + type_id.value;
         if (type->kind != C_TYPE_STRUCT && type->kind != C_TYPE_UNION)
         {
@@ -6164,11 +6342,22 @@ BUSTER_GLOBAL_LOCAL bool c_parse_promoted_member_type(CTypeParseMachine* machine
             CMember* field = result->members + type->member_start + field_index;
             if (string_equal(field->name, name))
             {
-                *type_out = field->type;
-                *root_field_out = current.root_field == UINT32_MAX ? field_index : current.root_field;
-                found = true;
-                work_index = work_count;
-                break;
+                if (!found)
+                {
+                    *type_out = field->type;
+                    *root_field_out = current.root_field == UINT32_MAX ? field_index : current.root_field;
+                    found = true;
+                    found_depth = current.depth;
+                }
+                else if (current.depth == found_depth)
+                {
+                    ambiguous = true;
+                }
+                continue;
+            }
+            if (found && current.depth >= found_depth)
+            {
+                continue;
             }
             CTypeId child_id = field->type;
             while (child_id.value < result->type_count && result->types[child_id.value].has_unqualified_type)
@@ -6187,10 +6376,15 @@ BUSTER_GLOBAL_LOCAL bool c_parse_promoted_member_type(CTypeParseMachine* machine
             work[work_count++] = (CParsePromotedMemberWork){
                 .type = child_id,
                 .root_field = current.root_field == UINT32_MAX ? field_index : current.root_field,
+                .depth = current.depth + 1,
             };
         }
     }
-    return found;
+    if (ambiguous_out)
+    {
+        *ambiguous_out = ambiguous;
+    }
+    return found && !ambiguous;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_parse_initializer_type_slots(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
@@ -6225,7 +6419,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_initializer_type_slots(CTypeParseMachine* machi
     }
     if (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION)
     {
-        *slots_out = type->kind == C_TYPE_UNION ? (type->member_count != 0) : type->member_count;
+        *slots_out = c_parse_initializer_member_count(result, type);
         return true;
     }
     return false;
@@ -6249,6 +6443,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_initializer_index(CTypeParseMachine* machine, A
 
 BUSTER_GLOBAL_LOCAL bool c_parse_initializer_designator(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                          CScopeId scope, CParseInitializerInferenceFrame* frame, u32 start, u32 limit,
+                                                         CParseInitializerContinuation* continuation_work, u32 continuation_capacity,
                                                          CParseInitializerInferenceDesignator* designator)
 {
     CTypeId current = frame->root ? frame->element_type : frame->type;
@@ -6256,6 +6451,12 @@ BUSTER_GLOBAL_LOCAL bool c_parse_initializer_designator(CTypeParseMachine* machi
     u32 cursor = start;
     bool first = true;
     bool has_designator = false;
+    if (!continuation_work || !continuation_capacity || continuation_capacity > UINT32_MAX / sizeof(CParseInitializerContinuation))
+    {
+        return false;
+    }
+    designator->continuations = continuation_work;
+    designator->continuation_count = 0;
     while (cursor < limit &&
            (c_token_is_punctuator(preprocess.tokens[cursor], S8("[")) || c_token_is_punctuator(preprocess.tokens[cursor], S8("."))))
     {
@@ -6274,6 +6475,17 @@ BUSTER_GLOBAL_LOCAL bool c_parse_initializer_designator(CTypeParseMachine* machi
             }
             else
             {
+                if (!first)
+                {
+                    if (designator->continuation_count >= continuation_capacity || selected == UINT64_MAX)
+                    {
+                        return false;
+                    }
+                    designator->continuations[designator->continuation_count++] = (CParseInitializerContinuation){
+                        .type = current,
+                        .next_index = index + 1,
+                    };
+                }
                 if (current.value >= result->type_count || result->types[current.value].kind != C_TYPE_ARRAY)
                 {
                     return false;
@@ -6296,10 +6508,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_initializer_designator(CTypeParseMachine* machi
         }
         else
         {
-            if (frame->root && first)
-            {
-                return false;
-            }
+            CTypeId container_id = current;
             if (current.value >= result->type_count)
             {
                 return false;
@@ -6312,17 +6521,51 @@ BUSTER_GLOBAL_LOCAL bool c_parse_initializer_designator(CTypeParseMachine* machi
             }
             u32 field_index = UINT32_MAX;
             CTypeId member_type = C_TYPE_ID_INVALID;
-            if (!c_parse_promoted_member_type(machine, result, current, preprocess.tokens[cursor + 1].spelling, &member_type, &field_index))
+            bool ambiguous = false;
+            if (!c_parse_promoted_member_type(machine, result, current, preprocess.tokens[cursor + 1].spelling, &member_type, &field_index, &ambiguous))
             {
+                if (ambiguous)
+                {
+                    c_parse_diagnostic(result, preprocess.tokens[cursor + 1].location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                       S8("ambiguous promoted member designator"));
+                }
                 return false;
             }
             current = member_type;
             if (first)
             {
-                if (!frame->root)
+                u32 member_slot = c_parse_initializer_member_slot(result, type, field_index);
+                if (member_slot == UINT32_MAX)
                 {
-                    selected = field_index;
+                    return false;
                 }
+                if (frame->root)
+                {
+                    if (designator->continuation_count >= continuation_capacity || member_slot == UINT32_MAX || member_slot == UINT32_MAX - 1)
+                    {
+                        return false;
+                    }
+                    designator->continuations[designator->continuation_count++] = (CParseInitializerContinuation){
+                        .type = container_id,
+                        .next_index = member_slot + 1,
+                    };
+                }
+                else
+                {
+                    selected = member_slot;
+                }
+            }
+            else
+            {
+                u32 member_slot = c_parse_initializer_member_slot(result, type, field_index);
+                if (member_slot == UINT32_MAX || member_slot == UINT32_MAX - 1 || designator->continuation_count >= continuation_capacity)
+                {
+                    return false;
+                }
+                designator->continuations[designator->continuation_count++] = (CParseInitializerContinuation){
+                    .type = container_id,
+                    .next_index = member_slot + 1,
+                };
             }
             cursor += 2;
         }
@@ -6368,8 +6611,12 @@ BUSTER_GLOBAL_LOCAL bool c_parse_initializer_designator(CTypeParseMachine* machi
         }
         else
         {
-            u32 field_index = (u32)frame->next_index;
-            designator->value_type = result->members[type->member_start + field_index].type;
+            CMember* member = c_parse_initializer_member_at(result, type, (u32)frame->next_index);
+            if (!member)
+            {
+                return false;
+            }
+            designator->value_type = member->type;
         }
     }
     designator->value_start = start;
@@ -6397,6 +6644,35 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_initializer_value_end(CPreprocessResult preproce
     return limit;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_initializer_consume_separator(CToken* tokens, u32 limit, u32* cursor, u64 next_index)
+{
+    if (!tokens || !cursor || *cursor >= limit || !c_token_is_punctuator(tokens[*cursor], S8(",")))
+    {
+        return true;
+    }
+    *cursor += 1;
+    return next_index != 0 && (*cursor >= limit || !c_token_is_punctuator(tokens[*cursor], S8(",")));
+}
+
+BUSTER_GLOBAL_LOCAL bool c_initializer_has_top_level_comma(CToken* tokens, u32 start, u32 end)
+{
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    u32 braces = 0;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = tokens[index];
+        if (c_token_is_punctuator(token, S8("("))) parentheses += 1;
+        else if (c_token_is_punctuator(token, S8(")"))) parentheses -= parentheses != 0;
+        else if (c_token_is_punctuator(token, S8("["))) brackets += 1;
+        else if (c_token_is_punctuator(token, S8("]"))) brackets -= brackets != 0;
+        else if (c_token_is_punctuator(token, S8("{"))) braces += 1;
+        else if (c_token_is_punctuator(token, S8("}"))) braces -= braces != 0;
+        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(token, S8(","))) return true;
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_parse_initializer_value_is_aggregate_expression(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                                            CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
@@ -6411,7 +6687,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_initializer_value_is_aggregate_expression(CType
 }
 
 BUSTER_GLOBAL_LOCAL bool c_parse_initializer_string_element_compatible(CPreprocessResult preprocess, CParseResult* result, CTypeId element_type,
-                                                                       u32 element_width)
+                                                                       CIrDecodedString decoded)
 {
     while (element_type.value < result->type_count && result->types[element_type.value].has_unqualified_type)
     {
@@ -6424,17 +6700,15 @@ BUSTER_GLOBAL_LOCAL bool c_parse_initializer_string_element_compatible(CPreproce
     CTypeKind kind = result->types[element_type.value].kind;
     u64 size = 0;
     u32 alignment = 0;
-    if (!c_parse_builtin_type_layout(preprocess.target, kind, &size, &alignment) || size != element_width)
+    if (!c_parse_builtin_type_layout(preprocess.target, kind, &size, &alignment) || size != decoded.element_width)
     {
         return false;
     }
-    if (element_width == 1)
+    if (decoded.encoding == C_IR_STRING_ENCODING_ORDINARY || decoded.encoding == C_IR_STRING_ENCODING_UTF8)
     {
-        return kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR;
+        return decoded.element_width == 1 && (kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR);
     }
-    return kind == C_TYPE_SHORT || kind == C_TYPE_UNSIGNED_SHORT || kind == C_TYPE_INT || kind == C_TYPE_UNSIGNED_INT ||
-           kind == C_TYPE_LONG || kind == C_TYPE_UNSIGNED_LONG || kind == C_TYPE_LONG_LONG || kind == C_TYPE_UNSIGNED_LONG_LONG ||
-           kind == C_TYPE_INT128 || kind == C_TYPE_UNSIGNED_INT128;
+    return kind == decoded.element_kind;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_parse_infer_initializer_array_count_core(CTypeParseMachine* machine, Arena* result_arena, Arena* temporary_arena,
@@ -6449,7 +6723,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_infer_initializer_array_count_core(CTypeParseMa
     {
         CIrDecodedString decoded = {0};
         if (!c_ir_decode_string_literal_range_for_target(temporary_arena, preprocess, preprocess.target, start, end, &decoded) ||
-            decoded.element_count == UINT64_MAX || !c_parse_initializer_string_element_compatible(preprocess, result, element_type, decoded.element_width))
+            decoded.element_count == UINT64_MAX || !c_parse_initializer_string_element_compatible(preprocess, result, element_type, decoded))
         {
             return false;
         }
@@ -6463,23 +6737,37 @@ BUSTER_GLOBAL_LOCAL bool c_parse_infer_initializer_array_count_core(CTypeParseMa
     }
     u32 string_start = start + 1;
     u32 string_end = end - 1;
-    while (string_end > string_start && c_token_is_punctuator(preprocess.tokens[string_end - 1], S8(",")))
+    bool trailing_comma = false;
+    if (string_end > string_start && c_token_is_punctuator(preprocess.tokens[string_end - 1], S8(",")))
     {
+        trailing_comma = true;
         string_end -= 1;
+    }
+    if ((trailing_comma && string_start >= string_end) ||
+        (string_end > string_start && c_token_is_punctuator(preprocess.tokens[string_end - 1], S8(","))))
+    {
+        return false;
     }
     if (string_start < string_end && c_ir_tokens_are_string_literals(preprocess, string_start, string_end))
     {
         CIrDecodedString decoded = {0};
         if (!c_ir_decode_string_literal_range_for_target(temporary_arena, preprocess, preprocess.target, string_start, string_end, &decoded) ||
-            decoded.element_count == UINT64_MAX || !c_parse_initializer_string_element_compatible(preprocess, result, element_type, decoded.element_width))
+            decoded.element_count == UINT64_MAX || !c_parse_initializer_string_element_compatible(preprocess, result, element_type, decoded))
         {
             return false;
         }
         *count_out = decoded.element_count + 1;
         return true;
     }
-    u32 capacity = end - start + 2;
+    u64 span = (u64)end - start;
+    if (span > UINT32_MAX - 2 || span + 2 > UINT32_MAX / sizeof(CParseInitializerInferenceFrame) ||
+        span + 1 > UINT32_MAX / sizeof(CParseInitializerContinuation))
+    {
+        return false;
+    }
+    u32 capacity = (u32)(span + 2);
     CParseInitializerInferenceFrame* frames = arena_allocate(temporary_arena, CParseInitializerInferenceFrame, capacity);
+    CParseInitializerContinuation* continuation_work = arena_allocate(temporary_arena, CParseInitializerContinuation, (u32)(span + 1));
     u32 frame_count = 1;
     frames[0] = (CParseInitializerInferenceFrame){
         .element_type = element_type,
@@ -6491,7 +6779,32 @@ BUSTER_GLOBAL_LOCAL bool c_parse_infer_initializer_array_count_core(CTypeParseMa
     while (frame_count)
     {
         CParseInitializerInferenceFrame* frame = frames + frame_count - 1;
-        while (frame->cursor < frame->limit && c_token_is_punctuator(preprocess.tokens[frame->cursor], S8(","))) frame->cursor += 1;
+        if (!c_initializer_consume_separator(preprocess.tokens, frame->limit, &frame->cursor, frame->next_index))
+        {
+            return false;
+        }
+        bool designated = frame->cursor < frame->limit &&
+                          (c_token_is_punctuator(preprocess.tokens[frame->cursor], S8("[")) ||
+                           c_token_is_punctuator(preprocess.tokens[frame->cursor], S8(".")));
+        if (designated && frame->borrowed)
+        {
+            while (frame_count && frames[frame_count - 1].borrowed)
+            {
+                frame_count -= 1;
+            }
+            if (!frame_count)
+            {
+                return false;
+            }
+            frame = frames + frame_count - 1;
+            if (!c_initializer_consume_separator(preprocess.tokens, frame->limit, &frame->cursor, frame->next_index))
+            {
+                return false;
+            }
+            designated = frame->cursor < frame->limit &&
+                         (c_token_is_punctuator(preprocess.tokens[frame->cursor], S8("[")) ||
+                          c_token_is_punctuator(preprocess.tokens[frame->cursor], S8(".")));
+        }
         u64 slots = 0;
         if (!c_parse_initializer_type_slots(machine, result_arena, preprocess, result, scope, frame, &slots))
         {
@@ -6505,9 +6818,6 @@ BUSTER_GLOBAL_LOCAL bool c_parse_infer_initializer_array_count_core(CTypeParseMa
             if (borrowed && frame_count) frames[frame_count - 1].cursor = cursor;
             continue;
         }
-        bool designated = frame->cursor < frame->limit &&
-                          (c_token_is_punctuator(preprocess.tokens[frame->cursor], S8("[")) ||
-                           c_token_is_punctuator(preprocess.tokens[frame->cursor], S8(".")));
         if (frame->next_index >= slots && !designated)
         {
             if (frame->borrowed)
@@ -6520,7 +6830,8 @@ BUSTER_GLOBAL_LOCAL bool c_parse_infer_initializer_array_count_core(CTypeParseMa
             return false;
         }
         CParseInitializerInferenceDesignator designator = {0};
-        if (!c_parse_initializer_designator(machine, result_arena, preprocess, result, scope, frame, frame->cursor, frame->limit, &designator) ||
+        if (!c_parse_initializer_designator(machine, result_arena, preprocess, result, scope, frame, frame->cursor, frame->limit, continuation_work,
+                                             (u32)(span + 1), &designator) ||
             designator.selected == UINT64_MAX)
         {
             return false;
@@ -6549,6 +6860,21 @@ BUSTER_GLOBAL_LOCAL bool c_parse_infer_initializer_array_count_core(CTypeParseMa
                 return false;
             }
             frame->cursor = close + 1;
+            if (frame_count + designator.continuation_count >= capacity)
+            {
+                return false;
+            }
+            for (u32 continuation_index = 0; continuation_index < designator.continuation_count; continuation_index += 1)
+            {
+                CParseInitializerContinuation continuation = designator.continuations[continuation_index];
+                frames[frame_count++] = (CParseInitializerInferenceFrame){
+                    .type = continuation.type,
+                    .cursor = close + 1,
+                    .limit = frame->limit,
+                    .next_index = continuation.next_index,
+                    .borrowed = true,
+                };
+            }
             frames[frame_count++] = (CParseInitializerInferenceFrame){
                 .type = designator.value_type,
                 .cursor = designator.value_start + 1,
@@ -6559,9 +6885,21 @@ BUSTER_GLOBAL_LOCAL bool c_parse_infer_initializer_array_count_core(CTypeParseMa
         if (aggregate && !c_ir_tokens_are_string_literals(preprocess, designator.value_start, frame->limit) &&
             !c_parse_initializer_value_is_aggregate_expression(machine, result_arena, preprocess, result, scope, designator.value_start, value_end))
         {
-            if (frame_count >= capacity)
+            if (frame_count + designator.continuation_count >= capacity)
             {
                 return false;
+            }
+            frame->cursor = value_end;
+            for (u32 continuation_index = 0; continuation_index < designator.continuation_count; continuation_index += 1)
+            {
+                CParseInitializerContinuation continuation = designator.continuations[continuation_index];
+                frames[frame_count++] = (CParseInitializerInferenceFrame){
+                    .type = continuation.type,
+                    .cursor = designator.value_start,
+                    .limit = frame->limit,
+                    .next_index = continuation.next_index,
+                    .borrowed = true,
+                };
             }
             frames[frame_count++] = (CParseInitializerInferenceFrame){
                 .type = designator.value_type,
@@ -6572,6 +6910,21 @@ BUSTER_GLOBAL_LOCAL bool c_parse_infer_initializer_array_count_core(CTypeParseMa
             continue;
         }
         frame->cursor = value_end;
+        if (frame_count + designator.continuation_count > capacity)
+        {
+            return false;
+        }
+        for (u32 continuation_index = 0; continuation_index < designator.continuation_count; continuation_index += 1)
+        {
+            CParseInitializerContinuation continuation = designator.continuations[continuation_index];
+            frames[frame_count++] = (CParseInitializerInferenceFrame){
+                .type = continuation.type,
+                .cursor = value_end,
+                .limit = frame->limit,
+                .next_index = continuation.next_index,
+                .borrowed = true,
+            };
+        }
     }
     *count_out = count;
     return count != 0;
@@ -6597,13 +6950,14 @@ BUSTER_GLOBAL_LOCAL void c_parse_infer_file_array_bounds(CTypeParseMachine* mach
         {
             continue;
         }
-        CType* type = &result->types[declaration.type.value];
-        if (type->kind != C_TYPE_ARRAY || type->array_bound >= result->array_bound_count)
+        CType type = result->types[declaration.type.value];
+        if (type.kind != C_TYPE_ARRAY || type.array_bound >= result->array_bound_count)
         {
             continue;
         }
-        CArrayBound* bound = &result->array_bounds[type->array_bound];
-        if (bound->token_count || bound->has_inferred_count)
+        u32 bound_index = type.array_bound;
+        CArrayBound bound = result->array_bounds[bound_index];
+        if (bound.token_count || bound.has_inferred_count)
         {
             continue;
         }
@@ -6640,22 +6994,94 @@ BUSTER_GLOBAL_LOCAL void c_parse_infer_file_array_bounds(CTypeParseMachine* mach
             end -= 1;
         }
         u64 count = 0;
-        if (c_parse_infer_initializer_array_count(machine, arena, preprocess, result, (CScopeId){.value = 0}, type->element_type, initializer, end, &count))
+        if (c_parse_infer_initializer_array_count(machine, arena, preprocess, result, (CScopeId){.value = 0}, type.element_type, initializer, end, &count) &&
+            bound_index < result->array_bound_count)
         {
-            bound->inferred_count = count;
-            bound->has_inferred_count = true;
+            result->array_bounds[bound_index].inferred_count = count;
+            result->array_bounds[bound_index].has_inferred_count = true;
         }
     }
 }
 
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_add_type(CParseResult* result, CType type)
 {
-    BUSTER_CHECK(result->type_count < result->type_capacity);
+    if (!c_parse_result_reserve_types(result, 1))
+    {
+        return C_TYPE_ID_INVALID;
+    }
     CTypeId id = {
         .value = result->type_count,
     };
     result->types[result->type_count++] = type;
     return id;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out)
+{
+    if (!machine || !result || !type_out || type.value >= result->type_count)
+    {
+        return false;
+    }
+    u32 capacity = machine->incomplete_array_chain_capacity;
+    CTypeId* chain = machine->incomplete_array_chain;
+    if (!capacity || !chain)
+    {
+        return false;
+    }
+    u32 chain_count = 0;
+    bool incomplete = false;
+    CTypeId current = type;
+    while (current.value < result->type_count && result->types[current.value].kind == C_TYPE_ARRAY)
+    {
+        if (chain_count >= capacity)
+        {
+            return false;
+        }
+        chain[chain_count++] = current;
+        CType* array = result->types + current.value;
+        if (c_parse_type_is_incomplete_array(result, current))
+        {
+            incomplete = true;
+        }
+        current = array->element_type;
+    }
+    if (!incomplete)
+    {
+        *type_out = type;
+        return true;
+    }
+    u32 incomplete_count = 0;
+    for (u32 index = 0; index < chain_count; index += 1)
+    {
+        CType* array = result->types + chain[index].value;
+        incomplete_count += array->array_bound < result->array_bound_count && c_parse_type_is_incomplete_array(result, chain[index]);
+    }
+    if (!c_parse_result_reserve_types(result, chain_count) || !c_parse_result_reserve_array_bounds(result, incomplete_count))
+    {
+        return false;
+    }
+    CTypeId cloned_element = current;
+    for (u32 reverse = chain_count; reverse; reverse -= 1)
+    {
+        CType original = result->types[chain[reverse - 1].value];
+        CType copy = original;
+        copy.element_type = cloned_element;
+        if (c_parse_type_is_incomplete_array(result, chain[reverse - 1]))
+        {
+            u32 bound_index = result->array_bound_count++;
+            result->array_bounds[bound_index] = result->array_bounds[original.array_bound];
+            result->array_bounds[bound_index].has_inferred_count = false;
+            result->array_bounds[bound_index].inferred_count = 0;
+            copy.array_bound = bound_index;
+        }
+        cloned_element = c_parse_add_type(result, copy);
+        if (cloned_element.value == C_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+    }
+    *type_out = cloned_element;
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId base, CType qualifiers)
@@ -9222,7 +9648,11 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_array_suffixes(CParseResult* result, CPrepro
             is_static |= string_equal(preprocess.tokens[token_index].spelling, S8("static"));
         }
         bool is_star = bound_count == 1 && c_token_is_punctuator(preprocess.tokens[bound_start], S8("*"));
-        BUSTER_CHECK(result->array_bound_count < result->array_bound_capacity);
+        if (!c_parse_result_reserve_array_bounds(result, 1))
+        {
+            result->array_bound_count = first_bound;
+            return C_TYPE_ID_INVALID;
+        }
         result->array_bounds[result->array_bound_count++] = (CArrayBound){
             .token_start = bound_start,
             .token_count = bound_count,
@@ -9680,6 +10110,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_validate_constexpr_declaration(CTypeParseMachin
         }
         if (type->kind == C_TYPE_ARRAY)
         {
+            CTypeId element_type = type->element_type;
             if (type->array_bound >= result->array_bound_count)
             {
                 valid = false;
@@ -9698,7 +10129,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_validate_constexpr_declaration(CTypeParseMachin
                 message = S8("constexpr object cannot have variably modified type");
                 break;
             }
-            work[work_count++] = type->element_type;
+            work[work_count++] = element_type;
             continue;
         }
         if (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION)
@@ -10413,8 +10844,8 @@ BUSTER_GLOBAL_LOCAL bool c_parse_record_constexpr_integer(CTypeParseMachine* mac
     {
         return true;
     }
-    CType* type = &result->types[entity->type.value];
-    if (!c_type_kind_is_integer(type->kind))
+    CType value_type = result->types[entity->type.value];
+    if (!c_type_kind_is_integer(value_type.kind))
     {
         return true;
     }
@@ -10437,12 +10868,12 @@ BUSTER_GLOBAL_LOCAL bool c_parse_record_constexpr_integer(CTypeParseMachine* mac
     u64 magnitude = negative ? 0 - value : value;
     u64 size = 0;
     u32 alignment = 0;
-    bool representable = c_parse_builtin_type_layout(preprocess.target, type->kind, &size, &alignment);
+    bool representable = c_parse_builtin_type_layout(preprocess.target, value_type.kind, &size, &alignment);
     BUSTER_UNUSED(alignment);
     if (representable && size <= 8)
     {
         u32 bits = (u32)(size * 8);
-        bool target_signed = c_type_kind_is_signed_integer(type->kind);
+        bool target_signed = c_type_kind_is_signed_integer(value_type.kind);
         if (target_signed)
         {
             u64 positive_max = bits == 64 ? (u64)INT64_MAX : ((u64)1 << (bits - 1)) - 1;
@@ -10451,7 +10882,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_record_constexpr_integer(CTypeParseMachine* mac
         }
         else
         {
-            u64 maximum = type->kind == C_TYPE_BOOL ? 1 : bits == 64 ? UINT64_MAX : ((u64)1 << bits) - 1;
+            u64 maximum = value_type.kind == C_TYPE_BOOL ? 1 : bits == 64 ? UINT64_MAX : ((u64)1 << bits) - 1;
             representable = !negative && magnitude <= maximum;
         }
     }
@@ -11236,6 +11667,17 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(CTypeParseMachine* machine, 
         {
             return false;
         }
+        if (!is_typedef)
+        {
+            CTypeId object_type = C_TYPE_ID_INVALID;
+            if (!c_parse_clone_incomplete_array_declarator(machine, result, type, &object_type))
+            {
+                c_parse_diagnostic(result, name.location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                   S8("compiler resource limit while materializing incomplete array declaration"));
+                return false;
+            }
+            type = object_type;
+        }
         if (is_typedef && (string_equal(name.spelling, S8("va_list")) || string_equal(name.spelling, S8("__gnuc_va_list")) ||
                            string_equal(name.spelling, S8("__builtin_va_list"))))
         {
@@ -11307,18 +11749,20 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(CTypeParseMachine* machine, 
         }
         if (initializer_start < segment_end && type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY)
         {
-            CType* array_type = &result->types[type.value];
-            if (array_type->array_bound < result->array_bound_count)
+            CType array_type = result->types[type.value];
+            if (array_type.array_bound < result->array_bound_count)
             {
-                CArrayBound* bound = &result->array_bounds[array_type->array_bound];
-                if (!bound->token_count)
+                u32 bound_index = array_type.array_bound;
+                CArrayBound bound = result->array_bounds[bound_index];
+                if (!bound.token_count)
                 {
                     u64 count = 0;
-                    if (c_parse_infer_initializer_array_count(machine, arena, preprocess, result, scope, array_type->element_type,
-                                                              initializer_start, segment_end, &count))
+                    if (c_parse_infer_initializer_array_count(machine, arena, preprocess, result, scope, array_type.element_type,
+                                                              initializer_start, segment_end, &count) &&
+                        bound_index < result->array_bound_count)
                     {
-                        bound->inferred_count = count;
-                        bound->has_inferred_count = true;
+                        result->array_bounds[bound_index].inferred_count = count;
+                        result->array_bounds[bound_index].has_inferred_count = true;
                     }
                 }
             }
@@ -12653,7 +13097,9 @@ BUSTER_GLOBAL_LOCAL String8 c_ir_unsupported_gnu_construct(CPreprocessResult pre
 
 BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)
 {
-    CParseResult result = {0};
+    CParseResult result = {
+        .arena = arena,
+    };
     if (syntax.diagnostic_count)
     {
         result.diagnostics = syntax.diagnostics;
@@ -12731,6 +13177,7 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
         return result;
     }
     u32 promoted_member_capacity = (u32)promoted_member_capacity_u64;
+    u32 incomplete_array_chain_capacity = (u32)promoted_member_capacity_u64;
     u64 machine_buffer_size = arena_minimum_position;
     if (!c_type_parse_buffer_size_add(&machine_buffer_size, type_frame_capacity, sizeof(CTypeParseFrame), BUSTER_ALIGN_OF(CTypeParseFrame)) ||
         !c_type_parse_buffer_size_add(&machine_buffer_size, type_mutation_capacity, sizeof(CTypeMutation), BUSTER_ALIGN_OF(CTypeMutation)) ||
@@ -12739,6 +13186,7 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
         !c_type_parse_buffer_size_add(&machine_buffer_size, promoted_member_capacity, sizeof(CParsePromotedMemberWork),
                                       BUSTER_ALIGN_OF(CParsePromotedMemberWork)) ||
         !c_type_parse_buffer_size_add(&machine_buffer_size, promoted_member_capacity, sizeof(bool), BUSTER_ALIGN_OF(bool)) ||
+        !c_type_parse_buffer_size_add(&machine_buffer_size, incomplete_array_chain_capacity, sizeof(CTypeId), BUSTER_ALIGN_OF(CTypeId)) ||
         machine_buffer_size > UINT64_MAX - (BUSTER_KB(64) - 1))
     {
         return result;
@@ -12761,6 +13209,8 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
         .frames = arena_allocate(machine_buffer_arena, CTypeParseFrame, type_frame_capacity),
         .mutations = arena_allocate(machine_buffer_arena, CTypeMutation, type_mutation_capacity),
         .expression_tasks = arena_allocate(machine_buffer_arena, CParseExpressionTypeTask, expression_task_capacity),
+        .incomplete_array_chain = arena_allocate(machine_buffer_arena, CTypeId, incomplete_array_chain_capacity),
+        .incomplete_array_chain_capacity = incomplete_array_chain_capacity,
         .scratch_arena = machine_temporary.arena,
         .promoted_member_work = arena_allocate(machine_buffer_arena, CParsePromotedMemberWork, promoted_member_capacity),
         .promoted_member_visited = arena_allocate(machine_buffer_arena, bool, promoted_member_capacity),
@@ -12864,6 +13314,19 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
         if (!static_assertion && !global_assembly)
         {
             c_parse_declaration_type(&machine, &result, preprocess, declaration);
+            if (declaration->kind == C_DECLARATION_OBJECT && declaration->type.value < result.type_count)
+            {
+                CTypeId object_type = C_TYPE_ID_INVALID;
+                if (!c_parse_clone_incomplete_array_declarator(&machine, &result, declaration->type, &object_type))
+                {
+                    c_parse_diagnostic(&result, declaration->location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                       S8("compiler resource limit while materializing incomplete array declaration"));
+                }
+                else
+                {
+                    declaration->type = object_type;
+                }
+            }
             if (declaration->is_constexpr && declaration->kind == C_DECLARATION_OBJECT && declaration->type.value < result.type_count)
             {
                 declaration->type = c_parse_add_qualified_type(&result, declaration->type,
@@ -15117,7 +15580,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_label_metadata_store_for_place(CIntegerIrBuilder* 
     IrLabelProvenancePath* old_paths = root_value->label_paths;
     u32 old_count = root_value->label_path_count;
     bool old_non_label = root_value->has_non_label_provenance;
-    bool preserve_branch_alternative = builder->label_metadata_store_valid && root.value < builder->function->value_count &&
+    bool preserve_branch_alternative = builder->label_metadata_store_valid && root.value < builder->label_metadata_store_capacity &&
                                        builder->label_metadata_store_valid[root.value] &&
                                        builder->label_metadata_store_blocks[root.value].value != builder->current_block.value;
     c_ir_label_metadata_clear(root_value);
@@ -15198,7 +15661,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_label_metadata_store_for_place(CIntegerIrBuilder* 
     }
     c_ir_label_metadata_rebuild_summary(builder->arena, root_value);
     bool root_contains_label = root_value->is_label_value || root_value->has_label_provenance || root_value->label_path_count != 0;
-    if (builder->label_metadata_store_valid && root.value < builder->function->value_count)
+    if (builder->label_metadata_store_valid && root.value < builder->label_metadata_store_capacity)
     {
         builder->label_metadata_store_blocks[root.value] = builder->current_block;
         builder->label_metadata_store_valid[root.value] = true;
@@ -16106,20 +16569,24 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder
     IrTypeId* work_types = arena_allocate(field_search.arena, IrTypeId, capacity);
     u32* work_parents = arena_allocate(field_search.arena, u32, capacity);
     u32* work_parent_fields = arena_allocate(field_search.arena, u32, capacity);
+    u32* work_depths = arena_allocate(field_search.arena, u32, capacity);
     bool* visited = arena_allocate(field_search.arena, bool, capacity);
     memset(visited, 0, sizeof(*visited) * capacity);
     u32 work_count = 1;
     u32 work_index = 0;
     u32 found_node = UINT32_MAX;
     u32 found_field = UINT32_MAX;
+    u32 found_depth = UINT32_MAX;
+    bool ambiguous = false;
     work_types[0] = aggregate_type_id;
     work_parents[0] = UINT32_MAX;
     work_parent_fields[0] = UINT32_MAX;
+    work_depths[0] = 0;
     if (aggregate_type_id.value < capacity)
     {
         visited[aggregate_type_id.value] = true;
     }
-    while (work_index < work_count && found_node == UINT32_MAX)
+    while (work_index < work_count && !ambiguous)
     {
         IrType* candidate = ir_type_from_id(&builder->program->types, work_types[work_index]);
         if (!candidate)
@@ -16127,14 +16594,31 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder
             scratch_end(field_search);
             return IR_VALUE_ID_INVALID;
         }
+        u32 candidate_depth = work_depths[work_index];
+        if (found_node != UINT32_MAX && candidate_depth > found_depth)
+        {
+            break;
+        }
         for (u32 index = 0; index < candidate->field_count; index += 1)
         {
             IrField* candidate_field = &candidate->fields[index];
             if (string_equal(candidate_field->name, member.spelling))
             {
-                found_node = work_index;
-                found_field = index;
-                break;
+                if (found_node == UINT32_MAX)
+                {
+                    found_node = work_index;
+                    found_field = index;
+                    found_depth = candidate_depth;
+                }
+                else if (candidate_depth == found_depth)
+                {
+                    ambiguous = true;
+                }
+                continue;
+            }
+            if (found_node != UINT32_MAX && candidate_depth >= found_depth)
+            {
+                continue;
             }
             IrType* nested = ir_type_from_id(&builder->program->types, candidate_field->type);
             if (!candidate_field->name.length && nested && (nested->kind == IR_TYPE_STRUCT || nested->kind == IR_TYPE_UNION) &&
@@ -16144,10 +16628,17 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder
                 work_types[work_count] = candidate_field->type;
                 work_parents[work_count] = work_index;
                 work_parent_fields[work_count] = index;
+                work_depths[work_count] = candidate_depth + 1;
                 work_count += 1;
             }
         }
         work_index += 1;
+    }
+    if (ambiguous)
+    {
+        builder->failure_message = S8("ambiguous promoted member designator");
+        scratch_end(field_search);
+        return IR_VALUE_ID_INVALID;
     }
     if (found_node == UINT32_MAX)
     {
@@ -17386,6 +17877,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_decode_string_literal_range_for_target(Arena* aren
         .element_count = element_count,
         .element_width = width,
         .element_kind = element_kind,
+        .encoding = encoding,
     };
     return true;
 }
@@ -20022,18 +20514,30 @@ struct CIrTypeCompatibilityTask
 
 BUSTER_GLOBAL_LOCAL bool c_ir_types_compatible(CIntegerIrBuilder* builder, IrTypeId left_id, IrTypeId right_id)
 {
-    u32 capacity = builder->program->types.count * 2 + 1;
-    CIrTypeCompatibilityTask* tasks = arena_allocate(builder->temporary_arena, CIrTypeCompatibilityTask, capacity ? capacity : 1);
+    if (!builder || !builder->program || !builder->temporary_arena)
+    {
+        return false;
+    }
+    u64 capacity_u64 = (u64)builder->program->types.count * 2 + 1;
+    if (capacity_u64 > UINT32_MAX)
+    {
+        return false;
+    }
+    u32 capacity = (u32)capacity_u64;
+    TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
+    CIrTypeCompatibilityTask* tasks = arena_allocate(temporary.arena, CIrTypeCompatibilityTask, capacity ? capacity : 1);
     u32 task_count = 1;
     tasks[0] = (CIrTypeCompatibilityTask){.left = left_id, .right = right_id};
-    while (task_count)
+    bool compatible = true;
+    while (task_count && compatible)
     {
         CIrTypeCompatibilityTask task = tasks[--task_count];
         IrType* left = ir_type_from_id(&builder->program->types, task.left);
         IrType* right = ir_type_from_id(&builder->program->types, task.right);
         if (!left || !right || left->kind != right->kind || left->is_atomic != right->is_atomic)
         {
-            return false;
+            compatible = false;
+            break;
         }
         if (task.left.value == task.right.value)
         {
@@ -20045,31 +20549,50 @@ BUSTER_GLOBAL_LOCAL bool c_ir_types_compatible(CIntegerIrBuilder* builder, IrTyp
             break;
         case IR_TYPE_BOOLEAN:
         case IR_TYPE_INTEGER:
-            if (left->bit_width != right->bit_width || left->is_signed != right->is_signed) return false;
+            if (left->bit_width != right->bit_width || left->is_signed != right->is_signed) compatible = false;
             break;
         case IR_TYPE_FLOAT:
-            if (left->bit_width != right->bit_width) return false;
+            if (left->bit_width != right->bit_width) compatible = false;
             break;
         case IR_TYPE_VA_LIST:
-            if (left->layout.size != right->layout.size || left->layout.alignment != right->layout.alignment) return false;
+            if (left->layout.size != right->layout.size || left->layout.alignment != right->layout.alignment) compatible = false;
             break;
         case IR_TYPE_POINTER:
-            if (task_count >= capacity) return false;
-            tasks[task_count++] = (CIrTypeCompatibilityTask){.left = left->element_type, .right = right->element_type};
+            if (task_count >= capacity)
+            {
+                compatible = false;
+            }
+            else
+            {
+                tasks[task_count++] = (CIrTypeCompatibilityTask){.left = left->element_type, .right = right->element_type};
+            }
             break;
         case IR_TYPE_ARRAY:
-            if (left->element_count != right->element_count || task_count >= capacity) return false;
-            tasks[task_count++] = (CIrTypeCompatibilityTask){.left = left->element_type, .right = right->element_type};
+            if (left->element_count != right->element_count || task_count >= capacity)
+            {
+                compatible = false;
+            }
+            else
+            {
+                tasks[task_count++] = (CIrTypeCompatibilityTask){.left = left->element_type, .right = right->element_type};
+            }
             break;
         case IR_TYPE_VECTOR:
-            if (left->element_count != right->element_count || left->layout.size != right->layout.size || task_count >= capacity) return false;
-            tasks[task_count++] = (CIrTypeCompatibilityTask){.left = left->element_type, .right = right->element_type};
+            if (left->element_count != right->element_count || left->layout.size != right->layout.size || task_count >= capacity)
+            {
+                compatible = false;
+            }
+            else
+            {
+                tasks[task_count++] = (CIrTypeCompatibilityTask){.left = left->element_type, .right = right->element_type};
+            }
             break;
         case IR_TYPE_FUNCTION:
             if (left->parameter_count != right->parameter_count || left->is_variadic != right->is_variadic || task_count >= capacity ||
-                task_count + left->parameter_count >= capacity)
+                (u64)task_count + left->parameter_count >= capacity)
             {
-                return false;
+                compatible = false;
+                break;
             }
             tasks[task_count++] = (CIrTypeCompatibilityTask){.left = left->return_type, .right = right->return_type};
             for (u32 parameter_index = 0; parameter_index < left->parameter_count; parameter_index += 1)
@@ -20083,23 +20606,37 @@ BUSTER_GLOBAL_LOCAL bool c_ir_types_compatible(CIntegerIrBuilder* builder, IrTyp
         case IR_TYPE_STRUCT:
         case IR_TYPE_UNION:
         case IR_TYPE_ENUM:
-            if (left->name.length ? !string_equal(left->name, right->name) : left->id.value != right->id.value) return false;
+            if (left->name.length ? !string_equal(left->name, right->name) : left->id.value != right->id.value) compatible = false;
             break;
         case IR_TYPE_SLICE:
         case IR_TYPE_RANGE:
-            if (left->layout.size != right->layout.size || left->layout.alignment != right->layout.alignment || task_count >= capacity) return false;
-            tasks[task_count++] = (CIrTypeCompatibilityTask){.left = left->element_type, .right = right->element_type};
+            if (left->layout.size != right->layout.size || left->layout.alignment != right->layout.alignment || task_count >= capacity)
+            {
+                compatible = false;
+            }
+            else
+            {
+                tasks[task_count++] = (CIrTypeCompatibilityTask){.left = left->element_type, .right = right->element_type};
+            }
             break;
         case IR_TYPE_COUNT:
-            return false;
+            compatible = false;
+            break;
         }
-        if (left->is_atomic)
+        if (compatible && left->is_atomic)
         {
-            if (task_count >= capacity) return false;
-            tasks[task_count++] = (CIrTypeCompatibilityTask){.left = left->unqualified_type, .right = right->unqualified_type};
+            if (task_count >= capacity)
+            {
+                compatible = false;
+            }
+            else
+            {
+                tasks[task_count++] = (CIrTypeCompatibilityTask){.left = left->unqualified_type, .right = right->unqualified_type};
+            }
         }
     }
-    return true;
+    scratch_end(temporary);
+    return compatible;
 }
 
 typedef struct CIrConstantConditionTask CIrConstantConditionTask;
@@ -24566,7 +25103,12 @@ struct CIrPromotedMemberPath
     IrTypeId type;
     IrField* field;
     u64 offset;
+    u64 union_offset;
+    u64 union_size;
     u32 root_field;
+    bool ambiguous;
+    bool has_union;
+    u8 reserved[2];
 };
 
 BUSTER_GLOBAL_LOCAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, IrTypeId root, String8 member, CIrPromotedMemberPath* result)
@@ -24580,8 +25122,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, I
     {
         IrTypeId type;
         u64 offset;
+        u64 union_offset;
+        u64 union_size;
         u32 root_field;
+        u32 depth;
+        bool has_union;
+        u8 reserved[3];
     };
+    result->ambiguous = false;
     TemporalArena promoted_member_scratch = scratch_begin(&builder->temporary_arena, 1);
     Arena* arena = promoted_member_scratch.arena;
     struct CIrPromotedMemberWork* work = arena_allocate(arena, struct CIrPromotedMemberWork, capacity);
@@ -24589,15 +25137,33 @@ BUSTER_GLOBAL_LOCAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, I
     memset(visited, 0, sizeof(*visited) * capacity);
     u32 work_index = 0;
     u32 work_count = 1;
-    work[0] = (struct CIrPromotedMemberWork){.type = root, .root_field = UINT32_MAX};
+    bool found = false;
+    bool ambiguous = false;
+    u32 found_depth = UINT32_MAX;
+    IrType* root_type = ir_type_from_id(&builder->program->types, root);
+    work[0] = (struct CIrPromotedMemberWork){
+        .type = root,
+        .root_field = UINT32_MAX,
+        .depth = 0,
+        .has_union = root_type && root_type->kind == IR_TYPE_UNION,
+        .union_size = root_type && root_type->kind == IR_TYPE_UNION ? root_type->layout.size : 0,
+    };
+    if (work[0].has_union && !root_type->layout.resolved)
+    {
+        work[0].has_union = false;
+    }
     visited[root.value] = true;
-    while (work_index < work_count)
+    while (work_index < work_count && !ambiguous)
     {
         struct CIrPromotedMemberWork current = work[work_index++];
         IrType* type = ir_type_from_id(&builder->program->types, current.type);
         if (!type || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION))
         {
             continue;
+        }
+        if (found && current.depth > found_depth)
+        {
+            break;
         }
         for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
         {
@@ -24609,30 +25175,55 @@ BUSTER_GLOBAL_LOCAL bool c_ir_promoted_member_path(CIntegerIrBuilder* builder, I
                     scratch_end(promoted_member_scratch);
                     return false;
                 }
-                *result = (CIrPromotedMemberPath){
-                    .type = field->type,
-                    .field = field,
-                    .offset = current.offset + field->offset,
-                    .root_field = current.root_field == UINT32_MAX ? field_index : current.root_field,
-                };
-                scratch_end(promoted_member_scratch);
-                return true;
+                if (!found)
+                {
+                    *result = (CIrPromotedMemberPath){
+                        .type = field->type,
+                        .field = field,
+                        .offset = current.offset + field->offset,
+                        .union_offset = current.union_offset,
+                        .union_size = current.union_size,
+                        .root_field = current.root_field == UINT32_MAX ? field_index : current.root_field,
+                        .has_union = current.has_union,
+                    };
+                    found = true;
+                    found_depth = current.depth;
+                }
+                else if (current.depth == found_depth)
+                {
+                    ambiguous = true;
+                }
+                continue;
+            }
+            if (found && current.depth >= found_depth)
+            {
+                continue;
             }
             IrType* child = ir_type_from_id(&builder->program->types, field->type);
             if (!field->name.length && child && (child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) && field->type.value < capacity &&
                 !visited[field->type.value] && work_count < capacity && current.offset <= UINT64_MAX - field->offset)
             {
                 visited[field->type.value] = true;
+                IrTypeId child_id = field->type;
+                bool child_is_union = child->kind == IR_TYPE_UNION && child->layout.resolved;
                 work[work_count++] = (struct CIrPromotedMemberWork){
-                    .type = field->type,
+                    .type = child_id,
                     .offset = current.offset + field->offset,
+                    .union_offset = child_is_union ? current.offset + field->offset : current.union_offset,
+                    .union_size = child_is_union ? child->layout.size : current.union_size,
                     .root_field = current.root_field == UINT32_MAX ? field_index : current.root_field,
+                    .depth = current.depth + 1,
+                    .has_union = child_is_union || current.has_union,
                 };
             }
         }
     }
+    if (ambiguous)
+    {
+        result->ambiguous = true;
+    }
     scratch_end(promoted_member_scratch);
-    return false;
+    return found && !ambiguous;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_promoted_member_type(CIntegerIrBuilder* builder, IrTypeId root, String8 member, IrTypeId* result)
@@ -24640,6 +25231,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_promoted_member_type(CIntegerIrBuilder* builder, I
     CIrPromotedMemberPath path = {0};
     if (!c_ir_promoted_member_path(builder, root, member, &path))
     {
+        if (path.ambiguous)
+        {
+            builder->failure_message = S8("ambiguous promoted member designator");
+        }
         return false;
     }
     *result = path.type;
@@ -33390,6 +33985,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                                                                                     .is_definition = true,
                                                                                     .is_thread_local = local_thread_local,
                                                                                 });
+                    if (symbol.value != IR_ID_UNDERLYING_INVALID)
+                    {
+                        builder->entity_symbols[entity.value] = symbol;
+                    }
                     IrGlobal global = {
                         .symbol = symbol,
                         .initializer_symbol = IR_SYMBOL_ID_INVALID,
@@ -33421,7 +34020,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                                                        : string_format(builder->arena, S8("could not lower static initializer for local '{S8}'"), name.spelling);
                         return false;
                     }
-                    builder->entity_symbols[entity.value] = symbol;
                     place = c_ir_emit_global_place(builder, entity, local_source);
                     builder->locals[builder->local_count++] = (CIntegerIrLocal){
                         .name = name.spelling,
@@ -33816,6 +34414,148 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_clear_subobject(CIntegerIrBui
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_ir_string_array_element_compatible(CIntegerIrBuilder* builder, IrTypeId element_type, CIrDecodedString decoded)
+{
+    IrType* element = ir_type_from_id(&builder->program->types, element_type);
+    if (!element || element->kind != IR_TYPE_INTEGER || !element->layout.resolved || element->layout.size != decoded.element_width)
+    {
+        return false;
+    }
+    if (decoded.encoding == C_IR_STRING_ENCODING_ORDINARY || decoded.encoding == C_IR_STRING_ENCODING_UTF8)
+    {
+        return decoded.element_width == 1 && element->bit_width == 8;
+    }
+    IrTypeId expected_type = decoded.element_kind < C_TYPE_COUNT ? builder->scalar_types[decoded.element_kind] : IR_TYPE_ID_INVALID;
+    return expected_type.value != IR_ID_UNDERLYING_INVALID && c_ir_types_compatible(builder, element_type, expected_type);
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_string_pointer_element_compatible(CIntegerIrBuilder* builder, IrTypeId element_type, CIrDecodedString decoded)
+{
+    IrType* element = ir_type_from_id(&builder->program->types, element_type);
+    if (!element || element->kind == IR_TYPE_VOID)
+    {
+        return element && element->kind == IR_TYPE_VOID;
+    }
+    IrTypeId expected_type = decoded.element_kind < C_TYPE_COUNT ? builder->scalar_types[decoded.element_kind] : IR_TYPE_ID_INVALID;
+    return expected_type.value != IR_ID_UNDERLYING_INVALID && c_ir_types_compatible(builder, element_type, expected_type);
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_label_address_expression(CIntegerIrBuilder* builder, u32 start, u32 end, u32* label_index_out, IrTypeId* cast_type_out)
+{
+    IrTypeId cast_type = IR_TYPE_ID_INVALID;
+    for (;;)
+    {
+        if (start + 1 < end && c_token_is_punctuator(builder->preprocess.tokens[start], S8("(")) &&
+            c_ir_matching_delimiter(builder->preprocess, start, end, S8("("), S8(")")) == end - 1)
+        {
+            start += 1;
+            end -= 1;
+            continue;
+        }
+        if (start < end && c_token_is_punctuator(builder->preprocess.tokens[start], S8("(")))
+        {
+            u32 close = c_ir_matching_delimiter(builder->preprocess, start, end, S8("("), S8(")"));
+            if (close > start + 1 && close < end)
+            {
+                IrTypeId candidate = c_ir_type_name(builder, start + 1, close);
+                IrType* candidate_type = ir_type_from_id(&builder->program->types, candidate);
+                if (candidate_type && candidate_type->kind == IR_TYPE_POINTER)
+                {
+                    cast_type = candidate;
+                    start = close + 1;
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    if (start + 2 != end || !c_ir_label_address_prefix(builder, start, start) || builder->preprocess.tokens[start + 1].kind != C_TOKEN_IDENTIFIER)
+    {
+        return false;
+    }
+    if (label_index_out) *label_index_out = start + 1;
+    if (cast_type_out) *cast_type_out = cast_type;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_pointer_integer_cast_expression(CIntegerIrBuilder* builder, IrTypeId destination_type, u32 start, u32 end, u64* value_out)
+{
+    u32 expression_start = start;
+    u32 expression_end = end;
+    while (expression_start + 1 < expression_end && c_token_is_punctuator(builder->preprocess.tokens[expression_start], S8("(")) &&
+           c_ir_matching_delimiter(builder->preprocess, expression_start, expression_end, S8("("), S8(")")) == expression_end - 1)
+    {
+        expression_start += 1;
+        expression_end -= 1;
+    }
+    if (expression_start >= expression_end || !c_token_is_punctuator(builder->preprocess.tokens[expression_start], S8("(")))
+    {
+        return false;
+    }
+    u32 close = c_ir_matching_delimiter(builder->preprocess, expression_start, expression_end, S8("("), S8(")"));
+    if (close <= expression_start + 1 || close + 1 >= expression_end)
+    {
+        return false;
+    }
+    IrTypeId cast_type = c_ir_type_name(builder, expression_start + 1, close);
+    IrType* cast = ir_type_from_id(&builder->program->types, cast_type);
+    IrType* destination = ir_type_from_id(&builder->program->types, destination_type);
+    if (!cast || !destination || cast->kind != IR_TYPE_POINTER || destination->kind != IR_TYPE_POINTER)
+    {
+        return false;
+    }
+    IrType* cast_element = ir_type_from_id(&builder->program->types, cast->element_type);
+    IrType* destination_element = ir_type_from_id(&builder->program->types, destination->element_type);
+    if (!cast_element || !destination_element || (cast_element->kind != IR_TYPE_VOID && destination_element->kind != IR_TYPE_VOID &&
+                                                   !c_ir_types_compatible(builder, cast->element_type, destination->element_type)))
+    {
+        return false;
+    }
+    CIrConstantValue value = {0};
+    if (!c_ir_constant_evaluate(builder, close + 1, expression_end, &value) || value.kind != C_IR_CONSTANT_INTEGER)
+    {
+        return false;
+    }
+    u32 pointer_size = builder->program->data_layout.pointer.size;
+    if (!pointer_size || pointer_size > sizeof(value.integer) || (pointer_size < sizeof(value.integer) &&
+                                                                    value.integer > (((u64)1 << (pointer_size * 8)) - 1)))
+    {
+        return false;
+    }
+    *value_out = value.integer;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_store_pointer_bits(CIntegerIrBuilder* builder, IrType* type, u8* bytes, u64 offset, u64 value)
+{
+    u64 size = type->layout.size;
+    for (u64 byte_index = 0; byte_index < size; byte_index += 1)
+    {
+        u64 source_index = builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte_index : size - byte_index - 1;
+        bytes[offset + byte_index] = source_index < sizeof(value) ? (u8)(value >> (u32)(source_index * 8)) : 0;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_symbol_is_thread_local(CIntegerIrBuilder* builder, IrSymbolId symbol)
+{
+    for (u32 entity_index = 0; entity_index < builder->parse.entity_count; entity_index += 1)
+    {
+        if (builder->entity_symbols[entity_index].value == symbol.value && builder->parse.entities[entity_index].is_thread_local)
+        {
+            return true;
+        }
+    }
+    for (u32 global_index = 0; global_index < builder->module->global_count; global_index += 1)
+    {
+        IrGlobal* global = builder->module->globals + global_index;
+        if (global->symbol.value == symbol.value && global->is_thread_local)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_string_range(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_type, u8* bytes,
                                                                  u64 byte_count, bool* handled)
 {
@@ -33837,9 +34577,16 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_string_range(CIntegerIrBuilde
     {
         string_start += 1;
         string_end -= 1;
-        while (string_end > string_start && c_token_is_punctuator(builder->preprocess.tokens[string_end - 1], S8(",")))
+        bool trailing_comma = false;
+        if (string_end > string_start && c_token_is_punctuator(builder->preprocess.tokens[string_end - 1], S8(",")))
         {
+            trailing_comma = true;
             string_end -= 1;
+        }
+        if ((trailing_comma && string_start >= string_end) ||
+            (string_end > string_start && c_token_is_punctuator(builder->preprocess.tokens[string_end - 1], S8(","))))
+        {
+            return false;
         }
     }
     if (string_start >= string_end || !c_ir_tokens_are_string_literals(builder->preprocess, string_start, string_end))
@@ -33852,9 +34599,9 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_string_range(CIntegerIrBuilde
     }
     CIrDecodedString decoded = {0};
     IrType* element = ir_type_from_id(&builder->program->types, type->element_type);
-    if (!element || element->kind != IR_TYPE_INTEGER || !element->layout.resolved ||
+    if (!element || !element->layout.resolved ||
         !c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, string_start, string_end, &decoded) ||
-        decoded.element_count == UINT64_MAX || !decoded.element_width || element->layout.size != decoded.element_width ||
+        decoded.element_count == UINT64_MAX || !decoded.element_width || !c_ir_string_array_element_compatible(builder, type->element_type, decoded) ||
         decoded.element_count > UINT64_MAX / decoded.element_width || decoded.element_count * decoded.element_width > byte_count ||
         decoded.bytes.length > byte_count)
     {
@@ -33868,7 +34615,12 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_string_range(CIntegerIrBuilde
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_legacy(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_type, u8* bytes, u64 byte_count,
-                                                                u64 relocation_base, IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity)
+                                                                u64 relocation_base, IrGlobalRelocation* relocations, u32* relocation_count,
+                                                                u32 relocation_capacity);
+
+BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBuilder* builder, Arena* task_arena, u32 start, u32 end,
+                                                                     IrTypeId root_type, u8* bytes, u64 byte_count, u64 relocation_base,
+                                                                     IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity)
 {
     Arena* arena = builder->arena;
     IrProgram* program = builder->program;
@@ -33881,7 +34633,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_legacy(CIntegerIrBuilde
         return false;
     }
     u32 capacity = end - start + 1;
-    CIrConstantInitializerTask* tasks = arena_allocate(arena, CIrConstantInitializerTask, capacity);
+    CIrConstantInitializerTask* tasks = arena_allocate(task_arena, CIrConstantInitializerTask, capacity);
     u32 task_count = 1;
     tasks[0] = (CIrConstantInitializerTask){
         .type = root_type,
@@ -33951,12 +34703,33 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_legacy(CIntegerIrBuilde
                 }
             }
             CIrConstantValue evaluated = {0};
+            if (type->kind == IR_TYPE_POINTER)
+            {
+                u64 raw_pointer = 0;
+                if (c_ir_pointer_integer_cast_expression(builder, task.type, task.start, task.end, &raw_pointer))
+                {
+                    c_ir_store_pointer_bits(builder, type, bytes, task.offset, raw_pointer);
+                    continue;
+                }
+            }
             if (c_ir_constant_evaluate(builder, task.start, task.end, &evaluated))
             {
                 if (type->kind == IR_TYPE_POINTER)
                 {
+                    if (evaluated.kind == C_IR_CONSTANT_INTEGER)
+                    {
+                        if (evaluated.integer != 0)
+                        {
+                            return false;
+                        }
+                        continue;
+                    }
                     CIrConstantValue converted = {0};
                     if (!c_ir_constant_cast(builder, evaluated, task.type, &converted))
+                    {
+                        return false;
+                    }
+                    if (c_ir_symbol_is_thread_local(builder, converted.symbol))
                     {
                         return false;
                     }
@@ -34029,13 +34802,21 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_legacy(CIntegerIrBuilde
                     continue;
                 }
             }
-            if (type->kind == IR_TYPE_POINTER && task.end == task.start + 2 && c_ir_label_address_prefix(builder, task.start, task.start) &&
-                preprocess.tokens[task.start + 1].kind == C_TOKEN_IDENTIFIER)
+            u32 label_index = 0;
+            IrTypeId label_cast_type = IR_TYPE_ID_INVALID;
+            if (type->kind == IR_TYPE_POINTER && c_ir_label_address_expression(builder, task.start, task.end, &label_index, &label_cast_type))
             {
                 IrType* element = ir_type_from_id(&program->types, type->element_type);
-                CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, preprocess.tokens[task.start + 1].spelling) : 0;
-                if (!element || element->kind != IR_TYPE_VOID || !label || !relocations || !relocation_count || *relocation_count >= relocation_capacity ||
-                    !builder->function)
+                IrType* cast_element = 0;
+                if (label_cast_type.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    IrType* cast = ir_type_from_id(&program->types, label_cast_type);
+                    cast_element = cast ? ir_type_from_id(&program->types, cast->element_type) : 0;
+                }
+                CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, preprocess.tokens[label_index].spelling) : 0;
+                if (!element || element->kind != IR_TYPE_VOID || (label_cast_type.value != IR_ID_UNDERLYING_INVALID &&
+                                                                   (!cast_element || cast_element->kind != IR_TYPE_VOID)) || !label || !relocations ||
+                    !relocation_count || *relocation_count >= relocation_capacity || !builder->function)
                 {
                     return false;
                 }
@@ -34191,9 +34972,13 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_legacy(CIntegerIrBuilde
                 {
                     memcpy(literal_bytes, decoded.bytes.pointer, decoded.bytes.length);
                 }
-                IrTypeId literal_element = type->element_type;
+                IrTypeId literal_element = decoded.element_kind < C_TYPE_COUNT ? builder->scalar_types[decoded.element_kind] : IR_TYPE_ID_INVALID;
+                if (literal_element.value == IR_ID_UNDERLYING_INVALID || !c_ir_string_pointer_element_compatible(builder, literal_element, decoded))
+                {
+                    return false;
+                }
                 IrType* pointee = ir_type_from_id(&program->types, literal_element);
-                if (!pointee || pointee->kind != IR_TYPE_INTEGER || pointee->bit_width != decoded.element_width * 8)
+                if (!pointee)
                 {
                     return false;
                 }
@@ -34208,7 +34993,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_legacy(CIntegerIrBuilde
                                                                                  .resolved = true,
                                                                              },
                                                                          .kind = IR_TYPE_ARRAY,
-                                                                         .element_count = length,
+                                                                                 .element_count = element_count,
                                                                      });
                 String8 literal_name = string_format(arena, S8(".L.cstr.{u32}"), program->symbols.count);
                 IrSourceRange source =
@@ -34282,9 +35067,9 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_legacy(CIntegerIrBuilde
         {
             IrType* element = ir_type_from_id(&program->types, type->element_type);
             CIrDecodedString decoded = {0};
-            if (!element || element->kind != IR_TYPE_INTEGER ||
+            if (!element ||
                 !c_ir_decode_string_literal_range_for_target(arena, preprocess, preprocess.target, task.start, task.end, &decoded) ||
-                element->bit_width != decoded.element_width * 8 || decoded.bytes.length > type->layout.size)
+                !c_ir_string_array_element_compatible(builder, type->element_type, decoded) || decoded.bytes.length > type->layout.size)
             {
                 return false;
             }
@@ -34382,6 +35167,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_legacy(CIntegerIrBuilde
                 CIrPromotedMemberPath path = {0};
                 if (!c_ir_promoted_member_path(builder, task.type, preprocess.tokens[item_start + 1].spelling, &path))
                 {
+                    if (path.ambiguous)
+                    {
+                        builder->failure_message = S8("ambiguous promoted member designator");
+                    }
                     return false;
                 }
                 selected_index = path.root_field;
@@ -34459,6 +35248,21 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_legacy(CIntegerIrBuilde
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_legacy(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_type, u8* bytes, u64 byte_count,
+                                                                u64 relocation_base, IrGlobalRelocation* relocations, u32* relocation_count,
+                                                                u32 relocation_capacity)
+{
+    if (!builder || !builder->scratch_arena)
+    {
+        return false;
+    }
+    TemporalArena temporary = arena_begin_temporal(builder->scratch_arena);
+    bool result = c_ir_constant_initializer_bytes_legacy_core(builder, temporary.arena, start, end, root_type, bytes, byte_count, relocation_base,
+                                                              relocations, relocation_count, relocation_capacity);
+    scratch_end(temporary);
+    return result;
+}
+
 typedef struct CIrConstantInitializerFrame CIrConstantInitializerFrame;
 struct CIrConstantInitializerFrame
 {
@@ -34481,7 +35285,63 @@ BUSTER_GLOBAL_LOCAL u64 c_ir_constant_initializer_slot_count(IrType* type)
     {
         return type->element_count;
     }
-    return type->kind == IR_TYPE_UNION ? (type->field_count != 0) : type->field_count;
+    if (type->kind == IR_TYPE_UNION)
+    {
+        for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
+        {
+            if (!(type->fields[field_index].is_bit_field && !type->fields[field_index].name.length))
+            {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    u64 count = 0;
+    for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
+    {
+        count += !(type->fields[field_index].is_bit_field && !type->fields[field_index].name.length);
+    }
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL u32 c_ir_constant_initializer_field_slot(IrType* type, u32 field_index)
+{
+    if (!type || field_index >= type->field_count || (type->fields[field_index].is_bit_field && !type->fields[field_index].name.length))
+    {
+        return UINT32_MAX;
+    }
+    if (type->kind == IR_TYPE_UNION)
+    {
+        return 0;
+    }
+    u32 slot = 0;
+    for (u32 index = 0; index < field_index; index += 1)
+    {
+        slot += !(type->fields[index].is_bit_field && !type->fields[index].name.length);
+    }
+    return slot;
+}
+
+BUSTER_GLOBAL_LOCAL IrField* c_ir_constant_initializer_field_at(IrType* type, u64 slot)
+{
+    if (!type || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION))
+    {
+        return 0;
+    }
+    u64 current = 0;
+    for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
+    {
+        IrField* field = type->fields + field_index;
+        if (field->is_bit_field && !field->name.length)
+        {
+            continue;
+        }
+        if (current++ == slot || type->kind == IR_TYPE_UNION)
+        {
+            return field;
+        }
+    }
+    return 0;
 }
 
 BUSTER_GLOBAL_LOCAL IrTypeId c_ir_constant_initializer_child_type(IrType* type, u64 index)
@@ -34490,7 +35350,8 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_constant_initializer_child_type(IrType* type, 
     {
         return index < type->element_count ? type->element_type : IR_TYPE_ID_INVALID;
     }
-    return index < type->field_count ? type->fields[(u32)index].type : IR_TYPE_ID_INVALID;
+    IrField* field = c_ir_constant_initializer_field_at(type, index);
+    return field ? field->type : IR_TYPE_ID_INVALID;
 }
 
 BUSTER_GLOBAL_LOCAL u64 c_ir_constant_initializer_child_offset(IrType* type, u64 index)
@@ -34499,100 +35360,75 @@ BUSTER_GLOBAL_LOCAL u64 c_ir_constant_initializer_child_offset(IrType* type, u64
     {
         return index < type->element_count ? index : UINT64_MAX;
     }
-    return index < type->field_count ? type->fields[(u32)index].offset : UINT64_MAX;
+    IrField* field = c_ir_constant_initializer_field_at(type, index);
+    return field ? field->offset : UINT64_MAX;
 }
+
+BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_type, u8* bytes, u64 byte_count,
+                                                         IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity);
 
 #if BUSTER_INCLUDE_TESTS
-bool c_test_constant_initializer_u64_slots(void)
+BUSTER_F_DECL u64 c_test_ir_initializer_slot_count(IrType* type)
 {
-    u64 count = (u64)UINT32_MAX + 1;
-    IrType element = {
-        .kind = IR_TYPE_INTEGER,
-        .layout =
-            {
-                .size = 1,
-                .alignment = 1,
-                .resolved = true,
-            },
-    };
-    IrType array = {
-        .element_type = {.value = 7},
-        .kind = IR_TYPE_ARRAY,
-        .element_count = count,
-        .layout =
-            {
-                .size = count,
-                .alignment = 1,
-                .resolved = true,
-            },
-    };
-    return c_ir_constant_initializer_slot_count(&array) == count && c_ir_constant_initializer_child_type(&array, count - 1).value == 7 &&
-           c_ir_constant_initializer_child_offset(&array, count - 1) == count - 1 && c_ir_constant_initializer_child_offset(&array, count) == UINT64_MAX &&
-           element.layout.size == 1;
+    return c_ir_constant_initializer_slot_count(type);
 }
 
-bool c_test_promoted_member_scratch(void)
+BUSTER_F_DECL bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool* restored_pointer_out,
+                                                           bool* old_tag_restored_out, bool* grown_tag_preserved_out)
 {
-    enum
+    if (!arena)
     {
-        type_count = 16000,
-    };
-    Arena* result_arena = arena_create((ArenaCreation){
-        .reserved_size = BUSTER_MB(4),
-        .granularity = BUSTER_KB(64),
-        .initial_size = BUSTER_KB(64),
-    });
-    Arena* machine_arena = arena_create((ArenaCreation){
-        .reserved_size = BUSTER_KB(256),
-        .granularity = BUSTER_KB(64),
-        .initial_size = BUSTER_KB(64),
-    });
-    if (!result_arena || !machine_arena)
-    {
-        if (result_arena) arena_destroy(result_arena, 1);
-        if (machine_arena) arena_destroy(machine_arena, 1);
         return false;
     }
-    CType* types = arena_allocate(result_arena, CType, type_count);
-    CMember* members = arena_allocate(result_arena, CMember, 1);
-    memset(types, 0, sizeof(*types) * type_count);
-    types[0] = (CType){
-        .member_count = 1,
-        .kind = C_TYPE_STRUCT,
-    };
-    types[1] = (CType){.kind = C_TYPE_INT};
-    members[0] = (CMember){
-        .name = S8("value"),
-        .type = (CTypeId){.value = 1},
-    };
-    CParsePromotedMemberWork* promoted_member_work = arena_allocate(machine_arena, CParsePromotedMemberWork, type_count);
-    bool* promoted_member_visited = arena_allocate(machine_arena, bool, type_count);
-    u64 remaining = machine_arena->reserved_size - machine_arena->position;
-    if (remaining > 1024)
+    CType* checkpoint_types = arena_allocate(arena, CType, 1);
+    if (!checkpoint_types)
     {
-        arena_allocate_bytes(machine_arena, remaining - 1024, 1);
+        return false;
     }
-    u64 machine_mark = machine_arena->position;
-    CTypeParseMachine machine = {
-        .scratch_arena = machine_arena,
-        .promoted_member_work = promoted_member_work,
-        .promoted_member_visited = promoted_member_visited,
-        .promoted_member_capacity = type_count,
+    checkpoint_types[0] = (CType){
+        .tag = S8("RollbackTag"),
+        .kind = C_TYPE_STRUCT,
+        .member_start = 0,
+        .member_count = 0,
+        .is_complete = false,
     };
     CParseResult result = {
-        .types = types,
-        .type_count = type_count,
-        .members = members,
-        .member_count = 1,
+        .arena = arena,
+        .types = checkpoint_types,
+        .type_count = 1,
+        .type_capacity = 1,
     };
-    CTypeId member_type = C_TYPE_ID_INVALID;
-    u32 root_field = UINT32_MAX;
-    bool found = c_parse_promoted_member_type(&machine, &result, (CTypeId){.value = 0}, S8("value"), &member_type, &root_field);
-    bool unchanged = machine_arena->position == machine_mark;
-    bool result_destroyed = arena_destroy(result_arena, 1);
-    bool machine_destroyed = arena_destroy(machine_arena, 1);
-    bool destroyed = result_destroyed && machine_destroyed;
-    return found && unchanged && destroyed && member_type.value == 1 && root_field == 0;
+    CParseResult checkpoint = result;
+    CType previous = checkpoint_types[0];
+    // Model a speculative tag completion recorded before a geometric reserve.
+    // The old rollback order restored the new copy and then selected this old
+    // checkpoint pointer, leaving the completed tag visible here.
+    checkpoint_types[0].is_complete = true;
+    checkpoint_types[0].member_count = 1;
+    if (!c_parse_result_reserve_types(&result, 1))
+    {
+        return false;
+    }
+    CType* grown_types = result.types;
+    bool grew = grown_types != checkpoint_types;
+    CTypeMutation mutation = {
+        .id = (CTypeId){.value = 0},
+        .previous = previous,
+    };
+    CTypeParseMachine machine = {
+        .mutations = &mutation,
+        .mutation_count = 1,
+        .mutation_capacity = 1,
+    };
+    c_type_parse_rollback(&machine, &result, checkpoint, 0);
+    bool restored_pointer = result.types == checkpoint_types && result.type_count == 1;
+    bool old_tag_restored = !checkpoint_types[0].is_complete && checkpoint_types[0].member_count == 0 && string_equal(checkpoint_types[0].tag, S8("RollbackTag"));
+    bool grown_tag_preserved = grown_types[0].is_complete && grown_types[0].member_count == 1 && string_equal(grown_types[0].tag, S8("RollbackTag"));
+    if (grew_out) *grew_out = grew;
+    if (restored_pointer_out) *restored_pointer_out = restored_pointer;
+    if (old_tag_restored_out) *old_tag_restored_out = old_tag_restored;
+    if (grown_tag_preserved_out) *grown_tag_preserved_out = grown_tag_preserved;
+    return machine.mutation_count == 0 && grew && restored_pointer && old_tag_restored && grown_tag_preserved;
 }
 #endif
 
@@ -34615,30 +35451,34 @@ BUSTER_GLOBAL_LOCAL u32 c_ir_constant_initializer_value_end(CIntegerIrBuilder* b
     return limit;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_initializer_compound_literal_range(CIntegerIrBuilder* builder, u32 start, u32 limit, u32* open_out, u32* close_out)
+BUSTER_GLOBAL_LOCAL bool c_ir_initializer_compound_literal_info(CIntegerIrBuilder* builder, u32 start, u32 limit, u32* open_out, u32* close_out,
+                                                                u32* type_start_out, u32* type_end_out)
 {
-    u32 open = start;
-    while (open < limit && c_token_is_punctuator(builder->preprocess.tokens[open], S8("(")))
+    while (start + 1 < limit && c_token_is_punctuator(builder->preprocess.tokens[start], S8("(")) &&
+           c_ir_matching_delimiter(builder->preprocess, start, limit, S8("("), S8(")")) == limit - 1)
     {
-        u32 close = c_ir_matching_delimiter(builder->preprocess, open, limit, S8("("), S8(")"));
-        if (close >= limit)
-        {
-            return false;
-        }
-        if (close + 1 < limit && c_token_is_punctuator(builder->preprocess.tokens[close + 1], S8("{")))
-        {
-            u32 initializer_close = c_ir_matching_delimiter(builder->preprocess, close + 1, limit, S8("{"), S8("}"));
-            if (initializer_close >= limit)
-            {
-                return false;
-            }
-            *open_out = close + 1;
-            *close_out = initializer_close;
-            return true;
-        }
-        open += 1;
+        start += 1;
+        limit -= 1;
     }
-    return false;
+    if (start + 2 >= limit || !c_token_is_punctuator(builder->preprocess.tokens[start], S8("(")))
+    {
+        return false;
+    }
+    u32 type_close = c_ir_matching_delimiter(builder->preprocess, start, limit, S8("("), S8(")"));
+    if (type_close >= limit || type_close + 1 >= limit || !c_token_is_punctuator(builder->preprocess.tokens[type_close + 1], S8("{")))
+    {
+        return false;
+    }
+    u32 initializer_close = c_ir_matching_delimiter(builder->preprocess, type_close + 1, limit, S8("{"), S8("}"));
+    if (initializer_close != limit - 1)
+    {
+        return false;
+    }
+    if (open_out) *open_out = type_close + 1;
+    if (close_out) *close_out = initializer_close;
+    if (type_start_out) *type_start_out = start + 1;
+    if (type_end_out) *type_end_out = type_close;
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_fail(String8* message_out, u32* token_out, String8 message, u32 token)
@@ -34677,11 +35517,21 @@ struct CIrInitializerInferenceFrame
 };
 
 typedef struct CIrInitializerInferenceDesignator CIrInitializerInferenceDesignator;
+typedef struct CIrInitializerContinuation CIrInitializerContinuation;
+struct CIrInitializerContinuation
+{
+    IrTypeId type;
+    u64 offset;
+    u64 next_index;
+};
+
 struct CIrInitializerInferenceDesignator
 {
     IrTypeId value_type;
     u32 value_start;
     u64 selected;
+    CIrInitializerContinuation* continuations;
+    u32 continuation_count;
     bool has_designator;
 };
 
@@ -34726,6 +35576,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_initializer_value_is_aggregate_expression(CInteger
     return c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, expression_type));
 }
 
+BUSTER_GLOBAL_LOCAL u64 c_ir_constant_initializer_slot_count(IrType* type);
+BUSTER_GLOBAL_LOCAL u32 c_ir_constant_initializer_field_slot(IrType* type, u32 field_index);
+BUSTER_GLOBAL_LOCAL IrField* c_ir_constant_initializer_field_at(IrType* type, u64 slot);
+
 BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_slots(CIntegerIrBuilder* builder, CIrInitializerInferenceFrame* frame, u64* slots_out)
 {
     if (frame->root)
@@ -34745,7 +35599,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_slots(CIntegerIrBuilder* bui
     }
     if (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
     {
-        *slots_out = type->kind == IR_TYPE_UNION ? (type->field_count != 0) : type->field_count;
+        *slots_out = c_ir_constant_initializer_slot_count(type);
         return true;
     }
     return false;
@@ -34793,6 +35647,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_index_value(CIntegerIrBuilde
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_designator(CIntegerIrBuilder* builder, CIrInitializerInferenceFrame* frame, u32 start, u32 limit,
+                                                               CIrInitializerContinuation* continuation_work, u32 continuation_capacity,
                                                                CIrInitializerInferenceDesignator* designator, String8* message_out,
                                                                u32* token_out)
 {
@@ -34801,6 +35656,12 @@ BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_designator(CIntegerIrBuilder
     u32 cursor = start;
     bool first = true;
     bool has_designator = false;
+    if (!continuation_work || !continuation_capacity || continuation_capacity > UINT32_MAX / sizeof(CIrInitializerContinuation))
+    {
+        return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer designator exceeds its capacity"), start);
+    }
+    designator->continuations = continuation_work;
+    designator->continuation_count = 0;
     while (cursor < limit &&
            (c_token_is_punctuator(builder->preprocess.tokens[cursor], S8("[")) ||
             c_token_is_punctuator(builder->preprocess.tokens[cursor], S8("."))))
@@ -34825,6 +35686,17 @@ BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_designator(CIntegerIrBuilder
             }
             else
             {
+                if (!first)
+                {
+                    if (designator->continuation_count >= continuation_capacity || index == UINT64_MAX)
+                    {
+                        return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer designator exceeds its capacity"), cursor);
+                    }
+                    designator->continuations[designator->continuation_count++] = (CIrInitializerContinuation){
+                        .type = current,
+                        .next_index = index + 1,
+                    };
+                }
                 if (!container || container->kind != IR_TYPE_ARRAY || index >= container->element_count)
                 {
                     return c_ir_initializer_inference_fail(message_out, token_out, S8("array designator index is outside the array bounds"), cursor);
@@ -34843,11 +35715,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_designator(CIntegerIrBuilder
         }
         else
         {
-            if (frame->root && first)
-            {
-                return c_ir_initializer_inference_fail(message_out, token_out,
-                                                        S8("array initializer requires an element designator before a member designator"), cursor);
-            }
             IrType* container = ir_type_from_id(&builder->program->types, current);
             if (!container || (container->kind != IR_TYPE_STRUCT && container->kind != IR_TYPE_UNION) || cursor + 1 >= limit ||
                 builder->preprocess.tokens[cursor + 1].kind != C_TOKEN_IDENTIFIER)
@@ -34857,16 +35724,44 @@ BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_designator(CIntegerIrBuilder
             CIrPromotedMemberPath path = {0};
             if (!c_ir_promoted_member_path(builder, current, builder->preprocess.tokens[cursor + 1].spelling, &path))
             {
-                return c_ir_initializer_inference_fail(message_out, token_out, S8("aggregate designator names an unknown field"), cursor + 1);
+                return c_ir_initializer_inference_fail(message_out, token_out,
+                                                        path.ambiguous ? S8("ambiguous promoted member designator")
+                                                                       : S8("aggregate designator names an unknown field"),
+                                                        cursor + 1);
+            }
+            IrTypeId container_id = current;
+            u32 member_slot = c_ir_constant_initializer_field_slot(container, path.root_field);
+            if (member_slot == UINT32_MAX || member_slot == UINT32_MAX - 1)
+            {
+                return c_ir_initializer_inference_fail(message_out, token_out, S8("aggregate designator names an uninitializable field"), cursor + 1);
+            }
+            if (first && frame->root)
+            {
+                if (designator->continuation_count >= continuation_capacity)
+                {
+                    return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer designator exceeds its capacity"), cursor);
+                }
+                designator->continuations[designator->continuation_count++] = (CIrInitializerContinuation){
+                    .type = container_id,
+                    .next_index = member_slot + 1,
+                };
+            }
+            else if (first)
+            {
+                selected = member_slot;
+            }
+            else
+            {
+                if (designator->continuation_count >= continuation_capacity)
+                {
+                    return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer designator exceeds its capacity"), cursor);
+                }
+                designator->continuations[designator->continuation_count++] = (CIrInitializerContinuation){
+                    .type = container_id,
+                    .next_index = member_slot + 1,
+                };
             }
             current = path.type;
-            if (first)
-            {
-                if (!frame->root)
-                {
-                    selected = path.root_field;
-                }
-            }
             cursor += 2;
         }
         has_designator = true;
@@ -34911,8 +35806,12 @@ BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_designator(CIntegerIrBuilder
         }
         else
         {
-            u32 field_index = (u32)frame->next_index;
-            designator->value_type = type->fields[field_index].type;
+            IrField* field = c_ir_constant_initializer_field_at(type, frame->next_index);
+            if (!field)
+            {
+                return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer has more elements than the aggregate can hold"), start);
+            }
+            designator->value_type = field->type;
         }
     }
     designator->value_start = start;
@@ -34933,8 +35832,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuild
         CIrDecodedString decoded = {0};
         IrType* element = ir_type_from_id(&builder->program->types, element_type);
         if (!c_ir_decode_string_literal_range_for_target(temporary_arena, builder->preprocess, builder->target, start, end, &decoded) ||
-            decoded.element_count == UINT64_MAX || !element || element->kind != IR_TYPE_INTEGER || !element->layout.resolved ||
-            element->layout.size != decoded.element_width)
+            decoded.element_count == UINT64_MAX || !element || !element->layout.resolved ||
+            !c_ir_string_array_element_compatible(builder, element_type, decoded))
         {
             return c_ir_initializer_inference_fail(message_out, token_out, S8("could not determine the size of the string initializer"), start);
         }
@@ -34949,25 +35848,39 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuild
     }
     u32 string_start = start + 1;
     u32 string_end = end - 1;
-    while (string_end > string_start && c_token_is_punctuator(builder->preprocess.tokens[string_end - 1], S8(",")))
+    bool trailing_comma = false;
+    if (string_end > string_start && c_token_is_punctuator(builder->preprocess.tokens[string_end - 1], S8(",")))
     {
+        trailing_comma = true;
         string_end -= 1;
+    }
+    if ((trailing_comma && string_start >= string_end) ||
+        (string_end > string_start && c_token_is_punctuator(builder->preprocess.tokens[string_end - 1], S8(","))))
+    {
+        return c_ir_initializer_inference_fail(message_out, token_out, S8("invalid initializer separator"), string_start);
     }
     if (string_start < string_end && c_ir_tokens_are_string_literals(builder->preprocess, string_start, string_end))
     {
         CIrDecodedString decoded = {0};
         IrType* element = ir_type_from_id(&builder->program->types, element_type);
-        if (!element || element->kind != IR_TYPE_INTEGER || !element->layout.resolved ||
+        if (!element || !element->layout.resolved ||
             !c_ir_decode_string_literal_range_for_target(temporary_arena, builder->preprocess, builder->target, string_start, string_end, &decoded) ||
-            decoded.element_count == UINT64_MAX || element->layout.size != decoded.element_width)
+            decoded.element_count == UINT64_MAX || !c_ir_string_array_element_compatible(builder, element_type, decoded))
         {
             return c_ir_initializer_inference_fail(message_out, token_out, S8("could not determine the size of the string initializer"), start);
         }
         *count_out = decoded.element_count + 1;
         return true;
     }
-    u32 capacity = end - start + 2;
+    u64 span = (u64)end - start;
+    if (span > UINT32_MAX - 2 || span + 2 > UINT32_MAX / sizeof(CIrInitializerInferenceFrame) ||
+        span + 1 > UINT32_MAX / sizeof(CIrInitializerContinuation))
+    {
+        return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer nesting exceeds its capacity"), start);
+    }
+    u32 capacity = (u32)(span + 2);
     CIrInitializerInferenceFrame* frames = arena_allocate(temporary_arena, CIrInitializerInferenceFrame, capacity);
+    CIrInitializerContinuation* continuation_work = arena_allocate(temporary_arena, CIrInitializerContinuation, (u32)(span + 1));
     u32 frame_count = 1;
     frames[0] = (CIrInitializerInferenceFrame){
         .element_type = element_type,
@@ -34979,9 +35892,31 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuild
     while (frame_count)
     {
         CIrInitializerInferenceFrame* frame = frames + frame_count - 1;
-        while (frame->cursor < frame->limit && c_token_is_punctuator(builder->preprocess.tokens[frame->cursor], S8(",")))
+        if (!c_initializer_consume_separator(builder->preprocess.tokens, frame->limit, &frame->cursor, frame->next_index))
         {
-            frame->cursor += 1;
+            return c_ir_initializer_inference_fail(message_out, token_out, S8("invalid initializer separator"), frame->cursor);
+        }
+        bool designated = frame->cursor < frame->limit &&
+                         (c_token_is_punctuator(builder->preprocess.tokens[frame->cursor], S8("[")) ||
+                          c_token_is_punctuator(builder->preprocess.tokens[frame->cursor], S8(".")));
+        if (designated && frame->borrowed)
+        {
+            while (frame_count && frames[frame_count - 1].borrowed)
+            {
+                frame_count -= 1;
+            }
+            if (!frame_count)
+            {
+                return c_ir_initializer_inference_fail(message_out, token_out, S8("invalid aggregate designator"), frame->cursor);
+            }
+            frame = frames + frame_count - 1;
+            if (!c_initializer_consume_separator(builder->preprocess.tokens, frame->limit, &frame->cursor, frame->next_index))
+            {
+                return c_ir_initializer_inference_fail(message_out, token_out, S8("invalid initializer separator"), frame->cursor);
+            }
+            designated = frame->cursor < frame->limit &&
+                         (c_token_is_punctuator(builder->preprocess.tokens[frame->cursor], S8("[")) ||
+                          c_token_is_punctuator(builder->preprocess.tokens[frame->cursor], S8(".")));
         }
         u64 slots = 0;
         if (!c_ir_initializer_inference_slots(builder, frame, &slots))
@@ -34999,9 +35934,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuild
             }
             continue;
         }
-        bool designated = frame->cursor < frame->limit &&
-                          (c_token_is_punctuator(builder->preprocess.tokens[frame->cursor], S8("[")) ||
-                           c_token_is_punctuator(builder->preprocess.tokens[frame->cursor], S8(".")));
         if (frame->next_index >= slots && !designated)
         {
             if (frame->borrowed)
@@ -35017,7 +35949,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuild
             return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer has more elements than the aggregate can hold"), frame->cursor);
         }
         CIrInitializerInferenceDesignator designator = {0};
-        if (!c_ir_initializer_inference_designator(builder, frame, frame->cursor, frame->limit, &designator, message_out, token_out))
+        if (!c_ir_initializer_inference_designator(builder, frame, frame->cursor, frame->limit, continuation_work, (u32)(span + 1), &designator,
+                                                   message_out, token_out))
         {
             return false;
         }
@@ -35053,6 +35986,21 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuild
                 return c_ir_initializer_inference_fail(message_out, token_out, S8("invalid nested aggregate initializer"), designator.value_start);
             }
             frame->cursor = close + 1;
+            if (frame_count + designator.continuation_count >= capacity)
+            {
+                return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer nesting exceeds its capacity"), designator.value_start);
+            }
+            for (u32 continuation_index = 0; continuation_index < designator.continuation_count; continuation_index += 1)
+            {
+                CIrInitializerContinuation continuation = designator.continuations[continuation_index];
+                frames[frame_count++] = (CIrInitializerInferenceFrame){
+                    .type = continuation.type,
+                    .cursor = close + 1,
+                    .limit = frame->limit,
+                    .next_index = continuation.next_index,
+                    .borrowed = true,
+                };
+            }
             frames[frame_count++] = (CIrInitializerInferenceFrame){
                 .type = designator.value_type,
                 .cursor = designator.value_start + 1,
@@ -35063,9 +36011,21 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuild
         if (aggregate && !c_ir_tokens_are_string_literals(builder->preprocess, designator.value_start, value_end) &&
             !c_ir_initializer_value_is_aggregate_expression(builder, scope, designator.value_start, value_end))
         {
-            if (frame_count >= capacity)
+            if (frame_count + designator.continuation_count >= capacity)
             {
                 return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer nesting exceeds its capacity"), designator.value_start);
+            }
+            frame->cursor = value_end;
+            for (u32 continuation_index = 0; continuation_index < designator.continuation_count; continuation_index += 1)
+            {
+                CIrInitializerContinuation continuation = designator.continuations[continuation_index];
+                frames[frame_count++] = (CIrInitializerInferenceFrame){
+                    .type = continuation.type,
+                    .cursor = designator.value_start,
+                    .limit = frame->limit,
+                    .next_index = continuation.next_index,
+                    .borrowed = true,
+                };
             }
             frames[frame_count++] = (CIrInitializerInferenceFrame){
                 .type = designator.value_type,
@@ -35076,6 +36036,21 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuild
             continue;
         }
         frame->cursor = value_end;
+        if (frame_count + designator.continuation_count > capacity)
+        {
+            return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer nesting exceeds its capacity"), designator.value_start);
+        }
+        for (u32 continuation_index = 0; continuation_index < designator.continuation_count; continuation_index += 1)
+        {
+            CIrInitializerContinuation continuation = designator.continuations[continuation_index];
+            frames[frame_count++] = (CIrInitializerInferenceFrame){
+                .type = continuation.type,
+                .cursor = value_end,
+                .limit = frame->limit,
+                .next_index = continuation.next_index,
+                .borrowed = true,
+            };
+        }
     }
     *count_out = count;
     return count != 0;
@@ -35185,9 +36160,12 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* b
                         break;
                     }
                 }
+                String8 diagnostic_message = string_equal(failure, S8("invalid initializer separator"))
+                                                 ? failure
+                                                 : string_format(builder->arena, S8("{S8} for incomplete array type {u32} '{S8}'"), failure, type_index,
+                                                                 candidate_name);
                 result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
-                    .message = string_format(builder->arena, S8("C IR lowering: {S8} for incomplete array type {u32} '{S8}'"), failure, type_index,
-                                             candidate_name),
+                    .message = string_format(builder->arena, S8("C IR lowering: {S8}"), diagnostic_message),
                     .location = failure_token < builder->preprocess.token_count ? builder->preprocess.tokens[failure_token].location : (CSourceLocation){0},
                     .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
                 };
@@ -35201,6 +36179,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* b
 }
 
 typedef struct CIrConstantInitializerDesignator CIrConstantInitializerDesignator;
+typedef struct CIrConstantInitializerContinuation CIrConstantInitializerContinuation;
+struct CIrConstantInitializerContinuation
+{
+    IrTypeId type;
+    u64 offset;
+    u64 next_index;
+};
+
 struct CIrConstantInitializerDesignator
 {
     IrTypeId value_type;
@@ -35208,10 +36194,16 @@ struct CIrConstantInitializerDesignator
     u64 value_offset;
     u32 value_start;
     u64 selected;
+    u64 clear_offset;
+    u64 clear_size;
+    CIrConstantInitializerContinuation* continuations;
+    u32 continuation_count;
+    bool clear_union;
     bool has_designator;
 };
 
 BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder* builder, CIrConstantInitializerFrame* frame,
+                                                               CIrConstantInitializerContinuation* continuation_work, u32 continuation_capacity,
                                                                CIrConstantInitializerDesignator* result)
 {
     IrTypeId current_type = frame->type;
@@ -35221,6 +36213,13 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder*
     u32 cursor = frame->cursor;
     bool first = true;
     bool has_designator = false;
+    if (!continuation_work || !continuation_capacity || continuation_capacity > UINT32_MAX / sizeof(CIrConstantInitializerContinuation))
+    {
+        return c_ir_constant_initializer_fail(builder, S8("initializer designator exceeds its capacity"), frame->cursor);
+    }
+    result->continuations = continuation_work;
+    result->continuation_count = 0;
+    result->clear_union = false;
     IrType* frame_type = ir_type_from_id(&builder->program->types, frame->type);
     while (cursor < frame->limit &&
            (c_token_is_punctuator(builder->preprocess.tokens[cursor], S8("[")) ||
@@ -35248,6 +36247,24 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder*
             if (designated >= container->element_count)
             {
                 return c_ir_constant_initializer_fail(builder, S8("array designator index is outside the array bounds"), cursor);
+            }
+            if (!first)
+            {
+                if (result->continuation_count >= continuation_capacity || designated == UINT64_MAX)
+                {
+                    return c_ir_constant_initializer_fail(builder, S8("initializer designator exceeds its capacity"), cursor);
+                }
+                result->continuations[result->continuation_count++] = (CIrConstantInitializerContinuation){
+                    .type = current_type,
+                    .offset = current_offset,
+                    .next_index = designated + 1,
+                };
+            }
+            if (container->kind == IR_TYPE_UNION)
+            {
+                result->clear_union = true;
+                result->clear_offset = current_offset;
+                result->clear_size = container->layout.size;
             }
             IrType* element = ir_type_from_id(&builder->program->types, container->element_type);
             if (!element || (designated && element->layout.size > UINT64_MAX / designated) ||
@@ -35278,7 +36295,37 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder*
             CIrPromotedMemberPath path = {0};
             if (!c_ir_promoted_member_path(builder, current_type, builder->preprocess.tokens[cursor + 1].spelling, &path))
             {
-                return c_ir_constant_initializer_fail(builder, S8("aggregate designator names an unknown field"), cursor + 1);
+                return c_ir_constant_initializer_fail(builder, path.ambiguous ? S8("ambiguous promoted member designator")
+                                                                               : S8("aggregate designator names an unknown field"),
+                                                       cursor + 1);
+            }
+            IrTypeId container_id = current_type;
+            if (path.has_union)
+            {
+                if (path.union_offset > UINT64_MAX - current_offset)
+                {
+                    return c_ir_constant_initializer_fail(builder, S8("aggregate designator offset overflows the target object"), cursor);
+                }
+                result->clear_union = true;
+                result->clear_offset = current_offset + path.union_offset;
+                result->clear_size = path.union_size;
+            }
+            u32 member_slot = c_ir_constant_initializer_field_slot(container, path.root_field);
+            if (member_slot == UINT32_MAX || member_slot == UINT32_MAX - 1)
+            {
+                return c_ir_constant_initializer_fail(builder, S8("aggregate designator names an uninitializable field"), cursor + 1);
+            }
+            if (!first)
+            {
+                if (result->continuation_count >= continuation_capacity)
+                {
+                    return c_ir_constant_initializer_fail(builder, S8("initializer designator exceeds its capacity"), cursor);
+                }
+                result->continuations[result->continuation_count++] = (CIrConstantInitializerContinuation){
+                    .type = container_id,
+                    .offset = current_offset,
+                    .next_index = member_slot + 1,
+                };
             }
             if (path.offset > UINT64_MAX - current_offset)
             {
@@ -35287,9 +36334,9 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder*
             current_offset += path.offset;
             current_type = path.type;
             current_field = path.field;
-            if (first && !frame->root)
+            if (first)
             {
-                selected = path.root_field;
+                selected = member_slot;
             }
             cursor += 2;
         }
@@ -35341,7 +36388,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder*
         return c_ir_constant_initializer_fail(builder, S8("aggregate initializer offset overflows the target object"), frame->cursor);
     }
     result->value_type = child_type;
-    result->value_field = (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) && selected < type->field_count ? type->fields + (u32)selected : 0;
+    result->value_field = c_ir_constant_initializer_field_at(type, selected);
     result->value_offset = frame->offset + scaled_offset;
     result->value_start = frame->cursor;
     result->selected = selected;
@@ -35350,13 +36397,38 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder*
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_type, u8* bytes, u64 byte_count,
-                                                         IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity)
+                                                         IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity);
+
+BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, u32 start, u32 end, IrTypeId root_type,
+                                                              u8* bytes, u64 byte_count, IrGlobalRelocation* relocations, u32* relocation_count,
+                                                              u32 relocation_capacity)
 {
     IrType* root = ir_type_from_id(&builder->program->types, root_type);
-    if (!root || !root->layout.resolved || start >= end || !c_token_is_punctuator(builder->preprocess.tokens[start], S8("{")) ||
-        !c_token_is_punctuator(builder->preprocess.tokens[end - 1], S8("}")) || c_ir_matching_delimiter(builder->preprocess, start, end, S8("{"), S8("}")) != end - 1)
+    if (!root || !root->layout.resolved || start >= end)
     {
-        return c_ir_constant_initializer_bytes_legacy(builder, start, end, root_type, bytes, byte_count, 0, relocations, relocation_count, relocation_capacity);
+        return false;
+    }
+    bool brace_root = c_token_is_punctuator(builder->preprocess.tokens[start], S8("{")) &&
+                      c_token_is_punctuator(builder->preprocess.tokens[end - 1], S8("}")) &&
+                      c_ir_matching_delimiter(builder->preprocess, start, end, S8("{"), S8("}")) == end - 1;
+    if (!brace_root)
+    {
+        u32 compound_open = 0;
+        u32 compound_close = 0;
+        u32 compound_type_start = 0;
+        u32 compound_type_end = 0;
+        if (!c_ir_initializer_compound_literal_info(builder, start, end, &compound_open, &compound_close, &compound_type_start, &compound_type_end))
+        {
+            return c_ir_constant_initializer_bytes_legacy(builder, start, end, root_type, bytes, byte_count, 0, relocations, relocation_count,
+                                                          relocation_capacity);
+        }
+        IrTypeId compound_type = c_ir_compound_literal_type(builder, compound_type_start, compound_type_end, compound_open, compound_close);
+        if (compound_type.value == IR_ID_UNDERLYING_INVALID || !c_ir_types_compatible(builder, compound_type, root_type))
+        {
+            return c_ir_constant_initializer_fail(builder, S8("compound literal type is incompatible with the destination object"), start);
+        }
+        start = compound_open;
+        end = compound_close + 1;
     }
     bool string_handled = false;
     if (!c_ir_constant_initializer_string_range(builder, start, end, root_type, bytes, byte_count, &string_handled))
@@ -35367,8 +36439,15 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* buil
     {
         return true;
     }
-    u32 capacity = end - start + 2;
-    CIrConstantInitializerFrame* frames = arena_allocate(builder->temporary_arena, CIrConstantInitializerFrame, capacity);
+    u64 span = (u64)end - start;
+    if (span > UINT32_MAX - 2 || span + 2 > UINT32_MAX / sizeof(CIrConstantInitializerFrame) ||
+        span + 1 > UINT32_MAX / sizeof(CIrConstantInitializerContinuation))
+    {
+        return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
+    }
+    u32 capacity = (u32)(span + 2);
+    CIrConstantInitializerFrame* frames = arena_allocate(task_arena, CIrConstantInitializerFrame, capacity);
+    CIrConstantInitializerContinuation* continuation_work = arena_allocate(task_arena, CIrConstantInitializerContinuation, (u32)(span + 1));
     u32 frame_count = 1;
     frames[0] = (CIrConstantInitializerFrame){
         .type = root_type,
@@ -35379,12 +36458,34 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* buil
     while (frame_count)
     {
         CIrConstantInitializerFrame* frame = frames + frame_count - 1;
-        while (frame->cursor < frame->limit && c_token_is_punctuator(builder->preprocess.tokens[frame->cursor], S8(","))) frame->cursor += 1;
-        IrType* type = ir_type_from_id(&builder->program->types, frame->type);
-        u64 slot_count = type ? c_ir_constant_initializer_slot_count(type) : 0;
+        if (!c_initializer_consume_separator(builder->preprocess.tokens, frame->limit, &frame->cursor, frame->next_index))
+        {
+            return c_ir_constant_initializer_fail(builder, S8("invalid initializer separator"), frame->cursor);
+        }
         bool designated = frame->cursor < frame->limit &&
                          (c_token_is_punctuator(builder->preprocess.tokens[frame->cursor], S8("[")) ||
                           c_token_is_punctuator(builder->preprocess.tokens[frame->cursor], S8(".")));
+        if (designated && frame->borrowed)
+        {
+            while (frame_count && frames[frame_count - 1].borrowed)
+            {
+                frame_count -= 1;
+            }
+            if (!frame_count)
+            {
+                return c_ir_constant_initializer_fail(builder, S8("invalid aggregate designator"), frame->cursor);
+            }
+            frame = frames + frame_count - 1;
+            if (!c_initializer_consume_separator(builder->preprocess.tokens, frame->limit, &frame->cursor, frame->next_index))
+            {
+                return c_ir_constant_initializer_fail(builder, S8("invalid initializer separator"), frame->cursor);
+            }
+            designated = frame->cursor < frame->limit &&
+                         (c_token_is_punctuator(builder->preprocess.tokens[frame->cursor], S8("[")) ||
+                          c_token_is_punctuator(builder->preprocess.tokens[frame->cursor], S8(".")));
+        }
+        IrType* type = ir_type_from_id(&builder->program->types, frame->type);
+        u64 slot_count = type ? c_ir_constant_initializer_slot_count(type) : 0;
         if (!type || !type->layout.resolved || frame->cursor >= frame->limit || (frame->next_index >= slot_count && !designated))
         {
             if (!type || (!frame->borrowed && frame->cursor < frame->limit && frame->next_index >= slot_count))
@@ -35398,7 +36499,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* buil
             continue;
         }
         CIrConstantInitializerDesignator designator = {0};
-        if (!c_ir_constant_initializer_designator(builder, frame, &designator)) return false;
+        if (!c_ir_constant_initializer_designator(builder, frame, continuation_work, (u32)(span + 1), &designator)) return false;
         u64 selected = designator.selected;
         u32 value_start = designator.value_start;
         if ((!designator.has_designator && selected >= slot_count) || (type && type->kind == IR_TYPE_ARRAY && selected >= slot_count))
@@ -35409,8 +36510,11 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* buil
         IrType* child = ir_type_from_id(&builder->program->types, child_type);
         u64 child_offset = designator.value_offset;
         if (!child) return false;
-        if (designator.has_designator && (!designator.value_field || !designator.value_field->is_bit_field) &&
-            !c_ir_constant_initializer_clear_subobject(builder, bytes, byte_count, child_offset, child->layout.size, 0, relocations, relocation_count))
+        u64 clear_offset = designator.clear_union ? designator.clear_offset : child_offset;
+        u64 clear_size = designator.clear_union ? designator.clear_size : child->layout.size;
+        bool clear_value = designator.has_designator && (designator.clear_union || !designator.value_field || !designator.value_field->is_bit_field);
+        if (clear_value &&
+            !c_ir_constant_initializer_clear_subobject(builder, bytes, byte_count, clear_offset, clear_size, 0, relocations, relocation_count))
         {
             return c_ir_constant_initializer_fail(builder, S8("designated initializer exceeds the target object"), value_start);
         }
@@ -35436,13 +36540,29 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* buil
                     return c_ir_constant_initializer_fail(builder, S8("aggregate initializer index overflows the target size"), frame->cursor);
                 }
                 frame->next_index = selected + 1;
+                if (frame_count + designator.continuation_count > capacity)
+                {
+                    return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), value_start);
+                }
+                for (u32 continuation_index = 0; continuation_index < designator.continuation_count; continuation_index += 1)
+                {
+                    CIrConstantInitializerContinuation continuation = designator.continuations[continuation_index];
+                    frames[frame_count++] = (CIrConstantInitializerFrame){
+                        .type = continuation.type,
+                        .offset = continuation.offset,
+                        .cursor = value_end,
+                        .limit = frame->limit,
+                        .next_index = continuation.next_index,
+                        .borrowed = true,
+                    };
+                }
                 continue;
             }
         }
         if (aggregate && c_token_is_punctuator(builder->preprocess.tokens[value_start], S8("{")))
         {
             u32 close = c_ir_matching_delimiter(builder->preprocess, value_start, frame->limit, S8("{"), S8("}"));
-            if (close >= frame->limit || frame_count >= capacity)
+            if (close >= frame->limit || frame_count + designator.continuation_count >= capacity)
             {
                 return c_ir_constant_initializer_fail(builder, S8("invalid nested aggregate initializer"), value_start);
             }
@@ -35452,6 +36572,18 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* buil
                 return c_ir_constant_initializer_fail(builder, S8("aggregate initializer index overflows the target size"), frame->cursor);
             }
             frame->next_index = selected + 1;
+            for (u32 continuation_index = 0; continuation_index < designator.continuation_count; continuation_index += 1)
+            {
+                CIrConstantInitializerContinuation continuation = designator.continuations[continuation_index];
+                frames[frame_count++] = (CIrConstantInitializerFrame){
+                    .type = continuation.type,
+                    .offset = continuation.offset,
+                    .cursor = close + 1,
+                    .limit = frame->limit,
+                    .next_index = continuation.next_index,
+                    .borrowed = true,
+                };
+            }
             frames[frame_count++] = (CIrConstantInitializerFrame){
                 .type = child_type,
                 .offset = child_offset,
@@ -35488,22 +36620,41 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* buil
                 return c_ir_constant_initializer_fail(builder, S8("aggregate initializer index overflows the target size"), frame->cursor);
             }
             frame->next_index = selected + 1;
+            if (frame_count + designator.continuation_count > capacity)
+            {
+                return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), value_start);
+            }
+            for (u32 continuation_index = 0; continuation_index < designator.continuation_count; continuation_index += 1)
+            {
+                CIrConstantInitializerContinuation continuation = designator.continuations[continuation_index];
+                frames[frame_count++] = (CIrConstantInitializerFrame){
+                    .type = continuation.type,
+                    .offset = continuation.offset,
+                    .cursor = value_end,
+                    .limit = frame->limit,
+                    .next_index = continuation.next_index,
+                    .borrowed = true,
+                };
+            }
             continue;
         }
         if (aggregate && !c_ir_tokens_are_string_literals(builder->preprocess, value_start, value_end))
         {
             u32 compound_open = 0;
             u32 compound_close = 0;
-            if (c_ir_initializer_compound_literal_range(builder, value_start, value_end, &compound_open, &compound_close))
+            u32 compound_type_start = 0;
+            u32 compound_type_end = 0;
+            if (c_ir_initializer_compound_literal_info(builder, value_start, value_end, &compound_open, &compound_close, &compound_type_start,
+                                                       &compound_type_end))
             {
                 if (child_offset > byte_count || !child || !child->layout.resolved || child->layout.size > byte_count - child_offset)
                 {
                     return c_ir_constant_initializer_fail(builder, S8("compound literal initializer exceeds the target object"), value_start);
                 }
-                if (!c_ir_constant_initializer_bytes_legacy(builder, compound_open, compound_close + 1, child_type, bytes + child_offset,
-                                                            byte_count - child_offset, child_offset, relocations, relocation_count, relocation_capacity))
+                IrTypeId compound_type = c_ir_compound_literal_type(builder, compound_type_start, compound_type_end, compound_open, compound_close);
+                if (compound_type.value == IR_ID_UNDERLYING_INVALID || !c_ir_types_compatible(builder, compound_type, child_type))
                 {
-                    return false;
+                    return c_ir_constant_initializer_fail(builder, S8("compound literal type is incompatible with the destination object"), value_start);
                 }
                 frame->cursor = value_end;
                 if (selected == UINT64_MAX)
@@ -35511,14 +36662,48 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* buil
                     return c_ir_constant_initializer_fail(builder, S8("aggregate initializer index overflows the target size"), frame->cursor);
                 }
                 frame->next_index = selected + 1;
+                if (frame_count + designator.continuation_count > capacity)
+                {
+                    return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), value_start);
+                }
+                for (u32 continuation_index = 0; continuation_index < designator.continuation_count; continuation_index += 1)
+                {
+                    CIrConstantInitializerContinuation continuation = designator.continuations[continuation_index];
+                    frames[frame_count++] = (CIrConstantInitializerFrame){
+                        .type = continuation.type,
+                        .offset = continuation.offset,
+                        .cursor = value_end,
+                        .limit = frame->limit,
+                        .next_index = continuation.next_index,
+                        .borrowed = true,
+                    };
+                }
+                frames[frame_count++] = (CIrConstantInitializerFrame){
+                    .type = child_type,
+                    .offset = child_offset,
+                    .cursor = compound_open + 1,
+                    .limit = compound_close,
+                };
                 continue;
             }
-            if (frame_count >= capacity) return false;
+            if (frame_count + designator.continuation_count >= capacity) return false;
             if (selected == UINT64_MAX)
             {
                 return c_ir_constant_initializer_fail(builder, S8("aggregate initializer index overflows the target size"), frame->cursor);
             }
             frame->next_index = selected + 1;
+            for (u32 continuation_index = 0; continuation_index < designator.continuation_count; continuation_index += 1)
+            {
+                CIrConstantInitializerContinuation continuation = designator.continuations[continuation_index];
+                frames[frame_count++] = (CIrConstantInitializerFrame){
+                    .type = continuation.type,
+                    .offset = continuation.offset,
+                    .cursor = value_start,
+                    .limit = frame->limit,
+                    .next_index = continuation.next_index,
+                    .borrowed = true,
+                };
+            }
             frames[frame_count++] = (CIrConstantInitializerFrame){
                 .type = child_type,
                 .offset = child_offset,
@@ -35537,8 +36722,38 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* buil
             return c_ir_constant_initializer_fail(builder, S8("aggregate initializer index overflows the target size"), frame->cursor);
         }
         frame->next_index = selected + 1;
+        if (frame_count + designator.continuation_count > capacity)
+        {
+            return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), value_start);
+        }
+        for (u32 continuation_index = 0; continuation_index < designator.continuation_count; continuation_index += 1)
+        {
+            CIrConstantInitializerContinuation continuation = designator.continuations[continuation_index];
+            frames[frame_count++] = (CIrConstantInitializerFrame){
+                .type = continuation.type,
+                .offset = continuation.offset,
+                .cursor = value_end,
+                .limit = frame->limit,
+                .next_index = continuation.next_index,
+                .borrowed = true,
+            };
+        }
     }
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_type, u8* bytes, u64 byte_count,
+                                                         IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity)
+{
+    if (!builder || !builder->scratch_arena)
+    {
+        return false;
+    }
+    TemporalArena temporary = arena_begin_temporal(builder->scratch_arena);
+    bool result = c_ir_constant_initializer_bytes_core(builder, temporary.arena, start, end, root_type, bytes, byte_count, relocations,
+                                                       relocation_count, relocation_capacity);
+    scratch_end(temporary);
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_constant_type_is_integer(IrType* type)
@@ -36702,8 +37917,16 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, 
     }
     if (type->kind == IR_TYPE_POINTER)
     {
+        if (value.kind == C_IR_CONSTANT_INTEGER && value.integer != 0)
+        {
+            return false;
+        }
         CIrConstantValue converted = {0};
         if (!c_ir_constant_cast(builder, value, global->type, &converted))
+        {
+            return false;
+        }
+        if (c_ir_symbol_is_thread_local(builder, converted.symbol))
         {
             return false;
         }
@@ -36746,6 +37969,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, 
             memcpy(&global->initializer_bits, &converted.floating, sizeof(converted.floating));
         }
         global->initializer_kind = IR_GLOBAL_INITIALIZER_FLOAT;
+        if (!global->is_read_only && global->initializer_bits == 0)
+        {
+            global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
+        }
         return true;
     }
     if (c_ir_constant_type_is_integer(type))
@@ -36754,9 +37981,182 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, 
         global->initializer_is_negative = type->is_signed && signed_value < 0;
         global->initializer_bits = global->initializer_is_negative ? (u64)(-(signed_value + 1)) + 1 : converted.integer;
         global->initializer_kind = IR_GLOBAL_INITIALIZER_INTEGER;
+        if (!global->is_read_only && global->initializer_bits == 0)
+        {
+            global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
+        }
         return true;
     }
     return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_global_string_pointer_initializer(CIntegerIrBuilder* builder, IrType* type, u32 start, u32 end, IrGlobal* global)
+{
+    CPreprocessResult preprocess = builder->preprocess;
+    if (!type || type->kind != IR_TYPE_POINTER || start >= end)
+    {
+        return false;
+    }
+    u32 literal_start = start;
+    u32 literal_end = end;
+    IrTypeId cast_type_id = IR_TYPE_ID_INVALID;
+    IrTypeId expression_cast_type_id = IR_TYPE_ID_INVALID;
+    bool has_explicit_cast = false;
+    for (;;)
+    {
+        bool unwrapped = false;
+        if (literal_start + 1 < literal_end && c_token_is_punctuator(preprocess.tokens[literal_start], S8("(")) &&
+            c_ir_matching_delimiter(preprocess, literal_start, literal_end, S8("("), S8(")")) == literal_end - 1)
+        {
+            literal_start += 1;
+            literal_end -= 1;
+            unwrapped = true;
+        }
+        if (unwrapped)
+        {
+            continue;
+        }
+        if (c_token_is_punctuator(preprocess.tokens[literal_start], S8("(")))
+        {
+            u32 close = c_ir_matching_delimiter(preprocess, literal_start, literal_end, S8("("), S8(")"));
+            if (close > literal_start + 1 && close < literal_end)
+            {
+                IrTypeId candidate = c_ir_type_name(builder, literal_start + 1, close);
+                if (candidate.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    IrType* candidate_type = ir_type_from_id(&builder->program->types, candidate);
+                    if (!candidate_type || candidate_type->kind != IR_TYPE_POINTER)
+                    {
+                        return false;
+                    }
+                    if (!has_explicit_cast)
+                    {
+                        expression_cast_type_id = candidate;
+                    }
+                    cast_type_id = candidate;
+                    has_explicit_cast = true;
+                    literal_start = close + 1;
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    if (!c_ir_tokens_are_string_literals(preprocess, literal_start, literal_end))
+    {
+        return false;
+    }
+    CIrDecodedString decoded = {0};
+    if (!c_ir_decode_string_literal_range_for_target(builder->arena, preprocess, builder->target, literal_start, literal_end, &decoded) || !decoded.element_width ||
+        decoded.element_count == UINT64_MAX)
+    {
+        return false;
+    }
+    u64 element_count = decoded.element_count + 1;
+    if (element_count > UINT64_MAX / decoded.element_width)
+    {
+        return false;
+    }
+    IrTypeId literal_element_type = decoded.element_kind < C_TYPE_COUNT ? builder->scalar_types[decoded.element_kind] : IR_TYPE_ID_INVALID;
+    IrType* literal_element = ir_type_from_id(&builder->program->types, literal_element_type);
+    IrType* destination_element = ir_type_from_id(&builder->program->types, type->element_type);
+    if (!literal_element || literal_element->kind != IR_TYPE_INTEGER || literal_element->layout.size != decoded.element_width || !destination_element)
+    {
+        return false;
+    }
+    if (has_explicit_cast)
+    {
+        IrType* cast_type = ir_type_from_id(&builder->program->types, expression_cast_type_id);
+        IrType* innermost_cast_type = ir_type_from_id(&builder->program->types, cast_type_id);
+        if (!cast_type || cast_type->kind != IR_TYPE_POINTER || !innermost_cast_type || innermost_cast_type->kind != IR_TYPE_POINTER)
+        {
+            return false;
+        }
+        IrType* cast_element = ir_type_from_id(&builder->program->types, cast_type->element_type);
+        if (!cast_element || (destination_element->kind != IR_TYPE_VOID && cast_element->kind != IR_TYPE_VOID &&
+                              !c_ir_types_compatible(builder, cast_type->element_type, type->element_type)))
+        {
+            return false;
+        }
+    }
+    else if (destination_element->kind != IR_TYPE_VOID && cast_type_id.value == IR_ID_UNDERLYING_INVALID &&
+             (destination_element->kind != literal_element->kind || destination_element->bit_width != literal_element->bit_width ||
+              destination_element->is_signed != literal_element->is_signed))
+    {
+        return false;
+    }
+    u64 length = element_count * decoded.element_width;
+    u8* bytes = arena_allocate(builder->arena, u8, length);
+    memset(bytes, 0, length);
+    if (decoded.bytes.length)
+    {
+        memcpy(bytes, decoded.bytes.pointer, decoded.bytes.length);
+    }
+    IrTypeId literal_type = ir_program_add_type(builder->program, (IrType){
+                                                                               .name = S8("C string literal"),
+                                                                           .element_type = literal_element_type,
+                                                                           .return_type = IR_TYPE_ID_INVALID,
+                                                                           .layout =
+                                                                               {
+                                                                                   .size = length,
+                                                                                   .alignment = literal_element->layout.alignment,
+                                                                                   .resolved = true,
+                                                                               },
+                                                                           .kind = IR_TYPE_ARRAY,
+                                                                           .element_count = element_count,
+                                                                       });
+    String8 literal_name = string_format(builder->arena, S8(".L.cstr.{u32}"), builder->program->symbols.count);
+    CToken token = preprocess.tokens[literal_start];
+    IrSourceRange literal_source = c_ir_source_range(token.location, token.spelling.length);
+    IrSymbolId literal_symbol = ir_program_add_symbol(builder->program, (IrSymbol){
+                                                                               .name = literal_name,
+                                                                               .link_name = literal_name,
+                                                                               .source = literal_source,
+                                                                               .type = literal_type,
+                                                                               .kind = IR_SYMBOL_DATA,
+                                                                               .linkage = IR_LINKAGE_INTERNAL,
+                                                                               .is_definition = true,
+                                                                           });
+    if (literal_symbol.value == IR_ID_UNDERLYING_INVALID || !ir_module_add_global(builder->arena, builder->module,
+                                                                                   (IrGlobal){
+                                                                                       .bytes =
+                                                                                           {
+                                                                                               .pointer = bytes,
+                                                                                               .length = length,
+                                                                                           },
+                                                                                       .symbol = literal_symbol,
+                                                                                       .initializer_symbol = IR_SYMBOL_ID_INVALID,
+                                                                                       .type = literal_type,
+                                                                                       .source = literal_source,
+                                                                                       .initializer_kind = IR_GLOBAL_INITIALIZER_BYTES,
+                                                                                       .is_read_only = true,
+                                                                                   }))
+    {
+        return false;
+    }
+    global->initializer_kind = IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS;
+    global->initializer_symbol = literal_symbol;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_global_canonicalize_zero_bytes(IrGlobal* global, u8* bytes, u64 byte_count, u32 relocation_count)
+{
+    if (!global || global->is_read_only || relocation_count)
+    {
+        return false;
+    }
+    for (u64 byte_index = 0; byte_index < byte_count; byte_index += 1)
+    {
+        if (bytes[byte_index])
+        {
+            return false;
+        }
+    }
+    global->bytes = (ByteSlice){0};
+    global->relocations = 0;
+    global->relocation_count = 0;
+    global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, IrGlobal* global)
@@ -36791,17 +38191,38 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDe
     {
         start += 1;
         end -= 1;
+        bool trailing_comma = false;
         if (end > start && c_token_is_punctuator(preprocess.tokens[end - 1], S8(",")))
         {
+            trailing_comma = true;
             end -= 1;
         }
         if (start >= end)
         {
+            if (trailing_comma)
+            {
+                builder->failure_message = S8("invalid initializer separator");
+                return false;
+            }
+            if (c_preprocess_dialect_is_c23(preprocess.dialect))
+            {
+                global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
+                return true;
+            }
+            return false;
+        }
+        if (c_initializer_has_top_level_comma(preprocess.tokens, start, end))
+        {
+            builder->failure_message = S8("invalid initializer separator");
             return false;
         }
     }
     if (type->kind == IR_TYPE_POINTER)
     {
+        if (c_ir_global_string_pointer_initializer(builder, type, start, end, global))
+        {
+            return true;
+        }
         bool nullptr_initializer = c_preprocess_dialect_is_c23(preprocess.dialect) && end - start == 1 && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
                                    string_equal(preprocess.tokens[start].spelling, S8("nullptr"));
         if (nullptr_initializer)
@@ -36822,11 +38243,20 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDe
                 return true;
             }
         }
-        if (end == start + 2 && c_ir_label_address_prefix(builder, start, start) && preprocess.tokens[start + 1].kind == C_TOKEN_IDENTIFIER)
+        u32 label_index = 0;
+        IrTypeId label_cast_type = IR_TYPE_ID_INVALID;
+        if (c_ir_label_address_expression(builder, start, end, &label_index, &label_cast_type))
         {
             IrType* element = ir_type_from_id(&program->types, type->element_type);
-            CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, preprocess.tokens[start + 1].spelling) : 0;
-            if (!element || element->kind != IR_TYPE_VOID || !label)
+            IrType* cast_element = 0;
+            if (label_cast_type.value != IR_ID_UNDERLYING_INVALID)
+            {
+                IrType* cast = ir_type_from_id(&program->types, label_cast_type);
+                cast_element = cast ? ir_type_from_id(&program->types, cast->element_type) : 0;
+            }
+            CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, preprocess.tokens[label_index].spelling) : 0;
+            if (!element || element->kind != IR_TYPE_VOID || (label_cast_type.value != IR_ID_UNDERLYING_INVALID &&
+                                                               (!cast_element || cast_element->kind != IR_TYPE_VOID)) || !label)
             {
                 builder->failure_message = S8("static label address must be a function-local void pointer label value");
                 return false;
@@ -36848,7 +38278,22 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDe
             global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
             return true;
         }
-        if (end >= start + 4 && c_token_is_punctuator(preprocess.tokens[start], S8("&")) && preprocess.tokens[start + 1].kind == C_TOKEN_IDENTIFIER)
+        u64 raw_pointer = 0;
+        if (c_ir_pointer_integer_cast_expression(builder, global->type, start, end, &raw_pointer))
+        {
+            if (raw_pointer == 0)
+            {
+                global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
+                return true;
+            }
+            u8* bytes = arena_allocate(arena, u8, type->layout.size);
+            memset(bytes, 0, type->layout.size);
+            c_ir_store_pointer_bits(builder, type, bytes, 0, raw_pointer);
+            global->bytes = (ByteSlice){.pointer = bytes, .length = type->layout.size};
+            global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
+            return true;
+        }
+        if (end >= start + 2 && c_token_is_punctuator(preprocess.tokens[start], S8("&")) && preprocess.tokens[start + 1].kind == C_TOKEN_IDENTIFIER)
         {
             CEntityId entity = C_ENTITY_ID_INVALID;
             for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
@@ -36872,12 +38317,17 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDe
                     }
                 }
             }
+            if (entity.value < parse.entity_count && parse.entities[entity.value].is_thread_local)
+            {
+                builder->failure_message = S8("a static initializer may not take the address of a thread-local object");
+                return false;
+            }
             IrSymbolId symbol = entity.value < parse.entity_count ? entity_symbols[entity.value] : IR_SYMBOL_ID_INVALID;
             IrSymbol* symbol_value = ir_symbol_from_id(&program->symbols, symbol);
             IrType* current = symbol_value ? ir_type_from_id(&program->types, symbol_value->type) : 0;
             s64 addend = 0;
             u32 index = start + 2;
-            bool valid = current && index < end;
+            bool valid = current != 0;
             while (valid && index < end)
             {
                 if (index + 1 >= end || !c_token_is_punctuator(preprocess.tokens[index], S8(".")) || preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER ||
@@ -36994,7 +38444,15 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDe
             return true;
         }
     }
-    if (aggregate_type && c_token_is_punctuator(preprocess.tokens[start], S8("{")) && c_token_is_punctuator(preprocess.tokens[end - 1], S8("}")))
+    bool compound_aggregate_initializer = false;
+    if (aggregate_type && start < end)
+    {
+        u32 compound_open = 0;
+        u32 compound_close = 0;
+        compound_aggregate_initializer = c_ir_initializer_compound_literal_info(builder, start, end, &compound_open, &compound_close, 0, 0);
+    }
+    if (aggregate_type && ((c_token_is_punctuator(preprocess.tokens[start], S8("{")) &&
+                           c_token_is_punctuator(preprocess.tokens[end - 1], S8("}"))) || compound_aggregate_initializer))
     {
         u8* bytes = arena_allocate(arena, u8, type->layout.size);
         u32 relocation_capacity = end - start + 1;
@@ -37004,6 +38462,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDe
         if (!c_ir_constant_initializer_bytes(builder, start, end, global->type, bytes, type->layout.size, relocations, &relocation_count, relocation_capacity))
         {
             return false;
+        }
+        if (c_ir_global_canonicalize_zero_bytes(global, bytes, type->layout.size, relocation_count))
+        {
+            return true;
         }
         global->bytes = (ByteSlice){
             .pointer = bytes,
@@ -37018,9 +38480,9 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDe
     {
         CIrDecodedString decoded = {0};
         IrType* element = ir_type_from_id(&program->types, type->element_type);
-        if (!element || element->kind != IR_TYPE_INTEGER ||
+        if (!element ||
             !c_ir_decode_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, &decoded) ||
-            element->bit_width != decoded.element_width * 8 || decoded.bytes.length > type->layout.size)
+            !c_ir_string_array_element_compatible(builder, type->element_type, decoded) || decoded.bytes.length > type->layout.size)
         {
             return false;
         }
@@ -37029,6 +38491,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDe
         if (decoded.bytes.length)
         {
             memcpy(bytes, decoded.bytes.pointer, decoded.bytes.length);
+        }
+        if (c_ir_global_canonicalize_zero_bytes(global, bytes, type->layout.size, 0))
+        {
+            return true;
         }
         global->bytes = (ByteSlice){
             .pointer = bytes,
@@ -37099,6 +38565,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDe
     global->initializer_kind = IR_GLOBAL_INITIALIZER_INTEGER;
     global->initializer_bits = value;
     global->initializer_is_negative = negative;
+    if (!global->is_read_only && value == 0)
+    {
+        global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
+    }
     return true;
 }
 
@@ -38041,9 +39511,21 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         u32 expression_start = 0;
         u32 expression_end = 0;
         CIrConstantValue assertion = {0};
-        if (!c_ir_static_assert_expression_range(&constant_builder, declaration.token_start, declaration_end, &expression_start, &expression_end) ||
-            !c_ir_constant_evaluate(&constant_builder, expression_start, expression_end, &assertion) ||
-            !c_ir_constant_truth(&constant_builder, assertion))
+        bool expression_valid = c_ir_static_assert_expression_range(&constant_builder, declaration.token_start, declaration_end, &expression_start, &expression_end);
+        bool constant = expression_valid && c_ir_constant_evaluate(&constant_builder, expression_start, expression_end, &assertion);
+        if (!expression_valid || !constant)
+        {
+            if (result.diagnostic_count >= parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + 1)
+            {
+                continue;
+            }
+            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                .message = S8("static assertion expression is not an integer constant expression"),
+                .location = declaration.location,
+                .kind = C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
+            };
+        }
+        else if (!c_ir_constant_truth(&constant_builder, assertion))
         {
             if (result.diagnostic_count >= parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + 1)
             {
@@ -38378,87 +39860,9 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .is_thread_local =
                 c_declaration_has_token(preprocess, *definition, S8("_Thread_local")) || c_declaration_has_token(preprocess, *definition, S8("__thread")),
         };
-        u32 initializer_start = 0;
-        u32 initializer_end = 0;
-        bool pointer_string = type_value->kind == IR_TYPE_POINTER &&
-                              c_ir_declaration_initializer_range(preprocess, *definition, &initializer_start, &initializer_end) &&
-                              c_ir_tokens_are_string_literals(preprocess, initializer_start, initializer_end);
-        bool initialized = false;
         constant_builder.failure_message = (String8){0};
         constant_builder.failure_token_index = UINT32_MAX;
-        if (pointer_string)
-        {
-            CToken token = preprocess.tokens[initializer_start];
-            CIrDecodedString decoded = {0};
-            if (c_ir_decode_string_literal_range_for_target(arena, preprocess, target, initializer_start, initializer_end, &decoded) &&
-                decoded.element_count < UINT64_MAX)
-            {
-                u64 element_count = decoded.element_count + 1;
-                if (element_count > UINT64_MAX / decoded.element_width)
-                {
-                    continue;
-                }
-                u64 length = element_count * decoded.element_width;
-                IrType* pointee = ir_type_from_id(&program->types, type_value->element_type);
-                if (!pointee || pointee->kind != IR_TYPE_INTEGER || pointee->bit_width != decoded.element_width * 8)
-                {
-                    continue;
-                }
-                u8* bytes = arena_allocate(arena, u8, length);
-                memset(bytes, 0, length);
-                if (decoded.bytes.length)
-                {
-                    memcpy(bytes, decoded.bytes.pointer, decoded.bytes.length);
-                }
-                IrTypeId literal_type = ir_program_add_type(program, (IrType){
-                                                                         .name = S8("C string literal"),
-                                                                         .element_type = type_value->element_type,
-                                                                         .return_type = IR_TYPE_ID_INVALID,
-                                                                         .layout =
-                                                                             {
-                                                                                 .size = length,
-                                                                                 .alignment = pointee->layout.alignment,
-                                                                                 .resolved = true,
-                                                                             },
-                                                                         .kind = IR_TYPE_ARRAY,
-                                                                         .element_count = element_count,
-                                                                     });
-                String8 literal_name = string_format(arena, S8(".L.cstr.{u32}"), program->symbols.count);
-                IrSourceRange literal_source = c_ir_source_range(token.location, token.spelling.length);
-                IrSymbolId literal_symbol = ir_program_add_symbol(program, (IrSymbol){
-                                                                               .name = literal_name,
-                                                                               .link_name = literal_name,
-                                                                               .source = literal_source,
-                                                                               .type = literal_type,
-                                                                               .kind = IR_SYMBOL_DATA,
-                                                                               .linkage = IR_LINKAGE_INTERNAL,
-                                                                               .is_definition = true,
-                                                                           });
-                if (literal_symbol.value != IR_ID_UNDERLYING_INVALID && ir_module_add_global(arena, module,
-                                                                                             (IrGlobal){
-                                                                                                 .bytes =
-                                                                                                     {
-                                                                                                         .pointer = bytes,
-                                                                                                         .length = length,
-                                                                                                     },
-                                                                                                 .symbol = literal_symbol,
-                                                                                                 .initializer_symbol = IR_SYMBOL_ID_INVALID,
-                                                                                                 .type = literal_type,
-                                                                                                 .source = literal_source,
-                                                                                                 .initializer_kind = IR_GLOBAL_INITIALIZER_BYTES,
-                                                                                                 .is_read_only = true,
-                                                                                             }))
-                {
-                    global.initializer_kind = IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS;
-                    global.initializer_symbol = literal_symbol;
-                    initialized = true;
-                }
-            }
-        }
-        else
-        {
-            initialized = c_ir_global_initializer(&constant_builder, *definition, type_value, &global);
-        }
+        bool initialized = c_ir_global_initializer(&constant_builder, *definition, type_value, &global);
         if (!initialized)
         {
             CSourceLocation failure_location = definition->location;
@@ -38721,6 +40125,17 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                       });
         declaration_functions[declaration_index] = function;
     }
+    Arena* lowering_arena = arena_create((ArenaCreation){0});
+    if (!lowering_arena)
+    {
+        result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            .message = S8("could not allocate C function lowering arena"),
+            .location = parse.declaration_count ? parse.declarations[0].location : (CSourceLocation){0},
+            .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+        };
+        scratch_end(temporary);
+        return result;
+    }
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
@@ -38761,7 +40176,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             program->rejected_function_count += 1;
             continue;
         }
-        TemporalArena lowering_temporary = arena_begin_temporal(temporary_arena);
+        TemporalArena lowering_temporary = arena_begin_temporal(lowering_arena);
         u64 local_capacity = signatures[declaration_index].parameter_count;
         for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
         {
@@ -38808,7 +40223,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         function->entry = block->id;
         CIntegerIrBuilder builder = {
             .arena = arena,
-            .scratch_arena = lowering_temporary.arena,
+            .scratch_arena = lowering_arena,
             .temporary_arena = temporary_arena,
             .program = program,
             .module = module,
@@ -38977,6 +40392,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         program->lowered_function_count += 1;
         scratch_end(lowering_temporary);
     }
+    arena_destroy(lowering_arena, 1);
     scratch_end(temporary);
     return result;
 }

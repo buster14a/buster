@@ -502,6 +502,9 @@ struct CParserResult
 typedef struct CParseResult CParseResult;
 struct CParseResult
 {
+    // Borrowed owner of the result arrays.  It must outlive this result and is
+    // never destroyed or rewound by the parser.
+    Arena* arena;
     CDeclaration* declarations;
     CType* types;
     CParameter* parameters;
