@@ -64,6 +64,8 @@ struct ProcessRun
     u32 flags;
     BuildActionCallback* callback;
     void* callback_data;
+    BuildActionCallback* cleanup_callback;
+    void* cleanup_data;
     ProcessRun* next;
 };
 
@@ -186,14 +188,13 @@ typedef enum BuildCompiler
     BUILD_COMPILER_CL,
     BUILD_COMPILER_CLANG,
     BUILD_COMPILER_GCC,
-    BUILD_COMPILER_TCC,
     BUILD_COMPILER_ZIG,
     BUILD_COMPILER_COUNT,
 } BuildCompiler;
 
 BUSTER_GLOBAL_LOCAL String8 build_compilers[] = {
-    [BUILD_COMPILER_CL] = S8_INITIALIZER("cl"),   [BUILD_COMPILER_CLANG] = S8_INITIALIZER("clang"), [BUILD_COMPILER_GCC] = S8_INITIALIZER("gcc"),
-    [BUILD_COMPILER_TCC] = S8_INITIALIZER("tcc"), [BUILD_COMPILER_ZIG] = S8_INITIALIZER("zig"),
+    [BUILD_COMPILER_CL] = S8_INITIALIZER("cl"), [BUILD_COMPILER_CLANG] = S8_INITIALIZER("clang"), [BUILD_COMPILER_GCC] = S8_INITIALIZER("gcc"),
+    [BUILD_COMPILER_ZIG] = S8_INITIALIZER("zig"),
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(build_compilers) == BUILD_COMPILER_COUNT);
@@ -252,6 +253,64 @@ BUSTER_GLOBAL_LOCAL bool string_equal_ascii_case_insensitive(String8 a, String8 
     {
         result = ascii_to_lower(a.pointer[i]) == ascii_to_lower(b.pointer[i]);
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_value_is_tcc(String8 value)
+{
+    u64 semicolon = string_first_code_unit(value, ';');
+    if (semicolon != BUSTER_STRING_NO_MATCH)
+    {
+        value = string_slice(value, 0, semicolon);
+    }
+    u64 basename_start = 0;
+    for (u64 i = 0; i < value.length; i += 1)
+    {
+        if (value.pointer[i] == '/' || value.pointer[i] == '\\')
+        {
+            basename_start = i + 1;
+        }
+    }
+    String8 basename = string_slice(value, basename_start, value.length);
+    bool result = string_equal_ascii_case_insensitive(basename, S8("tcc")) || string_equal_ascii_case_insensitive(basename, S8("tcc.exe"));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_cmake_definition_value(String8 argument, String8 key, String8* value)
+{
+    bool result = false;
+    if (string_starts_with_sequence(argument, S8("-D")))
+    {
+        String8 definition = string_slice(argument, 2, argument.length);
+        u64 equal_index = string_first_code_unit(definition, '=');
+        if (equal_index != BUSTER_STRING_NO_MATCH)
+        {
+            String8 name = string_slice(definition, 0, equal_index);
+            bool name_matches = string_equal(name, key) ||
+                                (name.length > key.length && string_starts_with_sequence(name, key) && name.pointer[key.length] == ':');
+            if (name_matches)
+            {
+                *value = string_slice(definition, equal_index + 1, definition.length);
+                result = true;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_cmake_argument_is_tcc_application_compiler(Arena* arena, String8 argument, String8 split_definition)
+{
+    if (string_equal(argument, S8("-D")))
+    {
+        if (!split_definition.length)
+        {
+            return false;
+        }
+        argument = string_format(arena, S8("-D{S8}"), split_definition);
+    }
+
+    String8 value = {0};
+    bool result = build_cmake_definition_value(argument, S8("CMAKE_C_COMPILER"), &value) && build_compiler_value_is_tcc(value);
     return result;
 }
 
@@ -376,7 +435,6 @@ BUSTER_GLOBAL_LOCAL String8 cmake_path = {0};
 BUSTER_GLOBAL_LOCAL String8 cl_path = {0};
 BUSTER_GLOBAL_LOCAL String8 clang_path = {0};
 BUSTER_GLOBAL_LOCAL String8 gcc_path = {0};
-BUSTER_GLOBAL_LOCAL String8 tcc_path = {0};
 BUSTER_GLOBAL_LOCAL String8 zig_cc_path = {0};
 
 BUSTER_GLOBAL_LOCAL BuildStep* step_create(Arena* arena)
@@ -479,9 +537,6 @@ BUSTER_GLOBAL_LOCAL String8 cmake_cc(Arena* arena, BuildCompiler compiler)
         break;
     case BUILD_COMPILER_GCC:
         return get_resolved_path(arena, &gcc_path, S8("gcc"));
-        break;
-    case BUILD_COMPILER_TCC:
-        return get_resolved_path(arena, &tcc_path, S8("tcc"));
         break;
     case BUILD_COMPILER_ZIG:
     {
@@ -716,7 +771,7 @@ BUSTER_GLOBAL_LOCAL String8 generate_linker(Generate generate, String8 cc)
     String8 result = generate.linker;
     if (!result.pointer)
     {
-        if (BUSTER_LINUX && !generate_cc_contains(generate, cc, S8("zig")) && !generate_cc_contains(generate, cc, S8("tcc")))
+        if (BUSTER_LINUX && !generate_cc_contains(generate, cc, S8("zig")))
         {
             result = S8("MOLD");
         }
@@ -856,6 +911,810 @@ struct CmakeBuildOptions
     u32 quiet : 1;
     u32 verbose : 1;
 };
+
+BUSTER_GLOBAL_LOCAL String8 cmake_build_config(CmakeBuildOptions options);
+
+typedef struct BuildArtifactCompilerMetadata BuildArtifactCompilerMetadata;
+struct BuildArtifactCompilerMetadata
+{
+    String8 compiler_path;
+    String8 compiler_arg1;
+    String8 compiler_id;
+    String8 compiler_version;
+    String8 compiler_wrapper;
+    String8 compiler_frontend_variant;
+    String8 compiler_apple_sysroot;
+    String8 compiler_architecture_id;
+    String8 compiler_ar;
+    String8 compiler_ranlib;
+    u64 compiler_hash;
+    u64 compiler_size;
+    u64 compiler_ar_hash;
+    u64 compiler_ar_size;
+    u64 compiler_ranlib_hash;
+    u64 compiler_ranlib_size;
+    u32 compiler_arg1_present : 1;
+    u32 compiler_wrapper_present : 1;
+};
+
+typedef struct BuildArtifactFanoutToolMetadata BuildArtifactFanoutToolMetadata;
+struct BuildArtifactFanoutToolMetadata
+{
+    String8 linker_path;
+    String8 slangc_path;
+    String8 spirv_opt_path;
+    u64 linker_hash;
+    u64 linker_size;
+    u64 slangc_hash;
+    u64 slangc_size;
+    u64 spirv_opt_hash;
+    u64 spirv_opt_size;
+};
+
+typedef struct BuildArtifactFanout BuildArtifactFanout;
+struct BuildArtifactFanout
+{
+    String8 build_directory;
+    String8 artifact_path;
+    String8 private_bootstrap_path;
+    Generate generate;
+    CmakeBuildOptions options;
+    BuildArtifactCompilerMetadata expected_compiler;
+    BuildArtifactFanoutToolMetadata expected_tools;
+    u64 artifact_hash;
+    u64 artifact_size;
+    u64 cache_fingerprint;
+    u64 graph_fingerprint;
+    u64 environment_fingerprint;
+    u32 release_build_scheduled : 1;
+    u32 release_build_succeeded : 1;
+    u32 provenance_captured : 1;
+};
+
+BUSTER_GLOBAL_LOCAL String8 build_artifact_fanout_trim(String8 string)
+{
+    u64 start = 0;
+    u64 end = string.length;
+    while (start < end && (u8)string.pointer[start] <= ' ')
+    {
+        start += 1;
+    }
+    while (end > start && (u8)string.pointer[end - 1] <= ' ')
+    {
+        end -= 1;
+    }
+    return string_slice(string, start, end);
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_find_cache_line(String8 cache, String8 key, String8* line_out)
+{
+    bool result = false;
+    for (u64 line_start = 0; line_start < cache.length && !result;)
+    {
+        u64 line_end = line_start;
+        while (line_end < cache.length && cache.pointer[line_end] != '\n')
+        {
+            line_end += 1;
+        }
+        String8 line = build_artifact_fanout_trim(string_slice(cache, line_start, line_end));
+        if (line.length > key.length && string_starts_with_sequence(line, key) && line.pointer[key.length] == ':')
+        {
+            *line_out = line;
+            result = true;
+        }
+        line_start = line_end < cache.length ? line_end + 1 : cache.length;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_find_value(String8 text, String8 key, bool cache, String8* value)
+{
+    bool result = false;
+    for (u64 line_start = 0; line_start < text.length && !result;)
+    {
+        u64 line_end = line_start;
+        while (line_end < text.length && text.pointer[line_end] != '\n')
+        {
+            line_end += 1;
+        }
+        String8 line = string_slice(text, line_start, line_end);
+        if (cache)
+        {
+            String8 cache_line = {0};
+            if (build_artifact_fanout_find_cache_line(text, key, &cache_line))
+            {
+                String8 after_key = string_slice(cache_line, key.length, cache_line.length);
+                u64 equal_index = string_first_code_unit(after_key, '=');
+                if (equal_index != BUSTER_STRING_NO_MATCH)
+                {
+                    *value = build_artifact_fanout_trim(string_slice(after_key, equal_index + 1, after_key.length));
+                    result = true;
+                }
+            }
+        }
+        else if (string_starts_with_sequence(line, S8("set(")))
+        {
+            u64 cursor = 4;
+            while (cursor < line.length && (u8)line.pointer[cursor] <= ' ')
+            {
+                cursor += 1;
+            }
+            if (cursor + key.length <= line.length && string_equal(string_slice(line, cursor, cursor + key.length), key) &&
+                (cursor + key.length == line.length || (u8)line.pointer[cursor + key.length] <= ' ' || line.pointer[cursor + key.length] == ')'))
+            {
+                cursor += key.length;
+                while (cursor < line.length && (u8)line.pointer[cursor] <= ' ')
+                {
+                    cursor += 1;
+                }
+                if (cursor < line.length && line.pointer[cursor] == '"')
+                {
+                    u64 value_start = cursor + 1;
+                    cursor = value_start;
+                    while (cursor < line.length && line.pointer[cursor] != '"')
+                    {
+                        cursor += 1;
+                    }
+                    if (cursor < line.length)
+                    {
+                        *value = string_slice(line, value_start, cursor);
+                        result = true;
+                    }
+                }
+                else
+                {
+                    u64 value_start = cursor;
+                    while (cursor < line.length && (u8)line.pointer[cursor] > ' ' && line.pointer[cursor] != ')')
+                    {
+                        cursor += 1;
+                    }
+                    *value = string_slice(line, value_start, cursor);
+                    result = true;
+                }
+            }
+        }
+
+        line_start = line_end < text.length ? line_end + 1 : text.length;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_cache_bool(String8 cache, String8 name, bool* value)
+{
+    String8 raw = {0};
+    bool result = build_artifact_fanout_find_value(cache, name, true, &raw) && cmake_bool_parse(raw, value);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_cache_string(String8 cache, String8 name, String8* value)
+{
+    bool result = build_artifact_fanout_find_value(cache, name, true, value);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_cache_value_matches(String8 cache, String8 name, String8 expected)
+{
+    String8 value = {0};
+    bool result = build_artifact_fanout_cache_string(cache, name, &value) && string_equal(value, expected);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 build_artifact_fanout_hash_mix_byte(u64 hash, u8 byte)
+{
+    hash ^= byte;
+    hash *= 1099511628211ULL;
+    return hash;
+}
+
+BUSTER_GLOBAL_LOCAL u64 build_artifact_fanout_hash_string(u64 hash, String8 string)
+{
+    for (u64 i = 0; i < string.length; i += 1)
+    {
+        hash = build_artifact_fanout_hash_mix_byte(hash, (u8)string.pointer[i]);
+    }
+    hash = build_artifact_fanout_hash_mix_byte(hash, 0);
+    return hash;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_cache_fingerprint(String8 cache, u64* fingerprint)
+{
+    String8 names[] = {
+        S8("CMAKE_C_COMPILER"),
+        S8("CMAKE_C_COMPILER_AR"),
+        S8("CMAKE_C_COMPILER_RANLIB"),
+        S8("CMAKE_C_COMPILER_TARGET"),
+        S8("CMAKE_C_COMPILER_EXTERNAL_TOOLCHAIN"),
+        S8("CMAKE_C_COMPILER_LAUNCHER"),
+        S8("CMAKE_CXX_COMPILER_LAUNCHER"),
+        S8("CMAKE_C_LINKER_LAUNCHER"),
+        S8("CMAKE_CXX_LINKER_LAUNCHER"),
+        S8("CMAKE_LINKER_LAUNCHER"),
+        S8("CMAKE_RULE_LAUNCH_COMPILE"),
+        S8("CMAKE_RULE_LAUNCH_LINK"),
+        S8("RULE_LAUNCH_COMPILE"),
+        S8("RULE_LAUNCH_LINK"),
+        S8("CMAKE_TOOLCHAIN_FILE"),
+        S8("CMAKE_SYSROOT"),
+        S8("CMAKE_SYSROOT_COMPILE"),
+        S8("CMAKE_SYSROOT_LINK"),
+        S8("CMAKE_OSX_SYSROOT"),
+        S8("CMAKE_OSX_ARCHITECTURES"),
+        S8("CMAKE_OSX_DEPLOYMENT_TARGET"),
+        S8("CMAKE_C_STANDARD_LIBRARIES"),
+        S8("CMAKE_C_STANDARD_LIBRARIES_DEBUG"),
+        S8("CMAKE_C_STANDARD_LIBRARIES_MINSIZEREL"),
+        S8("CMAKE_C_STANDARD_LIBRARIES_RELEASE"),
+        S8("CMAKE_C_STANDARD_LIBRARIES_RELWITHDEBINFO"),
+        S8("CMAKE_C_FLAGS"),
+        S8("CMAKE_C_FLAGS_DEBUG"),
+        S8("CMAKE_C_FLAGS_MINSIZEREL"),
+        S8("CMAKE_C_FLAGS_RELEASE"),
+        S8("CMAKE_C_FLAGS_RELWITHDEBINFO"),
+        S8("CMAKE_EXE_LINKER_FLAGS"),
+        S8("CMAKE_EXE_LINKER_FLAGS_DEBUG"),
+        S8("CMAKE_EXE_LINKER_FLAGS_MINSIZEREL"),
+        S8("CMAKE_EXE_LINKER_FLAGS_RELEASE"),
+        S8("CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO"),
+        S8("CMAKE_MODULE_LINKER_FLAGS"),
+        S8("CMAKE_MODULE_LINKER_FLAGS_DEBUG"),
+        S8("CMAKE_MODULE_LINKER_FLAGS_MINSIZEREL"),
+        S8("CMAKE_MODULE_LINKER_FLAGS_RELEASE"),
+        S8("CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO"),
+        S8("CMAKE_SHARED_LINKER_FLAGS"),
+        S8("CMAKE_SHARED_LINKER_FLAGS_DEBUG"),
+        S8("CMAKE_SHARED_LINKER_FLAGS_MINSIZEREL"),
+        S8("CMAKE_SHARED_LINKER_FLAGS_RELEASE"),
+        S8("CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO"),
+        S8("CMAKE_STATIC_LINKER_FLAGS"),
+        S8("CMAKE_STATIC_LINKER_FLAGS_DEBUG"),
+        S8("CMAKE_STATIC_LINKER_FLAGS_MINSIZEREL"),
+        S8("CMAKE_STATIC_LINKER_FLAGS_RELEASE"),
+        S8("CMAKE_STATIC_LINKER_FLAGS_RELWITHDEBINFO"),
+        S8("CMAKE_C_LINK_FLAGS"),
+        S8("CMAKE_LINKER"),
+        S8("CMAKE_EXECUTABLE_CREATE_C_FLAGS"),
+        S8("CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS"),
+        S8("CMAKE_SHARED_MODULE_CREATE_C_FLAGS"),
+        S8("CMAKE_INTERPROCEDURAL_OPTIMIZATION"),
+        S8("CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG"),
+        S8("CMAKE_INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL"),
+        S8("CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE"),
+        S8("CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO"),
+        S8("CMAKE_C_COMPILE_OPTIONS_IPO"),
+        S8("CMAKE_C_LINK_OPTIONS_IPO"),
+        S8("BUSTER_CI"),
+        S8("BUSTER_COMPILE_SHADERS"),
+        S8("BUSTER_FUZZ_AVAILABLE"),
+        S8("BUSTER_INCLUDE_TESTS"),
+        S8("BUSTER_INSTRUMENT"),
+        S8("BUSTER_LINK_LIBC"),
+        S8("BUSTER_LTO"),
+        S8("BUSTER_SANITIZE"),
+        S8("BUSTER_SINGLE_THREADED"),
+        S8("BUSTER_TIME_TRACE"),
+        S8("BUSTER_UNITY_BUILD"),
+        S8("BUSTER_USE_VULKAN"),
+        S8("BUSTER_USE_D3D12"),
+        S8("BUSTER_USE_METAL"),
+        S8("BUSTER_VULKAN_SDK"),
+        S8("BUSTER_VULKAN_INCLUDE_DIR"),
+        S8("BUSTER_SLANGC_EXECUTABLE"),
+        S8("BUSTER_SPIRV_OPT_EXECUTABLE"),
+        S8("CMAKE_LINKER_TYPE"),
+    };
+    u64 hash = 1469598103934665603ULL;
+    bool result = cache.pointer != 0;
+    for (u32 name_i = 0; result && name_i < BUSTER_ARRAY_LENGTH(names); name_i += 1)
+    {
+        String8 line = {0};
+        bool present = build_artifact_fanout_find_cache_line(cache, names[name_i], &line);
+        hash = build_artifact_fanout_hash_string(hash, names[name_i]);
+        hash = build_artifact_fanout_hash_mix_byte(hash, present ? 1 : 0);
+        if (present)
+        {
+            hash = build_artifact_fanout_hash_string(hash, line);
+        }
+    }
+    if (result)
+    {
+        *fingerprint = hash;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_restricted_cache_inputs_match(String8 cache)
+{
+    String8 empty_names[] = {
+        S8("CMAKE_C_COMPILER_LAUNCHER"),
+        S8("CMAKE_CXX_COMPILER_LAUNCHER"),
+        S8("CMAKE_C_LINKER_LAUNCHER"),
+        S8("CMAKE_CXX_LINKER_LAUNCHER"),
+        S8("CMAKE_LINKER_LAUNCHER"),
+        S8("CMAKE_RULE_LAUNCH_COMPILE"),
+        S8("CMAKE_RULE_LAUNCH_LINK"),
+        S8("RULE_LAUNCH_COMPILE"),
+        S8("RULE_LAUNCH_LINK"),
+        S8("CMAKE_TOOLCHAIN_FILE"),
+        S8("CMAKE_C_COMPILER_TARGET"),
+        S8("CMAKE_C_COMPILER_EXTERNAL_TOOLCHAIN"),
+        S8("CMAKE_OSX_ARCHITECTURES"),
+    };
+    bool result = true;
+    for (u32 name_i = 0; name_i < BUSTER_ARRAY_LENGTH(empty_names); name_i += 1)
+    {
+        String8 value = {0};
+        result &= !build_artifact_fanout_cache_string(cache, empty_names[name_i], &value) || value.length == 0;
+    }
+
+    String8 false_names[] = {
+        S8("CMAKE_INTERPROCEDURAL_OPTIMIZATION"),
+        S8("CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG"),
+        S8("CMAKE_INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL"),
+        S8("CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE"),
+        S8("CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO"),
+    };
+    for (u32 name_i = 0; name_i < BUSTER_ARRAY_LENGTH(false_names); name_i += 1)
+    {
+        bool value = false;
+        String8 raw = {0};
+        bool present = build_artifact_fanout_cache_string(cache, false_names[name_i], &raw);
+        result &= !present || (cmake_bool_parse(raw, &value) && !value);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_environment_fingerprint(u64* fingerprint)
+{
+    String8 rejected_names[] = {
+        S8("CC"),
+        S8("CXX"),
+        S8("CFLAGS"),
+        S8("CPPFLAGS"),
+        S8("LDFLAGS"),
+        S8("CMAKE_TOOLCHAIN_FILE"),
+        S8("CMAKE_C_COMPILER_LAUNCHER"),
+        S8("CMAKE_C_LINKER_LAUNCHER"),
+        S8("CMAKE_RULE_LAUNCH_COMPILE"),
+        S8("CMAKE_RULE_LAUNCH_LINK"),
+        S8("CMAKE_C_COMPILER_TARGET"),
+        S8("CMAKE_C_COMPILER_EXTERNAL_TOOLCHAIN"),
+        S8("CMAKE_INTERPROCEDURAL_OPTIMIZATION"),
+        S8("CMAKE_SYSROOT"),
+        S8("CMAKE_SYSROOT_COMPILE"),
+        S8("CMAKE_SYSROOT_LINK"),
+        S8("CMAKE_OSX_SYSROOT"),
+        S8("CMAKE_OSX_ARCHITECTURES"),
+    };
+    for (u32 name_i = 0; name_i < BUSTER_ARRAY_LENGTH(rejected_names); name_i += 1)
+    {
+        if (os_get_environment_variable(rejected_names[name_i]).length)
+        {
+            return false;
+        }
+    }
+
+    String8 observed_names[] = {
+        S8("SDKROOT"),
+        S8("MACOSX_DEPLOYMENT_TARGET"),
+        S8("VULKAN_SDK"),
+        S8("CPATH"),
+        S8("C_INCLUDE_PATH"),
+        S8("CPLUS_INCLUDE_PATH"),
+        S8("OBJC_INCLUDE_PATH"),
+        S8("LIBRARY_PATH"),
+        S8("COMPILER_PATH"),
+        S8("INCLUDE"),
+        S8("LIB"),
+        S8("LIBPATH"),
+    };
+    u64 hash = 1469598103934665603ULL;
+    for (u32 name_i = 0; name_i < BUSTER_ARRAY_LENGTH(observed_names); name_i += 1)
+    {
+        String8 value = os_get_environment_variable(observed_names[name_i]);
+        hash = build_artifact_fanout_hash_string(hash, observed_names[name_i]);
+        hash = build_artifact_fanout_hash_mix_byte(hash, value.pointer != 0);
+        hash = build_artifact_fanout_hash_string(hash, value);
+    }
+    *fingerprint = hash;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_hash_file(Arena* arena, String8 path, u64* hash, u64* size)
+{
+    String8 path_z = string_duplicate_arena(arena, path, true);
+    String8 absolute = os_path_absolute(arena, path_z, true);
+    if (!absolute.length)
+    {
+        return false;
+    }
+    FileMapRead map = file_map_read(arena, absolute, (FileReadOptions){.map_required = 1});
+    bool result = map.mapped_pointer && map.bytes.pointer && map.bytes.length;
+    if (result)
+    {
+        *hash = buster_hash_64(map.bytes.pointer, map.bytes.length);
+        *size = map.bytes.length;
+    }
+    file_map_unmap(map);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_compiler_digests(Arena* arena, BuildArtifactCompilerMetadata* compiler)
+{
+    bool result = build_artifact_fanout_hash_file(arena, compiler->compiler_path, &compiler->compiler_hash, &compiler->compiler_size);
+    if (result && compiler->compiler_ar.length && string_first_sequence(compiler->compiler_ar, S8("NOTFOUND")) == BUSTER_STRING_NO_MATCH)
+    {
+        result = build_artifact_fanout_hash_file(arena, compiler->compiler_ar, &compiler->compiler_ar_hash, &compiler->compiler_ar_size);
+    }
+    if (result && compiler->compiler_ranlib.length && string_first_sequence(compiler->compiler_ranlib, S8("NOTFOUND")) == BUSTER_STRING_NO_MATCH)
+    {
+        result = build_artifact_fanout_hash_file(arena, compiler->compiler_ranlib, &compiler->compiler_ranlib_hash, &compiler->compiler_ranlib_size);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_graph_fingerprint(Arena* arena, String8 build_directory, u64* fingerprint)
+{
+    String8 paths[] = {
+        S8("compile_commands.json"),
+        S8("build-Release.ninja"),
+        S8("build.ninja"),
+        S8("CMakeFiles/common.ninja"),
+        S8("CMakeFiles/rules.ninja"),
+        S8("CMakeFiles/impl-Release.ninja"),
+    };
+    u64 hash = 1469598103934665603ULL;
+    for (u32 path_i = 0; path_i < BUSTER_ARRAY_LENGTH(paths); path_i += 1)
+    {
+        String8 path = path_join(arena, build_directory, paths[path_i]);
+        u64 file_hash = 0;
+        u64 file_size = 0;
+        if (!build_artifact_fanout_hash_file(arena, path, &file_hash, &file_size))
+        {
+            return false;
+        }
+        hash = build_artifact_fanout_hash_string(hash, paths[path_i]);
+        hash = build_artifact_fanout_hash_mix_byte(hash, (u8)file_size);
+        for (u32 shift = 8; shift < 64; shift += 8)
+        {
+            hash = build_artifact_fanout_hash_mix_byte(hash, (u8)(file_size >> shift));
+        }
+        for (u32 shift = 0; shift < 64; shift += 8)
+        {
+            hash = build_artifact_fanout_hash_mix_byte(hash, (u8)(file_hash >> shift));
+        }
+    }
+    *fingerprint = hash;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_graph_definitions_match(Arena* arena, String8 build_directory)
+{
+    String8 path = path_join(arena, build_directory, S8("compile_commands.json"));
+    String8 absolute = os_path_absolute(arena, path, true);
+    FileMapRead map = file_map_read(arena, absolute, (FileReadOptions){.map_required = 1});
+    bool result = map.mapped_pointer && map.bytes.pointer;
+    if (result)
+    {
+        String8 graph = BYTE_SLICE_TO_STRING(8, map.bytes);
+        String8 expected[] = {
+            string_format(arena, S8("BUSTER_USE_VULKAN={u64}"), BUSTER_LINUX != 0),
+            string_format(arena, S8("BUSTER_USE_D3D12={u64}"), BUSTER_WINDOWS != 0),
+            string_format(arena, S8("BUSTER_USE_METAL={u64}"), BUSTER_MACOS != 0),
+            S8("BUSTER_USE_SLANG_SHADERS=1"),
+        };
+        String8 opposite[] = {
+            string_format(arena, S8("BUSTER_USE_VULKAN={u64}"), BUSTER_LINUX == 0),
+            string_format(arena, S8("BUSTER_USE_D3D12={u64}"), BUSTER_WINDOWS == 0),
+            string_format(arena, S8("BUSTER_USE_METAL={u64}"), BUSTER_MACOS == 0),
+            S8("BUSTER_USE_SLANG_SHADERS=0"),
+        };
+        for (u32 define_i = 0; define_i < BUSTER_ARRAY_LENGTH(expected); define_i += 1)
+        {
+            result &= string_first_sequence(graph, expected[define_i]) != BUSTER_STRING_NO_MATCH;
+            result &= string_first_sequence(graph, opposite[define_i]) == BUSTER_STRING_NO_MATCH;
+        }
+    }
+    file_map_unmap(map);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_platform_inputs_match(u64 expected_environment_fingerprint)
+{
+    u64 actual_environment_fingerprint = 0;
+    bool result = build_artifact_fanout_environment_fingerprint(&actual_environment_fingerprint) &&
+                  actual_environment_fingerprint == expected_environment_fingerprint;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_provenance_inputs_match(String8 cache)
+{
+    u64 fingerprint = 0;
+    bool compile_shaders = false;
+    bool result = build_artifact_fanout_cache_fingerprint(cache, &fingerprint) && build_artifact_fanout_restricted_cache_inputs_match(cache) &&
+                  build_artifact_fanout_cache_bool(cache, S8("BUSTER_COMPILE_SHADERS"), &compile_shaders) && compile_shaders;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_path_equal(String8 left, String8 right)
+{
+    u64 left_length = left.length;
+    u64 right_length = right.length;
+    while (left_length > 1 && path_is_separator(left.pointer[left_length - 1]))
+    {
+        left_length -= 1;
+    }
+    while (right_length > 1 && path_is_separator(right.pointer[right_length - 1]))
+    {
+        right_length -= 1;
+    }
+
+    bool result = left_length == right_length;
+    for (u64 i = 0; result && i < left_length; i += 1)
+    {
+        char8 left_character = left.pointer[i] == '\\' ? '/' : left.pointer[i];
+        char8 right_character = right.pointer[i] == '\\' ? '/' : right.pointer[i];
+#if BUSTER_WINDOWS
+        left_character = ascii_to_lower(left_character);
+        right_character = ascii_to_lower(right_character);
+#endif
+        result = left_character == right_character;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 build_artifact_fanout_absolute_path(Arena* arena, String8 path)
+{
+    String8 path_z = string_duplicate_arena(arena, path, true);
+    String8 result = os_path_absolute(arena, path_z, true);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_identity_matches(String8 expected_path, BuildArtifactCompilerMetadata actual)
+{
+    bool clang_id = string_equal(actual.compiler_id, S8("Clang")) || string_equal(actual.compiler_id, S8("AppleClang"));
+    bool result = clang_id && actual.compiler_version.length && (!actual.compiler_arg1_present || actual.compiler_arg1.length == 0) &&
+                  (!actual.compiler_wrapper_present || actual.compiler_wrapper.length == 0) && build_artifact_fanout_path_equal(expected_path, actual.compiler_path);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_config_matches(Generate generate, bool ci, bool link_libc, bool unity_build, bool include_tests,
+                                                              bool sanitize, bool time_trace, bool instrument, bool fuzz_available, bool lto,
+                                                              bool single_threaded, bool use_vulkan, bool check_optional_warnings,
+                                                              bool developer_targets, String8 linker)
+{
+    String8 expected_cc = generate.cc_set ? generate.cc : build_compilers[generate.compiler];
+    String8 expected_linker = generate_linker(generate, expected_cc);
+    bool result = ci == (bool)generate.ci && link_libc == (bool)generate.link_libc && unity_build && include_tests == (bool)generate.include_tests &&
+                  sanitize == (bool)generate.sanitize && time_trace == (bool)generate.time_trace && instrument == (bool)generate.instrument &&
+                  fuzz_available == (bool)generate.fuzz_available && lto == (bool)generate.lto && single_threaded &&
+                  use_vulkan == (BUSTER_LINUX != 0) && check_optional_warnings == (bool)generate.check_optional_warnings &&
+                  developer_targets == (bool)generate.developer_targets && string_equal(linker, expected_linker);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_is_canonical(Generate generate, CmakeBuildOptions options)
+{
+    bool valid_arguments = !generate.cmake_arguments.length;
+    if (generate.ci)
+    {
+        valid_arguments = generate.cmake_arguments.length == 1 &&
+                          string_equal(generate.cmake_arguments.pointer[0], S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"));
+    }
+
+    bool result = generate.compiler == BUILD_COMPILER_CLANG && !generate.cc_set && !generate.linker_set && !generate.config_set && !generate.sanitize &&
+                  generate.link_libc && !generate.time_trace && !generate.instrument &&
+                  !generate.lto && generate.include_tests && !generate.check_optional_warnings && !generate.developer_targets && valid_arguments &&
+                  options.optimize_set && options.optimize && string_equal(cmake_build_config(options), S8("Release"));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_read_compiler_metadata(Arena* arena, String8 build_directory,
+                                                                       BuildArtifactCompilerMetadata* result)
+{
+    String8 cache_path = path_join(arena, build_directory, S8("CMakeCache.txt"));
+    ByteSlice cache_bytes = file_read(arena, cache_path, (FileReadOptions){.map_required = 0});
+    String8 cache = BYTE_SLICE_TO_STRING(8, cache_bytes);
+    String8 major = {0};
+    String8 minor = {0};
+    String8 patch = {0};
+    bool result_valid = cache.pointer && build_artifact_fanout_cache_string(cache, S8("CMAKE_CACHE_MAJOR_VERSION"), &major) &&
+                        build_artifact_fanout_cache_string(cache, S8("CMAKE_CACHE_MINOR_VERSION"), &minor) &&
+                        build_artifact_fanout_cache_string(cache, S8("CMAKE_CACHE_PATCH_VERSION"), &patch);
+    if (result_valid)
+    {
+        String8 version_parts[] = {major, S8("."), minor, S8("."), patch};
+        String8 version = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(version_parts), true);
+        String8 metadata_path = path_join(arena, path_join(arena, path_join(arena, build_directory, S8("CMakeFiles")), version),
+                                          S8("CMakeCCompiler.cmake"));
+        ByteSlice metadata_bytes = file_read(arena, metadata_path, (FileReadOptions){.map_required = 0});
+        String8 metadata = BYTE_SLICE_TO_STRING(8, metadata_bytes);
+        result_valid = metadata.pointer && build_artifact_fanout_find_value(metadata, S8("CMAKE_C_COMPILER"), false, &result->compiler_path) &&
+                       build_artifact_fanout_find_value(metadata, S8("CMAKE_C_COMPILER_ID"), false, &result->compiler_id) &&
+                       build_artifact_fanout_find_value(metadata, S8("CMAKE_C_COMPILER_VERSION"), false, &result->compiler_version);
+        result->compiler_arg1_present = build_artifact_fanout_find_value(metadata, S8("CMAKE_C_COMPILER_ARG1"), false, &result->compiler_arg1);
+        result->compiler_wrapper_present = build_artifact_fanout_find_value(metadata, S8("CMAKE_C_COMPILER_WRAPPER"), false, &result->compiler_wrapper);
+        build_artifact_fanout_find_value(metadata, S8("CMAKE_C_COMPILER_FRONTEND_VARIANT"), false, &result->compiler_frontend_variant);
+        build_artifact_fanout_find_value(metadata, S8("CMAKE_C_COMPILER_APPLE_SYSROOT"), false, &result->compiler_apple_sysroot);
+        build_artifact_fanout_find_value(metadata, S8("CMAKE_C_COMPILER_ARCHITECTURE_ID"), false, &result->compiler_architecture_id);
+        build_artifact_fanout_find_value(metadata, S8("CMAKE_C_COMPILER_AR"), false, &result->compiler_ar);
+        build_artifact_fanout_find_value(metadata, S8("CMAKE_C_COMPILER_RANLIB"), false, &result->compiler_ranlib);
+    }
+    return result_valid;
+}
+
+typedef struct BuildArtifactFanoutLiveConfig BuildArtifactFanoutLiveConfig;
+struct BuildArtifactFanoutLiveConfig
+{
+    String8 cache;
+    String8 cached_compiler;
+    String8 linker;
+    String8 linker_path;
+    String8 slangc_path;
+    String8 spirv_opt_path;
+    bool ci;
+    bool compile_shaders;
+    bool link_libc;
+    bool unity_build;
+    bool include_tests;
+    bool sanitize;
+    bool time_trace;
+    bool instrument;
+    bool fuzz_available;
+    bool lto;
+    bool single_threaded;
+    bool use_vulkan;
+    bool check_optional_warnings;
+    bool developer_targets;
+};
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_read_live_config(Arena* arena, String8 build_directory, BuildArtifactFanoutLiveConfig* result)
+{
+    String8 cache_path = path_join(arena, build_directory, S8("CMakeCache.txt"));
+    ByteSlice cache_bytes = file_read(arena, cache_path, (FileReadOptions){.map_required = 0});
+    result->cache = BYTE_SLICE_TO_STRING(8, cache_bytes);
+    bool valid = result->cache.pointer && build_artifact_fanout_cache_string(result->cache, S8("CMAKE_C_COMPILER"), &result->cached_compiler) &&
+                 build_artifact_fanout_cache_string(result->cache, S8("CMAKE_LINKER_TYPE"), &result->linker) &&
+                 build_artifact_fanout_cache_string(result->cache, S8("CMAKE_LINKER"), &result->linker_path) &&
+                 build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_CI"), &result->ci) &&
+                 build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_COMPILE_SHADERS"), &result->compile_shaders) &&
+                 result->compile_shaders &&
+                 build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_LINK_LIBC"), &result->link_libc) &&
+                 build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_UNITY_BUILD"), &result->unity_build) &&
+                 build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_INCLUDE_TESTS"), &result->include_tests) &&
+                 build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_SANITIZE"), &result->sanitize) &&
+                 build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_TIME_TRACE"), &result->time_trace) &&
+                 build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_INSTRUMENT"), &result->instrument) &&
+                 build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_FUZZ_AVAILABLE"), &result->fuzz_available) &&
+                 build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_LTO"), &result->lto) &&
+                 build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_SINGLE_THREADED"), &result->single_threaded) &&
+                 build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_USE_VULKAN"), &result->use_vulkan) &&
+                 build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_CHECK_OPTIONAL_WARNINGS"), &result->check_optional_warnings) &&
+                 build_artifact_fanout_cache_bool(result->cache, S8("BUSTER_DEVELOPER_TARGETS"), &result->developer_targets) &&
+                 build_artifact_fanout_provenance_inputs_match(result->cache);
+    build_artifact_fanout_cache_string(result->cache, S8("BUSTER_SLANGC_EXECUTABLE"), &result->slangc_path);
+    build_artifact_fanout_cache_string(result->cache, S8("BUSTER_SPIRV_OPT_EXECUTABLE"), &result->spirv_opt_path);
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_tool_digests(Arena* arena, BuildArtifactFanoutLiveConfig live,
+                                                            BuildArtifactFanoutToolMetadata* tools)
+{
+    *tools = (BuildArtifactFanoutToolMetadata){
+        .linker_path = live.linker_path,
+        .slangc_path = live.slangc_path,
+        .spirv_opt_path = live.spirv_opt_path,
+    };
+    if (!tools->linker_path.length || string_first_sequence(tools->linker_path, S8("NOTFOUND")) != BUSTER_STRING_NO_MATCH ||
+        !build_artifact_fanout_hash_file(arena, tools->linker_path, &tools->linker_hash, &tools->linker_size))
+    {
+        return false;
+    }
+    if (live.compile_shaders && (!tools->slangc_path.length || string_first_sequence(tools->slangc_path, S8("NOTFOUND")) != BUSTER_STRING_NO_MATCH))
+    {
+        return false;
+    }
+    if (live.compile_shaders && live.use_vulkan &&
+        (!tools->spirv_opt_path.length || string_first_sequence(tools->spirv_opt_path, S8("NOTFOUND")) != BUSTER_STRING_NO_MATCH))
+    {
+        return false;
+    }
+    String8 optional_paths[] = {tools->slangc_path, tools->spirv_opt_path};
+    u64* optional_hashes[] = {&tools->slangc_hash, &tools->spirv_opt_hash};
+    u64* optional_sizes[] = {&tools->slangc_size, &tools->spirv_opt_size};
+    for (u32 path_i = 0; path_i < BUSTER_ARRAY_LENGTH(optional_paths); path_i += 1)
+    {
+        if (optional_paths[path_i].length && string_first_sequence(optional_paths[path_i], S8("NOTFOUND")) == BUSTER_STRING_NO_MATCH &&
+            !build_artifact_fanout_hash_file(arena, optional_paths[path_i], optional_hashes[path_i], optional_sizes[path_i]))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_tool_metadata_match(Arena* arena, BuildArtifactFanoutToolMetadata expected,
+                                                                    BuildArtifactFanoutToolMetadata actual)
+{
+    bool result = build_artifact_fanout_path_equal(build_artifact_fanout_absolute_path(arena, expected.linker_path),
+                                                   build_artifact_fanout_absolute_path(arena, actual.linker_path)) &&
+                  build_artifact_fanout_path_equal(build_artifact_fanout_absolute_path(arena, expected.slangc_path),
+                                                   build_artifact_fanout_absolute_path(arena, actual.slangc_path)) &&
+                  build_artifact_fanout_path_equal(build_artifact_fanout_absolute_path(arena, expected.spirv_opt_path),
+                                                   build_artifact_fanout_absolute_path(arena, actual.spirv_opt_path)) &&
+                  expected.linker_hash == actual.linker_hash && expected.linker_size == actual.linker_size &&
+                  expected.slangc_hash == actual.slangc_hash && expected.slangc_size == actual.slangc_size &&
+                  expected.spirv_opt_hash == actual.spirv_opt_hash && expected.spirv_opt_size == actual.spirv_opt_size;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_compiler_metadata_match(Arena* arena, BuildArtifactCompilerMetadata expected,
+                                                                         BuildArtifactCompilerMetadata actual)
+{
+    String8 expected_path = string_duplicate_arena(arena, expected.compiler_path, true);
+    String8 actual_path = string_duplicate_arena(arena, actual.compiler_path, true);
+    String8 expected_absolute = os_path_absolute(arena, expected_path, true);
+    String8 actual_absolute = os_path_absolute(arena, actual_path, true);
+    bool result = expected_absolute.length && actual_absolute.length && build_artifact_fanout_path_equal(expected_absolute, actual_absolute) &&
+                  string_equal(expected.compiler_id, actual.compiler_id) && string_equal(expected.compiler_version, actual.compiler_version) &&
+                  string_equal(expected.compiler_arg1, actual.compiler_arg1) && string_equal(expected.compiler_wrapper, actual.compiler_wrapper) &&
+                  string_equal(expected.compiler_frontend_variant, actual.compiler_frontend_variant) &&
+                  string_equal(expected.compiler_apple_sysroot, actual.compiler_apple_sysroot) &&
+                  string_equal(expected.compiler_architecture_id, actual.compiler_architecture_id) &&
+                  build_artifact_fanout_path_equal(expected.compiler_ar, actual.compiler_ar) &&
+                  build_artifact_fanout_path_equal(expected.compiler_ranlib, actual.compiler_ranlib) &&
+                  expected.compiler_hash == actual.compiler_hash && expected.compiler_size == actual.compiler_size &&
+                  expected.compiler_ar_hash == actual.compiler_ar_hash && expected.compiler_ar_size == actual.compiler_ar_size &&
+                  expected.compiler_ranlib_hash == actual.compiler_ranlib_hash && expected.compiler_ranlib_size == actual.compiler_ranlib_size &&
+                  expected.compiler_arg1_present == actual.compiler_arg1_present && expected.compiler_wrapper_present == actual.compiler_wrapper_present;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_snapshot(Arena* arena, String8 source, String8 destination, u64 expected_hash, u64 expected_size)
+{
+#if BUSTER_LINUX || BUSTER_MACOS
+    struct stat source_stats = {0};
+    if (stat((const char*)source.pointer, &source_stats) != 0 || !S_ISREG(source_stats.st_mode))
+    {
+        return false;
+    }
+    mode_t source_mode = source_stats.st_mode & 07777;
+    if (!(source_mode & 0111))
+    {
+        return false;
+    }
+#endif
+
+    bool result = file_copy((CopyFileArguments){.original_path = source, .new_path = destination});
+#if BUSTER_LINUX || BUSTER_MACOS
+    OsFileDescriptor* destination_file = os_file_open(destination, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    bool mode_result = false;
+    if (destination_file)
+    {
+        int fchmod_result = fchmod(generic_fd_to_posix(destination_file), source_mode);
+        bool close_result = os_file_close(destination_file);
+        mode_result = fchmod_result == 0 && close_result;
+    }
+    struct stat destination_stats = {0};
+    bool destination_mode_matches = stat((const char*)destination.pointer, &destination_stats) == 0 && S_ISREG(destination_stats.st_mode) &&
+                                    (destination_stats.st_mode & 07777) == source_mode;
+    result = result && mode_result && destination_mode_matches;
+#endif
+    u64 snapshot_hash = 0;
+    u64 snapshot_size = 0;
+    result = result && build_artifact_fanout_hash_file(arena, destination, &snapshot_hash, &snapshot_size) && snapshot_size == expected_size &&
+             snapshot_hash == expected_hash;
+    if (!result)
+    {
+        remove_path_recursive(arena, destination);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_ready(BuildArtifactFanout fanout, bool artifact_exists)
+{
+    bool result = fanout.release_build_scheduled && fanout.release_build_succeeded && artifact_exists;
+    return result;
+}
 
 typedef struct SelfHostCompare SelfHostCompare;
 struct SelfHostCompare
@@ -1060,8 +1919,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* d
     return PROCESS_RESULT_SUCCESS;
 }
 
-BUSTER_GLOBAL_LOCAL void self_host_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
-                                               String8 timing_description)
+BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
+                                                      String8 timing_description)
 {
     BuildStep* step = step_add(arena);
     ProcessRun* run = run_add(arena, step);
@@ -1123,6 +1982,7 @@ BUSTER_GLOBAL_LOCAL void self_host_compile_add(Arena* arena, String8 compiler, S
                 .use_process_environment = 1,
             },
     };
+    return run;
 }
 
 #if BUSTER_MACOS
@@ -1169,6 +2029,260 @@ BUSTER_GLOBAL_LOCAL String8 self_host_macos_sdk_path(Arena* arena)
     return result;
 }
 #endif
+
+BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_capture_action(Arena* arena, void* data)
+{
+    BuildArtifactFanout* fanout = (BuildArtifactFanout*)data;
+    BuildArtifactFanoutLiveConfig live = {0};
+    BuildArtifactCompilerMetadata compiler = {0};
+    BuildArtifactFanoutToolMetadata tools = {0};
+    u64 cache_fingerprint = 0;
+    u64 graph_fingerprint = 0;
+    u64 environment_fingerprint = 0;
+    String8 expected_compiler = cmake_cc(arena, fanout->generate.compiler);
+    String8 expected_compiler_absolute = build_artifact_fanout_absolute_path(arena, expected_compiler);
+    bool live_valid = build_artifact_fanout_read_live_config(arena, fanout->build_directory, &live);
+    bool tools_valid = live_valid && build_artifact_fanout_tool_digests(arena, live, &tools);
+    bool metadata_valid = build_artifact_fanout_read_compiler_metadata(arena, fanout->build_directory, &compiler);
+    bool compiler_digest_valid = metadata_valid && build_artifact_fanout_compiler_digests(arena, &compiler);
+    bool compiler_identity_valid = compiler_digest_valid && expected_compiler_absolute.length &&
+                                   build_artifact_fanout_identity_matches(expected_compiler_absolute,
+                                                                          (BuildArtifactCompilerMetadata){
+                                                                              .compiler_path = build_artifact_fanout_absolute_path(arena, compiler.compiler_path),
+                                                                              .compiler_arg1 = compiler.compiler_arg1,
+                                                                              .compiler_id = compiler.compiler_id,
+                                                                              .compiler_version = compiler.compiler_version,
+                                                                              .compiler_wrapper = compiler.compiler_wrapper,
+                                                                              .compiler_frontend_variant = compiler.compiler_frontend_variant,
+                                                                              .compiler_apple_sysroot = compiler.compiler_apple_sysroot,
+                                                                              .compiler_architecture_id = compiler.compiler_architecture_id,
+                                                                              .compiler_ar = compiler.compiler_ar,
+                                                                              .compiler_ranlib = compiler.compiler_ranlib,
+                                                                              .compiler_arg1_present = compiler.compiler_arg1_present,
+                                                                              .compiler_wrapper_present = compiler.compiler_wrapper_present,
+                                                                          });
+    bool cached_compiler_valid = live_valid && compiler_identity_valid &&
+                                 build_artifact_fanout_path_equal(build_artifact_fanout_absolute_path(arena, compiler.compiler_path),
+                                                                  build_artifact_fanout_absolute_path(arena, live.cached_compiler));
+    bool config_valid = live_valid && build_artifact_fanout_config_matches(fanout->generate, live.ci, live.link_libc, live.unity_build, live.include_tests,
+                                                                           live.sanitize, live.time_trace, live.instrument, live.fuzz_available,
+                                                                           live.lto, live.single_threaded, live.use_vulkan, live.check_optional_warnings,
+                                                                           live.developer_targets, live.linker);
+    bool environment_valid = build_artifact_fanout_environment_fingerprint(&environment_fingerprint);
+    bool cache_fingerprint_valid = live_valid && build_artifact_fanout_cache_fingerprint(live.cache, &cache_fingerprint);
+    bool graph_fingerprint_valid = build_artifact_fanout_graph_fingerprint(arena, fanout->build_directory, &graph_fingerprint);
+    bool graph_definitions_valid = build_artifact_fanout_graph_definitions_match(arena, fanout->build_directory);
+    bool valid = live_valid && tools_valid && metadata_valid && compiler_digest_valid && compiler_identity_valid && cached_compiler_valid && config_valid &&
+                 environment_valid && cache_fingerprint_valid && graph_fingerprint_valid && graph_definitions_valid;
+    if (!valid)
+    {
+        string_print(S8("error: canonical Clang Release provenance capture rejected generated state\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    fanout->expected_compiler = compiler;
+    fanout->expected_tools = tools;
+    fanout->cache_fingerprint = cache_fingerprint;
+    fanout->graph_fingerprint = graph_fingerprint;
+    fanout->environment_fingerprint = environment_fingerprint;
+    fanout->provenance_captured = 1;
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_release_success_action(Arena* arena, void* data)
+{
+    BuildArtifactFanout* fanout = (BuildArtifactFanout*)data;
+    if (!fanout->release_build_scheduled || !fanout->provenance_captured)
+    {
+        string_print(S8("error: canonical Clang Release build/provenance was not scheduled for artifact fan-out\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    if (!path_exists(arena, fanout->artifact_path))
+    {
+        string_print(S8("error: canonical Clang Release artifact is missing after its successful build: {S8}\n"), fanout->artifact_path);
+        return PROCESS_RESULT_FAILED;
+    }
+    fanout->release_build_succeeded = 1;
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_validate_action(Arena* arena, void* data)
+{
+    BuildArtifactFanout* fanout = (BuildArtifactFanout*)data;
+    if (!build_artifact_fanout_ready(*fanout, path_exists(arena, fanout->artifact_path)))
+    {
+        string_print(S8("error: canonical Clang Release artifact fan-out is unavailable; the producer build did not succeed or the artifact is missing\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    BuildArtifactCompilerMetadata compiler = {0};
+    BuildArtifactFanoutToolMetadata tools = {0};
+    BuildArtifactFanoutLiveConfig live = {0};
+    u64 cache_fingerprint = 0;
+    u64 graph_fingerprint = 0;
+    bool valid = build_artifact_fanout_read_live_config(arena, fanout->build_directory, &live) &&
+                 build_artifact_fanout_tool_digests(arena, live, &tools) && build_artifact_fanout_tool_metadata_match(arena, fanout->expected_tools, tools) &&
+                 build_artifact_fanout_read_compiler_metadata(arena, fanout->build_directory, &compiler) &&
+                 build_artifact_fanout_compiler_digests(arena, &compiler) &&
+                 build_artifact_fanout_compiler_metadata_match(arena, fanout->expected_compiler, compiler) &&
+                 build_artifact_fanout_path_equal(build_artifact_fanout_absolute_path(arena, compiler.compiler_path),
+                                                  build_artifact_fanout_absolute_path(arena, live.cached_compiler)) &&
+                 build_artifact_fanout_config_matches(fanout->generate, live.ci, live.link_libc, live.unity_build, live.include_tests, live.sanitize,
+                                                      live.time_trace, live.instrument, live.fuzz_available, live.lto, live.single_threaded,
+                                                      live.use_vulkan, live.check_optional_warnings, live.developer_targets, live.linker) &&
+                 build_artifact_fanout_platform_inputs_match(fanout->environment_fingerprint) &&
+                 build_artifact_fanout_cache_fingerprint(live.cache, &cache_fingerprint) && cache_fingerprint == fanout->cache_fingerprint &&
+                 build_artifact_fanout_graph_fingerprint(arena, fanout->build_directory, &graph_fingerprint) &&
+                 graph_fingerprint == fanout->graph_fingerprint && build_artifact_fanout_graph_definitions_match(arena, fanout->build_directory);
+    if (!valid)
+    {
+        string_print(S8("error: canonical Clang Release artifact fan-out configuration/compiler identity mismatch\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 artifact_absolute = os_path_absolute(arena, fanout->artifact_path, true);
+    if (!artifact_absolute.length)
+    {
+        string_print(S8("error: canonical Clang Release artifact path could not be resolved: {S8}\n"), fanout->artifact_path);
+        return PROCESS_RESULT_FAILED;
+    }
+    if (!build_artifact_fanout_hash_file(arena, artifact_absolute, &fanout->artifact_hash, &fanout->artifact_size))
+    {
+        string_print(S8("error: canonical Clang Release artifact could not be read: {S8}\n"), artifact_absolute);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    make_directory_recursive(arena, path_parent(arena, fanout->private_bootstrap_path));
+    remove_path_recursive(arena, fanout->private_bootstrap_path);
+    if (!build_artifact_fanout_snapshot(arena, artifact_absolute, fanout->private_bootstrap_path, fanout->artifact_hash, fanout->artifact_size))
+    {
+        string_print(S8("error: could not snapshot canonical Clang Release artifact for self-hosting\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("ARTIFACT_FANOUT producer=Clang/{S8} path={S8} eliminated=trusted Clang Release bootstrap build bytes={u64}\n"),
+                 cmake_build_config(fanout->options), fanout->artifact_path, fanout->artifact_size);
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_cleanup_action(Arena* arena, void* data)
+{
+    BuildArtifactFanout* fanout = (BuildArtifactFanout*)data;
+    remove_path_recursive(arena, fanout->private_bootstrap_path);
+    if (path_exists(arena, fanout->private_bootstrap_path))
+    {
+        string_print(S8("error: could not remove the private self-host bootstrap snapshot\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void self_host_compare_and_bench_add(Arena* arena, String8 stage1, String8 stage2
+#if BUSTER_WINDOWS
+                                                          , String8 stage1_pdb, String8 stage2_pdb
+#endif
+)
+{
+    SelfHostCompare* compare = arena_allocate(arena, SelfHostCompare, 1);
+    *compare = (SelfHostCompare){
+        .stage1 = stage1,
+        .stage2 = stage2,
+#if BUSTER_WINDOWS
+        .pdb1 = stage1_pdb,
+        .pdb2 = stage2_pdb,
+#endif
+    };
+    BuildStep* compare_step = step_add(arena);
+    ProcessRun* compare_run = run_add(arena, compare_step);
+    *compare_run = (ProcessRun){
+        .callback = self_host_compare_action,
+        .callback_data = compare,
+    };
+    BuildStep* bench_step = step_add(arena);
+    ProcessRun* bench_run = run_add(arena, bench_step);
+    String8* bench_arguments = arena_allocate(arena, String8, 2);
+    bench_arguments[0] = stage2;
+    bench_arguments[1] = S8("bench");
+    *bench_run = (ProcessRun){
+        .arguments =
+            {
+                .pointer = bench_arguments,
+                .length = 2,
+            },
+        .timing_description = S8("Self-host stage 2 benchmark"),
+        .spawn_options =
+            (ProcessSpawnOptions){
+                .use_process_environment = 1,
+            },
+    };
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, BuildArtifactFanout* fanout)
+{
+#if (!(BUSTER_LINUX || BUSTER_WINDOWS) || !BUSTER_CPU_ARCH_X86_64) && !BUSTER_MACOS
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(fanout);
+    string_print(S8("error: artifact fan-out self-host consumer is unsupported on this target\n"));
+    return PROCESS_RESULT_FAILED;
+#else
+    String8 config = cmake_build_config(fanout->options);
+    String8 sysroot = {0};
+#if BUSTER_MACOS
+    sysroot = self_host_macos_sdk_path(arena);
+    if (!sysroot.length)
+    {
+        string_print(S8("error: macOS self-host fan-out could not resolve an SDK sysroot\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+#endif
+    String8 output_directory = path_join(arena, path_join(arena, fanout->build_directory, S8("self-host")), config);
+    fanout->private_bootstrap_path = path_join(arena, output_directory,
+#if BUSTER_WINDOWS
+                                               S8("ide-bootstrap.exe"));
+#else
+                                               S8("ide-bootstrap"));
+#endif
+    String8 stage1 = path_join(arena, output_directory,
+#if BUSTER_WINDOWS
+                               S8("ide-stage1.exe"));
+#else
+                               S8("ide-stage1"));
+#endif
+    String8 stage2 = path_join(arena, output_directory,
+#if BUSTER_WINDOWS
+                               S8("ide-stage2.exe"));
+#else
+                               S8("ide-stage2"));
+#endif
+#if BUSTER_WINDOWS
+    String8 stage1_pdb = string_format(arena, S8("{S8}.pdb"), string_slice(stage1, 0, stage1.length - 4));
+    String8 stage2_pdb = string_format(arena, S8("{S8}.pdb"), string_slice(stage2, 0, stage2.length - 4));
+#endif
+    remove_path_recursive(arena, fanout->private_bootstrap_path);
+    remove_path_recursive(arena, stage1);
+    remove_path_recursive(arena, stage2);
+#if BUSTER_WINDOWS
+    remove_path_recursive(arena, stage1_pdb);
+    remove_path_recursive(arena, stage2_pdb);
+#endif
+
+    BuildStep* validate_step = step_add(arena);
+    ProcessRun* validate_run = run_add(arena, validate_step);
+    *validate_run = (ProcessRun){
+        .callback = build_artifact_fanout_validate_action,
+        .callback_data = fanout,
+    };
+    ProcessRun* stage1_run = self_host_compile_add(arena, fanout->private_bootstrap_path, fanout->build_directory, sysroot, stage1,
+                                                   S8("Self-host stage 1"));
+    stage1_run->cleanup_callback = build_artifact_fanout_cleanup_action;
+    stage1_run->cleanup_data = fanout;
+    self_host_compile_add(arena, stage1, fanout->build_directory, sysroot, stage2, S8("Self-host stage 2"));
+    self_host_compare_and_bench_add(arena, stage1, stage2
+#if BUSTER_WINDOWS
+                                    , stage1_pdb, stage2_pdb
+#endif
+    );
+    return PROCESS_RESULT_SUCCESS;
+#endif
+}
 
 BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_directory, CmakeBuildOptions options, Generate generate)
 {
@@ -3502,13 +4616,456 @@ BUSTER_GLOBAL_LOCAL void time_trace_summary_action_add(Arena* arena, TimeTraceSu
     };
 }
 
-BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_requested_for_platform(bool ci, bool forced, bool macos, bool windows, bool x86_64);
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_consumer_supported_for_platform(bool linux_host, bool macos, bool windows, bool x86_64);
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_selection_is_valid(bool requested, bool supported, bool producer_selected);
+BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_cleanup_action(Arena* arena, void* data);
+BUSTER_GLOBAL_LOCAL ProcessSpawnResult process_run_spawn(Arena* arena, ProcessRun* run);
+BUSTER_GLOBAL_LOCAL ProcessResult process_run_wait(Arena* arena, ProcessRun* run);
+
+BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool include_large_snapshot)
 {
+    String8 ci_arguments[] = {
+        S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
+    };
+    Generate canonical = {
+        .compiler = BUILD_COMPILER_CLANG,
+        .ci = 1,
+        .link_libc = 1,
+        .include_tests = 1,
+        .check_optional_warnings = 0,
+        .developer_targets = 0,
+        .cmake_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_arguments),
+    };
+    CmakeBuildOptions release = {
+        .config = S8("Release"),
+        .optimize = 1,
+        .optimize_set = 1,
+    };
+    if (!build_artifact_fanout_is_canonical(canonical, release))
+    {
+        string_print(S8("error: artifact fan-out canonical-combination test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    if (build_artifact_fanout_requested_for_platform(false, false, false, false, true) ||
+        !build_artifact_fanout_requested_for_platform(true, false, true, false, false) ||
+        !build_artifact_fanout_requested_for_platform(true, false, false, true, true) ||
+        build_artifact_fanout_requested_for_platform(true, false, false, true, false) ||
+        !build_artifact_fanout_requested_for_platform(false, true, false, false, true) ||
+        !build_artifact_fanout_consumer_supported_for_platform(true, false, false, true) ||
+        !build_artifact_fanout_consumer_supported_for_platform(false, true, false, false) ||
+        !build_artifact_fanout_consumer_supported_for_platform(false, false, true, true) ||
+        build_artifact_fanout_consumer_supported_for_platform(false, false, true, false) ||
+        !build_artifact_fanout_requested_for_platform(false, true, false, false, true) ||
+        build_artifact_fanout_selection_is_valid(true, true, false) || build_artifact_fanout_selection_is_valid(true, false, true) ||
+        !build_artifact_fanout_selection_is_valid(false, false, false) ||
+        !build_artifact_fanout_selection_is_valid(true, true, true))
+    {
+        string_print(S8("error: artifact fan-out platform-selection test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    if (!build_compiler_value_is_tcc(S8("tcc")) || !build_compiler_value_is_tcc(S8("C:\\tools\\tcc.exe")) ||
+        !build_compiler_value_is_tcc(S8("tcc;extra")) || !build_compiler_value_is_tcc(S8("C:\\tools\\tcc.exe;extra")) ||
+        build_compiler_value_is_tcc(S8("clang")) || build_compiler_value_is_tcc(S8("clang;tcc")) ||
+        !build_cmake_argument_is_tcc_application_compiler(arena, S8("-DCMAKE_C_COMPILER=tcc"), (String8){0}) ||
+        !build_cmake_argument_is_tcc_application_compiler(arena, S8("-DCMAKE_C_COMPILER:FILEPATH=tcc;extra"), (String8){0}) ||
+        !build_cmake_argument_is_tcc_application_compiler(arena, S8("-D"), S8("CMAKE_C_COMPILER:STRING=C:\\tools\\TCC.EXE;extra")) ||
+        build_cmake_argument_is_tcc_application_compiler(arena, S8("-DCMAKE_C_COMPILER=clang"), (String8){0}) ||
+        build_cmake_argument_is_tcc_application_compiler(arena, S8("-DCMAKE_C_COMPILER_LAUNCHER=ccache"), (String8){0}) ||
+        build_cmake_argument_is_tcc_application_compiler(arena, S8("-DCMAKE_C_LINKER_LAUNCHER=wrapper"), (String8){0}) ||
+        build_cmake_argument_is_tcc_application_compiler(arena, S8("-DCMAKE_C_FLAGS=-O2"), (String8){0}))
+    {
+        string_print(S8("error: artifact fan-out TCC application-compiler rejection test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    if (!build_artifact_fanout_path_equal(S8("C:\\LLVM\\bin\\clang.exe"), S8("C:/LLVM/bin/clang.exe")))
+    {
+        string_print(S8("error: artifact fan-out path separator normalization test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+#if BUSTER_WINDOWS
+    if (!build_artifact_fanout_path_equal(S8("C:\\LLVM\\bin\\clang.exe"), S8("c:/llvm/bin/clang.exe")))
+    {
+        string_print(S8("error: artifact fan-out Windows path case normalization test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+#endif
+
+    Generate non_clang = canonical;
+    non_clang.compiler = BUILD_COMPILER_GCC;
+    if (build_artifact_fanout_is_canonical(non_clang, release))
+    {
+        string_print(S8("error: artifact fan-out accepted a non-Clang producer\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    CmakeBuildOptions debug = release;
+    debug.config = S8("Debug");
+    debug.optimize = 0;
+    if (build_artifact_fanout_is_canonical(canonical, debug))
+    {
+        string_print(S8("error: artifact fan-out accepted a non-Release producer\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    BuildArtifactCompilerMetadata compiler = {
+        .compiler_path = S8("/usr/bin/clang"),
+        .compiler_id = S8("Clang"),
+        .compiler_version = S8("test"),
+        .compiler_arg1_present = 1,
+    };
+    if (!build_artifact_fanout_identity_matches(S8("/usr/bin/clang"), compiler))
+    {
+        string_print(S8("error: artifact fan-out actual compiler identity acceptance test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    compiler.compiler_id = S8("GNU");
+    if (build_artifact_fanout_identity_matches(S8("/usr/bin/clang"), compiler))
+    {
+        string_print(S8("error: artifact fan-out accepted non-Clang CMake metadata\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    compiler.compiler_id = S8("Clang");
+    compiler.compiler_path = S8("/tmp/clang-wrapper");
+    if (build_artifact_fanout_identity_matches(S8("/usr/bin/clang"), compiler))
+    {
+        string_print(S8("error: artifact fan-out accepted a compiler wrapper path\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    compiler.compiler_path = S8("/usr/bin/clang");
+    compiler.compiler_wrapper = S8("/tmp/clang-wrapper");
+    compiler.compiler_wrapper_present = 1;
+    if (build_artifact_fanout_identity_matches(S8("/usr/bin/clang"), compiler))
+    {
+        string_print(S8("error: artifact fan-out accepted a configured compiler wrapper\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 expected_linker = generate_linker(canonical, S8("clang"));
+    bool config_matches = build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, false, false, false, true,
+                                                                BUSTER_LINUX != 0, false, false, expected_linker);
+    if (!config_matches)
+    {
+        string_print(S8("error: artifact fan-out canonical configuration acceptance test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 canonical_flags_cache = S8(
+        "BUSTER_COMPILE_SHADERS:BOOL=ON\n"
+        "CMAKE_C_FLAGS:STRING=\n"
+        "CMAKE_C_FLAGS_DEBUG:STRING=-g\n"
+        "CMAKE_C_FLAGS_MINSIZEREL:STRING=-Os -DNDEBUG\n"
+        "CMAKE_C_FLAGS_RELEASE:STRING=-O3 -DNDEBUG\n"
+        "CMAKE_C_FLAGS_RELWITHDEBINFO:STRING=-O2 -g -DNDEBUG\n"
+        "CMAKE_EXE_LINKER_FLAGS:STRING=\n"
+        "CMAKE_EXE_LINKER_FLAGS_DEBUG:STRING=\n"
+        "CMAKE_EXE_LINKER_FLAGS_MINSIZEREL:STRING=\n"
+        "CMAKE_EXE_LINKER_FLAGS_RELEASE:STRING=\n"
+        "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO:STRING=\n"
+        "CMAKE_MODULE_LINKER_FLAGS:STRING=\n"
+        "CMAKE_MODULE_LINKER_FLAGS_DEBUG:STRING=\n"
+        "CMAKE_MODULE_LINKER_FLAGS_MINSIZEREL:STRING=\n"
+        "CMAKE_MODULE_LINKER_FLAGS_RELEASE:STRING=\n"
+        "CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO:STRING=\n"
+        "CMAKE_SHARED_LINKER_FLAGS:STRING=\n"
+        "CMAKE_SHARED_LINKER_FLAGS_DEBUG:STRING=\n"
+        "CMAKE_SHARED_LINKER_FLAGS_MINSIZEREL:STRING=\n"
+        "CMAKE_SHARED_LINKER_FLAGS_RELEASE:STRING=\n"
+        "CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO:STRING=\n"
+        "CMAKE_STATIC_LINKER_FLAGS:STRING=\n"
+        "CMAKE_STATIC_LINKER_FLAGS_DEBUG:STRING=\n"
+        "CMAKE_STATIC_LINKER_FLAGS_MINSIZEREL:STRING=\n"
+        "CMAKE_STATIC_LINKER_FLAGS_RELEASE:STRING=\n"
+        "CMAKE_STATIC_LINKER_FLAGS_RELWITHDEBINFO:STRING=\n");
+    if (!build_artifact_fanout_provenance_inputs_match(canonical_flags_cache))
+    {
+        string_print(S8("error: artifact fan-out canonical flag-state acceptance test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    u64 canonical_fingerprint = 0;
+    if (!build_artifact_fanout_cache_fingerprint(canonical_flags_cache, &canonical_fingerprint))
+    {
+        string_print(S8("error: artifact fan-out canonical configuration fingerprint test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 shaders_off_cache = string_format(arena, S8("BUSTER_COMPILE_SHADERS:BOOL=OFF\n{S8}"), canonical_flags_cache);
+    u64 shaders_off_fingerprint = 0;
+    if (build_artifact_fanout_provenance_inputs_match(shaders_off_cache) ||
+        !build_artifact_fanout_cache_fingerprint(shaders_off_cache, &shaders_off_fingerprint) || shaders_off_fingerprint == canonical_fingerprint)
+    {
+        string_print(S8("error: artifact fan-out accepted disabled shader compilation provenance\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 launcher_cache = string_format(arena, S8("CMAKE_C_COMPILER_LAUNCHER:FILEPATH=/tmp/ccache\n{S8}"), canonical_flags_cache);
+    if (build_artifact_fanout_provenance_inputs_match(launcher_cache))
+    {
+        string_print(S8("error: artifact fan-out accepted a configured compiler launcher\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 cflags_cache = string_format(arena, S8("CMAKE_C_FLAGS_RELEASE:STRING=-march=native\n{S8}"), canonical_flags_cache);
+    u64 cflags_fingerprint = 0;
+    if (!build_artifact_fanout_cache_fingerprint(cflags_cache, &cflags_fingerprint) || cflags_fingerprint == canonical_fingerprint)
+    {
+        string_print(S8("error: artifact fan-out accepted a noncanonical C compiler flag state\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 ldflags_cache = string_format(arena, S8("CMAKE_EXE_LINKER_FLAGS_RELEASE:STRING=-fuse-ld=gold\n{S8}"), canonical_flags_cache);
+    u64 ldflags_fingerprint = 0;
+    if (!build_artifact_fanout_cache_fingerprint(ldflags_cache, &ldflags_fingerprint) || ldflags_fingerprint == canonical_fingerprint)
+    {
+        string_print(S8("error: artifact fan-out accepted a noncanonical linker flag state\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 windows_cache = S8("BUSTER_COMPILE_SHADERS:BOOL=ON\n"
+                               "CMAKE_C_FLAGS_DEBUG:STRING=-O0 -gcodeview\n"
+                               "CMAKE_C_FLAGS_RELEASE:STRING=-O2 -DNDEBUG\n"
+                               "CMAKE_C_STANDARD_LIBRARIES_RELEASE:STRING=kernel32.lib;user32.lib;oldnames.lib\n"
+                               "CMAKE_EXE_LINKER_FLAGS_RELEASE:STRING=/DEBUG\n"
+                               "CMAKE_LINKER_TYPE:STRING=DEFAULT\n");
+    u64 windows_fingerprint = 0;
+    if (!build_artifact_fanout_provenance_inputs_match(windows_cache) || !build_artifact_fanout_cache_fingerprint(windows_cache, &windows_fingerprint))
+    {
+        string_print(S8("error: artifact fan-out Windows-shaped CMake flag-state acceptance test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 windows_standard_mutated_cache = string_format(arena, S8("CMAKE_C_STANDARD_LIBRARIES_RELEASE:STRING=kernel32.lib;advapi32.lib\n{S8}"),
+                                                           windows_cache);
+    u64 windows_standard_mutated_fingerprint = 0;
+    if (!build_artifact_fanout_provenance_inputs_match(windows_standard_mutated_cache) ||
+        !build_artifact_fanout_cache_fingerprint(windows_standard_mutated_cache, &windows_standard_mutated_fingerprint) ||
+        windows_standard_mutated_fingerprint == windows_fingerprint)
+    {
+        string_print(S8("error: artifact fan-out Windows standard-library provenance test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 windows_mutated_cache = S8("CMAKE_C_FLAGS_DEBUG:STRING=-O0 -gcodeview -fno-omit-frame-pointer\n"
+                                       "CMAKE_C_FLAGS_RELEASE:STRING=-O2 -DNDEBUG\n"
+                                       "CMAKE_EXE_LINKER_FLAGS_RELEASE:STRING=/DEBUG\n"
+                                       "CMAKE_LINKER_TYPE:STRING=DEFAULT\n");
+    u64 windows_mutated_fingerprint = 0;
+    if (!build_artifact_fanout_cache_fingerprint(windows_mutated_cache, &windows_mutated_fingerprint) ||
+        windows_mutated_fingerprint == windows_fingerprint)
+    {
+        string_print(S8("error: artifact fan-out Windows-shaped flag mutation was not fingerprinted\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 restricted_cache_mutations[] = {
+        S8("CMAKE_TOOLCHAIN_FILE:FILEPATH=C:/toolchain.cmake\n"),
+        S8("CMAKE_C_COMPILER_TARGET:STRING=x86_64-custom\n"),
+        S8("CMAKE_C_COMPILER_EXTERNAL_TOOLCHAIN:PATH=C:/external\n"),
+        S8("CMAKE_C_COMPILER_LAUNCHER:FILEPATH=C:/ccache.exe\n"),
+        S8("CMAKE_C_LINKER_LAUNCHER:FILEPATH=C:/link-wrapper.exe\n"),
+        S8("CMAKE_RULE_LAUNCH_COMPILE:STRING=wrapper\n"),
+        S8("CMAKE_RULE_LAUNCH_LINK:STRING=wrapper\n"),
+        S8("CMAKE_OSX_ARCHITECTURES:STRING=arm64\n"),
+        S8("CMAKE_INTERPROCEDURAL_OPTIMIZATION:BOOL=ON\n"),
+    };
+    for (u32 mutation_i = 0; mutation_i < BUSTER_ARRAY_LENGTH(restricted_cache_mutations); mutation_i += 1)
+    {
+        String8 mutation = string_format(arena, S8("{S8}{S8}"), restricted_cache_mutations[mutation_i], canonical_flags_cache);
+        if (build_artifact_fanout_provenance_inputs_match(mutation))
+        {
+            string_print(S8("error: artifact fan-out accepted a restricted toolchain/launcher/IPO input\n"));
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    if (build_artifact_fanout_config_matches(canonical, false, true, true, true, false, false, false, false, false, true, BUSTER_LINUX != 0, false,
+                                             false, expected_linker))
+    {
+        string_print(S8("error: artifact fan-out accepted a configuration mismatch\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    if (build_artifact_fanout_config_matches(canonical, true, true, true, true, true, false, false, false, false, true, BUSTER_LINUX != 0, false,
+                                             false, expected_linker) ||
+        build_artifact_fanout_config_matches(canonical, true, true, true, true, false, true, false, false, false, true, BUSTER_LINUX != 0, false,
+                                             false, expected_linker) ||
+        build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, true, false, false, true, BUSTER_LINUX != 0, false,
+                                             false, expected_linker) ||
+        build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, false, false, true, true, BUSTER_LINUX != 0, false,
+                                             false, expected_linker))
+    {
+        string_print(S8("error: artifact fan-out accepted a sanitizer/instrument/time-trace/LTO mismatch\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    BuildArtifactFanout state = {
+        .release_build_scheduled = 1,
+    };
+    if (build_artifact_fanout_ready(state, true) || !build_artifact_fanout_ready((BuildArtifactFanout){
+                                                         .release_build_scheduled = 1,
+                                                         .release_build_succeeded = 1,
+                                                     }, true) ||
+        build_artifact_fanout_ready((BuildArtifactFanout){
+                                        .release_build_scheduled = 1,
+                                        .release_build_succeeded = 1,
+                                    }, false))
+    {
+        string_print(S8("error: artifact fan-out producer-state test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 snapshot_source = string_format_z(arena, S8("build/artifact-fanout-snapshot-{u64}.source"), os_get_current_process_id());
+    String8 snapshot_copy = string_format_z(arena, S8("build/artifact-fanout-snapshot-{u64}.copy"), os_get_current_process_id());
+    String8 snapshot_failure_copy = string_format_z(arena, S8("build/artifact-fanout-snapshot-{u64}.failure"), os_get_current_process_id());
+    String8 lifecycle_copy = string_format_z(arena, S8("build/artifact-fanout-snapshot-{u64}.lifecycle"), os_get_current_process_id());
+    String8 large_snapshot_source = string_format_z(arena, S8("build/artifact-fanout-snapshot-{u64}.large.source"), os_get_current_process_id());
+    String8 large_snapshot_copy = string_format_z(arena, S8("build/artifact-fanout-snapshot-{u64}.large.copy"), os_get_current_process_id());
+    remove_path_recursive(arena, snapshot_source);
+    remove_path_recursive(arena, snapshot_copy);
+    remove_path_recursive(arena, snapshot_failure_copy);
+    remove_path_recursive(arena, lifecycle_copy);
+    remove_path_recursive(arena, large_snapshot_source);
+    remove_path_recursive(arena, large_snapshot_copy);
+    String8 snapshot_content = S8("canonical trusted artifact snapshot\n");
+    bool snapshot_written = file_write(snapshot_source, BUSTER_SLICE_TO_BYTE_SLICE(snapshot_content));
+#if BUSTER_LINUX || BUSTER_MACOS
+    snapshot_written = snapshot_written && chmod((const char*)snapshot_source.pointer, 0711) == 0;
+#endif
+    ByteSlice snapshot_source_bytes = file_read(arena, snapshot_source, (FileReadOptions){.map_required = 0});
+    u64 snapshot_hash = snapshot_source_bytes.pointer ? buster_hash_64(snapshot_source_bytes.pointer, snapshot_source_bytes.length) : 0;
+    bool snapshot_copied = snapshot_written && snapshot_source_bytes.pointer &&
+                           build_artifact_fanout_snapshot(arena, snapshot_source, snapshot_copy, snapshot_hash, snapshot_source_bytes.length);
+    bool snapshot_failure_cleanup = true;
+    if (snapshot_written && snapshot_source_bytes.pointer)
+    {
+        bool failed_snapshot = build_artifact_fanout_snapshot(arena, snapshot_source, snapshot_failure_copy, snapshot_hash ^ 1, snapshot_source_bytes.length);
+        snapshot_failure_cleanup = !failed_snapshot && !path_exists(arena, snapshot_failure_copy);
+    }
+    ByteSlice snapshot_copy_bytes = file_read(arena, snapshot_copy, (FileReadOptions){.map_required = 0});
+    bool snapshot_bytes_match = snapshot_copied && snapshot_copy_bytes.pointer && snapshot_copy_bytes.length == snapshot_source_bytes.length &&
+                                buster_hash_64(snapshot_copy_bytes.pointer, snapshot_copy_bytes.length) == snapshot_hash;
+#if BUSTER_LINUX || BUSTER_MACOS
+    struct stat snapshot_source_stats = {0};
+    struct stat snapshot_copy_stats = {0};
+    bool snapshot_mode_match = stat((const char*)snapshot_source.pointer, &snapshot_source_stats) == 0 &&
+                               stat((const char*)snapshot_copy.pointer, &snapshot_copy_stats) == 0 &&
+                               (snapshot_source_stats.st_mode & 07777) == (snapshot_copy_stats.st_mode & 07777) &&
+                               (snapshot_copy_stats.st_mode & 0111);
+#else
+    bool snapshot_mode_match = true;
+#endif
+    remove_path_recursive(arena, snapshot_source);
+    remove_path_recursive(arena, snapshot_copy);
+    remove_path_recursive(arena, snapshot_failure_copy);
+    bool snapshot_cleanup = !path_exists(arena, snapshot_source) && !path_exists(arena, snapshot_copy) && !path_exists(arena, snapshot_failure_copy);
+    if (!snapshot_bytes_match || !snapshot_mode_match || !snapshot_failure_cleanup || !snapshot_cleanup)
+    {
+        string_print(S8("error: artifact fan-out snapshot bytes/hash/mode test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    bool lifecycle_present_cleanup = file_write(lifecycle_copy, BUSTER_SLICE_TO_BYTE_SLICE(snapshot_content));
+    BuildArtifactFanout lifecycle_fanout = {.private_bootstrap_path = lifecycle_copy};
+    lifecycle_present_cleanup = lifecycle_present_cleanup &&
+                                build_artifact_fanout_cleanup_action(arena, &lifecycle_fanout) == PROCESS_RESULT_SUCCESS &&
+                                !path_exists(arena, lifecycle_copy);
+    bool lifecycle_absent_cleanup = build_artifact_fanout_cleanup_action(arena, &lifecycle_fanout) == PROCESS_RESULT_SUCCESS &&
+                                    !path_exists(arena, lifecycle_copy);
+    bool lifecycle_failure_cleanup = file_write(lifecycle_copy, BUSTER_SLICE_TO_BYTE_SLICE(snapshot_content));
+#if BUSTER_WINDOWS
+    String8 cleanup_failure_arguments[] = {S8("cmd.exe"), S8("/C"), S8("exit 200")};
+#else
+    String8 cleanup_failure_arguments[] = {S8("/bin/sh"), S8("-c"), S8("exit 200")};
+#endif
+    ProcessRun cleanup_failure_run = {
+        .arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(cleanup_failure_arguments),
+        .cleanup_callback = build_artifact_fanout_cleanup_action,
+        .cleanup_data = &lifecycle_fanout,
+    };
+    if (lifecycle_failure_cleanup)
+    {
+        cleanup_failure_run.spawn = process_run_spawn(arena, &cleanup_failure_run);
+        lifecycle_failure_cleanup = process_run_wait(arena, &cleanup_failure_run) != PROCESS_RESULT_SUCCESS &&
+                                    !path_exists(arena, lifecycle_copy);
+    }
+    if (!lifecycle_present_cleanup || !lifecycle_absent_cleanup || !lifecycle_failure_cleanup)
+    {
+        string_print(S8("error: artifact fan-out private snapshot lifecycle cleanup test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    bool large_snapshot_result = true;
+    if (include_large_snapshot)
+    {
+        OsFileDescriptor* large_snapshot_file =
+            os_file_open(large_snapshot_source, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+        bool large_snapshot_written = large_snapshot_file != 0;
+        u8 large_snapshot_buffer[BUSTER_KB(64)] = {0};
+        u64 large_snapshot_size = BUSTER_MB(65) + BUSTER_KB(1);
+        if (large_snapshot_file)
+        {
+            for (u64 remaining = large_snapshot_size; remaining;)
+            {
+                u64 write_size = BUSTER_MIN(remaining, (u64)sizeof(large_snapshot_buffer));
+                os_file_write(large_snapshot_file, (ByteSlice){large_snapshot_buffer, write_size});
+                remaining -= write_size;
+            }
+            large_snapshot_written = os_file_close(large_snapshot_file);
+        }
+#if BUSTER_LINUX || BUSTER_MACOS
+        large_snapshot_written = large_snapshot_written && chmod((const char*)large_snapshot_source.pointer, 0711) == 0;
+#endif
+        u64 large_snapshot_hash = 0;
+        u64 large_snapshot_actual_size = 0;
+        bool large_snapshot_digest = large_snapshot_written &&
+                                     build_artifact_fanout_hash_file(arena, large_snapshot_source, &large_snapshot_hash, &large_snapshot_actual_size) &&
+                                     large_snapshot_actual_size == large_snapshot_size;
+        bool large_snapshot_copied = large_snapshot_digest &&
+                                     build_artifact_fanout_snapshot(arena, large_snapshot_source, large_snapshot_copy, large_snapshot_hash,
+                                                                    large_snapshot_actual_size);
+        remove_path_recursive(arena, large_snapshot_source);
+        remove_path_recursive(arena, large_snapshot_copy);
+        bool large_snapshot_cleanup = !path_exists(arena, large_snapshot_source) && !path_exists(arena, large_snapshot_copy);
+        if (!large_snapshot_copied || !large_snapshot_cleanup)
+        {
+            large_snapshot_result = false;
+        }
+    }
+    if (!large_snapshot_result)
+    {
+        string_print(S8("error: artifact fan-out bounded-memory large snapshot test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("ARTIFACT_FANOUT_TESTS passed canonical=1 tcc=1 identity=1 config=1 flags=1 windows_flags=1 restricted=1 missing=1 snapshot=1 large_snapshot={S8} cleanup=1\n"),
+                 include_large_snapshot ? S8("1") : S8("skipped"));
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_requested_for_platform(bool ci, bool forced, bool macos, bool windows, bool x86_64)
+{
+    return forced || (ci && (macos || (windows && x86_64)));
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_consumer_supported_for_platform(bool linux_host, bool macos, bool windows, bool x86_64)
+{
+    return macos || (x86_64 && (linux_host || windows));
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_selection_is_valid(bool requested, bool supported, bool producer_selected)
+{
+    return !requested || (supported && producer_selected);
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
+{
+    bool fanout_forced = environment_flag_is_on(S8("BUSTER_TEST_FORCE_ARTIFACT_FANOUT"));
+    bool fanout_requested = build_artifact_fanout_requested_for_platform(ci, fanout_forced, BUSTER_MACOS != 0, BUSTER_WINDOWS != 0,
+                                                                          BUSTER_CPU_ARCH_X86_64 != 0);
+    bool fanout_supported = build_artifact_fanout_consumer_supported_for_platform(BUSTER_LINUX != 0, BUSTER_MACOS != 0, BUSTER_WINDOWS != 0,
+                                                                                     BUSTER_CPU_ARCH_X86_64 != 0);
+    if (fanout_requested && !fanout_supported)
+    {
+        string_print(S8("error: artifact fan-out was requested on an unsupported self-host consumer platform\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    ProcessResult focused_test_result = build_artifact_fanout_tests(arena, fanout_forced);
+    if (focused_test_result != PROCESS_RESULT_SUCCESS)
+    {
+        return focused_test_result;
+    }
+
     typedef struct TestCombination TestCombination;
     struct TestCombination
     {
         String8 build_directory;
         CmakeBuildOptions options;
+        Generate generate;
         BuildCompiler compiler;
         u32 sanitize : 1;
         u32 run_app_tests : 1;
@@ -3532,14 +5089,9 @@ BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_
 
     for (BuildCompiler compiler = !BUSTER_WINDOWS; compiler < BUILD_COMPILER_COUNT; compiler += 1)
     {
-        if (ci && compiler == BUILD_COMPILER_TCC)
-        {
-            continue;
-        }
-
         bool fuzz_supported = compiler == BUILD_COMPILER_CLANG && !BUSTER_APPLE;
         bool support_sanitize = compiler == BUILD_COMPILER_CLANG;
-        bool support_optimize = compiler != BUILD_COMPILER_TCC;
+        bool support_optimize = true;
 
         for (u32 sanitize = 0; sanitize < 1 + support_sanitize; sanitize += 1)
         {
@@ -3606,12 +5158,63 @@ BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_
                                 .quiet = base_options.quiet,
                             },
                         .compiler = compiler,
+                        .generate = generate,
                         .sanitize = sanitize,
                         .run_app_tests = (sanitize && !optimize) || (!sanitize && optimize),
                     };
                 }
             }
         }
+    }
+
+    BuildArtifactFanout* fanout = 0;
+    String8 ide_name =
+#if BUSTER_WINDOWS
+        S8("ide.exe");
+#else
+        S8("ide");
+#endif
+    for (u64 combination_i = 0; fanout_requested && combination_i < combination_count; combination_i += 1)
+    {
+        TestCombination combination = combinations[combination_i];
+        if (build_artifact_fanout_is_canonical(combination.generate, combination.options))
+        {
+            if (fanout)
+            {
+                string_print(S8("error: more than one canonical Clang Release combination was selected for artifact fan-out\n"));
+                return PROCESS_RESULT_FAILED;
+            }
+            fanout = arena_allocate(arena, BuildArtifactFanout, 1);
+            *fanout = (BuildArtifactFanout){
+                .build_directory = combination.build_directory,
+                .artifact_path = path_join(arena, path_join(arena, combination.build_directory, S8("Release")), ide_name),
+                .generate = combination.generate,
+                .options = combination.options,
+            };
+        }
+    }
+
+    if (!build_artifact_fanout_selection_is_valid(fanout_requested, fanout_supported, fanout != 0))
+    {
+        if (!fanout_supported)
+        {
+            string_print(S8("error: artifact fan-out was requested on an unsupported self-host consumer platform\n"));
+        }
+        else
+        {
+            string_print(S8("error: artifact fan-out was requested but no canonical Clang Release producer was selected\n"));
+        }
+        return PROCESS_RESULT_FAILED;
+    }
+
+    if (fanout && fanout_requested)
+    {
+        BuildStep* capture_step = step_add(arena);
+        ProcessRun* capture_run = run_add(arena, capture_step);
+        *capture_run = (ProcessRun){
+            .callback = build_artifact_fanout_capture_action,
+            .callback_data = fanout,
+        };
     }
 
     BuildStep* release_build_step = step_add(arena);
@@ -3621,7 +5224,21 @@ BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_
         if (!combination.sanitize && combination.options.optimize)
         {
             build_run_add(arena, release_build_step, combination.build_directory, (SliceString8){0}, (SliceString8){0}, combination.options);
+            if (fanout && fanout_requested && build_artifact_fanout_is_canonical(combination.generate, combination.options))
+            {
+                fanout->release_build_scheduled = 1;
+            }
         }
+    }
+
+    if (fanout && fanout_requested)
+    {
+        BuildStep* release_success_step = step_add(arena);
+        ProcessRun* release_success_run = run_add(arena, release_success_step);
+        *release_success_run = (ProcessRun){
+            .callback = build_artifact_fanout_release_success_action,
+            .callback_data = fanout,
+        };
     }
 
     for (u64 combination_i = 0; combination_i < combination_count; combination_i += 1)
@@ -3642,6 +5259,15 @@ BUSTER_GLOBAL_LOCAL void test_all(Arena* arena, bool ci, CmakeBuildOptions base_
             clang_analyze_command_add(arena, combination.build_directory, combination.options);
         }
     }
+    if (fanout && fanout_requested)
+    {
+        ProcessResult fanout_result = self_host_from_existing_add(arena, fanout);
+        if (fanout_result != PROCESS_RESULT_SUCCESS)
+        {
+            return fanout_result;
+        }
+    }
+    return PROCESS_RESULT_SUCCESS;
 }
 
 // --- import_assembly_metadata -------------------------------------------
@@ -12941,6 +14567,17 @@ ProcessResult process_arguments(void)
                 }
                 else
                 {
+                    String8 split_definition = {0};
+                    if (string_equal(passthrough_argument, S8("-D")) && argument_i + 1 < arguments.length)
+                    {
+                        split_definition = arguments.pointer[argument_i + 1];
+                    }
+                    if (build_cmake_argument_is_tcc_application_compiler(arena, passthrough_argument, split_definition))
+                    {
+                        string_print(S8("error: CMake compiler override selects TCC; TCC is reserved for bootstrapping build.c and is not an application compiler\n"));
+                        result = PROCESS_RESULT_FAILED;
+                        break;
+                    }
                     string8_list_push(arena, &generate_cmake_arguments, passthrough_argument);
                 }
                 argument_i += 1;
@@ -13022,8 +14659,21 @@ ProcessResult process_arguments(void)
             }
             else if (command == BUILD_COMMAND_GENERATE)
             {
-                string8_list_push(arena, &generate_cmake_arguments, argument);
-                argument_i += 1;
+                String8 split_definition = {0};
+                if (string_equal(argument, S8("-D")) && argument_i + 1 < arguments.length)
+                {
+                    split_definition = arguments.pointer[argument_i + 1];
+                }
+                if (build_cmake_argument_is_tcc_application_compiler(arena, argument, split_definition))
+                {
+                    string_print(S8("error: CMake compiler override selects TCC; TCC is reserved for bootstrapping build.c and is not an application compiler\n"));
+                    result = PROCESS_RESULT_FAILED;
+                }
+                else
+                {
+                    string8_list_push(arena, &generate_cmake_arguments, argument);
+                    argument_i += 1;
+                }
             }
             else
             {
@@ -13078,22 +14728,30 @@ ProcessResult process_arguments(void)
             String8 value = {0};
             if (command == BUILD_COMMAND_GENERATE && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &value))
             {
-                generate.cc = value;
-                generate.cc_set = true;
-
-                BuildCompiler compiler = BUILD_COMPILER_COUNT;
-                for (u64 i = 0; i < BUILD_COMPILER_COUNT; i += 1)
+                if (build_compiler_value_is_tcc(value))
                 {
-                    if (string_equal(value, build_compilers[i]))
-                    {
-                        compiler = (BuildCompiler)i;
-                        break;
-                    }
+                    string_print(S8("error: --cc tcc is reserved for bootstrapping build.c and is not an application compiler\n"));
+                    result = PROCESS_RESULT_FAILED;
                 }
-
-                if (compiler != BUILD_COMPILER_COUNT)
+                else
                 {
-                    generate.compiler = compiler;
+                    generate.cc = value;
+                    generate.cc_set = true;
+
+                    BuildCompiler compiler = BUILD_COMPILER_COUNT;
+                    for (u64 i = 0; i < BUILD_COMPILER_COUNT; i += 1)
+                    {
+                        if (string_equal(value, build_compilers[i]))
+                        {
+                            compiler = (BuildCompiler)i;
+                            break;
+                        }
+                    }
+
+                    if (compiler != BUILD_COMPILER_COUNT)
+                    {
+                        generate.compiler = compiler;
+                    }
                 }
             }
             else
@@ -13584,7 +15242,7 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI:
         {
             bool ci = command == BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI;
-            test_all(arena, ci, options);
+            result = test_all(arena, ci, options);
         }
         }
     }
@@ -13669,6 +15327,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult process_run_wait(Arena* arena, ProcessRun* run
     if ((run->flags & PROCESS_RUN_FLAG_STDERR_WARNING_IS_FAILURE) && has_warning && result == PROCESS_RESULT_SUCCESS)
     {
         result = PROCESS_RESULT_FAILED;
+    }
+
+    if (run->cleanup_callback)
+    {
+        ProcessResult cleanup_result = run->cleanup_callback(arena, run->cleanup_data);
+        if (result == PROCESS_RESULT_SUCCESS && cleanup_result != PROCESS_RESULT_SUCCESS)
+        {
+            result = cleanup_result;
+        }
     }
 
     return result;

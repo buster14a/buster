@@ -85,15 +85,18 @@ sanitizer rows are otherwise Clang-only. GCC and Zig cover unsanitized Debug
 and Release, and MSVC covers Debug and Release on Windows. Only optimized,
 unsanitized Clang/AppleClang builds use the requested unity build; GCC, Zig,
 MSVC, and every other non-Clang compiler use split translation units in
-Release as well as Debug. TCC remains a local Debug application compiler and
-is omitted from CI combinations. Independent non-sanitized Release builds
+Release as well as Debug. TCC is retained only as the bootstrap compiler for
+`build.c` and is omitted from all application/compiler combinations.
+Independent non-sanitized Release builds
 run in parallel. CI Release builds use `-O2`; local Release builds retain the
 toolchain default. Clang static analysis runs only against unsanitized
 Release. GUI/GPU smoke tests run for Debug sanitized and Release
 non-sanitized configurations; other combinations run unit tests only.
 Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
-`--instrument`, `--cc <clang|gcc|tcc|zig|cl>` are accepted **only by
+`--instrument`, `--cc <clang|gcc|zig|cl>` are accepted **only by
 `generate`**; `build` rejects them with an explicit diagnostic.
+TCC is reserved for compiling `build.c` through `build.sh`/`build.ps1` and
+`generate --cc tcc` is rejected as an application compiler.
 `--optimize`/`--no-optimize` are configuration shorthands for
 Release/Debug and never create separate cached optimization state. `build`
 accepts `--config <name>`, `--optimize`, `--target/-t <ninja target>`, and
@@ -255,10 +258,10 @@ enabled.
   must not execute through them.
 - **Warnings are errors** under a very large warning set (see
   `GNU_FAMILY_WARNINGS` in `CMakeLists.txt`), and code must stay clean under
-  Clang, GCC, TinyCC, Zig cc, and MSVC. TinyCC supports local Debug
-  application builds and bootstraps the native `build.c` driver through
-  `build.sh`/`build.ps1`; the CI matrix omits it. Avoid compiler-specific
-  extensions unless guarded.
+  Clang, GCC, Zig cc, and MSVC. TCC is required only to compile/bootstrap the
+  native `build.c` driver through `build.sh`/`build.ps1`; application code is
+  not promised to compile with TCC. Avoid compiler-specific extensions unless
+  guarded.
 - **Idioms**: arena allocation (`<buster/lib/arena.h>`) — no malloc/free churn;
   `String8`/`S8("...")` (defined in `<buster/lib/base.h>`) — no C strings; `STRUCT(Name)`
   declarations; `BUSTER_`-prefixed macros; 4-space indent, snake_case, braces

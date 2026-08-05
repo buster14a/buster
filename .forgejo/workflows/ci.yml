@@ -80,13 +80,6 @@ jobs:
         run: |
           set -euo pipefail
           ./build.sh test_all_combinations_ci --verbose=1
-      - name: Self-host (macOS)
-        shell: bash
-        if: ${{ contains(matrix.runner, 'macos') }}
-        run: |
-          set -euo pipefail
-          source /opt/vulkan-sdk/current/setup-env.sh
-          ./build.sh test_self_host --config Release
       - name: Test (iOS simulator)
         shell: bash
         if: ${{ contains(matrix.runner, 'macos') }}
@@ -122,7 +115,4 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           ./build.ps1 test_all_combinations_ci --verbose=1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          ./build.ps1 test_self_host --config Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
