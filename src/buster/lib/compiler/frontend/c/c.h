@@ -336,17 +336,20 @@ struct CEntity
     CEntityId next_typedef_in_lookup;
     u32 declaration_index;
     u32 declaration_token_plus_one;
+    u32 declaration_token_start;
+    u32 declaration_token_count;
     u32 alignment_start;
     u32 alignment_count;
     CEntityKind kind;
     bool is_definition;
     bool is_static_storage;
+    bool is_thread_local;
     bool is_constexpr;
     bool has_constant_value;
     bool constant_is_negative;
     bool has_cleanup;
     bool cleanup_attribute_checked;
-    u8 reserved[3];
+    u8 reserved[2];
     CEntityId cleanup_function;
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;
@@ -406,6 +409,15 @@ struct CDeclaration
     bool is_variadic;
     bool is_constexpr;
     u8 reserved;
+};
+
+typedef struct CDeferredStaticAssert CDeferredStaticAssert;
+struct CDeferredStaticAssert
+{
+    u32 token_start;
+    u32 token_count;
+    CScopeId scope;
+    CSourceLocation location;
 };
 
 typedef enum CParserDeclarationKind
@@ -503,6 +515,7 @@ struct CParseResult
     CEntityId* typedef_lookup_buckets;
     CIdentifierUse* identifier_uses;
     CDiagnostic* diagnostics;
+    CDeferredStaticAssert* deferred_static_asserts;
     u32 declaration_count;
     u32 type_count;
     u32 parameter_count;
@@ -514,6 +527,7 @@ struct CParseResult
     u32 scope_count;
     u32 identifier_use_count;
     u32 diagnostic_count;
+    u32 deferred_static_assert_count;
     u32 declaration_capacity;
     u32 type_capacity;
     u32 parameter_capacity;
@@ -526,6 +540,7 @@ struct CParseResult
     u32 entity_lookup_bucket_count;
     u32 identifier_use_capacity;
     u32 diagnostic_capacity;
+    u32 deferred_static_assert_capacity;
 };
 
 // CParseResult is the compatibility name for the semantic model.  New phase

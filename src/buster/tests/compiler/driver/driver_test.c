@@ -1182,6 +1182,42 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    String8 c_static_local_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-static-local"),
+#if BUSTER_WINDOWS
+                                                                         S8(".exe"));
+#else
+                                                                         S8(""));
+#endif
+    String8 c_static_local_command_line[] = {
+        S8("-o"),
+        c_static_local_executable_path,
+        S8("tests/basic_c_static_local.c"),
+    };
+    CompilerDriverResult c_static_local = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_static_local_command_line)));
+    BUSTER_TEST(arguments, c_static_local.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, c_static_local.has_object);
+    if (c_static_local.has_object)
+    {
+        BUSTER_TEST(arguments, c_static_local.object.sections[OBJECT_SECTION_READ_ONLY_DATA].data.length != 0);
+    }
+    if (c_static_local.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_static_local_run_arguments[] = {
+            c_static_local_executable_path,
+        };
+        ProcessSpawnResult c_static_local_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_static_local_run_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_static_local_spawn.handle != 0);
+        if (c_static_local_spawn.handle)
+        {
+            ProcessWaitResult c_static_local_wait = os_process_wait_sync(arguments->arena, c_static_local_spawn);
+            BUSTER_TEST(arguments, c_static_local_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     String8 c_auto_type_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-auto-type"),
 #if BUSTER_WINDOWS
                                                                       S8(".exe"));

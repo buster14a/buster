@@ -4838,6 +4838,584 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         scratch_end(direct_ir_temporary);
     }
     {
+        TemporalArena local_static_temporary = scratch_begin(0, 0);
+        CPreprocessResult local_static_tokens = c_preprocess(
+            local_static_temporary.arena,
+            S8("struct StaticPair { int first; int second; };"
+               " struct StaticNested { int values[2]; };"
+               " enum { STATIC_LOCAL_INDEX = 7 };"
+               " static int static_local_probe(void) {"
+               " int result = 0;"
+               " static const int scalar = 7;"
+               " static const struct StaticPair table[] = {"
+               " [3] = { 1, 2 }, [STATIC_LOCAL_INDEX] = { 3, 4 } };"
+               " static const struct StaticPair brace_elision[] = { 1, 2, 3, 4 };"
+               " static const int nested_elision[][2] = { 1, 2, 3, 4 };"
+               " static const struct StaticNested chained[] = { [3].values[1] = 7 };"
+               " static const int cast_index[] = { [(unsigned char)256] = 1 };"
+               " static const int duplicate_designator[] = { [3] = 4, [1] = 2, [3] = 5 };"
+               "\n#define ADD_MACRO_STATIC(value) { static const int macro_table[] = { value }; result += macro_table[0]; }\n"
+               "\n#define ONE(value) { static const int macro_same[] = { value }; result += macro_same[0]; }\n"
+               "\n#define BOTH(first_value, second_value) ONE(first_value) ONE(second_value)\n"
+               " ADD_MACRO_STATIC(17) ADD_MACRO_STATIC(19)"
+               " BOTH(1, 2)"
+               " { static const int duplicate[] = { 11 }; result += duplicate[0]; }"
+               " { static const int duplicate[] = { 13 }; result += duplicate[0]; }"
+               " return scalar + table[STATIC_LOCAL_INDEX].second + result + brace_elision[1].second + nested_elision[1][1] + chained[3].values[1] + cast_index[0] + duplicate_designator[3]; }"
+               " int main(void) { return static_local_probe() == 92 ? 0 : 1; }\n"),
+            (CPreprocessOptions){0});
+        CParseResult local_static_parse = c_parse(local_static_temporary.arena, local_static_tokens);
+        CIRLowerResult local_static_ir =
+            c_lower_to_ir(local_static_temporary.arena, S8("local-static-aggregate.c"), local_static_tokens, local_static_parse, target_native);
+        BUSTER_TEST(arguments, local_static_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, local_static_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, local_static_ir.diagnostic_count == 0);
+        if (local_static_ir.program)
+        {
+            IrModule* module = &local_static_ir.program->modules[0];
+            IrGlobal* scalar_global = 0;
+            IrGlobal* table_global = 0;
+            IrGlobal* brace_elision_global = 0;
+            IrGlobal* nested_elision_global = 0;
+            IrGlobal* chained_global = 0;
+            IrGlobal* cast_index_global = 0;
+            IrGlobal* duplicate_designator_global = 0;
+            IrSymbolId duplicate_symbols[2] = {IR_SYMBOL_ID_INVALID, IR_SYMBOL_ID_INVALID};
+            IrSymbolId macro_symbols[2] = {IR_SYMBOL_ID_INVALID, IR_SYMBOL_ID_INVALID};
+            IrSymbolId nested_macro_symbols[2] = {IR_SYMBOL_ID_INVALID, IR_SYMBOL_ID_INVALID};
+            u32 duplicate_count = 0;
+            u32 macro_count = 0;
+            u32 nested_macro_count = 0;
+            for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+            {
+                IrGlobal* global = module->globals + global_index;
+                IrSymbol* symbol = ir_symbol_from_id(&local_static_ir.program->symbols, global->symbol);
+                if (!symbol || !string_starts_with_sequence(symbol->link_name, S8(".L.static_local_probe.")))
+                {
+                    continue;
+                }
+                if (string_starts_with_sequence(symbol->link_name, S8(".L.static_local_probe.scalar.")))
+                {
+                    scalar_global = global;
+                }
+                else if (string_starts_with_sequence(symbol->link_name, S8(".L.static_local_probe.table.")))
+                {
+                    table_global = global;
+                }
+                else if (string_starts_with_sequence(symbol->link_name, S8(".L.static_local_probe.brace_elision.")))
+                {
+                    brace_elision_global = global;
+                }
+                else if (string_starts_with_sequence(symbol->link_name, S8(".L.static_local_probe.nested_elision.")))
+                {
+                    nested_elision_global = global;
+                }
+                else if (string_starts_with_sequence(symbol->link_name, S8(".L.static_local_probe.chained.")))
+                {
+                    chained_global = global;
+                }
+                else if (string_starts_with_sequence(symbol->link_name, S8(".L.static_local_probe.cast_index.")))
+                {
+                    cast_index_global = global;
+                }
+                else if (string_starts_with_sequence(symbol->link_name, S8(".L.static_local_probe.duplicate_designator.")))
+                {
+                    duplicate_designator_global = global;
+                }
+                else if (string_starts_with_sequence(symbol->link_name, S8(".L.static_local_probe.macro_table.")) && macro_count < 2)
+                {
+                    macro_symbols[macro_count++] = global->symbol;
+                }
+                else if (string_starts_with_sequence(symbol->link_name, S8(".L.static_local_probe.macro_same.")) && nested_macro_count < 2)
+                {
+                    nested_macro_symbols[nested_macro_count++] = global->symbol;
+                }
+                else if (string_starts_with_sequence(symbol->link_name, S8(".L.static_local_probe.duplicate.")) && duplicate_count < 2)
+                {
+                    duplicate_symbols[duplicate_count++] = global->symbol;
+                }
+                BUSTER_TEST(arguments, symbol->linkage == IR_LINKAGE_INTERNAL);
+                BUSTER_TEST(arguments, global->is_read_only);
+            }
+            BUSTER_TEST(arguments, scalar_global != 0);
+            BUSTER_TEST(arguments, table_global != 0);
+            BUSTER_TEST(arguments, brace_elision_global != 0);
+            BUSTER_TEST(arguments, nested_elision_global != 0);
+            BUSTER_TEST(arguments, chained_global != 0);
+            BUSTER_TEST(arguments, cast_index_global != 0);
+            BUSTER_TEST(arguments, duplicate_designator_global != 0);
+            BUSTER_TEST(arguments, duplicate_count == 2);
+            BUSTER_TEST(arguments, macro_count == 2);
+            BUSTER_TEST(arguments, nested_macro_count == 2);
+            BUSTER_TEST(arguments, duplicate_symbols[0].value != duplicate_symbols[1].value);
+            BUSTER_TEST(arguments, macro_symbols[0].value != macro_symbols[1].value);
+            BUSTER_TEST(arguments, nested_macro_symbols[0].value != nested_macro_symbols[1].value);
+            if (scalar_global)
+            {
+                BUSTER_TEST(arguments, scalar_global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER);
+                BUSTER_TEST(arguments, scalar_global->initializer_bits == 7);
+            }
+            if (table_global)
+            {
+                BUSTER_TEST(arguments, table_global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES);
+                BUSTER_TEST(arguments, table_global->bytes.length == 64);
+                if (table_global->bytes.pointer && table_global->bytes.length == 64)
+                {
+                    u32 first = 0;
+                    u32 second = 0;
+                    memcpy(&first, table_global->bytes.pointer + 7 * 8, sizeof(first));
+                    memcpy(&second, table_global->bytes.pointer + 7 * 8 + 4, sizeof(second));
+                    BUSTER_TEST(arguments, first == 3);
+                    BUSTER_TEST(arguments, second == 4);
+                }
+            }
+            if (brace_elision_global)
+            {
+                BUSTER_TEST(arguments, brace_elision_global->bytes.length == 16);
+                u32 second = 0;
+                memcpy(&second, brace_elision_global->bytes.pointer + 12, sizeof(second));
+                BUSTER_TEST(arguments, second == 4);
+            }
+            if (nested_elision_global)
+            {
+                BUSTER_TEST(arguments, nested_elision_global->bytes.length == 16);
+                u32 second = 0;
+                memcpy(&second, nested_elision_global->bytes.pointer + 12, sizeof(second));
+                BUSTER_TEST(arguments, second == 4);
+            }
+            if (chained_global)
+            {
+                BUSTER_TEST(arguments, chained_global->bytes.length == 32);
+                u32 value = 0;
+                memcpy(&value, chained_global->bytes.pointer + 28, sizeof(value));
+                BUSTER_TEST(arguments, value == 7);
+            }
+            if (cast_index_global)
+            {
+                BUSTER_TEST(arguments, cast_index_global->bytes.length == 4);
+                u32 value = 0;
+                memcpy(&value, cast_index_global->bytes.pointer, sizeof(value));
+                BUSTER_TEST(arguments, value == 1);
+            }
+            if (duplicate_designator_global)
+            {
+                BUSTER_TEST(arguments, duplicate_designator_global->bytes.length == 16);
+                u32 value = 0;
+                memcpy(&value, duplicate_designator_global->bytes.pointer + 12, sizeof(value));
+                BUSTER_TEST(arguments, value == 5);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(local_static_ir.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(local_static_temporary);
+    }
+    BUSTER_TEST(arguments, c_test_constant_initializer_u64_slots());
+    BUSTER_TEST(arguments, c_test_promoted_member_scratch());
+    {
+        TemporalArena aggregate_correction_temporary = scratch_begin(0, 0);
+        CPreprocessResult aggregate_correction_tokens = c_preprocess(
+            aggregate_correction_temporary.arena,
+            S8("static int aggregate_correction_target;"
+               " union AggregateCorrectionUnion { int first; int second; };"
+               " struct AggregateCorrectionOuter { struct { int promoted; } ; int tail; };"
+               " struct AggregateCorrectionOverride { int head; struct { int first; int second; } sub; int *pointer; };"
+               " struct AggregateCorrectionInnerPointer { int *p; };"
+               " struct AggregateCorrectionRelocationOuter { int *head; struct AggregateCorrectionInnerPointer inner; };"
+               " struct AggregateCorrectionString { char text[4]; int value; };"
+               " struct AggregateCorrectionExactString { char text[3]; int value; };"
+               " static int aggregate_correction_relocation_a;"
+               " static int aggregate_correction_relocation_b;"
+               " static int aggregate_correction_relocation_c;"
+               " static union AggregateCorrectionUnion union_values[] = { 1, 2 };"
+               " static struct AggregateCorrectionOverride override_value = { .sub = { 1, 2 }, .sub = { 3 }, .pointer = &aggregate_correction_target, .pointer = 0 };"
+               " static char braced_string[] = { \"abc\" };"
+               " static char exact_braced_string[3] = { \"abc\" };"
+               " static struct AggregateCorrectionString nested_string = { \"abc\", 7 };"
+               " static struct AggregateCorrectionExactString exact_nested_string = { { \"abc\" }, 9 };"
+               " static struct AggregateCorrectionRelocationOuter relocation_override = { .head = &aggregate_correction_relocation_a, .inner = (struct AggregateCorrectionInnerPointer){ .p = &aggregate_correction_relocation_b, .p = &aggregate_correction_relocation_c } };"
+               " static struct AggregateCorrectionOuter promoted_values[] = { [3].promoted = 7 };"
+               " int aggregate_correction_main(void) { return union_values[1].first + braced_string[3] + exact_braced_string[2] + nested_string.value + exact_nested_string.value + promoted_values[3].promoted + override_value.sub.first + (relocation_override.head == &aggregate_correction_relocation_a) + (relocation_override.inner.p == &aggregate_correction_relocation_c); }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+            });
+        CParseResult aggregate_correction_parse = c_parse(aggregate_correction_temporary.arena, aggregate_correction_tokens);
+        CIRLowerResult aggregate_correction_ir = c_lower_to_ir(aggregate_correction_temporary.arena, S8("aggregate-corrections.c"),
+                                                               aggregate_correction_tokens, aggregate_correction_parse, target_native);
+        BUSTER_TEST(arguments, aggregate_correction_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aggregate_correction_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aggregate_correction_ir.diagnostic_count == 0);
+        if (aggregate_correction_ir.program)
+        {
+            IrModule* module = &aggregate_correction_ir.program->modules[0];
+            IrGlobal* union_global = 0;
+            IrGlobal* override_global = 0;
+            IrGlobal* string_global = 0;
+            IrGlobal* exact_string_global = 0;
+            IrGlobal* nested_string_global = 0;
+            IrGlobal* exact_nested_string_global = 0;
+            IrGlobal* relocation_override_global = 0;
+            IrGlobal* promoted_global = 0;
+            for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+            {
+                IrGlobal* global = module->globals + global_index;
+                IrSymbol* symbol = ir_symbol_from_id(&aggregate_correction_ir.program->symbols, global->symbol);
+                if (!symbol)
+                {
+                    continue;
+                }
+                union_global = string_equal(symbol->name, S8("union_values")) ? global : union_global;
+                override_global = string_equal(symbol->name, S8("override_value")) ? global : override_global;
+                string_global = string_equal(symbol->name, S8("braced_string")) ? global : string_global;
+                exact_string_global = string_equal(symbol->name, S8("exact_braced_string")) ? global : exact_string_global;
+                nested_string_global = string_equal(symbol->name, S8("nested_string")) ? global : nested_string_global;
+                exact_nested_string_global = string_equal(symbol->name, S8("exact_nested_string")) ? global : exact_nested_string_global;
+                relocation_override_global = string_equal(symbol->name, S8("relocation_override")) ? global : relocation_override_global;
+                promoted_global = string_equal(symbol->name, S8("promoted_values")) ? global : promoted_global;
+            }
+            BUSTER_TEST(arguments, union_global != 0);
+            BUSTER_TEST(arguments, override_global != 0);
+            BUSTER_TEST(arguments, string_global != 0);
+            BUSTER_TEST(arguments, promoted_global != 0);
+            if (union_global && union_global->bytes.pointer && union_global->bytes.length == 2 * sizeof(u32))
+            {
+                u32 first = 0;
+                u32 second = 0;
+                memcpy(&first, union_global->bytes.pointer, sizeof(first));
+                memcpy(&second, union_global->bytes.pointer + sizeof(second), sizeof(second));
+                BUSTER_TEST(arguments, first == 1);
+                BUSTER_TEST(arguments, second == 2);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, false);
+            }
+            if (string_global && string_global->bytes.pointer && string_global->bytes.length == 4)
+            {
+                BUSTER_TEST(arguments, memcmp(string_global->bytes.pointer, "abc\0", 4) == 0);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, false);
+            }
+            if (exact_string_global && exact_string_global->bytes.pointer && exact_string_global->bytes.length == 3)
+            {
+                BUSTER_TEST(arguments, memcmp(exact_string_global->bytes.pointer, "abc", 3) == 0);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, false);
+            }
+            if (nested_string_global && nested_string_global->bytes.pointer)
+            {
+                BUSTER_TEST(arguments, nested_string_global->bytes.length >= 4 + sizeof(u32));
+                BUSTER_TEST(arguments, memcmp(nested_string_global->bytes.pointer, "abc\0", 4) == 0);
+                u32 value = 0;
+                memcpy(&value, nested_string_global->bytes.pointer + 4, sizeof(value));
+                BUSTER_TEST(arguments, value == 7);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, false);
+            }
+            if (exact_nested_string_global && exact_nested_string_global->bytes.pointer)
+            {
+                BUSTER_TEST(arguments, exact_nested_string_global->bytes.length >= 3 + sizeof(u32));
+                BUSTER_TEST(arguments, memcmp(exact_nested_string_global->bytes.pointer, "abc", 3) == 0);
+                u32 value = 0;
+                memcpy(&value, exact_nested_string_global->bytes.pointer + 4, sizeof(value));
+                BUSTER_TEST(arguments, value == 9);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, false);
+            }
+            if (override_global)
+            {
+                IrType* type = ir_type_from_id(&aggregate_correction_ir.program->types, override_global->type);
+                u64 sub_offset = UINT64_MAX;
+                u64 pointer_offset = UINT64_MAX;
+                if (type)
+                {
+                    for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
+                    {
+                        if (string_equal(type->fields[field_index].name, S8("sub"))) sub_offset = type->fields[field_index].offset;
+                        if (string_equal(type->fields[field_index].name, S8("pointer"))) pointer_offset = type->fields[field_index].offset;
+                    }
+                }
+                u32 sub_first = 0;
+                u32 sub_second = 0;
+                BUSTER_TEST(arguments, sub_offset != UINT64_MAX && pointer_offset != UINT64_MAX && override_global->bytes.pointer);
+                if (override_global->bytes.pointer && sub_offset != UINT64_MAX && pointer_offset != UINT64_MAX)
+                {
+                    memcpy(&sub_first, override_global->bytes.pointer + sub_offset, sizeof(sub_first));
+                    memcpy(&sub_second, override_global->bytes.pointer + sub_offset + sizeof(sub_second), sizeof(sub_second));
+                    BUSTER_TEST(arguments, sub_first == 3);
+                    BUSTER_TEST(arguments, sub_second == 0);
+                    BUSTER_TEST(arguments, override_global->relocation_count == 0);
+                    for (u64 byte_index = 0; byte_index < target_data_layout(target_native).pointer.size; byte_index += 1)
+                    {
+                        BUSTER_TEST(arguments, override_global->bytes.pointer[pointer_offset + byte_index] == 0);
+                    }
+                }
+            }
+            if (relocation_override_global)
+            {
+                IrType* type = ir_type_from_id(&aggregate_correction_ir.program->types, relocation_override_global->type);
+                u64 inner_offset = UINT64_MAX;
+                if (type)
+                {
+                    for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
+                    {
+                        if (string_equal(type->fields[field_index].name, S8("inner")))
+                        {
+                            inner_offset = type->fields[field_index].offset;
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, relocation_override_global->relocation_count == 2 && inner_offset != UINT64_MAX);
+                bool found_head = false;
+                bool found_inner = false;
+                for (u32 relocation_index = 0; relocation_index < relocation_override_global->relocation_count; relocation_index += 1)
+                {
+                    IrGlobalRelocation relocation = relocation_override_global->relocations[relocation_index];
+                    IrSymbol* symbol = ir_symbol_from_id(&aggregate_correction_ir.program->symbols, relocation.symbol);
+                    found_head |= relocation.offset == 0 && symbol && string_equal(symbol->name, S8("aggregate_correction_relocation_a"));
+                    found_inner |= relocation.offset == inner_offset && symbol && string_equal(symbol->name, S8("aggregate_correction_relocation_c"));
+                }
+                BUSTER_TEST(arguments, found_head && found_inner);
+            }
+            if (promoted_global && promoted_global->bytes.pointer && promoted_global->bytes.length == 4 * sizeof(u64))
+            {
+                u32 value = 0;
+                memcpy(&value, promoted_global->bytes.pointer + 3 * sizeof(u64), sizeof(value));
+                BUSTER_TEST(arguments, value == 7);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, false);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(aggregate_correction_ir.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(aggregate_correction_temporary);
+    }
+    {
+        TemporalArena union_invalid_temporary = scratch_begin(0, 0);
+        CPreprocessResult union_invalid_tokens = c_preprocess(
+            union_invalid_temporary.arena,
+            S8("union InvalidUnion { int first; int second; }; static union InvalidUnion invalid = { 1, 2 };"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+            });
+        CParseResult union_invalid_parse = c_parse(union_invalid_temporary.arena, union_invalid_tokens);
+        CIRLowerResult union_invalid_ir = c_lower_to_ir(union_invalid_temporary.arena, S8("invalid-union-initializer.c"), union_invalid_tokens,
+                                                        union_invalid_parse, target_native);
+        BUSTER_TEST(arguments, union_invalid_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, union_invalid_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, union_invalid_ir.diagnostic_count == 1);
+        scratch_end(union_invalid_temporary);
+    }
+    {
+        TemporalArena deferred_assert_temporary = scratch_begin(0, 0);
+        CPreprocessResult deferred_assert_tokens = c_preprocess(
+            deferred_assert_temporary.arena,
+            S8("static int inferred_assert_array[] = { [(unsigned char)256] = 1 };"
+               " _Static_assert(sizeof(inferred_assert_array) == 4, \"inferred array size\");"
+               " int deferred_assert_positive(void) { return inferred_assert_array[0]; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+            });
+        CParseResult deferred_assert_parse = c_parse(deferred_assert_temporary.arena, deferred_assert_tokens);
+        CIRLowerResult deferred_assert_ir = c_lower_to_ir(deferred_assert_temporary.arena, S8("deferred-assert-positive.c"), deferred_assert_tokens,
+                                                          deferred_assert_parse, target_native);
+        BUSTER_TEST(arguments, deferred_assert_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, deferred_assert_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, deferred_assert_parse.deferred_static_assert_count == 1);
+        BUSTER_TEST(arguments, deferred_assert_ir.diagnostic_count == 0);
+        scratch_end(deferred_assert_temporary);
+    }
+    {
+        TemporalArena deferred_assert_false_temporary = scratch_begin(0, 0);
+        CPreprocessResult deferred_assert_false_tokens = c_preprocess(
+            deferred_assert_false_temporary.arena,
+            S8("static int false_assert_array[] = { [(unsigned char)256] = 1 };"
+               " _Static_assert(sizeof(false_assert_array) == 8, \"false inferred array size\");\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+            });
+        CParseResult deferred_assert_false_parse = c_parse(deferred_assert_false_temporary.arena, deferred_assert_false_tokens);
+        CIRLowerResult deferred_assert_false_ir = c_lower_to_ir(deferred_assert_false_temporary.arena, S8("deferred-assert-false.c"),
+                                                                deferred_assert_false_tokens, deferred_assert_false_parse, target_native);
+        BUSTER_TEST(arguments, deferred_assert_false_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, deferred_assert_false_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, deferred_assert_false_parse.deferred_static_assert_count == 1);
+        BUSTER_TEST(arguments, deferred_assert_false_ir.diagnostic_count == 1);
+        if (deferred_assert_false_ir.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, deferred_assert_false_ir.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
+        }
+        scratch_end(deferred_assert_false_temporary);
+    }
+    {
+        TemporalArena tls_temporary = scratch_begin(0, 0);
+        CPreprocessResult tls_tokens = c_preprocess(
+            tls_temporary.arena,
+            S8("int tls_probe(void) {"
+               " static _Thread_local int c_value = 1;"
+               " static __thread int gnu_value = 2;"
+               " c_value += 1; gnu_value += 1; return c_value + gnu_value; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+            });
+        CParseResult tls_parse = c_parse(tls_temporary.arena, tls_tokens);
+        CIRLowerResult tls_ir = c_lower_to_ir(tls_temporary.arena, S8("local-tls.c"), tls_tokens, tls_parse, target_native);
+        BUSTER_TEST(arguments, tls_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, tls_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, tls_ir.diagnostic_count == 0);
+        u32 tls_entities = 0;
+        for (u32 entity_index = 0; entity_index < tls_parse.entity_count; entity_index += 1)
+        {
+            tls_entities += tls_parse.entities[entity_index].kind == C_ENTITY_LOCAL && tls_parse.entities[entity_index].is_thread_local;
+        }
+        BUSTER_TEST(arguments, tls_entities == 2);
+        if (tls_ir.program)
+        {
+            u32 tls_globals = 0;
+            IrModule* module = &tls_ir.program->modules[0];
+            for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+            {
+                IrGlobal* global = module->globals + global_index;
+                IrSymbol* symbol = ir_symbol_from_id(&tls_ir.program->symbols, global->symbol);
+                if (symbol && string_starts_with_sequence(symbol->link_name, S8(".L.tls_probe.")))
+                {
+                    tls_globals += 1;
+                    BUSTER_TEST(arguments, global->is_thread_local && symbol->is_thread_local);
+                }
+            }
+            BUSTER_TEST(arguments, tls_globals == 2);
+        }
+        scratch_end(tls_temporary);
+    }
+    {
+        TemporalArena invalid_static_temporary = scratch_begin(0, 0);
+        CPreprocessResult invalid_static_tokens = c_preprocess(
+            invalid_static_temporary.arena,
+            S8("struct StaticPair { int first; int second; };"
+               " extern int static_local_runtime(void);"
+               " static int invalid_static_local(void) {"
+               " static const struct StaticPair value = { static_local_runtime(), 2 };"
+               " return value.first; }"
+               " int main(void) { return invalid_static_local(); }\n"),
+            (CPreprocessOptions){0});
+        CParseResult invalid_static_parse = c_parse(invalid_static_temporary.arena, invalid_static_tokens);
+        CIRLowerResult invalid_static_ir =
+            c_lower_to_ir(invalid_static_temporary.arena, S8("invalid-local-static-initializer.c"), invalid_static_tokens, invalid_static_parse, target_native);
+        BUSTER_TEST(arguments, invalid_static_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_static_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_static_ir.diagnostic_count == 1);
+        if (invalid_static_ir.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, invalid_static_ir.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+            BUSTER_STRING_TEST(arguments, invalid_static_ir.diagnostics[0].message,
+                               S8("in function 'invalid_static_local': could not lower static initializer for local 'value'"));
+        }
+        scratch_end(invalid_static_temporary);
+    }
+    {
+        TemporalArena invalid_designator_temporary = scratch_begin(0, 0);
+        CPreprocessResult invalid_designator_tokens = c_preprocess(
+            invalid_designator_temporary.arena,
+            S8("static int invalid_designator_value;"
+               " static int invalid_designator_nonconstant[] = { [invalid_designator_value] = 1 };"
+               " static int invalid_designator_negative[] = { [-1] = 1 };"
+               " static int invalid_designator_overflow[] = { [18446744073709551615ULL] = 1 };"
+               " static int invalid_designator_range[] = { [2 ... 5] = 1 };"
+               " static int invalid_designator_fixed_nonconstant[1] = { [invalid_designator_value] = 1 };"
+               " static int invalid_designator_fixed_negative[1] = { [-1] = 1 };"
+               " static int invalid_designator_fixed_overflow[1] = { [2] = 1 };\n"),
+            (CPreprocessOptions){0});
+        CParseResult invalid_designator_parse = c_parse(invalid_designator_temporary.arena, invalid_designator_tokens);
+        CIRLowerResult invalid_designator_ir = c_lower_to_ir(invalid_designator_temporary.arena, S8("invalid-designators.c"), invalid_designator_tokens,
+                                                             invalid_designator_parse, target_native);
+        bool found_nonconstant = false;
+        bool found_negative = false;
+        bool found_overflow = false;
+        bool found_range = false;
+        bool found_outside_bounds = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < invalid_designator_ir.diagnostic_count; diagnostic_index += 1)
+        {
+            String8 message = invalid_designator_ir.diagnostics[diagnostic_index].message;
+            found_nonconstant |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is not an integer constant expression"));
+            found_negative |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is negative"));
+            found_overflow |= string_starts_with_sequence(message, S8("C IR lowering: array designator index exceeds the target object size"));
+            found_range |= string_starts_with_sequence(message, S8("C IR lowering: range designators are not supported for static aggregate initializers"));
+            found_outside_bounds |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is outside the array bounds"));
+        }
+        BUSTER_TEST(arguments, invalid_designator_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_designator_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_designator_ir.diagnostic_count == 7);
+        BUSTER_TEST(arguments, found_nonconstant);
+        BUSTER_TEST(arguments, found_negative);
+        BUSTER_TEST(arguments, found_overflow);
+        BUSTER_TEST(arguments, found_range);
+        BUSTER_TEST(arguments, found_outside_bounds);
+        scratch_end(invalid_designator_temporary);
+    }
+    {
+        TemporalArena invalid_root_designator_temporary = scratch_begin(0, 0);
+        CPreprocessResult invalid_root_designator_tokens = c_preprocess(
+            invalid_root_designator_temporary.arena,
+            S8("struct InvalidRootDesignator { int x; };"
+               " static struct InvalidRootDesignator fixed[1] = { .x = 1 };"
+               " static struct InvalidRootDesignator inferred[] = { .x = 2 };"
+               " static struct InvalidRootDesignator nested[1] = { { .x = 3 } };"
+               " static struct InvalidRootDesignator indexed[1] = { [0].x = 4 };\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+            });
+        CParseResult invalid_root_designator_parse = c_parse(invalid_root_designator_temporary.arena, invalid_root_designator_tokens);
+        CIRLowerResult invalid_root_designator_ir = c_lower_to_ir(invalid_root_designator_temporary.arena, S8("invalid-root-designators.c"),
+                                                                   invalid_root_designator_tokens, invalid_root_designator_parse, target_native);
+        bool found_root_member_diagnostic = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < invalid_root_designator_ir.diagnostic_count; diagnostic_index += 1)
+        {
+            found_root_member_diagnostic |=
+                string_starts_with_sequence(invalid_root_designator_ir.diagnostics[diagnostic_index].message,
+                                             S8("C IR lowering: array initializer requires an element designator before a member designator"));
+        }
+        BUSTER_TEST(arguments, invalid_root_designator_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_root_designator_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_root_designator_ir.diagnostic_count == 2);
+        BUSTER_TEST(arguments, found_root_member_diagnostic);
+        scratch_end(invalid_root_designator_temporary);
+    }
+    {
+        TemporalArena invalid_block_tls_temporary = scratch_begin(0, 0);
+        CPreprocessResult invalid_block_tls_tokens = c_preprocess(
+            invalid_block_tls_temporary.arena,
+            S8("int invalid_block_tls(void) { _Thread_local int value = 1; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+            });
+        CParseResult invalid_block_tls_parse = c_parse(invalid_block_tls_temporary.arena, invalid_block_tls_tokens);
+        BUSTER_TEST(arguments, invalid_block_tls_tokens.diagnostic_count == 0);
+        bool found_invalid_block_tls_diagnostic = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < invalid_block_tls_parse.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = invalid_block_tls_parse.diagnostics[diagnostic_index];
+            found_invalid_block_tls_diagnostic |= diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                                                   string_equal(diagnostic.message, S8("block-scope thread-local declarations require static or extern"));
+        }
+        BUSTER_TEST(arguments, invalid_block_tls_parse.diagnostic_count >= 1);
+        BUSTER_TEST(arguments, found_invalid_block_tls_diagnostic);
+        scratch_end(invalid_block_tls_temporary);
+    }
+    {
         TemporalArena artifact_temporary = scratch_begin(0, 0);
         CPreprocessResult artifact_tokens = c_preprocess(
             artifact_temporary.arena,
@@ -5378,6 +5956,67 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, ir_validate_canonical_module(array_bound_ir.program, array_bound_ir.program->modules).error == IR_VALIDATION_NONE);
         }
         BUSTER_TEST(arguments, arena_destroy(array_bound_arena, 1));
+    }
+    {
+        TemporalArena repeated_array_temporary = scratch_begin(0, 0);
+        CPreprocessResult repeated_array_tokens = c_preprocess(
+            repeated_array_temporary.arena,
+            S8("struct RepeatedArray { int values[2]; };"
+               " static int repeated_values[] = { [3] = 9 };"
+               " static struct RepeatedArray repeated_structs[] = { [2].values[1] = 7 };"
+               " static char repeated_string[] = { \"xy\" };"
+               " static int repeated_matrix[][2] = { 1, 2, 3, 4 };"
+               " int main(void) { return repeated_values[3] == 9 && repeated_structs[2].values[1] == 7 &&"
+               " repeated_string[1] == 'y' && repeated_matrix[1][1] == 4 ? 0 : 1; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+            });
+        CParseResult repeated_array_parse = c_parse(repeated_array_temporary.arena, repeated_array_tokens);
+        CIRLowerResult repeated_array_ir = c_lower_to_ir(repeated_array_temporary.arena, S8("repeated-incomplete-arrays.c"), repeated_array_tokens,
+                                                         repeated_array_parse, target_native);
+        BUSTER_TEST(arguments, repeated_array_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, repeated_array_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, repeated_array_ir.diagnostic_count == 0);
+        if (repeated_array_ir.program)
+        {
+            IrModule* module = &repeated_array_ir.program->modules[0];
+            IrGlobal* globals[] = {0, 0, 0, 0};
+            String8 names[] = {
+                S8("repeated_values"),
+                S8("repeated_structs"),
+                S8("repeated_string"),
+                S8("repeated_matrix"),
+            };
+            u64 expected_counts[] = {4, 3, 3, 2};
+            for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+            {
+                IrGlobal* global = module->globals + global_index;
+                IrSymbol* symbol = ir_symbol_from_id(&repeated_array_ir.program->symbols, global->symbol);
+                if (!symbol)
+                {
+                    continue;
+                }
+                for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+                {
+                    if (string_equal(symbol->name, names[name_index]))
+                    {
+                        globals[name_index] = global;
+                    }
+                }
+            }
+            for (u32 global_index = 0; global_index < BUSTER_ARRAY_LENGTH(globals); global_index += 1)
+            {
+                BUSTER_TEST(arguments, globals[global_index] != 0);
+                if (globals[global_index])
+                {
+                    IrType* type = ir_type_from_id(&repeated_array_ir.program->types, globals[global_index]->type);
+                    BUSTER_TEST(arguments, type && type->kind == IR_TYPE_ARRAY && type->element_count == expected_counts[global_index]);
+                }
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(repeated_array_ir.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(repeated_array_temporary);
     }
     TemporalArena nested_temporary = scratch_begin(0, 0);
     String8 nested_prefix = S8("static int identity(int value)"

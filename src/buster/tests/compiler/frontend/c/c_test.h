@@ -8,5 +8,7 @@
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL CType* c_type_from_id(CParseResult* parse, CTypeId id);
 BUSTER_F_DECL CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name);
+BUSTER_F_DECL bool c_test_constant_initializer_u64_slots(void);
+BUSTER_F_DECL bool c_test_promoted_member_scratch(void);
 BUSTER_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments);
 #endif
