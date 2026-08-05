@@ -5,6 +5,17 @@
 #include <buster/lib/hash.h>
 #include <buster/lib/string.h>
 #include <buster/lib/system_headers.h>
+#include <buster/lib/window.h>
+
+BUSTER_F_DECL IdeDocumentErrorKind ide_app_test_open_path(String8 path);
+BUSTER_F_DECL bool ide_app_test_bad_open_preserves_empty(String8 path);
+BUSTER_F_DECL bool ide_app_test_reload_discard(String8 path, String8 expected_source, String8 edited_source);
+BUSTER_F_DECL bool ide_app_test_scroll_round_trip(String8 first_path, String8 second_path);
+BUSTER_F_DECL bool ide_app_test_filter_state(String8 path, String8 query);
+BUSTER_F_DECL bool ide_app_test_oversized_request_preserves_action(String8 preserved_path);
+BUSTER_F_DECL bool ide_app_test_failed_editor_commit_preserves_buffer(String8 path, String8 edited_source);
+BUSTER_F_DECL bool ide_app_test_drop_preserves_first(SliceString8 first, SliceString8 second, String8 expected_path);
+BUSTER_F_DECL bool ide_app_test_copy_storage_self(void);
 
 UnitTestResult ide_document_tests(UnitTestArguments* arguments)
 {
@@ -159,6 +170,10 @@ UnitTestResult ide_document_tests(UnitTestArguments* arguments)
             has_dirty_cycle |= ide_document_model_import_at(&model, import_index)->state == IDE_DOCUMENT_IMPORT_CYCLE;
         }
         BUSTER_TEST(arguments, model.workspace.import_count == 2 && has_dirty_cycle);
+        u32 preserved_import_count = model.workspace.import_count;
+        u32 preserved_entity_count = model.workspace.entity_count;
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, a_path, a_source) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, model.workspace.import_count == preserved_import_count && model.workspace.entity_count == preserved_entity_count);
 
         IdeDocument* restored = ide_document_model_find(&model, a_path);
         u64 restored_revision = restored ? restored->revision : 0;
@@ -640,6 +655,352 @@ UnitTestResult ide_document_tests(UnitTestArguments* arguments)
     }
 
     ide_document_model_deinitialize(&model);
+    {
+        String8 second_root = buster_test_temporary_path(test_arena, S8("buster-ide-document-second-root"), S8(""));
+#if defined(_WIN32)
+        second_root = os_path_absolute(test_arena, second_root, true);
+#endif
+        String8 second_path = string_format_z(test_arena, S8("{S8}/second.bbb"), second_root);
+        String8 second_source = S8("code Helper : fn () s32 { return 8; }\n");
+        String8 missing_path = string_format_z(test_arena, S8("{S8}/missing.bbb"), second_root);
+        u64 second_name_start = second_root.length;
+        while (second_name_start && second_root.pointer[second_name_start - 1] != '/' && second_root.pointer[second_name_start - 1] != '\\')
+        {
+            second_name_start -= 1;
+        }
+        String8 second_name = string_slice(second_root, second_name_start, second_root.length);
+        String8 relative_second_path = string_format_z(test_arena, S8("../{S8}/second.bbb"), second_name);
+        os_directory_delete(second_root);
+        os_make_directory(second_root);
+        BUSTER_TEST(arguments, file_write(second_path, BUSTER_SLICE_TO_BYTE_SLICE(second_source)));
+
+        BUSTER_TEST(arguments, ide_app_test_open_path(second_path) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_app_test_bad_open_preserves_empty(missing_path));
+        BUSTER_TEST(arguments, ide_app_test_reload_discard(second_path, second_source,
+                                                           S8("code dirty from the application bridge : fn () s32 { return 9; }\n")));
+        BUSTER_TEST(arguments, ide_app_test_failed_editor_commit_preserves_buffer(
+                                  second_path, S8("code broken from the editor buffer : fn () s32 { return unknown; }\n")));
+        BUSTER_TEST(arguments, file_write(second_path, BUSTER_SLICE_TO_BYTE_SLICE(second_source)));
+        BUSTER_TEST(arguments, ide_app_test_scroll_round_trip(a_path, b_path));
+        BUSTER_TEST(arguments, ide_app_test_filter_state(second_path, S8("Helper")));
+        BUSTER_TEST(arguments, ide_app_test_oversized_request_preserves_action(second_path));
+        BUSTER_TEST(arguments, ide_app_test_copy_storage_self());
+
+        // The graphical bridge starts with no selected root or active document.
+        IdeDocumentModel empty_model = {0};
+        BUSTER_TEST(arguments, ide_document_model_initialize(&empty_model, arena, staging_arena, (IdeDocumentModelOptions){0}) ==
+                                  IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, empty_model.workspace.root_path.length == 0 && ide_document_model_document_count(&empty_model) == 0 &&
+                                  ide_document_model_active_document(&empty_model) == 0);
+        BUSTER_TEST(arguments, ide_document_model_open_path(&empty_model, missing_path) == IDE_DOCUMENT_ERROR_PATH_NOT_FOUND);
+        BUSTER_TEST(arguments, empty_model.workspace.root_path.length == 0 && ide_document_model_active_document(&empty_model) == 0);
+        BUSTER_TEST(arguments, ide_document_model_open_path(&empty_model, second_path) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, empty_model.workspace.root_path.length != 0 && ide_document_model_active_document(&empty_model) != 0);
+        ide_document_model_deinitialize(&empty_model);
+
+        // A successful open of a file in another directory stages a complete
+        // candidate before swapping it into the committed model.
+        BUSTER_TEST(arguments, ide_document_model_initialize(&model, arena, staging_arena, (IdeDocumentModelOptions){0}) ==
+                                  IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_open_path(&model, a_path) == IDE_DOCUMENT_ERROR_NONE);
+        IdeDocument* first_root_active = ide_document_model_active_document(&model);
+        String8 first_root_name = string_duplicate_arena(test_arena, model.workspace.root_path, true);
+        BUSTER_TEST(arguments, first_root_active && string_ends_with_sequence(first_root_active->path, S8("/a.bbb")));
+
+        BUSTER_TEST(arguments, ide_document_model_open(&model, b_path) == IDE_DOCUMENT_ERROR_NONE);
+        String8 dirty_non_active_source = S8("code dirty non-active : fn () s32 { return 10; }\n");
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, b_path, dirty_non_active_source) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_set_active(&model, a_path) == IDE_DOCUMENT_ERROR_NONE);
+        IdeDocument* clean_active_before_dirty_replacement = ide_document_model_active_document(&model);
+        IdeDocument* dirty_non_active_before_replacement = ide_document_model_find(&model, b_path);
+        IdeDocument* documents_before_dirty_replacement = model.workspace.documents;
+        IdeDocumentImport* imports_before_dirty_replacement = model.workspace.imports;
+        IdeDocumentEntitySnapshot* entities_before_dirty_replacement = model.workspace.entities;
+        String8 root_before_dirty_replacement = model.workspace.root_path;
+        String8 clean_source_before_dirty_replacement = clean_active_before_dirty_replacement ? clean_active_before_dirty_replacement->source : (String8){0};
+        String8 dirty_source_before_dirty_replacement = dirty_non_active_before_replacement ? dirty_non_active_before_replacement->source : (String8){0};
+        String8 missing_same_root_path = string_format_z(test_arena, S8("{S8}/not-created/missing.bbb"), model.workspace.root_path);
+        BUSTER_TEST(arguments, ide_document_model_open_path(&model, missing_same_root_path) == IDE_DOCUMENT_ERROR_PATH_NOT_FOUND);
+        BUSTER_TEST(arguments, model.workspace.documents == documents_before_dirty_replacement &&
+                                  ide_document_model_active_document(&model) == clean_active_before_dirty_replacement &&
+                                  ide_document_model_find(&model, b_path) == dirty_non_active_before_replacement);
+        IdeDocumentErrorKind dirty_replacement_error = ide_document_model_open_path(&model, relative_second_path);
+        BUSTER_TEST(arguments, dirty_replacement_error == IDE_DOCUMENT_ERROR_DIRTY_WORKSPACE_REPLACEMENT);
+        BUSTER_TEST(arguments, model.workspace.documents == documents_before_dirty_replacement && model.workspace.imports == imports_before_dirty_replacement &&
+                                  model.workspace.entities == entities_before_dirty_replacement && model.workspace.root_path.pointer == root_before_dirty_replacement.pointer &&
+                                  ide_document_model_active_document(&model) == clean_active_before_dirty_replacement &&
+                                  ide_document_model_find(&model, b_path) == dirty_non_active_before_replacement);
+        BUSTER_TEST(arguments, ide_document_model_active_document(&model) &&
+                                  string_equal(ide_document_model_active_document(&model)->source, clean_source_before_dirty_replacement));
+        dirty_non_active_before_replacement = ide_document_model_find(&model, b_path);
+        BUSTER_TEST(arguments, dirty_non_active_before_replacement &&
+                                  string_equal(dirty_non_active_before_replacement->source, dirty_source_before_dirty_replacement) &&
+                                  dirty_non_active_before_replacement->dirty);
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, b_path, b_source) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_set_active(&model, a_path) == IDE_DOCUMENT_ERROR_NONE);
+
+        // The candidate used to be a scratch pointer after root comparison.
+        // Clobbering that scratch must not affect a relative open that selects
+        // the sibling workspace root.
+        ide_document_model_test_set_open_path_scratch_clobber(true);
+        IdeDocumentErrorKind relative_open_error = ide_document_model_open_path(&model, relative_second_path);
+        ide_document_model_test_set_open_path_scratch_clobber(false);
+        BUSTER_TEST(arguments, relative_open_error == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, string_equal(model.workspace.root_path, second_root) &&
+                                  ide_document_model_active_document(&model) &&
+                                  string_ends_with_sequence(ide_document_model_active_document(&model)->path, S8("/second.bbb")));
+        BUSTER_TEST(arguments, ide_document_model_open_path(&model, a_path) == IDE_DOCUMENT_ERROR_NONE);
+
+        // Entity activation copies the target path/range before opening the
+        // closed document. The open-path scratch clobber makes same-scratch
+        // reuse corruptions deterministic rather than allocator-dependent.
+        u32 helper_entity_index = IDE_DOCUMENT_INDEX_INVALID;
+        String8 helper_entity_path = {0};
+        ParserSourceRange helper_entity_range = {0};
+        for (u32 entity_index = 0; entity_index < model.workspace.entity_count; entity_index += 1)
+        {
+            IdeDocumentEntitySnapshot* entity = model.workspace.entities + entity_index;
+            if (string_equal(entity->name, S8("helper")) && string_ends_with_sequence(entity->source_path, S8("/sub/b.bbb")))
+            {
+                helper_entity_index = entity_index;
+                helper_entity_path = string_duplicate_arena(test_arena, entity->source_path, true);
+                helper_entity_range = entity->range;
+                break;
+            }
+        }
+        BUSTER_TEST(arguments, helper_entity_index != IDE_DOCUMENT_INDEX_INVALID && helper_entity_path.length != 0);
+        BUSTER_TEST(arguments, ide_document_model_open(&model, helper_entity_path) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_set_view(&model, helper_entity_path,
+                                                           (IdeDocumentViewState){.scroll_x = 37.0f, .scroll_y = 91.0f}) ==
+                                  IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_set_active(&model, a_path) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_close(&model, helper_entity_path) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_find(&model, helper_entity_path) &&
+                                  !ide_document_model_find(&model, helper_entity_path)->is_open);
+
+        // A closed, clean indexed document must validate against the exact
+        // source staged from disk. A stale in-memory length used to let this
+        // activation commit a shortened file and only then reject the view.
+        IdeDocument* stale_active_before = ide_document_model_active_document(&model);
+        IdeDocument* stale_documents_before = model.workspace.documents;
+        IdeDocumentImport* stale_imports_before = model.workspace.imports;
+        IdeDocumentEntitySnapshot* stale_entities_before = model.workspace.entities;
+        String8 stale_root_before = model.workspace.root_path;
+        IdeDocument* stale_target_before = ide_document_model_find(&model, helper_entity_path);
+        String8 stale_source_before = stale_target_before ? string_duplicate_arena(test_arena, stale_target_before->source, true) : (String8){0};
+        String8 stale_short_source = S8("code helper : fn () s32 { return 0; }\n");
+        BUSTER_TEST(arguments, stale_target_before && !stale_target_before->is_open && stale_source_before.length > stale_short_source.length);
+        BUSTER_TEST(arguments, file_write(b_path, BUSTER_SLICE_TO_BYTE_SLICE(stale_short_source)));
+        IdeDocumentErrorKind stale_activation_error = ide_document_model_activate_source_range(
+            &model, helper_entity_path, (ParserSourceRange){.offset = (u32)stale_source_before.length, .length = 0});
+        BUSTER_TEST(arguments, stale_activation_error == IDE_DOCUMENT_ERROR_INVALID_SELECTION);
+        BUSTER_TEST(arguments, model.workspace.documents == stale_documents_before && model.workspace.imports == stale_imports_before &&
+                                  model.workspace.entities == stale_entities_before && model.workspace.root_path.pointer == stale_root_before.pointer &&
+                                  ide_document_model_active_document(&model) == stale_active_before &&
+                                  ide_document_model_find(&model, helper_entity_path) == stale_target_before);
+        stale_target_before = ide_document_model_find(&model, helper_entity_path);
+        BUSTER_TEST(arguments, stale_target_before && !stale_target_before->is_open);
+        if (stale_target_before)
+        {
+            BUSTER_STRING_TEST(arguments, stale_target_before->source, stale_source_before);
+        }
+        BUSTER_TEST(arguments, file_write(b_path, BUSTER_SLICE_TO_BYTE_SLICE(b_source)));
+
+        // Invalid source ranges are rejected before a closed target can be
+        // opened or the active document can be changed. Failed activation
+        // therefore preserves committed arena pointers exactly.
+        IdeDocument* invalid_range_active_before = ide_document_model_active_document(&model);
+        IdeDocument* invalid_range_documents_before = model.workspace.documents;
+        IdeDocument* invalid_range_target_before = ide_document_model_find(&model, helper_entity_path);
+        u32 invalid_range_offset = 1;
+        if (invalid_range_target_before && invalid_range_target_before->source.length < UINT32_MAX)
+        {
+            invalid_range_offset = (u32)(invalid_range_target_before->source.length + 1);
+        }
+        IdeDocumentErrorKind invalid_range_error = ide_document_model_activate_source_range(
+            &model, helper_entity_path, (ParserSourceRange){.offset = invalid_range_offset, .length = 0});
+        BUSTER_TEST(arguments, invalid_range_error == IDE_DOCUMENT_ERROR_INVALID_SELECTION);
+        BUSTER_TEST(arguments, model.workspace.documents == invalid_range_documents_before &&
+                                  ide_document_model_active_document(&model) == invalid_range_active_before &&
+                                  ide_document_model_find(&model, helper_entity_path) == invalid_range_target_before);
+
+        ide_document_model_test_set_open_path_scratch_clobber(true);
+        IdeDocumentErrorKind helper_activation_error = ide_document_model_activate_entity(&model, helper_entity_index);
+        ide_document_model_test_set_open_path_scratch_clobber(false);
+        BUSTER_TEST(arguments, helper_activation_error == IDE_DOCUMENT_ERROR_NONE);
+        IdeDocument* helper_active = ide_document_model_active_document(&model);
+        BUSTER_TEST(arguments, helper_active && string_equal(helper_active->path, helper_entity_path));
+        BUSTER_TEST(arguments, helper_active && helper_active->view.cursor_offset == helper_entity_range.offset &&
+                                  helper_active->view.selection_start == helper_entity_range.offset &&
+                                  helper_active->view.selection_end == (u64)helper_entity_range.offset + helper_entity_range.length &&
+                                  helper_active->view.scroll_x == 37.0f && helper_active->view.scroll_y == 91.0f);
+        BUSTER_TEST(arguments, ide_document_model_set_filter_state(&model, (IdeDocumentWorkspaceFilterState){0}) == IDE_DOCUMENT_ERROR_NONE);
+        helper_active = ide_document_model_active_document(&model);
+        BUSTER_TEST(arguments, helper_active && string_equal(helper_active->path, helper_entity_path) &&
+                                  helper_active->view.selection_end == (u64)helper_entity_range.offset + helper_entity_range.length);
+        BUSTER_TEST(arguments, ide_document_model_open_path(&model, a_path) == IDE_DOCUMENT_ERROR_NONE);
+
+        BUSTER_TEST(arguments, ide_document_model_open_path(&model, S8("sub/b.bbb")) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_active_document(&model) &&
+                                  string_ends_with_sequence(ide_document_model_active_document(&model)->path, S8("/sub/b.bbb")));
+        BUSTER_TEST(arguments, ide_document_model_open_path(&model, a_path) == IDE_DOCUMENT_ERROR_NONE);
+        first_root_active = ide_document_model_active_document(&model);
+        BUSTER_TEST(arguments, ide_document_model_open_path(&model, second_path) == IDE_DOCUMENT_ERROR_NONE);
+        IdeDocument* second_root_active = ide_document_model_active_document(&model);
+        BUSTER_TEST(arguments, second_root_active && string_ends_with_sequence(second_root_active->path, S8("/second.bbb")));
+        BUSTER_TEST(arguments, !string_equal(model.workspace.root_path, first_root_name));
+        BUSTER_TEST(arguments, second_root_active != first_root_active);
+
+        // Failed opens leave both the active document and its arena-backed
+        // source/diagnostic/entity snapshots untouched.
+        IdeDocument* active_before_failed_open = second_root_active;
+        String8 source_before_failed_open = second_root_active ? second_root_active->source : (String8){0};
+        IdeDocumentEntitySnapshot* entity_before_failed_open = model.workspace.entity_count ? model.workspace.entities : 0;
+        BUSTER_TEST(arguments, ide_document_model_open_path(&model, missing_path) == IDE_DOCUMENT_ERROR_PATH_NOT_FOUND);
+        second_root_active = ide_document_model_active_document(&model);
+        BUSTER_TEST(arguments, second_root_active == active_before_failed_open);
+        BUSTER_TEST(arguments, second_root_active && string_equal(second_root_active->source, source_before_failed_open));
+        BUSTER_TEST(arguments, (!entity_before_failed_open && !model.workspace.entity_count) ||
+                                  (entity_before_failed_open && model.workspace.entities == entity_before_failed_open));
+
+        String8 drop_txt = string_format_z(test_arena, S8("{S8}/notes.txt"), second_root);
+        String8 drop_first_bbb = string_format_z(test_arena, S8("{S8}/first.BBB"), second_root);
+        String8 drop_paths_storage[] = {drop_txt, drop_first_bbb, second_path};
+        IdeDocumentDropSelection drop = ide_document_choose_drop_path(
+            test_arena, (SliceString8){.pointer = drop_paths_storage, .length = BUSTER_ARRAY_LENGTH(drop_paths_storage)});
+        BUSTER_TEST(arguments, drop.accepted && string_equal(drop.path, drop_first_bbb) && drop.path_count == 3 && drop.ignored_count == 2);
+        String8 no_bbb_paths_storage[] = {drop_txt, S8("README")};
+        IdeDocumentDropSelection rejected_drop = ide_document_choose_drop_path(
+            test_arena, (SliceString8){.pointer = no_bbb_paths_storage, .length = BUSTER_ARRAY_LENGTH(no_bbb_paths_storage)});
+        BUSTER_TEST(arguments, !rejected_drop.accepted && rejected_drop.path_count == 2 && rejected_drop.ignored_count == 2);
+        String8 bridge_drop_paths[] = {drop_txt, drop_first_bbb, second_path};
+        String8 later_bridge_drop_paths[] = {second_path};
+        BUSTER_TEST(arguments, ide_app_test_drop_preserves_first(
+                                  (SliceString8){.pointer = bridge_drop_paths, .length = BUSTER_ARRAY_LENGTH(bridge_drop_paths)},
+                                  (SliceString8){.pointer = later_bridge_drop_paths, .length = BUSTER_ARRAY_LENGTH(later_bridge_drop_paths)}, drop_first_bbb));
+        BUSTER_TEST(arguments, ide_document_path_is_bbb(S8("source.BBB")) && !ide_document_path_is_bbb(S8("source.c")));
+        u8 control_modifier = (u8)(1u << WM_MODIFIER_CONTROL);
+        u8 shift_modifier = (u8)(1u << WM_MODIFIER_SHIFT);
+        u8 alt_modifier = (u8)(1u << WM_MODIFIER_ALT);
+        u8 shortcut_disallowed_modifiers = (u8)(shift_modifier | alt_modifier);
+        BUSTER_TEST(arguments, ide_document_shortcut_action((u8)'o', control_modifier, WM_MODIFIER_CONTROL,
+                                                            shortcut_disallowed_modifiers) == IDE_DOCUMENT_SHORTCUT_OPEN);
+        BUSTER_TEST(arguments, ide_document_shortcut_action((u8)'s', control_modifier, WM_MODIFIER_CONTROL,
+                                                            shortcut_disallowed_modifiers) == IDE_DOCUMENT_SHORTCUT_SAVE);
+        BUSTER_TEST(arguments, ide_document_shortcut_action((u8)'r', control_modifier, WM_MODIFIER_CONTROL,
+                                                            shortcut_disallowed_modifiers) == IDE_DOCUMENT_SHORTCUT_RELOAD);
+        BUSTER_TEST(arguments, ide_document_shortcut_action((u8)'o', 0, WM_MODIFIER_CONTROL, shortcut_disallowed_modifiers) ==
+                                  IDE_DOCUMENT_SHORTCUT_NONE);
+        BUSTER_TEST(arguments, ide_document_shortcut_action((u8)'s', (u8)(control_modifier | shift_modifier), WM_MODIFIER_CONTROL,
+                                                            shortcut_disallowed_modifiers) == IDE_DOCUMENT_SHORTCUT_NONE);
+        BUSTER_TEST(arguments, ide_document_shortcut_action((u8)'r', (u8)(control_modifier | alt_modifier), WM_MODIFIER_CONTROL,
+                                                            shortcut_disallowed_modifiers) == IDE_DOCUMENT_SHORTCUT_NONE);
+
+        BUSTER_TEST(arguments, ide_document_string_contains(S8("HelperFunction"), S8("helper"), false));
+        BUSTER_TEST(arguments, !ide_document_string_contains(S8("HelperFunction"), S8("helper"), true));
+        BUSTER_TEST(arguments, ide_document_model_set_filter_state(&model, (IdeDocumentWorkspaceFilterState){
+                                                                         .query = S8("SECOND"),
+                                                                         .case_sensitive = false,
+                                                                     }) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_document_matches_filter(&model, 0));
+        IdeDocument* filter_active_before_unsupported = ide_document_model_active_document(&model);
+        String8 filter_query_before_unsupported = model.workspace.filter.query;
+        BUSTER_TEST(arguments, ide_document_model_set_filter_state(&model, (IdeDocumentWorkspaceFilterState){
+                                                                         .query = S8("ignored"),
+                                                                         .whole_word = true,
+                                                                     }) == IDE_DOCUMENT_ERROR_UNSUPPORTED_FILTER);
+        BUSTER_TEST(arguments, ide_document_model_active_document(&model) == filter_active_before_unsupported &&
+                                  model.workspace.filter.query.pointer == filter_query_before_unsupported.pointer);
+        BUSTER_TEST(arguments, ide_document_model_set_filter_state(&model, (IdeDocumentWorkspaceFilterState){
+                                                                         .query = S8("ignored"),
+                                                                         .regular_expression = true,
+                                                                     }) == IDE_DOCUMENT_ERROR_UNSUPPORTED_FILTER);
+        BUSTER_TEST(arguments, ide_document_model_set_filter_state(&model, (IdeDocumentWorkspaceFilterState){
+                                                                         .query = S8("HELPER"),
+                                                                         .case_sensitive = false,
+                                                                     }) == IDE_DOCUMENT_ERROR_NONE);
+        bool found_helper = false;
+        for (u32 entity_index = 0; entity_index < model.workspace.entity_count; entity_index += 1)
+        {
+            found_helper |= ide_document_model_entity_matches_filter(&model, entity_index);
+        }
+        BUSTER_TEST(arguments, found_helper);
+
+        BUSTER_TEST(arguments, ide_document_model_set_filter_state(&model, (IdeDocumentWorkspaceFilterState){.show_open_only = true}) ==
+                                  IDE_DOCUMENT_ERROR_NONE);
+        bool found_open_helper = false;
+        for (u32 entity_index = 0; entity_index < model.workspace.entity_count; entity_index += 1)
+        {
+            found_open_helper |= ide_document_model_entity_matches_filter(&model, entity_index);
+        }
+        BUSTER_TEST(arguments, found_open_helper);
+        BUSTER_TEST(arguments, ide_document_model_close(&model, second_path) == IDE_DOCUMENT_ERROR_NONE);
+        bool found_closed_helper = false;
+        for (u32 entity_index = 0; entity_index < model.workspace.entity_count; entity_index += 1)
+        {
+            found_closed_helper |= ide_document_model_entity_matches_filter(&model, entity_index);
+        }
+        BUSTER_TEST(arguments, !found_closed_helper);
+        BUSTER_TEST(arguments, ide_document_model_open(&model, second_path) == IDE_DOCUMENT_ERROR_NONE);
+        String8 dirty_entity_source = S8("code Helper : fn () s32 { return 11; }\n");
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, second_path, dirty_entity_source) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_set_filter_state(&model, (IdeDocumentWorkspaceFilterState){.show_dirty_only = true}) ==
+                                  IDE_DOCUMENT_ERROR_NONE);
+        bool found_dirty_helper = false;
+        for (u32 entity_index = 0; entity_index < model.workspace.entity_count; entity_index += 1)
+        {
+            found_dirty_helper |= ide_document_model_entity_matches_filter(&model, entity_index);
+        }
+        BUSTER_TEST(arguments, found_dirty_helper);
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, second_path, second_source) == IDE_DOCUMENT_ERROR_NONE);
+
+        bool found_entity_snapshot = false;
+        for (u32 entity_index = 0; entity_index < model.workspace.entity_count; entity_index += 1)
+        {
+            IdeDocumentEntitySnapshot* entity = model.workspace.entities + entity_index;
+            if (string_equal(entity->name, S8("Helper")))
+            {
+                found_entity_snapshot = entity->source_path.length != 0 && entity->type_text.length != 0;
+                BUSTER_TEST(arguments, entity->range.length != 0 || entity->range.offset == 0);
+            }
+        }
+        BUSTER_TEST(arguments, found_entity_snapshot);
+
+        IdeDocumentWorkspaceStatus status_before_diagnostic = ide_document_model_status(&model);
+        BUSTER_TEST(arguments, status_before_diagnostic.document_count == 1 && status_before_diagnostic.open_document_count == 1 &&
+                                  status_before_diagnostic.entity_count == model.workspace.entity_count &&
+                                  status_before_diagnostic.diagnostic_document_count == 0);
+        IdeDocumentDiagnosticInput bridge_diagnostic = {
+            .file_path = second_path,
+            .range = {.offset = 5, .length = 6, .line = 0, .column = 5},
+            .message = S8("bridge diagnostic"),
+            .severity = IDE_DOCUMENT_DIAGNOSTIC_ERROR,
+            .source = IDE_DOCUMENT_DIAGNOSTIC_SOURCE_USER,
+        };
+        BUSTER_TEST(arguments, ide_document_model_replace_diagnostics(&model, &bridge_diagnostic, 1) == IDE_DOCUMENT_ERROR_NONE);
+        IdeDocumentWorkspaceStatus status_after_diagnostic = ide_document_model_status(&model);
+        BUSTER_TEST(arguments, status_after_diagnostic.diagnostic_document_count == 1 && status_after_diagnostic.error_count == 1);
+        BUSTER_TEST(arguments, ide_document_model_set_filter_state(&model, (IdeDocumentWorkspaceFilterState){.show_diagnostics_only = true}) ==
+                                  IDE_DOCUMENT_ERROR_NONE);
+        bool found_diagnostic_entity = false;
+        for (u32 entity_index = 0; entity_index < model.workspace.entity_count; entity_index += 1)
+        {
+            found_diagnostic_entity |= ide_document_model_entity_matches_filter(&model, entity_index);
+        }
+        BUSTER_TEST(arguments, found_diagnostic_entity);
+        BUSTER_TEST(arguments, ide_document_model_set_filter_state(&model, (IdeDocumentWorkspaceFilterState){
+                                                                         .query = S8("BRIDGE DIAGNOSTIC"),
+                                                                         .case_sensitive = false,
+                                                                     }) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_document_matches_filter(&model, 0));
+
+        BUSTER_TEST(arguments, ide_document_model_set_active(&model, second_path) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_active_document(&model) != 0 &&
+                                  string_ends_with_sequence(ide_document_model_active_document(&model)->path, S8("second.bbb")));
+        ide_document_model_deinitialize(&model);
+        BUSTER_TEST(arguments, os_file_delete(second_path));
+        BUSTER_TEST(arguments, os_directory_delete(second_root));
+    }
     error = ide_document_model_initialize(
         &model, arena, staging_arena,
         (IdeDocumentModelOptions){

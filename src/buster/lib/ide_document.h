@@ -30,6 +30,8 @@ typedef enum IdeDocumentErrorKind
     IDE_DOCUMENT_ERROR_DIRTY_RELOAD_CONFLICT,
     IDE_DOCUMENT_ERROR_INVALID_SELECTION,
     IDE_DOCUMENT_ERROR_DIAGNOSTIC_LIMIT,
+    IDE_DOCUMENT_ERROR_DIRTY_WORKSPACE_REPLACEMENT,
+    IDE_DOCUMENT_ERROR_UNSUPPORTED_FILTER,
     IDE_DOCUMENT_ERROR_COUNT,
 } IdeDocumentErrorKind;
 
@@ -48,6 +50,23 @@ typedef enum IdeDocumentImportState
     IDE_DOCUMENT_IMPORT_CYCLE,
     IDE_DOCUMENT_IMPORT_STATE_COUNT,
 } IdeDocumentImportState;
+
+typedef enum IdeDocumentEntityKind
+{
+    IDE_DOCUMENT_ENTITY_TYPE,
+    IDE_DOCUMENT_ENTITY_CODE,
+    IDE_DOCUMENT_ENTITY_DATA,
+    IDE_DOCUMENT_ENTITY_KIND_COUNT,
+} IdeDocumentEntityKind;
+
+typedef enum IdeDocumentShortcutAction
+{
+    IDE_DOCUMENT_SHORTCUT_NONE,
+    IDE_DOCUMENT_SHORTCUT_OPEN,
+    IDE_DOCUMENT_SHORTCUT_SAVE,
+    IDE_DOCUMENT_SHORTCUT_RELOAD,
+    IDE_DOCUMENT_SHORTCUT_ACTION_COUNT,
+} IdeDocumentShortcutAction;
 
 typedef enum IdeDocumentDiagnosticSeverity
 {
@@ -173,6 +192,31 @@ struct IdeDocumentImport
     u8 reserved[4];
 };
 
+// These are format-neutral UI snapshots. They deliberately do not retain
+// parser or analysis pointers: every string is copied into the committed
+// model arena and every location is a value.
+typedef struct IdeDocumentEntitySnapshot IdeDocumentEntitySnapshot;
+struct IdeDocumentEntitySnapshot
+{
+    String8 module_name;
+    String8 source_path;
+    String8 name;
+    String8 type_text;
+    ParserSourceRange range;
+    IdeDocumentEntityKind kind;
+    u8 reserved[4];
+};
+
+typedef struct IdeDocumentDropSelection IdeDocumentDropSelection;
+struct IdeDocumentDropSelection
+{
+    String8 path;
+    u32 path_count;
+    u32 ignored_count;
+    bool accepted;
+    u8 reserved[3];
+};
+
 typedef struct IdeDocument IdeDocument;
 struct IdeDocument
 {
@@ -205,9 +249,11 @@ struct IdeDocumentWorkspace
     String8 root_path;
     IdeDocument* documents;
     IdeDocumentImport* imports;
+    IdeDocumentEntitySnapshot* entities;
     IdeDocumentWorkspaceFilterState filter;
     u32 document_count;
     u32 import_count;
+    u32 entity_count;
     u32 active_document_index;
     u32 open_document_count;
     u64 next_open_order;
@@ -228,18 +274,41 @@ struct IdeDocumentModel
     u8 reserved[2];
 };
 
+typedef struct IdeDocumentWorkspaceStatus IdeDocumentWorkspaceStatus;
+struct IdeDocumentWorkspaceStatus
+{
+    u32 document_count;
+    u32 open_document_count;
+    u32 dirty_document_count;
+    u32 diagnostic_document_count;
+    u32 info_count;
+    u32 warning_count;
+    u32 error_count;
+    u32 import_count;
+    u32 entity_count;
+};
+
 BUSTER_F_DECL String8 ide_document_error_kind_name(IdeDocumentErrorKind kind);
 BUSTER_F_DECL String8 ide_document_path_canonical(Arena* arena, String8 path);
 BUSTER_F_DECL String8 ide_document_path_identity(Arena* arena, String8 canonical_path);
 BUSTER_F_DECL bool ide_document_path_is_within(String8 root, String8 path);
+BUSTER_F_DECL bool ide_document_path_is_bbb(String8 path);
+BUSTER_F_DECL bool ide_document_string_contains(String8 value, String8 query, bool case_sensitive);
+BUSTER_F_DECL IdeDocumentDropSelection ide_document_choose_drop_path(Arena* arena, SliceString8 paths);
+// key is an ASCII letter supplied by the platform/application key map;
+// disallowed_modifiers is a bit mask in the same modifier-index space.
+BUSTER_F_DECL IdeDocumentShortcutAction ide_document_shortcut_action(u8 key, u8 modifiers, u8 control_modifier, u8 disallowed_modifiers);
 
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_initialize(IdeDocumentModel* model, Arena* arena, Arena* staging_arena,
                                                                  IdeDocumentModelOptions options);
 BUSTER_F_DECL void ide_document_model_deinitialize(IdeDocumentModel* model);
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_refresh_workspace(IdeDocumentModel* model);
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_open(IdeDocumentModel* model, String8 path);
+BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_open_path(IdeDocumentModel* model, String8 path);
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_close(IdeDocumentModel* model, String8 path);
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_set_active(IdeDocumentModel* model, String8 path);
+BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_activate_source_range(IdeDocumentModel* model, String8 path, ParserSourceRange range);
+BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_activate_entity(IdeDocumentModel* model, u32 index);
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_set_text(IdeDocumentModel* model, String8 path, String8 source);
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_reload(IdeDocumentModel* model, String8 path, IdeDocumentReloadMode mode);
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_poll_external(IdeDocumentModel* model, String8 path);
@@ -250,6 +319,7 @@ BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_poll_external(IdeDocumentM
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_save(IdeDocumentModel* model, String8 path);
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL void ide_document_model_test_set_save_replace_failure(bool enabled);
+BUSTER_F_DECL void ide_document_model_test_set_open_path_scratch_clobber(bool enabled);
 #endif
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_set_view(IdeDocumentModel* model, String8 path, IdeDocumentViewState view);
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_set_compile_metadata(IdeDocumentModel* model, String8 path,
@@ -258,8 +328,11 @@ BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_set_search_state(IdeDocume
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_set_filter_state(IdeDocumentModel* model, IdeDocumentWorkspaceFilterState filter);
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_replace_diagnostics(IdeDocumentModel* model, const IdeDocumentDiagnosticInput* inputs,
                                                                           u32 input_count);
+BUSTER_F_DECL bool ide_document_model_document_matches_filter(IdeDocumentModel* model, u32 index);
+BUSTER_F_DECL bool ide_document_model_entity_matches_filter(IdeDocumentModel* model, u32 index);
+BUSTER_F_DECL IdeDocumentWorkspaceStatus ide_document_model_status(IdeDocumentModel* model);
 
-// Returned document and import pointers belong to the current committed arena. Any successful model mutation or deinitialization
+// Returned document, import, and entity pointers belong to the current committed arena. Any successful model mutation or deinitialization
 // invalidates every previously returned pointer, including pointers reacquired from an earlier lookup; reacquire after the mutation.
 // Failed mutations preserve the current committed pointers.
 BUSTER_F_DECL IdeDocument* ide_document_model_find(IdeDocumentModel* model, String8 path);

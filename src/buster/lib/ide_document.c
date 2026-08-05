@@ -51,7 +51,10 @@ struct IdeImportTraversalFrame
 BUSTER_GLOBAL_LOCAL u64 ide_save_temp_serial;
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL bool ide_test_force_save_replace_failure;
+BUSTER_GLOBAL_LOCAL bool ide_test_clobber_open_path_scratch;
 #endif
+
+BUSTER_GLOBAL_LOCAL String8 ide_string_copy(Arena* arena, String8 string);
 
 BUSTER_GLOBAL_LOCAL String8 ide_string_copy(Arena* arena, String8 string)
 {
@@ -111,9 +114,117 @@ BUSTER_GLOBAL_LOCAL bool ide_identity_equal(String8 left, String8 right)
     return ide_string_compare(left, right, true) == 0;
 }
 
-BUSTER_GLOBAL_LOCAL bool ide_path_has_suffix(String8 path, String8 suffix)
+bool ide_document_path_is_bbb(String8 path)
 {
-    return path.length >= suffix.length && string_equal(string_slice(path, path.length - suffix.length, path.length), suffix);
+    if (path.length < 4 || !path.pointer)
+    {
+        return false;
+    }
+    String8 suffix = string_slice(path, path.length - 4, path.length);
+    for (u64 index = 0; index < suffix.length; index += 1)
+    {
+        u8 byte = (u8)suffix.pointer[index];
+        if (byte >= (u8)'A' && byte <= (u8)'Z')
+        {
+            byte = (u8)(byte + ((u8)'a' - (u8)'A'));
+        }
+        if (byte != (u8)S8(".bbb").pointer[index])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+IdeDocumentShortcutAction ide_document_shortcut_action(u8 key, u8 modifiers, u8 control_modifier, u8 disallowed_modifiers)
+{
+    if (control_modifier >= 8 || !(modifiers & (u8)(1u << control_modifier)) || (modifiers & disallowed_modifiers))
+    {
+        return IDE_DOCUMENT_SHORTCUT_NONE;
+    }
+
+    switch (key)
+    {
+        case 'o':
+        case 'O':
+            return IDE_DOCUMENT_SHORTCUT_OPEN;
+        case 's':
+        case 'S':
+            return IDE_DOCUMENT_SHORTCUT_SAVE;
+        case 'r':
+        case 'R':
+            return IDE_DOCUMENT_SHORTCUT_RELOAD;
+    }
+    return IDE_DOCUMENT_SHORTCUT_NONE;
+}
+
+BUSTER_GLOBAL_LOCAL u8 ide_query_fold_byte(u8 byte)
+{
+    if (byte >= (u8)'A' && byte <= (u8)'Z')
+    {
+        byte = (u8)(byte + ((u8)'a' - (u8)'A'));
+    }
+    return byte;
+}
+
+bool ide_document_string_contains(String8 value, String8 query, bool case_sensitive)
+{
+    if (!query.length)
+    {
+        return true;
+    }
+    if (!value.pointer || !query.pointer || query.length > value.length)
+    {
+        return false;
+    }
+    for (u64 start = 0; start <= value.length - query.length; start += 1)
+    {
+        bool matches = true;
+        for (u64 index = 0; index < query.length; index += 1)
+        {
+            u8 left = (u8)value.pointer[start + index];
+            u8 right = (u8)query.pointer[index];
+            if (!case_sensitive)
+            {
+                left = ide_query_fold_byte(left);
+                right = ide_query_fold_byte(right);
+            }
+            if (left != right)
+            {
+                matches = false;
+                break;
+            }
+        }
+        if (matches)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+IdeDocumentDropSelection ide_document_choose_drop_path(Arena* arena, SliceString8 paths)
+{
+    IdeDocumentDropSelection result = {.path_count = paths.length > UINT32_MAX ? UINT32_MAX : (u32)paths.length};
+    u64 selected_index = UINT64_MAX;
+    for (u64 index = 0; index < paths.length; index += 1)
+    {
+        if (selected_index == UINT64_MAX && ide_document_path_is_bbb(paths.pointer[index]))
+        {
+            selected_index = index;
+        }
+    }
+    if (selected_index != UINT64_MAX)
+    {
+        result.accepted = true;
+        result.ignored_count = paths.length > UINT32_MAX ? UINT32_MAX - 1 : (u32)(paths.length - 1);
+        result.path = ide_string_copy(arena, paths.pointer[selected_index]);
+    }
+    else
+    {
+        result.ignored_count = paths.length > UINT32_MAX ? UINT32_MAX : (u32)paths.length;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool ide_path_is_absolute(String8 path)
@@ -342,6 +453,28 @@ BUSTER_GLOBAL_LOCAL bool ide_path_has_link_component(Arena* arena, String8 root,
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool ide_path_has_parent_component(String8 path)
+{
+    u64 cursor = 0;
+    while (cursor < path.length)
+    {
+        while (cursor < path.length && ide_path_separator(path.pointer[cursor]))
+        {
+            cursor += 1;
+        }
+        u64 component_start = cursor;
+        while (cursor < path.length && !ide_path_separator(path.pointer[cursor]))
+        {
+            cursor += 1;
+        }
+        if (string_equal(string_slice(path, component_start, cursor), S8("..")))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL String8 ide_path_parent(Arena* arena, String8 path)
 {
     if (!path.length)
@@ -379,7 +512,7 @@ BUSTER_GLOBAL_LOCAL String8 ide_path_parent(Arena* arena, String8 path)
 BUSTER_GLOBAL_LOCAL String8 ide_path_join(Arena* arena, String8 root, String8 part, bool add_bbb)
 {
     bool root_separator = root.length && ide_path_separator(root.pointer[root.length - 1]);
-    bool part_has_extension = ide_path_has_suffix(part, S8(".bbb"));
+    bool part_has_extension = ide_document_path_is_bbb(part);
     String8 result = string_format_z(arena, root_separator ? S8("{S8}{S8}{S8}") : S8("{S8}/{S8}{S8}"), root, part,
                                      add_bbb && !part_has_extension ? S8(".bbb") : S8(""));
     return result;
@@ -638,7 +771,7 @@ BUSTER_GLOBAL_LOCAL bool ide_scan_append(Arena* arena, String8 root, String8* di
         directories[*directory_count] = ide_string_copy(arena, entry);
         *directory_count += 1;
     }
-    else if (kind == IDE_PATH_REGULAR && ide_path_has_suffix(entry, S8(".bbb")))
+    else if (kind == IDE_PATH_REGULAR && ide_document_path_is_bbb(entry))
     {
         if (*path_count >= capacity)
         {
@@ -858,7 +991,7 @@ BUSTER_GLOBAL_LOCAL String8 ide_module_name_from_path(Arena* arena, String8 root
         start += 1;
     }
     String8 relative = string_slice(path, start, path.length);
-    if (ide_path_has_suffix(relative, S8(".bbb")))
+    if (ide_document_path_is_bbb(relative))
     {
         relative = string_slice(relative, 0, relative.length - 4);
     }
@@ -868,7 +1001,7 @@ BUSTER_GLOBAL_LOCAL String8 ide_module_name_from_path(Arena* arena, String8 root
 BUSTER_GLOBAL_LOCAL u32 ide_workspace_find_module(IdeDocumentWorkspace* workspace, String8 requested)
 {
     String8 normalized = requested;
-    if (ide_path_has_suffix(normalized, S8(".bbb")))
+    if (ide_document_path_is_bbb(normalized))
     {
         normalized = string_slice(normalized, 0, normalized.length - 4);
     }
@@ -882,7 +1015,14 @@ BUSTER_GLOBAL_LOCAL u32 ide_workspace_find_module(IdeDocumentWorkspace* workspac
     return IDE_DOCUMENT_INDEX_INVALID;
 }
 
-BUSTER_GLOBAL_LOCAL bool ide_document_copy_to_arena(Arena* arena, IdeDocument* destination, const IdeDocument* source)
+typedef enum IdeWorkspaceCopyMode
+{
+    IDE_WORKSPACE_COPY_PRESERVE_DERIVED,
+    IDE_WORKSPACE_COPY_REBUILD_DERIVED,
+} IdeWorkspaceCopyMode;
+
+BUSTER_GLOBAL_LOCAL bool ide_document_copy_to_arena(Arena* arena, IdeDocument* destination, const IdeDocument* source,
+                                                   IdeWorkspaceCopyMode mode)
 {
     *destination = *source;
     destination->path = ide_string_copy(arena, source->path);
@@ -895,7 +1035,12 @@ BUSTER_GLOBAL_LOCAL bool ide_document_copy_to_arena(Arena* arena, IdeDocument* d
     destination->compile.artifact_path = ide_string_copy(arena, source->compile.artifact_path);
     destination->compile.command_line = ide_string_copy(arena, source->compile.command_line);
     destination->compile.message = ide_string_copy(arena, source->compile.message);
-    if (source->diagnostic_count)
+    if (mode == IDE_WORKSPACE_COPY_REBUILD_DERIVED)
+    {
+        destination->diagnostics = 0;
+        destination->diagnostic_count = 0;
+    }
+    else if (source->diagnostic_count)
     {
         destination->diagnostics = arena_allocate(arena, IdeDocumentDiagnostic, source->diagnostic_count);
         for (u32 index = 0; index < source->diagnostic_count; index += 1)
@@ -908,7 +1053,8 @@ BUSTER_GLOBAL_LOCAL bool ide_document_copy_to_arena(Arena* arena, IdeDocument* d
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool ide_workspace_copy_to_arena(Arena* arena, IdeDocumentWorkspace* destination, const IdeDocumentWorkspace* source)
+BUSTER_GLOBAL_LOCAL bool ide_workspace_copy_to_arena_mode(Arena* arena, IdeDocumentWorkspace* destination,
+                                                          const IdeDocumentWorkspace* source, IdeWorkspaceCopyMode mode)
 {
     *destination = *source;
     destination->root_path = ide_string_copy(arena, source->root_path);
@@ -918,10 +1064,17 @@ BUSTER_GLOBAL_LOCAL bool ide_workspace_copy_to_arena(Arena* arena, IdeDocumentWo
         destination->documents = arena_allocate(arena, IdeDocument, source->document_count);
         for (u32 index = 0; index < source->document_count; index += 1)
         {
-            ide_document_copy_to_arena(arena, destination->documents + index, source->documents + index);
+            ide_document_copy_to_arena(arena, destination->documents + index, source->documents + index, mode);
         }
     }
-    if (source->import_count)
+    if (mode == IDE_WORKSPACE_COPY_REBUILD_DERIVED)
+    {
+        destination->imports = 0;
+        destination->import_count = 0;
+        destination->entities = 0;
+        destination->entity_count = 0;
+    }
+    else if (source->import_count)
     {
         destination->imports = arena_allocate(arena, IdeDocumentImport, source->import_count);
         for (u32 index = 0; index < source->import_count; index += 1)
@@ -935,7 +1088,26 @@ BUSTER_GLOBAL_LOCAL bool ide_workspace_copy_to_arena(Arena* arena, IdeDocumentWo
             destination_import->target_path = ide_string_copy(arena, source_import->target_path);
         }
     }
+    if (mode == IDE_WORKSPACE_COPY_PRESERVE_DERIVED && source->entity_count)
+    {
+        destination->entities = arena_allocate(arena, IdeDocumentEntitySnapshot, source->entity_count);
+        for (u32 index = 0; index < source->entity_count; index += 1)
+        {
+            IdeDocumentEntitySnapshot* destination_entity = destination->entities + index;
+            IdeDocumentEntitySnapshot* source_entity = source->entities + index;
+            *destination_entity = *source_entity;
+            destination_entity->module_name = ide_string_copy(arena, source_entity->module_name);
+            destination_entity->source_path = ide_string_copy(arena, source_entity->source_path);
+            destination_entity->name = ide_string_copy(arena, source_entity->name);
+            destination_entity->type_text = ide_string_copy(arena, source_entity->type_text);
+        }
+    }
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool ide_workspace_copy_to_arena(Arena* arena, IdeDocumentWorkspace* destination, const IdeDocumentWorkspace* source)
+{
+    return ide_workspace_copy_to_arena_mode(arena, destination, source, IDE_WORKSPACE_COPY_PRESERVE_DERIVED);
 }
 
 BUSTER_GLOBAL_LOCAL void ide_workspace_initialize_empty(IdeDocumentWorkspace* workspace)
@@ -1130,6 +1302,108 @@ BUSTER_GLOBAL_LOCAL void ide_imports_detect_cycles(Arena* arena, IdeDocumentWork
     }
 }
 
+BUSTER_GLOBAL_LOCAL AstType* ide_ast_type_for_entity(AnalysisEntity* entity)
+{
+    if (!entity)
+    {
+        return 0;
+    }
+    switch (entity->kind)
+    {
+        case ANALYSIS_ENTITY_CODE:
+            return entity->ast.code ? entity->ast.code->type : 0;
+        case ANALYSIS_ENTITY_DATA:
+            return entity->ast.data ? entity->ast.data->type : 0;
+        case ANALYSIS_ENTITY_TYPE:
+        case ANALYSIS_ENTITY_COUNT:
+            break;
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL String8 ide_source_range_text(Arena* arena, String8 source, ParserSourceRange range)
+{
+    if (!source.pointer || range.offset > source.length || range.length > source.length - range.offset)
+    {
+        return (String8){0};
+    }
+    return ide_string_copy(arena, string_slice(source, range.offset, range.offset + range.length));
+}
+
+BUSTER_GLOBAL_LOCAL String8 ide_analysis_type_fallback(Arena* arena, AnalysisResult* analysis, AnalysisTypeId id)
+{
+    if (!analysis || id.value == ANALYSIS_ID_UNDERLYING_INVALID)
+    {
+        return (String8){0};
+    }
+    AnalysisType* type = analysis_type_from_id(analysis, id);
+    if (!type)
+    {
+        return (String8){0};
+    }
+    if (type->name.length)
+    {
+        return ide_string_copy(arena, type->name);
+    }
+    switch (type->kind)
+    {
+        case ANALYSIS_TYPE_VOID:
+            return ide_string_copy(arena, S8("void"));
+        case ANALYSIS_TYPE_BOOL:
+            return ide_string_copy(arena, S8("bool"));
+        case ANALYSIS_TYPE_INTEGER:
+            return string_format_z(arena, type->as.integer.is_signed ? S8("s{u32}") : S8("u{u32}"), type->as.integer.bit_width);
+        case ANALYSIS_TYPE_FLOAT:
+            return string_format_z(arena, S8("f{u32}"), type->as.float_bit_width);
+        case ANALYSIS_TYPE_POINTER:
+            return ide_string_copy(arena, S8("pointer"));
+        case ANALYSIS_TYPE_SLICE:
+            return ide_string_copy(arena, S8("slice"));
+        case ANALYSIS_TYPE_INFERRED_ARRAY:
+            return ide_string_copy(arena, S8("inferred array"));
+        case ANALYSIS_TYPE_ARRAY:
+            return ide_string_copy(arena, S8("array"));
+        case ANALYSIS_TYPE_VECTOR:
+            return ide_string_copy(arena, S8("vector"));
+        case ANALYSIS_TYPE_FUNCTION:
+            return ide_string_copy(arena, S8("fn"));
+        case ANALYSIS_TYPE_RANGE:
+            return ide_string_copy(arena, S8("range"));
+        case ANALYSIS_TYPE_STRUCT:
+            return ide_string_copy(arena, S8("struct"));
+        case ANALYSIS_TYPE_UNION:
+            return ide_string_copy(arena, S8("union"));
+        case ANALYSIS_TYPE_ENUM:
+            return ide_string_copy(arena, S8("enum"));
+        case ANALYSIS_TYPE_POISON:
+        case ANALYSIS_TYPE_VA_LIST:
+        case ANALYSIS_TYPE_COMPILE_TIME_PARAMETER:
+        case ANALYSIS_TYPE_COUNT:
+            break;
+    }
+    return (String8){0};
+}
+
+BUSTER_GLOBAL_LOCAL String8 ide_entity_type_text(Arena* arena, IdeDocument* document, AnalysisResult* analysis, AnalysisEntity* entity,
+                                                 u32 entity_index)
+{
+    AstType* ast_type = ide_ast_type_for_entity(entity);
+    String8 result = ast_type ? ide_source_range_text(arena, document->source, ast_type->range) : (String8){0};
+    if (result.length)
+    {
+        return result;
+    }
+    if (analysis && analysis->module.semantics && entity_index < analysis->module.entity_count)
+    {
+        result = ide_analysis_type_fallback(arena, analysis, analysis->module.semantics[entity_index].type);
+    }
+    if (!result.length && entity && entity->kind == ANALYSIS_ENTITY_TYPE)
+    {
+        result = ide_string_copy(arena, S8("type"));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_rebuild_workspace_analysis(Arena* arena, Arena* expression_arena, IdeDocumentWorkspace* result,
                                                                          u32 max_diagnostics)
 {
@@ -1267,6 +1541,49 @@ BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_rebuild_workspace_analysis(Arena* a
     BUSTER_CHECK(import_index == result->import_count);
     ide_imports_detect_cycles(arena, result);
 
+    u64 entity_count64 = 0;
+    for (u32 index = 0; index < document_count; index += 1)
+    {
+        entity_count64 += analyses[index] ? analyses[index]->module.entity_count : 0;
+    }
+    if (entity_count64 > UINT32_MAX)
+    {
+        return IDE_DOCUMENT_ERROR_TRAVERSAL_LIMIT;
+    }
+    result->entity_count = (u32)entity_count64;
+    result->entities = result->entity_count ? arena_allocate(arena, IdeDocumentEntitySnapshot, result->entity_count) : 0;
+    if (result->entity_count && !result->entities)
+    {
+        return IDE_DOCUMENT_ERROR_FILE_READ;
+    }
+    u32 entity_index = 0;
+    for (u32 index = 0; index < document_count; index += 1)
+    {
+        AnalysisResult* analysis = analyses[index];
+        if (!analysis)
+        {
+            continue;
+        }
+        IdeDocument* document = result->documents + index;
+        for (u32 analysis_entity_index = 0; analysis_entity_index < analysis->module.entity_count; analysis_entity_index += 1)
+        {
+            AnalysisEntity* entity = analysis->module.entities + analysis_entity_index;
+            IdeDocumentEntitySnapshot* snapshot = result->entities + entity_index;
+            *snapshot = (IdeDocumentEntitySnapshot){
+                .module_name = ide_string_copy(arena, document->module_name),
+                .source_path = ide_string_copy(arena, document->path),
+                .name = ide_string_copy(arena, entity->name),
+                .type_text = ide_entity_type_text(arena, document, analysis, entity, analysis_entity_index),
+                .range = entity->range,
+                .kind = entity->kind == ANALYSIS_ENTITY_TYPE   ? IDE_DOCUMENT_ENTITY_TYPE
+                        : entity->kind == ANALYSIS_ENTITY_CODE ? IDE_DOCUMENT_ENTITY_CODE
+                                                               : IDE_DOCUMENT_ENTITY_DATA,
+            };
+            entity_index += 1;
+        }
+    }
+    BUSTER_CHECK(entity_index == result->entity_count);
+
     for (u32 index = 0; index < document_count; index += 1)
     {
         IdeDocument* document = result->documents + index;
@@ -1341,17 +1658,31 @@ BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_build_workspace(Arena* arena, Arena
 {
     ide_workspace_initialize_empty(result);
 
-    String8 root_candidate = root_input.length ? root_input : S8(".");
-    String8 canonical_root = ide_document_path_canonical(arena, root_candidate);
-    String8 open_candidate = open_input.length ? ide_path_resolve_for_root(arena, canonical_root, open_input) : (String8){0};
-    String8 canonical_open = open_input.length ? ide_document_path_canonical(arena, open_candidate) : (String8){0};
-    if (open_input.length && !canonical_open.length)
+    String8 canonical_root = {0};
+    String8 open_candidate = {0};
+    String8 canonical_open = {0};
+    if (open_input.length && !root_input.length)
     {
-        return IDE_DOCUMENT_ERROR_PATH_NOT_FOUND;
-    }
-    if (!canonical_root.length && open_input.length && !root_input.length)
-    {
+        // A standalone .bbb path is the workspace selector. This keeps CLI,
+        // path-bar, and drop opens on the same single-root analysis flow.
+        canonical_open = ide_document_path_canonical(arena, open_input);
+        if (!canonical_open.length)
+        {
+            return IDE_DOCUMENT_ERROR_PATH_NOT_FOUND;
+        }
+        open_candidate = canonical_open;
         canonical_root = ide_path_parent(arena, canonical_open);
+    }
+    else
+    {
+        String8 root_candidate = root_input.length ? root_input : S8(".");
+        canonical_root = ide_document_path_canonical(arena, root_candidate);
+        open_candidate = open_input.length ? ide_path_resolve_for_root(arena, canonical_root, open_input) : (String8){0};
+        canonical_open = open_input.length ? ide_document_path_canonical(arena, open_candidate) : (String8){0};
+        if (open_input.length && !canonical_open.length)
+        {
+            return IDE_DOCUMENT_ERROR_PATH_NOT_FOUND;
+        }
     }
     if (!canonical_root.length)
     {
@@ -1359,7 +1690,7 @@ BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_build_workspace(Arena* arena, Arena
     }
 
     IdePathKind root_kind = ide_path_kind(canonical_root);
-    if (root_kind == IDE_PATH_REGULAR && ide_path_has_suffix(canonical_root, S8(".bbb")))
+    if (root_kind == IDE_PATH_REGULAR && ide_document_path_is_bbb(canonical_root))
     {
         if (!canonical_open.length)
         {
@@ -1387,7 +1718,16 @@ BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_build_workspace(Arena* arena, Arena
     }
     if (canonical_open.length)
     {
-        if (ide_path_kind(canonical_open) != IDE_PATH_REGULAR)
+        if (!ide_document_path_is_bbb(canonical_open))
+        {
+            return IDE_DOCUMENT_ERROR_OPEN_PATH_NOT_SUPPORTED;
+        }
+        IdePathKind open_kind = ide_path_kind(canonical_open);
+        if (open_kind == IDE_PATH_MISSING)
+        {
+            return IDE_DOCUMENT_ERROR_PATH_NOT_FOUND;
+        }
+        if (open_kind != IDE_PATH_REGULAR)
         {
             return IDE_DOCUMENT_ERROR_NOT_REGULAR_FILE;
         }
@@ -1529,7 +1869,7 @@ BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_build_workspace(Arena* arena, Arena
                 continue;
             }
             IdeDocument* orphan = result->documents + document_index;
-            ide_document_copy_to_arena(arena, orphan, old_document);
+            ide_document_copy_to_arena(arena, orphan, old_document, IDE_WORKSPACE_COPY_PRESERVE_DERIVED);
             orphan->external_exists = false;
             orphan->external_modified = true;
             document_index += 1;
@@ -1630,6 +1970,22 @@ BUSTER_GLOBAL_LOCAL void ide_model_reset_staging(IdeDocumentModel* model)
     arena_reset_to_start(model->staging_arena);
 }
 
+BUSTER_GLOBAL_LOCAL bool ide_workspace_has_dirty_documents(const IdeDocumentWorkspace* workspace)
+{
+    if (!workspace)
+    {
+        return false;
+    }
+    for (u32 index = 0; index < workspace->document_count; index += 1)
+    {
+        if (workspace->documents[index].dirty)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL void ide_model_commit(IdeDocumentModel* model, IdeDocumentWorkspace workspace)
 {
     Arena* old_active = model->active_arena;
@@ -1693,6 +2049,8 @@ String8 ide_document_error_kind_name(IdeDocumentErrorKind kind)
         S8("reload would discard dirty edits"),
         S8("selection is outside the source"),
         S8("diagnostic limit exceeded"),
+        S8("workspace replacement would discard dirty documents"),
+        S8("requested filter mode is unsupported"),
     };
     return kind < IDE_DOCUMENT_ERROR_COUNT ? names[kind] : S8("unknown document error");
 }
@@ -1736,6 +2094,11 @@ IdeDocumentErrorKind ide_document_model_initialize(IdeDocumentModel* model, Aren
     model->max_diagnostics = options.max_diagnostics ? options.max_diagnostics : IDE_DOCUMENT_DEFAULT_MAX_DIAGNOSTICS;
     ide_workspace_initialize_empty(&model->workspace);
     arena_reset_to_start(model->staging_arena);
+    if (!options.workspace_root.length && !options.open_path.length)
+    {
+        model->initialized = true;
+        return IDE_DOCUMENT_ERROR_NONE;
+    }
     IdeDocumentWorkspace workspace = {0};
     IdeDocumentErrorKind error = ide_build_workspace(model->staging_arena, model->expression_arena, options.workspace_root, options.open_path, 0, false,
                                                       model->max_discovered_files, model->max_traversal_entries, model->max_diagnostics, &workspace);
@@ -1798,11 +2161,152 @@ IdeDocumentErrorKind ide_document_model_refresh_workspace(IdeDocumentModel* mode
     return IDE_DOCUMENT_ERROR_NONE;
 }
 
+BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_stage_open_path(IdeDocumentModel* model, String8 path, IdeDocumentWorkspace* result,
+                                                             u32* result_index)
+{
+    if (!model || !model->initialized || !path.length || !path.pointer)
+    {
+        return IDE_DOCUMENT_ERROR_INVALID_ARGUMENT;
+    }
+    if (path.length > BUSTER_MAX_PATH_LENGTH)
+    {
+        return IDE_DOCUMENT_ERROR_INVALID_ARGUMENT;
+    }
+    if (!ide_document_path_is_bbb(path))
+    {
+        return IDE_DOCUMENT_ERROR_OPEN_PATH_NOT_SUPPORTED;
+    }
+
+    TemporalArena scratch = scratch_begin(0, 0);
+    String8 candidate = model->workspace.root_path.length && !ide_path_is_absolute(path)
+                            ? ide_path_resolve_for_root(scratch.arena, model->workspace.root_path, path)
+                            : ide_string_copy(scratch.arena, path);
+    String8 canonical = ide_document_path_canonical(scratch.arena, candidate);
+    if (!canonical.length)
+    {
+        scratch_end(scratch);
+        return IDE_DOCUMENT_ERROR_PATH_NOT_FOUND;
+    }
+    if (candidate.length > BUSTER_MAX_PATH_LENGTH || canonical.length > BUSTER_MAX_PATH_LENGTH)
+    {
+        scratch_end(scratch);
+        return IDE_DOCUMENT_ERROR_INVALID_ARGUMENT;
+    }
+
+    // Path classification is deliberately completed before the dirty-workspace
+    // replacement guard. A missing target must remain PATH_NOT_FOUND even when
+    // another, non-active document is dirty.
+    char8 candidate_storage[BUSTER_MAX_PATH_LENGTH + 1];
+    char8 canonical_storage[BUSTER_MAX_PATH_LENGTH + 1];
+    memcpy(candidate_storage, candidate.pointer, candidate.length);
+    candidate_storage[candidate.length] = 0;
+    memcpy(canonical_storage, canonical.pointer, canonical.length);
+    canonical_storage[canonical.length] = 0;
+    String8 stable_candidate = {.pointer = candidate_storage, .length = candidate.length};
+    String8 stable_canonical = {.pointer = canonical_storage, .length = canonical.length};
+    bool lexical_inside_root = model->workspace.root_path.length && ide_document_path_is_within(model->workspace.root_path, stable_candidate);
+    bool canonical_inside_root = model->workspace.root_path.length && ide_document_path_is_within(model->workspace.root_path, stable_canonical);
+    if (lexical_inside_root &&
+        ((canonical_inside_root && ide_path_has_link_component(scratch.arena, model->workspace.root_path, stable_canonical)) ||
+         (!canonical_inside_root && !ide_path_has_parent_component(stable_candidate) &&
+          ide_path_has_link_component(scratch.arena, model->workspace.root_path, stable_candidate))))
+    {
+        scratch_end(scratch);
+        return IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT;
+    }
+    IdePathKind target_kind = ide_path_kind(stable_canonical);
+    if (target_kind == IDE_PATH_MISSING)
+    {
+        scratch_end(scratch);
+        return IDE_DOCUMENT_ERROR_PATH_NOT_FOUND;
+    }
+    if (target_kind != IDE_PATH_REGULAR)
+    {
+        scratch_end(scratch);
+        return IDE_DOCUMENT_ERROR_NOT_REGULAR_FILE;
+    }
+    bool same_root = model->workspace.root_path.length && ide_document_path_is_within(model->workspace.root_path, stable_canonical) &&
+                     !ide_path_has_link_component(scratch.arena, model->workspace.root_path, stable_canonical);
+
+    if (!same_root && ide_workspace_has_dirty_documents(&model->workspace))
+    {
+        scratch_end(scratch);
+        return IDE_DOCUMENT_ERROR_DIRTY_WORKSPACE_REPLACEMENT;
+    }
+
+    ide_model_reset_staging(model);
+    // Keep the caller's path stable across scratch_end as well. A routed drop
+    // normally supplies application-owned storage, but the model API must not
+    // assume that every caller's relative String8 outlives this scratch.
+    String8 build_path = ide_string_copy(model->staging_arena, path);
+    if (!same_root && !ide_path_is_absolute(path))
+    {
+        build_path = ide_string_copy(model->staging_arena, stable_candidate);
+    }
+#if BUSTER_INCLUDE_TESTS
+    if (ide_test_clobber_open_path_scratch && candidate.pointer && candidate.length)
+    {
+        // The test deliberately destroys the scratch candidate after root
+        // comparison. build_path must already own the value needed below.
+        memset(candidate.pointer, (int)'!', candidate.length);
+    }
+#endif
+    scratch_end(scratch);
+    IdeDocumentWorkspace workspace = {0};
+    String8 root_input = same_root ? model->workspace.root_path : (String8){0};
+    const IdeDocumentWorkspace* old_workspace = same_root ? &model->workspace : 0;
+    IdeDocumentErrorKind error = ide_build_workspace(model->staging_arena, model->expression_arena, root_input, build_path, old_workspace, same_root,
+                                                     model->max_discovered_files, model->max_traversal_entries, model->max_diagnostics, &workspace);
+    if (error != IDE_DOCUMENT_ERROR_NONE)
+    {
+        ide_model_reset_staging(model);
+        return error;
+    }
+
+    u32 index = ide_workspace_find_path(model->staging_arena, &workspace, build_path);
+    if (index == IDE_DOCUMENT_INDEX_INVALID)
+    {
+        ide_model_reset_staging(model);
+        return IDE_DOCUMENT_ERROR_DOCUMENT_NOT_FOUND;
+    }
+    IdeDocument* document = workspace.documents + index;
+    if (!document->is_open)
+    {
+        document->is_open = true;
+        document->open_order = workspace.next_open_order;
+        workspace.next_open_order += 1;
+        workspace.open_document_count += 1;
+    }
+    workspace.active_document_index = index;
+    *result = workspace;
+    if (result_index)
+    {
+        *result_index = index;
+    }
+    return IDE_DOCUMENT_ERROR_NONE;
+}
+
+IdeDocumentErrorKind ide_document_model_open_path(IdeDocumentModel* model, String8 path)
+{
+    IdeDocumentWorkspace workspace = {0};
+    IdeDocumentErrorKind error = ide_stage_open_path(model, path, &workspace, 0);
+    if (error != IDE_DOCUMENT_ERROR_NONE)
+    {
+        return error;
+    }
+    ide_model_commit(model, workspace);
+    return IDE_DOCUMENT_ERROR_NONE;
+}
+
 IdeDocumentErrorKind ide_document_model_open(IdeDocumentModel* model, String8 path)
 {
     if (!model || !model->initialized || !path.length)
     {
         return IDE_DOCUMENT_ERROR_INVALID_ARGUMENT;
+    }
+    if (!model->workspace.root_path.length)
+    {
+        return ide_document_model_open_path(model, path);
     }
     ide_model_reset_staging(model);
     IdeDocumentErrorKind path_error = ide_model_path_error(model->staging_arena, model->workspace.root_path, path);
@@ -1811,8 +2315,13 @@ IdeDocumentErrorKind ide_document_model_open(IdeDocumentModel* model, String8 pa
         ide_model_reset_staging(model);
         return path_error;
     }
+    u32 existing_index = ide_workspace_find_path(model->staging_arena, &model->workspace, path);
+    bool needs_analysis_rebuild = existing_index != IDE_DOCUMENT_INDEX_INVALID &&
+                                  !model->workspace.documents[existing_index].external_exists;
+    ide_model_reset_staging(model);
     IdeDocumentWorkspace workspace = {0};
-    ide_workspace_copy_to_arena(model->staging_arena, &workspace, &model->workspace);
+    ide_workspace_copy_to_arena_mode(model->staging_arena, &workspace, &model->workspace,
+                                     needs_analysis_rebuild ? IDE_WORKSPACE_COPY_REBUILD_DERIVED : IDE_WORKSPACE_COPY_PRESERVE_DERIVED);
     u32 index = ide_workspace_find_path(model->staging_arena, &workspace, path);
     if (index == IDE_DOCUMENT_INDEX_INVALID)
     {
@@ -1820,7 +2329,6 @@ IdeDocumentErrorKind ide_document_model_open(IdeDocumentModel* model, String8 pa
         return IDE_DOCUMENT_ERROR_DOCUMENT_NOT_FOUND;
     }
     IdeDocument* document = workspace.documents + index;
-    bool needs_analysis_rebuild = !document->external_exists;
     if (!document->external_exists && !document->dirty)
     {
         IdeLoadedFile loaded = {0};
@@ -1933,6 +2441,82 @@ IdeDocumentErrorKind ide_document_model_set_active(IdeDocumentModel* model, Stri
     return IDE_DOCUMENT_ERROR_NONE;
 }
 
+IdeDocumentErrorKind ide_document_model_activate_source_range(IdeDocumentModel* model, String8 path, ParserSourceRange range)
+{
+    if (!model || !model->initialized || !path.length || !path.pointer)
+    {
+        return IDE_DOCUMENT_ERROR_INVALID_ARGUMENT;
+    }
+    if (path.length > BUSTER_MAX_PATH_LENGTH)
+    {
+        return IDE_DOCUMENT_ERROR_INVALID_ARGUMENT;
+    }
+
+    char8 source_path_storage[BUSTER_MAX_PATH_LENGTH + 1];
+    memcpy(source_path_storage, path.pointer, path.length);
+    source_path_storage[path.length] = 0;
+    String8 source_path = {.pointer = source_path_storage, .length = path.length};
+    // Stage the complete target before changing the committed model. This
+    // refreshes clean files from disk and makes the range check use exactly
+    // the source that would become active, rather than an older indexed
+    // snapshot. No public mutation helper is called until every validation
+    // below has succeeded.
+    IdeDocumentWorkspace workspace = {0};
+    u32 index = IDE_DOCUMENT_INDEX_INVALID;
+    IdeDocumentErrorKind error = ide_stage_open_path(model, source_path, &workspace, &index);
+    if (error != IDE_DOCUMENT_ERROR_NONE)
+    {
+        return error;
+    }
+    if (index == IDE_DOCUMENT_INDEX_INVALID || index >= workspace.document_count)
+    {
+        ide_model_reset_staging(model);
+        return IDE_DOCUMENT_ERROR_DOCUMENT_NOT_FOUND;
+    }
+    IdeDocument* document = workspace.documents + index;
+    if (range.offset > document->source.length || range.length > document->source.length - range.offset)
+    {
+        ide_model_reset_staging(model);
+        return IDE_DOCUMENT_ERROR_INVALID_SELECTION;
+    }
+    document->view.cursor_offset = range.offset;
+    document->view.selection_start = range.offset;
+    document->view.selection_end = (u64)range.offset + range.length;
+    ide_model_commit(model, workspace);
+    return IDE_DOCUMENT_ERROR_NONE;
+}
+
+IdeDocumentErrorKind ide_document_model_activate_entity(IdeDocumentModel* model, u32 index)
+{
+    if (!model || !model->initialized)
+    {
+        return IDE_DOCUMENT_ERROR_INVALID_ARGUMENT;
+    }
+    if (index >= model->workspace.entity_count || !model->workspace.entities)
+    {
+        return IDE_DOCUMENT_ERROR_DOCUMENT_NOT_FOUND;
+    }
+
+    // Copy the snapshot values before the shared operation can acquire scratch
+    // or commit a new arena. The shared operation copies the path again into a
+    // stable local buffer before calling any other public model helper.
+    String8 snapshot_path = model->workspace.entities[index].source_path;
+    ParserSourceRange snapshot_range = model->workspace.entities[index].range;
+    if (snapshot_path.length > BUSTER_MAX_PATH_LENGTH ||
+        (snapshot_path.length && !snapshot_path.pointer))
+    {
+        return IDE_DOCUMENT_ERROR_INVALID_ARGUMENT;
+    }
+    char8 source_path_storage[BUSTER_MAX_PATH_LENGTH + 1];
+    if (snapshot_path.length)
+    {
+        memcpy(source_path_storage, snapshot_path.pointer, snapshot_path.length);
+    }
+    source_path_storage[snapshot_path.length] = 0;
+    String8 source_path = {.pointer = source_path_storage, .length = snapshot_path.length};
+    return ide_document_model_activate_source_range(model, source_path, snapshot_range);
+}
+
 IdeDocumentErrorKind ide_document_model_set_text(IdeDocumentModel* model, String8 path, String8 source)
 {
     if (!model || !model->initialized || (!source.pointer && source.length))
@@ -1946,14 +2530,18 @@ IdeDocumentErrorKind ide_document_model_set_text(IdeDocumentModel* model, String
         ide_model_reset_staging(model);
         return path_error;
     }
-    IdeDocumentWorkspace workspace = {0};
-    ide_workspace_copy_to_arena(model->staging_arena, &workspace, &model->workspace);
-    u32 index = ide_workspace_find_path(model->staging_arena, &workspace, path);
-    if (index == IDE_DOCUMENT_INDEX_INVALID)
+    u32 existing_index = ide_workspace_find_path(model->staging_arena, &model->workspace, path);
+    if (existing_index == IDE_DOCUMENT_INDEX_INVALID)
     {
         ide_model_reset_staging(model);
         return IDE_DOCUMENT_ERROR_DOCUMENT_NOT_FOUND;
     }
+    bool source_changed = !string_equal(model->workspace.documents[existing_index].source, source);
+    IdeDocumentWorkspace workspace = {0};
+    ide_model_reset_staging(model);
+    ide_workspace_copy_to_arena_mode(model->staging_arena, &workspace, &model->workspace,
+                                     source_changed ? IDE_WORKSPACE_COPY_REBUILD_DERIVED : IDE_WORKSPACE_COPY_PRESERVE_DERIVED);
+    u32 index = ide_workspace_find_path(model->staging_arena, &workspace, path);
     IdeDocument* document = workspace.documents + index;
     if (!document->is_open)
     {
@@ -1992,7 +2580,7 @@ IdeDocumentErrorKind ide_document_model_reload(IdeDocumentModel* model, String8 
         return path_error;
     }
     IdeDocumentWorkspace workspace = {0};
-    ide_workspace_copy_to_arena(model->staging_arena, &workspace, &model->workspace);
+    ide_workspace_copy_to_arena_mode(model->staging_arena, &workspace, &model->workspace, IDE_WORKSPACE_COPY_REBUILD_DERIVED);
     u32 index = ide_workspace_find_path(model->staging_arena, &workspace, path);
     if (index == IDE_DOCUMENT_INDEX_INVALID)
     {
@@ -2172,6 +2760,11 @@ void ide_document_model_test_set_save_replace_failure(bool enabled)
 {
     ide_test_force_save_replace_failure = enabled;
 }
+
+void ide_document_model_test_set_open_path_scratch_clobber(bool enabled)
+{
+    ide_test_clobber_open_path_scratch = enabled;
+}
 #endif
 
 IdeDocumentErrorKind ide_document_model_set_view(IdeDocumentModel* model, String8 path, IdeDocumentViewState view)
@@ -2259,6 +2852,10 @@ IdeDocumentErrorKind ide_document_model_set_filter_state(IdeDocumentModel* model
     if (!model || !model->initialized)
     {
         return IDE_DOCUMENT_ERROR_INVALID_ARGUMENT;
+    }
+    if (filter.whole_word || filter.regular_expression)
+    {
+        return IDE_DOCUMENT_ERROR_UNSUPPORTED_FILTER;
     }
     ide_model_reset_staging(model);
     IdeDocumentWorkspace workspace = {0};
@@ -2359,6 +2956,112 @@ IdeDocumentErrorKind ide_document_model_replace_diagnostics(IdeDocumentModel* mo
     }
     ide_model_commit(model, workspace);
     return IDE_DOCUMENT_ERROR_NONE;
+}
+
+bool ide_document_model_document_matches_filter(IdeDocumentModel* model, u32 index)
+{
+    if (!model || !model->initialized || index >= model->workspace.document_count)
+    {
+        return false;
+    }
+    IdeDocument* document = model->workspace.documents + index;
+    IdeDocumentWorkspaceFilterState filter = model->workspace.filter;
+    if (filter.show_open_only && !document->is_open)
+    {
+        return false;
+    }
+    if (filter.show_dirty_only && !document->dirty)
+    {
+        return false;
+    }
+    if (filter.show_diagnostics_only && !document->diagnostic_count)
+    {
+        return false;
+    }
+    if (!filter.query.length)
+    {
+        return true;
+    }
+    if (ide_document_string_contains(document->path, filter.query, filter.case_sensitive) ||
+        ide_document_string_contains(document->module_name, filter.query, filter.case_sensitive))
+    {
+        return true;
+    }
+    for (u32 diagnostic_index = 0; diagnostic_index < document->diagnostic_count; diagnostic_index += 1)
+    {
+        if (ide_document_string_contains(document->diagnostics[diagnostic_index].message, filter.query, filter.case_sensitive))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ide_document_model_entity_matches_filter(IdeDocumentModel* model, u32 index)
+{
+    if (!model || !model->initialized || index >= model->workspace.entity_count)
+    {
+        return false;
+    }
+    IdeDocumentEntitySnapshot* entity = model->workspace.entities + index;
+    IdeDocumentWorkspaceFilterState filter = model->workspace.filter;
+    IdeDocument* document = ide_document_model_find(model, entity->source_path);
+    if (filter.show_open_only && (!document || !document->is_open))
+    {
+        return false;
+    }
+    if (filter.show_dirty_only && (!document || !document->dirty))
+    {
+        return false;
+    }
+    if (filter.show_diagnostics_only && (!document || !document->diagnostic_count))
+    {
+        return false;
+    }
+    if (!filter.query.length)
+    {
+        return true;
+    }
+    return ide_document_string_contains(entity->module_name, filter.query, filter.case_sensitive) ||
+           ide_document_string_contains(entity->source_path, filter.query, filter.case_sensitive) ||
+           ide_document_string_contains(entity->name, filter.query, filter.case_sensitive) ||
+           ide_document_string_contains(entity->type_text, filter.query, filter.case_sensitive);
+}
+
+IdeDocumentWorkspaceStatus ide_document_model_status(IdeDocumentModel* model)
+{
+    IdeDocumentWorkspaceStatus result = {0};
+    if (!model || !model->initialized)
+    {
+        return result;
+    }
+    result.document_count = model->workspace.document_count;
+    result.open_document_count = model->workspace.open_document_count;
+    result.import_count = model->workspace.import_count;
+    result.entity_count = model->workspace.entity_count;
+    for (u32 index = 0; index < model->workspace.document_count; index += 1)
+    {
+        IdeDocument* document = model->workspace.documents + index;
+        result.dirty_document_count += document->dirty;
+        result.diagnostic_document_count += document->diagnostic_count != 0;
+        for (u32 diagnostic_index = 0; diagnostic_index < document->diagnostic_count; diagnostic_index += 1)
+        {
+            IdeDocumentDiagnosticSeverity severity = document->diagnostics[diagnostic_index].severity;
+            if (severity == IDE_DOCUMENT_DIAGNOSTIC_INFO)
+            {
+                result.info_count += 1;
+            }
+            else if (severity == IDE_DOCUMENT_DIAGNOSTIC_WARNING)
+            {
+                result.warning_count += 1;
+            }
+            else if (severity == IDE_DOCUMENT_DIAGNOSTIC_ERROR)
+            {
+                result.error_count += 1;
+            }
+        }
+    }
+    return result;
 }
 
 IdeDocument* ide_document_model_find(IdeDocumentModel* model, String8 path)
