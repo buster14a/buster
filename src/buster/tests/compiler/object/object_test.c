@@ -723,6 +723,54 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, windows_unwind_roundtrip.relocations[relocation_index].section == OBJECT_SECTION_WINDOWS_PDATA);
         BUSTER_TEST(arguments, windows_unwind_roundtrip.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
     }
+    u8 windows_save_code[16] = {0};
+    CodegenUnwindAction windows_save_actions[] = {
+        {
+            .code_offset = 8,
+            .value = 512,
+            .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER,
+            .register_index = 3,
+        },
+    };
+    CodegenFunctionDescriptor windows_save_function = {
+        .unwind_actions = windows_save_actions,
+        .code_size = sizeof(windows_save_code),
+        .prolog_size = 8,
+        .unwind_action_count = BUSTER_ARRAY_LENGTH(windows_save_actions),
+    };
+    CodegenModule windows_save_module = windows_unwind_module;
+    windows_save_module.code = (ByteSlice)BUSTER_ARRAY_TO_SLICE(windows_save_code);
+    windows_save_module.functions = &windows_save_function;
+    ObjectFile windows_save_object = object_from_codegen_module(arguments->arena, &separate_analysis, &windows_save_module, windows_unwind_target);
+    BUSTER_TEST(arguments, windows_save_object.error == OBJECT_ERROR_NONE);
+    u8 expected_windows_save_xdata[] = {
+        1, 8, 2, 0, 8, 0x34, 64, 0,
+    };
+    ByteSlice windows_save_xdata = windows_save_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+    BUSTER_TEST(arguments, windows_save_xdata.length == sizeof(expected_windows_save_xdata) &&
+                               memcmp(windows_save_xdata.pointer, expected_windows_save_xdata, sizeof(expected_windows_save_xdata)) == 0);
+    u8 windows_far_save_code[16] = {0};
+    windows_save_actions[0].value = 524288;
+    CodegenModule windows_far_save_module = windows_save_module;
+    windows_far_save_module.code = (ByteSlice)BUSTER_ARRAY_TO_SLICE(windows_far_save_code);
+    ObjectFile windows_far_save_object = object_from_codegen_module(arguments->arena, &separate_analysis, &windows_far_save_module, windows_unwind_target);
+    BUSTER_TEST(arguments, windows_far_save_object.error == OBJECT_ERROR_NONE);
+    u8 expected_windows_far_save_xdata[] = {
+        1, 8, 3, 0, 8, 0x35, 0, 0, 8, 0, 0, 0,
+    };
+    ByteSlice windows_far_save_xdata = windows_far_save_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+    BUSTER_TEST(arguments, windows_far_save_xdata.length == sizeof(expected_windows_far_save_xdata) &&
+                               memcmp(windows_far_save_xdata.pointer, expected_windows_far_save_xdata, sizeof(expected_windows_far_save_xdata)) == 0);
+    ObjectArtifact windows_far_save_coff = object_write(arguments->arena, &windows_far_save_object, OBJECT_FORMAT_COFF);
+    BUSTER_TEST(arguments, windows_far_save_coff.error == OBJECT_ERROR_NONE);
+    ObjectFile windows_far_save_roundtrip = object_read(arguments->arena, windows_far_save_coff.bytes, windows_unwind_target);
+    BUSTER_TEST(arguments, windows_far_save_roundtrip.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, windows_far_save_roundtrip.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == sizeof(expected_windows_far_save_xdata));
+    if (windows_far_save_roundtrip.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == sizeof(expected_windows_far_save_xdata))
+    {
+        BUSTER_TEST(arguments, memcmp(windows_far_save_roundtrip.sections[OBJECT_SECTION_WINDOWS_XDATA].data.pointer, expected_windows_far_save_xdata,
+                                      sizeof(expected_windows_far_save_xdata)) == 0);
+    }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
     ObjectExecutable windows_unwind_executable = object_link_executable(&windows_unwind_object);
     BUSTER_TEST(arguments, windows_unwind_executable.error == OBJECT_ERROR_NONE);

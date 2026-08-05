@@ -11,38 +11,240 @@
 
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_jump_target(IrInstruction* instruction, String8 literal, String8 prefix, u32* target_index_out)
 {
-    if (!instruction || !target_index_out || literal.length <= prefix.length)
+    return ir_inline_assembly_jump_target(instruction, literal, prefix, target_index_out);
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_emit_u8(CodegenBuffer* buffer, u8 value);
+BUSTER_GLOBAL_LOCAL void codegen_emit_u32(CodegenBuffer* buffer, u32 value);
+
+BUSTER_GLOBAL_LOCAL bool codegen_decimal_number(String8 string, u64* value_out)
+{
+    if (!string.pointer || !string.length || !value_out)
     {
         return false;
     }
-    for (u64 index = 0; index < prefix.length; index += 1)
+    u64 value = 0;
+    for (u64 index = 0; index < string.length; index += 1)
     {
-        if (literal.pointer[index] != prefix.pointer[index])
+        u8 digit = (u8)string.pointer[index];
+        if (digit < '0' || digit > '9' || value > (UINT64_MAX - (digit - '0')) / 10)
         {
             return false;
         }
+        value = value * 10 + (digit - '0');
     }
-    u64 operand_index = 0;
-    for (u64 index = prefix.length; index < literal.length; index += 1)
-    {
-        u8 digit = (u8)literal.pointer[index];
-        if (digit < '0' || digit > '9' || operand_index > (UINT64_MAX - (digit - '0')) / 10)
-        {
-            return false;
-        }
-        operand_index = operand_index * 10 + (digit - '0');
-    }
-    if (operand_index < instruction->operand_count)
-    {
-        return false;
-    }
-    u64 label_index = operand_index - instruction->operand_count;
-    if (!instruction->target_count || label_index >= instruction->target_count - 1)
-    {
-        return false;
-    }
-    *target_index_out = 1 + (u32)label_index;
+    *value_out = value;
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_clobber_is_rbx(String8 clobber)
+{
+    return string_equal(clobber, S8("rbx")) || string_equal(clobber, S8("ebx")) || string_equal(clobber, S8("bx")) || string_equal(clobber, S8("bl"));
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_clobber_register(String8 clobber, X64Register* register_out)
+{
+    if (string_equal(clobber, S8("rax")) || string_equal(clobber, S8("eax")) || string_equal(clobber, S8("ax")) || string_equal(clobber, S8("al")))
+    {
+        *register_out = X64_REGISTER_RAX;
+        return true;
+    }
+    if (codegen_inline_assembly_clobber_is_rbx(clobber))
+    {
+        *register_out = X64_REGISTER_RBX;
+        return true;
+    }
+    if (string_equal(clobber, S8("rcx")) || string_equal(clobber, S8("ecx")) || string_equal(clobber, S8("cx")) || string_equal(clobber, S8("cl")))
+    {
+        *register_out = X64_REGISTER_RCX;
+        return true;
+    }
+    if (string_equal(clobber, S8("rdx")) || string_equal(clobber, S8("edx")) || string_equal(clobber, S8("dx")) || string_equal(clobber, S8("dl")))
+    {
+        *register_out = X64_REGISTER_RDX;
+        return true;
+    }
+    if (string_equal(clobber, S8("rsi")) || string_equal(clobber, S8("esi")) || string_equal(clobber, S8("si")) || string_equal(clobber, S8("sil")))
+    {
+        *register_out = X64_REGISTER_RSI;
+        return true;
+    }
+    if (string_equal(clobber, S8("rdi")) || string_equal(clobber, S8("edi")) || string_equal(clobber, S8("di")) || string_equal(clobber, S8("dil")))
+    {
+        *register_out = X64_REGISTER_RDI;
+        return true;
+    }
+    if (clobber.length >= 2 && clobber.pointer[0] == 'r')
+    {
+        u64 number = 0;
+        String8 suffix = {
+            .pointer = clobber.pointer + 1,
+            .length = clobber.length - 1,
+        };
+        if (codegen_decimal_number(suffix, &number) && number >= 8 && number <= 11)
+        {
+            *register_out = (X64Register)number;
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_constraint_register(u64 constraint, X64Register* register_out)
+{
+    switch (constraint & 0xff)
+    {
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_A:
+        *register_out = X64_REGISTER_RAX;
+        return true;
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_B:
+        *register_out = X64_REGISTER_RBX;
+        return true;
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_C:
+        *register_out = X64_REGISTER_RCX;
+        return true;
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_D:
+        *register_out = X64_REGISTER_RDX;
+        return true;
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_R:
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT:
+        break;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_function_saves_rbx(IrFunction* function)
+{
+    if (!function)
+    {
+        return false;
+    }
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        IrInstruction* instruction = function->instructions + instruction_index;
+        if (instruction->opcode != IR_OPCODE_INLINE_ASSEMBLY)
+        {
+            continue;
+        }
+        if ((instruction->operand_count && !instruction->immediates) || (instruction->clobber_count && !instruction->clobbers))
+        {
+            return false;
+        }
+        for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+        {
+            if ((instruction->immediates[operand_index] & 0xff) == IR_INLINE_ASSEMBLY_CONSTRAINT_B)
+            {
+                return true;
+            }
+        }
+        for (u32 clobber_index = 0; clobber_index < instruction->clobber_count; clobber_index += 1)
+        {
+            if (codegen_inline_assembly_clobber_is_rbx(instruction->clobbers[clobber_index]))
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_asm_memory_width(u32 width)
+{
+    return width == 1 || width == 2 || width == 4 || width == 8;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_asm_memory_width(u32 width)
+{
+    return width == 1 || width == 2 || width == 4 || width == 8;
+}
+
+BUSTER_GLOBAL_LOCAL u32 codegen_canonical_a64_nop_count(String8 literal)
+{
+    u32 count = 0;
+    u64 offset = 0;
+    while (offset < literal.length)
+    {
+        while (offset < literal.length && (literal.pointer[offset] == ' ' || literal.pointer[offset] == '\t' || literal.pointer[offset] == '\r' ||
+                                            literal.pointer[offset] == '\n'))
+        {
+            offset += 1;
+        }
+        while (offset + 1 < literal.length && literal.pointer[offset] == '\\' &&
+               (literal.pointer[offset + 1] == 'n' || literal.pointer[offset + 1] == 'r' || literal.pointer[offset + 1] == 't'))
+        {
+            offset += 2;
+            while (offset < literal.length && (literal.pointer[offset] == ' ' || literal.pointer[offset] == '\t' || literal.pointer[offset] == '\r' ||
+                                                literal.pointer[offset] == '\n'))
+            {
+                offset += 1;
+            }
+        }
+        if (offset == literal.length || literal.pointer[offset] == 0)
+        {
+            break;
+        }
+        if (offset + 3 > literal.length || literal.pointer[offset] != 'n' || literal.pointer[offset + 1] != 'o' || literal.pointer[offset + 2] != 'p')
+        {
+            return 0;
+        }
+        offset += 3;
+        if (count == UINT32_MAX)
+        {
+            return 0;
+        }
+        count += 1;
+    }
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_asm_load(CodegenBuffer* buffer, X64Register target, X64Register base, u32 displacement, u32 width)
+{
+    u8 rex = 0x40;
+    rex |= target >= X64_REGISTER_R8 ? 0x04 : 0;
+    rex |= base >= X64_REGISTER_R8 ? 0x01 : 0;
+    rex |= width == 8 ? 0x08 : 0;
+    if (width == 2)
+    {
+        codegen_emit_u8(buffer, 0x66);
+    }
+    if (rex)
+    {
+        codegen_emit_u8(buffer, rex);
+    }
+    if (width == 1 || width == 2)
+    {
+        codegen_emit_u8(buffer, 0x0f);
+        codegen_emit_u8(buffer, width == 1 ? 0xb6 : 0xb7);
+    }
+    else
+    {
+        codegen_emit_u8(buffer, 0x8b);
+    }
+    codegen_emit_u8(buffer, (u8)(0x80 | ((target & 7) << 3) | (base & 7)));
+    codegen_emit_u32(buffer, displacement);
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_asm_store(CodegenBuffer* buffer, X64Register base, X64Register source, u32 displacement, u32 width)
+{
+    if (width == 2)
+    {
+        codegen_emit_u8(buffer, 0x66);
+    }
+    u8 rex = 0x40;
+    rex |= source >= X64_REGISTER_R8 ? 0x04 : 0;
+    rex |= base >= X64_REGISTER_R8 ? 0x01 : 0;
+    rex |= width == 8 ? 0x08 : 0;
+    if (width == 1 && source >= X64_REGISTER_RSP && source <= X64_REGISTER_RDI)
+    {
+        rex |= 0x40;
+    }
+    if (rex)
+    {
+        codegen_emit_u8(buffer, rex);
+    }
+    codegen_emit_u8(buffer, width == 1 ? 0x88 : 0x89);
+    codegen_emit_u8(buffer, (u8)(0x80 | ((source & 7) << 3) | (base & 7)));
+    codegen_emit_u32(buffer, displacement);
 }
 
 BUSTER_GLOBAL_LOCAL u32 codegen_align_u32(u32 value, u32 alignment)
@@ -8769,12 +8971,14 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 .entity = ANALYSIS_ENTITY_ID_INVALID,
                 .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
                 .symbol = relocation.symbol,
+                .label_block = relocation.label_block,
                 .addend = relocation.addend,
                 .offset = generated.offset + (u32)relocation.offset,
                 .source = generated.is_thread_local ? CODEGEN_MODULE_RELOCATION_THREAD_LOCAL_DATA
                           : generated.read_only     ? CODEGEN_MODULE_RELOCATION_READ_ONLY_DATA
                                                     : CODEGEN_MODULE_RELOCATION_DATA,
                 .absolute = true,
+                .label_address = relocation.is_label_address,
             };
         }
     }
@@ -8795,10 +8999,11 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     {
         IrBlockId target;
         u32 offset;
+        u32 secondary_offset;
         bool aarch64;
         bool conditional;
         bool label_address;
-        u8 reserved;
+        u8 reserved[3];
     };
     for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
@@ -8844,6 +9049,20 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 windows_dynamic_stack |= opcode == IR_OPCODE_STACK_ALLOCATE || opcode == IR_OPCODE_STACK_RESTORE;
             }
         }
+        bool x64_save_rbx = target.cpu_arch == CPU_ARCH_X86_64 && codegen_canonical_x64_function_saves_rbx(function);
+        if (target.cpu_arch == CPU_ARCH_X86_64 && !x64_save_rbx)
+        {
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = function->instructions + instruction_index;
+                if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY &&
+                    ((instruction->operand_count && !instruction->immediates) || (instruction->clobber_count && !instruction->clobbers)))
+                {
+                    result.error = CODEGEN_ERROR_INVALID_IR;
+                    return result;
+                }
+            }
+        }
         u32* value_offsets = arena_allocate(arena, u32, function->value_count);
         u8* direct_call_uses = codegen_canonical_direct_call_uses(arena, function);
         // Keep the x28 frame-base save in the directly encodable ARM64
@@ -8884,6 +9103,17 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     return result;
                 }
             }
+        }
+        u32 x64_rbx_save_offset = 0;
+        if (x64_save_rbx)
+        {
+            if (value_bytes > UINT32_MAX - 8)
+            {
+                result.error = CODEGEN_ERROR_CAPACITY;
+                return result;
+            }
+            x64_rbx_save_offset = (u32)value_bytes + 8;
+            value_bytes += 8;
         }
         u32* aligned_local_offsets = arena_allocate(arena, u32, function->value_count);
         for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
@@ -8999,7 +9229,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                      ? result.abi == CODEGEN_ABI_X86_64_WINDOWS ? (frame_size != 0) : frame_size / 4096 + (frame_size % 4096 != 0)
                                      : frame_size / 4080 + (frame_size % 4080 != 0);
         u32 stack_action_capacity = windows_aarch64 ? (frame_size > 4080 ? 14u : stack_action_count * 2) : stack_action_count;
-        u32 unwind_action_capacity = (target.cpu_arch == CPU_ARCH_X86_64 ? 2u : windows_aarch64 ? 6u : 5u) + stack_action_capacity;
+        u32 unwind_action_capacity = (target.cpu_arch == CPU_ARCH_X86_64 ? 3u : windows_aarch64 ? 6u : 5u) + stack_action_capacity;
         CodegenFunctionDescriptor* descriptor = result.functions + result.function_count;
         result.function_count += 1;
         *descriptor = (CodegenFunctionDescriptor){
@@ -9043,6 +9273,17 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                unwind_valid;
                 codegen_canonical_x64_adjust_stack_described(&buffer, frame_size, true, descriptor, unwind_action_capacity,
                                                              target.os == OPERATING_SYSTEM_WINDOWS);
+            }
+            if (x64_save_rbx)
+            {
+                codegen_emit_u8(&buffer, 0x48);
+                codegen_emit_u8(&buffer, 0x89);
+                codegen_emit_u8(&buffer, 0x9d);
+                codegen_emit_u32(&buffer, (u32)(-(s32)x64_rbx_save_offset));
+                unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, (u32)buffer.count - descriptor->code_offset,
+                                                            CODEGEN_UNWIND_ACTION_SAVE_REGISTER, X64_REGISTER_RBX,
+                                                            frame_size - x64_rbx_save_offset) &&
+                               unwind_valid;
             }
             descriptor->prolog_size = (u32)buffer.count - descriptor->code_offset;
             if (!unwind_valid || buffer.error != CODEGEN_ERROR_NONE)
@@ -9243,6 +9484,17 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     do                                                                                                                                                         \
     {                                                                                                                                                          \
         (void)(width);                                                                                                                                         \
+    } while (0)
+#define C_X64_RESTORE_RBX()                                                                                                                                    \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        if (x64_save_rbx)                                                                                                                                      \
+        {                                                                                                                                                      \
+            codegen_emit_u8(&buffer, 0x48);                                                                                                                    \
+            codegen_emit_u8(&buffer, 0x8b);                                                                                                                    \
+            codegen_emit_u8(&buffer, 0x9d);                                                                                                                    \
+            codegen_emit_u32(&buffer, (u32)(-(s32)x64_rbx_save_offset));                                                                                        \
+        }                                                                                                                                                      \
     } while (0)
                     if (instruction->opcode == IR_OPCODE_LOCAL)
                     {
@@ -11895,28 +12147,180 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         bool pause = string_equal(instruction->literal, S8("pause"));
                         bool interrupt = string_equal(instruction->literal, S8("int3"));
                         u32 jump_target_index = 0;
-                        bool jump_label = codegen_inline_assembly_jump_target(instruction, instruction->literal, S8("jmp %l"), &jump_target_index) ||
-                                          codegen_inline_assembly_jump_target(instruction, instruction->literal, S8("j %l"), &jump_target_index);
+                        bool jump_label = codegen_inline_assembly_jump_target(instruction, instruction->literal, S8("jmp %l"), &jump_target_index);
                         bool operandless = undefined || nop || pause || interrupt;
-                        if ((!cpuid && !xgetbv && !operandless && !no_instruction && !jump_label) || (operandless && instruction->operand_count) ||
-                            (jump_label && instruction->target_count < 2) ||
-                            instruction->operand_count != instruction->immediate_count)
+                        if (!cpuid && !xgetbv && !operandless && !no_instruction && !jump_label)
                         {
                             result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                             return result;
                         }
-                        static u8 const registers[] = {
-                            0, 3, 1, 2, 0,
-                        };
-                        bool preserve_b = false;
+                        if ((operandless && instruction->operand_count) || (jump_label && instruction->target_count < 2) ||
+                            instruction->operand_count != instruction->immediate_count || instruction->operand_name_count != instruction->operand_count ||
+                            (instruction->operand_count && (!instruction->operands || !instruction->immediates || !instruction->operand_names)) ||
+                            (instruction->clobber_count && !instruction->clobbers))
+                        {
+                            result.error = CODEGEN_ERROR_INVALID_IR;
+                            return result;
+                        }
+                        for (u32 clobber_index = 0; clobber_index < instruction->clobber_count; clobber_index += 1)
+                        {
+                            String8 clobber = instruction->clobbers[clobber_index];
+                            bool accepted = string_equal(clobber, S8("memory")) || string_equal(clobber, S8("cc")) ||
+                                            string_equal(clobber, S8("rax")) || string_equal(clobber, S8("eax")) || string_equal(clobber, S8("ax")) ||
+                                            string_equal(clobber, S8("al")) || string_equal(clobber, S8("rbx")) || string_equal(clobber, S8("ebx")) ||
+                                            string_equal(clobber, S8("bx")) || string_equal(clobber, S8("bl")) || string_equal(clobber, S8("rcx")) ||
+                                            string_equal(clobber, S8("ecx")) || string_equal(clobber, S8("cx")) || string_equal(clobber, S8("cl")) ||
+                                            string_equal(clobber, S8("rdx")) || string_equal(clobber, S8("edx")) || string_equal(clobber, S8("dx")) ||
+                                            string_equal(clobber, S8("dl")) || string_equal(clobber, S8("rsi")) || string_equal(clobber, S8("esi")) ||
+                                            string_equal(clobber, S8("si")) || string_equal(clobber, S8("sil")) || string_equal(clobber, S8("rdi")) ||
+                                            string_equal(clobber, S8("edi")) || string_equal(clobber, S8("di")) || string_equal(clobber, S8("dil"));
+                            if (!accepted && clobber.length >= 2 && clobber.pointer[0] == 'r')
+                            {
+                                u64 number = 0;
+                                String8 suffix = {
+                                    .pointer = clobber.pointer + 1,
+                                    .length = clobber.length - 1,
+                                };
+                                accepted = codegen_decimal_number(suffix, &number) && number >= 8 && number <= 11;
+                            }
+                            if (!accepted)
+                            {
+                                result.error = CODEGEN_ERROR_INVALID_IR;
+                                return result;
+                            }
+                        }
+                        bool indirect_operands = false;
+                        bool used_registers[12] = {0};
+                        bool clobbered_registers[12] = {0};
+                        bool* indirect = arena_allocate(arena, bool, instruction->operand_count ? instruction->operand_count : 1);
+                        X64Register* asm_registers = arena_allocate(arena, X64Register, instruction->operand_count ? instruction->operand_count : 1);
+                        for (u32 clobber_index = 0; clobber_index < instruction->clobber_count; clobber_index += 1)
+                        {
+                            X64Register clobber_register = X64_REGISTER_RAX;
+                            if (codegen_inline_assembly_clobber_register(instruction->clobbers[clobber_index], &clobber_register))
+                            {
+                                clobbered_registers[clobber_register] = true;
+                                used_registers[clobber_register] = true;
+                            }
+                        }
+                        // Reserve every fixed-register operand before assigning
+                        // any generic r operand.  The allocation order is not
+                        // part of GNU asm's constraint semantics: a generic
+                        // operand appearing before an a/b/c/d operand must not
+                        // steal that fixed register and make a valid operand
+                        // list appear to alias two outputs.
                         for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
                         {
                             u64 constraint = instruction->immediates[operand_index];
-                            preserve_b |= (constraint & 0xff) == IR_INLINE_ASSEMBLY_CONSTRAINT_B;
+                            if ((constraint & 0xff) > IR_INLINE_ASSEMBLY_CONSTRAINT_R)
+                            {
+                                result.error = CODEGEN_ERROR_INVALID_IR;
+                                return result;
+                            }
+                            X64Register fixed_register = X64_REGISTER_RAX;
+                            if (codegen_inline_assembly_constraint_register(constraint, &fixed_register))
+                            {
+                                if (clobbered_registers[fixed_register])
+                                {
+                                    result.error = CODEGEN_ERROR_INVALID_IR;
+                                    return result;
+                                }
+                                used_registers[fixed_register] = true;
+                            }
                         }
-                        if (preserve_b)
+                        for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
                         {
-                            codegen_emit_u8(&buffer, 0x53);
+                            IrValueId operand = instruction->operands[operand_index];
+                            if (operand.value >= function->value_count || function->values[operand.value].definition.value >= function->instruction_count)
+                            {
+                                result.error = CODEGEN_ERROR_INVALID_IR;
+                                return result;
+                            }
+                            IrInstruction* definition = function->instructions + function->values[operand.value].definition.value;
+                            indirect[operand_index] = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
+                                                       definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE;
+                            indirect_operands |= indirect[operand_index];
+                        }
+                        for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+                        {
+                            u64 constraint = instruction->immediates[operand_index];
+                            u64 constraint_index = constraint & 0xff;
+                            if (constraint_index > IR_INLINE_ASSEMBLY_CONSTRAINT_R)
+                            {
+                                result.error = CODEGEN_ERROR_INVALID_IR;
+                                return result;
+                            }
+                            IrValueId operand = instruction->operands[operand_index];
+                            if (operand.value >= function->value_count || function->values[operand.value].definition.value >= function->instruction_count)
+                            {
+                                result.error = CODEGEN_ERROR_INVALID_IR;
+                                return result;
+                            }
+                            IrInstruction* definition = function->instructions + function->values[operand.value].definition.value;
+                            indirect[operand_index] = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
+                                                       definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE;
+                            indirect_operands |= indirect[operand_index];
+                            X64Register register_index = X64_REGISTER_RAX;
+                            bool is_fixed_register = codegen_inline_assembly_constraint_register(constraint, &register_index);
+                            if (is_fixed_register)
+                            {
+                                if (clobbered_registers[register_index])
+                                {
+                                    result.error = CODEGEN_ERROR_INVALID_IR;
+                                    return result;
+                                }
+                                for (u32 previous_index = 0; previous_index < operand_index; previous_index += 1)
+                                {
+                                    if (asm_registers[previous_index] == register_index)
+                                    {
+                                        u64 previous_constraint = instruction->immediates[previous_index];
+                                        bool current_output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+                                        bool previous_output = (previous_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+                                        bool current_read_write = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
+                                        bool previous_read_write = (previous_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
+                                        bool output_input_pair = current_output != previous_output &&
+                                                                 ((current_output && !current_read_write) || (previous_output && !previous_read_write));
+                                        if (!output_input_pair)
+                                        {
+                                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                            return result;
+                                        }
+                                    }
+                                }
+                                used_registers[register_index] = true;
+                            }
+                            else
+                            {
+                                static X64Register const system_v_registers[] = {
+                                    X64_REGISTER_RAX, X64_REGISTER_RCX, X64_REGISTER_RDX, X64_REGISTER_RSI, X64_REGISTER_RDI,
+                                    X64_REGISTER_R8, X64_REGISTER_R9, X64_REGISTER_R10, X64_REGISTER_R11,
+                                };
+                                static X64Register const windows_registers[] = {
+                                    X64_REGISTER_RAX, X64_REGISTER_RCX, X64_REGISTER_RDX, X64_REGISTER_R8, X64_REGISTER_R9,
+                                    X64_REGISTER_R10, X64_REGISTER_R11,
+                                };
+                                X64Register const* candidates = result.abi == CODEGEN_ABI_X86_64_WINDOWS ? windows_registers : system_v_registers;
+                                u32 candidate_count = result.abi == CODEGEN_ABI_X86_64_WINDOWS ? BUSTER_ARRAY_LENGTH(windows_registers)
+                                                                                                 : BUSTER_ARRAY_LENGTH(system_v_registers);
+                                bool found = false;
+                                for (u32 candidate_index = 0; candidate_index < candidate_count; candidate_index += 1)
+                                {
+                                    X64Register candidate = candidates[candidate_index];
+                                    if (!used_registers[candidate] && !(indirect_operands && candidate == X64_REGISTER_R11))
+                                    {
+                                        register_index = candidate;
+                                        used_registers[candidate] = true;
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if (!found)
+                                {
+                                    result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                    return result;
+                                }
+                            }
+                            asm_registers[operand_index] = register_index;
                         }
                         for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
                         {
@@ -11925,33 +12329,28 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             {
                                 continue;
                             }
-                            u64 constraint_index = constraint & 0xff;
-                            if (constraint_index >= BUSTER_ARRAY_LENGTH(registers))
-                            {
-                                result.error = CODEGEN_ERROR_INVALID_IR;
-                                return result;
-                            }
                             IrValueId input = instruction->operands[operand_index];
                             IrType* input_type = ir_type_from_id(&program->types, function->values[input.value].canonical_type);
-                            bool wide = input_type && input_type->layout.size > 4;
-                            if (wide)
+                            if (!input_type || !input_type->layout.resolved || input_type->layout.size > UINT32_MAX ||
+                                !codegen_canonical_x64_asm_memory_width((u32)input_type->layout.size))
                             {
-                                codegen_emit_u8(&buffer, 0x48);
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
                             }
-                            codegen_emit_u8(&buffer, 0x8b);
-                            codegen_emit_u8(&buffer, (u8)(0x85 | (registers[constraint_index] << 3)));
-                            codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[input.value]));
+                            if (indirect[operand_index])
+                            {
+                                codegen_canonical_x64_asm_load(&buffer, X64_REGISTER_R11, X64_REGISTER_RBP,
+                                                              (u32)(-(s32)value_offsets[input.value]), 8);
+                                codegen_canonical_x64_asm_load(&buffer, asm_registers[operand_index], X64_REGISTER_R11, 0,
+                                                              (u32)input_type->layout.size);
+                            }
+                            else
+                            {
+                                codegen_canonical_x64_asm_load(&buffer, asm_registers[operand_index], X64_REGISTER_RBP,
+                                                              (u32)(-(s32)value_offsets[input.value]), (u32)input_type->layout.size);
+                            }
                         }
-                        if (jump_label)
-                        {
-                            codegen_emit_u8(&buffer, 0xe9);
-                            branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
-                                .target = instruction->targets[jump_target_index],
-                                .offset = (u32)buffer.count,
-                            };
-                            codegen_emit_u32(&buffer, 0);
-                        }
-                        else if (cpuid || xgetbv || undefined)
+                        if (cpuid || xgetbv || undefined)
                         {
                             codegen_emit_u8(&buffer, 0x0f);
                             codegen_emit_u8(&buffer, cpuid ? 0xa2 : xgetbv ? 0x01 : 0x0b);
@@ -11980,45 +12379,57 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             {
                                 continue;
                             }
-                            u64 constraint_index = constraint & 0xff;
-                            if (constraint_index >= BUSTER_ARRAY_LENGTH(registers))
+                            IrValueId place_id = instruction->operands[operand_index];
+                            if (place_id.value >= function->value_count)
                             {
                                 result.error = CODEGEN_ERROR_INVALID_IR;
                                 return result;
                             }
-                            IrValueId place_id = instruction->operands[operand_index];
                             IrValue* place = function->values + place_id.value;
+                            if (place->definition.value >= function->instruction_count)
+                            {
+                                result.error = CODEGEN_ERROR_INVALID_IR;
+                                return result;
+                            }
                             IrInstruction* definition = function->instructions + place->definition.value;
                             IrType* output_type = ir_type_from_id(&program->types, place->canonical_type);
-                            bool wide = output_type && output_type->layout.size > 4;
-                            bool indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-                                            definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE;
-                            if (indirect)
+                            if (!output_type || !output_type->layout.resolved || output_type->layout.size > UINT32_MAX ||
+                                !codegen_canonical_x64_asm_memory_width((u32)output_type->layout.size))
                             {
-                                codegen_emit_u8(&buffer, 0x4c);
-                                codegen_emit_u8(&buffer, 0x8b);
-                                codegen_emit_u8(&buffer, 0x9d);
-                                codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[place_id.value]));
-                                codegen_emit_u8(&buffer, wide ? 0x49 : 0x41);
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, (u8)((registers[constraint_index] << 3) | 3));
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            bool output_indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
+                                                   definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE;
+                            if (output_indirect)
+                            {
+                                codegen_canonical_x64_asm_load(&buffer, X64_REGISTER_R11, X64_REGISTER_RBP,
+                                                              (u32)(-(s32)value_offsets[place_id.value]), 8);
+                                codegen_canonical_x64_asm_store(&buffer, X64_REGISTER_R11, asm_registers[operand_index], 0,
+                                                               (u32)output_type->layout.size);
                             }
                             else
                             {
-                                if (wide)
-                                {
-                                    codegen_emit_u8(&buffer, 0x48);
-                                }
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, (u8)(0x85 | (registers[constraint_index] << 3)));
-                                codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[place_id.value]));
+                                codegen_canonical_x64_asm_store(&buffer, X64_REGISTER_RBP, asm_registers[operand_index],
+                                                               (u32)(-(s32)value_offsets[place_id.value]), (u32)output_type->layout.size);
                             }
                         }
-                        if (preserve_b)
+                        // Inline assembly may use RBX for a fixed b operand or
+                        // declare it clobbered.  Restore the ABI-owned value
+                        // before either falling through or taking an asm-goto
+                        // edge; otherwise a successor can observe the clobber
+                        // or call with an invalid callee-saved register.
+                        C_X64_RESTORE_RBX();
+                        if (jump_label)
                         {
-                            codegen_emit_u8(&buffer, 0x5b);
+                            codegen_emit_u8(&buffer, 0xe9);
+                            branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                                .target = instruction->targets[jump_target_index],
+                                .offset = (u32)buffer.count,
+                            };
+                            codegen_emit_u32(&buffer, 0);
                         }
-                        if (instruction->target_count && !jump_label)
+                        else if (instruction->target_count)
                         {
                             codegen_emit_u8(&buffer, 0xe9);
                             branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
@@ -12090,6 +12501,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                         integer_index += 1;
                                     }
                                 }
+                                C_X64_RESTORE_RBX();
                                 codegen_canonical_x64_emit_return(&buffer, frame_size, result.abi, windows_dynamic_stack);
                                 instruction_id = instruction->next;
                                 continue;
@@ -12127,6 +12539,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 codegen_emit_u8(&buffer, 0x48);
                                 codegen_emit_u8(&buffer, 0x89);
                                 codegen_emit_u8(&buffer, 0xc8);
+                                C_X64_RESTORE_RBX();
                                 codegen_canonical_x64_emit_return(&buffer, frame_size, result.abi, windows_dynamic_stack);
                                 instruction_id = instruction->next;
                                 continue;
@@ -12156,6 +12569,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 codegen_emit_u32(&buffer, (u32)(C_X64_FRAME_DISPLACEMENT(value_offsets[return_value.value]) + 8));
                             }
                         }
+                        C_X64_RESTORE_RBX();
                         codegen_canonical_x64_emit_return(&buffer, frame_size, result.abi, windows_dynamic_stack);
                     }
                     else
@@ -12167,6 +12581,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
 #undef C_X64_LOAD
 #undef C_X64_RECORD_FLOAT_STORE
 #undef C_X64_LOAD_FLOAT
+#undef C_X64_RESTORE_RBX
                 }
                 else
                 {
@@ -13921,7 +14336,18 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             .aarch64 = true,
                             .label_address = true,
                         };
+                        branch_patches[branch_patch_count - 1].secondary_offset = (u32)buffer.count + 4;
+                        // Materialize the byte delta from this ADR to the
+                        // target block.  Unlike ADRP, this remains correct
+                        // when the text section is placed at a non-page
+                        // aligned address or concatenated after another
+                        // object: both addresses move by the same amount.
                         codegen_emit_u32(&buffer, 0x10000009);
+                        codegen_emit_u32(&buffer, 0xd280000a);
+                        codegen_emit_u32(&buffer, 0xf2a0000a);
+                        codegen_emit_u32(&buffer, 0xf2c0000a);
+                        codegen_emit_u32(&buffer, 0xf2e0000a);
+                        codegen_emit_u32(&buffer, 0x8b0a0129);
                         C_A64_STORE(9);
                     }
                     else if (instruction->opcode == IR_OPCODE_BRANCH)
@@ -13991,7 +14417,8 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     {
                         bool empty = !instruction->literal.length;
                         bool brk = string_equal(instruction->literal, S8("brk #0"));
-                        bool nop = string_equal(instruction->literal, S8("nop"));
+                        u32 nop_count = codegen_canonical_a64_nop_count(instruction->literal);
+                        bool nop = nop_count != 0;
                         bool yield = string_equal(instruction->literal, S8("yield"));
                         bool wait_event = string_equal(instruction->literal, S8("wfe"));
                         bool wait_interrupt = string_equal(instruction->literal, S8("wfi"));
@@ -13999,18 +14426,143 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         bool send_event_local = string_equal(instruction->literal, S8("sevl"));
                         u32 jump_target_index = 0;
                         bool jump_label = codegen_inline_assembly_jump_target(instruction, instruction->literal, S8("b %l"), &jump_target_index);
-                        bool has_output = false;
-                        for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
-                        {
-                            has_output |= (instruction->immediates[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
-                        }
-                        bool allow_goto_inputs = instruction->target_count != 0 && !has_output && (empty || jump_label);
                         if ((!empty && !brk && !nop && !yield && !wait_event && !wait_interrupt && !send_event && !send_event_local && !jump_label) ||
-                            (jump_label && instruction->target_count < 2) ||
-                            (!allow_goto_inputs && (instruction->operand_count || instruction->immediate_count)))
+                            (jump_label && instruction->target_count < 2) || instruction->operand_count != instruction->immediate_count ||
+                            instruction->operand_name_count != instruction->operand_count ||
+                            (instruction->operand_count && (!instruction->operands || !instruction->immediates || !instruction->operand_names)) ||
+                            (instruction->clobber_count && !instruction->clobbers))
                         {
                             result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                             return result;
+                        }
+                        u32* asm_registers = arena_allocate(arena, u32, instruction->operand_count ? instruction->operand_count : 1);
+                        bool* asm_indirect = arena_allocate(arena, bool, instruction->operand_count ? instruction->operand_count : 1);
+                        bool used_asm_registers[8] = {0};
+                        // x16 is a valid eighth operand register.  Keep the
+                        // address scratch separate so an indirect eighth
+                        // output cannot overwrite its own pointer.
+                        u32 asm_address_register = 17;
+                        for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+                        {
+                            u64 constraint = instruction->immediates[operand_index];
+                            if ((constraint & 0xff) != IR_INLINE_ASSEMBLY_CONSTRAINT_R)
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            IrValueId operand = instruction->operands[operand_index];
+                            if (operand.value >= function->value_count || function->values[operand.value].definition.value >= function->instruction_count)
+                            {
+                                result.error = CODEGEN_ERROR_INVALID_IR;
+                                return result;
+                            }
+                            IrInstruction* definition = function->instructions + function->values[operand.value].definition.value;
+                            asm_indirect[operand_index] = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
+                                                          definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE;
+                            u32 register_index = 0;
+                            bool found = false;
+                            for (u32 candidate = 0; candidate < BUSTER_ARRAY_LENGTH(used_asm_registers); candidate += 1)
+                            {
+                                if (!used_asm_registers[candidate])
+                                {
+                                    used_asm_registers[candidate] = true;
+                                    register_index = 9 + candidate;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found)
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            asm_registers[operand_index] = register_index;
+                            IrType* operand_type = ir_type_from_id(&program->types, function->values[operand.value].canonical_type);
+                            if (!operand_type || !operand_type->layout.resolved || operand_type->layout.size > UINT32_MAX ||
+                                !codegen_canonical_a64_asm_memory_width((u32)operand_type->layout.size))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) == 0 ||
+                                (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0)
+                            {
+                                if (asm_indirect[operand_index])
+                                {
+                                    if (!codegen_canonical_a64_frame_memory_operation(&buffer, asm_address_register, value_offsets[operand.value], 8, false, false) ||
+                                        !codegen_canonical_a64_memory_operation_base(&buffer, register_index, 0, (u32)operand_type->layout.size, false, false,
+                                                                                      asm_address_register))
+                                    {
+                                        result.error = CODEGEN_ERROR_CAPACITY;
+                                        return result;
+                                    }
+                                }
+                                else if (!codegen_canonical_a64_frame_memory_operation(&buffer, register_index, value_offsets[operand.value],
+                                                                                         (u32)operand_type->layout.size, false, false))
+                                {
+                                    result.error = CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
+                            }
+                        }
+                        if (!empty)
+                        {
+                            if (nop)
+                            {
+                                for (u32 nop_index = 0; nop_index < nop_count; nop_index += 1)
+                                {
+                                    codegen_emit_u32(&buffer, 0xd503201f);
+                                }
+                            }
+                            else if (!jump_label)
+                            {
+                                codegen_emit_u32(&buffer, brk              ? 0xd4200000
+                                                          : yield          ? 0xd503203f
+                                                          : wait_event     ? 0xd503205f
+                                                          : wait_interrupt ? 0xd503207f
+                                                          : send_event     ? 0xd503209f
+                                                                           : 0xd50320bf);
+                            }
+                        }
+                        for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+                        {
+                            u64 constraint = instruction->immediates[operand_index];
+                            if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) == 0)
+                            {
+                                continue;
+                            }
+                            IrValueId place_id = instruction->operands[operand_index];
+                            if (place_id.value >= function->value_count || function->values[place_id.value].definition.value >= function->instruction_count)
+                            {
+                                result.error = CODEGEN_ERROR_INVALID_IR;
+                                return result;
+                            }
+                            IrType* output_type = ir_type_from_id(&program->types, function->values[place_id.value].canonical_type);
+                            if (!output_type || !output_type->layout.resolved || output_type->layout.size > UINT32_MAX ||
+                                !codegen_canonical_a64_asm_memory_width((u32)output_type->layout.size))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            IrInstruction* definition = function->instructions + function->values[place_id.value].definition.value;
+                            bool output_indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
+                                                   definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE;
+                            if (output_indirect)
+                            {
+                                if (!codegen_canonical_a64_frame_memory_operation(&buffer, asm_address_register, value_offsets[place_id.value], 8, false, false) ||
+                                    !codegen_canonical_a64_memory_operation_base(&buffer, asm_registers[operand_index], 0,
+                                                                                   (u32)output_type->layout.size, true, false, asm_address_register))
+                                {
+                                    result.error = CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
+                            }
+                            else if (!codegen_canonical_a64_frame_memory_operation(&buffer, asm_registers[operand_index], value_offsets[place_id.value],
+                                                                                   (u32)output_type->layout.size, true, false))
+                            {
+                                result.error = CODEGEN_ERROR_CAPACITY;
+                                return result;
+                            }
                         }
                         if (jump_label)
                         {
@@ -14021,17 +14573,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             };
                             codegen_emit_u32(&buffer, 0x14000000);
                         }
-                        else if (!empty)
-                        {
-                            codegen_emit_u32(&buffer, brk              ? 0xd4200000
-                                                      : nop            ? 0xd503201f
-                                                      : yield          ? 0xd503203f
-                                                      : wait_event     ? 0xd503205f
-                                                      : wait_interrupt ? 0xd503207f
-                                                      : send_event     ? 0xd503209f
-                                                                       : 0xd50320bf);
-                        }
-                        if (instruction->target_count && !jump_label)
+                        else if (instruction->target_count)
                         {
                             branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
                                 .target = instruction->targets[0],
@@ -14208,17 +14750,21 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             {
                 if (patch.label_address)
                 {
-                    if ((delta & 3) || delta < -(1 << 20) || delta >= (1 << 20))
+                    if (!patch.secondary_offset || patch.secondary_offset < patch.offset || patch.secondary_offset > buffer.count || buffer.count - patch.secondary_offset < 20)
                     {
                         result.error = CODEGEN_ERROR_CAPACITY;
                         return result;
                     }
-                    u32 instruction = 0;
-                    memcpy(&instruction, buffer.bytes + patch.offset, sizeof(instruction));
-                    u32 immediate = (u32)(delta >> 2);
-                    instruction |= ((u32)delta & 3) << 29;
-                    instruction |= (immediate & 0x7ffff) << 5;
-                    memcpy(buffer.bytes + patch.offset, &instruction, sizeof(instruction));
+                    s64 label_address_delta = (s64)block_offsets[patch.target.value] - (s64)patch.offset;
+                    u64 bits = (u64)label_address_delta;
+                    u32 movz = UINT32_C(0xd280000a) | ((u32)(bits & 0xffff) << 5);
+                    u32 movk16 = UINT32_C(0xf2a0000a) | ((u32)((bits >> 16) & 0xffff) << 5);
+                    u32 movk32 = UINT32_C(0xf2c0000a) | ((u32)((bits >> 32) & 0xffff) << 5);
+                    u32 movk48 = UINT32_C(0xf2e0000a) | ((u32)((bits >> 48) & 0xffff) << 5);
+                    memcpy(buffer.bytes + patch.secondary_offset, &movz, sizeof(movz));
+                    memcpy(buffer.bytes + patch.secondary_offset + 4, &movk16, sizeof(movk16));
+                    memcpy(buffer.bytes + patch.secondary_offset + 8, &movk32, sizeof(movk32));
+                    memcpy(buffer.bytes + patch.secondary_offset + 12, &movk48, sizeof(movk48));
                     continue;
                 }
                 if ((delta & 3) || (patch.conditional ? delta < -(1 << 20) || delta >= (1 << 20) : delta < -(1 << 27) || delta >= (1 << 27)))
@@ -14233,11 +14779,41 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 memcpy(buffer.bytes + patch.offset, &instruction, sizeof(instruction));
             }
         }
+        for (u32 relocation_index = 0; relocation_index < result.relocation_count; relocation_index += 1)
+        {
+            CodegenModuleRelocation* relocation = result.relocations + relocation_index;
+            if (!relocation->label_address || relocation->symbol.value != function->symbol.value)
+            {
+                continue;
+            }
+            if (relocation->label_block.value >= function->block_count)
+            {
+                result.error = CODEGEN_ERROR_INVALID_IR;
+                return result;
+            }
+            s64 block_addend = (s64)block_offsets[relocation->label_block.value] - (s64)descriptor->code_offset;
+            if ((block_addend > 0 && relocation->addend > INT64_MAX - block_addend) ||
+                (block_addend < 0 && relocation->addend < INT64_MIN - block_addend))
+            {
+                result.error = CODEGEN_ERROR_CAPACITY;
+                return result;
+            }
+            relocation->addend += block_addend;
+            relocation->label_address = false;
+        }
         descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
         if (options.debug_info)
         {
             codegen_record_canonical_locations(&result, function, value_offsets, block_offsets, descriptor->code_offset, (u32)buffer.count, target, frame_size,
                                                (s32)canonical_x64_frame_base_offset, debug_location_capacity);
+        }
+    }
+    for (u32 relocation_index = 0; relocation_index < result.relocation_count; relocation_index += 1)
+    {
+        if (result.relocations[relocation_index].label_address)
+        {
+            result.error = CODEGEN_ERROR_INVALID_IR;
+            return result;
         }
     }
     for (u32 assembly_index = 0; assembly_index < module->assembly_count; assembly_index += 1)

@@ -193,6 +193,106 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_has
 }
 #endif
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_label_relocations(ObjectFile* object, u32* count_out)
+{
+    if (!object || !count_out || object->error != OBJECT_ERROR_NONE || !object->sections || !object->symbols || !object->relocations ||
+        object->symbol_count == 0)
+    {
+        return false;
+    }
+    ByteSlice text = object->sections[OBJECT_SECTION_TEXT].data;
+    u32 count = 0;
+    bool distinct_addend = false;
+    s64 first_addend = 0;
+    for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + relocation_index;
+        if (relocation->section != OBJECT_SECTION_DATA || relocation->kind != OBJECT_RELOCATION_ABSOLUTE64)
+        {
+            continue;
+        }
+        if (relocation->symbol >= object->symbol_count || relocation->offset > object->sections[OBJECT_SECTION_DATA].data.length ||
+            sizeof(u64) > object->sections[OBJECT_SECTION_DATA].data.length - relocation->offset)
+        {
+            return false;
+        }
+        ObjectSymbol* symbol = object->symbols + relocation->symbol;
+        if (symbol->section != OBJECT_SECTION_TEXT || symbol->kind != OBJECT_SYMBOL_FUNCTION || relocation->addend < 0 ||
+            (symbol->size && (u64)relocation->addend >= symbol->size) || symbol->value > text.length || (u64)relocation->addend > text.length - symbol->value)
+        {
+            return false;
+        }
+        for (u32 previous_index = 0; previous_index < relocation_index; previous_index += 1)
+        {
+            ObjectRelocation* previous = object->relocations + previous_index;
+            if (previous->section == OBJECT_SECTION_DATA && previous->kind == OBJECT_RELOCATION_ABSOLUTE64 && previous->offset == relocation->offset)
+            {
+                return false;
+            }
+        }
+        if (count == 0)
+        {
+            first_addend = relocation->addend;
+        }
+        else
+        {
+            distinct_addend |= relocation->addend != first_addend;
+        }
+        count += 1;
+    }
+    *count_out = count;
+    return count >= 2 && distinct_addend;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_label_relocations_roundtrip(ObjectFile* source, ObjectFile* roundtrip)
+{
+    if (!source || !roundtrip || source->error != OBJECT_ERROR_NONE || roundtrip->error != OBJECT_ERROR_NONE)
+    {
+        return false;
+    }
+    u32 source_count = 0;
+    u32 roundtrip_count = 0;
+    if (!compiler_driver_test_label_relocations(source, &source_count) || !compiler_driver_test_label_relocations(roundtrip, &roundtrip_count) ||
+        source_count != roundtrip_count)
+    {
+        return false;
+    }
+    for (u32 source_index = 0; source_index < source->relocation_count; source_index += 1)
+    {
+        ObjectRelocation* source_relocation = source->relocations + source_index;
+        if (source_relocation->section != OBJECT_SECTION_DATA || source_relocation->kind != OBJECT_RELOCATION_ABSOLUTE64)
+        {
+            continue;
+        }
+        if (source_relocation->symbol >= source->symbol_count)
+        {
+            return false;
+        }
+        String8 source_symbol = source->symbols[source_relocation->symbol].name;
+        bool found = false;
+        for (u32 roundtrip_index = 0; roundtrip_index < roundtrip->relocation_count; roundtrip_index += 1)
+        {
+            ObjectRelocation* roundtrip_relocation = roundtrip->relocations + roundtrip_index;
+            if (roundtrip_relocation->section != OBJECT_SECTION_DATA || roundtrip_relocation->kind != OBJECT_RELOCATION_ABSOLUTE64 ||
+                roundtrip_relocation->offset != source_relocation->offset || roundtrip_relocation->addend != source_relocation->addend ||
+                roundtrip_relocation->symbol >= roundtrip->symbol_count)
+            {
+                continue;
+            }
+            found = string_equal(roundtrip->symbols[roundtrip_relocation->symbol].name, source_symbol);
+            if (found)
+            {
+                break;
+            }
+        }
+        if (!found)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ByteSlice compiler_driver_test_archive(Arena* arena, ByteSlice* members, String8* names, u32 member_count)
 {
     u64 size = 8;
@@ -1578,6 +1678,29 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_labels_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // A zeroed label-table slot must remain a non-label value.  The runtime
+    // dispatch therefore traps on the selector-0 path instead of treating a
+    // sibling label as an over-approximation of the overwritten element.
+    String8 c_invalid_labels_path = buster_test_temporary_path(arguments->arena, S8("buster-c-invalid-labels"),
+#if BUSTER_WINDOWS
+                                                                S8(".exe"));
+#else
+                                                                S8(""));
+#endif
+    String8 c_invalid_labels_command_line[] = {
+        S8("-g0"),
+        S8("-o"),
+        c_invalid_labels_path,
+        S8("tests/basic_c_invalid_labels.c"),
+    };
+    CompilerDriverResult c_invalid_labels = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_invalid_labels_command_line)));
+    BUSTER_TEST(arguments, c_invalid_labels.error == COMPILER_DRIVER_ERROR_ANALYSIS);
+    BUSTER_TEST(arguments, c_invalid_labels.codegen_error == CODEGEN_ERROR_NONE);
+    BUSTER_TEST(arguments, c_invalid_labels.tokenizer_error_count == 0 && c_invalid_labels.parser_diagnostic_count == 0 &&
+                           c_invalid_labels.analysis_diagnostic_count == 1 && !c_invalid_labels.has_object);
+    BUSTER_TEST(arguments, string_starts_with_sequence(c_invalid_labels.diagnostic,
+                                                       S8("tests/basic_c_invalid_labels.c:17:11: in function 'invalid_unsafe_branch': computed goto requires a function-local void pointer label value")));
     String8 c_labels_aarch64_path = buster_test_temporary_path(arguments->arena, S8("buster-c-labels-aarch64"), S8(".o"));
     String8 c_labels_aarch64_command_line[] = {
         S8("-c"),
@@ -1593,7 +1716,239 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_labels_aarch64.has_object);
     if (c_labels_aarch64.has_object)
     {
-        BUSTER_TEST(arguments, c_labels_aarch64.object.sections[OBJECT_SECTION_TEXT].data.length != 0);
+        ByteSlice aarch64_label_text = c_labels_aarch64.object.sections[OBJECT_SECTION_TEXT].data;
+        BUSTER_TEST(arguments, aarch64_label_text.length != 0);
+        bool asm_goto_value_found = false;
+        bool asm_goto_value_branch = false;
+        bool asm_goto_value_sevl = false;
+        for (u32 symbol_index = 0; symbol_index < c_labels_aarch64.object.symbol_count; symbol_index += 1)
+        {
+            ObjectSymbol* symbol = c_labels_aarch64.object.symbols + symbol_index;
+            if (!string_equal(symbol->name, S8("asm_goto_value")) || symbol->section != OBJECT_SECTION_TEXT || symbol->value > aarch64_label_text.length ||
+                symbol->size > aarch64_label_text.length - symbol->value)
+            {
+                continue;
+            }
+            asm_goto_value_found = true;
+            for (u64 byte_offset = symbol->value; byte_offset + sizeof(u32) <= symbol->value + symbol->size; byte_offset += sizeof(u32))
+            {
+                u32 word = 0;
+                memcpy(&word, aarch64_label_text.pointer + byte_offset, sizeof(word));
+                asm_goto_value_sevl |= word == UINT32_C(0xd50320bf);
+                asm_goto_value_branch |= (word & UINT32_C(0xfc000000)) == UINT32_C(0x14000000);
+            }
+        }
+        BUSTER_TEST(arguments, asm_goto_value_found && asm_goto_value_branch && !asm_goto_value_sevl);
+        u32 aarch64_label_relocation_count = 0;
+        BUSTER_TEST(arguments, compiler_driver_test_label_relocations(&c_labels_aarch64.object, &aarch64_label_relocation_count));
+        ObjectFormat aarch64_format = object_format_for_target(c_labels_aarch64.object.target);
+        ObjectArtifact aarch64_artifact = object_write(arguments->arena, &c_labels_aarch64.object, aarch64_format);
+        BUSTER_TEST(arguments, aarch64_artifact.error == OBJECT_ERROR_NONE);
+        ObjectFile aarch64_roundtrip = object_read(arguments->arena, aarch64_artifact.bytes, c_labels_aarch64.object.target);
+        BUSTER_TEST(arguments, compiler_driver_test_label_relocations_roundtrip(&c_labels_aarch64.object, &aarch64_roundtrip));
+    }
+    {
+        Arena* long_label_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
+        String8 long_label_prefix = S8("int long_label_address(void)\n{\n    void *target = &&target;\n");
+        String8 long_label_asm_prefix = S8("    __asm__(\"");
+        String8 long_label_asm_nop = S8("nop\\n");
+        String8 long_label_asm_suffix = S8("\");\n");
+        String8 long_label_suffix = S8("    goto *target;\ntarget:\n    return 0;\n}\n");
+        u64 statement_count = 9000;
+        u64 nops_per_statement = 31;
+        u64 statement_length = long_label_asm_prefix.length + nops_per_statement * long_label_asm_nop.length + long_label_asm_suffix.length;
+        u64 source_length = long_label_prefix.length + statement_count * statement_length + long_label_suffix.length;
+        char8* source_pointer = arena_allocate(long_label_arena, char8, source_length);
+        u64 source_offset = 0;
+        memcpy(source_pointer + source_offset, long_label_prefix.pointer, long_label_prefix.length);
+        source_offset += long_label_prefix.length;
+        for (u64 statement_index = 0; statement_index < statement_count; statement_index += 1)
+        {
+            memcpy(source_pointer + source_offset, long_label_asm_prefix.pointer, long_label_asm_prefix.length);
+            source_offset += long_label_asm_prefix.length;
+            for (u64 nop_index = 0; nop_index < nops_per_statement; nop_index += 1)
+            {
+                memcpy(source_pointer + source_offset, long_label_asm_nop.pointer, long_label_asm_nop.length);
+                source_offset += long_label_asm_nop.length;
+            }
+            memcpy(source_pointer + source_offset, long_label_asm_suffix.pointer, long_label_asm_suffix.length);
+            source_offset += long_label_asm_suffix.length;
+        }
+        memcpy(source_pointer + source_offset, long_label_suffix.pointer, long_label_suffix.length);
+        source_offset += long_label_suffix.length;
+        String8 long_label_source_path = buster_test_temporary_path(long_label_arena, S8("buster-c-label-address-long"), S8(".c"));
+        BUSTER_TEST(arguments, file_write(long_label_source_path, (ByteSlice){.pointer = (u8*)source_pointer, .length = source_offset}));
+        String8 long_label_object_path = buster_test_temporary_path(long_label_arena, S8("buster-c-label-address-long"), S8(".o"));
+        String8 long_label_command_line[] = {
+            S8("-c"), S8("-g0"), S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), long_label_object_path, long_label_source_path,
+        };
+        CompilerDriverResult long_label = compiler_driver_execute_invocation(
+            long_label_arena, compiler_driver_parse_arguments(long_label_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(long_label_command_line)));
+        BUSTER_TEST(arguments, long_label.error == COMPILER_DRIVER_ERROR_NONE && long_label.has_object);
+        bool long_label_sequence = false;
+        if (long_label.has_object)
+        {
+            ByteSlice long_text = long_label.object.sections[OBJECT_SECTION_TEXT].data;
+            u64 function_offset = 0;
+            u64 function_size = 0;
+            bool function_found = false;
+            for (u32 symbol_index = 0; symbol_index < long_label.object.symbol_count; symbol_index += 1)
+            {
+                ObjectSymbol* symbol = long_label.object.symbols + symbol_index;
+                if (string_equal(symbol->name, S8("long_label_address")) && symbol->section == OBJECT_SECTION_TEXT)
+                {
+                    function_offset = symbol->value;
+                    function_size = symbol->size;
+                    function_found = true;
+                    break;
+                }
+            }
+            BUSTER_TEST(arguments, function_found && function_offset <= long_text.length && function_size <= long_text.length - function_offset);
+            if (function_found && function_offset <= long_text.length && function_size <= long_text.length - function_offset)
+            {
+                for (u64 byte_offset = function_offset; byte_offset + 24 <= function_offset + function_size; byte_offset += 4)
+                {
+                    u32 adr = 0;
+                    u32 movz = 0;
+                    u32 movk16 = 0;
+                    u32 movk32 = 0;
+                    u32 movk48 = 0;
+                    u32 add = 0;
+                    memcpy(&adr, long_text.pointer + byte_offset, sizeof(adr));
+                    memcpy(&movz, long_text.pointer + byte_offset + 4, sizeof(movz));
+                    memcpy(&movk16, long_text.pointer + byte_offset + 8, sizeof(movk16));
+                    memcpy(&movk32, long_text.pointer + byte_offset + 12, sizeof(movk32));
+                    memcpy(&movk48, long_text.pointer + byte_offset + 16, sizeof(movk48));
+                    memcpy(&add, long_text.pointer + byte_offset + 20, sizeof(add));
+                    bool is_adr_x9 = adr == UINT32_C(0x10000009);
+                    bool is_movz_x10 = (movz & UINT32_C(0xffe0001f)) == UINT32_C(0xd280000a);
+                    bool is_movk16_x10 = (movk16 & UINT32_C(0xffe0001f)) == UINT32_C(0xf2a0000a);
+                    bool is_movk32_x10 = (movk32 & UINT32_C(0xffe0001f)) == UINT32_C(0xf2c0000a);
+                    bool is_movk48_x10 = (movk48 & UINT32_C(0xffe0001f)) == UINT32_C(0xf2e0000a);
+                    bool is_add_x9_x9_x10 = add == UINT32_C(0x8b0a0129);
+                    long_label_sequence |= is_adr_x9 && is_movz_x10 && is_movk16_x10 && is_movk32_x10 && is_movk48_x10 && is_add_x9_x9_x10;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, long_label_sequence);
+        BUSTER_TEST(arguments, arena_destroy(long_label_arena, 1));
+    }
+    String8 c_labels_object_path = buster_test_temporary_path(arguments->arena, S8("buster-c-labels-object"), S8(".o"));
+    String8 c_labels_object_command_line[] = {
+        S8("-c"),
+        S8("-o"),
+        c_labels_object_path,
+        S8("tests/basic_c_labels.c"),
+    };
+    CompilerDriverResult c_labels_object = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_labels_object_command_line)));
+    BUSTER_TEST(arguments, c_labels_object.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, c_labels_object.has_object);
+    if (c_labels_object.has_object)
+    {
+        ByteSlice text = c_labels_object.object.sections[OBJECT_SECTION_TEXT].data;
+        BUSTER_TEST(arguments, text.length != 0);
+        u32 label_relocation_count = 0;
+        BUSTER_TEST(arguments, compiler_driver_test_label_relocations(&c_labels_object.object, &label_relocation_count));
+        ObjectFormat label_format = object_format_for_target(c_labels_object.object.target);
+        ObjectArtifact label_artifact = object_write(arguments->arena, &c_labels_object.object, label_format);
+        BUSTER_TEST(arguments, label_artifact.error == OBJECT_ERROR_NONE);
+        ObjectFile label_roundtrip = object_read(arguments->arena, label_artifact.bytes, c_labels_object.object.target);
+        BUSTER_TEST(arguments, compiler_driver_test_label_relocations_roundtrip(&c_labels_object.object, &label_roundtrip));
+#if BUSTER_CPU_ARCH_X86_64
+        u64 function_offset = 0;
+        u64 function_size = 0;
+        bool function_found = false;
+        for (u32 symbol_index = 0; symbol_index < c_labels_object.object.symbol_count; symbol_index += 1)
+        {
+            ObjectSymbol* symbol = c_labels_object.object.symbols + symbol_index;
+            if (string_equal(symbol->name, S8("asm_goto_saved_register")) && symbol->section == OBJECT_SECTION_TEXT)
+            {
+                function_offset = symbol->value;
+                function_size = symbol->size;
+                function_found = true;
+                break;
+            }
+        }
+        BUSTER_TEST(arguments, function_found && function_offset <= text.length && function_size <= text.length - function_offset);
+        bool restored_before_taken_edge = false;
+        bool restored_before_fallthrough = false;
+        if (function_found && function_offset <= text.length && function_size <= text.length - function_offset)
+        {
+            for (u64 byte_index = function_offset; byte_index + 7 < function_offset + function_size; byte_index += 1)
+            {
+                bool restore = text.pointer[byte_index] == 0x48 && text.pointer[byte_index + 1] == 0x8b && text.pointer[byte_index + 2] == 0x9d;
+                if (restore)
+                {
+                    restored_before_taken_edge |= text.pointer[byte_index + 7] == 0xe9;
+                    restored_before_fallthrough |= text.pointer[byte_index + 7] == 0xc9;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, restored_before_taken_edge);
+        BUSTER_TEST(arguments, restored_before_fallthrough);
+#endif
+    }
+    String8 invalid_asm_jump_path = buster_test_temporary_path(arguments->arena, S8("buster-invalid-asm-jump"), S8(".o"));
+    String8 invalid_asm_jump_command_line[] = {
+        S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-o"), invalid_asm_jump_path, S8("tests/basic_c_invalid_asm_goto.c"),
+    };
+    CompilerDriverResult invalid_asm_jump = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_asm_jump_command_line)));
+    BUSTER_TEST(arguments, invalid_asm_jump.error == COMPILER_DRIVER_ERROR_CODEGEN);
+    BUSTER_TEST(arguments, invalid_asm_jump.codegen_error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION);
+    BUSTER_TEST(arguments, invalid_asm_jump.tokenizer_error_count == 0);
+    BUSTER_TEST(arguments, invalid_asm_jump.parser_diagnostic_count == 0);
+    BUSTER_TEST(arguments, invalid_asm_jump.analysis_diagnostic_count == 0);
+    BUSTER_TEST(arguments, !invalid_asm_jump.has_object && invalid_asm_jump.diagnostic.length != 0);
+    BUSTER_TEST(arguments, string_starts_with_sequence(invalid_asm_jump.diagnostic, S8("C code generation failed with error 2, function 0 ('main'")));
+    {
+        String8 unsupported_template_source_path = buster_test_temporary_path(arguments->arena, S8("buster-invalid-asm-conditional"), S8(".c"));
+        String8 unsupported_template_source = S8("int conditional_asm_goto(int value) {"
+                                                 " __asm__ goto (\"jne %l1\" : : \"r\"(value) : \"cc\" : taken);"
+                                                 " return 0; taken: return 1; }\n");
+        BUSTER_TEST(arguments, file_write(unsupported_template_source_path, BUSTER_SLICE_TO_BYTE_SLICE(unsupported_template_source)));
+        String8 unsupported_template_object_path = buster_test_temporary_path(arguments->arena, S8("buster-invalid-asm-conditional"), S8(".o"));
+        String8 unsupported_template_command_line[] = {
+            S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-o"), unsupported_template_object_path, unsupported_template_source_path,
+        };
+        CompilerDriverResult unsupported_template = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unsupported_template_command_line)));
+        BUSTER_TEST(arguments, unsupported_template.error == COMPILER_DRIVER_ERROR_CODEGEN);
+        BUSTER_TEST(arguments, unsupported_template.codegen_error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION);
+        BUSTER_TEST(arguments, unsupported_template.tokenizer_error_count == 0 && unsupported_template.parser_diagnostic_count == 0 &&
+                               unsupported_template.analysis_diagnostic_count == 0);
+        BUSTER_TEST(arguments, string_starts_with_sequence(unsupported_template.diagnostic,
+                                                           S8("C code generation failed with error 2, function 0 ('conditional_asm_goto'")));
+    }
+    {
+        String8 label_object_targets[] = {
+            S8("x86_64-pc-windows-msvc"), S8("x86_64-apple-macos"), S8("aarch64-pc-windows-msvc"), S8("aarch64-apple-macos"),
+        };
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(label_object_targets); target_index += 1)
+        {
+            TemporalArena label_object_temporary = scratch_begin(&arguments->arena, 1);
+            String8 object_path = buster_test_temporary_path(label_object_temporary.arena, S8("buster-c-label-format"),
+                                                             string_format(label_object_temporary.arena, S8("-{u32}.o"), target_index));
+            String8 label_object_command_line[] = {
+                S8("-c"), S8("-g0"), S8("-target"), label_object_targets[target_index], S8("-o"), object_path, S8("tests/basic_c_labels.c"),
+            };
+            CompilerDriverResult label_object = compiler_driver_execute_invocation(
+                label_object_temporary.arena,
+                compiler_driver_parse_arguments(label_object_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(label_object_command_line)));
+            BUSTER_TEST(arguments, label_object.error == COMPILER_DRIVER_ERROR_NONE && label_object.has_object);
+            if (label_object.error == COMPILER_DRIVER_ERROR_NONE && label_object.has_object)
+            {
+                u32 label_relocation_count = 0;
+                BUSTER_TEST(arguments, compiler_driver_test_label_relocations(&label_object.object, &label_relocation_count));
+                ObjectFormat label_format = object_format_for_target(label_object.object.target);
+                ObjectArtifact label_artifact = object_write(label_object_temporary.arena, &label_object.object, label_format);
+                BUSTER_TEST(arguments, label_artifact.error == OBJECT_ERROR_NONE);
+                ObjectFile label_roundtrip = object_read(label_object_temporary.arena, label_artifact.bytes, label_object.object.target);
+                BUSTER_TEST(arguments, compiler_driver_test_label_relocations_roundtrip(&label_object.object, &label_roundtrip));
+            }
+            scratch_end(label_object_temporary);
+        }
     }
 #if (BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64) || BUSTER_MACOS
     String8 c_thread_local_path = buster_test_temporary_path(arguments->arena, S8("buster-c-thread-local"), S8(""));

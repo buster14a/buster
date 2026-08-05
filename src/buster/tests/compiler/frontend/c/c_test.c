@@ -6307,17 +6307,33 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 {
                     IrValue* label_value = labels_function->values + label_address->result.value;
                     BUSTER_TEST(arguments, label_value->is_label_value);
-                    BUSTER_TEST(arguments, label_address->target_count == 1 && label_value->label_block.value == label_address->targets[0].value);
+                    BUSTER_TEST(arguments, ir_label_provenance_valid(label_value) && label_value->label_block_count == 1 &&
+                                             label_address->target_count == 1 && label_value->label_blocks[0].value == label_address->targets[0].value);
                 }
-                if (indirect_branch && indirect_branch->operand_count == 1 && indirect_branch->target_count >= 2 &&
+                if (indirect_branch && indirect_branch->operand_count == 1 && indirect_branch->target_count >= 1 &&
                     indirect_branch->operands[0].value < labels_function->value_count)
                 {
                     IrValue* target_value = labels_function->values + indirect_branch->operands[0].value;
                     BUSTER_TEST(arguments, target_value->is_label_value);
-                    bool target_in_successors = false;
-                    for (u32 target_index = 0; target_index < indirect_branch->target_count; target_index += 1)
+                    bool target_in_successors = ir_label_provenance_valid(target_value) &&
+                                                indirect_branch->target_count == target_value->label_block_count;
+                    for (u32 label_index = 0; target_in_successors && label_index < target_value->label_block_count; label_index += 1)
                     {
-                        target_in_successors |= indirect_branch->targets[target_index].value == target_value->label_block.value;
+                        bool found = false;
+                        for (u32 target_index = 0; target_index < indirect_branch->target_count; target_index += 1)
+                        {
+                            found |= indirect_branch->targets[target_index].value == target_value->label_blocks[label_index].value;
+                        }
+                        target_in_successors &= found;
+                    }
+                    for (u32 target_index = 0; target_in_successors && target_index < indirect_branch->target_count; target_index += 1)
+                    {
+                        bool found = false;
+                        for (u32 label_index = 0; label_index < target_value->label_block_count; label_index += 1)
+                        {
+                            found |= indirect_branch->targets[target_index].value == target_value->label_blocks[label_index].value;
+                        }
+                        target_in_successors &= found;
                     }
                     BUSTER_TEST(arguments, target_in_successors);
                 }
@@ -6327,9 +6343,532 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                     BUSTER_TEST(arguments, asm_goto->literal.length == 0);
                 }
                 BUSTER_TEST(arguments, ir_validate_canonical_module(labels_lowered.program, labels_module).error == IR_VALIDATION_NONE);
+                if (indirect_branch)
+                {
+                    u32 saved_operand_count = indirect_branch->operand_count;
+                    IrValueId* saved_operands = indirect_branch->operands;
+                    indirect_branch->operands = 0;
+                    IrValidationResult missing_operand = ir_validate_canonical_module(labels_lowered.program, labels_module);
+                    BUSTER_TEST(arguments, missing_operand.error != IR_VALIDATION_NONE);
+                    indirect_branch->operands = saved_operands;
+                    indirect_branch->operand_count = 0;
+                    IrValidationResult wrong_shape = ir_validate_canonical_module(labels_lowered.program, labels_module);
+                    BUSTER_TEST(arguments, wrong_shape.error != IR_VALIDATION_NONE);
+                    indirect_branch->operand_count = saved_operand_count;
+                    IrValueId saved_operand = indirect_branch->operands[0];
+                    indirect_branch->operands[0].value = labels_function->value_count + 1;
+                    IrValidationResult invalid_operand = ir_validate_canonical_module(labels_lowered.program, labels_module);
+                    BUSTER_TEST(arguments, invalid_operand.error != IR_VALIDATION_NONE);
+                    indirect_branch->operands[0] = saved_operand;
+                    IrBlockId saved_target = indirect_branch->targets[0];
+                    indirect_branch->targets[0].value = labels_function->block_count + 1;
+                    IrValidationResult invalid_target = ir_validate_canonical_module(labels_lowered.program, labels_module);
+                    BUSTER_TEST(arguments, invalid_target.error != IR_VALIDATION_NONE);
+                    indirect_branch->targets[0] = saved_target;
+                    if (indirect_branch->target_count < UINT32_MAX)
+                    {
+                        u32 saved_target_count = indirect_branch->target_count;
+                        IrBlockId* saved_targets = indirect_branch->targets;
+                        IrBlockId* extra_targets = arena_allocate(labels_temporary.arena, IrBlockId, saved_target_count + 1);
+                        memcpy(extra_targets, saved_targets, sizeof(IrBlockId) * saved_target_count);
+                        extra_targets[saved_target_count] = saved_targets[0];
+                        indirect_branch->targets = extra_targets;
+                        indirect_branch->target_count += 1;
+                        IrValidationResult extra_target = ir_validate_canonical_module(labels_lowered.program, labels_module);
+                        BUSTER_TEST(arguments, extra_target.error != IR_VALIDATION_NONE);
+                        indirect_branch->targets = saved_targets;
+                        indirect_branch->target_count = saved_target_count;
+                    }
+                }
+                if (label_address)
+                {
+                    IrTypeId saved_type = label_address->canonical_type;
+                    IrTypeId non_void_pointer_type = IR_TYPE_ID_INVALID;
+                    for (u32 value_index = 0; value_index < labels_function->value_count; value_index += 1)
+                    {
+                        IrType* candidate_type = ir_type_from_id(&labels_lowered.program->types, labels_function->values[value_index].canonical_type);
+                        if (candidate_type && candidate_type->kind != IR_TYPE_POINTER)
+                        {
+                            non_void_pointer_type = labels_function->values[value_index].canonical_type;
+                            break;
+                        }
+                    }
+                    if (non_void_pointer_type.value != IR_ID_UNDERLYING_INVALID)
+                    {
+                        label_address->canonical_type = non_void_pointer_type;
+                        IrValidationResult invalid_type = ir_validate_canonical_module(labels_lowered.program, labels_module);
+                        BUSTER_TEST(arguments, invalid_type.error != IR_VALIDATION_NONE);
+                        label_address->canonical_type = saved_type;
+                    }
+                    IrValue* label_value = label_address->result.value < labels_function->value_count ? labels_function->values + label_address->result.value : 0;
+                    if (label_value && label_value->label_block_count == 1 && label_value->label_blocks && labels_function->block_count > 1)
+                    {
+                        IrBlockId alternate = IR_BLOCK_ID_INVALID;
+                        for (u32 block_index = 0; block_index < labels_function->block_count; block_index += 1)
+                        {
+                            if (block_index != label_value->label_blocks[0].value)
+                            {
+                                alternate = (IrBlockId){.value = block_index};
+                                break;
+                            }
+                        }
+                        if (alternate.value != IR_ID_UNDERLYING_INVALID)
+                        {
+                            IrBlockId* saved_blocks = label_value->label_blocks;
+                            label_value->label_blocks = arena_allocate(labels_temporary.arena, IrBlockId, 1);
+                            label_value->label_blocks[0] = alternate;
+                            IrValidationResult invalid_provenance = ir_validate_canonical_module(labels_lowered.program, labels_module);
+                            BUSTER_TEST(arguments, invalid_provenance.error != IR_VALIDATION_NONE);
+                            label_value->label_blocks = saved_blocks;
+                        }
+                    }
+                    IrValueId saved_result = label_address->result;
+                    label_address->result.value = labels_function->value_count + 1;
+                    IrValidationResult invalid_result = ir_validate_canonical_module(labels_lowered.program, labels_module);
+                    BUSTER_TEST(arguments, invalid_result.error != IR_VALIDATION_NONE);
+                    label_address->result = saved_result;
+                }
             }
         }
         scratch_end(labels_temporary);
+    }
+    {
+        TemporalArena label_flow_temporary = scratch_begin(0, 0);
+        String8 label_flow_source = S8("int conditional_labels(int selector) {"
+                                       " goto *(selector ? &&one : &&zero);"
+                                       "zero: return 13;"
+                                       "one: return 17;"
+                                       "}"
+                                       "int table_labels(int selector) {"
+                                       " void *targets[2] = { &&zero, &&one };"
+                                       " goto *targets[selector & 1];"
+                                       "zero: return 19;"
+                                       "one: return 23;"
+                                       "}"
+                                       "int copied_table_labels(int selector) {"
+                                       " void *source[2] = { &&zero, &&one };"
+                                       " void *targets[2] = { source[0], source[1] };"
+                                       " goto *targets[selector & 1];"
+                                       "zero: return 29;"
+                                       "one: return 31;"
+                                       "}"
+                                       "int overwritten_table_labels(int selector) {"
+                                       " void *targets[2];"
+                                       " targets[0] = &&zero;"
+                                       " targets[1] = &&one;"
+                                       " targets[0] = 0;"
+                                       " goto *targets[1];"
+                                       "zero: return 37;"
+                                       "one: return 41;"
+                                       "}"
+                                       "int typedef_labels(void) {"
+                                       " typedef void *P;"
+                                       " P target = (P)&&typed;"
+                                       " goto *target;"
+                                       "typed: return 43;"
+                                       "}"
+                                       "int read_write_asm_label(int selector) {"
+                                       " int value = selector;"
+                                       " __asm__ goto (\"jmp %l2\" : \"+r\"(value) : : : target);"
+                                       " return 29;"
+                                       "target: return value + 31;"
+                                       "}"
+                                       "int named_asm_operand(int value) {"
+                                       " __asm__(\"%[named]\" : [named] \"+r\"(value));"
+                                       " return value;"
+                                       "}"
+                                       "int outputs_only_asm(void) {"
+                                       " int generic, fixed;"
+                                       " __asm__(\"\" : \"=r\"(generic), \"=a\"(fixed));"
+                                       " return generic + fixed;"
+                                       "}"
+                                       "int named_asm_label(int selector) {"
+                                       " int value = selector;"
+                                       " __asm__ goto (\"jmp %l[target]\" : \"+r\"(value) : : : target);"
+                                       " return 37;"
+                                       "target: return value + 41;"
+                                       "}\n");
+        CPreprocessResult label_flow_tokens = c_preprocess(label_flow_temporary.arena, label_flow_source,
+                                                           (CPreprocessOptions){
+                                                               .target = target_native,
+                                                               .data_layout = target_data_layout(target_native),
+                                                               .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                           });
+        CParseResult label_flow_parse = c_parse(label_flow_temporary.arena, label_flow_tokens);
+        CIRLowerResult label_flow_lowered = c_lower_to_ir(label_flow_temporary.arena, S8("label-flow.c"), label_flow_tokens, label_flow_parse, target_native);
+        BUSTER_TEST(arguments, label_flow_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, label_flow_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, label_flow_lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, label_flow_lowered.program != 0);
+        if (label_flow_lowered.program)
+        {
+            IrModule* module = label_flow_lowered.program->modules;
+            u32 indirect_count = 0;
+            u32 inline_goto_count = 0;
+            u32 set_valued_indirect_count = 0;
+            u32 conditional_set_count = 0;
+            u32 table_set_count = 0;
+            u32 copied_table_set_count = 0;
+            u32 overwritten_table_set_count = 0;
+            u32 typedef_indirect_count = 0;
+            IrInstruction* numeric_asm = 0;
+            IrInstruction* named_asm = 0;
+            IrInstruction* named_operand_asm = 0;
+            IrInstruction* outputs_only_asm = 0;
+            IrInstruction* set_valued_indirect = 0;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + instruction_index;
+                    if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH)
+                    {
+                        indirect_count += 1;
+                        if (instruction->operand_count == 1 && instruction->operands[0].value < function->value_count)
+                        {
+                            IrValue* target = function->values + instruction->operands[0].value;
+                            set_valued_indirect_count += target->label_block_count == 2 && instruction->target_count == 2;
+                            if (target->label_block_count == 2 && instruction->target_count == 2)
+                            {
+                                set_valued_indirect = instruction;
+                                conditional_set_count += string_equal(function->name, S8("conditional_labels"));
+                                table_set_count += string_equal(function->name, S8("table_labels"));
+                                copied_table_set_count += string_equal(function->name, S8("copied_table_labels"));
+                                overwritten_table_set_count += string_equal(function->name, S8("overwritten_table_labels"));
+                            }
+                            if (target->label_block_count == 1 && instruction->target_count == 1)
+                            {
+                                typedef_indirect_count += string_equal(function->name, S8("typedef_labels"));
+                            }
+                            for (u32 label_index = 0; label_index < target->label_block_count; label_index += 1)
+                            {
+                                bool found = false;
+                                for (u32 target_index = 0; target_index < instruction->target_count; target_index += 1)
+                                {
+                                    found |= instruction->targets[target_index].value == target->label_blocks[label_index].value;
+                                }
+                                BUSTER_TEST(arguments, found);
+                            }
+                        }
+                    }
+                    else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count)
+                    {
+                        inline_goto_count += 1;
+                        if (instruction->literal.length && instruction->literal.pointer[instruction->literal.length - 1] == '2')
+                        {
+                            numeric_asm = instruction;
+                        }
+                        else
+                        {
+                            named_asm = instruction;
+                        }
+                    }
+                    else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && string_equal(function->name, S8("named_asm_operand")))
+                    {
+                        named_operand_asm = instruction;
+                    }
+                    else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && string_equal(function->name, S8("outputs_only_asm")))
+                    {
+                        outputs_only_asm = instruction;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, indirect_count == 5);
+            BUSTER_TEST(arguments, set_valued_indirect_count == 3);
+            BUSTER_TEST(arguments, conditional_set_count == 1);
+            BUSTER_TEST(arguments, table_set_count == 1);
+            BUSTER_TEST(arguments, copied_table_set_count == 1);
+            BUSTER_TEST(arguments, overwritten_table_set_count == 0);
+            BUSTER_TEST(arguments, typedef_indirect_count == 1);
+            BUSTER_TEST(arguments, inline_goto_count == 2);
+            BUSTER_TEST(arguments, numeric_asm && numeric_asm->label_name_count == 1);
+            BUSTER_TEST(arguments, named_asm && named_asm->label_name_count == 1);
+            BUSTER_TEST(arguments, named_operand_asm && named_operand_asm->operand_name_count == 1);
+            BUSTER_TEST(arguments, outputs_only_asm && outputs_only_asm->operand_count == 2 && outputs_only_asm->target_count == 0);
+            if (named_operand_asm)
+            {
+                BUSTER_STRING_TEST(arguments, named_operand_asm->operand_names[0], S8("named"));
+                BUSTER_STRING_TEST(arguments, named_operand_asm->literal, S8("%0"));
+            }
+            if (numeric_asm)
+            {
+                BUSTER_TEST(arguments, ir_inline_assembly_label_operand_base(numeric_asm) == 2);
+                u32 target_index = 0;
+                BUSTER_TEST(arguments, ir_inline_assembly_jump_target(numeric_asm, numeric_asm->literal, S8("jmp %l"), &target_index));
+                BUSTER_TEST(arguments, target_index == 1);
+                BUSTER_TEST(arguments, !ir_inline_assembly_jump_target(numeric_asm, S8("jmp %l1"), S8("jmp %l"), &target_index));
+            }
+            if (named_asm)
+            {
+                u32 target_index = 0;
+                BUSTER_TEST(arguments, ir_inline_assembly_jump_target(named_asm, named_asm->literal, S8("jmp %l"), &target_index));
+                BUSTER_TEST(arguments, target_index == 1);
+                BUSTER_STRING_TEST(arguments, named_asm->label_names[0], S8("target"));
+            }
+            IrValidationResult label_flow_validation = ir_validate_canonical_module(label_flow_lowered.program, module);
+            BUSTER_TEST(arguments, label_flow_validation.error == IR_VALIDATION_NONE);
+            IrLabelProvenancePath* mutable_path = 0;
+            for (u32 function_index = 0; function_index < module->function_count && !mutable_path; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 value_index = 0; value_index < function->value_count && !mutable_path; value_index += 1)
+                {
+                    IrValue* value = function->values + value_index;
+                    if (value->label_path_count && value->label_paths && value->label_paths[0].size)
+                    {
+                        mutable_path = value->label_paths;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, mutable_path != 0);
+            if (mutable_path)
+            {
+                u64 saved_offset = mutable_path->offset;
+                u64 saved_size = mutable_path->size;
+                mutable_path->offset = UINT64_MAX - saved_size + 1;
+                IrValidationResult invalid_path = ir_validate_canonical_module(label_flow_lowered.program, module);
+                BUSTER_TEST(arguments, invalid_path.error != IR_VALIDATION_NONE);
+                mutable_path->offset = saved_offset;
+                mutable_path->size = saved_size;
+            }
+            if (set_valued_indirect)
+            {
+                IrFunction* set_function = 0;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    IrFunction* candidate = module->functions + function_index;
+                    for (u32 instruction_index = 0; instruction_index < candidate->instruction_count; instruction_index += 1)
+                    {
+                        if (candidate->instructions + instruction_index == set_valued_indirect)
+                        {
+                            set_function = candidate;
+                            break;
+                        }
+                    }
+                    if (set_function)
+                    {
+                        break;
+                    }
+                }
+                BUSTER_TEST(arguments, set_function != 0);
+                if (set_function)
+                {
+                    IrBlockId* saved_targets = set_valued_indirect->targets;
+                    u32 saved_target_count = set_valued_indirect->target_count;
+                    set_valued_indirect->target_count = 1;
+                    IrValidationResult missing_successor = ir_validate_canonical_module(label_flow_lowered.program, module);
+                    BUSTER_TEST(arguments, missing_successor.error != IR_VALIDATION_NONE);
+                    set_valued_indirect->targets = arena_allocate(label_flow_temporary.arena, IrBlockId, saved_target_count + 1);
+                    memcpy(set_valued_indirect->targets, saved_targets, sizeof(IrBlockId) * saved_target_count);
+                    IrBlockId extra_target = IR_BLOCK_ID_INVALID;
+                    IrValue* set_value = set_valued_indirect->operands[0].value < set_function->value_count
+                                             ? set_function->values + set_valued_indirect->operands[0].value
+                                             : 0;
+                    for (u32 block_index = 0; set_value && block_index < set_function->block_count; block_index += 1)
+                    {
+                        bool present = false;
+                        for (u32 target_index = 0; target_index < saved_target_count; target_index += 1)
+                        {
+                            present |= saved_targets[target_index].value == block_index;
+                        }
+                        if (!present)
+                        {
+                            extra_target = (IrBlockId){.value = block_index};
+                            break;
+                        }
+                    }
+                    if (extra_target.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        extra_target = saved_targets[0];
+                    }
+                    set_valued_indirect->targets[saved_target_count] = extra_target;
+                    set_valued_indirect->target_count = saved_target_count + 1;
+                    IrValidationResult extra_successor = ir_validate_canonical_module(label_flow_lowered.program, module);
+                    BUSTER_TEST(arguments, extra_successor.error != IR_VALIDATION_NONE);
+                    set_valued_indirect->targets = saved_targets;
+                    set_valued_indirect->target_count = saved_target_count;
+                }
+            }
+        }
+        scratch_end(label_flow_temporary);
+    }
+    {
+        TemporalArena dynamic_aggregate_temporary = scratch_begin(0, 0);
+        CPreprocessResult dynamic_aggregate_tokens = c_preprocess(
+            dynamic_aggregate_temporary.arena,
+            S8("struct dynamic_label_pair { void *target; };"
+               "int dynamic_aggregate_index(int index) {"
+               " struct dynamic_label_pair table[2] = { { &&dynamic_zero }, { &&dynamic_one } };"
+               " goto *table[index].target;"
+               "dynamic_zero: return 13;"
+               "dynamic_one: return 17;"
+               "}\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult dynamic_aggregate_parse = c_parse(dynamic_aggregate_temporary.arena, dynamic_aggregate_tokens);
+        CIRLowerResult dynamic_aggregate_lowered = c_lower_to_ir(dynamic_aggregate_temporary.arena, S8("dynamic-aggregate-label.c"),
+                                                                  dynamic_aggregate_tokens, dynamic_aggregate_parse, target_native);
+        BUSTER_TEST(arguments, dynamic_aggregate_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, dynamic_aggregate_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, dynamic_aggregate_lowered.diagnostic_count == 1);
+        if (dynamic_aggregate_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, dynamic_aggregate_lowered.diagnostics[0].message,
+                               S8("in function 'dynamic_aggregate_index': dynamic indexing of label-containing aggregate elements is unsupported"));
+        }
+        scratch_end(dynamic_aggregate_temporary);
+    }
+    {
+        IrBlockId scalar_a = {.value = 11};
+        IrBlockId scalar_b = {.value = 13};
+        IrBlockId scalar_blocks_a[] = {scalar_a};
+        IrBlockId scalar_blocks_b[] = {scalar_b};
+        IrBlockId scalar_blocks_union[] = {scalar_a, scalar_b};
+        IrValue scalar_values[3] = {
+            [0] = {.is_label_value = true, .label_blocks = scalar_blocks_a, .label_block_count = 1},
+            [1] = {.is_label_value = true, .label_blocks = scalar_blocks_b, .label_block_count = 1},
+            [2] = {.has_label_provenance = true, .label_blocks = scalar_blocks_union, .label_block_count = 2},
+        };
+        IrIncoming scalar_incoming_b = {.predecessor = {.value = 1}, .value = {.value = 1}};
+        IrIncoming scalar_incoming_a = {.next = &scalar_incoming_b, .predecessor = {.value = 0}, .value = {.value = 0}};
+        IrBlockParameter scalar_parameter = {
+            .first_incoming = &scalar_incoming_a,
+            .last_incoming = &scalar_incoming_b,
+            .value = {.value = 2},
+            .incoming_count = 2,
+        };
+        IrFunction scalar_function = {.values = scalar_values, .value_count = BUSTER_ARRAY_LENGTH(scalar_values)};
+        BUSTER_TEST(arguments, ir_label_block_parameter_provenance_valid(&scalar_function, &scalar_parameter));
+        scalar_blocks_union[1] = (IrBlockId){.value = 17};
+        BUSTER_TEST(arguments, !ir_label_block_parameter_provenance_valid(&scalar_function, &scalar_parameter));
+        scalar_blocks_union[1] = scalar_b;
+
+        IrLabelProvenancePath aggregate_path_a = {
+            .label_blocks = scalar_blocks_a,
+            .size = 8,
+            .label_block_count = 1,
+        };
+        IrLabelProvenancePath aggregate_path_b = {
+            .label_blocks = scalar_blocks_b,
+            .size = 8,
+            .label_block_count = 1,
+        };
+        IrLabelProvenancePath aggregate_path_union = {
+            .label_blocks = scalar_blocks_union,
+            .size = 8,
+            .label_block_count = 2,
+        };
+        IrValue aggregate_values[3] = {
+            [0] = {.has_label_provenance = true, .label_blocks = scalar_blocks_a, .label_block_count = 1, .label_paths = &aggregate_path_a, .label_path_count = 1},
+            [1] = {.has_label_provenance = true, .label_blocks = scalar_blocks_b, .label_block_count = 1, .label_paths = &aggregate_path_b, .label_path_count = 1},
+            [2] = {.has_label_provenance = true,
+                   .label_blocks = scalar_blocks_union,
+                   .label_block_count = 2,
+                   .label_paths = &aggregate_path_union,
+                   .label_path_count = 1},
+        };
+        IrIncoming aggregate_incoming_b = {.predecessor = {.value = 1}, .value = {.value = 1}};
+        IrIncoming aggregate_incoming_a = {.next = &aggregate_incoming_b, .predecessor = {.value = 0}, .value = {.value = 0}};
+        IrBlockParameter aggregate_parameter = {
+            .first_incoming = &aggregate_incoming_a,
+            .last_incoming = &aggregate_incoming_b,
+            .value = {.value = 2},
+            .incoming_count = 2,
+        };
+        IrFunction aggregate_function = {.values = aggregate_values, .value_count = BUSTER_ARRAY_LENGTH(aggregate_values)};
+        BUSTER_TEST(arguments, ir_label_block_parameter_provenance_valid(&aggregate_function, &aggregate_parameter));
+    }
+    {
+        TemporalArena cleanup_label_temporary = scratch_begin(0, 0);
+        CPreprocessResult cleanup_label_tokens = c_preprocess(
+            cleanup_label_temporary.arena,
+            S8("extern void cleanup_dispatch_callback(int *);"
+               "int cleanup_computed_dispatch(int selector) {"
+               " { int value __attribute__((cleanup(cleanup_dispatch_callback))) = selector;"
+               "   goto *(selector ? &&one : &&zero);"
+               " }"
+               "zero: return 0;"
+               "one: return 1;"
+               "}"
+               "int cleanup_asm_dispatch(int selector) {"
+               " { int value __attribute__((cleanup(cleanup_dispatch_callback))) = selector;"
+               "   if (selector)"
+               "     __asm__ goto(\"jmp %l1\" : : \"r\"(selector) : \"cc\" : taken);"
+               " }"
+               " return 0;"
+               "taken: return 1;"
+               "}\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult cleanup_label_parse = c_parse(cleanup_label_temporary.arena, cleanup_label_tokens);
+        CIRLowerResult cleanup_label_lowered = c_lower_to_ir(cleanup_label_temporary.arena, S8("cleanup-labels.c"), cleanup_label_tokens,
+                                                             cleanup_label_parse, target_native);
+        BUSTER_TEST(arguments, cleanup_label_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, cleanup_label_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, cleanup_label_lowered.diagnostic_count == 0);
+        if (cleanup_label_lowered.program)
+        {
+            IrFunction* function = 0;
+            for (u32 function_index = 0; function_index < cleanup_label_lowered.program->modules[0].function_count; function_index += 1)
+            {
+                IrFunction* candidate = cleanup_label_lowered.program->modules[0].functions + function_index;
+                if (string_equal(candidate->name, S8("cleanup_computed_dispatch")))
+                {
+                    function = candidate;
+                    break;
+                }
+            }
+            u32 cleanup_call_count = 0;
+            u32 indirect_branch_count = 0;
+            u32 branch_if_count = 0;
+            IrFunction* asm_function = 0;
+            if (function)
+            {
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrOpcode opcode = function->instructions[instruction_index].opcode;
+                    cleanup_call_count += opcode == IR_OPCODE_CALL;
+                    indirect_branch_count += opcode == IR_OPCODE_INDIRECT_BRANCH;
+                    branch_if_count += opcode == IR_OPCODE_BRANCH_IF;
+                }
+            }
+            BUSTER_TEST(arguments, function != 0);
+            BUSTER_TEST(arguments, cleanup_call_count != 0);
+            BUSTER_TEST(arguments, indirect_branch_count == 0);
+            BUSTER_TEST(arguments, branch_if_count >= 2);
+            for (u32 function_index = 0; function_index < cleanup_label_lowered.program->modules[0].function_count; function_index += 1)
+            {
+                IrFunction* candidate = cleanup_label_lowered.program->modules[0].functions + function_index;
+                if (string_equal(candidate->name, S8("cleanup_asm_dispatch")))
+                {
+                    asm_function = candidate;
+                    break;
+                }
+            }
+            BUSTER_TEST(arguments, asm_function != 0);
+            if (asm_function)
+            {
+                u32 asm_goto_count = 0;
+                u32 asm_cleanup_call_count = 0;
+                for (u32 instruction_index = 0; instruction_index < asm_function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = asm_function->instructions + instruction_index;
+                    asm_goto_count += instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count == 2;
+                    asm_cleanup_call_count += instruction->opcode == IR_OPCODE_CALL;
+                }
+                BUSTER_TEST(arguments, asm_goto_count == 1);
+                BUSTER_TEST(arguments, asm_cleanup_call_count != 0);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(cleanup_label_lowered.program, &cleanup_label_lowered.program->modules[0]).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(cleanup_label_temporary);
     }
     {
         TemporalArena invalid_labels_temporary = scratch_begin(0, 0);
@@ -6349,9 +6888,31 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         if (invalid_labels_lowered.diagnostic_count == 1)
         {
             BUSTER_STRING_TEST(arguments, invalid_labels_lowered.diagnostics[0].message,
-                               S8("in function 'invalid_labels': computed goto requires a label address from this function"));
+                               S8("in function 'invalid_labels': computed goto requires a function-local void pointer label value"));
         }
         scratch_end(invalid_labels_temporary);
+    }
+    {
+        TemporalArena invalid_static_label_temporary = scratch_begin(0, 0);
+        CPreprocessResult invalid_static_label_tokens = c_preprocess(invalid_static_label_temporary.arena,
+                                                                      S8("void *saved_label; int invalid_static_label(void) { saved_label = &&target; target: return 0; }\n"),
+                                                                      (CPreprocessOptions){
+                                                                          .target = target_native,
+                                                                          .data_layout = target_data_layout(target_native),
+                                                                          .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                                      });
+        CParseResult invalid_static_label_parse = c_parse(invalid_static_label_temporary.arena, invalid_static_label_tokens);
+        CIRLowerResult invalid_static_label_lowered = c_lower_to_ir(invalid_static_label_temporary.arena, S8("invalid-static-label.c"),
+                                                                      invalid_static_label_tokens, invalid_static_label_parse, target_native);
+        BUSTER_TEST(arguments, invalid_static_label_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_static_label_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_static_label_lowered.diagnostic_count == 1);
+        if (invalid_static_label_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, invalid_static_label_lowered.diagnostics[0].message,
+                               S8("in function 'invalid_static_label': a label address may not be stored in static storage"));
+        }
+        scratch_end(invalid_static_label_temporary);
     }
     {
         TemporalArena duplicate_labels_temporary = scratch_begin(0, 0);
@@ -6392,7 +6953,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         if (invalid_label_cast_lowered.diagnostic_count == 1)
         {
             BUSTER_STRING_TEST(arguments, invalid_label_cast_lowered.diagnostics[0].message,
-                               S8("in function 'invalid_label_cast': a label address may only be used as its original void pointer type"));
+                               S8("in function 'invalid_label_cast': a label-provenance value may only be used with its original void pointer type"));
         }
         scratch_end(invalid_label_cast_temporary);
     }
@@ -6414,9 +6975,216 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         if (invalid_label_deref_lowered.diagnostic_count == 1)
         {
             BUSTER_STRING_TEST(arguments, invalid_label_deref_lowered.diagnostics[0].message,
-                               S8("in function 'invalid_label_deref': a label address may not be dereferenced"));
+                               S8("in function 'invalid_label_deref': a label-provenance value may not be used as an addressable place"));
         }
         scratch_end(invalid_label_deref_temporary);
+    }
+    {
+        TemporalArena invalid_label_address_of_temporary = scratch_begin(0, 0);
+        CPreprocessResult invalid_label_address_of_tokens = c_preprocess(
+            invalid_label_address_of_temporary.arena,
+            S8("int invalid_label_address_of(void) { void *value = &&target; goto *&value; target: return 0; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult invalid_label_address_of_parse = c_parse(invalid_label_address_of_temporary.arena, invalid_label_address_of_tokens);
+        CIRLowerResult invalid_label_address_of_lowered = c_lower_to_ir(invalid_label_address_of_temporary.arena, S8("invalid-label-address-of.c"),
+                                                                         invalid_label_address_of_tokens, invalid_label_address_of_parse, target_native);
+        BUSTER_TEST(arguments, invalid_label_address_of_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_label_address_of_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_label_address_of_lowered.diagnostic_count == 1);
+        if (invalid_label_address_of_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, invalid_label_address_of_lowered.diagnostics[0].message,
+                               S8("in function 'invalid_label_address_of': computed goto requires a function-local void pointer label value"));
+        }
+        scratch_end(invalid_label_address_of_temporary);
+    }
+    {
+        TemporalArena invalid_union_overlay_temporary = scratch_begin(0, 0);
+        CPreprocessResult invalid_union_overlay_tokens = c_preprocess(
+            invalid_union_overlay_temporary.arena,
+            S8("union label_overlay { void *label; int *data; };"
+               "int invalid_union_overlay(void) { union label_overlay value = { .label = &&target }; return *value.data; target: return 0; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult invalid_union_overlay_parse = c_parse(invalid_union_overlay_temporary.arena, invalid_union_overlay_tokens);
+        CIRLowerResult invalid_union_overlay_lowered = c_lower_to_ir(invalid_union_overlay_temporary.arena, S8("invalid-union-overlay.c"),
+                                                                      invalid_union_overlay_tokens, invalid_union_overlay_parse, target_native);
+        BUSTER_TEST(arguments, invalid_union_overlay_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_union_overlay_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_union_overlay_lowered.diagnostic_count == 1);
+        if (invalid_union_overlay_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, invalid_union_overlay_lowered.diagnostics[0].message,
+                               S8("in function 'invalid_union_overlay': a label-provenance value may not be used as an addressable place"));
+        }
+        scratch_end(invalid_union_overlay_temporary);
+    }
+    {
+        TemporalArena invalid_mixed_label_integer_cast_temporary = scratch_begin(0, 0);
+        CPreprocessResult invalid_mixed_label_integer_cast_tokens = c_preprocess(
+            invalid_mixed_label_integer_cast_temporary.arena,
+            S8("unsigned long invalid_mixed_label_integer_cast(int selector) { void *value = selector ? &&target : 0; return (unsigned long)value; target: return 0; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult invalid_mixed_label_integer_cast_parse = c_parse(invalid_mixed_label_integer_cast_temporary.arena, invalid_mixed_label_integer_cast_tokens);
+        CIRLowerResult invalid_mixed_label_integer_cast_lowered = c_lower_to_ir(
+            invalid_mixed_label_integer_cast_temporary.arena, S8("invalid-mixed-label-integer-cast.c"), invalid_mixed_label_integer_cast_tokens,
+            invalid_mixed_label_integer_cast_parse, target_native);
+        BUSTER_TEST(arguments, invalid_mixed_label_integer_cast_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_mixed_label_integer_cast_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_mixed_label_integer_cast_lowered.diagnostic_count == 1);
+        if (invalid_mixed_label_integer_cast_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, invalid_mixed_label_integer_cast_lowered.diagnostics[0].message,
+                               S8("in function 'invalid_mixed_label_integer_cast': a label-provenance value may only be used with its original void pointer type"));
+        }
+        scratch_end(invalid_mixed_label_integer_cast_temporary);
+    }
+    {
+        TemporalArena invalid_mixed_label_pointer_cast_temporary = scratch_begin(0, 0);
+        CPreprocessResult invalid_mixed_label_pointer_cast_tokens = c_preprocess(
+            invalid_mixed_label_pointer_cast_temporary.arena,
+            S8("int invalid_mixed_label_pointer_cast(int selector) { void *value = selector ? &&target : 0; return *(int *)value; target: return 0; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult invalid_mixed_label_pointer_cast_parse = c_parse(invalid_mixed_label_pointer_cast_temporary.arena, invalid_mixed_label_pointer_cast_tokens);
+        CIRLowerResult invalid_mixed_label_pointer_cast_lowered = c_lower_to_ir(
+            invalid_mixed_label_pointer_cast_temporary.arena, S8("invalid-mixed-label-pointer-cast.c"), invalid_mixed_label_pointer_cast_tokens,
+            invalid_mixed_label_pointer_cast_parse, target_native);
+        BUSTER_TEST(arguments, invalid_mixed_label_pointer_cast_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_mixed_label_pointer_cast_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_mixed_label_pointer_cast_lowered.diagnostic_count == 1);
+        if (invalid_mixed_label_pointer_cast_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, invalid_mixed_label_pointer_cast_lowered.diagnostics[0].message,
+                               S8("in function 'invalid_mixed_label_pointer_cast': a label-provenance value may only be used with its original void pointer type"));
+        }
+        scratch_end(invalid_mixed_label_pointer_cast_temporary);
+    }
+    {
+        TemporalArena valid_struct_label_sibling_temporary = scratch_begin(0, 0);
+        CPreprocessResult valid_struct_label_sibling_tokens = c_preprocess(
+            valid_struct_label_sibling_temporary.arena,
+            S8("struct label_and_count { void *label; int count; };"
+               "int valid_struct_label_sibling(void) { struct label_and_count value = { .label = &&target, .count = 7 }; return value.count; target: return value.count; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult valid_struct_label_sibling_parse = c_parse(valid_struct_label_sibling_temporary.arena, valid_struct_label_sibling_tokens);
+        CIRLowerResult valid_struct_label_sibling_lowered = c_lower_to_ir(valid_struct_label_sibling_temporary.arena, S8("valid-struct-label-sibling.c"),
+                                                                            valid_struct_label_sibling_tokens, valid_struct_label_sibling_parse, target_native);
+        BUSTER_TEST(arguments, valid_struct_label_sibling_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, valid_struct_label_sibling_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, valid_struct_label_sibling_lowered.diagnostic_count == 0);
+        if (valid_struct_label_sibling_lowered.program)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(valid_struct_label_sibling_lowered.program,
+                                                                 &valid_struct_label_sibling_lowered.program->modules[0]).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(valid_struct_label_sibling_temporary);
+    }
+    {
+        TemporalArena label_provenance_mutation_temporary = scratch_begin(0, 0);
+        CPreprocessResult label_provenance_mutation_tokens = c_preprocess(
+            label_provenance_mutation_temporary.arena,
+            S8("int forged_label_dereference(int *pointer) { return *pointer; }"
+               "unsigned long forged_label_cast(int *pointer) { return (unsigned long)pointer; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult label_provenance_mutation_parse = c_parse(label_provenance_mutation_temporary.arena, label_provenance_mutation_tokens);
+        CIRLowerResult label_provenance_mutation_lowered = c_lower_to_ir(label_provenance_mutation_temporary.arena, S8("label-provenance-mutations.c"),
+                                                                          label_provenance_mutation_tokens, label_provenance_mutation_parse, target_native);
+        BUSTER_TEST(arguments, label_provenance_mutation_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, label_provenance_mutation_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, label_provenance_mutation_lowered.diagnostic_count == 0);
+        if (label_provenance_mutation_lowered.program)
+        {
+            IrModule* mutation_module = &label_provenance_mutation_lowered.program->modules[0];
+            BUSTER_TEST(arguments, ir_validate_canonical_module(label_provenance_mutation_lowered.program, mutation_module).error == IR_VALIDATION_NONE);
+            IrBlockId forged_block = {.value = 0};
+            bool dereference_mutated = false;
+            bool cast_mutated = false;
+            for (u32 function_index = 0; function_index < mutation_module->function_count; function_index += 1)
+            {
+                IrFunction* function = mutation_module->functions + function_index;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + instruction_index;
+                    if (instruction->operand_count != 1 || !instruction->operands || instruction->operands[0].value >= function->value_count)
+                    {
+                        continue;
+                    }
+                    if ((instruction->opcode != IR_OPCODE_DEREFERENCE && instruction->opcode != IR_OPCODE_CAST) ||
+                        function->block_count == 0)
+                    {
+                        continue;
+                    }
+                    IrValue* operand = function->values + instruction->operands[0].value;
+                    IrValue saved = *operand;
+                    operand->is_label_value = false;
+                    operand->has_label_provenance = true;
+                    operand->has_non_label_provenance = false;
+                    operand->label_blocks = &forged_block;
+                    operand->label_block_count = 1;
+                    operand->label_paths = 0;
+                    operand->label_path_count = 0;
+                    IrValidationResult mutated_validation = ir_validate_canonical_module(label_provenance_mutation_lowered.program, mutation_module);
+                    if (instruction->opcode == IR_OPCODE_DEREFERENCE)
+                    {
+                        dereference_mutated = mutated_validation.error != IR_VALIDATION_NONE;
+                    }
+                    else
+                    {
+                        cast_mutated = mutated_validation.error != IR_VALIDATION_NONE;
+                    }
+                    *operand = saved;
+                }
+            }
+            BUSTER_TEST(arguments, dereference_mutated && cast_mutated);
+        }
+        scratch_end(label_provenance_mutation_temporary);
+    }
+    {
+        TemporalArena legal_label_address_of_temporary = scratch_begin(0, 0);
+        CPreprocessResult legal_label_address_of_tokens = c_preprocess(
+            legal_label_address_of_temporary.arena,
+            S8("extern void take_pointer_address(void **);"
+               "int legal_label_address_of(void) { void *value = 0; take_pointer_address(&value); return 0; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult legal_label_address_of_parse = c_parse(legal_label_address_of_temporary.arena, legal_label_address_of_tokens);
+        CIRLowerResult legal_label_address_of_lowered = c_lower_to_ir(legal_label_address_of_temporary.arena, S8("legal-label-address-of.c"),
+                                                                       legal_label_address_of_tokens, legal_label_address_of_parse, target_native);
+        BUSTER_TEST(arguments, legal_label_address_of_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, legal_label_address_of_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, legal_label_address_of_lowered.diagnostic_count == 0);
+        if (legal_label_address_of_lowered.program)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(legal_label_address_of_lowered.program,
+                                                                 &legal_label_address_of_lowered.program->modules[0]).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(legal_label_address_of_temporary);
     }
     {
         TemporalArena invalid_asm_goto_temporary = scratch_begin(0, 0);
@@ -6485,6 +7253,51 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         scratch_end(malformed_asm_goto_temporary);
     }
     {
+        TemporalArena unqualified_asm_goto_temporary = scratch_begin(0, 0);
+        CPreprocessResult unqualified_asm_goto_tokens = c_preprocess(unqualified_asm_goto_temporary.arena,
+                                                                      S8("int unqualified_asm_goto(void) { __asm__ (\"\" : : : : target); target: return 0; }\n"),
+                                                                      (CPreprocessOptions){
+                                                                          .target = target_native,
+                                                                          .data_layout = target_data_layout(target_native),
+                                                                          .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                                                      });
+        CParseResult unqualified_asm_goto_parse = c_parse(unqualified_asm_goto_temporary.arena, unqualified_asm_goto_tokens);
+        CIRLowerResult unqualified_asm_goto_lowered = c_lower_to_ir(unqualified_asm_goto_temporary.arena, S8("unqualified-asm-goto.c"),
+                                                                      unqualified_asm_goto_tokens, unqualified_asm_goto_parse, target_native);
+        BUSTER_TEST(arguments, unqualified_asm_goto_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, unqualified_asm_goto_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, unqualified_asm_goto_lowered.diagnostic_count == 1);
+        if (unqualified_asm_goto_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, unqualified_asm_goto_lowered.diagnostics[0].message,
+                               S8("in function 'unqualified_asm_goto': four asm colon sections require the goto qualifier"));
+        }
+        scratch_end(unqualified_asm_goto_temporary);
+    }
+    {
+        TemporalArena conflicting_fixed_asm_temporary = scratch_begin(0, 0);
+        CPreprocessResult conflicting_fixed_asm_tokens = c_preprocess(
+            conflicting_fixed_asm_temporary.arena,
+            S8("int conflicting_fixed_asm(int left, int right) { __asm__(\"\" : \"+a\"(left) : \"a\"(right)); return left; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult conflicting_fixed_asm_parse = c_parse(conflicting_fixed_asm_temporary.arena, conflicting_fixed_asm_tokens);
+        CIRLowerResult conflicting_fixed_asm_lowered = c_lower_to_ir(conflicting_fixed_asm_temporary.arena, S8("conflicting-fixed-asm.c"),
+                                                                       conflicting_fixed_asm_tokens, conflicting_fixed_asm_parse, target_native);
+        BUSTER_TEST(arguments, conflicting_fixed_asm_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, conflicting_fixed_asm_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, conflicting_fixed_asm_lowered.diagnostic_count == 1);
+        if (conflicting_fixed_asm_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, conflicting_fixed_asm_lowered.diagnostics[0].message,
+                               S8("in function 'conflicting_fixed_asm': asm fixed-register operands conflict without a supported matching constraint"));
+        }
+        scratch_end(conflicting_fixed_asm_temporary);
+    }
+    {
         TemporalArena c_labels_temporary = scratch_begin(0, 0);
         CPreprocessResult c_labels_tokens = c_preprocess(c_labels_temporary.arena,
                                                          S8("int c_labels(void) { return &&target; target: return 0; }\n"),
@@ -6502,6 +7315,226 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                S8("in function 'c_labels': GNU labels-as-values are only available in GNU dialects"));
         }
         scratch_end(c_labels_temporary);
+    }
+    {
+        TemporalArena same_fixed_asm_temporary = scratch_begin(0, 0);
+        CPreprocessResult same_fixed_asm_tokens = c_preprocess(
+            same_fixed_asm_temporary.arena,
+            S8("int same_fixed_asm(int value) { __asm__(\"\" : \"+a\"(value) : \"a\"(value)); return value; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult same_fixed_asm_parse = c_parse(same_fixed_asm_temporary.arena, same_fixed_asm_tokens);
+        CIRLowerResult same_fixed_asm_lowered = c_lower_to_ir(same_fixed_asm_temporary.arena, S8("same-fixed-asm.c"), same_fixed_asm_tokens,
+                                                               same_fixed_asm_parse, target_native);
+        BUSTER_TEST(arguments, same_fixed_asm_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, same_fixed_asm_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, same_fixed_asm_lowered.diagnostic_count == 1);
+        if (same_fixed_asm_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, same_fixed_asm_lowered.diagnostics[0].message,
+                               S8("in function 'same_fixed_asm': asm fixed-register operands conflict without a supported matching constraint"));
+        }
+        scratch_end(same_fixed_asm_temporary);
+    }
+    {
+        TemporalArena aarch64_clobber_temporary = scratch_begin(0, 0);
+        Target aarch64_target = target_native;
+        aarch64_target.cpu_arch = CPU_ARCH_AARCH64;
+        CPreprocessResult aarch64_clobber_tokens = c_preprocess(
+            aarch64_clobber_temporary.arena,
+            S8("int invalid_aarch64_clobber(void) { __asm__(\"\" ::: \"x19\"); return 0; }\n"),
+            (CPreprocessOptions){
+                .target = aarch64_target,
+                .data_layout = target_data_layout(aarch64_target),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult aarch64_clobber_parse = c_parse(aarch64_clobber_temporary.arena, aarch64_clobber_tokens);
+        CIRLowerResult aarch64_clobber_lowered = c_lower_to_ir(aarch64_clobber_temporary.arena, S8("aarch64-clobber.c"), aarch64_clobber_tokens,
+                                                               aarch64_clobber_parse, aarch64_target);
+        BUSTER_TEST(arguments, aarch64_clobber_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aarch64_clobber_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aarch64_clobber_lowered.diagnostic_count == 1);
+        if (aarch64_clobber_lowered.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, aarch64_clobber_lowered.diagnostics[0].message,
+                               S8("in function 'invalid_aarch64_clobber': unsupported GNU inline assembly clobber"));
+        }
+        scratch_end(aarch64_clobber_temporary);
+    }
+    {
+        TemporalArena malformed_recovery_temporary = scratch_begin(0, 0);
+        CPreprocessResult malformed_recovery_tokens = c_preprocess(
+            malformed_recovery_temporary.arena,
+            S8("int malformed_recovery(void) { __asm__ goto(\"\"); return 1; }\n"
+               "int valid_after_malformed(void) { return 9; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult malformed_recovery_parse = c_parse(malformed_recovery_temporary.arena, malformed_recovery_tokens);
+        CIRLowerResult malformed_recovery_lowered = c_lower_to_ir(malformed_recovery_temporary.arena, S8("malformed-recovery.c"), malformed_recovery_tokens,
+                                                                   malformed_recovery_parse, target_native);
+        BUSTER_TEST(arguments, malformed_recovery_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, malformed_recovery_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, malformed_recovery_lowered.diagnostic_count == 1);
+        bool recovered_function = false;
+        if (malformed_recovery_lowered.program)
+        {
+            IrModule* module = malformed_recovery_lowered.program->modules;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                recovered_function |= string_equal(function->name, S8("valid_after_malformed")) && function->state == IR_FUNCTION_LOWERED &&
+                                      function->instruction_count != 0;
+            }
+        }
+        BUSTER_TEST(arguments, recovered_function);
+        scratch_end(malformed_recovery_temporary);
+    }
+    {
+        TemporalArena typedef_shadow_label_temporary = scratch_begin(0, 0);
+        CPreprocessResult typedef_shadow_label_tokens = c_preprocess(
+            typedef_shadow_label_temporary.arena,
+            S8("typedef void *T;"
+               "int typedef_shadow_label(void) { int T = 1; int x = 2; return (T) && x; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+        });
+        CParseResult typedef_shadow_label_parse = c_parse(typedef_shadow_label_temporary.arena, typedef_shadow_label_tokens);
+        CIRLowerResult typedef_shadow_label_lowered = c_lower_to_ir(typedef_shadow_label_temporary.arena, S8("typedef-shadow-label.c"), typedef_shadow_label_tokens,
+                                                                     typedef_shadow_label_parse, target_native);
+        BUSTER_TEST(arguments, typedef_shadow_label_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, typedef_shadow_label_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, typedef_shadow_label_lowered.diagnostic_count == 0);
+        if (typedef_shadow_label_lowered.program)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(typedef_shadow_label_lowered.program,
+                                                                 &typedef_shadow_label_lowered.program->modules[0]).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(typedef_shadow_label_temporary);
+    }
+    {
+        TemporalArena symbolic_array_operand_temporary = scratch_begin(0, 0);
+        CPreprocessResult symbolic_array_operand_tokens = c_preprocess(
+            symbolic_array_operand_temporary.arena,
+            S8("int symbolic_array_operand(int index) { int values[2] = {1, 2};"
+               " __asm__(\"\" : [value] \"+r\"(values[index]) : [index_input] \"r\"(index)); return values[index]; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult symbolic_array_operand_parse = c_parse(symbolic_array_operand_temporary.arena, symbolic_array_operand_tokens);
+        CIRLowerResult symbolic_array_operand_lowered = c_lower_to_ir(symbolic_array_operand_temporary.arena, S8("symbolic-array-operand.c"),
+                                                                      symbolic_array_operand_tokens, symbolic_array_operand_parse, target_native);
+        BUSTER_TEST(arguments, symbolic_array_operand_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, symbolic_array_operand_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, symbolic_array_operand_lowered.diagnostic_count == 0);
+        if (symbolic_array_operand_lowered.program)
+        {
+            IrInstruction* assembly = 0;
+            IrFunction* function = symbolic_array_operand_lowered.program->modules[0].functions;
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                {
+                    assembly = function->instructions + instruction_index;
+                    break;
+                }
+            }
+            BUSTER_TEST(arguments, assembly && assembly->operand_name_count == 2);
+            if (assembly && assembly->operand_name_count == 2)
+            {
+                BUSTER_STRING_TEST(arguments, assembly->operand_names[0], S8("value"));
+                BUSTER_STRING_TEST(arguments, assembly->operand_names[1], S8("index_input"));
+            }
+        }
+        scratch_end(symbolic_array_operand_temporary);
+    }
+    {
+        TemporalArena label_escape_temporary = scratch_begin(0, 0);
+        CPreprocessResult label_escape_tokens = c_preprocess(
+            label_escape_temporary.arena,
+            S8("struct label_pair { void *first; void *second; };"
+               "union label_union { void *pointer; int integer; };"
+               "extern void take_pair(struct label_pair);"
+               "extern void take_union(union label_union);"
+               "extern void take_pointer(void **);"
+               "int invalid_pair_call(void) { struct label_pair pair = {&&pair_a, &&pair_b}; take_pair(pair); return 0; pair_a: return 1; pair_b: return 2; }"
+               "struct label_pair invalid_pair_return(void) { struct label_pair pair = {&&return_a, &&return_b}; return pair; return_a: return pair; return_b: return pair; }"
+               "int invalid_pair_address(void) { struct label_pair pair = {&&address_a, &&address_b}; take_pointer((void **)&pair); return 0; address_a: return 1; address_b: return 2; }"
+               "int invalid_union_call(void) { union label_union value = { .pointer = &&union_a }; take_union(value); return 0; union_a: return 1; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult label_escape_parse = c_parse(label_escape_temporary.arena, label_escape_tokens);
+        CIRLowerResult label_escape_lowered = c_lower_to_ir(label_escape_temporary.arena, S8("label-escape.c"), label_escape_tokens, label_escape_parse, target_native);
+        BUSTER_TEST(arguments, label_escape_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, label_escape_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, label_escape_lowered.diagnostic_count >= 4);
+        scratch_end(label_escape_temporary);
+    }
+    {
+        TemporalArena legal_label_pointer_address_temporary = scratch_begin(0, 0);
+        CPreprocessResult legal_label_pointer_address_tokens = c_preprocess(
+            legal_label_pointer_address_temporary.arena,
+            S8("extern void take_pointer(void **);"
+               "int legal_label_pointer_address(void) { void *pointer = &&target; take_pointer(&pointer); return 0; target: return 1; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult legal_label_pointer_address_parse = c_parse(legal_label_pointer_address_temporary.arena, legal_label_pointer_address_tokens);
+        CIRLowerResult legal_label_pointer_address_lowered = c_lower_to_ir(legal_label_pointer_address_temporary.arena, S8("legal-label-pointer-address.c"),
+                                                                            legal_label_pointer_address_tokens, legal_label_pointer_address_parse, target_native);
+        BUSTER_TEST(arguments, legal_label_pointer_address_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, legal_label_pointer_address_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, legal_label_pointer_address_lowered.diagnostic_count == 0);
+        scratch_end(legal_label_pointer_address_temporary);
+    }
+    {
+        TemporalArena cfg_label_storage_temporary = scratch_begin(0, 0);
+        CPreprocessResult cfg_label_storage_tokens = c_preprocess(
+            cfg_label_storage_temporary.arena,
+            S8("int cfg_label_storage(int selector) { void *table[1]; if (selector) table[0] = &&first; else table[0] = &&second; goto *table[0]; first: return 1; second: return 2; }\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        CParseResult cfg_label_storage_parse = c_parse(cfg_label_storage_temporary.arena, cfg_label_storage_tokens);
+        CIRLowerResult cfg_label_storage_lowered = c_lower_to_ir(cfg_label_storage_temporary.arena, S8("cfg-label-storage.c"), cfg_label_storage_tokens,
+                                                                  cfg_label_storage_parse, target_native);
+        BUSTER_TEST(arguments, cfg_label_storage_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, cfg_label_storage_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, cfg_label_storage_lowered.diagnostic_count == 0);
+        bool cfg_set = false;
+        if (cfg_label_storage_lowered.program)
+        {
+            IrFunction* function = cfg_label_storage_lowered.program->modules[0].functions;
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = function->instructions + instruction_index;
+                if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH && instruction->operand_count == 1 && instruction->operands[0].value < function->value_count)
+                {
+                    IrValue* target = function->values + instruction->operands[0].value;
+                    cfg_set |= target->label_block_count == 2 && instruction->target_count == 2;
+                }
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(cfg_label_storage_lowered.program,
+                                                                 &cfg_label_storage_lowered.program->modules[0]).error == IR_VALIDATION_NONE);
+        }
+        BUSTER_TEST(arguments, cfg_set);
+        scratch_end(cfg_label_storage_temporary);
     }
     return result;
 }

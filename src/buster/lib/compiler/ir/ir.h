@@ -242,6 +242,17 @@ typedef enum IrBinaryOperation
 } IrBinaryOperation;
 
 typedef struct IrValue IrValue;
+typedef struct IrLabelProvenancePath IrLabelProvenancePath;
+struct IrLabelProvenancePath
+{
+    IrBlockId* label_blocks;
+    u64 offset;
+    u64 size;
+    u32 label_block_count;
+    bool is_non_label;
+    u8 reserved[3];
+};
+
 struct IrValue
 {
     AnalysisTypeId type;
@@ -252,8 +263,13 @@ struct IrValue
     bool is_read_only;
     bool points_to_read_only;
     bool is_label_value;
+    bool has_label_provenance;
+    bool has_non_label_provenance;
     u8 reserved;
-    IrBlockId label_block;
+    IrBlockId* label_blocks;
+    u32 label_block_count;
+    IrLabelProvenancePath* label_paths;
+    u32 label_path_count;
 };
 
 typedef struct IrIncoming IrIncoming;
@@ -291,6 +307,9 @@ struct IrInstruction
     IrValueId* operands;
     IrBlockId* targets;
     u64* immediates;
+    String8* label_names;
+    String8* operand_names;
+    String8* clobbers;
     String8 literal;
     ParserSourceRange source;
     IrSourceRange canonical_source;
@@ -314,6 +333,9 @@ struct IrInstruction
     u32 operand_count;
     u32 target_count;
     u32 immediate_count;
+    u32 label_name_count;
+    u32 operand_name_count;
+    u32 clobber_count;
     bool immediate_is_negative;
     bool atomic_signal_fence;
     u8 reserved[2];
@@ -361,8 +383,11 @@ typedef struct IrGlobalRelocation IrGlobalRelocation;
 struct IrGlobalRelocation
 {
     IrSymbolId symbol;
+    IrBlockId label_block;
     s64 addend;
     u64 offset;
+    bool is_label_address;
+    u8 reserved[3];
 };
 
 typedef struct IrGlobal IrGlobal;
@@ -512,6 +537,20 @@ BUSTER_F_DECL IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrG
 BUSTER_F_DECL IrBlock* ir_function_add_block(Arena* arena, IrFunction* function, IrBlock block);
 BUSTER_F_DECL IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue value);
 BUSTER_F_DECL IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, IrInstruction instruction);
+BUSTER_F_DECL bool ir_label_provenance_valid(IrValue* value);
+BUSTER_F_DECL bool ir_label_storage_provenance_valid(IrValue* value);
+BUSTER_F_DECL bool ir_block_id_array_unique(IrBlockId* blocks, u32 count);
+BUSTER_F_DECL bool ir_label_provenance_contains(IrValue* value, IrBlockId block);
+BUSTER_F_DECL void ir_label_provenance_copy(Arena* arena, IrValue* destination, IrValue* source);
+BUSTER_F_DECL void ir_label_provenance_union(Arena* arena, IrValue* destination, IrValue* source);
+BUSTER_F_DECL void ir_label_storage_provenance_copy(Arena* arena, IrValue* destination, IrValue* source);
+BUSTER_F_DECL void ir_label_storage_provenance_union(Arena* arena, IrValue* destination, IrValue* source);
+BUSTER_F_DECL void ir_label_provenance_load(Arena* arena, IrValue* destination, IrValue* source);
+BUSTER_F_DECL bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrValue* value);
+BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFunction* function, IrValue* value);
+BUSTER_F_DECL bool ir_label_block_parameter_provenance_valid(IrFunction* function, IrBlockParameter* parameter);
+BUSTER_F_DECL u32 ir_inline_assembly_label_operand_base(IrInstruction* instruction);
+BUSTER_F_DECL bool ir_inline_assembly_jump_target(IrInstruction* instruction, String8 literal, String8 prefix, u32* target_index_out);
 BUSTER_F_DECL IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module);
 BUSTER_F_DECL IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module);
 BUSTER_F_DECL String8 ir_print_module(Arena* arena, AnalysisResult* analysis, IrModule* module);

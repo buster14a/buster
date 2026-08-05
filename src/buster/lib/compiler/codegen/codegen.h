@@ -199,8 +199,10 @@ struct CodegenModuleRelocation
     s64 addend;
     u32 offset;
     CodegenModuleRelocationSource source;
+    IrBlockId label_block;
     bool aarch64;
     bool absolute;
+    bool label_address;
     bool is_thread_local;
     bool thread_local_low;
     bool thread_local_index;

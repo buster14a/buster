@@ -4020,7 +4020,16 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                        : relocation_type == 0xf ? OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12
                        : relocation_type == 0xe ? OBJECT_RELOCATION_ABSOLUTE64
                                                 : OBJECT_RELOCATION_COUNT;
-                if (relocation_type == 2)
+                if (relocation_type == 0xe)
+                {
+                    u64 stored = 0;
+                    if (!object_read_u64(bytes, (u64)raw_offset + source_offset, &stored))
+                    {
+                        return result;
+                    }
+                    addend = (s64)stored;
+                }
+                else if (relocation_type == 2)
                 {
                     u32 stored = 0;
                     if (!object_read_u32(bytes, (u64)raw_offset + source_offset, &stored))
@@ -6528,11 +6537,16 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Ar
                     frame_offset += action->value;
                 }
             }
+            else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
+            {
+                if (action->value % 8)
+                {
+                    return result;
+                }
+                unwind_slot_count += action->value <= 524280 ? 2 : 3;
+            }
             else
             {
-                // x86-64 codegen does not currently save nonvolatile registers
-                // to arbitrary frame slots. Do not publish misleading unwind
-                // metadata if that changes without a matching UWOP encoding.
                 return result;
             }
             if (unwind_slot_count > UINT8_MAX)
@@ -6596,6 +6610,10 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Ar
                     frame_offset += action->value;
                 }
             }
+            else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
+            {
+                unwind_slot_count += action->value <= 524280 ? 2 : 3;
+            }
         }
         bool encode_frame = frame_action != UINT32_MAX && frame_offset <= 240 && frame_offset % 16 == 0;
         unwind_slot_count += encode_frame;
@@ -6625,6 +6643,27 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Ar
             {
                 record[cursor + 1] = 3;
                 cursor += 2;
+            }
+            else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
+            {
+                if (action->value <= 524280)
+                {
+                    u16 scaled_offset = (u16)(action->value / 8);
+                    record[cursor + 1] = (u8)((action->register_index << 4) | 4);
+                    memcpy(record + cursor + 2, &scaled_offset, sizeof(scaled_offset));
+                    cursor += 4;
+                }
+                else
+                {
+                    if (action->value > UINT32_MAX)
+                    {
+                        return result;
+                    }
+                    record[cursor + 1] = (u8)((action->register_index << 4) | 5);
+                    u32 far_offset = (u32)action->value;
+                    memcpy(record + cursor + 2, &far_offset, sizeof(far_offset));
+                    cursor += 6;
+                }
             }
             else if (action->value <= 128)
             {

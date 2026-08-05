@@ -34,11 +34,12 @@ struct IrRuntimeValue
     u64 element_size;
     u32 va_index;
     u32 va_count;
+    IrFunctionId label_function;
     IrRuntimeValueKind kind;
     bool initialized;
     bool reversed;
     bool va_ended;
-    u8 reserved;
+    bool has_label_provenance;
 };
 
 struct IrRuntimeObject
@@ -121,6 +122,7 @@ IrExecutionTarget ir_interpreter_function_find(AnalysisProgram* analysis, IrProg
             {
                 target = (IrExecutionTarget){
                     .analysis = candidate_analysis,
+                    .program = program,
                     .module = candidate_module,
                     .function = candidate,
                 };
@@ -409,6 +411,9 @@ BUSTER_GLOBAL_LOCAL IrRuntimeObject* ir_interpreter_object_create(Arena* arena, 
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_write(Arena* arena, IrRuntimeObject* object, u64 offset, u64 size, IrRuntimeValue value);
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_object_range_valid(IrRuntimeObject* object, u64 offset, u64 size);
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_runtime_globals_initialize(Arena* arena, IrProgram* program, IrRuntimeContext* runtime);
+BUSTER_GLOBAL_LOCAL IrRuntimeStoredValue* ir_interpreter_stored_value_find(IrRuntimeObject* object, u64 offset, u64 size);
 
 BUSTER_GLOBAL_LOCAL IrRuntimeGlobal* ir_interpreter_global_find(IrRuntimeContext* runtime, IrSymbolId symbol)
 {
@@ -437,6 +442,206 @@ BUSTER_GLOBAL_LOCAL void ir_interpreter_global_zero_initialize(IrRuntimeObject* 
         object->bytes[index] = 0;
         object->initialized[index] = 1;
     }
+}
+
+BUSTER_GLOBAL_LOCAL IrFunction* ir_interpreter_label_function_for_symbol(IrProgram* program, IrSymbolId symbol)
+{
+    if (!program || symbol.value == IR_ID_UNDERLYING_INVALID || (program->module_count && !program->modules))
+    {
+        return 0;
+    }
+    IrFunction* result = 0;
+    for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
+    {
+        IrModule* module = program->modules + module_index;
+        if (module->function_count && !module->functions)
+        {
+            return 0;
+        }
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            if (function->symbol.value != symbol.value)
+            {
+                continue;
+            }
+            if (result)
+            {
+                return 0;
+            }
+            result = function;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_global_relocation_apply(Arena* arena, IrProgram* program, IrRuntimeContext* runtime, IrRuntimeObject* object,
+                                                                 IrGlobalRelocation* relocation)
+{
+    if (!arena || !program || !runtime || !object || !relocation || !program->data_layout.pointer.size)
+    {
+        return false;
+    }
+    u64 pointer_size = program->data_layout.pointer.size;
+    if (!ir_interpreter_object_range_valid(object, relocation->offset, pointer_size))
+    {
+        return false;
+    }
+    if (relocation->is_label_address)
+    {
+        IrFunction* owner = ir_interpreter_label_function_for_symbol(program, relocation->symbol);
+        if (!owner || owner->state != IR_FUNCTION_LOWERED || relocation->addend != 0 || relocation->label_block.value >= owner->block_count)
+        {
+            return false;
+        }
+        IrRuntimeValue label = {
+            .bits = relocation->label_block.value,
+            .kind = IR_RUNTIME_VALUE_SCALAR,
+            .initialized = true,
+            .label_function = owner->id,
+            .has_label_provenance = true,
+        };
+        return ir_interpreter_memory_write(arena, object, relocation->offset, pointer_size, label);
+    }
+    IrRuntimeGlobal* target_global = ir_interpreter_global_find(runtime, relocation->symbol);
+    if (target_global)
+    {
+        if (!target_global->object || relocation->addend < 0 || (u64)relocation->addend > target_global->object->size)
+        {
+            return false;
+        }
+        IrRuntimeValue address = {
+            .object = target_global->object,
+            .offset = (u64)relocation->addend,
+            .kind = IR_RUNTIME_VALUE_ADDRESS,
+            .initialized = true,
+        };
+        return ir_interpreter_memory_write(arena, object, relocation->offset, pointer_size, address);
+    }
+    IrFunction* target_function = ir_interpreter_label_function_for_symbol(program, relocation->symbol);
+    if (!target_function || relocation->addend != 0)
+    {
+        return false;
+    }
+    IrRuntimeValue function = {
+        .entity = target_function->entity,
+        .instantiation = target_function->instantiation,
+        .kind = IR_RUNTIME_VALUE_FUNCTION,
+        .initialized = true,
+    };
+    return ir_interpreter_memory_write(arena, object, relocation->offset, pointer_size, function);
+}
+
+BUSTER_TEST_F_DECL bool ir_interpreter_test_static_label_relocations(Arena* arena)
+{
+    if (!arena)
+    {
+        return false;
+    }
+    IrProgram program = ir_program_initialize(arena, 1, 3, 2, 0);
+    program.data_layout.pointer.size = 8;
+    IrTypeId void_type = ir_program_add_type(&program, (IrType){
+                                                               .kind = IR_TYPE_VOID,
+                                                               .layout = {.resolved = true},
+                                                           });
+    IrTypeId pointer_type = ir_program_add_type(&program, (IrType){
+                                                                  .element_type = void_type,
+                                                                  .kind = IR_TYPE_POINTER,
+                                                                  .layout = {.size = 8, .alignment = 8, .resolved = true},
+                                                              });
+    IrTypeId table_type = ir_program_add_type(&program, (IrType){
+                                                                .element_type = pointer_type,
+                                                                .kind = IR_TYPE_ARRAY,
+                                                                .element_count = 2,
+                                                                .layout = {.size = 16, .alignment = 8, .resolved = true},
+                                                            });
+    IrSymbolId function_symbol = ir_program_add_symbol(&program, (IrSymbol){
+                                                                                .kind = IR_SYMBOL_FUNCTION,
+                                                                                .is_definition = true,
+                                                                            });
+    IrSymbolId global_symbol = ir_program_add_symbol(&program, (IrSymbol){
+                                                                             .kind = IR_SYMBOL_DATA,
+                                                                             .is_definition = true,
+                                                                         });
+    if (void_type.value == IR_ID_UNDERLYING_INVALID || pointer_type.value == IR_ID_UNDERLYING_INVALID || table_type.value == IR_ID_UNDERLYING_INVALID ||
+        function_symbol.value == IR_ID_UNDERLYING_INVALID || global_symbol.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return false;
+    }
+    IrModule* module = program.modules;
+    IrBlock* blocks = arena_allocate(arena, IrBlock, 2);
+    blocks[0].id = (IrBlockId){.value = 0};
+    blocks[1].id = (IrBlockId){.value = 1};
+    IrFunction function = {
+        .symbol = function_symbol,
+        .canonical_type = IR_TYPE_ID_INVALID,
+        .id = {.value = 17},
+        .blocks = blocks,
+        .block_count = 2,
+        .state = IR_FUNCTION_LOWERED,
+    };
+    IrFunction* owner = ir_module_add_function(arena, module, function);
+    if (!owner)
+    {
+        return false;
+    }
+    u8* bytes = arena_allocate(arena, u8, 16);
+    memset(bytes, 0, 16);
+    IrGlobalRelocation* relocations = arena_allocate(arena, IrGlobalRelocation, 2);
+    relocations[0] = (IrGlobalRelocation){
+        .symbol = function_symbol,
+        .label_block = {.value = 0},
+        .offset = 0,
+        .is_label_address = true,
+    };
+    relocations[1] = (IrGlobalRelocation){
+        .symbol = function_symbol,
+        .label_block = {.value = 1},
+        .offset = 8,
+        .is_label_address = true,
+    };
+    if (!ir_module_add_global(arena, module,
+                              (IrGlobal){
+                                  .bytes = {.pointer = bytes, .length = 16},
+                                  .relocations = relocations,
+                                  .symbol = global_symbol,
+                                  .type = table_type,
+                                  .initializer_kind = IR_GLOBAL_INITIALIZER_BYTES,
+                                  .relocation_count = 2,
+                              }))
+    {
+        return false;
+    }
+    IrRuntimeContext runtime = {0};
+    if (!ir_interpreter_runtime_globals_initialize(arena, &program, &runtime))
+    {
+        return false;
+    }
+    IrRuntimeGlobal* global = ir_interpreter_global_find(&runtime, global_symbol);
+    IrRuntimeStoredValue* first = global ? ir_interpreter_stored_value_find(global->object, 0, 8) : 0;
+    IrRuntimeStoredValue* second = global ? ir_interpreter_stored_value_find(global->object, 8, 8) : 0;
+    bool labels_valid = first && second && first->value.initialized && second->value.initialized && first->value.has_label_provenance && second->value.has_label_provenance &&
+                        first->value.label_function.value == owner->id.value && second->value.label_function.value == owner->id.value && first->value.bits == 0 &&
+                        second->value.bits == 1;
+    IrGlobalRelocation saved_relocation = relocations[0];
+    relocations[0] = (IrGlobalRelocation){
+        .symbol = global_symbol,
+        .addend = -1,
+        .offset = 0,
+    };
+    IrRuntimeContext negative_addend_runtime = {0};
+    bool negative_addend_rejected = !ir_interpreter_runtime_globals_initialize(arena, &program, &negative_addend_runtime);
+    relocations[0] = saved_relocation;
+    IrGlobal saved_global = module->globals[0];
+    module->globals[0].initializer_kind = IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS;
+    module->globals[0].initializer_symbol = global_symbol;
+    module->globals[0].initializer_addend = -1;
+    module->globals[0].relocations = 0;
+    module->globals[0].relocation_count = 0;
+    IrRuntimeContext negative_initializer_runtime = {0};
+    bool negative_initializer_rejected = !ir_interpreter_runtime_globals_initialize(arena, &program, &negative_initializer_runtime);
+    module->globals[0] = saved_global;
+    return labels_valid && negative_addend_rejected && negative_initializer_rejected;
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_runtime_globals_initialize(Arena* arena, IrProgram* program, IrRuntimeContext* runtime)
@@ -540,22 +745,16 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_runtime_globals_initialize(Arena* arena,
             {
                 IrRuntimeGlobal* target = ir_interpreter_global_find(runtime, global->initializer_symbol);
                 IrType* type = ir_type_from_id(&program->types, global->type);
-                u64 addend_magnitude = global->initializer_addend < 0 ? (u64)(-(global->initializer_addend + 1)) + 1 : (u64)global->initializer_addend;
-                bool addend_valid = target && addend_magnitude <= target->object->size;
-                if (!addend_valid)
+                if (!target || !target->object || global->initializer_addend < 0 || (u64)global->initializer_addend > target->object->size)
                 {
                     return false;
                 }
                 IrRuntimeValue address = {
                     .object = target->object,
-                    .offset = addend_magnitude,
+                    .offset = (u64)global->initializer_addend,
                     .kind = IR_RUNTIME_VALUE_ADDRESS,
                     .initialized = true,
                 };
-                if (global->initializer_addend < 0)
-                {
-                    address.offset = target->object->size - addend_magnitude;
-                }
                 if (!type || !ir_interpreter_memory_write(arena, object, 0, type->layout.size, address))
                 {
                     return false;
@@ -564,6 +763,17 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_runtime_globals_initialize(Arena* arena,
             break;
             case IR_GLOBAL_INITIALIZER_COUNT:
                 return false;
+            }
+            if (global->relocation_count && !global->relocations)
+            {
+                return false;
+            }
+            for (u32 relocation_index = 0; relocation_index < global->relocation_count; relocation_index += 1)
+            {
+                if (!ir_interpreter_global_relocation_apply(arena, program, runtime, object, global->relocations + relocation_index))
+                {
+                    return false;
+                }
             }
         }
     }
@@ -667,6 +877,10 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_write(Arena* arena, IrRuntimeObje
         {
             object->bytes[offset + index] = (u8)(index < 8 ? value.bits >> (u32)(index * 8) : 0);
             object->initialized[offset + index] = 1;
+        }
+        if (value.has_label_provenance)
+        {
+            ir_interpreter_stored_value_add(arena, object, offset, size, value);
         }
         return true;
     }
@@ -773,38 +987,7 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_field(IrExecutionFrame* frame, AnalysisT
 
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_inline_assembly_jump_target(IrInstruction* instruction, String8 literal, String8 prefix, u32* target_index_out)
 {
-    if (!instruction || !target_index_out || literal.length <= prefix.length)
-    {
-        return false;
-    }
-    for (u64 index = 0; index < prefix.length; index += 1)
-    {
-        if (literal.pointer[index] != prefix.pointer[index])
-        {
-            return false;
-        }
-    }
-    u64 operand_index = 0;
-    for (u64 index = prefix.length; index < literal.length; index += 1)
-    {
-        u8 digit = (u8)literal.pointer[index];
-        if (digit < '0' || digit > '9' || operand_index > (UINT64_MAX - (digit - '0')) / 10)
-        {
-            return false;
-        }
-        operand_index = operand_index * 10 + (digit - '0');
-    }
-    if (operand_index < instruction->operand_count)
-    {
-        return false;
-    }
-    u64 label_index = operand_index - instruction->operand_count;
-    if (!instruction->target_count || label_index >= instruction->target_count - 1)
-    {
-        return false;
-    }
-    *target_index_out = 1 + (u32)label_index;
-    return true;
+    return ir_inline_assembly_jump_target(instruction, literal, prefix, target_index_out);
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_instruction_shape_valid(IrExecutionFrame* frame, IrInstruction* instruction)
@@ -898,7 +1081,10 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_instruction_shape_valid(IrExecutionFrame
         return instruction->operand_count == 2 && instruction->target_count == 0 && instruction->immediate_count == 0;
     case IR_OPCODE_INLINE_ASSEMBLY:
     {
-        bool valid = instruction->operand_count == instruction->immediate_count && (instruction->target_count == 0 || instruction->target_count >= 2);
+        bool valid = instruction->operand_count == instruction->immediate_count && (instruction->target_count == 0 || instruction->target_count >= 2) &&
+                     instruction->label_name_count == (instruction->target_count ? instruction->target_count - 1 : 0) &&
+                     (!instruction->label_name_count || instruction->label_names) && instruction->operand_name_count == instruction->operand_count &&
+                     (!instruction->operand_name_count || instruction->operand_names) && (!instruction->clobber_count || instruction->clobbers);
         for (u32 target_index = 0; valid && target_index < instruction->target_count; target_index += 1)
         {
             valid = instruction->targets[target_index].value < frame->function->block_count;
@@ -906,10 +1092,16 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_instruction_shape_valid(IrExecutionFrame
         return valid;
     }
     case IR_OPCODE_LABEL_ADDRESS:
-        return instruction->operand_count == 0 && instruction->target_count == 1 && instruction->targets[0].value < frame->function->block_count &&
-               instruction->immediate_count == 0 && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
-               instruction->result.value < frame->function->value_count && frame->function->values[instruction->result.value].is_label_value &&
-               frame->function->values[instruction->result.value].label_block.value == instruction->targets[0].value;
+    {
+        AnalysisType* type = analysis_type_from_id(frame->analysis, instruction->type);
+        AnalysisType* element = type && type->kind == ANALYSIS_TYPE_POINTER ? analysis_type_from_id(frame->analysis, type->as.element_type) : 0;
+        IrValue* result = instruction->result.value < frame->function->value_count ? frame->function->values + instruction->result.value : 0;
+        return instruction->operand_count == 0 && instruction->target_count == 1 && instruction->targets && instruction->targets[0].value < frame->function->block_count &&
+               instruction->immediate_count == 0 && instruction->result.value != IR_ID_UNDERLYING_INVALID && result && element &&
+               element->kind == ANALYSIS_TYPE_VOID && !result->has_non_label_provenance && !result->has_label_provenance && !result->label_paths &&
+               !result->label_path_count && ir_label_provenance_valid(result) && result->label_block_count == 1 && result->label_blocks &&
+               result->label_blocks[0].value == instruction->targets[0].value;
+    }
     case IR_OPCODE_BRANCH:
         return instruction->operand_count == 0 && instruction->target_count == 1 && instruction->immediate_count == 0;
     case IR_OPCODE_BRANCH_IF:
@@ -918,17 +1110,38 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_instruction_shape_valid(IrExecutionFrame
         return instruction->operand_count == 1 && instruction->immediate_count != UINT32_MAX && instruction->target_count == instruction->immediate_count + 1;
     case IR_OPCODE_INDIRECT_BRANCH:
     {
-        bool valid = instruction->operand_count == 1 && instruction->operands[0].value < frame->function->value_count && instruction->target_count != 0 &&
+        IrValue* target_value = instruction->operand_count == 1 && instruction->operands && instruction->operands[0].value < frame->function->value_count
+                                    ? frame->function->values + instruction->operands[0].value
+                                    : 0;
+        AnalysisType* target_type = target_value ? analysis_type_from_id(frame->analysis, target_value->type) : 0;
+        AnalysisType* target_element = target_type && target_type->kind == ANALYSIS_TYPE_POINTER
+                                           ? analysis_type_from_id(frame->analysis, target_type->as.element_type)
+                                           : 0;
+        bool valid = instruction->operand_count == 1 && target_value && target_element && target_element->kind == ANALYSIS_TYPE_VOID &&
+                     instruction->target_count == target_value->label_block_count && instruction->target_count != 0 && instruction->targets &&
                      instruction->immediate_count == 0 && instruction->result.value == IR_ID_UNDERLYING_INVALID &&
-                     frame->function->values[instruction->operands[0].value].is_label_value;
-        bool label_target = false;
+                     !target_value->has_non_label_provenance && ir_label_provenance_valid(target_value) &&
+                     ir_block_id_array_unique(instruction->targets, instruction->target_count);
+        bool label_targets = valid;
+        for (u32 label_index = 0; label_targets && label_index < target_value->label_block_count; label_index += 1)
+        {
+            bool found = false;
+            for (u32 target_index = 0; target_index < instruction->target_count; target_index += 1)
+            {
+                found |= instruction->targets[target_index].value == target_value->label_blocks[label_index].value;
+            }
+            label_targets &= target_value->label_blocks[label_index].value < frame->function->block_count && found;
+        }
         for (u32 target_index = 0; valid && target_index < instruction->target_count; target_index += 1)
         {
-            valid &= instruction->targets[target_index].value < frame->function->block_count;
-            label_target |= instruction->targets[target_index].value ==
-                            frame->function->values[instruction->operands[0].value].label_block.value;
+            bool found = false;
+            for (u32 label_index = 0; label_index < target_value->label_block_count; label_index += 1)
+            {
+                found |= instruction->targets[target_index].value == target_value->label_blocks[label_index].value;
+            }
+            valid &= found;
         }
-        return valid && label_target;
+        return valid && label_targets;
     }
     case IR_OPCODE_RETURN:
         return instruction->operand_count <= 1 && instruction->target_count == 0 && instruction->immediate_count == 0;
@@ -965,6 +1178,15 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_function_shape_valid(IrExecutionTarget t
         {
             return false;
         }
+        // The interpreter also admits the legacy analysis-backed IR used by
+        // its scalar tests; canonical layout checks belong to the canonical
+        // module validator.  The transfer/shape checks remain active here so
+        // forged label metadata is still rejected before execution.
+        if (!ir_label_metadata_shape_valid(0, function, function->values + value_index) ||
+            !ir_label_metadata_transfer_valid(0, function, function->values + value_index))
+        {
+            return false;
+        }
     }
     IrExecutionFrame shape_frame = {
         .analysis = target.analysis,
@@ -986,6 +1208,10 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_function_shape_valid(IrExecutionTarget t
         for (IrBlockParameter* parameter = block->first_parameter; parameter && parameter_count < block->parameter_count; parameter = parameter->next)
         {
             if (parameter->value.value >= function->value_count || !ir_interpreter_type_id_valid(target.analysis, parameter->type))
+            {
+                return false;
+            }
+            if (!ir_label_block_parameter_provenance_valid(function, parameter))
             {
                 return false;
             }
@@ -2536,6 +2762,8 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
             }
             produced.bits = instruction->targets[0].value;
             produced.kind = IR_RUNTIME_VALUE_SCALAR;
+            produced.label_function = frame->function->id;
+            produced.has_label_provenance = true;
         }
         break;
         case IR_OPCODE_CAST:
@@ -2830,7 +3058,6 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
             IrBlockId target = instruction->targets[0];
             u32 jump_target_index = 0;
             bool jump_label = ir_interpreter_inline_assembly_jump_target(instruction, instruction->literal, S8("jmp %l"), &jump_target_index) ||
-                              ir_interpreter_inline_assembly_jump_target(instruction, instruction->literal, S8("j %l"), &jump_target_index) ||
                               ir_interpreter_inline_assembly_jump_target(instruction, instruction->literal, S8("b %l"), &jump_target_index);
             if (jump_label)
             {
@@ -2902,12 +3129,14 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
         break;
         case IR_OPCODE_INDIRECT_BRANCH:
         {
-            if (instruction->operand_count != 1 || !instruction->target_count)
+            IrRuntimeValue target_value = instruction->operand_count == 1 ? frame->values[instruction->operands[0].value] : (IrRuntimeValue){0};
+            if (instruction->operand_count != 1 || !instruction->target_count || !target_value.has_label_provenance ||
+                target_value.label_function.value != frame->function->id.value)
             {
                 operation_trap = IR_EXECUTION_TRAP_INVALID_PROGRAM;
                 break;
             }
-            u64 label = frame->values[instruction->operands[0].value].bits;
+            u64 label = target_value.bits;
             IrBlockId target = IR_BLOCK_ID_INVALID;
             for (u32 target_index = 0; target_index < instruction->target_count; target_index += 1)
             {

@@ -141,6 +141,40 @@ outside:
     return cleanup_event_count == start + 1 && cleanup_events[start] == 13;
 }
 
+static int cleanup_computed_goto(int selector)
+{
+    int start = cleanup_event_count;
+    {
+        int value __attribute__((cleanup(cleanup_int))) = selector ? 41 : 43;
+        goto *(selector ? &&one : &&zero);
+    }
+zero:
+    return cleanup_event_count == start + 1 && cleanup_events[start] == 43 ? 7 : 0;
+one:
+    return cleanup_event_count == start + 1 && cleanup_events[start] == 41 ? 11 : 0;
+}
+
+static int cleanup_asm_goto(int selector)
+{
+    int start = cleanup_event_count;
+    {
+        int value __attribute__((cleanup(cleanup_int))) = selector ? 47 : 53;
+        if (selector)
+#if defined(__aarch64__) || defined(_M_ARM64)
+            __asm__ goto("b %l1" : : "r"(selector) : "cc" : taken);
+#else
+            __asm__ goto("jmp %l1" : : "r"(selector) : "cc" : taken);
+#endif
+    }
+    if (!selector)
+    {
+        return cleanup_event_count == start + 1 && cleanup_events[start] == 53 ? 13 : 0;
+    }
+    return 0;
+taken:
+    return cleanup_event_count == start + 1 && cleanup_events[start] == 47 ? 17 : 0;
+}
+
 static int cleanup_unreached(void)
 {
     int start = cleanup_event_count;
@@ -178,7 +212,8 @@ static int cleanup_pointer_conversions(void)
 int main(void)
 {
     if (!cleanup_fallthrough() || !cleanup_nested() || cleanup_return() != 6 || cleanup_block_scope_extern() != 14 || !cleanup_loop_exits() ||
-        !cleanup_goto() || !cleanup_unreached() || !cleanup_uninitialized() || !cleanup_pointer_conversions())
+        !cleanup_goto() || cleanup_computed_goto(0) != 7 || cleanup_computed_goto(1) != 11 || cleanup_asm_goto(0) != 13 ||
+        cleanup_asm_goto(1) != 17 || !cleanup_unreached() || !cleanup_uninitialized() || !cleanup_pointer_conversions())
     {
         return 1;
     }
