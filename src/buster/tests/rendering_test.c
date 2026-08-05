@@ -514,6 +514,13 @@ UnitTestResult rendering_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, rendering_blur_rgba8(blur_scratch, clamped_blur_pixels, 3, 1, 12, RENDERING_MAX_BLUR_RADIUS + 1));
     BUSTER_TEST(arguments, rendering_blur_rgba8(blur_scratch, maximum_blur_pixels, 3, 1, 12, RENDERING_MAX_BLUR_RADIUS));
     BUSTER_TEST(arguments, memcmp(clamped_blur_pixels, maximum_blur_pixels, sizeof(clamped_blur_pixels)) == 0);
+    u8 maximum_input_blur_pixels[] = {
+        0, 0, 0, 255,
+        255, 255, 255, 255,
+        0, 0, 0, 255,
+    };
+    BUSTER_TEST(arguments, rendering_blur_rgba8(blur_scratch, maximum_input_blur_pixels, 3, 1, 12, UINT32_MAX));
+    BUSTER_TEST(arguments, memcmp(maximum_input_blur_pixels, maximum_blur_pixels, sizeof(maximum_input_blur_pixels)) == 0);
     u8 edge_blur_pixels[] = {
         255, 0, 0, 255,
         0, 0, 0, 255,

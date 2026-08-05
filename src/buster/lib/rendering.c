@@ -1690,9 +1690,14 @@ BUSTER_GLOBAL_LOCAL bool rendering_blur_bytes(Arena* scratch, u8* pixels, u32 wi
         radius = RENDERING_MAX_BLUR_RADIUS;
     }
 
+    u32 window_size = radius * 2 + 1;
+    if (!window_size)
+    {
+        return false;
+    }
+    u32 divisor = window_size;
     u64 pixel_count = (u64)width * height;
     u8* horizontal = (u8*)arena_allocate_bytes(scratch, pixel_count * channels, 16);
-    u32 window_size = radius * 2 + 1;
     for (u32 y = 0; y < height; y += 1)
     {
         for (u32 x = 0; x < width; x += 1)
@@ -1714,7 +1719,7 @@ BUSTER_GLOBAL_LOCAL bool rendering_blur_bytes(Arena* scratch, u8* pixels, u32 wi
                     }
                     sum += pixels[(u64)y * stride + (u64)sample_x * channels + channel];
                 }
-                horizontal[((u64)y * width + x) * channels + channel] = (u8)((sum + window_size / 2) / window_size);
+                horizontal[((u64)y * width + x) * channels + channel] = (u8)((sum + divisor / 2) / divisor);
             }
         }
     }
@@ -1740,7 +1745,7 @@ BUSTER_GLOBAL_LOCAL bool rendering_blur_bytes(Arena* scratch, u8* pixels, u32 wi
                     }
                     sum += horizontal[((u64)sample_y * width + x) * channels + channel];
                 }
-                pixels[(u64)y * stride + (u64)x * channels + channel] = (u8)((sum + window_size / 2) / window_size);
+                pixels[(u64)y * stride + (u64)x * channels + channel] = (u8)((sum + divisor / 2) / divisor);
             }
         }
     }
