@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/debug/debug_test.h>
+#if BUSTER_INCLUDE_TESTS
 
-BUSTER_TEST_F_DECL UnitTestResult debug_model_tests(UnitTestArguments* arguments)
+UnitTestResult debug_model_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, debug_register_dwarf_number((Target){.cpu_arch = CPU_ARCH_X86_64}, DEBUG_REGISTER_X86_RAX) == 0);
@@ -137,3 +138,4 @@ BUSTER_TEST_F_DECL UnitTestResult debug_model_tests(UnitTestArguments* arguments
     BUSTER_TEST(arguments, analysis_model.types[1].fields[0].type == 2 && analysis_model.types[2].element_type == 1);
     return result;
 }
+#endif

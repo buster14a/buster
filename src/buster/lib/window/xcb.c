@@ -2,42 +2,42 @@
 
 #define BUSTER_X11_XDND_MAX_TRANSFER_BYTES BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES
 
-BUSTER_TEST_F_DECL u64 wm_x11_utf8_result_length(int result, u64 capacity)
+u64 wm_x11_utf8_result_length(int result, u64 capacity)
 {
     return result > 0 && (u64)result < capacity ? (u64)result : 0;
 }
 
-BUSTER_TEST_F_DECL bool wm_x11_xdnd_version_supported(u8 version)
+bool wm_x11_xdnd_version_supported(u8 version)
 {
     return version >= 3 && version <= 5;
 }
 
-BUSTER_TEST_F_DECL bool wm_x11_xdnd_transaction_matches(u32 active_source, u32 active_target, u32 source, u32 target)
+bool wm_x11_xdnd_transaction_matches(u32 active_source, u32 active_target, u32 source, u32 target)
 {
     return active_source != 0 && active_target != 0 && active_source == source && active_target == target;
 }
 
-BUSTER_TEST_F_DECL u32 wm_x11_xdnd_source_watch_event_mask(u32 previous_mask)
+u32 wm_x11_xdnd_source_watch_event_mask(u32 previous_mask)
 {
     return previous_mask | XCB_EVENT_MASK_STRUCTURE_NOTIFY;
 }
 
-BUSTER_TEST_F_DECL u32 wm_x11_xdnd_source_restore_event_mask(u32 saved_mask)
+u32 wm_x11_xdnd_source_restore_event_mask(u32 saved_mask)
 {
     return saved_mask;
 }
 
-BUSTER_TEST_F_DECL bool wm_x11_xdnd_source_destroyed(bool source_destroy_observed, u32 source, u32 destroyed_window)
+bool wm_x11_xdnd_source_destroyed(bool source_destroy_observed, u32 source, u32 destroyed_window)
 {
     return source_destroy_observed && source != XCB_WINDOW_NONE && source == destroyed_window;
 }
 
-BUSTER_TEST_F_DECL u64 wm_x11_xdnd_max_transfer_bytes(void)
+u64 wm_x11_xdnd_max_transfer_bytes(void)
 {
     return BUSTER_X11_XDND_MAX_TRANSFER_BYTES;
 }
 
-BUSTER_TEST_F_DECL bool wm_x11_xdnd_transfer_length_allowed(u64 current_length, u64 incoming_length)
+bool wm_x11_xdnd_transfer_length_allowed(u64 current_length, u64 incoming_length)
 {
     return current_length <= BUSTER_X11_XDND_MAX_TRANSFER_BYTES && incoming_length <= BUSTER_X11_XDND_MAX_TRANSFER_BYTES - current_length;
 }
@@ -60,7 +60,7 @@ BUSTER_GLOBAL_LOCAL s16 wm_x11_s16_from_s32(s32 value)
     return result;
 }
 
-BUSTER_TEST_F_DECL WmOffset wm_x11_drop_position_from_root(s32 root_x, s32 root_y, s32 window_root_x, s32 window_root_y)
+WmOffset wm_x11_drop_position_from_root(s32 root_x, s32 root_y, s32 window_root_x, s32 window_root_y)
 {
     return (WmOffset){
         .x = wm_x11_s16_from_s32(root_x - window_root_x),
@@ -674,7 +674,7 @@ BUSTER_GLOBAL_LOCAL u32 const wm_xim_input_style_candidates[] = {
     XCB_IM_PreeditCallbacks | XCB_IM_StatusCallbacks, XCB_IM_PreeditCallbacks | XCB_IM_StatusNothing, XCB_IM_PreeditCallbacks | XCB_IM_StatusNone,
 };
 
-BUSTER_TEST_F_DECL u32 wm_xim_next_input_style_attempt(u32 current)
+u32 wm_xim_next_input_style_attempt(u32 current)
 {
     return current < BUSTER_ARRAY_LENGTH(wm_xim_input_style_candidates) ? current + 1 : current;
 }
@@ -1109,7 +1109,7 @@ BUSTER_GLOBAL_LOCAL u64 wm_x11_file_uri_decoded_length(String8 uri, u64* path_st
     return decoded_length;
 }
 
-BUSTER_TEST_F_DECL String8 wm_x11_decode_file_uri(Arena* arena, String8 uri, bool* valid_out)
+String8 wm_x11_decode_file_uri(Arena* arena, String8 uri, bool* valid_out)
 {
     u64 path_start = 0;
     bool valid = false;
@@ -1150,7 +1150,7 @@ BUSTER_TEST_F_DECL String8 wm_x11_decode_file_uri(Arena* arena, String8 uri, boo
     return result;
 }
 
-BUSTER_TEST_F_DECL SliceString8 wm_x11_parse_uri_list(Arena* arena, String8 uri_list)
+SliceString8 wm_x11_parse_uri_list(Arena* arena, String8 uri_list)
 {
     u64 candidate_count = 0;
     u64 decoded_path_bytes = 0;

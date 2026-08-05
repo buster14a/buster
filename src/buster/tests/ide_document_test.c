@@ -1,8 +1,12 @@
 #include <buster/tests/ide_document_test.h>
+#if BUSTER_INCLUDE_TESTS
 
+#include <buster/lib/file.h>
+#include <buster/lib/hash.h>
+#include <buster/lib/string.h>
 #include <buster/lib/system_headers.h>
 
-BUSTER_TEST_F_DECL UnitTestResult ide_document_tests(UnitTestArguments* arguments)
+UnitTestResult ide_document_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
 #if !BUSTER_ANDROID && !BUSTER_IOS
@@ -654,3 +658,4 @@ BUSTER_TEST_F_DECL UnitTestResult ide_document_tests(UnitTestArguments* argument
 #endif
     return result;
 }
+#endif

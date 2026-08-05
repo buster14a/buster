@@ -4,5 +4,7 @@
 #include <buster/lib/target.h>
 #include <buster/lib/string.h>
 
-BUSTER_TEST_F_DECL CpuModel cpu_model_resolve_detected(CpuModel model);
-BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments);
+#if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL CpuModel cpu_model_resolve_detected(CpuModel model);
+BUSTER_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments);
+#endif

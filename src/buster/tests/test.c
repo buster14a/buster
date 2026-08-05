@@ -5,6 +5,11 @@
 #include <buster/lib/string.h>
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
+#if BUSTER_CPU_ARCH_X86_64
+#include <buster/lib/x86_64.h>
+#endif
+
+#if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/frontend/buster/parser.h>
 #include <buster/lib/compiler/frontend/buster/analysis.h>
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -19,11 +24,7 @@
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/ide_document.h>
-#if BUSTER_CPU_ARCH_X86_64
-#include <buster/lib/x86_64.h>
-#endif
 
-#if BUSTER_INCLUDE_TESTS
 #include <buster/tests/arena_test.h>
 #include <buster/tests/hash_test.h>
 #include <buster/tests/string_test.h>
@@ -49,10 +50,12 @@
 #include <buster/tests/compiler/object/object_test.h>
 #include <buster/tests/compiler/link/link_test.h>
 #include <buster/tests/compiler/driver/driver_test.h>
+
 #if BUSTER_CPU_ARCH_X86_64
 #include <buster/tests/x86_64_test.h>
 #endif
 
+#if BUSTER_UNITY_BUILD
 #include <buster/tests/arena_test.c>
 #include <buster/tests/hash_test.c>
 #include <buster/tests/string_test.c>
@@ -81,6 +84,8 @@
 #if BUSTER_CPU_ARCH_X86_64
 #include <buster/tests/x86_64_test.c>
 #endif
+#endif
+
 #endif
 
 bool unit_test_succeeded(UnitTestResult result)

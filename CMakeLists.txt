@@ -816,7 +816,6 @@ buster_register_module(simd "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
 buster_register_module(target "${BUSTER_SOURCE_DIR}/target${COMMON_EXTENSION}")
 buster_register_module(x86_64 "${BUSTER_SOURCE_DIR}/x86_64${COMMON_EXTENSION}")
 buster_register_module(aarch64 "${BUSTER_SOURCE_DIR}/aarch64${COMMON_EXTENSION}")
-buster_register_module(test "src/buster/tests/test${COMMON_EXTENSION}")
 buster_register_module(time "${BUSTER_SOURCE_DIR}/time${COMMON_EXTENSION}")
 buster_register_module(ui_core "${BUSTER_SOURCE_DIR}/ui_core${COMMON_EXTENSION}")
 buster_register_module(ui_builder "${BUSTER_SOURCE_DIR}/ui_builder${COMMON_EXTENSION}")
@@ -827,64 +826,65 @@ buster_register_module(font_provider "${BUSTER_SOURCE_DIR}/font_provider${COMMON
 buster_register_module(hash "${BUSTER_SOURCE_DIR}/hash${COMMON_EXTENSION}")
 buster_register_module(ide_document "${BUSTER_SOURCE_DIR}/ide_document${COMMON_EXTENSION}")
 
-# Include-only module tests stay visible to IDEs without becoming independent
-# translation units. test.c includes the sources when tests are enabled.
-set(BUSTER_TEST_FILES
-    src/buster/tests/test.h
+# Test sources follow the selected build mode: test.c includes them in unity
+# builds, while CMake compiles them as independent translation units otherwise.
+set(BUSTER_TEST_SOURCES
     src/buster/tests/arena_test.c
-    src/buster/tests/arena_test.h
     src/buster/tests/hash_test.c
-    src/buster/tests/hash_test.h
     src/buster/tests/string_test.c
-    src/buster/tests/string_test.h
     src/buster/tests/os_test.c
-    src/buster/tests/os_test.h
     src/buster/tests/file_test.c
-    src/buster/tests/file_test.h
     src/buster/tests/ide_document_test.c
-    src/buster/tests/ide_document_test.h
     src/buster/tests/window_test.c
-    src/buster/tests/window_test.h
     src/buster/tests/rendering_test.c
-    src/buster/tests/rendering_test.h
     src/buster/tests/ui_test.c
-    src/buster/tests/ui_test.h
     src/buster/tests/target_test.c
-    src/buster/tests/target_test.h
-    src/buster/tests/x86_64_test.c
-    src/buster/tests/x86_64_test.h
     src/buster/tests/compiler/frontend/buster/parser_test.c
-    src/buster/tests/compiler/frontend/buster/parser_test.h
     src/buster/tests/compiler/frontend/buster/analysis_test.c
-    src/buster/tests/compiler/frontend/buster/analysis_test.h
     src/buster/tests/compiler/frontend/c/c_test.c
-    src/buster/tests/compiler/frontend/c/c_test.h
     src/buster/tests/compiler/assembly/assembly_test.c
-    src/buster/tests/compiler/assembly/assembly_test.h
     src/buster/tests/compiler/assembly/x86_64_metadata_test.c
-    src/buster/tests/compiler/assembly/x86_64_metadata_test.h
     src/buster/tests/compiler/ir/ir_test.c
-    src/buster/tests/compiler/ir/ir_test.h
     src/buster/tests/compiler/ir/interpreter_test.c
-    src/buster/tests/compiler/ir/interpreter_test.h
     src/buster/tests/compiler/codegen/codegen_test.c
-    src/buster/tests/compiler/codegen/codegen_test.h
     src/buster/tests/compiler/debug/debug_test.c
-    src/buster/tests/compiler/debug/debug_test.h
     src/buster/tests/compiler/dwarf/dwarf_test.c
-    src/buster/tests/compiler/dwarf/dwarf_test.h
     src/buster/tests/compiler/codeview/codeview_test.c
-    src/buster/tests/compiler/codeview/codeview_test.h
     src/buster/tests/compiler/pdb/pdb_test.c
-    src/buster/tests/compiler/pdb/pdb_test.h
     src/buster/tests/compiler/object/object_test.c
-    src/buster/tests/compiler/object/object_test.h
     src/buster/tests/compiler/link/link_test.c
-    src/buster/tests/compiler/link/link_test.h
     src/buster/tests/compiler/driver/driver_test.c
+)
+set(BUSTER_TEST_HEADERS
+    src/buster/tests/test.h
+    src/buster/tests/arena_test.h
+    src/buster/tests/hash_test.h
+    src/buster/tests/string_test.h
+    src/buster/tests/os_test.h
+    src/buster/tests/file_test.h
+    src/buster/tests/ide_document_test.h
+    src/buster/tests/window_test.h
+    src/buster/tests/rendering_test.h
+    src/buster/tests/ui_test.h
+    src/buster/tests/target_test.h
+    src/buster/tests/x86_64_test.h
+    src/buster/tests/compiler/frontend/buster/parser_test.h
+    src/buster/tests/compiler/frontend/buster/analysis_test.h
+    src/buster/tests/compiler/frontend/c/c_test.h
+    src/buster/tests/compiler/assembly/assembly_test.h
+    src/buster/tests/compiler/assembly/x86_64_metadata_test.h
+    src/buster/tests/compiler/ir/ir_test.h
+    src/buster/tests/compiler/ir/interpreter_test.h
+    src/buster/tests/compiler/codegen/codegen_test.h
+    src/buster/tests/compiler/debug/debug_test.h
+    src/buster/tests/compiler/dwarf/dwarf_test.h
+    src/buster/tests/compiler/codeview/codeview_test.h
+    src/buster/tests/compiler/pdb/pdb_test.h
+    src/buster/tests/compiler/object/object_test.h
+    src/buster/tests/compiler/link/link_test.h
     src/buster/tests/compiler/driver/driver_test.h
 )
-set_source_files_properties(${BUSTER_TEST_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
+set_source_files_properties(${BUSTER_TEST_HEADERS} PROPERTIES HEADER_FILE_ONLY TRUE)
 
 set(GNU_FAMILY_OPTIONS
     -fwrapv
@@ -1346,10 +1346,6 @@ function(executable_add name is_buster_program main_file)
     buster_resolve_modules(module_sources module_names ${EXECUTABLE_ADD_MODULES})
     set(target_sources ${module_sources} ${EXECUTABLE_ADD_SOURCES})
 
-    if (${is_buster_program} AND ${BUSTER_INCLUDE_TESTS})
-        list(APPEND target_sources ${BUSTER_MODULE_TEST})
-    endif()
-
     if(${is_buster_program} AND "${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^(x86_64|amd64|X86_64|X86-64|AMD64)$")
         list(APPEND target_sources ${BUSTER_MODULE_X86_64})
     elseif(${is_buster_program} AND "${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^(aarch64|arm64|a64|AARCH64|ARM64|A64)$")
@@ -1373,7 +1369,17 @@ function(executable_add name is_buster_program main_file)
         add_executable(${name} ${main_file})
     endif()
     if (${is_buster_program})
-        target_sources(${name} PRIVATE ${BUSTER_TEST_FILES})
+        target_sources(${name} PRIVATE ${BUSTER_TEST_HEADERS})
+        set(test_sources ${BUSTER_TEST_SOURCES})
+        if ("${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^(x86_64|amd64|X86_64|X86-64|AMD64)$")
+            list(APPEND test_sources src/buster/tests/x86_64_test.c)
+        endif()
+        foreach(test_source IN LISTS test_sources)
+            target_sources(${name} PRIVATE "$<${BUSTER_NON_UNITY_SOURCE_CONDITION}:${CMAKE_CURRENT_SOURCE_DIR}/${test_source}>")
+        endforeach()
+        if (${BUSTER_INCLUDE_TESTS})
+            target_sources(${name} PRIVATE "$<${BUSTER_NON_UNITY_SOURCE_CONDITION}:${CMAKE_CURRENT_SOURCE_DIR}/src/buster/tests/test.c>")
+        endif()
     endif()
     foreach(target_source IN LISTS target_sources)
         if (IS_ABSOLUTE "${target_source}")

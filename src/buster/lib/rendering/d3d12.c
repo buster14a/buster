@@ -1738,7 +1738,7 @@ void rendering_backend_trace_command(RenderingCommandStream* stream, u32 command
     }
 }
 
-BUSTER_TEST_F_DECL RenderingBackendReplayResult rendering_backend_replay_for_test(RenderingCommandStream* stream, RenderingReplayEvent* events, u32 capacity)
+RenderingBackendReplayResult rendering_backend_replay_for_test(RenderingCommandStream* stream, RenderingReplayEvent* events, u32 capacity)
 {
     RenderingBackendReplayResult result = rendering_backend_replay_policy(stream, RENDERING_BACKEND_D3D12, events, capacity);
     rendering_backend_trace_begin(stream, RENDERING_BACKEND_D3D12);

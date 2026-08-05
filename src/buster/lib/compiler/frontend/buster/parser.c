@@ -2580,7 +2580,7 @@ BUSTER_GLOBAL_LOCAL u8 parser_utf8_encode(u32 code_point, u8 output[4])
     return length;
 }
 
-BUSTER_TEST_F_DECL StringLiteralParsing parse_string_literal(Arena* arena, String8 spelling)
+StringLiteralParsing parse_string_literal(Arena* arena, String8 spelling)
 {
     char8* decoded = arena_allocate(arena, char8, spelling.length + 1);
     u64 write = 0;
@@ -3570,7 +3570,7 @@ BUSTER_GLOBAL_LOCAL void finish_expression(Parser* restrict parser)
     }
 }
 
-BUSTER_TEST_F_DECL String8 string_from_token_id(TokenIdEnum id)
+String8 string_from_token_id(TokenIdEnum id)
 {
     switch (id)
     {
@@ -7009,7 +7009,7 @@ BUSTER_GLOBAL_LOCAL ParserFileExpectedDiagnostic missing_compile_time_marker_dia
     },
 };
 
-BUSTER_TEST_F_DECL ParserFileTestCase parser_file_test_cases[] = {
+BUSTER_V_IMPL ParserFileTestCase parser_file_test_cases[] = {
     {
         .path = S8_INITIALIZER("tests/basic_vector.bbb"),
         .expected_expression = S8_INITIALIZER("(@cast (index negated 0))"),

@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/link/link_test.h>
+#if BUSTER_INCLUDE_TESTS
 
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/file.h>
@@ -1068,7 +1069,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk(UnitTestArgument
     return result;
 }
 
-BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
+UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     static u8 const sha256_abc[32] = {
@@ -2303,3 +2304,4 @@ BUSTER_TEST_F_DECL UnitTestResult link_tests(UnitTestArguments* arguments)
     result.test_count += runtime_stack_walk.test_count;
     return result;
 }
+#endif

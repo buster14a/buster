@@ -158,5 +158,5 @@ BUSTER_WINDOW_INTERNAL_LINKAGE SliceWmWindowHandle get_windows(WmHandle* handle)
 
 #undef BUSTER_WINDOW_INTERNAL_LINKAGE
 
-BUSTER_TEST_F_DECL SliceString8 wm_apple_file_paths_from_values(Arena* arena, SliceWmAppleFileUrlPath values);
-BUSTER_TEST_F_DECL WmOffset wm_apple_drop_position_from_content_point(f64 x, f64 y, f64 height);
+BUSTER_F_DECL SliceString8 wm_apple_file_paths_from_values(Arena* arena, SliceWmAppleFileUrlPath values);
+BUSTER_F_DECL WmOffset wm_apple_drop_position_from_content_point(f64 x, f64 y, f64 height);

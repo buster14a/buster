@@ -122,12 +122,14 @@ enabled.
   cannot weaken unit-test or fuzz coverage. Android and iOS retain the combined
   in-app test and counted graphical smoke-test flow.
 - Module tests live under `src/buster/tests/` as mirrored `*_test.c`/`*_test.h`
-  pairs. They are include-only sources: only `src/buster/tests/test.c`
-  includes the test headers and implementations, while `CMakeLists.txt` lists
-  them as `HEADER_FILE_ONLY` so IDEs can display them without compiling them as
-  independent translation units. Production sources expose only the narrow
-  seams needed by tests; `BUSTER_TEST_F_DECL` keeps those seams static in
-  production and unity builds and externally linkable in non-unity test builds.
+  pairs. `test.c` includes their headers and owns registration. In unity builds
+  it also includes their implementations before the production sources; in
+  non-unity builds CMake compiles `test.c` and every test implementation as an
+  independent translation unit. Production sources expose only the narrow
+  seams needed by tests. Each `*_test.h` has one `BUSTER_INCLUDE_TESTS` block
+  around its test-only declarations and types. Each paired `*_test.c` keeps its
+  own header include outside one block guarding the rest of the file, so
+  tests-disabled non-unity builds still compile a non-empty translation unit.
   Private data shared by codegen and interpreter tests belongs in their
   `*_internal.h` headers under `src/buster/lib/`.
 - Run from the **repo root**: parser tests open `tests/*.bbb` by relative
@@ -296,11 +298,12 @@ enabled.
   on their own line. Prefer function headers, declarations, statements, and
   similar constructs on one line; split them only when doing so is clearer.
   Match the surrounding file.
-- Test implementations are not registered as modules and are not added to the
-  unity-build include list; add new test pairs under `src/buster/tests/`, add
-  them to the `BUSTER_TEST_FILES` `HEADER_FILE_ONLY` list in `CMakeLists.txt`,
-  and include them from `src/buster/tests/test.c` in the existing registration
-  order.
+- Test implementations are not registered as modules; add new test pairs under
+  `src/buster/tests/`, add
+  the implementation to `BUSTER_TEST_SOURCES` and the header to
+  `BUSTER_TEST_HEADERS` in `CMakeLists.txt`, and include both from
+  `src/buster/tests/test.c` in the existing registration order (the
+  implementation only in the `BUSTER_UNITY_BUILD` block).
 - **Adding a module** (`foo.c`/`foo.h` under `src/buster/lib/`) takes three
   edits: (1) `buster_register_module(foo ...)` in `CMakeLists.txt`;
   (2) add `foo` to the `MODULES` list of `buster_add_executable(ide ...)`;
@@ -539,7 +542,7 @@ Top level:
 | `cmake/` | `embed_d3d12_shaders.cmake`, `embed_metal_shaders.cmake` — turn compiled shaders into embeddable C data. |
 | `src/buster/apps/` | Application entrypoints and standalone tools. |
 | `src/buster/lib/` | Reusable runtime, UI, platform, compiler, and rendering code. |
-| `src/buster/tests/` | Include-only test harness and module test pairs. |
+| `src/buster/tests/` | Test harness and module test pairs, unity-included or independently compiled according to the build mode. |
 | `tests/` | Runtime compiler fixture corpus: `.bbb` language programs and C frontend/driver fixtures. Test implementations themselves live under `src/buster/tests/`. |
 | `android/`, `ios/` | Manifest/plist plus CI scripts to package, install, and run the on-device/simulator test suite. |
 | `.forgejo/workflows/ci.yml` | CI pipeline, including the per-platform `Perf` steps. |

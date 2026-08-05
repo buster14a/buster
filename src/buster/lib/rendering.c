@@ -1,32 +1,32 @@
 #include <buster/lib/rendering/internal.h>
 
-BUSTER_TEST_F_DECL bool rendering_vulkan_window_requires_device_initialization(bool device_initialized)
+bool rendering_vulkan_window_requires_device_initialization(bool device_initialized)
 {
     return !device_initialized;
 }
 
-BUSTER_TEST_F_DECL bool rendering_vulkan_existing_surface_is_compatible(RenderingVulkanSurfaceCompatibility compatibility)
+bool rendering_vulkan_existing_surface_is_compatible(RenderingVulkanSurfaceCompatibility compatibility)
 {
     return compatibility.queue_setup && compatibility.present_queue && compatibility.capabilities && compatibility.format && compatibility.present_modes &&
            compatibility.usage && compatibility.image_count && compatibility.composite_alpha;
 }
 
-BUSTER_TEST_F_DECL bool rendering_vulkan_surface_format_sentinel_is_compatible(u32 available_color_space, u32 selected_color_space)
+bool rendering_vulkan_surface_format_sentinel_is_compatible(u32 available_color_space, u32 selected_color_space)
 {
     return available_color_space == selected_color_space;
 }
 
-BUSTER_TEST_F_DECL bool rendering_vulkan_enumeration_needs_retry(bool incomplete, u32 capacity, u32 reported_count)
+bool rendering_vulkan_enumeration_needs_retry(bool incomplete, u32 capacity, u32 reported_count)
 {
     return incomplete || reported_count > capacity;
 }
 
-BUSTER_TEST_F_DECL bool rendering_vulkan_queue_family_enumeration_needs_retry(u32 capacity, u32 reported_count, u32 available_count)
+bool rendering_vulkan_queue_family_enumeration_needs_retry(u32 capacity, u32 reported_count, u32 available_count)
 {
     return reported_count > capacity || available_count > capacity || available_count > reported_count;
 }
 
-BUSTER_TEST_F_DECL RenderingVulkanQueueFamilySelection rendering_vulkan_select_queue_families(RenderingVulkanQueueFamilyCandidateSlice candidates)
+RenderingVulkanQueueFamilySelection rendering_vulkan_select_queue_families(RenderingVulkanQueueFamilyCandidateSlice candidates)
 {
     RenderingVulkanQueueFamilySelection result = {
         .graphics_family_index = 0,
@@ -74,13 +74,13 @@ BUSTER_TEST_F_DECL RenderingVulkanQueueFamilySelection rendering_vulkan_select_q
     return result;
 }
 
-BUSTER_TEST_F_DECL bool rendering_vulkan_device_candidate_is_eligible(RenderingVulkanDeviceCandidate candidate)
+bool rendering_vulkan_device_candidate_is_eligible(RenderingVulkanDeviceCandidate candidate)
 {
     return !candidate.excluded && candidate.has_required_extension && candidate.has_required_features && candidate.has_surface_support &&
            candidate.queues.eligible;
 }
 
-BUSTER_TEST_F_DECL u64 rendering_vulkan_device_score(RenderingVulkanDeviceCandidate candidate)
+u64 rendering_vulkan_device_score(RenderingVulkanDeviceCandidate candidate)
 {
     u64 score = 0;
     switch (candidate.device_type)
@@ -162,7 +162,7 @@ BUSTER_GLOBAL_LOCAL bool rendering_vulkan_device_is_better(RenderingVulkanDevice
     return candidate.enumeration_index < current.enumeration_index;
 }
 
-BUSTER_TEST_F_DECL RenderingVulkanDeviceSelection rendering_vulkan_select_device(RenderingVulkanDeviceCandidateSlice candidates)
+RenderingVulkanDeviceSelection rendering_vulkan_select_device(RenderingVulkanDeviceCandidateSlice candidates)
 {
     RenderingVulkanDeviceSelection result = {
         .candidate_index = 0,
@@ -205,7 +205,7 @@ bool rendering_scale_is_valid(RenderingScale scale)
     return scale.x > 0.0f && scale.y > 0.0f && scale.x == scale.x && scale.y == scale.y && scale.x <= maximum_finite_f32 && scale.y <= maximum_finite_f32;
 }
 
-BUSTER_TEST_F_DECL bool rendering_vulkan_device_functions_loaded_for_test(bool core_loaded, bool clear_attachments_loaded, bool blit_image_loaded)
+bool rendering_vulkan_device_functions_loaded_for_test(bool core_loaded, bool clear_attachments_loaded, bool blit_image_loaded)
 {
     return core_loaded && clear_attachments_loaded && blit_image_loaded;
 }
@@ -668,7 +668,7 @@ BUSTER_GLOBAL_LOCAL bool rendering_command_stream_push_batch(RenderingCommandStr
     return true;
 }
 
-BUSTER_TEST_F_DECL bool rendering_command_stream_rect_allocation_fits(RenderingCommandStream* stream, BusterPipeline pipeline, TextureIndex texture,
+bool rendering_command_stream_rect_allocation_fits(RenderingCommandStream* stream, BusterPipeline pipeline, TextureIndex texture,
                                                                        u32 first_index, u32 index_count, u64 vertex_bytes, u32 vertex_count)
 {
     if (!stream || !rendering_command_stream_is_valid(stream) || pipeline >= BUSTER_PIPELINE_COUNT || stream->command_count >= RENDERING_MAX_DRAW_COUNT ||
@@ -1297,7 +1297,7 @@ FontTextureAtlas rendering_font_create(Arena* arena, RenderingHandle* rendering,
 
 #endif
 
-BUSTER_TEST_F_DECL bool rendering_command_stream_add_vertices(RenderingCommandStream* stream, ByteSlice vertex_memory, u32 vertex_count)
+bool rendering_command_stream_add_vertices(RenderingCommandStream* stream, ByteSlice vertex_memory, u32 vertex_count)
 {
     if (!stream || stream->vertex_count > RENDERING_MAX_VERTEX_COUNT || vertex_count > RENDERING_MAX_VERTEX_COUNT - stream->vertex_count || !stream->vertex_cpu ||
         (vertex_memory.length && !vertex_memory.pointer) || !rendering_arena_allocation_fits(stream->vertex_cpu, vertex_memory.length, 16))
@@ -1317,7 +1317,7 @@ BUSTER_TEST_F_DECL bool rendering_command_stream_add_vertices(RenderingCommandSt
     return true;
 }
 
-BUSTER_TEST_F_DECL bool rendering_command_stream_add_indices(RenderingCommandStream* stream, Sliceu32 indices)
+bool rendering_command_stream_add_indices(RenderingCommandStream* stream, Sliceu32 indices)
 {
     if (!stream || stream->index_count > RENDERING_MAX_INDEX_COUNT || indices.length > RENDERING_MAX_INDEX_COUNT - stream->index_count || !stream->index_cpu ||
         (indices.length && !indices.pointer) || indices.length > UINT64_MAX / sizeof(*indices.pointer))

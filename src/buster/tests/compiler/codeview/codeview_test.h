@@ -4,6 +4,7 @@
 #include <buster/lib/compiler/codeview/codeview.h>
 #include <buster/lib/string.h>
 
+#if BUSTER_INCLUDE_TESTS
 enum
 {
     CODEVIEW_TEST_SIGNATURE_C13 = 4,
@@ -23,4 +24,5 @@ enum
 #define CODEVIEW_TEST_LINE_STATEMENT 0x80000000u
 #define CODEVIEW_TEST_LINE_NUMBER_MASK 0x00ffffffu
 
-BUSTER_TEST_F_DECL UnitTestResult codeview_tests(UnitTestArguments* arguments);
+BUSTER_F_DECL UnitTestResult codeview_tests(UnitTestArguments* arguments);
+#endif

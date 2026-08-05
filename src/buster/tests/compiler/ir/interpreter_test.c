@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/ir/interpreter_test.h>
+#if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL AnalysisEntity* ir_interpreter_test_entity_find(AnalysisResult* analysis, String8 name)
 {
@@ -13,7 +14,7 @@ BUSTER_GLOBAL_LOCAL AnalysisEntity* ir_interpreter_test_entity_find(AnalysisResu
     return 0;
 }
 
-BUSTER_TEST_F_DECL UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
+UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     TemporalArena temporary = arena_begin_temporal(arguments->arena);
@@ -495,3 +496,4 @@ BUSTER_TEST_F_DECL UnitTestResult ir_interpreter_tests(UnitTestArguments* argume
     arena_set_position(temporary.arena, temporary.position);
     return result;
 }
+#endif

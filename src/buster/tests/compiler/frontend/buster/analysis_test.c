@@ -1,4 +1,6 @@
 #include <buster/tests/compiler/frontend/buster/analysis_test.h>
+#if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/ir/ir.h>
 
 BUSTER_GLOBAL_LOCAL ParserSourceRange analysis_test_range(u32 offset)
 {
@@ -80,7 +82,7 @@ BUSTER_GLOBAL_LOCAL AnalysisFixtureTest analysis_fixture_tests[] = {
     {S8_INITIALIZER("tests/basic_variable.bbb"), 0},
 };
 
-BUSTER_TEST_F_DECL UnitTestResult analysis_tests(UnitTestArguments* arguments)
+UnitTestResult analysis_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     TemporalArena temporary = arena_begin_temporal(arguments->arena);
@@ -1151,3 +1153,4 @@ BUSTER_TEST_F_DECL UnitTestResult analysis_tests(UnitTestArguments* arguments)
     arena_set_position(temporary.arena, temporary.position);
     return result;
 }
+#endif

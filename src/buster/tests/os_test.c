@@ -1,7 +1,9 @@
 #include <buster/tests/os_test.h>
+#if BUSTER_INCLUDE_TESTS
+#include <buster/lib/file.h>
 #include <buster/lib/time.h>
 
-BUSTER_TEST_F_DECL UnitTestResult os_tests(UnitTestArguments* arguments)
+UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
 
@@ -352,3 +354,4 @@ BUSTER_TEST_F_DECL UnitTestResult os_tests(UnitTestArguments* arguments)
 
     return result;
 }
+#endif

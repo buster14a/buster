@@ -5,4 +5,6 @@
 #include <buster/tests/compiler/dwarf/dwarf_test.h>
 #include <buster/lib/string.h>
 
-BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* arguments);
+#if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* arguments);
+#endif

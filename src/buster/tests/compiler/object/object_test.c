@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/object/object_test.h>
+#if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL bool object_bytes_contain(ByteSlice bytes, String8 value)
 {
@@ -182,7 +183,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_test_archive_long_name(Arena* arena, ByteSl
     return (ByteSlice){.pointer = bytes, .length = total_size};
 }
 
-BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
+UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
     UnitTestResult result = {0};
@@ -1408,3 +1409,4 @@ BUSTER_TEST_F_DECL UnitTestResult object_tests(UnitTestArguments* arguments)
 #endif
     return result;
 }
+#endif

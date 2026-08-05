@@ -314,7 +314,7 @@ TargetParseResult target_parse_triple(String8 triple)
     return result;
 }
 
-BUSTER_TEST_F_DECL CpuModel cpu_model_resolve_detected(CpuModel model)
+CpuModel cpu_model_resolve_detected(CpuModel model)
 {
     return model == CPU_MODEL_ERROR ? CPU_MODEL_NATIVE : model;
 }

@@ -4688,8 +4688,8 @@ requested_resolved:
     return true;
 }
 
-BUSTER_TEST_F_DECL CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name);
-BUSTER_TEST_F_DECL CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, String8 name, u32 token_index);
+CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name);
+CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, String8 name, u32 token_index);
 
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_add_type(CParseResult* result, CType type);
 
@@ -9643,7 +9643,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_scope_add_entity(CParseResult* result, CScopeId
     }
 }
 
-BUSTER_TEST_F_DECL CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name)
+CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name)
 {
     while (scope.value != C_ID_UNDERLYING_INVALID)
     {
@@ -9679,7 +9679,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_entity_visible_at(CPreprocessResult preprocess,
     return entity->location.file != reference.file || entity->location.offset <= reference.offset;
 }
 
-BUSTER_TEST_F_DECL CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, String8 name,
+CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, String8 name,
                                                        u32 token_index)
 {
     while (scope.value != C_ID_UNDERLYING_INVALID)
@@ -12680,7 +12680,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_va_list_parameter_decays(Target target)
            (target.cpu_arch == CPU_ARCH_X86_64 || target.os == OPERATING_SYSTEM_WINDOWS);
 }
 
-BUSTER_TEST_F_DECL CType* c_type_from_id(CParseResult* parse, CTypeId id)
+CType* c_type_from_id(CParseResult* parse, CTypeId id)
 {
     if (!parse || id.value == C_ID_UNDERLYING_INVALID || id.value >= parse->type_count)
     {

@@ -211,15 +211,6 @@
 #define BUSTER_UNITY_BUILD 0
 #endif
 
-// Test seams stay translation-unit local in production and unity builds. A
-// non-unity test build needs external linkage so the include-only test
-// translation unit can call into its production module.
-#if BUSTER_INCLUDE_TESTS && !BUSTER_UNITY_BUILD
-#define BUSTER_TEST_F_DECL
-#else
-#define BUSTER_TEST_F_DECL static
-#endif
-
 #if BUSTER_UNITY_BUILD
 #define BUSTER_F_DECL static
 #if defined __cplusplus

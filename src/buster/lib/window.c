@@ -122,28 +122,28 @@ BUSTER_GLOBAL_LOCAL bool wm_file_path_is_valid(String8 path)
     return result;
 }
 
-BUSTER_TEST_F_DECL BUSTER_UNUSED_DECL u64 wm_native_file_drop_max_path_count(void)
+u64 wm_native_file_drop_max_path_count(void)
 {
     return BUSTER_NATIVE_FILE_DROP_MAX_PATH_COUNT;
 }
 
-BUSTER_TEST_F_DECL BUSTER_UNUSED_DECL u64 wm_native_file_drop_max_path_bytes(void)
+u64 wm_native_file_drop_max_path_bytes(void)
 {
     return BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES;
 }
 
-BUSTER_TEST_F_DECL BUSTER_UNUSED_DECL bool wm_native_file_drop_budget_allows(u64 path_count, u64 output_bytes)
+bool wm_native_file_drop_budget_allows(u64 path_count, u64 output_bytes)
 {
     return path_count <= BUSTER_NATIVE_FILE_DROP_MAX_PATH_COUNT && output_bytes <= BUSTER_NATIVE_FILE_DROP_MAX_PATH_BYTES;
 }
 
-BUSTER_TEST_F_DECL BUSTER_UNUSED_DECL bool wm_native_file_drop_array_size_allowed(u64 count, u64 element_size)
+bool wm_native_file_drop_array_size_allowed(u64 count, u64 element_size)
 {
     return element_size != 0 && count <= UINT64_MAX / element_size;
 }
 
 #if BUSTER_MACOS || BUSTER_INCLUDE_TESTS
-BUSTER_TEST_F_DECL BUSTER_UNUSED_DECL SliceString8 wm_apple_file_paths_from_values(Arena* arena, SliceWmAppleFileUrlPath values)
+SliceString8 wm_apple_file_paths_from_values(Arena* arena, SliceWmAppleFileUrlPath values)
 {
     u64 valid_count = 0;
     u64 output_bytes = 0;
@@ -210,7 +210,7 @@ BUSTER_GLOBAL_LOCAL s16 wm_s16_from_f64(f64 value)
     return result;
 }
 
-BUSTER_TEST_F_DECL BUSTER_UNUSED_DECL WmOffset wm_apple_drop_position_from_content_point(f64 x, f64 y, f64 height)
+BUSTER_UNUSED_DECL WmOffset wm_apple_drop_position_from_content_point(f64 x, f64 y, f64 height)
 {
     return (WmOffset){
         .x = wm_s16_from_f64(x),

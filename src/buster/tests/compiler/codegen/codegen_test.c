@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/codegen/codegen_test.h>
+#if BUSTER_INCLUDE_TESTS
 
 typedef u64 CodegenTestFunction2(u64 left, u64 right);
 typedef u64 CodegenTestFunction1(u64 value);
@@ -499,7 +500,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_x64_decode_instruction(ByteSlice code, u64
     return result->length != 0;
 }
 
-BUSTER_TEST_F_DECL CodegenTestX64BodyScan codegen_test_x64_scan_body(ByteSlice code, u64 start, u64 end, u32 allocation,
+CodegenTestX64BodyScan codegen_test_x64_scan_body(ByteSlice code, u64 start, u64 end, u32 allocation,
                                                                       u32 frame_restore_displacement)
 {
     CodegenTestX64BodyScan result = {.valid = true};
@@ -547,7 +548,7 @@ BUSTER_TEST_F_DECL CodegenTestX64BodyScan codegen_test_x64_scan_body(ByteSlice c
     return result;
 }
 
-BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
+UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     u8 negative_rsp_store_bytes[] = {0x48, 0x89, 0x44, 0x24, 0xf8, 0x5d, 0xc3};
@@ -2972,3 +2973,4 @@ BUSTER_TEST_F_DECL UnitTestResult codegen_tests(UnitTestArguments* arguments)
     arena_set_position(temporary.arena, temporary.position);
     return result;
 }
+#endif

@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/driver/driver_test.h>
+#if BUSTER_INCLUDE_TESTS
 #include <buster/tests/compiler/codegen/codegen_test.h>
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_elf_section_find(ByteSlice image, String8 name, u64* offset, u64* size, u64* address)
@@ -227,7 +228,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ByteSlice compiler_driver_test_archive(Ar
     return result;
 }
 
-BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
+UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     String8 command_line[] = {
@@ -2489,3 +2490,4 @@ BUSTER_TEST_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* argum
 #endif
     return result;
 }
+#endif

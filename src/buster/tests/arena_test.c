@@ -1,6 +1,7 @@
 #include <buster/tests/arena_test.h>
+#if BUSTER_INCLUDE_TESTS
 
-BUSTER_TEST_F_DECL UnitTestResult arena_tests(UnitTestArguments* arguments)
+UnitTestResult arena_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
     UnitTestResult result = {0};
@@ -28,3 +29,4 @@ BUSTER_TEST_F_DECL UnitTestResult arena_tests(UnitTestArguments* arguments)
 
     return result;
 }
+#endif

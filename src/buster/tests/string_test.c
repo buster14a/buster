@@ -1,5 +1,7 @@
 #include <buster/tests/string_test.h>
+#if BUSTER_INCLUDE_TESTS
 
+#include <buster/lib/os.h>
 
 #if defined(_WIN32)
 #define BUSTER_UNICODE_OS_TO_UTF8_TEST(args, arena_value, utf8_value, utf16_value)                                                                             \
@@ -65,7 +67,7 @@ BUSTER_GLOBAL_LOCAL s128 string_test_s128(u64 low, u64 high)
         BUSTER_TEST_RAW((args), unicode_utf8.pointer[unicode_utf8.length] == 0, S8("string16_to_string8_arena did not write a terminator"));                   \
     } while (0)
 
-BUSTER_TEST_F_DECL UnitTestResult string_tests(UnitTestArguments* arguments)
+UnitTestResult string_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
@@ -5892,3 +5894,4 @@ BUSTER_TEST_F_DECL UnitTestResult string_tests(UnitTestArguments* arguments)
 #undef BUSTER_UTF16_TO_UTF8_TEST
 #undef BUSTER_UNICODE_ROUND_TRIP_TEST
 #undef BUSTER_UNICODE_OS_TO_UTF8_TEST
+#endif

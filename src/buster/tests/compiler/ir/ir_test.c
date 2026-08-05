@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/ir/ir_test.h>
+#if BUSTER_INCLUDE_TESTS
 
 typedef struct IrFixtureTest IrFixtureTest;
 struct IrFixtureTest
@@ -119,7 +120,7 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_conversion_count(IrModule* module, IrConversionO
     return count;
 }
 
-BUSTER_TEST_F_DECL UnitTestResult ir_tests(UnitTestArguments* arguments)
+UnitTestResult ir_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     TemporalArena temporary = arena_begin_temporal(arguments->arena);
@@ -759,3 +760,4 @@ BUSTER_TEST_F_DECL UnitTestResult ir_tests(UnitTestArguments* arguments)
     arena_set_position(temporary.arena, temporary.position);
     return result;
 }
+#endif

@@ -356,14 +356,14 @@ BUSTER_GLOBAL_LOCAL void link_write_u64(u8* bytes, u64 offset, u64 value)
     memcpy(bytes + offset, &value, sizeof(value));
 }
 
-BUSTER_TEST_F_DECL u64 link_read_u64(u8 const* bytes, u64 offset)
+u64 link_read_u64(u8 const* bytes, u64 offset)
 {
     u64 result = 0;
     memcpy(&result, bytes + offset, sizeof(result));
     return result;
 }
 
-BUSTER_TEST_F_DECL u32 link_read_u32(u8 const* bytes, u64 offset)
+u32 link_read_u32(u8 const* bytes, u64 offset)
 {
     u32 result = 0;
     memcpy(&result, bytes + offset, sizeof(result));
@@ -383,7 +383,7 @@ BUSTER_GLOBAL_LOCAL u32 link_rotate_right_u32(u32 value, u32 amount)
     return (value >> amount) | (value << (32 - amount));
 }
 
-BUSTER_TEST_F_DECL void link_sha256(Arena* arena, u8 const* input, u64 length, u8* output)
+void link_sha256(Arena* arena, u8 const* input, u64 length, u8* output)
 {
     static u32 const constants[64] = {
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be,
@@ -2196,7 +2196,7 @@ BUSTER_GLOBAL_LOCAL String8 link_pe_pdb_path(Arena* arena, String8 executable_pa
     return string_format_z(arena, S8("{S8}.pdb"), string_slice(executable_path, 0, dot));
 }
 
-BUSTER_TEST_F_DECL ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
+ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
                                                        u32 const* object_output_sections, u64 const* object_section_offsets,
                                                        u32 output_section_count)
 {

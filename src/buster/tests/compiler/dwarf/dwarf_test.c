@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/dwarf/dwarf_test.h>
+#if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/codegen/codegen.h>
 
 
@@ -52,7 +53,7 @@ BUSTER_GLOBAL_LOCAL bool dwarf_test_read_sleb128(ByteSlice bytes, u64* offset, s
     return false;
 }
 
-BUSTER_TEST_F_DECL bool dwarf_line_lookup(ByteSlice debug_line, u64 address, DwarfLineRow* row)
+bool dwarf_line_lookup(ByteSlice debug_line, u64 address, DwarfLineRow* row)
 {
     if (debug_line.length < 16 || !row)
     {
@@ -192,7 +193,7 @@ BUSTER_TEST_F_DECL bool dwarf_line_lookup(ByteSlice debug_line, u64 address, Dwa
     return false;
 }
 
-BUSTER_TEST_F_DECL UnitTestResult dwarf_tests(UnitTestArguments* arguments)
+UnitTestResult dwarf_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     String8 files[] = {
@@ -543,3 +544,4 @@ BUSTER_TEST_F_DECL UnitTestResult dwarf_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !invalid_cfi.valid);
     return result;
 }
+#endif

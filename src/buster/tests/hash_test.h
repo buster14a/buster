@@ -4,4 +4,6 @@
 #include <buster/lib/hash.h>
 #include <buster/lib/string.h>
 
-BUSTER_TEST_F_DECL UnitTestResult hash_tests(UnitTestArguments* arguments);
+#if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL UnitTestResult hash_tests(UnitTestArguments* arguments);
+#endif

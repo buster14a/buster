@@ -1,6 +1,7 @@
 #include <buster/tests/rendering_test.h>
+#if BUSTER_INCLUDE_TESTS
 
-BUSTER_TEST_F_DECL UnitTestResult rendering_tests(UnitTestArguments* arguments)
+UnitTestResult rendering_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_UNUSED(arguments);
@@ -581,3 +582,4 @@ BUSTER_TEST_F_DECL UnitTestResult rendering_tests(UnitTestArguments* arguments)
 
     return result;
 }
+#endif

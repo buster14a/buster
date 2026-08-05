@@ -1659,7 +1659,7 @@ BUSTER_GLOBAL_LOCAL void ir_lower_statement_task(IrBuilder* builder, IrLowerTask
     }
 }
 
-BUSTER_TEST_F_DECL bool ir_entity_has_diagnostic(AnalysisResult* analysis, AnalysisEntityId entity)
+bool ir_entity_has_diagnostic(AnalysisResult* analysis, AnalysisEntityId entity)
 {
     for (AnalysisDiagnostic* diagnostic = analysis->first_diagnostic; diagnostic; diagnostic = diagnostic->next)
     {
@@ -1982,7 +1982,7 @@ BUSTER_GLOBAL_LOCAL IrModule ir_module_initialize(Arena* result_arena, AnalysisR
     return module;
 }
 
-BUSTER_TEST_F_DECL AnalysisInstantiation* ir_instantiation_from_id(AnalysisResult* analysis, AnalysisInstantiationId id)
+AnalysisInstantiation* ir_instantiation_from_id(AnalysisResult* analysis, AnalysisInstantiationId id)
 {
     for (AnalysisInstantiation* instantiation = analysis->first_instantiation; instantiation; instantiation = instantiation->next)
     {

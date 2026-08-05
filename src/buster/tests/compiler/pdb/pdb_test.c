@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/pdb/pdb_test.h>
+#if BUSTER_INCLUDE_TESTS
 
-BUSTER_TEST_F_DECL UnitTestResult pdb_tests(UnitTestArguments* arguments)
+UnitTestResult pdb_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     DwarfFunction functions[] = {
@@ -259,3 +260,4 @@ BUSTER_TEST_F_DECL UnitTestResult pdb_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !pdb_build(arguments->arena, invalid).valid);
     return result;
 }
+#endif

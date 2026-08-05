@@ -329,7 +329,7 @@ BUSTER_GLOBAL_LOCAL DebugLocation debug_unavailable_location(void)
     };
 }
 
-BUSTER_TEST_F_DECL void debug_variable_add_location(Arena* arena, DebugModelInput* input, DebugVariable* variable, IrSymbolId symbol,
+void debug_variable_add_location(Arena* arena, DebugModelInput* input, DebugVariable* variable, IrSymbolId symbol,
                                                      IrLocalId local, u32 start, u32 end)
 {
     u32 matching_count = 0;
@@ -376,7 +376,7 @@ BUSTER_TEST_F_DECL void debug_variable_add_location(Arena* arena, DebugModelInpu
     }
 }
 
-BUSTER_TEST_F_DECL DebugScopeId debug_scope_add(Arena* arena, DebugModel* model, DebugScopeId parent, DebugScopeKind kind,
+DebugScopeId debug_scope_add(Arena* arena, DebugModel* model, DebugScopeId parent, DebugScopeKind kind,
                                                  DebugSourceLocation declaration, u32 start, u32 end, u32 variable_capacity)
 {
     if (model->scope_count == UINT32_MAX)
@@ -396,7 +396,7 @@ BUSTER_TEST_F_DECL DebugScopeId debug_scope_add(Arena* arena, DebugModel* model,
     return id;
 }
 
-BUSTER_TEST_F_DECL DebugVariableId debug_variable_add(Arena* arena, DebugModel* model, DebugModelInput* input, DebugScope* scope,
+DebugVariableId debug_variable_add(Arena* arena, DebugModel* model, DebugModelInput* input, DebugScope* scope,
                                                        String8 name, DebugTypeId type, DebugSourceLocation declaration, DebugVariableKind kind,
                                                        IrSymbolId symbol, IrLocalId local, u32 start, u32 end)
 {

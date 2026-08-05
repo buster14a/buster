@@ -10,6 +10,6 @@ struct IrExecutionTarget
     IrFunction* function;
 };
 
-BUSTER_TEST_F_DECL IrExecutionTarget ir_interpreter_function_find(AnalysisProgram* analysis, IrProgram* program, AnalysisEntityId entity,
+BUSTER_F_DECL IrExecutionTarget ir_interpreter_function_find(AnalysisProgram* analysis, IrProgram* program, AnalysisEntityId entity,
                                                                   AnalysisInstantiationId instantiation);
-BUSTER_TEST_F_DECL f64 ir_interpreter_float_read(u64 bits, u32 width);
+BUSTER_F_DECL f64 ir_interpreter_float_read(u64 bits, u32 width);

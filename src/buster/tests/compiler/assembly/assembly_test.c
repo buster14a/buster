@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/assembly/assembly_test.h>
+#if BUSTER_INCLUDE_TESTS
 
-BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
+UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Target x86_target = {
@@ -4089,3 +4090,4 @@ BUSTER_TEST_F_DECL UnitTestResult assembly_tests(UnitTestArguments* arguments)
     }
     return result;
 }
+#endif

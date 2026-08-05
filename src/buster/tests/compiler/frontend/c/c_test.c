@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/frontend/c/c_test.h>
+#if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL void c_test_token(UnitTestArguments* arguments, UnitTestResult* outer_result, CLexResult lex, u64 index, CTokenKind kind, String8 spelling)
 {
@@ -179,7 +180,7 @@ BUSTER_GLOBAL_LOCAL void c_test_case_range_lower_diagnostic(UnitTestArguments* a
 #if BUSTER_COMPILER_CLANG
 __attribute__((optnone))
 #endif
-BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
+UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     CLexResult basic = c_lex(arguments->arena, S8("int ma\\\r\nin(void) // comment\r\n"
@@ -6250,3 +6251,4 @@ BUSTER_TEST_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     }
     return result;
 }
+#endif

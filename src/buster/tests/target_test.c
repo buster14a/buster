@@ -1,6 +1,7 @@
 #include <buster/tests/target_test.h>
+#if BUSTER_INCLUDE_TESTS
 
-BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
+UnitTestResult target_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_UNUSED(arguments);
@@ -796,3 +797,4 @@ BUSTER_TEST_F_DECL UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, target_data_layout_is_valid(linux_arm_layout));
     return result;
 }
+#endif

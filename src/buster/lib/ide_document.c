@@ -2168,7 +2168,7 @@ IdeDocumentErrorKind ide_document_model_save(IdeDocumentModel* model, String8 pa
 }
 
 #if BUSTER_INCLUDE_TESTS
-BUSTER_TEST_F_DECL void ide_document_model_test_set_save_replace_failure(bool enabled)
+void ide_document_model_test_set_save_replace_failure(bool enabled)
 {
     ide_test_force_save_replace_failure = enabled;
 }

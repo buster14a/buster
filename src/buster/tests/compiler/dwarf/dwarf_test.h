@@ -4,6 +4,7 @@
 #include <buster/lib/compiler/dwarf/dwarf.h>
 #include <buster/lib/compiler/debug/debug.h>
 
+#if BUSTER_INCLUDE_TESTS
 enum
 {
     DWARF_TEST_VERSION = 4,
@@ -28,6 +29,7 @@ struct DwarfLineRow
     u8 reserved[3];
 };
 
-BUSTER_TEST_F_DECL bool dwarf_line_lookup(ByteSlice debug_line, u64 address, DwarfLineRow* row);
+BUSTER_F_DECL bool dwarf_line_lookup(ByteSlice debug_line, u64 address, DwarfLineRow* row);
 
-BUSTER_TEST_F_DECL UnitTestResult dwarf_tests(UnitTestArguments* arguments);
+BUSTER_F_DECL UnitTestResult dwarf_tests(UnitTestArguments* arguments);
+#endif

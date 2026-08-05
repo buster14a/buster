@@ -294,22 +294,22 @@ BUSTER_F_DECL void rendering_backend_trace_copy_result(RenderingBackendReplayRes
 BUSTER_F_DECL void rendering_frame_error_commit(bool* last_frame_error, bool frame_error);
 BUSTER_F_DECL bool rendering_frame_error_query(bool* last_frame_error);
 BUSTER_F_DECL bool rendering_window_has_rendering_error_internal(RenderingWindowHandle* window);
-BUSTER_TEST_F_DECL RenderingBlurDimensions rendering_blur_dimensions_make(RenderingWindowSize target_size);
-BUSTER_TEST_F_DECL RenderingBlurDescriptorBindings rendering_blur_descriptor_bindings(u32 occurrence);
-BUSTER_TEST_F_DECL RenderingDescriptorRange rendering_descriptor_range_make(u32 descriptor_base, u32 window_slot, u32 window_count, u32 window_length);
-BUSTER_TEST_F_DECL bool rendering_arena_allocation_fits(Arena* arena, u64 size, u64 alignment);
-BUSTER_TEST_F_DECL RenderingBlurPlan rendering_blur_plan_make(RenderingWindowSize target_size, RenderingClipRect rect, u32 radius);
-BUSTER_TEST_F_DECL u32 rendering_command_stream_replay(RenderingCommandStream* stream, RenderingReplayEvent* events, u32 capacity);
-BUSTER_TEST_F_DECL RenderingBackendReplayResult rendering_backend_replay_policy(RenderingCommandStream* stream, RenderingBackendKind backend,
+BUSTER_F_DECL RenderingBlurDimensions rendering_blur_dimensions_make(RenderingWindowSize target_size);
+BUSTER_F_DECL RenderingBlurDescriptorBindings rendering_blur_descriptor_bindings(u32 occurrence);
+BUSTER_F_DECL RenderingDescriptorRange rendering_descriptor_range_make(u32 descriptor_base, u32 window_slot, u32 window_count, u32 window_length);
+BUSTER_F_DECL bool rendering_arena_allocation_fits(Arena* arena, u64 size, u64 alignment);
+BUSTER_F_DECL RenderingBlurPlan rendering_blur_plan_make(RenderingWindowSize target_size, RenderingClipRect rect, u32 radius);
+BUSTER_F_DECL u32 rendering_command_stream_replay(RenderingCommandStream* stream, RenderingReplayEvent* events, u32 capacity);
+BUSTER_F_DECL RenderingBackendReplayResult rendering_backend_replay_policy(RenderingCommandStream* stream, RenderingBackendKind backend,
                                                                                   RenderingReplayEvent* events, u32 capacity);
-BUSTER_TEST_F_DECL RenderingBackendReplayResult rendering_backend_replay_for_test(RenderingCommandStream* stream, RenderingReplayEvent* events, u32 capacity);
-BUSTER_TEST_F_DECL bool rendering_command_stream_add_vertices(RenderingCommandStream* stream, ByteSlice vertex_memory, u32 vertex_count);
-BUSTER_TEST_F_DECL bool rendering_command_stream_add_indices(RenderingCommandStream* stream, Sliceu32 indices);
-BUSTER_TEST_F_DECL bool rendering_command_stream_rect_allocation_fits(RenderingCommandStream* stream, BusterPipeline pipeline, TextureIndex texture,
+BUSTER_F_DECL RenderingBackendReplayResult rendering_backend_replay_for_test(RenderingCommandStream* stream, RenderingReplayEvent* events, u32 capacity);
+BUSTER_F_DECL bool rendering_command_stream_add_vertices(RenderingCommandStream* stream, ByteSlice vertex_memory, u32 vertex_count);
+BUSTER_F_DECL bool rendering_command_stream_add_indices(RenderingCommandStream* stream, Sliceu32 indices);
+BUSTER_F_DECL bool rendering_command_stream_rect_allocation_fits(RenderingCommandStream* stream, BusterPipeline pipeline, TextureIndex texture,
                                                                        u32 first_index, u32 index_count, u64 vertex_bytes, u32 vertex_count);
-BUSTER_TEST_F_DECL bool rendering_vulkan_device_functions_loaded_for_test(bool core_loaded, bool clear_attachments_loaded, bool blit_image_loaded);
-BUSTER_TEST_F_DECL bool rendering_window_set_size_for_test(RenderingWindowHandle* window, RenderingWindowSize size);
-BUSTER_TEST_F_DECL RenderingUvCoordinate rendering_rect_uv_for_quad(RectVertex vertex, u32 quad_vertex_index);
+BUSTER_F_DECL bool rendering_vulkan_device_functions_loaded_for_test(bool core_loaded, bool clear_attachments_loaded, bool blit_image_loaded);
+BUSTER_F_DECL bool rendering_window_set_size_for_test(RenderingWindowHandle* window, RenderingWindowSize size);
+BUSTER_F_DECL RenderingUvCoordinate rendering_rect_uv_for_quad(RectVertex vertex, u32 quad_vertex_index);
 BUSTER_F_DECL bool rendering_scale_is_valid(RenderingScale scale);
 
 typedef enum RenderingVulkanDeviceType
@@ -392,14 +392,14 @@ struct RenderingVulkanSurfaceCompatibility
     bool composite_alpha;
 };
 
-BUSTER_TEST_F_DECL bool rendering_vulkan_window_requires_device_initialization(bool device_initialized);
-BUSTER_TEST_F_DECL bool rendering_vulkan_existing_surface_is_compatible(RenderingVulkanSurfaceCompatibility compatibility);
-BUSTER_TEST_F_DECL bool rendering_vulkan_surface_format_sentinel_is_compatible(u32 available_color_space, u32 selected_color_space);
-BUSTER_TEST_F_DECL bool rendering_vulkan_enumeration_needs_retry(bool incomplete, u32 capacity, u32 reported_count);
-BUSTER_TEST_F_DECL bool rendering_vulkan_queue_family_enumeration_needs_retry(u32 capacity, u32 reported_count, u32 available_count);
-BUSTER_TEST_F_DECL RenderingVulkanQueueFamilySelection rendering_vulkan_select_queue_families(RenderingVulkanQueueFamilyCandidateSlice candidates);
-BUSTER_TEST_F_DECL bool rendering_vulkan_device_candidate_is_eligible(RenderingVulkanDeviceCandidate candidate);
-BUSTER_TEST_F_DECL u64 rendering_vulkan_device_score(RenderingVulkanDeviceCandidate candidate);
-BUSTER_TEST_F_DECL RenderingVulkanDeviceSelection rendering_vulkan_select_device(RenderingVulkanDeviceCandidateSlice candidates);
+BUSTER_F_DECL bool rendering_vulkan_window_requires_device_initialization(bool device_initialized);
+BUSTER_F_DECL bool rendering_vulkan_existing_surface_is_compatible(RenderingVulkanSurfaceCompatibility compatibility);
+BUSTER_F_DECL bool rendering_vulkan_surface_format_sentinel_is_compatible(u32 available_color_space, u32 selected_color_space);
+BUSTER_F_DECL bool rendering_vulkan_enumeration_needs_retry(bool incomplete, u32 capacity, u32 reported_count);
+BUSTER_F_DECL bool rendering_vulkan_queue_family_enumeration_needs_retry(u32 capacity, u32 reported_count, u32 available_count);
+BUSTER_F_DECL RenderingVulkanQueueFamilySelection rendering_vulkan_select_queue_families(RenderingVulkanQueueFamilyCandidateSlice candidates);
+BUSTER_F_DECL bool rendering_vulkan_device_candidate_is_eligible(RenderingVulkanDeviceCandidate candidate);
+BUSTER_F_DECL u64 rendering_vulkan_device_score(RenderingVulkanDeviceCandidate candidate);
+BUSTER_F_DECL RenderingVulkanDeviceSelection rendering_vulkan_select_device(RenderingVulkanDeviceCandidateSlice candidates);
 
 #define BUSTER_GPU_VALIDATION_ENABLED (!BUSTER_OPTIMIZE || BUSTER_SANITIZE)

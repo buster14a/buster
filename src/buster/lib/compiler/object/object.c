@@ -4068,7 +4068,7 @@ BUSTER_GLOBAL_LOCAL bool object_mach_compact_action_append(CodegenFunctionDescri
     return true;
 }
 
-BUSTER_TEST_F_DECL bool object_mach_compact_decode(Arena* arena, ByteSlice text, u32 function_offset, u32 function_size, u32 encoding, Target target,
+bool object_mach_compact_decode(Arena* arena, ByteSlice text, u32 function_offset, u32 function_size, u32 encoding, Target target,
                                                    CodegenFunctionDescriptor* descriptor)
 {
     enum
@@ -6150,7 +6150,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_fuzz_seed_write(Arena* arena, Target t
     return object_write(arena, &object, format);
 }
 
-BUSTER_F_DECL s32 object_fuzz_test_input(const u8* pointer, size_t size)
+s32 object_fuzz_test_input(const u8* pointer, size_t size)
 {
     if (size > BUSTER_KB(64) || (size && !pointer))
     {
@@ -6226,7 +6226,7 @@ BUSTER_F_DECL s32 object_fuzz_test_input(const u8* pointer, size_t size)
 }
 #endif
 
-BUSTER_TEST_F_DECL AnalysisEntity* object_entity_find(AnalysisResult* analysis, AnalysisEntityId entity)
+AnalysisEntity* object_entity_find(AnalysisResult* analysis, AnalysisEntityId entity)
 {
     if (entity.module.value == analysis->module.id.value)
     {

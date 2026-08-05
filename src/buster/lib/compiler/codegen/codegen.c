@@ -193,7 +193,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_win64_relayout_indirect_copies(AnalysisResult* 
     return true;
 }
 
-BUSTER_TEST_F_DECL CodegenAbiSignature codegen_classify_signature_with_arguments(Arena* arena, AnalysisResult* analysis, AnalysisTypeId function_type_id,
+CodegenAbiSignature codegen_classify_signature_with_arguments(Arena* arena, AnalysisResult* analysis, AnalysisTypeId function_type_id,
                                                                                   AnalysisTypeId* argument_types, u32 argument_count, Target target)
 {
     CodegenAbiSignature result = {0};
@@ -295,7 +295,7 @@ BUSTER_TEST_F_DECL CodegenAbiSignature codegen_classify_signature_with_arguments
     return result;
 }
 
-BUSTER_TEST_F_DECL Target codegen_target_for_abi(CodegenAbi abi)
+Target codegen_target_for_abi(CodegenAbi abi)
 {
     bool x86 = abi == CODEGEN_ABI_X86_64_SYSTEM_V || abi == CODEGEN_ABI_X86_64_WINDOWS;
     Target result = {
@@ -1243,7 +1243,7 @@ BUSTER_GLOBAL_LOCAL void x64_emit_store_result(X64Builder* builder, IrInstructio
     }
 }
 
-BUSTER_TEST_F_DECL CodegenError codegen_x64_maximum_call_stack_size(Arena* arena, AnalysisResult* analysis, IrFunction* function, Target target,
+CodegenError codegen_x64_maximum_call_stack_size(Arena* arena, AnalysisResult* analysis, IrFunction* function, Target target,
                                                                     u32* stack_size)
 {
     if (!stack_size)
@@ -1660,7 +1660,7 @@ BUSTER_GLOBAL_LOCAL void x64_emit_vector_memory_operation(X64Builder* builder, u
     codegen_emit_u8(&builder->buffer, (u8)(((vector_register & 7) << 3) | (base & 7)));
 }
 
-BUSTER_TEST_F_DECL void x64_emit_vector_native_memory(X64Builder* builder, bool store, u32 size, X64Register base)
+void x64_emit_vector_native_memory(X64Builder* builder, bool store, u32 size, X64Register base)
 {
     if (size == 64)
     {
@@ -1684,7 +1684,7 @@ BUSTER_TEST_F_DECL void x64_emit_vector_native_memory(X64Builder* builder, bool 
     codegen_emit_u8(&builder->buffer, (u8)(base & 7));
 }
 
-BUSTER_TEST_F_DECL void x64_emit_vector_native_binary_operation(X64Builder* builder, u8 prefix, u8 opcode, u32 size, X64Register base)
+void x64_emit_vector_native_binary_operation(X64Builder* builder, u8 prefix, u8 opcode, u32 size, X64Register base)
 {
     u8 packed_prefix = prefix == 0x66 ? 1 : 0;
     if (size == 64)
@@ -1709,7 +1709,7 @@ BUSTER_TEST_F_DECL void x64_emit_vector_native_binary_operation(X64Builder* buil
     codegen_emit_u8(&builder->buffer, (u8)(base & 7));
 }
 
-BUSTER_TEST_F_DECL bool x64_target_supports_native_vector(Target target, u64 size, u32 element_width, bool integer_operation)
+bool x64_target_supports_native_vector(Target target, u64 size, u32 element_width, bool integer_operation)
 {
     if (size <= 16 || size > target_vector_register_size(target))
     {
@@ -1736,7 +1736,7 @@ BUSTER_GLOBAL_LOCAL bool x64_vector_binary_is_commutative(IrBinaryOperation oper
            operation == IR_BINARY_VECTOR_INTEGER_BITWISE_XOR;
 }
 
-BUSTER_TEST_F_DECL void x64_emit_vzeroupper(X64Builder* builder)
+void x64_emit_vzeroupper(X64Builder* builder)
 {
     if (!builder->upper_vector_dirty)
     {
@@ -3576,7 +3576,7 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(X64Builder* builder, IrBlockId blo
     return true;
 }
 
-BUSTER_TEST_F_DECL void codegen_record_line(CodegenLineEntry* entries, u32* count, u32 capacity, u32 code_offset, u32 source, u32 line, u32 column)
+void codegen_record_line(CodegenLineEntry* entries, u32* count, u32 capacity, u32 code_offset, u32 source, u32 line, u32 column)
 {
     if (!entries || !line || *count >= capacity)
     {
@@ -3616,7 +3616,7 @@ BUSTER_GLOBAL_LOCAL DebugRegister codegen_debug_register_for_value(Target target
 // offsets are distances below RBP and need their sign changed; AArch64
 // codegen stores values relative to the final SP and keeps X29 at the
 // pre-allocation SP, so translate those offsets back across the frame here.
-BUSTER_TEST_F_DECL s32 codegen_debug_frame_offset(u32 offset, Target target, bool negative_offsets, u32 frame_size)
+s32 codegen_debug_frame_offset(u32 offset, Target target, bool negative_offsets, u32 frame_size)
 {
     s64 result = offset > INT32_MAX ? INT32_MAX : (s64)offset;
     if (target.cpu_arch == CPU_ARCH_AARCH64)
@@ -4218,7 +4218,7 @@ BUSTER_GLOBAL_LOCAL void a64_emit_store_offset(CodegenBuffer* buffer, u32 source
     a64_emit_instruction_word(buffer, 0xf90003e0 | ((offset / 8) << 10) | source);
 }
 
-BUSTER_TEST_F_DECL void a64_emit_float_load_offset(CodegenBuffer* buffer, u32 target, u32 offset, u32 size)
+void a64_emit_float_load_offset(CodegenBuffer* buffer, u32 target, u32 offset, u32 size)
 {
     u32 scale = size <= 4 ? 4 : size <= 8 ? 8 : 16;
     if (offset % scale || offset / scale > 4095)
@@ -4229,7 +4229,7 @@ BUSTER_TEST_F_DECL void a64_emit_float_load_offset(CodegenBuffer* buffer, u32 ta
     a64_emit_instruction_word(buffer, (size <= 4 ? 0xbd4003e0 : size <= 8 ? 0xfd4003e0 : 0x3dc003e0) | ((offset / scale) << 10) | target);
 }
 
-BUSTER_TEST_F_DECL void a64_emit_float_store_offset(CodegenBuffer* buffer, u32 source, u32 offset, u32 size)
+void a64_emit_float_store_offset(CodegenBuffer* buffer, u32 source, u32 offset, u32 size)
 {
     u32 scale = size <= 4 ? 4 : size <= 8 ? 8 : 16;
     if (offset % scale || offset / scale > 4095)
@@ -4457,9 +4457,9 @@ BUSTER_GLOBAL_LOCAL void a64_emit_atomic_exclusive_store(CodegenBuffer* buffer, 
     a64_emit_instruction_word(buffer, (release ? UINT32_C(0x0800fc00) : UINT32_C(0x08007c00)) | size_bits | (status << 16) | (address << 5) | value);
 }
 
-BUSTER_TEST_F_DECL void codegen_canonical_a64_base_address(CodegenBuffer* buffer, u32 register_number, u32 base_register, u32 byte_offset);
+void codegen_canonical_a64_base_address(CodegenBuffer* buffer, u32 register_number, u32 base_register, u32 byte_offset);
 
-BUSTER_TEST_F_DECL void a64_emit_load_pointer_offset(CodegenBuffer* buffer, u32 target, u32 address, u32 offset, u32 size)
+void a64_emit_load_pointer_offset(CodegenBuffer* buffer, u32 target, u32 address, u32 offset, u32 size)
 {
     u32 scale = size == 1 ? 1 : size == 2 ? 2 : size == 4 ? 4 : 8;
     u32 encoded = size == 1 ? 0x39400000 : size == 2 ? 0x79400000 : size == 4 ? 0xb9400000 : size == 8 ? 0xf9400000 : 0;
@@ -4477,7 +4477,7 @@ BUSTER_TEST_F_DECL void a64_emit_load_pointer_offset(CodegenBuffer* buffer, u32 
     a64_emit_instruction_word(buffer, encoded | ((offset / scale) << 10) | (address << 5) | target);
 }
 
-BUSTER_TEST_F_DECL void a64_emit_store_pointer_offset(CodegenBuffer* buffer, u32 source, u32 address, u32 offset, u32 size)
+void a64_emit_store_pointer_offset(CodegenBuffer* buffer, u32 source, u32 address, u32 offset, u32 size)
 {
     u32 scale = size == 1 ? 1 : size == 2 ? 2 : size == 4 ? 4 : 8;
     u32 encoded = size == 1 ? 0x39000000 : size == 2 ? 0x79000000 : size == 4 ? 0xb9000000 : size == 8 ? 0xf9000000 : 0;
@@ -4516,7 +4516,7 @@ BUSTER_GLOBAL_LOCAL void a64_emit_float_pointer_offset(CodegenBuffer* buffer, u3
     a64_emit_instruction_word(buffer, encoded | ((offset / scale) << 10) | (address << 5) | target);
 }
 
-BUSTER_TEST_F_DECL void a64_emit_copy_memory_registers(CodegenBuffer* buffer, u32 destination, u32 source, u32 scratch, u32 size)
+void a64_emit_copy_memory_registers(CodegenBuffer* buffer, u32 destination, u32 source, u32 scratch, u32 size)
 {
     u32 offset = 0;
     while (size - offset >= 8)
@@ -4549,7 +4549,7 @@ BUSTER_GLOBAL_LOCAL void a64_emit_copy_memory(CodegenBuffer* buffer, u32 size)
     a64_emit_copy_memory_registers(buffer, 0, 1, 2, size);
 }
 
-BUSTER_TEST_F_DECL void a64_emit_initialize_aggregate_result(CodegenBuffer* buffer, u32* value_storage_offsets, IrValueId value)
+void a64_emit_initialize_aggregate_result(CodegenBuffer* buffer, u32* value_storage_offsets, IrValueId value)
 {
     a64_emit_stack_address(buffer, 16, value_storage_offsets[value.value]);
     a64_emit_store_value_component(buffer, 16, value, 0);
@@ -6909,7 +6909,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_integer_aggregate_parts(IrProgram* pr
     return true;
 }
 
-BUSTER_TEST_F_DECL CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
+CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
                                                                   CodegenAbi abi, CodegenCanonicalCallLayout* layout)
 {
     if (!layout)
@@ -7174,7 +7174,7 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_a64_adjust_stack_described(CodegenBuf
     }
 }
 
-BUSTER_TEST_F_DECL void codegen_canonical_a64_adjust_stack(CodegenBuffer* buffer, u32 byte_count, bool subtract)
+void codegen_canonical_a64_adjust_stack(CodegenBuffer* buffer, u32 byte_count, bool subtract)
 {
     codegen_canonical_a64_adjust_stack_described(buffer, byte_count, subtract, 0, 0, false);
 }
@@ -7233,7 +7233,7 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_adjust_stack_described(CodegenBuf
     }
 }
 
-BUSTER_TEST_F_DECL void codegen_canonical_x64_adjust_stack(CodegenBuffer* buffer, u32 byte_count, bool subtract)
+void codegen_canonical_x64_adjust_stack(CodegenBuffer* buffer, u32 byte_count, bool subtract)
 {
     codegen_canonical_x64_adjust_stack_described(buffer, byte_count, subtract, 0, 0, false);
 }
@@ -7279,7 +7279,7 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_emit_return(CodegenBuffer* buffer
     codegen_emit_u8(buffer, 0xc3);
 }
 
-BUSTER_TEST_F_DECL void codegen_canonical_a64_base_address(CodegenBuffer* buffer, u32 register_number, u32 base_register, u32 byte_offset)
+void codegen_canonical_a64_base_address(CodegenBuffer* buffer, u32 register_number, u32 base_register, u32 byte_offset)
 {
     if (byte_offset <= 4095)
     {
@@ -8131,13 +8131,13 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_memory_operation(CodegenBuffer* b
     return codegen_canonical_a64_memory_operation_base(buffer, register_number, offset, size, store, sign_extend, 31);
 }
 
-BUSTER_TEST_F_DECL bool codegen_canonical_a64_frame_memory_operation(CodegenBuffer* buffer, u32 register_number, u32 offset, u32 size, bool store,
+bool codegen_canonical_a64_frame_memory_operation(CodegenBuffer* buffer, u32 register_number, u32 offset, u32 size, bool store,
                                                                       bool sign_extend)
 {
     return codegen_canonical_a64_memory_operation_base(buffer, register_number, offset, size, store, sign_extend, 28);
 }
 
-BUSTER_TEST_F_DECL u32 codegen_canonical_a64_remainder_divide_instruction(bool signed_remainder, bool wide)
+u32 codegen_canonical_a64_remainder_divide_instruction(bool signed_remainder, bool wide)
 {
     return (signed_remainder ? 0x1aca0d2b : 0x1aca092b) | (wide ? 0x80000000 : 0);
 }

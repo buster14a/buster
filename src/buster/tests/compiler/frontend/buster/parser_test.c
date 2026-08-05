@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/frontend/buster/parser_test.h>
+#if BUSTER_INCLUDE_TESTS
 
 // Number of operand subtrees a node consumes. Drives the implicit-tree walk:
 // leaves push, unary pops 1, binary pops 2.
@@ -167,7 +168,7 @@ BUSTER_GLOBAL_LOCAL String8 ast_node_symbol(AstNodeId id)
 // over the postorder stream. This is the exact shape an analysis/typecheck pass
 // takes: stream the contiguous array, push leaves and reduce operators against a
 // small operand stack. No recursion, no pointer chasing.
-BUSTER_TEST_F_DECL String8 ast_expression_to_string(Arena* arena, AstExpression expression)
+String8 ast_expression_to_string(Arena* arena, AstExpression expression)
 {
     if (expression.count == 0)
     {
@@ -397,7 +398,7 @@ BUSTER_GLOBAL_LOCAL bool tokenizer_stream_covers_source(TokenizerResult tokenize
     return result;
 }
 
-BUSTER_TEST_F_DECL UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments)
+UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
@@ -727,7 +728,7 @@ BUSTER_GLOBAL_LOCAL AstExpression parse_expression_snippet(Arena* arena, Arena* 
     return parsed.first_code->body.first_statement->return_statement.expression;
 }
 
-BUSTER_TEST_F_DECL UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
+UnitTestResult parser_expression_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
@@ -896,7 +897,7 @@ BUSTER_TEST_F_DECL UnitTestResult parser_expression_tests(UnitTestArguments* arg
     return result;
 }
 
-BUSTER_TEST_F_DECL UnitTestResult parser_result_tests(UnitTestArguments* arguments)
+UnitTestResult parser_result_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
@@ -2808,7 +2809,7 @@ BUSTER_TEST_F_DECL UnitTestResult parser_result_tests(UnitTestArguments* argumen
     return result;
 }
 
-BUSTER_TEST_F_DECL UnitTestResult parser_file_tests(UnitTestArguments* arguments)
+UnitTestResult parser_file_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
@@ -2958,3 +2959,4 @@ BUSTER_TEST_F_DECL UnitTestResult parser_file_tests(UnitTestArguments* arguments
     BUSTER_CHECK(expression_arena_destroyed);
     return result;
 }
+#endif

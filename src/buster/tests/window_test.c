@@ -1,4 +1,5 @@
 #include <buster/tests/window_test.h>
+#if BUSTER_INCLUDE_TESTS
 
 #include <buster/lib/string.h>
 #include <buster/lib/ui_core.h>
@@ -10,7 +11,7 @@
 #endif
 #endif
 
-BUSTER_TEST_F_DECL UnitTestResult window_tests(UnitTestArguments* arguments)
+UnitTestResult window_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     u64 max_drop_paths = wm_native_file_drop_max_path_count();
@@ -347,3 +348,4 @@ BUSTER_TEST_F_DECL UnitTestResult window_tests(UnitTestArguments* arguments)
     }
     return result;
 }
+#endif

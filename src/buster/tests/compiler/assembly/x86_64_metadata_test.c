@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.h>
+#if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_string_equal(BusterX86MetadataString first, String8 second)
 {
@@ -1544,3 +1545,4 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     }
     return result;
 }
+#endif

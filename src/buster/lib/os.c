@@ -157,7 +157,7 @@ BUSTER_GLOBAL_LOCAL void os_entity_release(OsEntity* entity)
 }
 
 #if defined(__APPLE__)
-BUSTER_TEST_F_DECL bool os_apple_process_is_traced(u32 process_flags)
+bool os_apple_process_is_traced(u32 process_flags)
 {
     return (process_flags & P_TRACED) != 0;
 }
@@ -307,7 +307,7 @@ BUSTER_GLOBAL_LOCAL OsFileDescriptor* posix_fd_to_generic_fd(int fd)
     return (OsFileDescriptor*)((u64)fd + 1);
 }
 
-BUSTER_TEST_F_DECL int generic_fd_to_posix(OsFileDescriptor* fd)
+int generic_fd_to_posix(OsFileDescriptor* fd)
 {
     BUSTER_CHECK(fd);
     return (int)((u64)fd - 1);
@@ -1131,7 +1131,7 @@ u64 string8_code_point_count(String8 s, u8 code_point)
 }
 
 #if defined(_WIN32)
-BUSTER_TEST_F_DECL bool os_windows_pipe_disable_inheritance(OsFileDescriptor* pipe)
+bool os_windows_pipe_disable_inheritance(OsFileDescriptor* pipe)
 {
     return SetHandleInformation((HANDLE)pipe, HANDLE_FLAG_INHERIT, 0) != 0;
 }

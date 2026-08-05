@@ -249,7 +249,7 @@ BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_poll_external(IdeDocumentM
 // parent-directory fsync and crash-durability guarantees are outside this contract.
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_save(IdeDocumentModel* model, String8 path);
 #if BUSTER_INCLUDE_TESTS
-BUSTER_TEST_F_DECL void ide_document_model_test_set_save_replace_failure(bool enabled);
+BUSTER_F_DECL void ide_document_model_test_set_save_replace_failure(bool enabled);
 #endif
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_set_view(IdeDocumentModel* model, String8 path, IdeDocumentViewState view);
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_set_compile_metadata(IdeDocumentModel* model, String8 path,

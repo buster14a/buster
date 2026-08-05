@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/codeview/codeview_test.h>
+#if BUSTER_INCLUDE_TESTS
 
-BUSTER_TEST_F_DECL UnitTestResult codeview_tests(UnitTestArguments* arguments)
+UnitTestResult codeview_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     String8 files[] = {
@@ -298,3 +299,4 @@ BUSTER_TEST_F_DECL UnitTestResult codeview_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, globals_built.valid && globals_built.relocation_count == 2);
     return result;
 }
+#endif

@@ -1,4 +1,5 @@
 #include <buster/tests/ui_test.h>
+#if BUSTER_INCLUDE_TESTS
 
 #include <buster/lib/ui_builder.h>
 #include <buster/lib/string.h>
@@ -2177,3 +2178,4 @@ UnitTestResult ui_tests(UnitTestArguments* arguments)
     ui_test_text_and_widgets(arguments, &result);
     return result;
 }
+#endif

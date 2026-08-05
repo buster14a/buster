@@ -94,7 +94,7 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_entity_equal(AnalysisEntityId left, Anal
     return left.module.value == right.module.value && left.index.value == right.index.value;
 }
 
-BUSTER_TEST_F_DECL IrExecutionTarget ir_interpreter_function_find(AnalysisProgram* analysis, IrProgram* program, AnalysisEntityId entity,
+IrExecutionTarget ir_interpreter_function_find(AnalysisProgram* analysis, IrProgram* program, AnalysisEntityId entity,
                                                                   AnalysisInstantiationId instantiation)
 {
     IrExecutionTarget target = {0};
@@ -194,7 +194,7 @@ BUSTER_GLOBAL_LOCAL s32 ir_interpreter_signed_compare(u64 left, u64 right, u32 w
     return left < right ? -1 : left > right ? 1 : 0;
 }
 
-BUSTER_TEST_F_DECL f64 ir_interpreter_float_read(u64 bits, u32 width)
+f64 ir_interpreter_float_read(u64 bits, u32 width)
 {
     if (width == 32)
     {

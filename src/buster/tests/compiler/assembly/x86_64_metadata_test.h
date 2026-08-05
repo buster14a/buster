@@ -7,4 +7,6 @@
 #include <stdatomic.h>
 #endif
 
-BUSTER_TEST_F_DECL UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments);
+#if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments);
+#endif

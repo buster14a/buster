@@ -71,7 +71,7 @@ RenderingWindowSize rendering_window_get_size(RenderingWindowHandle* window)
                  : (RenderingWindowSize){0};
 }
 
-BUSTER_TEST_F_DECL bool rendering_window_set_size_for_test(RenderingWindowHandle* window, RenderingWindowSize size)
+bool rendering_window_set_size_for_test(RenderingWindowHandle* window, RenderingWindowSize size)
 {
     if (!window || !size.width || !size.height)
     {
@@ -173,7 +173,7 @@ void rendering_backend_trace_command(RenderingCommandStream* stream, u32 command
     rendering_backend_trace_validate_common(stream, command_index, command);
 }
 
-BUSTER_TEST_F_DECL RenderingBackendReplayResult rendering_backend_replay_for_test(RenderingCommandStream* stream, RenderingReplayEvent* events, u32 capacity)
+RenderingBackendReplayResult rendering_backend_replay_for_test(RenderingCommandStream* stream, RenderingReplayEvent* events, u32 capacity)
 {
     RenderingBackendReplayResult result = rendering_backend_replay_policy(stream, RENDERING_BACKEND_NULL, events, capacity);
     rendering_backend_trace_begin(stream, RENDERING_BACKEND_NULL);

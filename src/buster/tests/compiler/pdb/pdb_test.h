@@ -7,6 +7,7 @@
 // against the exact blob the object writers produce.
 #include <buster/lib/compiler/codeview/codeview.h>
 
+#if BUSTER_INCLUDE_TESTS
 enum
 {
     PDB_TEST_BLOCK_SIZE = 4096,
@@ -23,5 +24,6 @@ enum
     PDB_TEST_S_DEFRANGE_FRAMEPOINTER_REL = 0x1142,
 };
 
-BUSTER_TEST_F_DECL u32 pdb_read_u32(ByteSlice bytes, u64 offset);
-BUSTER_TEST_F_DECL UnitTestResult pdb_tests(UnitTestArguments* arguments);
+BUSTER_F_DECL u32 pdb_read_u32(ByteSlice bytes, u64 offset);
+BUSTER_F_DECL UnitTestResult pdb_tests(UnitTestArguments* arguments);
+#endif

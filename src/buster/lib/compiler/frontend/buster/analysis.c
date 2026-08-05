@@ -3612,7 +3612,7 @@ BUSTER_GLOBAL_LOCAL bool analysis_generic_type_infer(Arena* scratch_arena, Analy
     return true;
 }
 
-BUSTER_TEST_F_DECL AnalysisEntity* analysis_value_entity_find(AnalysisResult* result, String8 name)
+AnalysisEntity* analysis_value_entity_find(AnalysisResult* result, String8 name)
 {
     for (u32 index = 0; index < result->module.entity_count; index += 1)
     {

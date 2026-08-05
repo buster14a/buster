@@ -29,13 +29,13 @@
 #endif
 
 #if BUSTER_UNITY_BUILD
+#if BUSTER_INCLUDE_TESTS
+#include <buster/tests/test.c>
+#endif
 #include <buster/lib/arena.c>
 #include <buster/lib/integer.c>
 #include <buster/lib/os.c>
 #include <buster/lib/string.c>
-#if BUSTER_INCLUDE_TESTS
-#include <buster/tests/test.c>
-#endif
 #include <buster/lib/entry_point.c>
 #include <buster/lib/target.c>
 #include <buster/lib/simd.c>

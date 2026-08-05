@@ -525,12 +525,12 @@ BUSTER_GLOBAL_LOCAL void wm_win32_push_file_drop(WmHandle* windowing, WmWindowHa
 }
 
 #if BUSTER_INCLUDE_TESTS
-BUSTER_TEST_F_DECL WmKey wm_win32_keyboard_key_for_test(u32 virtual_key)
+WmKey wm_win32_keyboard_key_for_test(u32 virtual_key)
 {
     return wm_win32_keyboard_key((WPARAM)virtual_key);
 }
 
-BUSTER_TEST_F_DECL WmEventList wm_win32_text_events_for_test(Arena* arena, String16 units, bool flush)
+WmEventList wm_win32_text_events_for_test(Arena* arena, String16 units, bool flush)
 {
     WmHandle windowing = {.event_arena = arena};
     WmWindowHandle* window = arena_allocate(arena, WmWindowHandle, 1);

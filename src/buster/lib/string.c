@@ -352,7 +352,7 @@ String8 string_from_pointer_length(const char8* pointer, u64 length)
     return (String8){.pointer = (char8*)pointer, .length = length};
 }
 
-BUSTER_TEST_F_DECL String16 string16_from_pointer_length(const char16* pointer, u64 length)
+String16 string16_from_pointer_length(const char16* pointer, u64 length)
 {
     return (String16){.pointer = (char16*)pointer, .length = length};
 }
@@ -1539,7 +1539,7 @@ String8 string_from_pointer(const char8* pointer)
     return (String8){.pointer = (char8*)pointer, .length = string8_length(pointer)};
 }
 
-BUSTER_TEST_F_DECL String16 string16_from_pointer(const char16* pointer)
+String16 string16_from_pointer(const char16* pointer)
 {
     return (String16){.pointer = (char16*)pointer, .length = string16_length(pointer)};
 }

@@ -144,7 +144,7 @@ BUSTER_GLOBAL_LOCAL void pdb_write_u32_at(PdbBuffer* buffer, u64 offset, u32 val
     memcpy(buffer->bytes + offset, &value, sizeof(value));
 }
 
-BUSTER_TEST_F_DECL u32 pdb_read_u32(ByteSlice bytes, u64 offset)
+u32 pdb_read_u32(ByteSlice bytes, u64 offset)
 {
     u32 value = 0;
     memcpy(&value, bytes.pointer + offset, sizeof(value));

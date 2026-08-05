@@ -1,5 +1,6 @@
 #include <buster/tests/hash_test.h>
-BUSTER_TEST_F_DECL UnitTestResult hash_tests(UnitTestArguments* arguments)
+#if BUSTER_INCLUDE_TESTS
+UnitTestResult hash_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
     UnitTestResult result = {0};
@@ -21,3 +22,4 @@ BUSTER_TEST_F_DECL UnitTestResult hash_tests(UnitTestArguments* arguments)
 
     return result;
 }
+#endif

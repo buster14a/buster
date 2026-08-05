@@ -1,6 +1,7 @@
 #include <buster/tests/x86_64_test.h>
+#if BUSTER_INCLUDE_TESTS
 
-BUSTER_TEST_F_DECL UnitTestResult x86_64_tests(UnitTestArguments* arguments)
+UnitTestResult x86_64_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
     UnitTestResult result = {0};
@@ -64,3 +65,4 @@ BUSTER_TEST_F_DECL UnitTestResult x86_64_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_64_encode_register_operation(X86_64_REGISTER_OPERATION_MOVE, 32, 0).length == 0);
     return result;
 }
+#endif
