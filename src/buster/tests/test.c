@@ -5,6 +5,7 @@
 #include <buster/lib/string.h>
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
+#include <buster/lib/time.h>
 #if BUSTER_CPU_ARCH_X86_64
 #include <buster/lib/x86_64.h>
 #endif
@@ -86,6 +87,130 @@
 #endif
 #endif
 
+#endif
+
+#if BUSTER_INCLUDE_TESTS
+typedef struct TestDescriptor TestDescriptor;
+struct TestDescriptor
+{
+    String8 name;
+    TestFunction* function;
+};
+
+typedef struct TestTimingRecord TestTimingRecord;
+struct TestTimingRecord
+{
+    u64 index;
+    String8 module;
+    u64 duration_ns;
+    UnitTestResult result;
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult test_timing_self_test_pass(UnitTestArguments* arguments)
+{
+    BUSTER_UNUSED(arguments);
+    return (UnitTestResult){2, 2};
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult test_timing_self_test_fail(UnitTestArguments* arguments)
+{
+    BUSTER_UNUSED(arguments);
+    return (UnitTestResult){1, 2};
+}
+
+BUSTER_GLOBAL_LOCAL TestTimingRecord test_timing_run_descriptor(UnitTestArguments* arguments, TestDescriptor descriptor, u64 index)
+{
+    TimeDataType start = timestamp_take();
+    UnitTestResult result = descriptor.function(arguments);
+    TimeDataType end = timestamp_take();
+    u64 duration_ns = timestamp_ns_between(start, end);
+
+    return (TestTimingRecord){
+        .index = index,
+        .module = descriptor.name,
+        .duration_ns = duration_ns,
+        .result = result,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL bool test_timing_self_test(UnitTestArguments* arguments)
+{
+    TestDescriptor descriptors[] = {
+        {S8("self_test_first"), &test_timing_self_test_pass},
+        {S8("self_test_failed"), &test_timing_self_test_fail},
+        {S8("self_test_last"), &test_timing_self_test_pass},
+    };
+    TestTimingRecord records[BUSTER_ARRAY_LENGTH(descriptors)] = {0};
+    u64 arena_position = arguments->arena->position;
+    u64 record_count = 0;
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(descriptors); i += 1)
+    {
+        records[record_count] = test_timing_run_descriptor(arguments, descriptors[i], i);
+        record_count += 1;
+    }
+    arena_set_position(arguments->arena, arena_position);
+
+    bool result = record_count == BUSTER_ARRAY_LENGTH(descriptors);
+    result = result && string_equal(records[0].module, S8("self_test_first"));
+    result = result && string_equal(records[1].module, S8("self_test_failed"));
+    result = result && string_equal(records[2].module, S8("self_test_last"));
+    result = result && records[0].index == 0 && records[1].index == 1 && records[2].index == 2;
+    result = result && records[0].result.succeeded_test_count == 2 && records[0].result.test_count == 2;
+    result = result && records[1].result.succeeded_test_count == 1 && records[1].result.test_count == 2;
+    result = result && records[2].result.succeeded_test_count == 2 && records[2].result.test_count == 2;
+    result = result && records[1].result.test_count - records[1].result.succeeded_test_count == 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void test_timing_report(UnitTestArguments* arguments, TestTimingRecord record)
+{
+    u64 failed_test_count = record.result.test_count - record.result.succeeded_test_count;
+    String8 status = unit_test_succeeded(record.result) ? S8("pass") : S8("fail");
+    arguments->show(arguments,
+                    S8("TEST_MODULE_TIMING index={u64} module={S8} duration_ns={u64} passed={u64} failed={u64} assertions={u64} status={S8}\n"),
+                    record.index, record.module, record.duration_ns, record.result.succeeded_test_count, failed_test_count,
+                    record.result.test_count, status);
+}
+
+BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
+    {S8("arena_tests"), &arena_tests},
+    {S8("hash_tests"), &hash_tests},
+    {S8("string_tests"), &string_tests},
+    {S8("os_tests"), &os_tests},
+    {S8("file_tests"), &file_tests},
+    {S8("ide_document_tests"), &ide_document_tests},
+    {S8("window_tests"), &window_tests},
+    {S8("rendering_tests"), &rendering_tests},
+    {S8("ui_tests"), &ui_tests},
+    {S8("target_tests"), &target_tests},
+    {S8("parser_tokenizer_tests"), &parser_tokenizer_tests},
+    {S8("parser_expression_tests"), &parser_expression_tests},
+    {S8("parser_result_tests"), &parser_result_tests},
+    {S8("parser_file_tests"), &parser_file_tests},
+    {S8("c_frontend_tests"), &c_frontend_tests},
+    {S8("assembly_tests"), &assembly_tests},
+    {S8("x86_64_metadata_tests"), &x86_64_metadata_tests},
+    {S8("analysis_tests"), &analysis_tests},
+    {S8("ir_tests"), &ir_tests},
+    {S8("ir_interpreter_tests"), &ir_interpreter_tests},
+    {S8("codegen_tests"), &codegen_tests},
+    {S8("debug_model_tests"), &debug_model_tests},
+    {S8("dwarf_tests"), &dwarf_tests},
+    {S8("codeview_tests"), &codeview_tests},
+    {S8("pdb_tests"), &pdb_tests},
+    {S8("object_tests"), &object_tests},
+    {S8("link_tests"), &link_tests},
+    {S8("compiler_driver_tests"), &compiler_driver_tests},
+#if BUSTER_CPU_ARCH_X86_64
+    {S8("x86_64_tests"), &x86_64_tests},
+#endif
+};
+
+#if BUSTER_CPU_ARCH_X86_64
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 29);
+#else
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 28);
+#endif
 #endif
 
 bool unit_test_succeeded(UnitTestResult result)
@@ -174,50 +299,35 @@ bool batch_test_report(UnitTestArguments* arguments, BatchTestResult test)
 }
 
 #if BUSTER_INCLUDE_TESTS
-BUSTER_GLOBAL_LOCAL TestFunction* test_functions[] = {
-    &arena_tests,
-    &hash_tests,
-    &string_tests,
-    &os_tests,
-    &file_tests,
-    &ide_document_tests,
-    &window_tests,
-    &rendering_tests,
-    &ui_tests,
-    &target_tests,
-    &parser_tokenizer_tests,
-    &parser_expression_tests,
-    &parser_result_tests,
-    &parser_file_tests,
-    &c_frontend_tests,
-    &assembly_tests,
-    &x86_64_metadata_tests,
-    &analysis_tests,
-    &ir_tests,
-    &ir_interpreter_tests,
-    &codegen_tests,
-    &debug_model_tests,
-    &dwarf_tests,
-    &codeview_tests,
-    &pdb_tests,
-    &object_tests,
-    &link_tests,
-    &compiler_driver_tests,
-#if BUSTER_CPU_ARCH_X86_64
-    &x86_64_tests,
-#endif
-};
-
 BatchTestResult library_tests(UnitTestArguments* arguments)
 {
     BatchTestResult result = {0};
-    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(test_functions); i += 1)
+    bool timing_enabled = program_state != 0 && program_flag_get(PROGRAM_FLAG_VERBOSE);
+    if (timing_enabled)
+    {
+        BUSTER_CHECK(test_timing_self_test(arguments));
+    }
+
+    u64 timing_record_count = 0;
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(test_descriptors); i += 1)
     {
         u64 arena_position = arguments->arena->position;
-        UnitTestResult unit_test_result = test_functions[i](arguments);
-        consume_unit_tests(&result, unit_test_result);
-        arena_set_position(arguments->arena, arena_position);
+        if (timing_enabled)
+        {
+            TestTimingRecord timing = test_timing_run_descriptor(arguments, test_descriptors[i], i);
+            consume_unit_tests(&result, timing.result);
+            arena_set_position(arguments->arena, arena_position);
+            test_timing_report(arguments, timing);
+            timing_record_count += 1;
+        }
+        else
+        {
+            UnitTestResult unit_test_result = test_descriptors[i].function(arguments);
+            consume_unit_tests(&result, unit_test_result);
+            arena_set_position(arguments->arena, arena_position);
+        }
     }
+    BUSTER_CHECK(!timing_enabled || timing_record_count == BUSTER_ARRAY_LENGTH(test_descriptors));
 
     return result;
 }
