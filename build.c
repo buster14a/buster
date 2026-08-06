@@ -6641,12 +6641,32 @@ struct MatrixTestTree
 
 BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_outer_jobs(u32 thread_count, u32 tree_count)
 {
-    return tree_count ? BUSTER_MIN(BUSTER_MAX(thread_count, 1), tree_count) : 0;
+    if (!tree_count)
+    {
+        return 0;
+    }
+    thread_count = BUSTER_MAX(thread_count, 1);
+    // A one-job split build starves on low-core CI runners. Reserve at least
+    // two logical CPUs per admitted split tree; unity trees use the same
+    // admission slot but receive their lower job count in the allocator.
+    u32 split_tree_limit = BUSTER_MAX(thread_count / 2, 1);
+    return BUSTER_MIN(split_tree_limit, tree_count);
 }
 
 BUSTER_GLOBAL_LOCAL void matrix_superbuild_allocate_jobs(MatrixTestTree* trees, u32 tree_count, u32 thread_count)
 {
     thread_count = BUSTER_MAX(thread_count, 1);
+    u32 outer_jobs = matrix_superbuild_outer_jobs(thread_count, tree_count);
+    if (outer_jobs < tree_count)
+    {
+        u32 split_jobs = BUSTER_MAX(thread_count / outer_jobs, 1);
+        for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
+        {
+            trees[tree_i].parallel_jobs = trees[tree_i].unity_only ? 1 : split_jobs;
+        }
+        return;
+    }
+
     for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
     {
         trees[tree_i].parallel_jobs = 1;
@@ -6703,19 +6723,27 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(void)
         }
     }
 
-    MatrixTestTree constrained_trees[6] = {0};
-    constrained_trees[0].unity_only = 1;
-    matrix_superbuild_allocate_jobs(constrained_trees, BUSTER_ARRAY_LENGTH(constrained_trees), 4);
-    for (u32 tree_i = 0; tree_i < BUSTER_ARRAY_LENGTH(constrained_trees); tree_i += 1)
+    MatrixTestTree windows_trees[7] = {
+        {0},
+        {0},
+        {.unity_only = 1},
+        {0},
+        {0},
+        {0},
+        {0},
+    };
+    matrix_superbuild_allocate_jobs(windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4);
+    u32 expected_windows_jobs[] = {2, 2, 1, 2, 2, 2, 2};
+    for (u32 tree_i = 0; tree_i < BUSTER_ARRAY_LENGTH(windows_trees); tree_i += 1)
     {
-        if (constrained_trees[tree_i].parallel_jobs != 1)
+        if (windows_trees[tree_i].parallel_jobs != expected_windows_jobs[tree_i])
         {
-            string_print(S8("error: superbuild constrained job allocation test failed at tree {u32}: jobs={u32}\n"), tree_i,
-                         constrained_trees[tree_i].parallel_jobs);
+            string_print(S8("error: superbuild Windows job allocation test failed at tree {u32}: jobs={u32}\n"), tree_i,
+                         windows_trees[tree_i].parallel_jobs);
             return PROCESS_RESULT_FAILED;
         }
     }
-    if (matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(constrained_trees)) != 4 || matrix_superbuild_outer_jobs(16, 6) != 6 ||
+    if (matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(windows_trees)) != 2 || matrix_superbuild_outer_jobs(16, 6) != 6 ||
         matrix_superbuild_outer_jobs(0, 0) != 0)
     {
         string_print(S8("error: superbuild outer job allocation test failed\n"));

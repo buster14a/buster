@@ -95,14 +95,17 @@ Ninja process, so concurrent builds never write the same `.ninja_deps` or
 `.ninja_log`. Each tree starts its tests as soon as its own compilation
 finishes, while unrelated trees continue compiling. One logical-CPU budget is
 divided across the active inner Ninja processes; a unity-only tree receives at
-most two jobs and split trees share the remainder. Pipelined test processes
-inherit their tree's released allocation through `BUSTER_TEST_JOBS`; future
-multithreaded test work must honor that limit. Set `BUSTER_MATRIX_DIRECT=1`
-only to diagnose the retained legacy scheduler. CI Release builds use `-O2`;
-local Release builds retain the toolchain default. Clang static analysis runs
-only against unsanitized Release. GUI/GPU smoke tests run for Debug sanitized
-and Release non-sanitized configurations; other combinations run unit tests
-only.
+most two jobs and split trees share the remainder. When the tree count exceeds
+the admission limit, the outer graph admits at most half the logical CPU count
+and assigns each split tree the CPU budget divided by that limit; unity trees
+use one job. Thus a four-thread runner admits at most two split trees with two
+jobs each. Pipelined tests inherit their tree's released allocation through
+`BUSTER_TEST_JOBS`; future multithreaded test work must honor that limit. Set
+`BUSTER_MATRIX_DIRECT=1` only to diagnose the retained legacy scheduler. CI
+Release builds use `-O2`; local Release builds retain the toolchain default.
+Clang static analysis runs only against unsanitized Release. GUI/GPU smoke
+tests run for Debug sanitized and Release non-sanitized configurations; other
+combinations run unit tests only.
 Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
 `--instrument`, `--cc <clang|gcc|zig|cl>` are accepted **only by
 `generate`**; `build` rejects them with an explicit diagnostic.
