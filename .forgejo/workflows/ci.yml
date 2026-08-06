@@ -2,7 +2,11 @@ on: [push]
 
 jobs:
   test:
-    timeout-minutes: 30
+    # Forgejo 12.7 counts this timeout from scheduling, including time waiting for a runner.
+    # 120 minutes covers three queued Windows jobs at the observed 22-29 minute runtime
+    # (87 minutes) plus the existing <=30 minute execution target.
+    # This remains a finite bound and cannot guarantee completion under an unbounded backlog.
+    timeout-minutes: 120
     strategy:
       # A failing runner stops its own job, while the other matrix runners
       # continue independently and report their own result.
