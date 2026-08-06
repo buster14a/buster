@@ -159,7 +159,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_pe_rva_to_file_offset(ByteSlice im
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_test_pe_tls_directory(ByteSlice image, u32 expected_alignment)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_pe_tls_directory(ByteSlice image, u32 expected_alignment)
 {
     if (image.length < 0x40 || image.pointer[0] != 'M' || image.pointer[1] != 'Z')
     {
