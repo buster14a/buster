@@ -1595,12 +1595,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_repeated_incomplete_arrays(UnitTestArg
     return result;
 }
 
-#if BUSTER_COMPILER_CLANG
-__attribute__((optnone))
-#endif
-UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
     CLexResult basic = c_lex(arguments->arena, S8("int ma\\\r\nin(void) // comment\r\n"
                                                   "{ return 0; }\r\n"));
     BUSTER_TEST(arguments, basic.diagnostic_count == 0);
@@ -2305,6 +2303,13 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     {
         BUSTER_TEST(arguments, invalid_line.diagnostics[diagnostic_index].kind == C_DIAGNOSTIC_INVALID_LINE);
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
     CPreprocessResult local_declaration_tokens = c_preprocess(arguments->arena,
                                                               S8("typedef struct SignalInfo {\n"
                                                                  "    int code;\n"
@@ -3243,6 +3248,13 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, found_pow);
         BUSTER_TEST(arguments, ir_validate_canonical_module(math_builtin_ir.program, math_module).error == IR_VALIDATION_NONE);
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
     TemporalArena global_temporary = scratch_begin(0, 0);
     Arena* global_arena = global_temporary.arena;
     CPreprocessResult global_tokens = c_preprocess(global_arena,
@@ -4180,6 +4192,13 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_auto_type_diagnostic(arguments, &result, S8("int f(void) { __auto_type value = 1; return 0; }\n"), C_PREPROCESS_DIALECT_C23,
                                 C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("GNU __auto_type is only available in GNU dialects"));
 
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
     TemporalArena control_flow_temporary = scratch_begin(0, 0);
     CPreprocessResult if_tokens = c_preprocess(control_flow_temporary.arena,
                                                S8("int choose(int value) {\n"
@@ -4700,6 +4719,13 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, cast_count == 1);
         BUSTER_TEST(arguments, ir_validate_canonical_module(argument_ir.program, module).error == IR_VALIDATION_NONE);
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vectors(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
     TemporalArena vector_temporary = scratch_begin(0, 0);
     CPreprocessResult vector_tokens = c_preprocess(vector_temporary.arena,
                                                    S8("typedef float Float4 "
@@ -4976,6 +5002,13 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, ir_validate_canonical_module(regression_ir.program, regression_module).error == IR_VALIDATION_NONE);
     }
     scratch_end(regression_temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
     Arena* scratch_lifetime_arena = arena_create((ArenaCreation){
         .reserved_size = BUSTER_MB(256),
     });
@@ -5607,6 +5640,13 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         scratch_end(temporary);
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
     TemporalArena vla_temporary = scratch_begin(0, 0);
     CPreprocessResult vla_tokens = c_preprocess(vla_temporary.arena,
                                                 S8("int unspecified(int count,"
@@ -6255,6 +6295,22 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         scratch_end(direct_ir_temporary);
     }
+    return result;
+}
+
+#if BUSTER_COMPILER_CLANG
+__attribute__((optnone))
+#endif
+UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
+    c_test_result_add(&result, c_test_frontend_semantic_basics(arguments));
+    c_test_result_add(&result, c_test_frontend_global_types(arguments));
+    c_test_result_add(&result, c_test_frontend_control_flow(arguments));
+    c_test_result_add(&result, c_test_frontend_vectors(arguments));
+    c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));
+    c_test_result_add(&result, c_test_frontend_vla_and_ir(arguments));
     c_test_result_add(&result, c_test_local_static_aggregates(arguments));
 
     c_test_result_add(&result, c_test_u64_initializer_slots(arguments));
