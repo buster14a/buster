@@ -98,9 +98,11 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_canonical_value_frame_size(IrProgram* progr
     for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
     {
         IrType* type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
-        u64 slot_size = (type->layout.size + 7) & ~(u64)7;
+        IrInstructionId definition = function->values[value_index].definition;
+        bool global_place = definition.value < function->instruction_count && function->instructions[definition.value].opcode == IR_OPCODE_GLOBAL;
+        u64 slot_size = global_place ? 8 : (type->layout.size + 7) & ~(u64)7;
         slot_size = BUSTER_MAX(slot_size, 8u);
-        u64 alignment = BUSTER_MAX(BUSTER_MAX(type->layout.alignment, function->values[value_index].alignment), 8u);
+        u64 alignment = global_place ? 8 : BUSTER_MAX(BUSTER_MAX(type->layout.alignment, function->values[value_index].alignment), 8u);
         value_bytes += slot_size;
         u64 remainder = value_bytes % alignment;
         if (remainder)
@@ -109,6 +111,23 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_canonical_value_frame_size(IrProgram* progr
         }
     }
     return (u32)((value_bytes + 15) & ~(u64)15);
+}
+
+BUSTER_GLOBAL_LOCAL u32 codegen_test_canonical_descriptor_stack_size(CodegenFunctionDescriptor* descriptor)
+{
+    u32 stack_size = 0;
+    if (descriptor)
+    {
+        for (u32 action_index = 0; action_index < descriptor->unwind_action_count; action_index += 1)
+        {
+            CodegenUnwindAction* action = descriptor->unwind_actions + action_index;
+            if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
+            {
+                stack_size += action->value;
+            }
+        }
+    }
+    return stack_size;
 }
 
 typedef struct CodegenTestX64Modrm CodegenTestX64Modrm;
@@ -2968,6 +2987,116 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, dynamic_outgoing_allocation_valid);
             BUSTER_TEST(arguments, dynamic_outgoing_cleanup_valid);
         }
+    }
+    String8 static_aggregate_c_source = S8(
+        "typedef struct LargeAggregate { char padding[1024 * 1024]; int first; int second; } LargeAggregate;\n"
+        "static LargeAggregate global_aggregate;\n"
+        "int read_fields(void) {\n"
+        "    return global_aggregate.first + global_aggregate.second + global_aggregate.first + global_aggregate.second +\n"
+        "           global_aggregate.first + global_aggregate.second + global_aggregate.first + global_aggregate.second;\n"
+        "}\n");
+    Target static_aggregate_targets[] = {target, aarch64_target};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(static_aggregate_targets); target_index += 1)
+    {
+        Target static_aggregate_target = static_aggregate_targets[target_index];
+        CPreprocessResult static_aggregate_tokens = c_preprocess(arguments->arena, static_aggregate_c_source, (CPreprocessOptions){0});
+        CParseResult static_aggregate_parse = c_parse(arguments->arena, static_aggregate_tokens);
+        CIRLowerResult static_aggregate_ir = c_lower_to_ir(arguments->arena, S8("static-aggregate-member.c"), static_aggregate_tokens,
+                                                           static_aggregate_parse, static_aggregate_target);
+        BUSTER_TEST(arguments, static_aggregate_tokens.error_count == 0);
+        BUSTER_TEST(arguments, static_aggregate_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, static_aggregate_ir.diagnostic_count == 0);
+        if (!static_aggregate_ir.program)
+        {
+            continue;
+        }
+        IrProgram* static_aggregate_program = static_aggregate_ir.program;
+        IrModule* static_aggregate_module = static_aggregate_program->modules;
+        IrFunction* read_fields = codegen_test_c_function_find(static_aggregate_module, S8("read_fields"));
+        IrValidationResult static_aggregate_validation = ir_validate_canonical_module(static_aggregate_program, static_aggregate_module);
+        BUSTER_TEST(arguments, static_aggregate_validation.error == IR_VALIDATION_NONE);
+        BUSTER_TEST(arguments, read_fields != 0);
+        if (!read_fields)
+        {
+            continue;
+        }
+        u32 global_place_count = 0;
+        u32 field_count = 0;
+        u32 aggregate_load_count = 0;
+        for (u32 instruction_index = 0; instruction_index < read_fields->instruction_count; instruction_index += 1)
+        {
+            IrInstruction* instruction = read_fields->instructions + instruction_index;
+            if (instruction->opcode == IR_OPCODE_GLOBAL && instruction->result.value < read_fields->value_count)
+            {
+                IrType* type = ir_type_from_id(&static_aggregate_program->types, read_fields->values[instruction->result.value].canonical_type);
+                global_place_count += type && type->kind == IR_TYPE_STRUCT && type->layout.size >= BUSTER_MB(1);
+            }
+            field_count += instruction->opcode == IR_OPCODE_FIELD;
+            if (instruction->opcode == IR_OPCODE_LOAD && instruction->result.value < read_fields->value_count)
+            {
+                IrType* type = ir_type_from_id(&static_aggregate_program->types, read_fields->values[instruction->result.value].canonical_type);
+                aggregate_load_count += type && type->kind == IR_TYPE_STRUCT && type->layout.size >= BUSTER_MB(1);
+            }
+        }
+        BUSTER_TEST(arguments, global_place_count == 8);
+        BUSTER_TEST(arguments, field_count == 8);
+        BUSTER_TEST(arguments, aggregate_load_count == 0);
+        u32 expected_frame_size = codegen_test_canonical_value_frame_size(static_aggregate_program, read_fields);
+        BUSTER_TEST(arguments, expected_frame_size < BUSTER_KB(64));
+        CodegenModule static_aggregate_codegen = codegen_generate_canonical_module(arguments->arena, static_aggregate_program, static_aggregate_module,
+                                                                                     static_aggregate_target, (CodegenModuleOptions){0});
+        BUSTER_TEST(arguments, static_aggregate_codegen.error == CODEGEN_ERROR_NONE);
+        CodegenFunctionDescriptor* read_fields_descriptor = codegen_test_c_descriptor_find(&static_aggregate_codegen, read_fields->symbol);
+        BUSTER_TEST(arguments, read_fields_descriptor != 0);
+        u32 actual_frame_size = codegen_test_canonical_descriptor_stack_size(read_fields_descriptor);
+        BUSTER_TEST(arguments, actual_frame_size < BUSTER_KB(64));
+        BUSTER_TEST(arguments, actual_frame_size >= expected_frame_size);
+    }
+    String8 aggregate_copy_c_source = S8(
+        "struct AggregatePair { int first; int second; };\n"
+        "int copy_pair(void) {\n"
+        "    struct AggregatePair source = {3, 4};\n"
+        "    struct AggregatePair local = source;\n"
+        "    local.first += 1;\n"
+        "    return local.first + local.second;\n"
+        "}\n");
+    CPreprocessResult aggregate_copy_tokens = c_preprocess(arguments->arena, aggregate_copy_c_source, (CPreprocessOptions){0});
+    CParseResult aggregate_copy_parse = c_parse(arguments->arena, aggregate_copy_tokens);
+    CIRLowerResult aggregate_copy_ir = c_lower_to_ir(arguments->arena, S8("aggregate-value-copy.c"), aggregate_copy_tokens, aggregate_copy_parse, target);
+    BUSTER_TEST(arguments, aggregate_copy_tokens.error_count == 0);
+    BUSTER_TEST(arguments, aggregate_copy_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, aggregate_copy_ir.diagnostic_count == 0);
+    if (aggregate_copy_ir.program)
+    {
+        IrProgram* aggregate_copy_program = aggregate_copy_ir.program;
+        IrModule* aggregate_copy_module = aggregate_copy_program->modules;
+        IrFunction* copy_pair = codegen_test_c_function_find(aggregate_copy_module, S8("copy_pair"));
+        BUSTER_TEST(arguments, copy_pair != 0);
+        if (copy_pair)
+        {
+            u32 aggregate_load_count = 0;
+            u32 aggregate_store_count = 0;
+            for (u32 instruction_index = 0; instruction_index < copy_pair->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = copy_pair->instructions + instruction_index;
+                if (instruction->opcode == IR_OPCODE_LOAD && instruction->result.value < copy_pair->value_count)
+                {
+                    IrType* type = ir_type_from_id(&aggregate_copy_program->types, copy_pair->values[instruction->result.value].canonical_type);
+                    aggregate_load_count += type && type->kind == IR_TYPE_STRUCT;
+                }
+                if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 2 && instruction->operands[1].value < copy_pair->value_count)
+                {
+                    IrType* type = ir_type_from_id(&aggregate_copy_program->types, copy_pair->values[instruction->operands[1].value].canonical_type);
+                    aggregate_store_count += type && type->kind == IR_TYPE_STRUCT;
+                }
+            }
+            BUSTER_TEST(arguments, aggregate_load_count != 0);
+            BUSTER_TEST(arguments, aggregate_store_count != 0);
+        }
+        BUSTER_TEST(arguments, ir_validate_canonical_module(aggregate_copy_program, aggregate_copy_module).error == IR_VALIDATION_NONE);
+        CodegenModule aggregate_copy_codegen = codegen_generate_canonical_module(arguments->arena, aggregate_copy_program, aggregate_copy_module,
+                                                                                    target, (CodegenModuleOptions){0});
+        BUSTER_TEST(arguments, aggregate_copy_codegen.error == CODEGEN_ERROR_NONE);
     }
     BUSTER_CHECK(arena_destroy(expression_arena, 1));
     arena_set_position(temporary.arena, temporary.position);

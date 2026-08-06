@@ -8742,6 +8742,16 @@ BUSTER_GLOBAL_LOCAL u8* codegen_canonical_direct_call_uses(Arena* arena, IrFunct
     return uses;
 }
 
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_value_is_global_place(IrFunction* function, u32 value_index)
+{
+    if (!function || value_index >= function->value_count)
+    {
+        return false;
+    }
+    IrInstructionId definition = function->values[value_index].definition;
+    return definition.value < function->instruction_count && function->instructions[definition.value].opcode == IR_OPCODE_GLOBAL;
+}
+
 CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options)
 {
     CodegenModule result = {
@@ -8907,9 +8917,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 result.error = CODEGEN_ERROR_INVALID_IR;
                 return result;
             }
-            u64 slot_size = (value_type->layout.size + 7) & ~(u64)7;
+            bool global_place = codegen_canonical_value_is_global_place(function, value_index);
+            u64 slot_size = global_place ? 8 : (value_type->layout.size + 7) & ~(u64)7;
             slot_size = BUSTER_MAX(slot_size, 8u);
-            u64 slot_alignment = BUSTER_MAX(BUSTER_MAX(value_type->layout.alignment, function->values[value_index].alignment), 8u);
+            u64 slot_alignment = global_place ? 8 : BUSTER_MAX(BUSTER_MAX(value_type->layout.alignment, function->values[value_index].alignment), 8u);
             if (target.cpu_arch == CPU_ARCH_X86_64)
             {
                 function_value_bytes += slot_size;
@@ -9076,9 +9087,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 result.error = CODEGEN_ERROR_INVALID_IR;
                 return result;
             }
-            u32 slot_size = ((u32)value_type->layout.size + 7) & ~(u32)7;
+            bool global_place = codegen_canonical_value_is_global_place(function, value_index);
+            u32 slot_size = global_place ? 8 : ((u32)value_type->layout.size + 7) & ~(u32)7;
             slot_size = BUSTER_MAX(slot_size, 8u);
-            u64 slot_alignment = BUSTER_MAX(BUSTER_MAX(value_type->layout.alignment, function->values[value_index].alignment), 8u);
+            u64 slot_alignment = global_place ? 8 : BUSTER_MAX(BUSTER_MAX(value_type->layout.alignment, function->values[value_index].alignment), 8u);
             if (target.cpu_arch == CPU_ARCH_X86_64)
             {
                 value_bytes += slot_size;

@@ -1494,6 +1494,39 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+    String8 c_static_aggregate_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-static-aggregate-member"),
+#if BUSTER_WINDOWS
+                                                                              S8(".exe"));
+#else
+                                                                              S8(""));
+#endif
+    String8 c_static_aggregate_command_line[] = {
+        S8("-o"),
+        c_static_aggregate_executable_path,
+        S8("tests/basic_c_static_aggregate_member.c"),
+    };
+    CompilerDriverResult c_static_aggregate = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_static_aggregate_command_line)));
+    BUSTER_TEST(arguments, c_static_aggregate.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, c_static_aggregate.has_object);
+    BUSTER_TEST(arguments, c_static_aggregate.codegen_statistics.maximum_stack_frame_bytes < BUSTER_KB(64));
+    if (c_static_aggregate.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_static_aggregate_run_arguments[] = {
+            c_static_aggregate_executable_path,
+        };
+        ProcessSpawnResult c_static_aggregate_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_static_aggregate_run_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_static_aggregate_spawn.handle != 0);
+        if (c_static_aggregate_spawn.handle)
+        {
+            ProcessWaitResult c_static_aggregate_wait = os_process_wait_sync(arguments->arena, c_static_aggregate_spawn);
+            BUSTER_TEST(arguments, c_static_aggregate_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     String8 c_auto_type_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-auto-type"),
 #if BUSTER_WINDOWS
                                                                       S8(".exe"));
@@ -1687,7 +1720,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         TemporalArena arm64_unwind_temporary = scratch_begin(&arguments->arena, 1);
         String8 arm64_unwind_object_path = buster_test_temporary_path(arm64_unwind_temporary.arena, S8("buster-c-arm64-unwind"), S8(".o"));
         String8 arm64_unwind_command_line[] = {
-            S8("-target"), S8("aarch64-windows"), S8("-c"), S8("-g0"), S8("-o"), arm64_unwind_object_path, S8("tests/basic_c_operations.c"),
+            S8("-target"), S8("aarch64-windows"), S8("-c"), S8("-g0"), S8("-o"), arm64_unwind_object_path, S8("tests/basic_c_large_frame.c"),
         };
         CompilerDriverResult arm64_unwind_compile = compiler_driver_execute_invocation(
             arm64_unwind_temporary.arena,
