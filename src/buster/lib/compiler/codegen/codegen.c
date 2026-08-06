@@ -113,6 +113,73 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_constraint_register(u64 constra
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL u32 codegen_inline_assembly_type_class(IrType* type)
+{
+    if (!type || !type->layout.resolved || !type->layout.size || type->layout.size > 8)
+    {
+        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
+    }
+    switch (type->kind)
+    {
+    case IR_TYPE_BOOLEAN:
+    case IR_TYPE_INTEGER:
+    case IR_TYPE_ENUM:
+        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER;
+    case IR_TYPE_POINTER:
+        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER;
+    case IR_TYPE_VOID:
+    case IR_TYPE_FLOAT:
+    case IR_TYPE_VA_LIST:
+    case IR_TYPE_SLICE:
+    case IR_TYPE_ARRAY:
+    case IR_TYPE_VECTOR:
+    case IR_TYPE_FUNCTION:
+    case IR_TYPE_RANGE:
+    case IR_TYPE_STRUCT:
+    case IR_TYPE_UNION:
+    case IR_TYPE_COUNT:
+        break;
+    }
+    return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_types_compatible(IrType* output, IrType* input)
+{
+    u32 output_class = codegen_inline_assembly_type_class(output);
+    u32 input_class = codegen_inline_assembly_type_class(input);
+    return output_class != IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID && output_class == input_class && output->layout.size == input->layout.size;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_constraint_shape_valid(u64 constraint, u32 operand_index, u32 operand_count, u32* match_index_out)
+{
+    if ((constraint & ~IR_INLINE_ASSEMBLY_CONSTRAINT_KNOWN_MASK) ||
+        (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) >= IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
+    {
+        return false;
+    }
+    bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+    bool read_write = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
+    bool matching = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0;
+    if ((read_write && !output) || (matching && (output || read_write)))
+    {
+        return false;
+    }
+    if (!matching)
+    {
+        return (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_MASK) == 0;
+    }
+    u32 match_index = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
+    if (match_index >= operand_index || match_index >= operand_count)
+    {
+        return false;
+    }
+    if (match_index_out)
+    {
+        *match_index_out = match_index;
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_function_saves_rbx(IrFunction* function)
 {
     if (!function)
@@ -12228,10 +12295,34 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
                         {
                             u64 constraint = instruction->immediates[operand_index];
-                            if ((constraint & 0xff) > IR_INLINE_ASSEMBLY_CONSTRAINT_R)
+                            if (!codegen_inline_assembly_constraint_shape_valid(constraint, operand_index, instruction->operand_count, 0) ||
+                                (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) > IR_INLINE_ASSEMBLY_CONSTRAINT_R)
                             {
                                 result.error = CODEGEN_ERROR_INVALID_IR;
                                 return result;
+                            }
+                            if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0)
+                            {
+                                u32 match_index = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
+                                u64 output_constraint = instruction->immediates[match_index];
+                                if ((output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) == 0 ||
+                                    (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0 ||
+                                    (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) !=
+                                        (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
+                                {
+                                    result.error = CODEGEN_ERROR_INVALID_IR;
+                                    return result;
+                                }
+                                for (u32 previous_index = 0; previous_index < operand_index; previous_index += 1)
+                                {
+                                    u64 previous_constraint = instruction->immediates[previous_index];
+                                    if ((previous_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0 &&
+                                        IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(previous_constraint) == match_index)
+                                    {
+                                        result.error = CODEGEN_ERROR_INVALID_IR;
+                                        return result;
+                                    }
+                                }
                             }
                             X64Register fixed_register = X64_REGISTER_RAX;
                             if (codegen_inline_assembly_constraint_register(constraint, &fixed_register))
@@ -12260,7 +12351,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
                         {
                             u64 constraint = instruction->immediates[operand_index];
-                            u64 constraint_index = constraint & 0xff;
+                            u64 constraint_index = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
                             if (constraint_index > IR_INLINE_ASSEMBLY_CONSTRAINT_R)
                             {
                                 result.error = CODEGEN_ERROR_INVALID_IR;
@@ -12276,6 +12367,40 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             indirect[operand_index] = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                                        definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE;
                             indirect_operands |= indirect[operand_index];
+                            IrType* operand_type = ir_type_from_id(&program->types, function->values[operand.value].canonical_type);
+                            if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0)
+                            {
+                                if (codegen_inline_assembly_type_class(operand_type) == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID)
+                                {
+                                    result.error = CODEGEN_ERROR_INVALID_IR;
+                                    return result;
+                                }
+                                u32 match_index = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
+                                IrValueId output = instruction->operands[match_index];
+                                u64 output_constraint = instruction->immediates[match_index];
+                                IrType* output_type = ir_type_from_id(&program->types, function->values[output.value].canonical_type);
+                                if ((output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) == 0 ||
+                                    (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0 ||
+                                    (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) !=
+                                        (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) ||
+                                    !codegen_inline_assembly_types_compatible(output_type, operand_type))
+                                {
+                                    result.error = CODEGEN_ERROR_INVALID_IR;
+                                    return result;
+                                }
+                                for (u32 previous_index = 0; previous_index < operand_index; previous_index += 1)
+                                {
+                                    u64 previous_constraint = instruction->immediates[previous_index];
+                                    if ((previous_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0 &&
+                                        IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(previous_constraint) == match_index)
+                                    {
+                                        result.error = CODEGEN_ERROR_INVALID_IR;
+                                        return result;
+                                    }
+                                }
+                                asm_registers[operand_index] = asm_registers[match_index];
+                                continue;
+                            }
                             X64Register register_index = X64_REGISTER_RAX;
                             bool is_fixed_register = codegen_inline_assembly_constraint_register(constraint, &register_index);
                             if (is_fixed_register)
@@ -14461,9 +14586,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
                         {
                             u64 constraint = instruction->immediates[operand_index];
-                            if ((constraint & 0xff) != IR_INLINE_ASSEMBLY_CONSTRAINT_R)
+                            if (!codegen_inline_assembly_constraint_shape_valid(constraint, operand_index, instruction->operand_count, 0) ||
+                                (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) != IR_INLINE_ASSEMBLY_CONSTRAINT_R)
                             {
-                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                result.error = CODEGEN_ERROR_INVALID_IR;
                                 return result;
                             }
                             IrValueId operand = instruction->operands[operand_index];
@@ -14475,25 +14601,60 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             IrInstruction* definition = function->instructions + function->values[operand.value].definition.value;
                             asm_indirect[operand_index] = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                                           definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE;
-                            u32 register_index = 0;
-                            bool found = false;
-                            for (u32 candidate = 0; candidate < BUSTER_ARRAY_LENGTH(used_asm_registers); candidate += 1)
-                            {
-                                if (!used_asm_registers[candidate])
-                                {
-                                    used_asm_registers[candidate] = true;
-                                    register_index = 9 + candidate;
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (!found)
-                            {
-                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-                                return result;
-                            }
-                            asm_registers[operand_index] = register_index;
                             IrType* operand_type = ir_type_from_id(&program->types, function->values[operand.value].canonical_type);
+                            if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0)
+                            {
+                                if (codegen_inline_assembly_type_class(operand_type) == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID)
+                                {
+                                    result.error = CODEGEN_ERROR_INVALID_IR;
+                                    return result;
+                                }
+                                u32 match_index = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
+                                IrValueId output = instruction->operands[match_index];
+                                u64 output_constraint = instruction->immediates[match_index];
+                                IrType* output_type = ir_type_from_id(&program->types, function->values[output.value].canonical_type);
+                                if ((output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) == 0 ||
+                                    (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0 ||
+                                    (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) !=
+                                        (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) ||
+                                    !codegen_inline_assembly_types_compatible(output_type, operand_type))
+                                {
+                                    result.error = CODEGEN_ERROR_INVALID_IR;
+                                    return result;
+                                }
+                                for (u32 previous_index = 0; previous_index < operand_index; previous_index += 1)
+                                {
+                                    u64 previous_constraint = instruction->immediates[previous_index];
+                                    if ((previous_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0 &&
+                                        IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(previous_constraint) == match_index)
+                                    {
+                                        result.error = CODEGEN_ERROR_INVALID_IR;
+                                        return result;
+                                    }
+                                }
+                                asm_registers[operand_index] = asm_registers[match_index];
+                            }
+                            else
+                            {
+                                u32 register_index = 0;
+                                bool found = false;
+                                for (u32 candidate = 0; candidate < BUSTER_ARRAY_LENGTH(used_asm_registers); candidate += 1)
+                                {
+                                    if (!used_asm_registers[candidate])
+                                    {
+                                        used_asm_registers[candidate] = true;
+                                        register_index = 9 + candidate;
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if (!found)
+                                {
+                                    result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                    return result;
+                                }
+                                asm_registers[operand_index] = register_index;
+                            }
                             if (!operand_type || !operand_type->layout.resolved || operand_type->layout.size > UINT32_MAX ||
                                 !codegen_canonical_a64_asm_memory_width((u32)operand_type->layout.size))
                             {
@@ -14506,14 +14667,14 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 if (asm_indirect[operand_index])
                                 {
                                     if (!codegen_canonical_a64_frame_memory_operation(&buffer, asm_address_register, value_offsets[operand.value], 8, false, false) ||
-                                        !codegen_canonical_a64_memory_operation_base(&buffer, register_index, 0, (u32)operand_type->layout.size, false, false,
+                                        !codegen_canonical_a64_memory_operation_base(&buffer, asm_registers[operand_index], 0, (u32)operand_type->layout.size, false, false,
                                                                                       asm_address_register))
                                     {
                                         result.error = CODEGEN_ERROR_CAPACITY;
                                         return result;
                                     }
                                 }
-                                else if (!codegen_canonical_a64_frame_memory_operation(&buffer, register_index, value_offsets[operand.value],
+                                else if (!codegen_canonical_a64_frame_memory_operation(&buffer, asm_registers[operand_index], value_offsets[operand.value],
                                                                                          (u32)operand_type->layout.size, false, false))
                                 {
                                     result.error = CODEGEN_ERROR_CAPACITY;

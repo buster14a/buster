@@ -30,6 +30,26 @@ static int compiler_barrier(int value)
     return value;
 }
 
+struct LegacyAsmPair
+{
+    int left;
+    int right;
+};
+
+static void legacy_nonmatching_float(float value)
+{
+    float result;
+    __asm__ volatile("" : "=r"(result) : "r"(value));
+    (void)result;
+}
+
+static void legacy_nonmatching_pair(struct LegacyAsmPair value)
+{
+    struct LegacyAsmPair result;
+    __asm__ volatile("" : "=r"(result) : "r"(value));
+    (void)result;
+}
+
 #if defined(__x86_64__) || defined(_M_X64)
 struct AsmWidthProbe
 {
@@ -83,6 +103,15 @@ static void outputs_only_fixed_order(void)
     (void)generic;
     (void)fixed;
 }
+
+#if defined(__x86_64__) || defined(_M_X64)
+static int fixed_tied_output(int value)
+{
+    int result;
+    __asm__ volatile("" : "=b"(result) : "0"(value));
+    return result;
+}
+#endif
 
 static int dynamic_stack_fixed_b(int count)
 {
@@ -139,12 +168,37 @@ static int exact_width_asm_outputs(void)
 }
 #endif
 
+static int numeric_tied_output(int value)
+{
+    int result;
+    __asm__ volatile("" : "=r"(result) : "0"(value));
+    return result;
+}
+
+static int named_tied_output(int value)
+{
+    int result;
+    __asm__ volatile("" : [dst] "=r"(result) : "[dst]"(value));
+    return result;
+}
+
+static int four_tied_output(int a, int b, int c, int d)
+{
+    int result0;
+    int result1;
+    int result2;
+    int result3;
+    __asm__ volatile("" : "=r"(result0), "=r"(result1), "=r"(result2), "=r"(result3) : "0"(a), "1"(b), "2"(c), "3"(d), "r"(a), "r"(b));
+    return result0 + result1 + result2 + result3;
+}
+
 int main(void)
 {
-    int valid = compiler_barrier(37) == 37 && global_asm_answer() == 42;
+    int valid = compiler_barrier(37) == 37 && global_asm_answer() == 42 && numeric_tied_output(53) == 53 && named_tied_output(71) == 71 &&
+                four_tied_output(1, 2, 3, 4) == 10;
 #if defined(__x86_64__) || defined(_M_X64)
     outputs_only_fixed_order();
-    valid = valid && two_generic_read_write_outputs() == 12 && generic_before_fixed_read_write_output() == 12 &&
+    valid = valid && fixed_tied_output(89) == 89 && two_generic_read_write_outputs() == 12 && generic_before_fixed_read_write_output() == 12 &&
             fixed_before_generic_read_write_output() == 12 && dynamic_stack_fixed_b(3) == 7 && exact_width_asm_outputs();
 #endif
     return valid ? 0 : 1;

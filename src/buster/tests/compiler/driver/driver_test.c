@@ -98,6 +98,41 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_bytes_contain(ByteSl
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_aarch64_tied_input_load(ObjectFile* object)
+{
+    if (!object || object->error != OBJECT_ERROR_NONE || object->section_count <= OBJECT_SECTION_TEXT || !object->sections || !object->symbols)
+    {
+        return false;
+    }
+    ByteSlice text = object->sections[OBJECT_SECTION_TEXT].data;
+    // Object-reader/disassembly sequence for int numeric_tied_output with an empty asm body:
+    // ldr w9, [x28, #0x20]; str w9, [x28, #0x10].  The adjacent load/store
+    // proves that the tied input reaches the reused output register and is
+    // then published through the output place.
+    static u8 const tied_sequence[] = {
+        0x89, 0x23, 0x40, 0xb9,
+        0x89, 0x13, 0x00, 0xb9,
+    };
+    for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + symbol_index;
+        if (symbol->kind != OBJECT_SYMBOL_FUNCTION || symbol->section != OBJECT_SECTION_TEXT || !string_equal(symbol->name, S8("numeric_tied_output")) ||
+            symbol->value > text.length || symbol->size > text.length - symbol->value)
+        {
+            continue;
+        }
+        u64 function_end = symbol->value + symbol->size;
+        for (u64 offset = symbol->value; offset + sizeof(tied_sequence) <= function_end; offset += 4)
+        {
+            if (memcmp(text.pointer + offset, tied_sequence, sizeof(tied_sequence)) == 0)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL u16 compiler_driver_test_pe_read_u16(ByteSlice image, u64 offset)
 {
     u16 value = 0;
@@ -3148,6 +3183,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                                                                                                            },
                                                                                                        .length = 4,
                                                                                                    }));
+        BUSTER_TEST(arguments, compiler_driver_test_aarch64_tied_input_load(&c_asm_aarch64.object));
     }
     String8 c_asm_windows_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-windows"), S8(".obj"));
     String8 c_asm_windows_command_line[] = {

@@ -89,6 +89,218 @@ BUSTER_GLOBAL_LOCAL bool ir_value_id_valid(IrFunction* function, IrValueId value
     return value.value < function->value_count;
 }
 
+BUSTER_GLOBAL_LOCAL u32 ir_analysis_inline_assembly_type_class(AnalysisType* type)
+{
+    if (!type || type->layout.state != ANALYSIS_LAYOUT_RESOLVED || !type->layout.size || type->layout.size > 8)
+    {
+        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
+    }
+    switch (type->kind)
+    {
+    case ANALYSIS_TYPE_BOOL:
+    case ANALYSIS_TYPE_INTEGER:
+    case ANALYSIS_TYPE_ENUM:
+        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER;
+    case ANALYSIS_TYPE_POINTER:
+        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER;
+    case ANALYSIS_TYPE_POISON:
+    case ANALYSIS_TYPE_VOID:
+    case ANALYSIS_TYPE_FLOAT:
+    case ANALYSIS_TYPE_VA_LIST:
+    case ANALYSIS_TYPE_COMPILE_TIME_PARAMETER:
+    case ANALYSIS_TYPE_SLICE:
+    case ANALYSIS_TYPE_INFERRED_ARRAY:
+    case ANALYSIS_TYPE_ARRAY:
+    case ANALYSIS_TYPE_VECTOR:
+    case ANALYSIS_TYPE_FUNCTION:
+    case ANALYSIS_TYPE_RANGE:
+    case ANALYSIS_TYPE_STRUCT:
+    case ANALYSIS_TYPE_UNION:
+    case ANALYSIS_TYPE_COUNT:
+        break;
+    }
+    return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
+}
+
+BUSTER_GLOBAL_LOCAL u32 ir_canonical_inline_assembly_type_class(IrType* type)
+{
+    if (!type || !type->layout.resolved || !type->layout.size || type->layout.size > 8)
+    {
+        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
+    }
+    switch (type->kind)
+    {
+    case IR_TYPE_BOOLEAN:
+    case IR_TYPE_INTEGER:
+    case IR_TYPE_ENUM:
+        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER;
+    case IR_TYPE_POINTER:
+        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER;
+    case IR_TYPE_VOID:
+    case IR_TYPE_FLOAT:
+    case IR_TYPE_VA_LIST:
+    case IR_TYPE_SLICE:
+    case IR_TYPE_ARRAY:
+    case IR_TYPE_VECTOR:
+    case IR_TYPE_FUNCTION:
+    case IR_TYPE_RANGE:
+    case IR_TYPE_STRUCT:
+    case IR_TYPE_UNION:
+    case IR_TYPE_COUNT:
+        break;
+    }
+    return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_inline_assembly_constraint_shape_valid(u64 constraint, u32 operand_index, u32 operand_count, u32* match_index_out)
+{
+    if ((constraint & ~IR_INLINE_ASSEMBLY_CONSTRAINT_KNOWN_MASK) || (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) >= IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
+    {
+        return false;
+    }
+    bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+    bool read_write = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
+    bool matching = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0;
+    u64 match_bits = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_MASK;
+    if ((read_write && !output) || (matching && (output || read_write)))
+    {
+        return false;
+    }
+    if (!matching)
+    {
+        return match_bits == 0;
+    }
+    u32 match_index = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
+    if (match_index >= operand_index || match_index >= operand_count)
+    {
+        return false;
+    }
+    if (match_index_out)
+    {
+        *match_index_out = match_index;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_analysis_inline_assembly_types_compatible(AnalysisType* output, AnalysisType* input)
+{
+    u32 output_class = ir_analysis_inline_assembly_type_class(output);
+    u32 input_class = ir_analysis_inline_assembly_type_class(input);
+    return output_class != IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID && output_class == input_class && output->layout.size == input->layout.size;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_canonical_inline_assembly_types_compatible(IrType* output, IrType* input)
+{
+    u32 output_class = ir_canonical_inline_assembly_type_class(output);
+    u32 input_class = ir_canonical_inline_assembly_type_class(input);
+    return output_class != IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID && output_class == input_class && output->layout.size == input->layout.size;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_analysis_inline_assembly_valid(AnalysisResult* analysis, IrFunction* function, IrInstruction* instruction)
+{
+    bool valid = instruction->operand_count == instruction->immediate_count && (instruction->target_count == 0 || instruction->target_count >= 2) &&
+                 instruction->label_name_count == (instruction->target_count ? instruction->target_count - 1 : 0) &&
+                 (!instruction->label_name_count || instruction->label_names) && instruction->operand_name_count == instruction->operand_count &&
+                 (!instruction->operand_name_count || instruction->operand_names) && (!instruction->clobber_count || instruction->clobbers) &&
+                 instruction->result.value == IR_ID_UNDERLYING_INVALID;
+    for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
+    {
+        IrValueId operand_id = instruction->operands ? instruction->operands[operand_index] : IR_VALUE_ID_INVALID;
+        if (operand_id.value >= function->value_count)
+        {
+            valid = false;
+            break;
+        }
+        u64 constraint = instruction->immediates ? instruction->immediates[operand_index] : UINT64_MAX;
+        bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+        valid = ir_inline_assembly_constraint_shape_valid(constraint, operand_index, instruction->operand_count, 0) &&
+                function->values[operand_id.value].category == (output ? IR_VALUE_PLACE : IR_VALUE_VALUE);
+        if (!valid)
+        {
+            break;
+        }
+        AnalysisType* operand_type = analysis_type_from_id(analysis, function->values[operand_id.value].type);
+        if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0)
+        {
+            valid = ir_analysis_inline_assembly_type_class(operand_type) != IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
+            if (!valid)
+            {
+                break;
+            }
+            u32 match_index = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
+            IrValueId output_id = instruction->operands[match_index];
+            u64 output_constraint = instruction->immediates[match_index];
+            AnalysisType* output_type = analysis_type_from_id(analysis, function->values[output_id.value].type);
+            valid &= (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0 &&
+                     (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) == 0 &&
+                     (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) &&
+                     ir_analysis_inline_assembly_types_compatible(output_type, operand_type);
+            for (u32 previous_index = 0; valid && previous_index < operand_index; previous_index += 1)
+            {
+                u64 previous_constraint = instruction->immediates[previous_index];
+                valid &= !(previous_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) ||
+                         IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(previous_constraint) != match_index;
+            }
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_canonical_inline_assembly_valid(IrProgram* program, IrFunction* function, IrInstruction* instruction)
+{
+    bool valid = instruction->canonical_type.value < program->types.count && ir_type_from_id(&program->types, instruction->canonical_type)->kind == IR_TYPE_VOID &&
+                 instruction->operand_count == instruction->immediate_count && (instruction->target_count == 0 || instruction->target_count >= 2) &&
+                 instruction->label_name_count == (instruction->target_count ? instruction->target_count - 1 : 0) &&
+                 (!instruction->label_name_count || instruction->label_names) && instruction->operand_name_count == instruction->operand_count &&
+                 (!instruction->operand_name_count || instruction->operand_names) && (!instruction->clobber_count || instruction->clobbers) &&
+                 instruction->result.value == IR_ID_UNDERLYING_INVALID;
+    for (u32 target_index = 0; valid && target_index < instruction->target_count; target_index += 1)
+    {
+        valid = instruction->targets && instruction->targets[target_index].value < function->block_count;
+    }
+    for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
+    {
+        IrValueId operand_id = instruction->operands ? instruction->operands[operand_index] : IR_VALUE_ID_INVALID;
+        valid = operand_id.value < function->value_count;
+        if (!valid)
+        {
+            break;
+        }
+        u64 constraint = instruction->immediates ? instruction->immediates[operand_index] : UINT64_MAX;
+        bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+        valid = ir_inline_assembly_constraint_shape_valid(constraint, operand_index, instruction->operand_count, 0) &&
+                function->values[operand_id.value].category == (output ? IR_VALUE_PLACE : IR_VALUE_VALUE);
+        if (!valid)
+        {
+            break;
+        }
+        IrType* operand_type = ir_type_from_id(&program->types, function->values[operand_id.value].canonical_type);
+        if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0)
+        {
+            valid = ir_canonical_inline_assembly_type_class(operand_type) != IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
+            if (!valid)
+            {
+                break;
+            }
+            u32 match_index = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
+            IrValueId output_id = instruction->operands[match_index];
+            u64 output_constraint = instruction->immediates[match_index];
+            IrType* output_type = ir_type_from_id(&program->types, function->values[output_id.value].canonical_type);
+            valid &= (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0 &&
+                     (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) == 0 &&
+                     (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) &&
+                     ir_canonical_inline_assembly_types_compatible(output_type, operand_type);
+            for (u32 previous_index = 0; valid && previous_index < operand_index; previous_index += 1)
+            {
+                u64 previous_constraint = instruction->immediates[previous_index];
+                valid &= !(previous_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) ||
+                         IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(previous_constraint) != match_index;
+            }
+        }
+    }
+    return valid;
+}
+
 bool ir_label_provenance_valid(IrValue* value)
 {
     if (!value || !value->is_label_value || value->has_label_provenance || value->has_non_label_provenance || !value->label_block_count || !value->label_blocks)
@@ -4794,20 +5006,7 @@ BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(AnalysisResult* analysis
     }
     if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY)
     {
-        bool valid = instruction->operand_count == instruction->immediate_count && (instruction->target_count == 0 || instruction->target_count >= 2) &&
-                     instruction->label_name_count == (instruction->target_count ? instruction->target_count - 1 : 0) &&
-                     (!instruction->label_name_count || instruction->label_names) && instruction->operand_name_count == instruction->operand_count &&
-                     (!instruction->operand_name_count || instruction->operand_names) && (!instruction->clobber_count || instruction->clobbers) &&
-                     instruction->result.value == IR_ID_UNDERLYING_INVALID;
-        for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
-        {
-            IrValueId operand_id = instruction->operands ? instruction->operands[operand_index] : IR_VALUE_ID_INVALID;
-            u64 constraint = instruction->immediates ? instruction->immediates[operand_index] : UINT64_MAX;
-            bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
-            valid = operand_id.value < function->value_count && (constraint & 0xff) < IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT &&
-                    function->values[operand_id.value].category == (output ? IR_VALUE_PLACE : IR_VALUE_VALUE);
-        }
-        return valid;
+        return ir_analysis_inline_assembly_valid(analysis, function, instruction);
     }
     if (instruction->opcode == IR_OPCODE_LENGTH || instruction->opcode == IR_OPCODE_REVERSE)
     {
@@ -5923,25 +6122,7 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                 }
                 else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY)
                 {
-                    IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    bool valid = type && type->kind == IR_TYPE_VOID && instruction->operand_count == instruction->immediate_count &&
-                                 instruction->result.value == IR_ID_UNDERLYING_INVALID &&
-                                 (instruction->target_count == 0 || instruction->target_count >= 2) &&
-                                 instruction->label_name_count == (instruction->target_count ? instruction->target_count - 1 : 0) &&
-                                 (!instruction->label_name_count || instruction->label_names) && instruction->operand_name_count == instruction->operand_count &&
-                                 (!instruction->operand_name_count || instruction->operand_names) && (!instruction->clobber_count || instruction->clobbers);
-                    for (u32 target_index = 0; valid && target_index < instruction->target_count; target_index += 1)
-                    {
-                        valid = instruction->targets[target_index].value < function->block_count;
-                    }
-                    for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
-                    {
-                        IrValue* operand = function->values + instruction->operands[operand_index].value;
-                        u64 constraint = instruction->immediates[operand_index];
-                        bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
-                        valid &= (constraint & 0xff) < IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT && operand->category == (output ? IR_VALUE_PLACE : IR_VALUE_VALUE);
-                    }
-                    if (!valid)
+                    if (!ir_canonical_inline_assembly_valid(program, function, instruction))
                     {
                         return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }

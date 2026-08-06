@@ -8972,6 +8972,234 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         scratch_end(symbolic_array_operand_temporary);
     }
     {
+        TemporalArena tied_assembly_temporary = scratch_begin(0, 0);
+        String8 tied_assembly_source = S8(
+            "int numeric_tied(int input) { int output; __asm__(\"\" : \"=r\"(output) : \"0\"(input)); return output; }"
+            "int named_tied(int input) { int output; __asm__(\"\" : [dst] \"=r\"(output) : \"[dst]\"(input)); return output; }"
+            "int many_tied(int input) { int output0, output1, output2, output3, output4, output5, output6, output7, output8, output9, output10;"
+            " __asm__(\"\" : \"=r\"(output0), \"=r\"(output1), \"=r\"(output2), \"=r\"(output3), \"=r\"(output4), \"=r\"(output5),"
+            " \"=r\"(output6), \"=r\"(output7), \"=r\"(output8), \"=r\"(output9), \"=r\"(output10) : \"10\"(input)); return output10; }"
+            "int four_tied(int a, int b, int c, int d) { int output0, output1, output2, output3;"
+            " __asm__(\"\" : \"=r\"(output0), \"=r\"(output1), \"=r\"(output2), \"=r\"(output3) : \"0\"(a), \"1\"(b), \"2\"(c), \"3\"(d), \"r\"(a), \"r\"(b));"
+            " return output0 + output1 + output2 + output3; }\n");
+        CPreprocessResult tied_assembly_tokens = {0};
+        CParseResult tied_assembly_parse = {0};
+        CIRLowerResult tied_assembly_lowered = c_test_lower_source(tied_assembly_temporary.arena, tied_assembly_source, S8("tied-assembly.c"), target_native,
+                                                                    &tied_assembly_tokens, &tied_assembly_parse);
+        BUSTER_TEST(arguments, tied_assembly_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, tied_assembly_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, tied_assembly_lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, tied_assembly_lowered.program != 0);
+        IrInstruction* numeric_tied_assembly = 0;
+        IrInstruction* named_tied_assembly = 0;
+        IrInstruction* many_tied_assembly = 0;
+        IrInstruction* four_tied_assembly = 0;
+        if (tied_assembly_lowered.program)
+        {
+            IrModule* module = tied_assembly_lowered.program->modules;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                IrInstruction* first_assembly = 0;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                    {
+                        first_assembly = function->instructions + instruction_index;
+                        break;
+                    }
+                }
+                if (string_equal(function->name, S8("numeric_tied")))
+                {
+                    numeric_tied_assembly = first_assembly;
+                }
+                else if (string_equal(function->name, S8("named_tied")))
+                {
+                    named_tied_assembly = first_assembly;
+                }
+                else if (string_equal(function->name, S8("many_tied")))
+                {
+                    many_tied_assembly = first_assembly;
+                }
+                else if (string_equal(function->name, S8("four_tied")))
+                {
+                    four_tied_assembly = first_assembly;
+                }
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(tied_assembly_lowered.program, module).error == IR_VALIDATION_NONE);
+        }
+        BUSTER_TEST(arguments, numeric_tied_assembly && numeric_tied_assembly->operand_count == 2);
+        BUSTER_TEST(arguments, named_tied_assembly && named_tied_assembly->operand_count == 2);
+        BUSTER_TEST(arguments, many_tied_assembly && many_tied_assembly->operand_count == 12);
+        BUSTER_TEST(arguments, four_tied_assembly && four_tied_assembly->operand_count == 10);
+        if (numeric_tied_assembly)
+        {
+            BUSTER_TEST(arguments, numeric_tied_assembly->immediates[0] == (IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT | IR_INLINE_ASSEMBLY_CONSTRAINT_R));
+            BUSTER_TEST(arguments, (numeric_tied_assembly->immediates[1] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_R);
+            BUSTER_TEST(arguments, (numeric_tied_assembly->immediates[1] & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0);
+            BUSTER_TEST(arguments, IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(numeric_tied_assembly->immediates[1]) == 0);
+            u64 saved_constraint = numeric_tied_assembly->immediates[1];
+            numeric_tied_assembly->immediates[1] |= UINT64_C(1) << 11;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(tied_assembly_lowered.program, tied_assembly_lowered.program->modules).error != IR_VALIDATION_NONE);
+            numeric_tied_assembly->immediates[1] = saved_constraint;
+            numeric_tied_assembly->immediates[1] = (saved_constraint & ~IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_MASK) |
+                                                    IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH | IR_INLINE_ASSEMBLY_CONSTRAINT_R |
+                                                    ((u64)1 << IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_SHIFT);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(tied_assembly_lowered.program, tied_assembly_lowered.program->modules).error != IR_VALIDATION_NONE);
+            numeric_tied_assembly->immediates[1] = saved_constraint;
+            numeric_tied_assembly->immediates[1] = saved_constraint | IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(tied_assembly_lowered.program, tied_assembly_lowered.program->modules).error != IR_VALIDATION_NONE);
+            numeric_tied_assembly->immediates[1] = saved_constraint;
+            numeric_tied_assembly->immediates[1] = saved_constraint | IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(tied_assembly_lowered.program, tied_assembly_lowered.program->modules).error != IR_VALIDATION_NONE);
+            numeric_tied_assembly->immediates[1] = saved_constraint;
+            numeric_tied_assembly->immediates[1] = (saved_constraint & ~IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) | IR_INLINE_ASSEMBLY_CONSTRAINT_A;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(tied_assembly_lowered.program, tied_assembly_lowered.program->modules).error != IR_VALIDATION_NONE);
+            numeric_tied_assembly->immediates[1] = saved_constraint;
+            u64 saved_output_constraint = numeric_tied_assembly->immediates[0];
+            numeric_tied_assembly->immediates[0] = IR_INLINE_ASSEMBLY_CONSTRAINT_R;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(tied_assembly_lowered.program, tied_assembly_lowered.program->modules).error != IR_VALIDATION_NONE);
+            numeric_tied_assembly->immediates[0] = saved_output_constraint;
+            numeric_tied_assembly->immediates[1] = (saved_constraint & ~(IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH | IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_MASK)) |
+                                                    ((u64)1 << IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_SHIFT);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(tied_assembly_lowered.program, tied_assembly_lowered.program->modules).error != IR_VALIDATION_NONE);
+            numeric_tied_assembly->immediates[1] = saved_constraint;
+        }
+        if (named_tied_assembly)
+        {
+            BUSTER_STRING_TEST(arguments, named_tied_assembly->operand_names[0], S8("dst"));
+            BUSTER_TEST(arguments, (named_tied_assembly->immediates[1] & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0);
+            BUSTER_TEST(arguments, IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(named_tied_assembly->immediates[1]) == 0);
+        }
+        if (many_tied_assembly)
+        {
+            BUSTER_TEST(arguments, (many_tied_assembly->immediates[11] & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0);
+            BUSTER_TEST(arguments, IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(many_tied_assembly->immediates[11]) == 10);
+        }
+        if (four_tied_assembly)
+        {
+            for (u32 pair_index = 0; pair_index < 4; pair_index += 1)
+            {
+                u64 constraint = four_tied_assembly->immediates[4 + pair_index];
+                BUSTER_TEST(arguments, (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0);
+                BUSTER_TEST(arguments, IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint) == pair_index);
+            }
+            u64 saved_duplicate_constraint = four_tied_assembly->immediates[5];
+            four_tied_assembly->immediates[5] = (saved_duplicate_constraint & ~IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_MASK) |
+                                                IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH | IR_INLINE_ASSEMBLY_CONSTRAINT_R;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(tied_assembly_lowered.program, tied_assembly_lowered.program->modules).error != IR_VALIDATION_NONE);
+            four_tied_assembly->immediates[5] = saved_duplicate_constraint;
+        }
+        scratch_end(tied_assembly_temporary);
+    }
+    {
+        TemporalArena fixed_tied_assembly_temporary = scratch_begin(0, 0);
+        Target x86_tied_target = target_native;
+        x86_tied_target.cpu_arch = CPU_ARCH_X86_64;
+        x86_tied_target.cpu_model = CPU_MODEL_BASELINE;
+        CPreprocessResult fixed_tied_tokens = {0};
+        CParseResult fixed_tied_parse = {0};
+        CIRLowerResult fixed_tied_lowered = c_test_lower_source(
+            fixed_tied_assembly_temporary.arena,
+            S8("int fixed_tied(int input) { int output; __asm__(\"\" : \"=a\"(output) : \"0\"(input)); return output; }\n"), S8("fixed-tied.c"),
+            x86_tied_target, &fixed_tied_tokens, &fixed_tied_parse);
+        BUSTER_TEST(arguments, fixed_tied_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, fixed_tied_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, fixed_tied_lowered.diagnostic_count == 0);
+        if (fixed_tied_lowered.program)
+        {
+            IrModule* module = fixed_tied_lowered.program->modules;
+            IrFunction* function = c_test_find_ir_function(module, S8("fixed_tied"));
+            IrInstruction* assembly = 0;
+            if (function)
+            {
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                    {
+                        assembly = function->instructions + instruction_index;
+                        break;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, assembly && assembly->operand_count == 2);
+            if (assembly)
+            {
+                BUSTER_TEST(arguments, (assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_A);
+                BUSTER_TEST(arguments, (assembly->immediates[1] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_A);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(fixed_tied_lowered.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(fixed_tied_assembly_temporary);
+    }
+    {
+        TemporalArena legacy_asm_operand_temporary = scratch_begin(0, 0);
+        CPreprocessResult legacy_asm_operand_tokens = {0};
+        CParseResult legacy_asm_operand_parse = {0};
+        CIRLowerResult legacy_asm_operand_lowered = c_test_lower_source(
+            legacy_asm_operand_temporary.arena,
+            S8("struct legacy_asm_pair { int left; int right; };"
+               "void legacy_float_asm(float input) { float output; __asm__(\"\" : \"=r\"(output) : \"r\"(input)); }"
+               "void legacy_pair_asm(struct legacy_asm_pair input) { struct legacy_asm_pair output;"
+               " __asm__(\"\" : \"=r\"(output) : \"r\"(input)); }\n"),
+            S8("legacy-asm-operands.c"), target_native, &legacy_asm_operand_tokens, &legacy_asm_operand_parse);
+        BUSTER_TEST(arguments, legacy_asm_operand_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, legacy_asm_operand_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, legacy_asm_operand_lowered.diagnostic_count == 0);
+        if (legacy_asm_operand_lowered.program)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(legacy_asm_operand_lowered.program, legacy_asm_operand_lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(legacy_asm_operand_temporary);
+    }
+    {
+        String8 invalid_tied_assembly_sources[] = {
+            S8("int invalid_tied(void) { int output, input; __asm__(\"\" : \"=r\"(output) : \"12\"(input)); return output; }\n"),
+            S8("int invalid_tied(void) { int output, input; __asm__(\"\" : [dst] \"=r\"(output) : \"[missing]\"(input)); return output; }\n"),
+            S8("int invalid_tied(void) { int output, input; __asm__(\"\" : [dst] \"=r\"(output) : \"[dst\"(input)); return output; }\n"),
+            S8("int invalid_tied(void) { int output, input, other; __asm__(\"\" : \"=r\"(output) : \"0\"(input), \"0\"(other)); return output; }\n"),
+            S8("int invalid_tied(void) { int output, input; __asm__(\"\" : \"+r\"(output) : \"0\"(input)); return output; }\n"),
+            S8("int invalid_tied(void) { int output; short input; __asm__(\"\" : \"=r\"(output) : \"0\"(input)); return output; }\n"),
+            S8("int invalid_tied(void) { int output; void *input = 0; __asm__(\"\" : \"=r\"(output) : \"0\"(input)); return output; }\n"),
+            S8("int invalid_tied(float input) { float output; __asm__(\"\" : \"=r\"(output) : \"0\"(input)); return (int)output; }\n"),
+            S8("struct invalid_tied_pair { int left; int right; };"
+               "void invalid_tied_pair(struct invalid_tied_pair input) { struct invalid_tied_pair output;"
+               " __asm__(\"\" : \"=r\"(output) : \"0\"(input)); }\n"),
+            S8("int invalid_tied(void) { int output, input; __asm__(\"\" : \"=r\"(output) : \"1x\"(input)); return output; }\n"),
+        };
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_tied_assembly_sources); source_index += 1)
+        {
+            TemporalArena invalid_tied_temporary = scratch_begin(0, 0);
+            CPreprocessResult invalid_tied_tokens = {0};
+            CParseResult invalid_tied_parse = {0};
+            CIRLowerResult invalid_tied_lowered = c_test_lower_source(invalid_tied_temporary.arena, invalid_tied_assembly_sources[source_index], S8("invalid-tied.c"),
+                                                                       target_native, &invalid_tied_tokens, &invalid_tied_parse);
+            BUSTER_TEST(arguments, invalid_tied_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, invalid_tied_parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, invalid_tied_lowered.diagnostic_count == 1);
+            scratch_end(invalid_tied_temporary);
+        }
+    }
+    {
+        TemporalArena aarch64_tied_assembly_temporary = scratch_begin(0, 0);
+        Target aarch64_tied_target = target_native;
+        aarch64_tied_target.cpu_arch = CPU_ARCH_AARCH64;
+        CPreprocessResult aarch64_tied_tokens = {0};
+        CParseResult aarch64_tied_parse = {0};
+        CIRLowerResult aarch64_tied_lowered = c_test_lower_source(
+            aarch64_tied_assembly_temporary.arena,
+            S8("int aarch64_tied(int input) { int output; __asm__(\"\" : \"=r\"(output) : \"0\"(input)); return output; }\n"), S8("aarch64-tied.c"),
+            aarch64_tied_target, &aarch64_tied_tokens, &aarch64_tied_parse);
+        BUSTER_TEST(arguments, aarch64_tied_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aarch64_tied_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aarch64_tied_lowered.diagnostic_count == 0);
+        if (aarch64_tied_lowered.program)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(aarch64_tied_lowered.program, aarch64_tied_lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(aarch64_tied_assembly_temporary);
+    }
+    {
         TemporalArena label_escape_temporary = scratch_begin(0, 0);
         CPreprocessResult label_escape_tokens = c_preprocess(
             label_escape_temporary.arena,
