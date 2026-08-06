@@ -6646,9 +6646,16 @@ BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_outer_jobs(u32 thread_count, u32 tree_
         return 0;
     }
     thread_count = BUSTER_MAX(thread_count, 1);
-    // A one-job split build starves on low-core CI runners. Reserve at least
-    // two logical CPUs per admitted split tree; unity trees use the same
-    // admission slot but receive their lower job count in the allocator.
+    // On a low-core runner, admit one tree per logical CPU and give every
+    // inner build one job. This keeps the complete matrix moving without
+    // nesting several two-job Ninja processes on the same four CPUs.
+    if (thread_count <= 4)
+    {
+        return BUSTER_MIN(thread_count, tree_count);
+    }
+
+    // Larger runners retain the weighted schedule: reserve at least two
+    // logical CPUs per admitted split tree and let unity trees use one job.
     u32 split_tree_limit = BUSTER_MAX(thread_count / 2, 1);
     return BUSTER_MIN(split_tree_limit, tree_count);
 }
@@ -6704,21 +6711,23 @@ BUSTER_GLOBAL_LOCAL void matrix_superbuild_allocate_jobs(MatrixTestTree* trees, 
 BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(void)
 {
     MatrixTestTree linux_trees[6] = {
-        {.unity_only = 1},
         {0},
+        {.unity_only = 1},
         {0},
         {0},
         {0},
         {0},
     };
     matrix_superbuild_allocate_jobs(linux_trees, BUSTER_ARRAY_LENGTH(linux_trees), 16);
-    u32 expected_linux_jobs[] = {2, 3, 3, 3, 3, 2};
+    u32 expected_linux_unity[] = {0, 1, 0, 0, 0, 0};
+    u32 expected_linux_jobs[] = {3, 2, 3, 3, 3, 2};
     for (u32 tree_i = 0; tree_i < BUSTER_ARRAY_LENGTH(linux_trees); tree_i += 1)
     {
-        if (linux_trees[tree_i].parallel_jobs != expected_linux_jobs[tree_i])
+        if (linux_trees[tree_i].unity_only != expected_linux_unity[tree_i] ||
+            linux_trees[tree_i].parallel_jobs != expected_linux_jobs[tree_i])
         {
-            string_print(S8("error: superbuild Linux job allocation test failed at tree {u32}: jobs={u32}\n"), tree_i,
-                         linux_trees[tree_i].parallel_jobs);
+            string_print(S8("error: superbuild Linux manifest allocation test failed at tree {u32}: unity={u32} jobs={u32}\n"), tree_i,
+                         linux_trees[tree_i].unity_only, linux_trees[tree_i].parallel_jobs);
             return PROCESS_RESULT_FAILED;
         }
     }
@@ -6733,17 +6742,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(void)
         {0},
     };
     matrix_superbuild_allocate_jobs(windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4);
-    u32 expected_windows_jobs[] = {2, 2, 1, 2, 2, 2, 2};
+    u32 expected_windows_unity[] = {0, 0, 1, 0, 0, 0, 0};
+    u32 expected_windows_jobs[] = {1, 1, 1, 1, 1, 1, 1};
     for (u32 tree_i = 0; tree_i < BUSTER_ARRAY_LENGTH(windows_trees); tree_i += 1)
     {
-        if (windows_trees[tree_i].parallel_jobs != expected_windows_jobs[tree_i])
+        if (windows_trees[tree_i].unity_only != expected_windows_unity[tree_i] ||
+            windows_trees[tree_i].parallel_jobs != expected_windows_jobs[tree_i])
         {
-            string_print(S8("error: superbuild Windows job allocation test failed at tree {u32}: jobs={u32}\n"), tree_i,
-                         windows_trees[tree_i].parallel_jobs);
+            string_print(S8("error: superbuild Windows manifest allocation test failed at tree {u32}: unity={u32} jobs={u32}\n"), tree_i,
+                         windows_trees[tree_i].unity_only, windows_trees[tree_i].parallel_jobs);
             return PROCESS_RESULT_FAILED;
         }
     }
-    if (matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(windows_trees)) != 2 || matrix_superbuild_outer_jobs(16, 6) != 6 ||
+    if (matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(windows_trees)) != 4 || matrix_superbuild_outer_jobs(16, 6) != 6 ||
         matrix_superbuild_outer_jobs(0, 0) != 0)
     {
         string_print(S8("error: superbuild outer job allocation test failed\n"));
@@ -6753,11 +6764,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(void)
 }
 
 BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 path, String8 source_directory, MatrixTestTree* trees,
-                                                           u32 tree_count, MatrixTestCombination* combinations, bool verbose, bool quiet)
+                                                           u32 tree_count, u32 outer_jobs, MatrixTestCombination* combinations,
+                                                           bool verbose, bool quiet)
 {
     String8List lines = {0};
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_SOURCE_DIR [==[{S8}]==])\n"), source_directory));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_TREE_COUNT {u32})\n"), tree_count));
+    string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_OUTER_JOBS {u32})\n"), outer_jobs));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_VERBOSE {S8})\n"), verbose ? S8("ON") : S8("OFF")));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_QUIET {S8})\n"), quiet ? S8("ON") : S8("OFF")));
 
@@ -6800,6 +6813,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
             string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_BUILD_TARGETS ide:{S8})\n"), prefix, first_config));
         }
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_PARALLEL_JOBS {u32})\n"), prefix, tree.parallel_jobs));
+        string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_UNITY_ONLY {u32})\n"), prefix, tree.unity_only));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_0_CONFIG {S8})\n"), prefix, first_config));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_0_TARGET {S8})\n"), prefix, first_target));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_1_CONFIG {S8})\n"), prefix, second_config));
@@ -7020,7 +7034,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         String8 superbuild_absolute_directory = os_path_absolute(arena, superbuild_directory_z, true);
         String8 manifest_path = path_join(arena, superbuild_absolute_directory, S8("matrix.cmake"));
         if (!source_directory.length || !superbuild_absolute_directory.length ||
-            !matrix_superbuild_manifest_write(arena, manifest_path, source_directory, trees, tree_count, combinations, base_options.verbose,
+            !matrix_superbuild_manifest_write(arena, manifest_path, source_directory, trees, tree_count,
+                                              matrix_superbuild_outer_jobs(thread_count, tree_count), combinations, base_options.verbose,
                                               base_options.quiet))
         {
             string_print(S8("error: failed to write the CMake superbuild matrix manifest\n"));

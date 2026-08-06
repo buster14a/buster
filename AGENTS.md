@@ -92,17 +92,18 @@ The matrix configures its compiler trees in parallel, then uses
 `cmake/superbuild/CMakeLists.txt` for one outer `cmake --build` invocation.
 Each shared compiler tree builds Debug and Release through one cross-config
 Ninja process, so concurrent builds never write the same `.ninja_deps` or
-`.ninja_log`. Each tree starts its tests as soon as its own compilation
-finishes, while unrelated trees continue compiling. One logical-CPU budget is
-divided across the active inner Ninja processes; a unity-only tree receives at
-most two jobs and split trees share the remainder. When the tree count exceeds
-the admission limit, the outer graph admits at most half the logical CPU count
-and assigns each split tree the CPU budget divided by that limit; unity trees
-use one job. Thus a four-thread runner admits at most two split trees with two
-jobs each. Pipelined tests inherit their tree's released allocation through
-`BUSTER_TEST_JOBS`; future multithreaded test work must honor that limit. Set
-`BUSTER_MATRIX_DIRECT=1` only to diagnose the retained legacy scheduler. CI
-Release builds use `-O2`; local Release builds retain the toolchain default.
+.ninja_log`. One shared CMake job pool admits the outer compiler and test
+commands, so a completed tree can release its slot to its tests while other
+trees continue compiling. On hosts with four or fewer logical CPUs, it admits
+one tree per CPU and sets every inner Ninja and `BUSTER_TEST_JOBS` quota to
+one; the seven-tree Windows matrix therefore runs four one-job compiler trees
+at a time without nested oversubscription. Larger hosts retain the weighted
+allocator: split trees share at least two logical CPUs per admission slot while
+unity trees use one job. Tests then run concurrently in the same bounded pool,
+with each tree's quota passed through `BUSTER_TEST_JOBS`; future multithreaded test work
+must honor that limit. Set `BUSTER_MATRIX_DIRECT=1` only to diagnose the
+retained legacy scheduler. CI Release builds use `-O2`; local Release builds
+retain the toolchain default.
 Clang static analysis runs only against unsanitized Release. GUI/GPU smoke
 tests run for Debug sanitized and Release non-sanitized configurations; other
 combinations run unit tests only.
