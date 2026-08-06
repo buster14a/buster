@@ -61,7 +61,9 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
     add_dependencies(buster_compile ${BUSTER_TREE_COMPILE_TARGET})
 
     set(BUSTER_TREE_TEST_COMMANDS
-        COMMAND "${CMAKE_COMMAND}" --build "${BUSTER_TREE_BUILD_DIRECTORY}"
+        COMMAND "${CMAKE_COMMAND}" -E env
+            "BUSTER_TEST_JOBS=${BUSTER_TREE_PARALLEL_JOBS}"
+            "${CMAKE_COMMAND}" --build "${BUSTER_TREE_BUILD_DIRECTORY}"
             --config "${BUSTER_TREE_TEST_0_CONFIG}"
             --target "${BUSTER_TREE_TEST_0_TARGET}"
             ${BUSTER_TREE_BUILD_OPTIONS}
@@ -71,7 +73,9 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
             message(FATAL_ERROR "Compiler tree ${BUSTER_SUPERBUILD_TREE_INDEX} has an incomplete second test")
         endif()
         list(APPEND BUSTER_TREE_TEST_COMMANDS
-            COMMAND "${CMAKE_COMMAND}" --build "${BUSTER_TREE_BUILD_DIRECTORY}"
+            COMMAND "${CMAKE_COMMAND}" -E env
+                "BUSTER_TEST_JOBS=${BUSTER_TREE_PARALLEL_JOBS}"
+                "${CMAKE_COMMAND}" --build "${BUSTER_TREE_BUILD_DIRECTORY}"
                 --config "${BUSTER_TREE_TEST_1_CONFIG}"
                 --target "${BUSTER_TREE_TEST_1_TARGET}"
                 ${BUSTER_TREE_BUILD_OPTIONS}
@@ -92,6 +96,6 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
         WORKING_DIRECTORY "${BUSTER_SUPERBUILD_SOURCE_DIR}"
         VERBATIM
     )
-    add_dependencies(${BUSTER_TREE_TEST_TARGET} buster_compile)
+    add_dependencies(${BUSTER_TREE_TEST_TARGET} ${BUSTER_TREE_COMPILE_TARGET})
     add_dependencies(buster_matrix ${BUSTER_TREE_TEST_TARGET})
 endforeach()
