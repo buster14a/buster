@@ -34,6 +34,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TIME_TRACE_SUMMARY_SELF_TEST,
     BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA,
     BUILD_COMMAND_TEST_SELF_HOST,
+    BUILD_COMMAND_SELF_HOST_FROM_EXISTING,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -100,6 +101,7 @@ typedef enum BuildArgument
 {
     BUILD_ARGUMENT_BUILD_DIRECTORY,
     BUILD_ARGUMENT_BUILD_DIR,
+    BUILD_ARGUMENT_PROVENANCE_RECORD,
     BUILD_ARGUMENT_AUDIT,
     BUILD_ARGUMENT_CC,
     BUILD_ARGUMENT_CLANG,
@@ -143,6 +145,7 @@ typedef enum BuildArgument
 BUSTER_GLOBAL_LOCAL String8 build_arguments[] = {
     [BUILD_ARGUMENT_BUILD_DIRECTORY] = S8_INITIALIZER("--build-directory"),
     [BUILD_ARGUMENT_BUILD_DIR] = S8_INITIALIZER("--build-dir"),
+    [BUILD_ARGUMENT_PROVENANCE_RECORD] = S8_INITIALIZER("--provenance-record"),
     [BUILD_ARGUMENT_AUDIT] = S8_INITIALIZER("--audit"),
     [BUILD_ARGUMENT_CC] = S8_INITIALIZER("--cc"),
     [BUILD_ARGUMENT_CLANG] = S8_INITIALIZER("--clang"),
@@ -962,6 +965,7 @@ struct BuildArtifactFanout
     String8 build_directory;
     String8 artifact_path;
     String8 private_bootstrap_path;
+    String8 provenance_record_path;
     Generate generate;
     CmakeBuildOptions options;
     BuildArtifactCompilerMetadata expected_compiler;
@@ -974,7 +978,44 @@ struct BuildArtifactFanout
     u32 release_build_scheduled : 1;
     u32 release_build_succeeded : 1;
     u32 provenance_captured : 1;
+    u32 producer_clean_scheduled : 1;
+    u32 producer_clean_succeeded : 1;
 };
+
+typedef struct BuildArtifactFanoutProvenanceRecord BuildArtifactFanoutProvenanceRecord;
+struct BuildArtifactFanoutProvenanceRecord
+{
+    String8 build_directory;
+    String8 artifact_path;
+    String8 provenance_record_path;
+    String8 config;
+    BuildArtifactCompilerMetadata compiler;
+    BuildArtifactFanoutToolMetadata tools;
+    u64 cache_fingerprint;
+    u64 graph_fingerprint;
+    u64 environment_fingerprint;
+    u32 ci : 1;
+    u32 fuzz_available : 1;
+    u32 producer_cleaned : 1;
+};
+
+typedef struct String8Node String8Node;
+struct String8Node
+{
+    String8 string;
+    String8Node* next;
+};
+
+typedef struct String8List String8List;
+struct String8List
+{
+    String8Node* first;
+    String8Node* last;
+    u64 count;
+};
+
+BUSTER_GLOBAL_LOCAL void string8_list_push(Arena* arena, String8List* list, String8 string);
+BUSTER_GLOBAL_LOCAL SliceString8 string8_list_to_slice(Arena* arena, String8List list);
 
 BUSTER_GLOBAL_LOCAL String8 build_artifact_fanout_trim(String8 string)
 {
@@ -1674,6 +1715,363 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_compiler_metadata_match(Arena* ar
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_provenance_state_matches(Arena* arena, BuildArtifactFanout expected,
+                                                                         BuildArtifactCompilerMetadata actual_compiler,
+                                                                         BuildArtifactFanoutToolMetadata actual_tools,
+                                                                         u64 actual_cache_fingerprint, u64 actual_graph_fingerprint,
+                                                                         u64 actual_environment_fingerprint)
+{
+    bool result = build_artifact_fanout_compiler_metadata_match(arena, expected.expected_compiler, actual_compiler) &&
+                  build_artifact_fanout_tool_metadata_match(arena, expected.expected_tools, actual_tools) &&
+                  expected.cache_fingerprint == actual_cache_fingerprint && expected.graph_fingerprint == actual_graph_fingerprint &&
+                  expected.environment_fingerprint == actual_environment_fingerprint;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void build_artifact_fanout_provenance_record_append_u64(Arena* arena, String8List* parts, u64 value)
+{
+    string8_list_push(arena, parts, string_format(arena, S8("{u64}\n"), value));
+}
+
+BUSTER_GLOBAL_LOCAL void build_artifact_fanout_provenance_record_append_string(Arena* arena, String8List* parts, String8 value)
+{
+    build_artifact_fanout_provenance_record_append_u64(arena, parts, value.length);
+    if (value.length)
+    {
+        string8_list_push(arena, parts, value);
+    }
+    string8_list_push(arena, parts, S8("\n"));
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_provenance_record_read_line(String8 text, u64* cursor, String8* line)
+{
+    if (!cursor || !line || *cursor > text.length)
+    {
+        return false;
+    }
+    u64 end = *cursor;
+    while (end < text.length && text.pointer[end] != '\n')
+    {
+        end += 1;
+    }
+    if (end == text.length)
+    {
+        return false;
+    }
+    *line = string_slice(text, *cursor, end);
+    *cursor = end + 1;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_provenance_record_read_u64(String8 text, u64* cursor, u64* value)
+{
+    String8 line = {0};
+    if (!build_artifact_fanout_provenance_record_read_line(text, cursor, &line) || !line.length)
+    {
+        return false;
+    }
+    IntegerParsingU64 parsed = string8_parse_u64_decimal(line.pointer);
+    if (parsed.length != line.length)
+    {
+        return false;
+    }
+    *value = parsed.value;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_provenance_record_read_string(String8 text, u64* cursor, String8* value)
+{
+    u64 length = 0;
+    if (!build_artifact_fanout_provenance_record_read_u64(text, cursor, &length) || length > BUSTER_MB(1) || *cursor > text.length ||
+        length > text.length - *cursor)
+    {
+        return false;
+    }
+    *value = string_slice(text, *cursor, *cursor + length);
+    *cursor += length;
+    if (*cursor >= text.length || text.pointer[*cursor] != '\n')
+    {
+        return false;
+    }
+    *cursor += 1;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_provenance_record_payload(String8 text, String8* payload)
+{
+    if (!text.length || text.pointer[text.length - 1] != '\n')
+    {
+        return false;
+    }
+    u64 checksum_line_start = text.length - 1;
+    while (checksum_line_start && text.pointer[checksum_line_start - 1] != '\n')
+    {
+        checksum_line_start -= 1;
+    }
+    if (!checksum_line_start)
+    {
+        return false;
+    }
+    String8 checksum_line = string_slice(text, checksum_line_start, text.length - 1);
+    String8 checksum_prefix = S8("CHECKSUM ");
+    if (!string_starts_with_sequence(checksum_line, checksum_prefix))
+    {
+        return false;
+    }
+    String8 checksum_digits = string_slice(checksum_line, checksum_prefix.length, checksum_line.length);
+    if (!checksum_digits.length)
+    {
+        return false;
+    }
+    IntegerParsingU64 parsed = string8_parse_u64_hexadecimal(checksum_digits.pointer);
+    if (parsed.length != checksum_digits.length)
+    {
+        return false;
+    }
+    *payload = string_slice(text, 0, checksum_line_start);
+    return buster_hash_64((u8*)payload->pointer, payload->length) == parsed.value;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_provenance_record_write(Arena* arena, BuildArtifactFanout* fanout)
+{
+    if (!fanout->provenance_record_path.length)
+    {
+        return true;
+    }
+
+    String8List parts = {0};
+    string8_list_push(arena, &parts, S8("BUSTER_ARTIFACT_FANOUT_PROVENANCE_V1\n"));
+    build_artifact_fanout_provenance_record_append_string(arena, &parts, fanout->build_directory);
+    build_artifact_fanout_provenance_record_append_string(arena, &parts, fanout->artifact_path);
+    build_artifact_fanout_provenance_record_append_string(arena, &parts, fanout->provenance_record_path);
+    build_artifact_fanout_provenance_record_append_string(arena, &parts, cmake_build_config(fanout->options));
+    build_artifact_fanout_provenance_record_append_u64(arena, &parts, fanout->generate.ci);
+    build_artifact_fanout_provenance_record_append_u64(arena, &parts, fanout->generate.fuzz_available);
+    build_artifact_fanout_provenance_record_append_u64(arena, &parts, fanout->producer_clean_succeeded);
+
+    BuildArtifactCompilerMetadata compiler = fanout->expected_compiler;
+    String8 compiler_strings[] = {
+        compiler.compiler_path,
+        compiler.compiler_arg1,
+        compiler.compiler_id,
+        compiler.compiler_version,
+        compiler.compiler_wrapper,
+        compiler.compiler_frontend_variant,
+        compiler.compiler_apple_sysroot,
+        compiler.compiler_architecture_id,
+        compiler.compiler_ar,
+        compiler.compiler_ranlib,
+    };
+    for (u32 string_i = 0; string_i < BUSTER_ARRAY_LENGTH(compiler_strings); string_i += 1)
+    {
+        build_artifact_fanout_provenance_record_append_string(arena, &parts, compiler_strings[string_i]);
+    }
+    u64 compiler_values[] = {
+        compiler.compiler_hash,
+        compiler.compiler_size,
+        compiler.compiler_ar_hash,
+        compiler.compiler_ar_size,
+        compiler.compiler_ranlib_hash,
+        compiler.compiler_ranlib_size,
+        compiler.compiler_arg1_present,
+        compiler.compiler_wrapper_present,
+    };
+    for (u32 value_i = 0; value_i < BUSTER_ARRAY_LENGTH(compiler_values); value_i += 1)
+    {
+        build_artifact_fanout_provenance_record_append_u64(arena, &parts, compiler_values[value_i]);
+    }
+
+    BuildArtifactFanoutToolMetadata tools = fanout->expected_tools;
+    String8 tool_strings[] = {tools.linker_path, tools.slangc_path, tools.spirv_opt_path};
+    for (u32 string_i = 0; string_i < BUSTER_ARRAY_LENGTH(tool_strings); string_i += 1)
+    {
+        build_artifact_fanout_provenance_record_append_string(arena, &parts, tool_strings[string_i]);
+    }
+    u64 tool_values[] = {
+        tools.linker_hash,
+        tools.linker_size,
+        tools.slangc_hash,
+        tools.slangc_size,
+        tools.spirv_opt_hash,
+        tools.spirv_opt_size,
+        fanout->cache_fingerprint,
+        fanout->graph_fingerprint,
+        fanout->environment_fingerprint,
+    };
+    for (u32 value_i = 0; value_i < BUSTER_ARRAY_LENGTH(tool_values); value_i += 1)
+    {
+        build_artifact_fanout_provenance_record_append_u64(arena, &parts, tool_values[value_i]);
+    }
+    string8_list_push(arena, &parts, S8("END\n"));
+
+    String8 payload = string_join_arena(arena, string8_list_to_slice(arena, parts), false);
+    u64 checksum = buster_hash_64((u8*)payload.pointer, payload.length);
+    String8 record = string_format(arena, S8("{S8}CHECKSUM {u64:x,no_prefix}\n"), payload, checksum);
+    return file_write(fanout->provenance_record_path, BUSTER_SLICE_TO_BYTE_SLICE(record));
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_provenance_record_read(Arena* arena, String8 path,
+                                                                       BuildArtifactFanoutProvenanceRecord* result)
+{
+    ByteSlice bytes = file_read(arena, path, (FileReadOptions){.map_required = 0});
+    if (!bytes.pointer || !bytes.length || bytes.length > BUSTER_MB(1))
+    {
+        return false;
+    }
+    String8 text = BYTE_SLICE_TO_STRING(8, bytes);
+    String8 payload = {0};
+    if (!build_artifact_fanout_provenance_record_payload(text, &payload))
+    {
+        return false;
+    }
+    u64 cursor = 0;
+    String8 line = {0};
+    if (!build_artifact_fanout_provenance_record_read_line(payload, &cursor, &line) ||
+        !string_equal(line, S8("BUSTER_ARTIFACT_FANOUT_PROVENANCE_V1")))
+    {
+        return false;
+    }
+    BuildArtifactFanoutProvenanceRecord record = {0};
+    if (!build_artifact_fanout_provenance_record_read_string(payload, &cursor, &record.build_directory) ||
+        !build_artifact_fanout_provenance_record_read_string(payload, &cursor, &record.artifact_path) ||
+        !build_artifact_fanout_provenance_record_read_string(payload, &cursor, &record.provenance_record_path) ||
+        !build_artifact_fanout_provenance_record_read_string(payload, &cursor, &record.config))
+    {
+        return false;
+    }
+    u64 value = 0;
+    if (!build_artifact_fanout_provenance_record_read_u64(payload, &cursor, &value) || value > 1)
+    {
+        return false;
+    }
+    record.ci = (u32)value;
+    if (!build_artifact_fanout_provenance_record_read_u64(payload, &cursor, &value) || value > 1)
+    {
+        return false;
+    }
+    record.fuzz_available = (u32)value;
+    if (!build_artifact_fanout_provenance_record_read_u64(payload, &cursor, &value) || value > 1)
+    {
+        return false;
+    }
+    record.producer_cleaned = (u32)value;
+
+    String8* compiler_strings[] = {
+        &record.compiler.compiler_path,
+        &record.compiler.compiler_arg1,
+        &record.compiler.compiler_id,
+        &record.compiler.compiler_version,
+        &record.compiler.compiler_wrapper,
+        &record.compiler.compiler_frontend_variant,
+        &record.compiler.compiler_apple_sysroot,
+        &record.compiler.compiler_architecture_id,
+        &record.compiler.compiler_ar,
+        &record.compiler.compiler_ranlib,
+    };
+    for (u32 string_i = 0; string_i < BUSTER_ARRAY_LENGTH(compiler_strings); string_i += 1)
+    {
+        if (!build_artifact_fanout_provenance_record_read_string(payload, &cursor, compiler_strings[string_i]))
+        {
+            return false;
+        }
+    }
+    u64* compiler_values[] = {
+        &record.compiler.compiler_hash,
+        &record.compiler.compiler_size,
+        &record.compiler.compiler_ar_hash,
+        &record.compiler.compiler_ar_size,
+        &record.compiler.compiler_ranlib_hash,
+        &record.compiler.compiler_ranlib_size,
+    };
+    for (u32 value_i = 0; value_i < 6; value_i += 1)
+    {
+        if (!build_artifact_fanout_provenance_record_read_u64(payload, &cursor, compiler_values[value_i]))
+        {
+            return false;
+        }
+    }
+    if (!build_artifact_fanout_provenance_record_read_u64(payload, &cursor, &value) || value > 1)
+    {
+        return false;
+    }
+    record.compiler.compiler_arg1_present = (u32)value;
+    if (!build_artifact_fanout_provenance_record_read_u64(payload, &cursor, &value) || value > 1)
+    {
+        return false;
+    }
+    record.compiler.compiler_wrapper_present = (u32)value;
+
+    String8* tool_strings[] = {&record.tools.linker_path, &record.tools.slangc_path, &record.tools.spirv_opt_path};
+    for (u32 string_i = 0; string_i < BUSTER_ARRAY_LENGTH(tool_strings); string_i += 1)
+    {
+        if (!build_artifact_fanout_provenance_record_read_string(payload, &cursor, tool_strings[string_i]))
+        {
+            return false;
+        }
+    }
+    u64* tool_values[] = {
+        &record.tools.linker_hash,
+        &record.tools.linker_size,
+        &record.tools.slangc_hash,
+        &record.tools.slangc_size,
+        &record.tools.spirv_opt_hash,
+        &record.tools.spirv_opt_size,
+        &record.cache_fingerprint,
+        &record.graph_fingerprint,
+        &record.environment_fingerprint,
+    };
+    for (u32 value_i = 0; value_i < BUSTER_ARRAY_LENGTH(tool_values); value_i += 1)
+    {
+        if (!build_artifact_fanout_provenance_record_read_u64(payload, &cursor, tool_values[value_i]))
+        {
+            return false;
+        }
+    }
+    if (!build_artifact_fanout_provenance_record_read_line(payload, &cursor, &line) || !string_equal(line, S8("END")) || cursor != payload.length)
+    {
+        return false;
+    }
+    *result = record;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_provenance_record_load(Arena* arena, String8 path, BuildArtifactFanout* fanout)
+{
+    BuildArtifactFanoutProvenanceRecord record = {0};
+    if (!path.length || !fanout->provenance_record_path.length || !build_artifact_fanout_is_canonical(fanout->generate, fanout->options) ||
+        !build_artifact_fanout_provenance_record_read(arena, path, &record))
+    {
+        return false;
+    }
+    bool paths_match = build_artifact_fanout_path_equal(build_artifact_fanout_absolute_path(arena, record.build_directory),
+                                                        build_artifact_fanout_absolute_path(arena, fanout->build_directory)) &&
+                       build_artifact_fanout_path_equal(build_artifact_fanout_absolute_path(arena, record.artifact_path),
+                                                        build_artifact_fanout_absolute_path(arena, fanout->artifact_path)) &&
+                       build_artifact_fanout_path_equal(build_artifact_fanout_absolute_path(arena, record.provenance_record_path),
+                                                        build_artifact_fanout_absolute_path(arena, path)) &&
+                       build_artifact_fanout_path_equal(build_artifact_fanout_absolute_path(arena, record.provenance_record_path),
+                                                        build_artifact_fanout_absolute_path(arena, fanout->provenance_record_path));
+    if (!paths_match || !string_equal(record.config, cmake_build_config(fanout->options)) || record.ci != fanout->generate.ci ||
+        record.fuzz_available != fanout->generate.fuzz_available)
+    {
+        return false;
+    }
+    fanout->expected_compiler = record.compiler;
+    fanout->expected_tools = record.tools;
+    fanout->cache_fingerprint = record.cache_fingerprint;
+    fanout->graph_fingerprint = record.graph_fingerprint;
+    fanout->environment_fingerprint = record.environment_fingerprint;
+    fanout->producer_clean_succeeded = record.producer_cleaned;
+    fanout->provenance_captured = 1;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_provenance_record_consume(Arena* arena, String8 path)
+{
+    remove_path_recursive(arena, path);
+    return !path_exists(arena, path);
+}
+
 BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_snapshot(Arena* arena, String8 source, String8 destination, u64 expected_hash, u64 expected_size)
 {
 #if BUSTER_LINUX || BUSTER_MACOS
@@ -1717,7 +2115,7 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_snapshot(Arena* arena, String8 so
 
 BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_ready(BuildArtifactFanout fanout, bool artifact_exists)
 {
-    bool result = fanout.release_build_scheduled && fanout.release_build_succeeded && artifact_exists;
+    bool result = fanout.release_build_scheduled && fanout.release_build_succeeded && fanout.producer_clean_succeeded && artifact_exists;
     return result;
 }
 
@@ -1802,8 +2200,8 @@ BUSTER_GLOBAL_LOCAL bool self_host_compare_pe(ByteSlice left, ByteSlice right)
 }
 #endif
 
-BUSTER_GLOBAL_LOCAL void build_run_add(Arena* arena, BuildStep* step, String8 build_directory, SliceString8 targets, SliceString8 native_arguments,
-                                       CmakeBuildOptions options)
+BUSTER_GLOBAL_LOCAL ProcessRun* build_run_add(Arena* arena, BuildStep* step, String8 build_directory, SliceString8 targets, SliceString8 native_arguments,
+                                              CmakeBuildOptions options)
 {
     String8 parallel_jobs = options.parallel_jobs ? string_format(arena, S8("{u32}"), options.parallel_jobs) : (String8){0};
     GenericRun r = generic_tool_run_add_start(arena, step, &cmake_path, S8("cmake"));
@@ -1854,6 +2252,7 @@ BUSTER_GLOBAL_LOCAL void build_run_add(Arena* arena, BuildStep* step, String8 bu
     }
 
     generic_tool_run_add_end(r);
+    return r.run;
 }
 
 BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceString8 targets, SliceString8 native_arguments, CmakeBuildOptions options)
@@ -2042,6 +2441,106 @@ BUSTER_GLOBAL_LOCAL String8 self_host_macos_sdk_path(Arena* arena)
 }
 #endif
 
+BUSTER_GLOBAL_LOCAL u32 build_artifact_fanout_producer_output_paths(Arena* arena, BuildArtifactFanout fanout, String8* paths)
+{
+    String8 config = cmake_build_config(fanout.options);
+    String8 object_suffix =
+#if BUSTER_WINDOWS
+        S8(".obj");
+#else
+        S8(".o");
+#endif
+    String8 object_path = path_join(arena, fanout.build_directory,
+                                    string_format(arena, S8("CMakeFiles/ide.dir/{S8}/src/buster/apps/ide/ide.c{S8}"), config, object_suffix));
+    u32 producer_output_count = 0;
+    paths[producer_output_count++] = fanout.artifact_path;
+    paths[producer_output_count++] = object_path;
+#if BUSTER_WINDOWS
+    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/rect.vert.hlsl"));
+    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/rect.frag.hlsl"));
+    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("generated/buster/lib/shaders/d3d12.h"));
+#elif BUSTER_MACOS
+    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/rect.vert.metal"));
+    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/rect.frag.metal"));
+    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("generated/buster/lib/shaders/metal.h"));
+#else
+    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/rect.vert.spv"));
+    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/rect.frag.spv"));
+    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/blur.vert.spv"));
+    paths[producer_output_count++] = path_join(arena, fanout.build_directory, S8("shaders/blur.frag.spv"));
+#endif
+    return producer_output_count;
+}
+
+BUSTER_GLOBAL_LOCAL u32 build_artifact_fanout_graph_cache_paths(Arena* arena, BuildArtifactFanout fanout, String8* paths)
+{
+    paths[0] = path_join(arena, fanout.build_directory, S8("CMakeCache.txt"));
+    paths[1] = path_join(arena, fanout.build_directory, S8("build.ninja"));
+    paths[2] = path_join(arena, fanout.build_directory, S8("build-Release.ninja"));
+    paths[3] = path_join(arena, path_join(arena, fanout.build_directory, S8("CMakeFiles")), S8("common.ninja"));
+    paths[4] = path_join(arena, path_join(arena, fanout.build_directory, S8("CMakeFiles")), S8("rules.ninja"));
+    paths[5] = path_join(arena, path_join(arena, fanout.build_directory, S8("CMakeFiles")), S8("impl-Release.ninja"));
+    paths[6] = path_join(arena, fanout.build_directory, S8("compile_commands.json"));
+    return 7;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_clean_postcondition(Arena* arena, BuildArtifactFanout fanout, bool* graph_preserved,
+                                                                    bool* producer_outputs_absent)
+{
+    String8 producer_outputs[12] = {0};
+    u32 producer_output_count = build_artifact_fanout_producer_output_paths(arena, fanout, producer_outputs);
+    bool outputs_absent = true;
+    for (u32 output_i = 0; output_i < producer_output_count; output_i += 1)
+    {
+        outputs_absent &= !path_exists(arena, producer_outputs[output_i]);
+    }
+    String8 graph_and_cache_paths[7] = {0};
+    u32 graph_and_cache_path_count = build_artifact_fanout_graph_cache_paths(arena, fanout, graph_and_cache_paths);
+    bool graph_files_present = true;
+    for (u32 path_i = 0; path_i < graph_and_cache_path_count; path_i += 1)
+    {
+        graph_files_present &= path_exists(arena, graph_and_cache_paths[path_i]);
+    }
+    if (graph_preserved)
+    {
+        *graph_preserved = graph_files_present;
+    }
+    if (producer_outputs_absent)
+    {
+        *producer_outputs_absent = outputs_absent;
+    }
+    return graph_files_present && outputs_absent;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_clean_action(Arena* arena, void* data)
+{
+    BuildArtifactFanout* fanout = (BuildArtifactFanout*)data;
+    if (!fanout->producer_clean_scheduled || !fanout->provenance_captured)
+    {
+        string_print(S8("error: canonical Clang Release producer clean was not scheduled after provenance capture\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    bool graph_preserved = false;
+    bool producer_outputs_absent = false;
+    if (!build_artifact_fanout_clean_postcondition(arena, *fanout, &graph_preserved, &producer_outputs_absent))
+    {
+        string_print(S8("error: canonical Clang Release producer clean did not preserve graph/cache or remove all producer outputs graph={u32} outputs={u32}\n"),
+                     graph_preserved, producer_outputs_absent);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    fanout->producer_clean_succeeded = 1;
+    if (fanout->provenance_record_path.length && !build_artifact_fanout_provenance_record_write(arena, fanout))
+    {
+        fanout->producer_clean_succeeded = 0;
+        remove_path_recursive(arena, fanout->provenance_record_path);
+        string_print(S8("error: could not persist canonical producer-clean provenance state\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("ARTIFACT_FANOUT producer_clean=1 graph_preserved=1 producer_outputs_absent=1\n"));
+    return PROCESS_RESULT_SUCCESS;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_capture_action(Arena* arena, void* data)
 {
     BuildArtifactFanout* fanout = (BuildArtifactFanout*)data;
@@ -2097,15 +2596,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_capture_action(Arena* ar
     fanout->graph_fingerprint = graph_fingerprint;
     fanout->environment_fingerprint = environment_fingerprint;
     fanout->provenance_captured = 1;
+    if (fanout->provenance_record_path.length && !build_artifact_fanout_provenance_record_write(arena, fanout))
+    {
+        fanout->provenance_captured = 0;
+        remove_path_recursive(arena, fanout->provenance_record_path);
+        string_print(S8("error: could not persist canonical Clang Release provenance record: {S8}\n"), fanout->provenance_record_path);
+        return PROCESS_RESULT_FAILED;
+    }
     return PROCESS_RESULT_SUCCESS;
 }
 
 BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_release_success_action(Arena* arena, void* data)
 {
     BuildArtifactFanout* fanout = (BuildArtifactFanout*)data;
-    if (!fanout->release_build_scheduled || !fanout->provenance_captured)
+    if (!fanout->release_build_scheduled || !fanout->provenance_captured || !fanout->producer_clean_succeeded)
     {
-        string_print(S8("error: canonical Clang Release build/provenance was not scheduled for artifact fan-out\n"));
+        string_print(S8("error: canonical Clang Release build/provenance/producer-clean state was not completed for artifact fan-out\n"));
         return PROCESS_RESULT_FAILED;
     }
     if (!path_exists(arena, fanout->artifact_path))
@@ -2131,23 +2637,32 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_validate_action(Arena* a
     BuildArtifactFanoutLiveConfig live = {0};
     u64 cache_fingerprint = 0;
     u64 graph_fingerprint = 0;
-    bool valid = build_artifact_fanout_read_live_config(arena, fanout->build_directory, &live) &&
-                 build_artifact_fanout_tool_digests(arena, live, &tools) && build_artifact_fanout_tool_metadata_match(arena, fanout->expected_tools, tools) &&
-                 build_artifact_fanout_read_compiler_metadata(arena, fanout->build_directory, &compiler) &&
-                 build_artifact_fanout_compiler_digests(arena, &compiler) &&
-                 build_artifact_fanout_compiler_metadata_match(arena, fanout->expected_compiler, compiler) &&
-                 build_artifact_fanout_path_equal(build_artifact_fanout_absolute_path(arena, compiler.compiler_path),
-                                                  build_artifact_fanout_absolute_path(arena, live.cached_compiler)) &&
-                 build_artifact_fanout_config_matches(fanout->generate, live.ci, live.link_libc, live.unity_build, live.include_tests, live.sanitize,
-                                                      live.time_trace, live.instrument, live.fuzz_available, live.lto, live.single_threaded,
-                                                      live.use_vulkan, live.check_optional_warnings, live.developer_targets, live.linker) &&
-                 build_artifact_fanout_platform_inputs_match(fanout->environment_fingerprint) &&
-                 build_artifact_fanout_cache_fingerprint(live.cache, &cache_fingerprint) && cache_fingerprint == fanout->cache_fingerprint &&
-                 build_artifact_fanout_graph_fingerprint(arena, fanout->build_directory, &graph_fingerprint) &&
-                 graph_fingerprint == fanout->graph_fingerprint && build_artifact_fanout_graph_definitions_match(arena, fanout->build_directory);
+    bool live_valid = build_artifact_fanout_read_live_config(arena, fanout->build_directory, &live);
+    bool tools_valid = live_valid && build_artifact_fanout_tool_digests(arena, live, &tools);
+    bool metadata_valid = build_artifact_fanout_read_compiler_metadata(arena, fanout->build_directory, &compiler);
+    bool compiler_digest_valid = metadata_valid && build_artifact_fanout_compiler_digests(arena, &compiler);
+    bool compiler_path_valid = compiler_digest_valid &&
+                               build_artifact_fanout_path_equal(build_artifact_fanout_absolute_path(arena, compiler.compiler_path),
+                                                               build_artifact_fanout_absolute_path(arena, live.cached_compiler));
+    bool config_valid = live_valid &&
+                        build_artifact_fanout_config_matches(fanout->generate, live.ci, live.link_libc, live.unity_build, live.include_tests,
+                                                             live.sanitize, live.time_trace, live.instrument, live.fuzz_available, live.lto,
+                                                             live.single_threaded, live.use_vulkan, live.check_optional_warnings,
+                                                             live.developer_targets, live.linker);
+    bool environment_valid = build_artifact_fanout_platform_inputs_match(fanout->environment_fingerprint);
+    bool cache_valid = live_valid && build_artifact_fanout_cache_fingerprint(live.cache, &cache_fingerprint);
+    bool graph_valid = build_artifact_fanout_graph_fingerprint(arena, fanout->build_directory, &graph_fingerprint);
+    bool graph_definitions_valid = build_artifact_fanout_graph_definitions_match(arena, fanout->build_directory);
+    bool state_valid = metadata_valid && compiler_digest_valid && tools_valid && cache_valid && graph_valid &&
+                       build_artifact_fanout_provenance_state_matches(arena, *fanout, compiler, tools, cache_fingerprint, graph_fingerprint,
+                                                                      fanout->environment_fingerprint);
+    bool valid = live_valid && tools_valid && metadata_valid && compiler_digest_valid && compiler_path_valid && config_valid && environment_valid &&
+                 cache_valid && graph_valid && graph_definitions_valid && state_valid;
     if (!valid)
     {
-        string_print(S8("error: canonical Clang Release artifact fan-out configuration/compiler identity mismatch\n"));
+        string_print(S8("error: canonical Clang Release artifact fan-out configuration/compiler identity mismatch live={u32} tools={u32} metadata={u32} digest={u32} compiler_path={u32} config={u32} environment={u32} cache={u32} graph={u32} graph_definitions={u32} state={u32}\n"),
+                     live_valid, tools_valid, metadata_valid, compiler_digest_valid, compiler_path_valid, config_valid, environment_valid,
+                     cache_valid, graph_valid, graph_definitions_valid, state_valid);
         return PROCESS_RESULT_FAILED;
     }
 
@@ -2296,6 +2811,86 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, Buil
 #endif
 }
 
+BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_command_add(Arena* arena, String8 build_directory, String8 provenance_record_path,
+                                                                       CmakeBuildOptions options, Generate request)
+{
+#if (!(BUSTER_LINUX || BUSTER_WINDOWS) || !BUSTER_CPU_ARCH_X86_64) && !BUSTER_MACOS
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(build_directory);
+    BUSTER_UNUSED(provenance_record_path);
+    BUSTER_UNUSED(options);
+    BUSTER_UNUSED(request);
+    string_print(S8("error: artifact fan-out self-host consumer is unsupported on this target\n"));
+    return PROCESS_RESULT_FAILED;
+#else
+    if (!string_equal(cmake_build_config(options), S8("Release")) || !provenance_record_path.length)
+    {
+        string_print(S8("error: self_host_from_existing requires the canonical Release configuration and provenance record\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    options.optimize = 1;
+    options.optimize_set = 1;
+
+    String8* cmake_arguments = 0;
+    if (request.ci)
+    {
+        cmake_arguments = arena_allocate(arena, String8, 1);
+        cmake_arguments[0] = S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY");
+    }
+
+    Generate canonical = {
+        .compiler = BUILD_COMPILER_CLANG,
+        .fuzz_available = request.fuzz_available,
+        .ci = request.ci,
+        .link_libc = 1,
+        .include_tests = 1,
+        .check_optional_warnings = 0,
+        .developer_targets = 0,
+        .cmake_arguments =
+            {
+                .pointer = cmake_arguments,
+                .length = request.ci ? 1 : 0,
+            },
+    };
+    BuildArtifactFanout* fanout = arena_allocate(arena, BuildArtifactFanout, 1);
+    String8 ide_name =
+#if BUSTER_WINDOWS
+        S8("ide.exe");
+#else
+        S8("ide");
+#endif
+    *fanout = (BuildArtifactFanout){
+        .build_directory = build_directory,
+        .artifact_path = path_join(arena, path_join(arena, build_directory, S8("Release")), ide_name),
+        .provenance_record_path = provenance_record_path,
+        .generate = canonical,
+        .options = options,
+        .release_build_scheduled = 1,
+    };
+
+    ProcessResult result = build_artifact_fanout_provenance_record_load(arena, provenance_record_path, fanout) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    if (result != PROCESS_RESULT_SUCCESS)
+    {
+        string_print(S8("error: canonical Clang Release provenance record is missing, malformed, or mismatched: {S8}\n"), provenance_record_path);
+    }
+    if (result == PROCESS_RESULT_SUCCESS && !build_artifact_fanout_provenance_record_consume(arena, provenance_record_path))
+    {
+        string_print(S8("error: canonical Clang Release provenance record could not be consumed before self-host stages: {S8}\n"),
+                     provenance_record_path);
+        result = PROCESS_RESULT_FAILED;
+    }
+    if (result == PROCESS_RESULT_SUCCESS)
+    {
+        result = build_artifact_fanout_release_success_action(arena, fanout);
+    }
+    if (result == PROCESS_RESULT_SUCCESS)
+    {
+        result = self_host_from_existing_add(arena, fanout);
+    }
+    return result;
+#endif
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_directory, CmakeBuildOptions options, Generate generate)
 {
 #if (!(BUSTER_LINUX || BUSTER_WINDOWS) || !BUSTER_CPU_ARCH_X86_64) && !BUSTER_MACOS
@@ -2399,21 +2994,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
     return PROCESS_RESULT_SUCCESS;
 #endif
 }
-
-typedef struct String8Node String8Node;
-struct String8Node
-{
-    String8 string;
-    String8Node* next;
-};
-
-typedef struct String8List String8List;
-struct String8List
-{
-    String8Node* first;
-    String8Node* last;
-    u64 count;
-};
 
 typedef struct JsonParser JsonParser;
 struct JsonParser
@@ -6404,18 +6984,260 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
     BuildArtifactFanout state = {
         .release_build_scheduled = 1,
     };
-    if (build_artifact_fanout_ready(state, true) || !build_artifact_fanout_ready((BuildArtifactFanout){
-                                                         .release_build_scheduled = 1,
-                                                         .release_build_succeeded = 1,
-                                                     }, true) ||
+    BuildArtifactFanout producer_ready = {
+        .release_build_scheduled = 1,
+        .release_build_succeeded = 1,
+        .producer_clean_succeeded = 1,
+    };
+    if (build_artifact_fanout_ready(state, true) ||
         build_artifact_fanout_ready((BuildArtifactFanout){
-                                        .release_build_scheduled = 1,
-                                        .release_build_succeeded = 1,
-                                    }, false))
+                                         .release_build_scheduled = 1,
+                                         .release_build_succeeded = 1,
+                                     }, true) ||
+        !build_artifact_fanout_ready(producer_ready, true) || build_artifact_fanout_ready(producer_ready, false))
     {
         string_print(S8("error: artifact fan-out producer-state test failed\n"));
         return PROCESS_RESULT_FAILED;
     }
+
+    canonical.fuzz_available = 1;
+    String8 provenance_record_path = string_format_z(arena, S8("build/artifact-fanout-provenance-{u64}.record"), os_get_current_process_id());
+    remove_path_recursive(arena, provenance_record_path);
+    BuildArtifactFanout provenance_state = {
+        .build_directory = S8("build/provenance-tree"),
+        .artifact_path = S8("build/provenance-tree/Release/ide"),
+        .provenance_record_path = provenance_record_path,
+        .generate = canonical,
+        .options = release,
+        .expected_compiler = {
+            .compiler_path = S8("/usr/bin/clang"),
+            .compiler_id = S8("Clang"),
+            .compiler_version = S8("test"),
+            .compiler_ar = S8("/usr/bin/llvm-ar"),
+            .compiler_ranlib = S8("/usr/bin/llvm-ranlib"),
+            .compiler_hash = 11,
+            .compiler_size = 12,
+            .compiler_ar_hash = 13,
+            .compiler_ar_size = 14,
+            .compiler_ranlib_hash = 15,
+            .compiler_ranlib_size = 16,
+        },
+        .expected_tools = {
+            .linker_path = S8("/usr/bin/ld"),
+            .slangc_path = S8("/usr/bin/slangc"),
+            .spirv_opt_path = S8("/usr/bin/spirv-opt"),
+            .linker_hash = 21,
+            .linker_size = 22,
+            .slangc_hash = 23,
+            .slangc_size = 24,
+            .spirv_opt_hash = 25,
+            .spirv_opt_size = 26,
+        },
+        .cache_fingerprint = 31,
+        .graph_fingerprint = 32,
+        .environment_fingerprint = 33,
+        .provenance_captured = 1,
+        .producer_clean_succeeded = 1,
+    };
+    bool provenance_written = build_artifact_fanout_provenance_record_write(arena, &provenance_state);
+    BuildArtifactFanout loaded_provenance = {
+        .build_directory = provenance_state.build_directory,
+        .artifact_path = provenance_state.artifact_path,
+        .provenance_record_path = provenance_state.provenance_record_path,
+        .generate = provenance_state.generate,
+        .options = provenance_state.options,
+    };
+    bool provenance_loaded = provenance_written && build_artifact_fanout_provenance_record_load(arena, provenance_record_path, &loaded_provenance);
+    bool provenance_round_trip = provenance_loaded &&
+                                 loaded_provenance.producer_clean_succeeded &&
+                                 build_artifact_fanout_provenance_state_matches(arena, loaded_provenance, loaded_provenance.expected_compiler,
+                                                                                loaded_provenance.expected_tools,
+                                                                                loaded_provenance.cache_fingerprint,
+                                                                                loaded_provenance.graph_fingerprint,
+                                                                                loaded_provenance.environment_fingerprint);
+    BuildArtifactCompilerMetadata changed_compiler = loaded_provenance.expected_compiler;
+    changed_compiler.compiler_hash ^= 1;
+    BuildArtifactFanoutToolMetadata changed_tools = loaded_provenance.expected_tools;
+    changed_tools.linker_hash ^= 1;
+    bool changed_pre_post_rejected = provenance_round_trip &&
+                                      !build_artifact_fanout_provenance_state_matches(arena, loaded_provenance, changed_compiler,
+                                                                                       loaded_provenance.expected_tools,
+                                                                                       loaded_provenance.cache_fingerprint,
+                                                                                       loaded_provenance.graph_fingerprint,
+                                                                                       loaded_provenance.environment_fingerprint) &&
+                                      !build_artifact_fanout_provenance_state_matches(arena, loaded_provenance,
+                                                                                       loaded_provenance.expected_compiler, changed_tools,
+                                                                                       loaded_provenance.cache_fingerprint,
+                                                                                       loaded_provenance.graph_fingerprint,
+                                                                                       loaded_provenance.environment_fingerprint) &&
+                                      !build_artifact_fanout_provenance_state_matches(arena, loaded_provenance,
+                                                                                       loaded_provenance.expected_compiler,
+                                                                                       loaded_provenance.expected_tools,
+                                                                                       loaded_provenance.cache_fingerprint ^ 1,
+                                                                                       loaded_provenance.graph_fingerprint,
+                                                                                       loaded_provenance.environment_fingerprint);
+    ByteSlice original_provenance_bytes = file_read(arena, provenance_record_path, (FileReadOptions){.map_required = 0});
+    BuildArtifactFanout unclean_provenance_state = provenance_state;
+    unclean_provenance_state.producer_clean_succeeded = 0;
+    bool unclean_record_written = build_artifact_fanout_provenance_record_write(arena, &unclean_provenance_state);
+    BuildArtifactFanout unclean_candidate = {
+        .build_directory = provenance_state.build_directory,
+        .artifact_path = provenance_state.artifact_path,
+        .provenance_record_path = provenance_state.provenance_record_path,
+        .generate = provenance_state.generate,
+        .options = provenance_state.options,
+        .release_build_scheduled = 1,
+        .release_build_succeeded = 1,
+    };
+    bool unclean_record_loaded = unclean_record_written &&
+                                 build_artifact_fanout_provenance_record_load(arena, provenance_record_path, &unclean_candidate);
+    bool unclean_record_rejected = unclean_record_loaded && !unclean_candidate.producer_clean_succeeded &&
+                                   !build_artifact_fanout_ready(unclean_candidate, true);
+    bool restored_after_unclean = original_provenance_bytes.pointer &&
+                                  file_write(provenance_record_path, original_provenance_bytes);
+    String8 corrupted_provenance = original_provenance_bytes.pointer
+                                       ? string_duplicate_arena(arena, BYTE_SLICE_TO_STRING(8, original_provenance_bytes), false)
+                                       : (String8){0};
+    u64 header_end = string_first_code_unit(corrupted_provenance, '\n');
+    bool corruption_written = original_provenance_bytes.pointer && header_end != BUSTER_STRING_NO_MATCH && header_end + 1 < corrupted_provenance.length;
+    if (corruption_written)
+    {
+        corrupted_provenance.pointer[header_end + 1] = corrupted_provenance.pointer[header_end + 1] == '9' ? '8' : '9';
+        corruption_written = file_write(provenance_record_path, BUSTER_SLICE_TO_BYTE_SLICE(corrupted_provenance));
+    }
+    BuildArtifactFanout corrupted_candidate = {
+        .build_directory = provenance_state.build_directory,
+        .artifact_path = provenance_state.artifact_path,
+        .provenance_record_path = provenance_state.provenance_record_path,
+        .generate = provenance_state.generate,
+        .options = provenance_state.options,
+    };
+    bool corrupted_rejected = corruption_written && !build_artifact_fanout_provenance_record_load(arena, provenance_record_path, &corrupted_candidate);
+    bool restored_provenance = original_provenance_bytes.pointer &&
+                               file_write(provenance_record_path, original_provenance_bytes);
+    bool malformed_written = file_write(provenance_record_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("malformed\n")));
+    BuildArtifactFanout malformed_candidate = {
+        .build_directory = provenance_state.build_directory,
+        .artifact_path = provenance_state.artifact_path,
+        .provenance_record_path = provenance_state.provenance_record_path,
+        .generate = provenance_state.generate,
+        .options = provenance_state.options,
+    };
+    bool malformed_rejected = malformed_written && !build_artifact_fanout_provenance_record_load(arena, provenance_record_path, &malformed_candidate);
+    bool restored_after_malformed = restored_provenance &&
+                                    file_write(provenance_record_path, original_provenance_bytes);
+    remove_path_recursive(arena, provenance_record_path);
+    if (!provenance_round_trip || !changed_pre_post_rejected || !unclean_record_rejected || !restored_after_unclean || !corrupted_rejected ||
+        !restored_after_malformed || !malformed_rejected ||
+        path_exists(arena, provenance_record_path))
+    {
+        string_print(S8("error: artifact fan-out durable provenance record/mismatch test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 clean_tree = string_format_z(arena, S8("build/artifact-fanout-clean-tree-{u64}"), os_get_current_process_id());
+    String8 clean_record_path = path_join(arena, clean_tree, S8("producer.provenance"));
+    String8 clean_artifact_path = path_join(arena, path_join(arena, clean_tree, S8("Release")),
+#if BUSTER_WINDOWS
+                                            S8("ide.exe")
+#else
+                                            S8("ide")
+#endif
+    );
+    String8 same_path_tool = path_join(arena, clean_tree, S8("producer-tool"));
+    remove_path_recursive(arena, clean_tree);
+    BuildArtifactFanout clean_state = {
+        .build_directory = clean_tree,
+        .artifact_path = clean_artifact_path,
+        .provenance_record_path = clean_record_path,
+        .generate = canonical,
+        .options = release,
+        .expected_compiler = provenance_state.expected_compiler,
+        .expected_tools = provenance_state.expected_tools,
+        .cache_fingerprint = provenance_state.cache_fingerprint,
+        .graph_fingerprint = provenance_state.graph_fingerprint,
+        .environment_fingerprint = provenance_state.environment_fingerprint,
+        .release_build_scheduled = 1,
+        .release_build_succeeded = 1,
+        .provenance_captured = 1,
+        .producer_clean_scheduled = 1,
+    };
+    String8 clean_outputs[12] = {0};
+    u32 clean_output_count = build_artifact_fanout_producer_output_paths(arena, clean_state, clean_outputs);
+    String8 clean_graph_paths[7] = {0};
+    u32 clean_graph_path_count = build_artifact_fanout_graph_cache_paths(arena, clean_state, clean_graph_paths);
+    make_directory_recursive(arena, clean_tree);
+    bool clean_graph_written = true;
+    for (u32 path_i = 0; path_i < clean_graph_path_count; path_i += 1)
+    {
+        make_directory_recursive(arena, path_parent(arena, clean_graph_paths[path_i]));
+        clean_graph_written &= file_write(clean_graph_paths[path_i], BUSTER_SLICE_TO_BYTE_SLICE(S8("configured graph or cache\n")));
+    }
+    bool clean_outputs_written = true;
+    for (u32 path_i = 0; path_i < clean_output_count; path_i += 1)
+    {
+        make_directory_recursive(arena, path_parent(arena, clean_outputs[path_i]));
+        clean_outputs_written &= file_write(clean_outputs[path_i], BUSTER_SLICE_TO_BYTE_SLICE(S8("old producer output\n")));
+    }
+    bool old_tool_written = file_write(same_path_tool, BUSTER_SLICE_TO_BYTE_SLICE(S8("producer-old\n")));
+    u64 old_tool_hash = 0;
+    u64 old_tool_size = 0;
+    bool old_tool_hashed = old_tool_written && build_artifact_fanout_hash_file(arena, same_path_tool, &old_tool_hash, &old_tool_size);
+    bool changed_tool_written = file_write(same_path_tool, BUSTER_SLICE_TO_BYTE_SLICE(S8("producer-new-at-the-same-path\n")));
+    u64 changed_tool_hash = 0;
+    u64 changed_tool_size = 0;
+    bool changed_tool_hashed = changed_tool_written && build_artifact_fanout_hash_file(arena, same_path_tool, &changed_tool_hash, &changed_tool_size);
+    clean_state.expected_tools.linker_path = same_path_tool;
+    clean_state.expected_tools.linker_hash = changed_tool_hash;
+    clean_state.expected_tools.linker_size = changed_tool_size;
+    bool preclean_graph_preserved = false;
+    bool preclean_outputs_absent = true;
+    bool preclean_postcondition_rejected = clean_graph_written && clean_outputs_written && old_tool_hashed && changed_tool_hashed &&
+                                           old_tool_hash != changed_tool_hash &&
+                                           !build_artifact_fanout_clean_postcondition(arena, clean_state, &preclean_graph_preserved,
+                                                                                       &preclean_outputs_absent) &&
+                                           preclean_graph_preserved && !preclean_outputs_absent && !clean_state.producer_clean_succeeded;
+    for (u32 path_i = 0; path_i < clean_output_count; path_i += 1)
+    {
+        remove_path_recursive(arena, clean_outputs[path_i]);
+    }
+    bool modeled_clean_preserved = true;
+    for (u32 path_i = 0; path_i < clean_graph_path_count; path_i += 1)
+    {
+        modeled_clean_preserved &= path_exists(arena, clean_graph_paths[path_i]);
+    }
+    bool clean_action_succeeded = build_artifact_fanout_clean_action(arena, &clean_state) == PROCESS_RESULT_SUCCESS;
+    bool clean_record_written = clean_action_succeeded && clean_state.producer_clean_succeeded && path_exists(arena, clean_record_path);
+    bool clean_artifact_absent = !path_exists(arena, clean_artifact_path);
+    bool clean_ready_without_artifact = !build_artifact_fanout_ready(clean_state, path_exists(arena, clean_artifact_path));
+    BuildArtifactFanout consumed_clean_record = {
+        .build_directory = clean_state.build_directory,
+        .artifact_path = clean_state.artifact_path,
+        .provenance_record_path = clean_state.provenance_record_path,
+        .generate = clean_state.generate,
+        .options = clean_state.options,
+    };
+    bool clean_record_loaded = clean_record_written &&
+                               build_artifact_fanout_provenance_record_load(arena, clean_record_path, &consumed_clean_record) &&
+                               consumed_clean_record.producer_clean_succeeded;
+    bool clean_record_consumed = clean_record_loaded && build_artifact_fanout_provenance_record_consume(arena, clean_record_path) &&
+                                 !path_exists(arena, clean_record_path);
+    BuildArtifactFanout non_reusable_clean_record = consumed_clean_record;
+    bool clean_record_non_reusable = clean_record_consumed &&
+                                     !build_artifact_fanout_provenance_record_load(arena, clean_record_path, &non_reusable_clean_record);
+    make_directory_recursive(arena, path_parent(arena, clean_artifact_path));
+    bool new_artifact_written = file_write(clean_artifact_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("artifact-from-new-producer\n")));
+    bool clean_ready_after_new_artifact = new_artifact_written &&
+                                          build_artifact_fanout_ready(clean_state, path_exists(arena, clean_artifact_path));
+    remove_path_recursive(arena, clean_tree);
+    if (!preclean_postcondition_rejected || !modeled_clean_preserved || !clean_action_succeeded ||
+        !clean_record_written || !clean_artifact_absent || !clean_ready_without_artifact || !clean_record_non_reusable ||
+        !clean_ready_after_new_artifact || path_exists(arena, clean_tree))
+    {
+        string_print(S8("error: artifact fan-out producer clean lifecycle test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
     String8 snapshot_source = string_format_z(arena, S8("build/artifact-fanout-snapshot-{u64}.source"), os_get_current_process_id());
     String8 snapshot_copy = string_format_z(arena, S8("build/artifact-fanout-snapshot-{u64}.copy"), os_get_current_process_id());
     String8 snapshot_failure_copy = string_format_z(arena, S8("build/artifact-fanout-snapshot-{u64}.failure"), os_get_current_process_id());
@@ -6537,7 +7359,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
         string_print(S8("error: artifact fan-out bounded-memory large snapshot test failed\n"));
         return PROCESS_RESULT_FAILED;
     }
-    string_print(S8("ARTIFACT_FANOUT_TESTS passed canonical=1 tcc=1 identity=1 config=1 flags=1 windows_flags=1 restricted=1 missing=1 snapshot=1 large_snapshot={S8} cleanup=1\n"),
+    string_print(S8("ARTIFACT_FANOUT_TESTS passed canonical=1 tcc=1 identity=1 config=1 flags=1 windows_flags=1 restricted=1 missing=1 provenance_record=1 mismatch=1 unclean_record=1 clean_lifecycle=1 record_consume=1 malformed=1 snapshot=1 large_snapshot={S8} cleanup=1\n"),
                  include_large_snapshot ? S8("1") : S8("skipped"));
     return PROCESS_RESULT_SUCCESS;
 }
@@ -6639,6 +7461,23 @@ struct MatrixTestTree
     u32 unity_only : 1;
 };
 
+typedef struct MatrixSuperbuildSelfHostPlan MatrixSuperbuildSelfHostPlan;
+struct MatrixSuperbuildSelfHostPlan
+{
+    String8 build_directory;
+    String8 config;
+    String8 build_driver;
+    String8 provenance_record_path;
+    u32 tree_index;
+    u32 pool_jobs;
+    u32 fuzz_available : 1;
+    u32 enabled : 1;
+    u32 ci : 1;
+    u32 depends_on_compile : 1;
+    u32 uses_inner_ninja : 1;
+    u32 producer_clean_required : 1;
+};
+
 BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_outer_jobs(u32 thread_count, u32 tree_count)
 {
     if (!tree_count)
@@ -6708,11 +7547,67 @@ BUSTER_GLOBAL_LOCAL void matrix_superbuild_allocate_jobs(MatrixTestTree* trees, 
     }
 }
 
-BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(void)
+BUSTER_GLOBAL_LOCAL bool matrix_superbuild_self_host_enabled(bool direct_matrix, bool fanout_requested)
+{
+    return !direct_matrix && fanout_requested;
+}
+
+BUSTER_GLOBAL_LOCAL bool matrix_superbuild_self_host_cpu_budget_valid(MatrixTestTree* trees, u32 tree_count, u32 thread_count)
+{
+    u32 outer_jobs = matrix_superbuild_outer_jobs(thread_count, tree_count);
+    if (!outer_jobs || tree_count > BUILD_COMPILER_COUNT * 2)
+    {
+        return false;
+    }
+
+    bool selected[BUILD_COMPILER_COUNT * 2] = {0};
+    u32 selected_count = 0;
+    u32 cpu_budget = 1;
+    while (selected_count + 1 < outer_jobs)
+    {
+        u32 best_tree = tree_count;
+        for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
+        {
+            if (!selected[tree_i] && (best_tree == tree_count || trees[tree_i].parallel_jobs > trees[best_tree].parallel_jobs))
+            {
+                best_tree = tree_i;
+            }
+        }
+        if (best_tree == tree_count || !trees[best_tree].parallel_jobs)
+        {
+            return false;
+        }
+        selected[best_tree] = true;
+        cpu_budget += trees[best_tree].parallel_jobs;
+        selected_count += 1;
+    }
+    return cpu_budget <= BUSTER_MAX(thread_count, 1);
+}
+
+BUSTER_GLOBAL_LOCAL bool matrix_superbuild_self_host_plan_valid(MatrixSuperbuildSelfHostPlan plan, MatrixTestTree* trees, u32 tree_count,
+                                                                  u32 thread_count)
+{
+    bool result = !plan.enabled;
+    if (plan.enabled)
+    {
+        result = plan.tree_index < tree_count && string_equal(plan.build_directory, trees[plan.tree_index].build_directory) &&
+                 string_equal(plan.config, S8("Release")) && plan.build_driver.length && plan.provenance_record_path.length && plan.pool_jobs == 1 &&
+                 plan.depends_on_compile && !plan.uses_inner_ninja && plan.producer_clean_required &&
+                 matrix_superbuild_self_host_cpu_budget_valid(trees, tree_count, thread_count);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 path, String8 source_directory, String8 build_driver,
+                                                           MatrixTestTree* trees, u32 tree_count, u32 outer_jobs,
+                                                           MatrixTestCombination* combinations, MatrixSuperbuildSelfHostPlan self_host,
+                                                           bool verbose, bool quiet);
+
+BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* arena)
 {
     MatrixTestTree linux_trees[6] = {
-        {0},
-        {.unity_only = 1},
+        {.build_directory = S8("linux-debug")},
+        {.build_directory = S8("linux-canonical"), .unity_only = 1},
         {0},
         {0},
         {0},
@@ -6735,7 +7630,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(void)
     MatrixTestTree windows_trees[7] = {
         {0},
         {0},
-        {.unity_only = 1},
+        {.build_directory = S8("windows-canonical"), .unity_only = 1},
         {0},
         {0},
         {0},
@@ -6754,25 +7649,127 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(void)
             return PROCESS_RESULT_FAILED;
         }
     }
+    MatrixSuperbuildSelfHostPlan windows_self_host = {
+        .build_directory = S8("windows-canonical"),
+        .config = S8("Release"),
+        .build_driver = S8("build/build.exe"),
+        .provenance_record_path = S8("superbuild/matrix.provenance"),
+        .tree_index = 2,
+        .pool_jobs = 1,
+        .enabled = 1,
+        .ci = 1,
+        .depends_on_compile = 1,
+        .uses_inner_ninja = 0,
+        .producer_clean_required = 1,
+    };
+    MatrixSuperbuildSelfHostPlan linux_self_host = {
+        .build_directory = S8("linux-canonical"),
+        .config = S8("Release"),
+        .build_driver = S8("build/build"),
+        .provenance_record_path = S8("superbuild/matrix.provenance"),
+        .tree_index = 1,
+        .pool_jobs = 1,
+        .enabled = 1,
+        .ci = 1,
+        .depends_on_compile = 1,
+        .uses_inner_ninja = 0,
+        .producer_clean_required = 1,
+    };
+    MatrixSuperbuildSelfHostPlan invalid_self_host = windows_self_host;
+    invalid_self_host.tree_index = BUSTER_ARRAY_LENGTH(windows_trees);
+    MatrixSuperbuildSelfHostPlan malformed_manifest = windows_self_host;
+    malformed_manifest.build_driver = (String8){0};
+    MatrixSuperbuildSelfHostPlan missing_provenance = windows_self_host;
+    missing_provenance.provenance_record_path = (String8){0};
+    MatrixSuperbuildSelfHostPlan missing_producer_clean = windows_self_host;
+    missing_producer_clean.producer_clean_required = 0;
+    String8 manifest_path = string_format_z(arena, S8("build/superbuild-manifest-{u64}.cmake"), os_get_current_process_id());
+    remove_path_recursive(arena, manifest_path);
+    MatrixTestCombination manifest_combination = {
+        .build_directory = S8("build/canonical"),
+        .options = {.config = S8("Release"), .optimize = 1, .optimize_set = 1},
+        .compiler = BUILD_COMPILER_CLANG,
+    };
+    MatrixTestTree manifest_tree = {
+        .build_directory = S8("build/canonical"),
+        .combination_indices = {0},
+        .combination_count = 1,
+        .parallel_jobs = 1,
+        .unity_only = 1,
+    };
+    MatrixSuperbuildSelfHostPlan manifest_plan = {
+        .build_directory = manifest_tree.build_directory,
+        .config = S8("Release"),
+        .build_driver = S8("/absolute/build-driver"),
+        .provenance_record_path = S8("/absolute/provenance.record"),
+        .tree_index = 0,
+        .pool_jobs = 1,
+        .enabled = 1,
+        .ci = 1,
+        .depends_on_compile = 1,
+        .producer_clean_required = 1,
+    };
+    bool manifest_written = matrix_superbuild_manifest_write(arena, manifest_path, S8("/absolute/source"), manifest_plan.build_driver,
+                                                              &manifest_tree, 1, 1, &manifest_combination, manifest_plan, false, false);
+    ByteSlice manifest_bytes = file_read(arena, manifest_path, (FileReadOptions){.map_required = 0});
+    String8 manifest = BYTE_SLICE_TO_STRING(8, manifest_bytes);
+    bool manifest_fields_valid = manifest_written && manifest.pointer &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_BUILD_DRIVER [==[/absolute/build-driver]==])")) !=
+                                     BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("BUSTER_SUPERBUILD_SELF_HOST_PROVENANCE_RECORD")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("BUSTER_SUPERBUILD_SELF_HOST_PRODUCER_CLEAN_REQUIRED")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("BUSTER_SUPERBUILD_SELF_HOST_BUILD_DRIVER")) == BUSTER_STRING_NO_MATCH;
+    remove_path_recursive(arena, manifest_path);
     if (matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(windows_trees)) != 4 || matrix_superbuild_outer_jobs(16, 6) != 6 ||
-        matrix_superbuild_outer_jobs(0, 0) != 0)
+        matrix_superbuild_outer_jobs(0, 0) != 0 || matrix_superbuild_self_host_enabled(true, true) ||
+        !matrix_superbuild_self_host_enabled(false, true) || matrix_superbuild_self_host_enabled(false, false) ||
+        !matrix_superbuild_self_host_plan_valid(windows_self_host, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
+        !matrix_superbuild_self_host_plan_valid(linux_self_host, linux_trees, BUSTER_ARRAY_LENGTH(linux_trees), 16) ||
+        matrix_superbuild_self_host_plan_valid(invalid_self_host, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
+        matrix_superbuild_self_host_plan_valid(malformed_manifest, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
+        matrix_superbuild_self_host_plan_valid(missing_provenance, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
+        matrix_superbuild_self_host_plan_valid(missing_producer_clean, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) || !manifest_fields_valid ||
+        path_exists(arena, manifest_path))
     {
-        string_print(S8("error: superbuild outer job allocation test failed\n"));
+        string_print(S8("error: superbuild self-host resource/dependency allocation test failed\n"));
         return PROCESS_RESULT_FAILED;
     }
     return PROCESS_RESULT_SUCCESS;
 }
 
-BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 path, String8 source_directory, MatrixTestTree* trees,
-                                                           u32 tree_count, u32 outer_jobs, MatrixTestCombination* combinations,
+BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 path, String8 source_directory, String8 build_driver,
+                                                           MatrixTestTree* trees, u32 tree_count, u32 outer_jobs,
+                                                           MatrixTestCombination* combinations, MatrixSuperbuildSelfHostPlan self_host,
                                                            bool verbose, bool quiet)
 {
     String8List lines = {0};
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_SOURCE_DIR [==[{S8}]==])\n"), source_directory));
+    string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_BUILD_DRIVER [==[{S8}]==])\n"), build_driver));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_TREE_COUNT {u32})\n"), tree_count));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_OUTER_JOBS {u32})\n"), outer_jobs));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_VERBOSE {S8})\n"), verbose ? S8("ON") : S8("OFF")));
     string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_QUIET {S8})\n"), quiet ? S8("ON") : S8("OFF")));
+    string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_ENABLED {u32})\n"), self_host.enabled));
+    string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_BUILD_DIRECTORY [==[{S8}]==])\n"),
+                                                        self_host.build_directory));
+    string8_list_push(arena, &lines,
+                      string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_PROVENANCE_RECORD [==[{S8}]==])\n"),
+                                    self_host.provenance_record_path));
+    string8_list_push(arena, &lines,
+                      string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_CONFIG {S8})\n"), self_host.config));
+    string8_list_push(arena, &lines,
+                      string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_TREE_INDEX {u32})\n"), self_host.tree_index));
+    string8_list_push(arena, &lines,
+                      string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_POOL_JOBS {u32})\n"), self_host.pool_jobs));
+    string8_list_push(arena, &lines,
+                      string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_FUZZ_AVAILABLE {u32})\n"), self_host.fuzz_available));
+    string8_list_push(arena, &lines, string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_CI {S8})\n"), self_host.ci ? S8("ON") : S8("OFF")));
+    string8_list_push(arena, &lines,
+                      string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_DEPENDS_ON_COMPILE {u32})\n"), self_host.depends_on_compile));
+    string8_list_push(arena, &lines,
+                      string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_USES_INNER_NINJA {u32})\n"), self_host.uses_inner_ninja));
+    string8_list_push(arena, &lines,
+                      string_format(arena, S8("set(BUSTER_SUPERBUILD_SELF_HOST_PRODUCER_CLEAN_REQUIRED {u32})\n"), self_host.producer_clean_required));
 
     for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
     {
@@ -6868,7 +7865,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     {
         return release_parallelism_test_result;
     }
-    ProcessResult superbuild_parallelism_test_result = matrix_superbuild_parallelism_tests();
+    ProcessResult superbuild_parallelism_test_result = matrix_superbuild_parallelism_tests(arena);
     if (superbuild_parallelism_test_result != PROCESS_RESULT_SUCCESS)
     {
         return superbuild_parallelism_test_result;
@@ -7013,38 +8010,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         }
     }
 
-    u32 thread_count = os_get_logical_thread_count();
-    String8 superbuild_directory = {0};
-    if (!direct_matrix)
-    {
-        matrix_superbuild_allocate_jobs(trees, tree_count, thread_count);
-        string_print(S8("BUSTER_SUPERBUILD_PARALLELISM: threads={u32} trees={u32} outer_jobs={u32}\n"), thread_count, tree_count,
-                     matrix_superbuild_outer_jobs(thread_count, tree_count));
-        for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
-        {
-            string_print(S8("BUSTER_SUPERBUILD_TREE: index={u32} configs={u32} unity_only={u32} jobs={u32} directory={S8}\n"), tree_i,
-                         trees[tree_i].combination_count, trees[tree_i].unity_only, trees[tree_i].parallel_jobs, trees[tree_i].build_directory);
-        }
-
-        superbuild_directory = string_format(arena, S8("{S8}superbuild-ci_{S8}"), build_prefix, ci ? S8("on") : S8("off"));
-        remove_path_recursive(arena, superbuild_directory);
-        make_directory_recursive(arena, superbuild_directory);
-        String8 source_directory = os_path_absolute(arena, S8("."), true);
-        String8 superbuild_directory_z = string_duplicate_arena(arena, superbuild_directory, true);
-        String8 superbuild_absolute_directory = os_path_absolute(arena, superbuild_directory_z, true);
-        String8 manifest_path = path_join(arena, superbuild_absolute_directory, S8("matrix.cmake"));
-        if (!source_directory.length || !superbuild_absolute_directory.length ||
-            !matrix_superbuild_manifest_write(arena, manifest_path, source_directory, trees, tree_count,
-                                              matrix_superbuild_outer_jobs(thread_count, tree_count), combinations, base_options.verbose,
-                                              base_options.quiet))
-        {
-            string_print(S8("error: failed to write the CMake superbuild matrix manifest\n"));
-            return PROCESS_RESULT_FAILED;
-        }
-        matrix_superbuild_generate_add(arena, generate_step, superbuild_directory, manifest_path);
-    }
-
     BuildArtifactFanout* fanout = 0;
+    u32 fanout_tree_index = tree_count;
     String8 ide_name =
 #if BUSTER_WINDOWS
         S8("ide.exe");
@@ -7068,6 +8035,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
                 .generate = combination.generate,
                 .options = combination.options,
             };
+            for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
+            {
+                if (string_equal(trees[tree_i].build_directory, combination.build_directory))
+                {
+                    fanout_tree_index = tree_i;
+                    break;
+                }
+            }
         }
     }
 
@@ -7084,6 +8059,69 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         return PROCESS_RESULT_FAILED;
     }
 
+    u32 thread_count = os_get_logical_thread_count();
+    String8 superbuild_directory = {0};
+    if (!direct_matrix)
+    {
+        matrix_superbuild_allocate_jobs(trees, tree_count, thread_count);
+        string_print(S8("BUSTER_SUPERBUILD_PARALLELISM: threads={u32} trees={u32} outer_jobs={u32}\n"), thread_count, tree_count,
+                     matrix_superbuild_outer_jobs(thread_count, tree_count));
+        for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
+        {
+            string_print(S8("BUSTER_SUPERBUILD_TREE: index={u32} configs={u32} unity_only={u32} jobs={u32} directory={S8}\n"), tree_i,
+                         trees[tree_i].combination_count, trees[tree_i].unity_only, trees[tree_i].parallel_jobs, trees[tree_i].build_directory);
+        }
+
+        superbuild_directory = string_format(arena, S8("{S8}superbuild-ci_{S8}"), build_prefix, ci ? S8("on") : S8("off"));
+        remove_path_recursive(arena, superbuild_directory);
+        make_directory_recursive(arena, superbuild_directory);
+        String8 source_directory = os_path_absolute(arena, S8("."), true);
+        String8 superbuild_directory_z = string_duplicate_arena(arena, superbuild_directory, true);
+        String8 superbuild_absolute_directory = os_path_absolute(arena, superbuild_directory_z, true);
+        String8 manifest_path = path_join(arena, superbuild_absolute_directory, S8("matrix.cmake"));
+        String8 build_driver = path_join(arena, source_directory,
+#if BUSTER_WINDOWS
+                                         S8("build/build.exe")
+#else
+                                         S8("build/build")
+#endif
+        );
+        String8 provenance_record_path = {0};
+        if (fanout && fanout_requested)
+        {
+            provenance_record_path = path_join(arena, superbuild_absolute_directory, S8("canonical-artifact.provenance"));
+            fanout->provenance_record_path = provenance_record_path;
+        }
+        MatrixSuperbuildSelfHostPlan self_host_plan = {
+            .build_directory = fanout && fanout_requested ? fanout->build_directory : (String8){0},
+            .config = fanout && fanout_requested ? cmake_build_config(fanout->options) : (String8){0},
+            .build_driver = fanout && fanout_requested ? build_driver : (String8){0},
+            .provenance_record_path = provenance_record_path,
+            .tree_index = fanout && fanout_requested ? fanout_tree_index : 0,
+            .pool_jobs = fanout && fanout_requested ? 1 : 0,
+            .fuzz_available = fanout && fanout_requested ? fanout->generate.fuzz_available : 0,
+            .enabled = matrix_superbuild_self_host_enabled(direct_matrix, fanout_requested && fanout),
+            .ci = fanout && fanout_requested ? fanout->generate.ci : 0,
+            .depends_on_compile = fanout && fanout_requested ? 1 : 0,
+            .uses_inner_ninja = 0,
+            .producer_clean_required = fanout && fanout_requested ? 1 : 0,
+        };
+        if (!matrix_superbuild_self_host_plan_valid(self_host_plan, trees, tree_count, thread_count))
+        {
+            string_print(S8("error: invalid superbuild self-host resource/dependency plan\n"));
+            return PROCESS_RESULT_FAILED;
+        }
+        if (!source_directory.length || !superbuild_absolute_directory.length || !build_driver.length ||
+            !matrix_superbuild_manifest_write(arena, manifest_path, source_directory, build_driver, trees, tree_count,
+                                              matrix_superbuild_outer_jobs(thread_count, tree_count), combinations, self_host_plan,
+                                              base_options.verbose, base_options.quiet))
+        {
+            string_print(S8("error: failed to write the CMake superbuild matrix manifest\n"));
+            return PROCESS_RESULT_FAILED;
+        }
+        matrix_superbuild_generate_add(arena, generate_step, superbuild_directory, manifest_path);
+    }
+
     if (fanout && fanout_requested)
     {
         BuildStep* capture_step = step_add(arena);
@@ -7092,15 +8130,37 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             .callback = build_artifact_fanout_capture_action,
             .callback_data = fanout,
         };
+
+        // CMake does not model compiler/linker/shader executable bytes as
+        // dependencies of every producer output. A reused canonical tree can
+        // therefore be a successful Ninja no-op after a same-path tool change.
+        // Run the generated Release clean target after capture and before any
+        // matrix Ninja starts. This process is strictly serialized with the
+        // outer superbuild, preserves CMake's cache/graph, and makes every
+        // relevant producer output regenerate under the captured inputs.
+        fanout->producer_clean_scheduled = 1;
+        String8 clean_target[] = {S8("clean")};
+        CmakeBuildOptions clean_options = fanout->options;
+        clean_options.config = S8("Release");
+        clean_options.optimize = 1;
+        clean_options.optimize_set = 1;
+        clean_options.parallel_jobs = 1;
+        clean_options.quiet = base_options.quiet;
+        clean_options.verbose = base_options.verbose;
+        BuildStep* producer_clean_step = step_add(arena);
+        ProcessRun* producer_clean_run = build_run_add(arena, producer_clean_step, fanout->build_directory,
+                                                        (SliceString8)BUSTER_ARRAY_TO_SLICE(clean_target), (SliceString8){0}, clean_options);
+        producer_clean_run->timing_description = S8("Canonical Clang Release producer clean");
+        BuildStep* producer_clean_success_step = step_add(arena);
+        ProcessRun* producer_clean_success_run = run_add(arena, producer_clean_success_step);
+        *producer_clean_success_run = (ProcessRun){
+            .callback = build_artifact_fanout_clean_action,
+            .callback_data = fanout,
+        };
     }
 
     if (!direct_matrix)
     {
-        if (fanout && fanout_requested)
-        {
-            fanout->release_build_scheduled = 1;
-        }
-
         String8 superbuild_targets[] = {S8("buster_matrix")};
         CmakeBuildOptions superbuild_options = base_options;
         superbuild_options.config = S8("Debug");
@@ -7108,21 +8168,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         BuildStep* superbuild_step = step_add(arena);
         build_run_add(arena, superbuild_step, superbuild_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(superbuild_targets), (SliceString8){0},
                       superbuild_options);
-
-        if (fanout && fanout_requested)
-        {
-            BuildStep* release_success_step = step_add(arena);
-            ProcessRun* release_success_run = run_add(arena, release_success_step);
-            *release_success_run = (ProcessRun){
-                .callback = build_artifact_fanout_release_success_action,
-                .callback_data = fanout,
-            };
-            ProcessResult fanout_result = self_host_from_existing_add(arena, fanout);
-            if (fanout_result != PROCESS_RESULT_SUCCESS)
-            {
-                return fanout_result;
-            }
-        }
         return PROCESS_RESULT_SUCCESS;
     }
 
@@ -16412,6 +17457,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TIME_TRACE_SUMMARY_SELF_TEST] = S8_INITIALIZER("time_trace_summary_self_test"),
         [BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA] = S8_INITIALIZER("import_assembly_metadata"),
         [BUILD_COMMAND_TEST_SELF_HOST] = S8_INITIALIZER("test_self_host"),
+        [BUILD_COMMAND_SELF_HOST_FROM_EXISTING] = S8_INITIALIZER("self_host_from_existing"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -16453,6 +17499,7 @@ ProcessResult process_arguments(void)
     }
 
     String8 build_directory = S8("build");
+    String8 provenance_record_path = {0};
     Generate generate = {
         .build_directory = build_directory,
         .compiler = BUILD_COMPILER_CLANG,
@@ -16652,6 +17699,20 @@ ProcessResult process_arguments(void)
             }
         }
         break;
+        case BUILD_ARGUMENT_PROVENANCE_RECORD:
+        {
+            String8 value = {0};
+            if (command == BUILD_COMMAND_SELF_HOST_FROM_EXISTING &&
+                build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &value))
+            {
+                provenance_record_path = value;
+            }
+            else
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        break;
         case BUILD_ARGUMENT_CC:
         {
             String8 value = {0};
@@ -16714,7 +17775,7 @@ ProcessResult process_arguments(void)
                     string_print(S8("error: invalid configuration => \"{S8}\"\n"), config);
                     result = PROCESS_RESULT_FAILED;
                 }
-                else if (command == BUILD_COMMAND_BUILD || command == BUILD_COMMAND_TEST_SELF_HOST)
+                else if (command == BUILD_COMMAND_BUILD || command == BUILD_COMMAND_TEST_SELF_HOST || command == BUILD_COMMAND_SELF_HOST_FROM_EXISTING)
                 {
                     options.config = config;
                 }
@@ -16879,7 +17940,20 @@ ProcessResult process_arguments(void)
         case BUILD_ARGUMENT_DEVELOPER_TARGETS:
         {
             bool value = false;
-            if (command == BUILD_COMMAND_GENERATE && build_argument_read_optional_bool(arguments, &argument_i, argument_has_value, argument_value, &value))
+            if ((command == BUILD_COMMAND_GENERATE || command == BUILD_COMMAND_SELF_HOST_FROM_EXISTING) &&
+                (build_argument == BUILD_ARGUMENT_CI || build_argument == BUILD_ARGUMENT_FUZZ) &&
+                build_argument_read_optional_bool(arguments, &argument_i, argument_has_value, argument_value, &value))
+            {
+                if (build_argument == BUILD_ARGUMENT_CI)
+                {
+                    generate.ci = value;
+                }
+                else
+                {
+                    generate.fuzz_available = value;
+                }
+            }
+            else if (command == BUILD_COMMAND_GENERATE && build_argument_read_optional_bool(arguments, &argument_i, argument_has_value, argument_value, &value))
             {
                 switch (build_argument)
                 {
@@ -16946,7 +18020,20 @@ ProcessResult process_arguments(void)
         case BUILD_ARGUMENT_NO_CHECK_OPTIONAL_WARNINGS:
         case BUILD_ARGUMENT_NO_DEVELOPER_TARGETS:
         {
-            if (command == BUILD_COMMAND_GENERATE && !argument_has_value)
+            if ((command == BUILD_COMMAND_GENERATE || command == BUILD_COMMAND_SELF_HOST_FROM_EXISTING) &&
+                (build_argument == BUILD_ARGUMENT_NO_CI || build_argument == BUILD_ARGUMENT_NO_FUZZ) && !argument_has_value)
+            {
+                if (build_argument == BUILD_ARGUMENT_NO_CI)
+                {
+                    generate.ci = false;
+                }
+                else
+                {
+                    generate.fuzz_available = false;
+                }
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_GENERATE && !argument_has_value)
             {
                 switch (build_argument)
                 {
@@ -17170,6 +18257,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_SELF_HOST:
         {
             result = self_host_add(arena, build_directory, options, generate);
+        }
+        break;
+        case BUILD_COMMAND_SELF_HOST_FROM_EXISTING:
+        {
+            result = self_host_from_existing_command_add(arena, build_directory, provenance_record_path, options, generate);
         }
         break;
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:

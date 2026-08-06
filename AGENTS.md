@@ -78,7 +78,8 @@ shell, CMake, and utility subprocesses.
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`,
 `import_assembly_metadata`, `test_self_host`, `test_all_combinations`,
-`test_all_combinations_ci`.
+`test_all_combinations_ci`; `self_host_from_existing` is an internal
+build-driver worker command used only by the pooled artifact-fanout target.
 The combination matrix shares one multi-config build tree across Debug and
 Release when their configure-time policy matches. Clang's fuzz-enabled Debug
 sanitized and Release non-sanitized configurations use dedicated trees;
@@ -102,14 +103,27 @@ allocator: split trees share at least two logical CPUs per admission slot while
 unity trees use one job. Tests then run concurrently in the same bounded pool,
 with each tree's quota passed through `BUSTER_TEST_JOBS`; future multithreaded test work
 must honor that limit. Set `BUSTER_MATRIX_DIRECT=1` only to diagnose the
-retained legacy scheduler. CI Release builds use `-O2`; local Release builds
-retain the toolchain default.
+retained legacy scheduler. When artifact fan-out is enabled on the supported
+desktop CI platforms, the canonical trusted Clang Release tree also gets a
+self-host worker in this same pool. The build-driver boundary is mandatory:
+capture provenance, clean the canonical Release producer, then start the outer
+superbuild. The clean preserves the configured CMake/Ninja graph and cache while
+forcing producer objects, links, and generated shader outputs to rebuild under
+the captured inputs. The worker depends only on the canonical compile target,
+consumes the producer's one-shot integrity-checked compiler/tool/cache/graph/
+environment provenance record before validating and snapshotting the artifact,
+runs the existing direct fixed-point workflow without starting an inner Ninja
+process, and remains disabled for the direct scheduler and unsupported platforms.
+CI Release builds use `-O2`; local Release builds retain the toolchain default.
 Clang static analysis runs only against unsanitized Release. GUI/GPU smoke
 tests run for Debug sanitized and Release non-sanitized configurations; other
 combinations run unit tests only.
 Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
 `--instrument`, `--cc <clang|gcc|zig|cl>` are accepted **only by
-`generate`**; `build` rejects them with an explicit diagnostic.
+`generate`** for public workflows; `build` rejects them with an explicit
+diagnostic. The internal `self_host_from_existing` worker is the narrow
+exception for build-driver-supplied `--ci/--no-ci` and
+`--fuzz/--no-fuzz`, and requires the captured provenance record.
 TCC is reserved for compiling `build.c` through `build.sh`/`build.ps1` and
 `generate --cc tcc` is rejected as an application compiler.
 `--optimize`/`--no-optimize` are configuration shorthands for
