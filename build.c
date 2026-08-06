@@ -5805,10 +5805,76 @@ BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_expect_failure(Arena* aren
     return result != PROCESS_RESULT_SUCCESS && actual_reason == failure.reason && string_equal(actual_output, expected_output);
 }
 
+typedef enum TimeTraceSummaryDirectoryClaimResult TimeTraceSummaryDirectoryClaimResult;
+enum TimeTraceSummaryDirectoryClaimResult
+{
+    TIME_TRACE_SUMMARY_DIRECTORY_CLAIMED,
+    TIME_TRACE_SUMMARY_DIRECTORY_ALREADY_EXISTS,
+    TIME_TRACE_SUMMARY_DIRECTORY_ERROR,
+};
+
+BUSTER_GLOBAL_LOCAL TimeTraceSummaryDirectoryClaimResult time_trace_summary_self_test_directory_claim(String8 path)
+{
+#if BUSTER_WINDOWS
+    TemporalArena temp = scratch_begin(0, 0);
+    String16 path_w = string16_from_string8(temp.arena, path, true);
+    bool created = CreateDirectoryW(path_w.pointer, 0) != 0;
+    DWORD error = created ? ERROR_SUCCESS : GetLastError();
+    scratch_end(temp);
+    if (created)
+    {
+        return TIME_TRACE_SUMMARY_DIRECTORY_CLAIMED;
+    }
+    return error == ERROR_ALREADY_EXISTS ? TIME_TRACE_SUMMARY_DIRECTORY_ALREADY_EXISTS : TIME_TRACE_SUMMARY_DIRECTORY_ERROR;
+#elif BUSTER_LINUX || BUSTER_MACOS
+    if (mkdir((const char*)path.pointer, 0755) == 0)
+    {
+        return TIME_TRACE_SUMMARY_DIRECTORY_CLAIMED;
+    }
+    return errno == EEXIST ? TIME_TRACE_SUMMARY_DIRECTORY_ALREADY_EXISTS : TIME_TRACE_SUMMARY_DIRECTORY_ERROR;
+#else
+    BUSTER_UNUSED(path);
+    return TIME_TRACE_SUMMARY_DIRECTORY_ERROR;
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_claim_directory(Arena* arena, String8* directory_out)
+{
+    enum
+    {
+        TIME_TRACE_SUMMARY_SELF_TEST_DIRECTORY_ATTEMPTS = 32,
+    };
+    make_directory_recursive(arena, S8("build"));
+    u64 process_id = os_get_current_process_id();
+    u64 timestamp = os_now_microseconds();
+    for (u64 attempt = 0; attempt < TIME_TRACE_SUMMARY_SELF_TEST_DIRECTORY_ATTEMPTS; attempt += 1)
+    {
+        String8 directory_name = string_format(arena, S8("time-trace-summary-self-test-{u64}-{u64}-{u64}"), process_id, timestamp, attempt);
+        String8 directory = path_join(arena, S8("build"), directory_name);
+        TimeTraceSummaryDirectoryClaimResult claim_result = time_trace_summary_self_test_directory_claim(directory);
+        if (claim_result == TIME_TRACE_SUMMARY_DIRECTORY_CLAIMED)
+        {
+            *directory_out = directory;
+            return true;
+        }
+        if (claim_result == TIME_TRACE_SUMMARY_DIRECTORY_ERROR)
+        {
+            break;
+        }
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_self_test(Arena* arena)
 {
-    String8 directory_name = string_format(arena, S8("time-trace-summary-self-test-{u64}-{u64}"), os_get_current_process_id(), os_now_microseconds());
-    String8 directory = path_join(arena, S8("build"), directory_name);
+    String8 directory = {0};
+    bool directory_owned = time_trace_summary_self_test_claim_directory(arena, &directory);
+    if (!directory_owned)
+    {
+        string_print(S8("error: time_trace_summary self-test could not claim an exclusive directory\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
     String8 ordinary_a = path_join(arena, directory, S8("ordinary-a.json"));
     String8 ordinary_b = path_join(arena, directory, S8("ordinary-b.json"));
     String8 phase = path_join(arena, directory, S8("phase.json"));
@@ -5827,24 +5893,26 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_self_test(Arena* arena)
     String8 invalid_surrogate_low = path_join(arena, directory, S8("invalid-surrogate-low.json"));
     String8 large = path_join(arena, directory, S8("large.json"));
     bool passed = true;
-    bool directory_owned = false;
+    String8 existing_candidate = path_join(arena, directory, S8("already-exists"));
+    String8 existing_sentinel = path_join(arena, existing_candidate, S8("sentinel.txt"));
+    make_directory_recursive(arena, existing_candidate);
+    bool existing_sentinel_written = time_trace_summary_self_test_write_text(existing_sentinel, S8("preserve"));
+    TimeTraceSummaryDirectoryClaimResult existing_claim = TIME_TRACE_SUMMARY_DIRECTORY_ERROR;
+    if (existing_sentinel_written)
+    {
+        existing_claim = time_trace_summary_self_test_directory_claim(existing_candidate);
+    }
+    ByteSlice existing_contents = {0};
+    if (existing_claim == TIME_TRACE_SUMMARY_DIRECTORY_ALREADY_EXISTS)
+    {
+        existing_contents = file_read(arena, existing_sentinel, (FileReadOptions){.map_required = 0});
+    }
+    String8 preserved_text = S8("preserve");
+    bool existing_candidate_preserved = existing_claim == TIME_TRACE_SUMMARY_DIRECTORY_ALREADY_EXISTS && existing_contents.pointer &&
+                                        existing_contents.length == preserved_text.length &&
+                                        memcmp(existing_contents.pointer, preserved_text.pointer, preserved_text.length) == 0;
+    passed = passed && existing_candidate_preserved;
 
-    // A live native process id is unique, and the monotonic timestamp avoids
-    // reusing a stale directory after that id is recycled. Never delete a
-    // pre-existing candidate: only the process that successfully claimed its
-    // own absent directory may clean it up.
-    if (path_exists(arena, directory))
-    {
-        string_print(S8("error: time_trace_summary self-test directory is already owned: {S8}\n"), directory);
-        return PROCESS_RESULT_FAILED;
-    }
-    make_directory_recursive(arena, directory);
-    directory_owned = path_exists(arena, directory);
-    if (!directory_owned)
-    {
-        string_print(S8("error: time_trace_summary self-test could not claim directory: {S8}\n"), directory);
-        return PROCESS_RESULT_FAILED;
-    }
     passed = passed && time_trace_summary_self_test_write_text(
                             ordinary_a,
                             S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total Backend\",\"dur\":1500},{\"ph\":\"X\",\"name\":\"Total Backend\",\"dur\":500},{\"\\u0070h\":\"X\",\"\\u006eame\":\"Total \\u0046rontend\",\"\\u0064ur\":5,\"args\":{\"nested\":[true,{\"x\":\"y\"}]}},{\"ph\":\"X\",\"name\":\"Total \\ud83d\\ude00\",\"dur\":3}]}"));
@@ -6016,13 +6084,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_self_test(Arena* arena)
         passed = passed && failure_passed;
     }
 
-    if (directory_owned)
+    if (directory_owned && !os_directory_delete(directory))
     {
-        remove_path_recursive(arena, directory);
-        if (path_exists(arena, directory))
-        {
-            passed = false;
-        }
+        passed = false;
     }
     if (!passed)
     {
