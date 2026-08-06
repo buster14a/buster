@@ -1,3 +1,7 @@
+#ifndef BUSTER_C_STATIC_LOCAL_PROBE
+#define BUSTER_C_STATIC_LOCAL_PROBE 0
+#endif
+
 struct StaticPair
 {
     int first;
@@ -134,6 +138,7 @@ static int static_table_sum(void)
            (cast_string_pointer[1] == 'k' ? 0 : 1) + (((const char *)void_string_pointer)[1] == 'k' ? 0 : 1);
 }
 
+#if BUSTER_C_STATIC_LOCAL_PROBE == 0 || BUSTER_C_STATIC_LOCAL_PROBE == 1
 static int static_thread_local_sum(void)
 {
     static _Thread_local int c_thread_value = 4;
@@ -142,6 +147,18 @@ static int static_thread_local_sum(void)
     gnu_thread_value += 1;
     return c_thread_value + gnu_thread_value;
 }
+#endif
+
+#if BUSTER_C_STATIC_LOCAL_PROBE == 0 || BUSTER_C_STATIC_LOCAL_PROBE == 2
+static int static_thread_local_zero_sum(void)
+{
+    static _Thread_local struct StaticPair pair_zero = {0};
+    static _Thread_local int scalar_zero = 0;
+    static _Thread_local int *pointer_zero = (int *)0;
+    static _Thread_local char empty_string[1] = "";
+    return pair_zero.first + pair_zero.second + scalar_zero + (pointer_zero != 0) + empty_string[0];
+}
+#endif
 
 static int static_aligned_address_ok(void)
 {
@@ -162,6 +179,7 @@ static int static_brace_designator_sum(void)
            static_brace_array[2].z == 10 && static_brace_inferred[2].a.x[1] == 7 && static_brace_inferred[2].z == 10;
 }
 
+#if BUSTER_C_STATIC_LOCAL_PROBE == 0
 static int static_zero_aggregate_sum(void)
 {
     static struct StaticPair mutable_zero = {0};
@@ -181,13 +199,30 @@ static int static_zero_aggregate_sum(void)
            mutable_scalar_zero + tls_scalar_zero + const_scalar_zero + (mutable_pointer_zero != 0) + (tls_pointer_zero != 0) +
            (const_pointer_zero != 0) + empty_string[0] + tls_empty_string[0] + const_empty_string[0];
 }
+#endif
+
+static int static_non_tls_static_local_sum(void)
+{
+    return static_table_sum() == 30 && static_nested_table_sum() == 67 && macro_static_table_sum() == 18 && enum_static_table_sum() == 4 &&
+                   static_entry_table()[7].value == 13 && static_aligned_address_ok() && static_bit_field_sum() && static_brace_designator_sum()
+               ? 0
+               : 1;
+}
 
 int main(void)
 {
+#if BUSTER_C_STATIC_LOCAL_PROBE == 1
+    return static_thread_local_sum() == 12 && static_thread_local_sum() == 14 ? 0 : 1;
+#elif BUSTER_C_STATIC_LOCAL_PROBE == 2
+    return static_thread_local_zero_sum() == 0 ? 0 : 1;
+#elif BUSTER_C_STATIC_LOCAL_PROBE == 3
+    return static_non_tls_static_local_sum();
+#else
     return static_table_sum() == 30 && static_nested_table_sum() == 67 && macro_static_table_sum() == 18 && enum_static_table_sum() == 4 &&
                    static_entry_table()[7].value == 13 && static_thread_local_sum() == 12 && static_thread_local_sum() == 14 && static_aligned_address_ok() &&
                    static_bit_field_sum() && static_brace_designator_sum() &&
-                   static_zero_aggregate_sum() == 1
+                   static_zero_aggregate_sum() == 1 && static_thread_local_zero_sum() == 0
                ? 0
                : 1;
+#endif
 }

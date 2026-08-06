@@ -2480,9 +2480,23 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     object_section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] = 0;
     object_section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO] =
         align_forward(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment);
-    u64 tls_initialized_size = object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length;
     u64 tls_virtual_size = object_section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO] + object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
-    u64 tls_raw_size = align_forward(BUSTER_MAX(tls_initialized_size, 1), PE_FILE_ALIGNMENT);
+    u32 tls_alignment = BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment);
+    if (tls_virtual_size && (!BUSTER_IS_POWER_OF_TWO(tls_alignment) || tls_alignment > 8192))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    u32 tls_alignment_shift = 0;
+    for (u32 alignment = tls_alignment; alignment > 1; alignment >>= 1)
+    {
+        tls_alignment_shift += 1;
+    }
+    u32 tls_characteristics = tls_virtual_size ? (tls_alignment_shift + 1) << 20 : 0;
+    // The loader copies the complete TLS template before applying per-thread zero-fill.
+    // Serialize the TBSS range in that template so the directory can describe no
+    // additional zero-fill and EndAddressOfRawData covers every TLS object.
+    u64 tls_raw_size = align_forward(BUSTER_MAX(tls_virtual_size, 1), PE_FILE_ALIGNMENT);
     u32 runtime_function_size = aarch64 ? 8 : 12;
     u32 startup_xdata_size = 8;
     u64 pdata_virtual_size = runtime_function_size + object->sections[OBJECT_SECTION_WINDOWS_PDATA].data.length;
@@ -2512,7 +2526,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     u32 import_descriptor_count = active_group_count + 2;
     u64 tls_directory_offset = 0;
     u64 tls_index_offset = 40;
-    u64 import_descriptor_offset = align_forward(tls_index_offset + 4, 8);
+    u64 tls_callbacks_offset = tls_virtual_size ? align_forward(tls_index_offset + 4, 8) : 0;
+    u64 import_descriptor_offset = tls_virtual_size ? align_forward(tls_callbacks_offset + sizeof(u64), 8) : align_forward(tls_index_offset + 4, 8);
     u64 runtime_lookup_offset = align_forward(import_descriptor_offset + (u64)import_descriptor_count * PE_IMPORT_DESCRIPTOR_SIZE, 8);
     u64 runtime_address_offset = runtime_lookup_offset + (u64)total_import_slots * sizeof(u64);
     u64 kernel_lookup_offset = runtime_address_offset + (u64)total_import_slots * sizeof(u64);
@@ -2604,9 +2619,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     u64 import_section_raw = section_raw_offsets[PE_SECTION_IMPORT];
     u64 pe_image_base = ((u64)PE_IMAGE_BASE_HIGH << 32) | PE_IMAGE_BASE_LOW;
     link_write_u64(bytes, import_section_raw + tls_directory_offset, pe_image_base + section_rvas[PE_SECTION_TLS]);
-    link_write_u64(bytes, import_section_raw + tls_directory_offset + 8, pe_image_base + section_rvas[PE_SECTION_TLS] + tls_initialized_size);
+    link_write_u64(bytes, import_section_raw + tls_directory_offset + 8, pe_image_base + section_rvas[PE_SECTION_TLS] + tls_virtual_size);
     link_write_u64(bytes, import_section_raw + tls_directory_offset + 16, pe_image_base + import_section_rva + tls_index_offset);
-    link_write_u32(bytes, import_section_raw + tls_directory_offset + 32, (u32)(tls_virtual_size - tls_initialized_size));
+    if (tls_virtual_size)
+    {
+        link_write_u64(bytes, import_section_raw + tls_directory_offset + 24, pe_image_base + import_section_rva + tls_callbacks_offset);
+        link_write_u32(bytes, import_section_raw + tls_directory_offset + 32, 0);
+        link_write_u32(bytes, import_section_raw + tls_directory_offset + 36, tls_characteristics);
+        link_write_u64(bytes, import_section_raw + tls_callbacks_offset, 0);
+    }
     u64 imported_name_cursor = import_name_offset;
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {

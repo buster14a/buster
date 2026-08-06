@@ -98,6 +98,178 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_bytes_contain(ByteSl
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL u16 compiler_driver_test_pe_read_u16(ByteSlice image, u64 offset)
+{
+    u16 value = 0;
+    if (offset <= image.length && image.length - offset >= sizeof(value))
+    {
+        memcpy(&value, image.pointer + offset, sizeof(value));
+    }
+    return value;
+}
+
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_test_pe_read_u32(ByteSlice image, u64 offset)
+{
+    u32 value = 0;
+    if (offset <= image.length && image.length - offset >= sizeof(value))
+    {
+        memcpy(&value, image.pointer + offset, sizeof(value));
+    }
+    return value;
+}
+
+BUSTER_GLOBAL_LOCAL u64 compiler_driver_test_pe_read_u64(ByteSlice image, u64 offset)
+{
+    u64 value = 0;
+    if (offset <= image.length && image.length - offset >= sizeof(value))
+    {
+        memcpy(&value, image.pointer + offset, sizeof(value));
+    }
+    return value;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_pe_rva_to_file_offset(ByteSlice image, u64 section_table, u16 section_count, u32 rva, u64 size,
+                                                                     u64* file_offset)
+{
+    for (u16 section_index = 0; section_index < section_count; section_index += 1)
+    {
+        u64 header = section_table + (u64)section_index * 40;
+        if (header > image.length || image.length - header < 40)
+        {
+            return false;
+        }
+        u32 virtual_size = compiler_driver_test_pe_read_u32(image, header + 8);
+        u32 virtual_address = compiler_driver_test_pe_read_u32(image, header + 12);
+        u32 raw_size = compiler_driver_test_pe_read_u32(image, header + 16);
+        u32 raw_offset = compiler_driver_test_pe_read_u32(image, header + 20);
+        if (rva < virtual_address)
+        {
+            continue;
+        }
+        u64 relative = (u64)rva - virtual_address;
+        u64 mapped_size = BUSTER_MAX(virtual_size, raw_size);
+        if (relative > mapped_size || size > mapped_size - relative || relative > raw_size || size > (u64)raw_size - relative || raw_offset > image.length ||
+            relative > image.length - raw_offset || size > image.length - raw_offset - relative)
+        {
+            continue;
+        }
+        *file_offset = raw_offset + relative;
+        return *file_offset <= image.length && size <= image.length - *file_offset;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_pe_tls_directory(ByteSlice image, u32 expected_alignment)
+{
+    if (image.length < 0x40 || image.pointer[0] != 'M' || image.pointer[1] != 'Z')
+    {
+        return false;
+    }
+    u32 pe_offset = compiler_driver_test_pe_read_u32(image, 0x3c);
+    if (pe_offset > image.length || image.length - pe_offset < 4 + 20)
+    {
+        return false;
+    }
+    u64 coff = pe_offset + 4;
+    u16 section_count = compiler_driver_test_pe_read_u16(image, coff + 2);
+    u16 optional_size = compiler_driver_test_pe_read_u16(image, coff + 16);
+    u64 optional = coff + 20;
+    if (image.length - optional < optional_size || optional_size < 192 || compiler_driver_test_pe_read_u16(image, optional) != 0x20b)
+    {
+        return false;
+    }
+    u64 section_table = optional + optional_size;
+    if ((u64)section_count * 40 > image.length - section_table)
+    {
+        return false;
+    }
+    u32 tls_rva = compiler_driver_test_pe_read_u32(image, optional + 184);
+    u32 tls_size = compiler_driver_test_pe_read_u32(image, optional + 188);
+    u64 image_base = compiler_driver_test_pe_read_u64(image, optional + 24);
+    if (!tls_rva || tls_size != 40)
+    {
+        return false;
+    }
+    u64 tls_directory = 0;
+    if (!compiler_driver_test_pe_rva_to_file_offset(image, section_table, section_count, tls_rva, tls_size, &tls_directory))
+    {
+        return false;
+    }
+    u64 tls_start = compiler_driver_test_pe_read_u64(image, tls_directory);
+    u64 tls_end = compiler_driver_test_pe_read_u64(image, tls_directory + 8);
+    u64 tls_index = compiler_driver_test_pe_read_u64(image, tls_directory + 16);
+    u64 tls_callbacks = compiler_driver_test_pe_read_u64(image, tls_directory + 24);
+    u32 tls_zero_fill = compiler_driver_test_pe_read_u32(image, tls_directory + 32);
+    u32 tls_characteristics = compiler_driver_test_pe_read_u32(image, tls_directory + 36);
+    if (!BUSTER_IS_POWER_OF_TWO(expected_alignment) || expected_alignment > 8192 || !tls_start || tls_end < tls_start || tls_zero_fill != 0 || !tls_callbacks)
+    {
+        return false;
+    }
+    u32 expected_shift = 0;
+    for (u32 alignment = expected_alignment; alignment > 1; alignment >>= 1)
+    {
+        expected_shift += 1;
+    }
+    if (tls_characteristics != (expected_shift + 1) << 20 || tls_start < image_base || tls_index < image_base || tls_callbacks < image_base)
+    {
+        return false;
+    }
+    bool tls_section_found = false;
+    u32 tls_virtual_size = 0;
+    u32 tls_raw_size = 0;
+    u32 tls_raw_offset = 0;
+    u32 tls_virtual_address = 0;
+    for (u16 section_index = 0; section_index < section_count; section_index += 1)
+    {
+        u64 header = section_table + (u64)section_index * 40;
+        if (memcmp(image.pointer + header, ".tls", 4) != 0)
+        {
+            continue;
+        }
+        tls_section_found = true;
+        tls_virtual_size = compiler_driver_test_pe_read_u32(image, header + 8);
+        tls_virtual_address = compiler_driver_test_pe_read_u32(image, header + 12);
+        tls_raw_size = compiler_driver_test_pe_read_u32(image, header + 16);
+        tls_raw_offset = compiler_driver_test_pe_read_u32(image, header + 20);
+        break;
+    }
+    if (!tls_section_found || !tls_virtual_size || tls_raw_size < tls_virtual_size || !tls_raw_offset || tls_raw_offset > image.length ||
+        tls_raw_size > image.length - tls_raw_offset || image_base > UINT64_MAX - tls_virtual_address ||
+        tls_start != image_base + tls_virtual_address || tls_end - tls_start != tls_virtual_size)
+    {
+        return false;
+    }
+    u64 index_rva = tls_index - image_base;
+    u64 callbacks_rva = tls_callbacks - image_base;
+    if (index_rva > UINT32_MAX || callbacks_rva > UINT32_MAX)
+    {
+        return false;
+    }
+    u64 index_file_offset = 0;
+    u64 callbacks_file_offset = 0;
+    if (!compiler_driver_test_pe_rva_to_file_offset(image, section_table, section_count, (u32)index_rva, sizeof(u32), &index_file_offset) ||
+        !compiler_driver_test_pe_rva_to_file_offset(image, section_table, section_count, (u32)callbacks_rva, sizeof(u64), &callbacks_file_offset) ||
+        compiler_driver_test_pe_read_u64(image, callbacks_file_offset) != 0)
+    {
+        return false;
+    }
+    return true;
+}
+
+#if BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_process_success(Arena* arena, String8 path)
+{
+    String8 run_arguments[] = {path};
+    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                (ProcessSpawnOptions){.use_process_environment = true});
+    if (!spawn.handle)
+    {
+        return false;
+    }
+    return os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS;
+}
+#endif
+
 #if BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_unwind_records(ObjectFile* object, bool* has_frame_register)
 {
@@ -1261,6 +1433,14 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, const_pointer_zero_found);
         BUSTER_TEST(arguments, nonzero_found);
     }
+#if BUSTER_WINDOWS
+    if (c_static_local.error == COMPILER_DRIVER_ERROR_NONE && c_static_local.has_object)
+    {
+        u32 tls_alignment = BUSTER_MAX(c_static_local.object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment,
+                                       c_static_local.object.sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment);
+        BUSTER_TEST(arguments, compiler_driver_test_pe_tls_directory(c_static_local.native_link.executable, tls_alignment));
+    }
+#endif
     if (c_static_local.error == COMPILER_DRIVER_ERROR_NONE)
     {
         String8 c_static_local_run_arguments[] = {
@@ -1278,6 +1458,42 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_static_local_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+#if BUSTER_WINDOWS
+    String8 c_static_local_probe_names[] = {
+        S8("initialized TLS"),
+        S8("zero TLS"),
+        S8("non-TLS static aggregates"),
+    };
+    for (u32 probe_index = 0; probe_index < BUSTER_ARRAY_LENGTH(c_static_local_probe_names); probe_index += 1)
+    {
+        String8 probe_path = buster_test_temporary_path(arguments->arena, S8("buster-c-static-local-probe"),
+                                                         string_format(arguments->arena, S8("-{u32}.exe"), probe_index + 1)
+        );
+        String8 probe_command_line[] = {
+            S8("-g0"),
+            string_format(arguments->arena, S8("-DBUSTER_C_STATIC_LOCAL_PROBE={u32}"), probe_index + 1),
+            S8("-o"),
+            probe_path,
+            S8("tests/basic_c_static_local.c"),
+        };
+        CompilerDriverResult probe = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(probe_command_line)));
+        BUSTER_TEST_RAW(arguments, probe.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(arguments->arena, S8("C static-local {S8} compile"), c_static_local_probe_names[probe_index]));
+        if (probe.error == COMPILER_DRIVER_ERROR_NONE && probe_index < 2 && probe.has_object)
+        {
+            u32 tls_alignment = BUSTER_MAX(probe.object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment,
+                                           probe.object.sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment);
+            BUSTER_TEST_RAW(arguments, compiler_driver_test_pe_tls_directory(probe.native_link.executable, tls_alignment),
+                            string_format(arguments->arena, S8("C static-local {S8} PE TLS metadata"), c_static_local_probe_names[probe_index]));
+        }
+        if (probe.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(arguments->arena, probe_path),
+                            string_format(arguments->arena, S8("C static-local {S8} runtime"), c_static_local_probe_names[probe_index]));
+        }
+    }
+#endif
     String8 c_auto_type_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-auto-type"),
 #if BUSTER_WINDOWS
                                                                       S8(".exe"));
@@ -2350,6 +2566,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
             BUSTER_TEST(arguments, pe_header);
             BUSTER_TEST(arguments, tls_directory_rva != 0);
+            BUSTER_TEST(arguments, compiler_driver_test_pe_tls_directory(executable, 16));
         }
     }
     String8 c_thread_local_apple_targets[] = {
