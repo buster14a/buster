@@ -159,6 +159,9 @@ adb_path=${BUSTER_ANDROID_ADB:-}
 if [[ -z $adb_path ]]; then
     adb_path=$(command -v adb || true)
 fi
+if [[ -z $adb_path && -x $android_sdk/platform-tools/adb ]]; then
+    adb_path=$android_sdk/platform-tools/adb
+fi
 if [[ -z $adb_path ]]; then
     echo "error: adb was not found after the Android build; cannot install/run tests" >&2
     exit 1
