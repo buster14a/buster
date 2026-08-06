@@ -100,7 +100,11 @@ BUSTER_F_DECL void rendering_window_render_rect(RenderingWindowHandle* window, R
 BUSTER_F_DECL void rendering_window_render_text(RenderingHandle* rendering, RenderingWindowHandle* window, String8 string, float4 color,
                                                 RenderFontType font_type, f32 x_offset, f32 y_offset);
 BUSTER_F_DECL bool rendering_window_render_background_blur(RenderingWindowHandle* window, F32Interval2 rect, u32 radius);
+BUSTER_F_DECL bool rendering_window_render_background_blur_rounded(RenderingWindowHandle* window, F32Interval2 rect, u32 radius, float4 corner_radii);
 BUSTER_F_DECL bool rendering_blur_rgba8(Arena* scratch, u8* pixels, u32 width, u32 height, u32 stride, u32 radius);
 BUSTER_F_DECL TextureIndex rendering_texture_create_blurred(Arena* arena, RenderingHandle* rendering, TextureMemory source, u32 radius);
+BUSTER_F_DECL f32 rendering_blur_kernel_weight(u32 radius, s32 offset);
+BUSTER_F_DECL u32 rendering_blur_kernel_weight_fixed16(u32 radius, s32 offset);
+BUSTER_F_DECL f32 rendering_rounded_rect_mask_factor(RenderingClipRect rect, float2 pixel_position, float4 corner_radii);
 BUSTER_F_DECL void rendering_deinitialize(RenderingHandle* rendering);
 BUSTER_F_DECL void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHandle* window);

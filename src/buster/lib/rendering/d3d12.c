@@ -380,7 +380,7 @@ BUSTER_GLOBAL_LOCAL const char* d3d12_rect_pixel_shader_source(void)
 
 BUSTER_GLOBAL_LOCAL const char* d3d12_blur_shader_source(void)
 {
-    return "struct BlurConstants { float2 texel_step; uint radius; uint vertical; };\n"
+    return "struct BlurConstants { float2 texel_step; uint radius; uint vertical; float4 mask_rect; float4 corner_radii; float2 target_size; uint composite; uint reserved; };\n"
            "struct BlurVertexOut { float4 position : SV_Position; float2 uv : TEXCOORD0; };\n"
            "static const float2 blur_triangle[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };\n"
            "Texture2D<float4> blur_source : register(t0);\n"
@@ -388,11 +388,18 @@ BUSTER_GLOBAL_LOCAL const char* d3d12_blur_shader_source(void)
            "cbuffer BlurConstantsBuffer : register(b0) { BlurConstants blur_constants; };\n"
            "BlurVertexOut blur_vs(uint vertex_id : SV_VertexID) { BlurVertexOut output; float2 position = blur_triangle[vertex_id]; "
            "output.position = float4(position, 0.0, 1.0); output.uv = float2(position.x * 0.5 + 0.5, 0.5 - position.y * 0.5); return output; }\n"
-           "float4 blur_ps(BlurVertexOut input) : SV_Target { float4 sum = float4(0.0, 0.0, 0.0, 0.0); uint count = 0; "
-           "uint limit = min(blur_constants.radius, 32); for (uint sample_index = 0; sample_index <= 64; sample_index += 1) { "
-           "if (sample_index > limit * 2) break; int offset = (int)sample_index - (int)limit; float2 delta = blur_constants.texel_step * (float)offset; "
-           "float2 sample_uv = input.uv + (blur_constants.vertical != 0 ? float2(0.0, delta.y) : float2(delta.x, 0.0)); "
-           "sum += blur_source.Sample(blur_sampler, sample_uv); count += 1; } return count != 0 ? sum / (float)count : float4(0.0, 0.0, 0.0, 0.0); }\n";
+           "float4 blur_ps(BlurVertexOut input) : SV_Target { float2 mask_position = input.uv * blur_constants.target_size; float2 rect_min = blur_constants.mask_rect.xy; "
+           "float2 rect_max = blur_constants.mask_rect.zw; float2 half_size = (rect_max - rect_min) * 0.5; float2 center = (rect_max + rect_min) * 0.5; "
+           "float radius = mask_position.x < center.x ? (mask_position.y < center.y ? blur_constants.corner_radii.x : blur_constants.corner_radii.y) : "
+           "(mask_position.y < center.y ? blur_constants.corner_radii.z : blur_constants.corner_radii.w); radius = min(max(radius, 0.0), min(half_size.x, half_size.y)); "
+           "float2 d2_no_r2 = abs(center - mask_position) - half_size; float2 d2 = d2_no_r2 + float2(radius, radius); "
+           "float negative_distance = min(max(d2.x, d2.y), 0.0); float positive_distance = length(max(d2, 0.0)); float mask_distance = negative_distance + positive_distance - radius; "
+           "float4 sum = float4(0.0, 0.0, 0.0, 0.0); float weight_sum = 0.0; uint limit = min(blur_constants.radius, 32); float sigma = max((float)limit * 0.5, 1.0); "
+           "for (int offset = -32; offset <= 32; offset += 1) { if (offset < -(int)limit || offset > (int)limit) continue; float distance = (float)offset; "
+           "float weight = pow(2.7182818, -(distance * distance) / (2.0 * sigma * sigma)); float2 delta = blur_constants.texel_step * distance; "
+           "float2 sample_uv = input.uv + (blur_constants.vertical != 0 ? float2(0.0, delta.y) : float2(delta.x, 0.0)); sample_uv = clamp(sample_uv, float2(0.0, 0.0), float2(1.0, 1.0)); "
+           "sum += blur_source.Sample(blur_sampler, sample_uv) * weight; weight_sum += weight; } if (blur_constants.composite != 0 && mask_distance > 0.0) discard; "
+           "return weight_sum > 0.0 ? sum / weight_sum : float4(0.0, 0.0, 0.0, 0.0); }\n";
 }
 
 BUSTER_GLOBAL_LOCAL ID3DBlob* d3d12_compile_shader(const char* source, const char* entry_point, const char* target)
@@ -1100,6 +1107,10 @@ BUSTER_GLOBAL_LOCAL bool d3d12_record_background_blur(RenderingHandle* rendering
         .texel_step = float2_make(1.0f / (f32)plan.half_width, 1.0f / (f32)plan.half_height),
         .radius = plan.radius,
         .vertical = 1,
+        .target_size = float2_make((f32)window->width, (f32)window->height),
+        .mask_rect = float4_make((f32)command.blur_rect.x0, (f32)command.blur_rect.y0, (f32)command.blur_rect.x1, (f32)command.blur_rect.y1),
+        .corner_radii = command.blur_corner_radii,
+        .composite = 1,
     };
     ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(command_list, 1, (UINT)(sizeof(vertical_constants) / sizeof(u32)), &vertical_constants, 0);
     ID3D12GraphicsCommandList_DrawInstanced(command_list, 3, 1, 0, 0);

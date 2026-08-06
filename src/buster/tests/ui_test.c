@@ -1577,6 +1577,10 @@ BUSTER_GLOBAL_LOCAL void ui_test_background_blur_renderer_order(UnitTestArgument
         ui_set_next_fixed_width(20.0f);
         ui_set_next_fixed_height(20.0f);
         UI_Box* blur = ui_box_make(UI_BoxFlag_DrawBackgroundBlur | UI_BoxFlag_DisableTruncatedHover, S8("blur_order_blur"));
+        blur->corner_radii[CORNER_00] = 1.0f;
+        blur->corner_radii[CORNER_01] = 2.0f;
+        blur->corner_radii[CORNER_10] = 3.0f;
+        blur->corner_radii[CORNER_11] = 4.0f;
         ui_set_next_fixed_width(20.0f);
         ui_set_next_fixed_height(20.0f);
         UI_Box* after = ui_box_make(UI_BoxFlag_DrawBackground | UI_BoxFlag_DisableTruncatedHover, S8("blur_order_after"));
@@ -1594,7 +1598,9 @@ BUSTER_GLOBAL_LOCAL void ui_test_background_blur_renderer_order(UnitTestArgument
                                    ui_test_draw_command_count(context.state, blur, UI_DrawCommandKind_BackgroundBlur) == 1);
         BUSTER_TEST(arguments, blur_audit && blur_audit->rect.x0 == blur->rect.x0 && blur_audit->rect.y0 == blur->rect.y0 &&
                                    blur_audit->rect.x1 == blur->rect.x1 && blur_audit->rect.y1 == blur->rect.y1 &&
-                                   blur_audit->blur_radius == UI_BACKGROUND_BLUR_RADIUS_DEFAULT);
+                                   blur_audit->blur_radius == UI_BACKGROUND_BLUR_RADIUS_DEFAULT &&
+                                   float4_element(blur_audit->corner_radii, 0) == 1.0f && float4_element(blur_audit->corner_radii, 1) == 2.0f &&
+                                   float4_element(blur_audit->corner_radii, 2) == 3.0f && float4_element(blur_audit->corner_radii, 3) == 4.0f);
 
         RenderingCommandStream* stream = rendering_window_command_stream(context.window);
         RenderingReplayEvent replay_events[16] = {0};
@@ -1623,11 +1629,17 @@ BUSTER_GLOBAL_LOCAL void ui_test_background_blur_renderer_order(UnitTestArgument
         }
         BUSTER_TEST(arguments, replay_count == 3 && replay_events[0].kind == RENDERING_REPLAY_DRAW &&
                                    replay_events[1].kind == RENDERING_REPLAY_BACKGROUND_BLUR && replay_events[2].kind == RENDERING_REPLAY_DRAW);
+        BUSTER_TEST(arguments, float4_element(replay_events[1].blur_corner_radii, 0) == 1.0f && float4_element(replay_events[1].blur_corner_radii, 1) == 2.0f &&
+                                   float4_element(replay_events[1].blur_corner_radii, 2) == 3.0f && float4_element(replay_events[1].blur_corner_radii, 3) == 4.0f);
         BUSTER_TEST(arguments, blur_command_index != UINT32_MAX && saw_rect_before && saw_rect_after &&
                                    stream->commands[blur_command_index].blur_rect.x0 == (s32)blur->rect.x0 &&
                                    stream->commands[blur_command_index].blur_rect.y0 == (s32)blur->rect.y0 &&
                                    stream->commands[blur_command_index].blur_rect.x1 == (s32)blur->rect.x1 &&
-                                   stream->commands[blur_command_index].blur_rect.y1 == (s32)blur->rect.y1);
+                                   stream->commands[blur_command_index].blur_rect.y1 == (s32)blur->rect.y1 &&
+                                   float4_element(stream->commands[blur_command_index].blur_corner_radii, 0) == 1.0f &&
+                                   float4_element(stream->commands[blur_command_index].blur_corner_radii, 1) == 2.0f &&
+                                   float4_element(stream->commands[blur_command_index].blur_corner_radii, 2) == 3.0f &&
+                                   float4_element(stream->commands[blur_command_index].blur_corner_radii, 3) == 4.0f);
 
         rendering_window_frame_end(context.rendering, context.window);
         BUSTER_TEST(arguments, stream->backend_trace.blur_capture_pass_count == 1 && stream->backend_trace.blur_horizontal_pass_count == 1 &&

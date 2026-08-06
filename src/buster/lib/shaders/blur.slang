@@ -62,29 +62,54 @@ ConstantBuffer<BlurConstants> blur_constants : register(b0);
 float4 blur_fs(BlurVertexOut input) : SV_Target
 {
     float4 sum = float4(0.0, 0.0, 0.0, 0.0);
-    uint count = 0;
+    float weight_sum = 0.0;
     uint limit = blur_constants.radius;
-    if (limit > 32)
+    if (limit > BUSTER_BLUR_MAX_RADIUS)
     {
-        limit = 32;
+        limit = BUSTER_BLUR_MAX_RADIUS;
     }
-    for (uint sample_index = 0; sample_index <= 64; sample_index += 1)
+    float sigma = max((float)limit * BUSTER_BLUR_SIGMA_SCALE, BUSTER_BLUR_MIN_SIGMA);
+    for (int offset = -BUSTER_BLUR_MAX_RADIUS; offset <= BUSTER_BLUR_MAX_RADIUS; offset += 1)
     {
-        if (sample_index > limit * 2)
+        if (offset < -(int)limit || offset > (int)limit)
         {
-            break;
+            continue;
         }
-        int offset = (int)sample_index - (int)limit;
+        float distance = (float)offset;
+        float weight = pow(BUSTER_BLUR_EXP_BASE, -(distance * distance) / (2.0 * sigma * sigma));
         float2 delta = blur_constants.texel_step * (float)offset;
         float2 sample_uv = input.uv + (blur_constants.vertical != 0 ? float2(0.0, delta.y) : float2(delta.x, 0.0));
+        sample_uv = clamp(sample_uv, float2(0.0, 0.0), float2(1.0, 1.0));
 #if BUSTER_VULKAN
-        sum += blur_source.Sample(sample_uv);
+        sum += blur_source.Sample(sample_uv) * weight;
 #else
-        sum += blur_source.Sample(blur_sampler, sample_uv);
+        sum += blur_source.Sample(blur_sampler, sample_uv) * weight;
 #endif
-        count += 1;
+        weight_sum += weight;
     }
-    return count != 0 ? sum / (float)count : float4(0.0, 0.0, 0.0, 0.0);
+
+    float4 result = weight_sum > 0.0 ? sum / weight_sum : float4(0.0, 0.0, 0.0, 0.0);
+    if (blur_constants.composite != 0)
+    {
+        float2 pixel_position = input.uv * blur_constants.target_size;
+        float2 rect_min = blur_constants.mask_rect.xy;
+        float2 rect_max = blur_constants.mask_rect.zw;
+        float2 half_size = (rect_max - rect_min) * 0.5;
+        float2 center = (rect_max + rect_min) * 0.5;
+        float radius = pixel_position.x < center.x ? (pixel_position.y < center.y ? blur_constants.corner_radii.x : blur_constants.corner_radii.y)
+                                                    : (pixel_position.y < center.y ? blur_constants.corner_radii.z : blur_constants.corner_radii.w);
+        radius = min(max(radius, 0.0), min(half_size.x, half_size.y));
+        float2 d2_no_r2 = abs(center - pixel_position) - half_size;
+        float2 d2 = d2_no_r2 + float2(radius, radius);
+        float negative_distance = min(max(d2.x, d2.y), 0.0);
+        float positive_distance = length(max(d2, 0.0));
+        float distance = negative_distance + positive_distance - radius;
+        if (distance > 0.0)
+        {
+            discard;
+        }
+    }
+    return result;
 }
 
 #if BUSTER_METAL

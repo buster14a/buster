@@ -343,8 +343,9 @@ UnitTestResult rendering_tests(UnitTestArguments* arguments)
     rendering_command_stream_record_flush(replay_stream);
     rendering_command_stream_record_rect(replay_stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = 0}, 18, 6);
     BUSTER_TEST(arguments, rendering_command_stream_record_target(replay_stream, RENDERING_TARGET_BACKBUFFER));
-    BUSTER_TEST(arguments, rendering_command_stream_record_background_blur(replay_stream, (F32Interval2){.x0 = 10, .y0 = 10, .x1 = 80, .y1 = 70},
-                                                                            RENDERING_MAX_BLUR_RADIUS + 5));
+    BUSTER_TEST(arguments, rendering_command_stream_record_background_blur_rounded(
+                              replay_stream, (F32Interval2){.x0 = 10, .y0 = 10, .x1 = 80, .y1 = 70}, RENDERING_MAX_BLUR_RADIUS + 5,
+                              float4_make(1.0f, 2.0f, 3.0f, 4.0f)));
     BUSTER_TEST(arguments, rendering_command_stream_record_background_blur(replay_stream, (F32Interval2){.x0 = 20, .y0 = 20, .x1 = 60, .y1 = 60}, 2));
     rendering_command_stream_record_rect(replay_stream, BUSTER_PIPELINE_RECT, (TextureIndex){.value = 0}, 24, 6);
     RenderingReplayEvent replay_events[32] = {0};
@@ -395,7 +396,11 @@ UnitTestResult rendering_tests(UnitTestArguments* arguments)
                                   replay_events[8].clip.x0 == 0 && replay_events[8].clip.y0 == 0);
     BUSTER_TEST(arguments, replay_events[9].kind == RENDERING_REPLAY_TARGET);
     BUSTER_TEST(arguments, replay_events[10].kind == RENDERING_REPLAY_BACKGROUND_BLUR && replay_events[10].radius == RENDERING_MAX_BLUR_RADIUS);
+    BUSTER_TEST(arguments, float4_element(replay_events[10].blur_corner_radii, 0) == 1.5f && float4_element(replay_events[10].blur_corner_radii, 1) == 3.0f &&
+                                  float4_element(replay_events[10].blur_corner_radii, 2) == 4.5f && float4_element(replay_events[10].blur_corner_radii, 3) == 6.0f);
     BUSTER_TEST(arguments, replay_events[11].kind == RENDERING_REPLAY_BACKGROUND_BLUR && replay_events[11].radius == 2);
+    BUSTER_TEST(arguments, float4_element(replay_events[11].blur_corner_radii, 0) == 0.0f && float4_element(replay_events[11].blur_corner_radii, 1) == 0.0f &&
+                                  float4_element(replay_events[11].blur_corner_radii, 2) == 0.0f && float4_element(replay_events[11].blur_corner_radii, 3) == 0.0f);
     BUSTER_TEST(arguments, replay_events[12].kind == RENDERING_REPLAY_DRAW && replay_events[12].resources.textures[0].value == 12 &&
                                   replay_events[12].batch_index != replay_events[8].batch_index);
 
@@ -492,6 +497,29 @@ UnitTestResult rendering_tests(UnitTestArguments* arguments)
                                                      (RenderingClipRect){.x0 = 1, .y0 = 1, .x1 = 2, .y1 = 2}, 1)
                                       .valid);
 
+    u32 gaussian_fixed_weights[7] = {0};
+    u32 gaussian_fixed_sum = 0;
+    for (s32 offset = -3; offset <= 3; offset += 1)
+    {
+        u32 weight = rendering_blur_kernel_weight_fixed16(3, offset);
+        gaussian_fixed_weights[offset + 3] = weight;
+        gaussian_fixed_sum += weight;
+    }
+    u32 box_fixed_weight = 65536 / 7;
+    BUSTER_TEST(arguments, gaussian_fixed_weights[0] == gaussian_fixed_weights[6] && gaussian_fixed_weights[1] == gaussian_fixed_weights[5] &&
+                                  gaussian_fixed_weights[2] == gaussian_fixed_weights[4]);
+    BUSTER_TEST(arguments, gaussian_fixed_sum >= 65534 && gaussian_fixed_sum <= 65538);
+    BUSTER_TEST(arguments, gaussian_fixed_weights[3] > box_fixed_weight && gaussian_fixed_weights[0] < box_fixed_weight);
+    BUSTER_TEST(arguments, rendering_blur_kernel_weight(3, -2) == rendering_blur_kernel_weight(3, 2) &&
+                                  rendering_blur_kernel_weight(3, -1) == rendering_blur_kernel_weight(3, 1));
+
+    RenderingClipRect rounded_mask_rect = {.x0 = 0, .y0 = 0, .x1 = 20, .y1 = 20};
+    float4 asymmetric_corner_radii = float4_make(6.0f, 2.0f, 4.0f, 8.0f);
+    BUSTER_TEST(arguments, rendering_rounded_rect_mask_factor(rounded_mask_rect, float2_make(10.0f, 10.0f), asymmetric_corner_radii) == 1.0f);
+    BUSTER_TEST(arguments, rendering_rounded_rect_mask_factor(rounded_mask_rect, float2_make(0.5f, 0.5f), asymmetric_corner_radii) == 0.0f &&
+                                  rendering_rounded_rect_mask_factor(rounded_mask_rect, float2_make(19.5f, 19.5f), asymmetric_corner_radii) == 0.0f);
+    BUSTER_TEST(arguments, rendering_rounded_rect_mask_factor(rounded_mask_rect, float2_make(6.5f, 0.5f), asymmetric_corner_radii) == 1.0f);
+
     u8 blur_pixels[] = {
         0, 0, 0, 255,
         255, 255, 255, 255,
@@ -499,7 +527,7 @@ UnitTestResult rendering_tests(UnitTestArguments* arguments)
     };
     Arena* blur_scratch = arena_create((ArenaCreation){0});
     BUSTER_TEST(arguments, rendering_blur_rgba8(blur_scratch, blur_pixels, 3, 1, 12, 1));
-    BUSTER_TEST(arguments, blur_pixels[0] == 85 && blur_pixels[4] == 85 && blur_pixels[8] == 85);
+    BUSTER_TEST(arguments, blur_pixels[0] == 70 && blur_pixels[4] == 115 && blur_pixels[8] == 70);
     BUSTER_TEST(arguments, blur_pixels[3] == 255 && blur_pixels[7] == 255 && blur_pixels[11] == 255);
     u8 clamped_blur_pixels[] = {
         0, 0, 0, 255,
@@ -527,7 +555,7 @@ UnitTestResult rendering_tests(UnitTestArguments* arguments)
         0, 0, 0, 255,
     };
     BUSTER_TEST(arguments, rendering_blur_rgba8(blur_scratch, edge_blur_pixels, 3, 1, 12, 1));
-    BUSTER_TEST(arguments, edge_blur_pixels[0] == 170 && edge_blur_pixels[4] == 85 && edge_blur_pixels[8] == 0);
+    BUSTER_TEST(arguments, edge_blur_pixels[0] == 185 && edge_blur_pixels[4] == 70 && edge_blur_pixels[8] == 0);
     BUSTER_TEST(arguments, !rendering_blur_rgba8(blur_scratch, blur_pixels, 3, 1, 11, 1));
     arena_destroy(blur_scratch, 1);
 

@@ -3701,6 +3701,10 @@ BUSTER_GLOBAL_LOCAL bool vulkan_record_background_blur(RenderingHandle* renderin
         .texel_step = float2_make(1.0f / (f32)plan.half_width, 1.0f / (f32)plan.half_height),
         .radius = plan.radius,
         .vertical = 1,
+        .target_size = float2_make((f32)window->width, (f32)window->height),
+        .mask_rect = float4_make((f32)command.blur_rect.x0, (f32)command.blur_rect.y0, (f32)command.blur_rect.x1, (f32)command.blur_rect.y1),
+        .corner_radii = command.blur_corner_radii,
+        .composite = 1,
     };
     vkCmdPushConstants(frame->command_buffer, blur_pipeline->layout, blur_push_range.stageFlags, blur_push_range.offset, blur_push_range.size,
                        &vertical_constants);
@@ -4520,7 +4524,6 @@ RenderingBackendReplayResult rendering_backend_replay_for_test(RenderingCommandS
     return result;
 }
 
-// TODO: support gradient
 void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHandle* window)
 {
     if (!rendering || !window)

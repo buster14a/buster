@@ -866,7 +866,27 @@ bool rendering_command_stream_record_target(RenderingCommandStream* stream, u32 
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL float4 rendering_blur_corner_radii_to_device(RenderingScale scale, float4 corner_radii)
+{
+    if (!rendering_scale_is_valid(scale))
+    {
+        scale = (RenderingScale){.x = 1.0f, .y = 1.0f};
+    }
+    f32 radius_scale = scale.x < scale.y ? scale.x : scale.y;
+    float4 result = {0};
+    for (u32 index = 0; index < 4; index += 1)
+    {
+        float4_element(result, index) = float4_element(corner_radii, index) * radius_scale;
+    }
+    return result;
+}
+
 bool rendering_command_stream_record_background_blur(RenderingCommandStream* stream, F32Interval2 rect, u32 radius)
+{
+    return rendering_command_stream_record_background_blur_rounded(stream, rect, radius, (float4){0});
+}
+
+bool rendering_command_stream_record_background_blur_rounded(RenderingCommandStream* stream, F32Interval2 rect, u32 radius, float4 corner_radii)
 {
     if (!stream)
     {
@@ -888,6 +908,7 @@ bool rendering_command_stream_record_background_blur(RenderingCommandStream* str
         .pipeline = BUSTER_PIPELINE_RECT,
         .clip = stream->clip_stack[stream->clip_depth - 1],
         .blur_rect = blur_rect,
+        .blur_corner_radii = rendering_blur_corner_radii_to_device(stream->scale, corner_radii),
         .blur_radius = radius,
         .resources = stream->resources,
         .target = stream->target,
@@ -1040,6 +1061,7 @@ u32 rendering_command_stream_replay(RenderingCommandStream* stream, RenderingRep
             .texture = command.texture,
             .clip = command.clip,
             .blur_rect = command.blur_rect,
+            .blur_corner_radii = command.blur_corner_radii,
             .resources = command.resources,
             .target = command.target,
             .radius = command.blur_radius,
@@ -1241,6 +1263,12 @@ bool rendering_window_render_background_blur(RenderingWindowHandle* window, F32I
 {
     RenderingCommandStream* stream = window ? rendering_window_command_stream(window) : 0;
     return rendering_command_stream_record_background_blur(stream, rect, radius);
+}
+
+bool rendering_window_render_background_blur_rounded(RenderingWindowHandle* window, F32Interval2 rect, u32 radius, float4 corner_radii)
+{
+    RenderingCommandStream* stream = window ? rendering_window_command_stream(window) : 0;
+    return rendering_command_stream_record_background_blur_rounded(stream, rect, radius, corner_radii);
 }
 
 #if BUSTER_USE_VULKAN || (defined(_WIN32) && BUSTER_USE_D3D12) || defined(__APPLE__)
@@ -1655,6 +1683,83 @@ RenderingUvCoordinate rendering_rect_uv_for_quad(RectVertex vertex, u32 quad_ver
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL f32 rendering_blur_kernel_raw_weight(u32 radius, s32 offset)
+{
+    f32 sigma = (f32)radius * (f32)BUSTER_BLUR_SIGMA_SCALE;
+    if (sigma < (f32)BUSTER_BLUR_MIN_SIGMA)
+    {
+        sigma = (f32)BUSTER_BLUR_MIN_SIGMA;
+    }
+    f32 distance = (f32)offset;
+    f32 exponent = -(distance * distance) / (2.0f * sigma * sigma);
+    return pow_f32((f32)BUSTER_BLUR_EXP_BASE, exponent);
+}
+
+f32 rendering_blur_kernel_weight(u32 radius, s32 offset)
+{
+    radius = radius > RENDERING_MAX_BLUR_RADIUS ? RENDERING_MAX_BLUR_RADIUS : radius;
+    if (offset < -(s32)radius || offset > (s32)radius)
+    {
+        return 0.0f;
+    }
+
+    f32 weight = rendering_blur_kernel_raw_weight(radius, offset);
+    f32 normalization = 0.0f;
+    for (s32 normalization_offset = -(s32)RENDERING_MAX_BLUR_RADIUS; normalization_offset <= (s32)RENDERING_MAX_BLUR_RADIUS; normalization_offset += 1)
+    {
+        if (normalization_offset < -(s32)radius || normalization_offset > (s32)radius)
+        {
+            continue;
+        }
+        normalization += rendering_blur_kernel_raw_weight(radius, normalization_offset);
+    }
+    return normalization > 0.0f ? weight / normalization : 0.0f;
+}
+
+u32 rendering_blur_kernel_weight_fixed16(u32 radius, s32 offset)
+{
+    f32 weight = rendering_blur_kernel_weight(radius, offset) * 65536.0f;
+    return weight > 0.0f ? (u32)floor_f32(weight + 0.5f) : 0;
+}
+
+BUSTER_GLOBAL_LOCAL f32 rendering_rounded_rect_sdf(RenderingClipRect rect, float2 pixel_position, float4 corner_radii)
+{
+    if (rendering_clip_rect_is_empty(rect))
+    {
+        return 1.0f;
+    }
+
+    f32 rect_x0 = (f32)rect.x0;
+    f32 rect_y0 = (f32)rect.y0;
+    f32 rect_x1 = (f32)rect.x1;
+    f32 rect_y1 = (f32)rect.y1;
+    float2 half_size = float2_make((rect_x1 - rect_x0) * 0.5f, (rect_y1 - rect_y0) * 0.5f);
+    float2 center = float2_make((rect_x1 + rect_x0) * 0.5f, (rect_y1 + rect_y0) * 0.5f);
+    u32 corner_index = float2_element(pixel_position, 0) < float2_element(center, 0)
+                            ? (float2_element(pixel_position, 1) < float2_element(center, 1) ? 0 : 1)
+                            : (float2_element(pixel_position, 1) < float2_element(center, 1) ? 2 : 3);
+    f32 radius = float4_element(corner_radii, corner_index);
+    if (radius < 0.0f || radius != radius)
+    {
+        radius = 0.0f;
+    }
+    f32 maximum_radius = float2_element(half_size, 0) < float2_element(half_size, 1) ? float2_element(half_size, 0) : float2_element(half_size, 1);
+    radius = radius > maximum_radius ? maximum_radius : radius;
+    float2 distance_without_radius = float2_make(fabs_f32(float2_element(center, 0) - float2_element(pixel_position, 0)) - float2_element(half_size, 0),
+                                                  fabs_f32(float2_element(center, 1) - float2_element(pixel_position, 1)) - float2_element(half_size, 1));
+    float2 distance_with_radius = float2_make(float2_element(distance_without_radius, 0) + radius, float2_element(distance_without_radius, 1) + radius);
+    f32 negative_distance = BUSTER_MIN(BUSTER_MAX(float2_element(distance_with_radius, 0), float2_element(distance_with_radius, 1)), 0.0f);
+    f32 positive_x = BUSTER_MAX(float2_element(distance_with_radius, 0), 0.0f);
+    f32 positive_y = BUSTER_MAX(float2_element(distance_with_radius, 1), 0.0f);
+    f32 positive_distance = sqrt_f32(positive_x * positive_x + positive_y * positive_y);
+    return negative_distance + positive_distance - radius;
+}
+
+f32 rendering_rounded_rect_mask_factor(RenderingClipRect rect, float2 pixel_position, float4 corner_radii)
+{
+    return rendering_rounded_rect_sdf(rect, pixel_position, corner_radii) <= 0.0f ? 1.0f : 0.0f;
+}
+
 BUSTER_GLOBAL_LOCAL bool rendering_blur_validate(Arena* scratch, u8* pixels, u32 width, u32 height, u32 stride, u32 channels, u32 radius)
 {
     if (!width || !height || !pixels || !scratch || !channels)
@@ -1690,12 +1795,15 @@ BUSTER_GLOBAL_LOCAL bool rendering_blur_bytes(Arena* scratch, u8* pixels, u32 wi
         radius = RENDERING_MAX_BLUR_RADIUS;
     }
 
-    u32 window_size = radius * 2 + 1;
-    if (!window_size)
+    f32 kernel_weights[RENDERING_MAX_BLUR_RADIUS * 2 + 1] = {0};
+    for (s32 offset = -(s32)RENDERING_MAX_BLUR_RADIUS; offset <= (s32)RENDERING_MAX_BLUR_RADIUS; offset += 1)
     {
-        return false;
+        if (offset < -(s32)radius || offset > (s32)radius)
+        {
+            continue;
+        }
+        kernel_weights[offset + RENDERING_MAX_BLUR_RADIUS] = rendering_blur_kernel_weight(radius, offset);
     }
-    u32 divisor = window_size;
     u64 pixel_count = (u64)width * height;
     u8* horizontal = (u8*)arena_allocate_bytes(scratch, pixel_count * channels, 16);
     for (u32 y = 0; y < height; y += 1)
@@ -1704,10 +1812,14 @@ BUSTER_GLOBAL_LOCAL bool rendering_blur_bytes(Arena* scratch, u8* pixels, u32 wi
         {
             for (u32 channel = 0; channel < channels; channel += 1)
             {
-                u32 sum = 0;
-                for (u32 sample = 0; sample < window_size; sample += 1)
+                f32 sum = 0.0f;
+                f32 weight_sum = 0.0f;
+                for (s32 offset = -(s32)RENDERING_MAX_BLUR_RADIUS; offset <= (s32)RENDERING_MAX_BLUR_RADIUS; offset += 1)
                 {
-                    s32 offset = (s32)sample - (s32)radius;
+                    if (offset < -(s32)radius || offset > (s32)radius)
+                    {
+                        continue;
+                    }
                     s32 sample_x = (s32)x + offset;
                     if (sample_x < 0)
                     {
@@ -1717,9 +1829,13 @@ BUSTER_GLOBAL_LOCAL bool rendering_blur_bytes(Arena* scratch, u8* pixels, u32 wi
                     {
                         sample_x = (s32)width - 1;
                     }
-                    sum += pixels[(u64)y * stride + (u64)sample_x * channels + channel];
+                    f32 weight = kernel_weights[offset + RENDERING_MAX_BLUR_RADIUS];
+                    sum += (f32)pixels[(u64)y * stride + (u64)sample_x * channels + channel] * weight;
+                    weight_sum += weight;
                 }
-                horizontal[((u64)y * width + x) * channels + channel] = (u8)((sum + divisor / 2) / divisor);
+                f32 value = weight_sum > 0.0f ? sum / weight_sum : 0.0f;
+                value = BUSTER_CLAMP(0.0f, value, 255.0f);
+                horizontal[((u64)y * width + x) * channels + channel] = (u8)round_f32(value);
             }
         }
     }
@@ -1730,10 +1846,14 @@ BUSTER_GLOBAL_LOCAL bool rendering_blur_bytes(Arena* scratch, u8* pixels, u32 wi
         {
             for (u32 channel = 0; channel < channels; channel += 1)
             {
-                u32 sum = 0;
-                for (u32 sample = 0; sample < window_size; sample += 1)
+                f32 sum = 0.0f;
+                f32 weight_sum = 0.0f;
+                for (s32 offset = -(s32)RENDERING_MAX_BLUR_RADIUS; offset <= (s32)RENDERING_MAX_BLUR_RADIUS; offset += 1)
                 {
-                    s32 offset = (s32)sample - (s32)radius;
+                    if (offset < -(s32)radius || offset > (s32)radius)
+                    {
+                        continue;
+                    }
                     s32 sample_y = (s32)y + offset;
                     if (sample_y < 0)
                     {
@@ -1743,9 +1863,13 @@ BUSTER_GLOBAL_LOCAL bool rendering_blur_bytes(Arena* scratch, u8* pixels, u32 wi
                     {
                         sample_y = (s32)height - 1;
                     }
-                    sum += horizontal[((u64)sample_y * width + x) * channels + channel];
+                    f32 weight = kernel_weights[offset + RENDERING_MAX_BLUR_RADIUS];
+                    sum += (f32)horizontal[((u64)sample_y * width + x) * channels + channel] * weight;
+                    weight_sum += weight;
                 }
-                pixels[(u64)y * stride + (u64)x * channels + channel] = (u8)((sum + divisor / 2) / divisor);
+                f32 value = weight_sum > 0.0f ? sum / weight_sum : 0.0f;
+                value = BUSTER_CLAMP(0.0f, value, 255.0f);
+                pixels[(u64)y * stride + (u64)x * channels + channel] = (u8)round_f32(value);
             }
         }
     }

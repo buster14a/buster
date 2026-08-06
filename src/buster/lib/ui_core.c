@@ -3166,8 +3166,9 @@ BUSTER_GLOBAL_LOCAL void ui_draw_box(UI_Box* box)
     {
         u32 radius = ui_background_blur_radius_clamp(box->background_blur_radius);
         box->background_blur_radius = radius;
+        float4 corner_radii = float4_make(box->corner_radii[CORNER_00], box->corner_radii[CORNER_01], box->corner_radii[CORNER_10], box->corner_radii[CORNER_11]);
         ui_draw_command_push_background_blur(box, rect, radius);
-        if (ui_state->rendering_window && !rendering_window_render_background_blur(ui_state->rendering_window, rect, radius))
+        if (ui_state->rendering_window && !rendering_window_render_background_blur_rounded(ui_state->rendering_window, rect, radius, corner_radii))
         {
             ui_state->draw_renderer_succeeded = false;
         }

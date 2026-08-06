@@ -50,12 +50,26 @@ typedef enum BusterPipeline
 #define RENDERING_MAX_CLIP_DEPTH (64)
 #define RENDERING_MAX_VERTEX_COUNT (RENDERING_MAX_DRAW_COUNT * 4)
 #define RENDERING_MAX_INDEX_COUNT (RENDERING_MAX_DRAW_COUNT * 6)
-#define RENDERING_MAX_BLUR_RADIUS (32)
+#define RENDERING_MAX_BLUR_RADIUS (BUSTER_BLUR_MAX_RADIUS)
 #define RENDERING_MAX_BLUR_PIXELS (4 * 1024 * 1024)
 #define RENDERING_MAX_BLUR_PASS_SET_COUNT (RENDERING_MAX_DRAW_COUNT * 3)
 #define RENDERING_MAX_WINDOW_COUNT (8)
 #define RENDERING_TARGET_BACKBUFFER (0)
 #define RENDERING_RESOURCE_SLOT_COUNT RECT_TEXTURE_SLOT_COUNT
+
+// The self-hosted C frontend does not yet constant-evaluate vector-backed
+// sizeof/offsetof expressions; native C toolchains enforce the ABI here.
+#if !defined(__BUSTER__)
+BUSTER_CT_CHECK(sizeof(BlurConstants) == 64);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(BlurConstants, texel_step) == 0);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(BlurConstants, radius) == 8);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(BlurConstants, vertical) == 12);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(BlurConstants, mask_rect) == 16);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(BlurConstants, corner_radii) == 32);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(BlurConstants, target_size) == 48);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(BlurConstants, composite) == 56);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(BlurConstants, reserved) == 60);
+#endif
 
 typedef struct RenderingResourceBindings RenderingResourceBindings;
 struct RenderingResourceBindings
@@ -95,6 +109,7 @@ struct RenderingCommand
     RenderingClipRect clip;
     RenderingResourceBindings resources;
     RenderingClipRect blur_rect;
+    float4 blur_corner_radii;
     u32 batch_index;
     u32 resource_slot;
     u32 target;
@@ -187,6 +202,7 @@ struct RenderingReplayEvent
     TextureIndex texture;
     RenderingClipRect clip;
     RenderingClipRect blur_rect;
+    float4 blur_corner_radii;
     RenderingResourceBindings resources;
     u32 target;
     u32 radius;
@@ -281,6 +297,7 @@ BUSTER_F_DECL void rendering_command_stream_record_flush(RenderingCommandStream*
 BUSTER_F_DECL bool rendering_command_stream_set_texture_binding(RenderingCommandStream* stream, u32 slot, TextureIndex texture);
 BUSTER_F_DECL bool rendering_command_stream_record_target(RenderingCommandStream* stream, u32 target);
 BUSTER_F_DECL bool rendering_command_stream_record_background_blur(RenderingCommandStream* stream, F32Interval2 rect, u32 radius);
+BUSTER_F_DECL bool rendering_command_stream_record_background_blur_rounded(RenderingCommandStream* stream, F32Interval2 rect, u32 radius, float4 corner_radii);
 BUSTER_F_DECL bool rendering_command_stream_command_ends_batch(RenderingCommandStream* stream, u32 command_index);
 BUSTER_F_DECL void rendering_command_stream_mark_failure(RenderingCommandStream* stream);
 BUSTER_F_DECL bool rendering_command_stream_is_valid(RenderingCommandStream* stream);
