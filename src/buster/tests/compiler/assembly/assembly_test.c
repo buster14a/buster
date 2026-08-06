@@ -4731,28 +4731,274 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    memcmp(apx_rol_immediate_att.bytes.pointer, expected_apx_rol_immediate,
                                           sizeof(expected_apx_rol_immediate)) == 0);
 
-        // XED exposes CET, CLDEMOTE, and ICACHE_PREFETCH selectors, but the
-        // public Target feature enum has no corresponding bits yet.  Source
-        // syntax is therefore parsed through the real Intel/AT&T paths and
-        // reports the precise feature seam without claiming public bytes.
+        Target selector_target = advanced_target;
+        selector_target.cpu_features |= TARGET_CPU_FEATURE_X86_IBT | TARGET_CPU_FEATURE_X86_CLDEMOTE |
+                                        TARGET_CPU_FEATURE_X86_PREFETCHI | TARGET_CPU_FEATURE_X86_MOVRS |
+                                        TARGET_CPU_FEATURE_X86_SHSTK;
+        u8 expected_selector[] = {
+            0xf3, 0x0f, 0x1e, 0xfb,
+            0xf3, 0x0f, 0x1e, 0xfa,
+            0x0f, 0x1c, 0x00,
+            0x0f, 0x18, 0x20,
+        };
         AssemblyEncodeResult selector_intel = assembly_encode(
             arguments->arena,
-            S8("endbr64\ncldemote byte ptr [rax]\nprefetchit0 byte ptr [rax]\nprefetchrst2 byte ptr [rax]\n"),
-            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            S8("endbr32\nendbr64\ncldemote byte ptr [rax]\nprefetchrst2 byte ptr [rax]\n"),
+            (AssemblyEncodeOptions){.target = selector_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
         AssemblyEncodeResult selector_att = assembly_encode(
             arguments->arena,
-            S8("endbr64\ncldemote (%rax)\nprefetchit0 (%rax)\nprefetchrst2 (%rax)\n"),
-            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
-        bool selector_intel_features = selector_intel.diagnostic_count == 4;
-        bool selector_att_features = selector_att.diagnostic_count == 4;
-        for (u32 index = 0; index < selector_intel.diagnostic_count; index += 1)
-            selector_intel_features &= selector_intel.diagnostics[index].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE;
-        for (u32 index = 0; index < selector_att.diagnostic_count; index += 1)
-            selector_att_features &= selector_att.diagnostics[index].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE;
-        BUSTER_TEST(arguments, selector_intel_features && selector_intel.bytes.length == 0 && selector_intel.relocation_count == 0 &&
-                                   selector_intel.symbol_count == 0);
-        BUSTER_TEST(arguments, selector_att_features && selector_att.bytes.length == 0 && selector_att.relocation_count == 0 &&
-                                   selector_att.symbol_count == 0);
+            S8("endbr32\nendbr64\ncldemote (%rax)\nprefetchrst2 (%rax)\n"),
+            (AssemblyEncodeOptions){.target = selector_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, selector_intel.diagnostic_count == 0 && selector_intel.bytes.length == sizeof(expected_selector) &&
+                                   memcmp(selector_intel.bytes.pointer, expected_selector, sizeof(expected_selector)) == 0 &&
+                                   selector_intel.relocation_count == 0 && selector_intel.symbol_count == 0);
+        BUSTER_TEST(arguments, selector_att.diagnostic_count == 0 && selector_att.bytes.length == sizeof(expected_selector) &&
+                                   memcmp(selector_att.bytes.pointer, expected_selector, sizeof(expected_selector)) == 0 &&
+                                   selector_att.relocation_count == 0 && selector_att.symbol_count == 0);
+        u8 expected_prefetchit[] = {
+            0x0f, 0x18, 0x3d, 0x00, 0x00, 0x00, 0x00,
+            0x0f, 0x18, 0x35, 0x00, 0x00, 0x00, 0x00,
+        };
+        AssemblyEncodeResult prefetchit_intel = assembly_encode(
+            arguments->arena,
+            S8("prefetchit0 byte ptr [rip + prefetchit0_external]\nprefetchit1 byte ptr [rip + prefetchit1_external]\n"),
+            (AssemblyEncodeOptions){.target = selector_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult prefetchit_att = assembly_encode(
+            arguments->arena,
+            S8("prefetchit0 prefetchit0_external(%rip)\nprefetchit1 prefetchit1_external(%rip)\n"),
+            (AssemblyEncodeOptions){.target = selector_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, prefetchit_intel.diagnostic_count == 0 && prefetchit_intel.bytes.length == sizeof(expected_prefetchit) &&
+                                   memcmp(prefetchit_intel.bytes.pointer, expected_prefetchit, sizeof(expected_prefetchit)) == 0 &&
+                                   prefetchit_intel.relocation_count == 2 && prefetchit_intel.symbol_count == 2 &&
+                                   prefetchit_intel.relocations[0].offset == 3 && prefetchit_intel.relocations[0].addend == -4 &&
+                                   prefetchit_intel.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                                   string_equal(prefetchit_intel.symbols[prefetchit_intel.relocations[0].symbol].name, S8("prefetchit0_external")) &&
+                                   prefetchit_intel.relocations[1].offset == 10 && prefetchit_intel.relocations[1].addend == -4 &&
+                                   prefetchit_intel.relocations[1].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                                   string_equal(prefetchit_intel.symbols[prefetchit_intel.relocations[1].symbol].name, S8("prefetchit1_external")));
+        BUSTER_TEST(arguments, prefetchit_att.diagnostic_count == 0 && prefetchit_att.bytes.length == sizeof(expected_prefetchit) &&
+                                   memcmp(prefetchit_att.bytes.pointer, expected_prefetchit, sizeof(expected_prefetchit)) == 0 &&
+                                   prefetchit_att.relocation_count == 2 && prefetchit_att.symbol_count == 2 &&
+                                   prefetchit_att.relocations[0].offset == 3 && prefetchit_att.relocations[0].addend == -4 &&
+                                   prefetchit_att.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                                   string_equal(prefetchit_att.symbols[prefetchit_att.relocations[0].symbol].name, S8("prefetchit0_external")) &&
+                                   prefetchit_att.relocations[1].offset == 10 && prefetchit_att.relocations[1].addend == -4 &&
+                                   prefetchit_att.relocations[1].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                                   string_equal(prefetchit_att.symbols[prefetchit_att.relocations[1].symbol].name, S8("prefetchit1_external")));
+        AssemblyEncodeResult invalid_prefetchit_intel = assembly_encode(
+            arguments->arena, S8("prefetchit0 byte ptr [rax]\nprefetchit1 byte ptr [rax]\n"),
+            (AssemblyEncodeOptions){.target = selector_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult invalid_prefetchit_att = assembly_encode(
+            arguments->arena, S8("prefetchit0 (%rax)\nprefetchit1 (%rax)\n"),
+            (AssemblyEncodeOptions){.target = selector_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, invalid_prefetchit_intel.diagnostic_count == 2 &&
+                                   invalid_prefetchit_intel.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   invalid_prefetchit_intel.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   invalid_prefetchit_intel.bytes.length == 0 && invalid_prefetchit_intel.relocation_count == 0 &&
+                                   invalid_prefetchit_intel.symbol_count == 0);
+        BUSTER_TEST(arguments, invalid_prefetchit_att.diagnostic_count == 2 &&
+                                   invalid_prefetchit_att.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   invalid_prefetchit_att.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   invalid_prefetchit_att.bytes.length == 0 && invalid_prefetchit_att.relocation_count == 0 &&
+                                   invalid_prefetchit_att.symbol_count == 0);
+        String8 cet_ordinary_intel_source = S8(
+            "clrssbsy [rax]\n"
+            "endbr32\n"
+            "endbr64\n"
+            "incsspd eax\n"
+            "incsspq rax\n"
+            "rdsspd eax\n"
+            "rdsspq rax\n"
+            "rstorssp [rax]\n"
+            "saveprevssp\n"
+            "setssbsy\n"
+            "wrssd dword ptr [rax], ebx\n"
+            "wrssq qword ptr [rax], rbx\n"
+            "wrussd dword ptr [rax], ebx\n"
+            "wrussq qword ptr [rax], rbx\n");
+        String8 cet_ordinary_att_source = S8(
+            "clrssbsy (%rax)\n"
+            "endbr32\n"
+            "endbr64\n"
+            "incsspd %eax\n"
+            "incsspq %rax\n"
+            "rdsspd %eax\n"
+            "rdsspq %rax\n"
+            "rstorssp (%rax)\n"
+            "saveprevssp\n"
+            "setssbsy\n"
+            "wrssd %ebx, (%rax)\n"
+            "wrssq %rbx, (%rax)\n"
+            "wrussd %ebx, (%rax)\n"
+            "wrussq %rbx, (%rax)\n");
+        u8 expected_cet_ordinary[] = {
+            0xf3, 0x0f, 0xae, 0x30,
+            0xf3, 0x0f, 0x1e, 0xfb,
+            0xf3, 0x0f, 0x1e, 0xfa,
+            0xf3, 0x0f, 0xae, 0xe8,
+            0xf3, 0x48, 0x0f, 0xae, 0xe8,
+            0xf3, 0x0f, 0x1e, 0xc8,
+            0xf3, 0x48, 0x0f, 0x1e, 0xc8,
+            0xf3, 0x0f, 0x01, 0x28,
+            0xf3, 0x0f, 0x01, 0xea,
+            0xf3, 0x0f, 0x01, 0xe8,
+            0x0f, 0x38, 0xf6, 0x18,
+            0x48, 0x0f, 0x38, 0xf6, 0x18,
+            0x66, 0x0f, 0x38, 0xf5, 0x18,
+            0x66, 0x48, 0x0f, 0x38, 0xf5, 0x18,
+        };
+        Target ordinary_cet_target = selector_target;
+        ordinary_cet_target.cpu_features &= ~((TargetCpuFeatures)TARGET_CPU_FEATURE_X86_APX | TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF);
+        AssemblyEncodeResult cet_ordinary_intel = assembly_encode(
+            arguments->arena, cet_ordinary_intel_source,
+            (AssemblyEncodeOptions){.target = ordinary_cet_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult cet_ordinary_att = assembly_encode(
+            arguments->arena, cet_ordinary_att_source,
+            (AssemblyEncodeOptions){.target = ordinary_cet_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, cet_ordinary_intel.diagnostic_count == 0 && cet_ordinary_intel.bytes.length == sizeof(expected_cet_ordinary) &&
+                                   memcmp(cet_ordinary_intel.bytes.pointer, expected_cet_ordinary, sizeof(expected_cet_ordinary)) == 0 &&
+                                   cet_ordinary_intel.relocation_count == 0 && cet_ordinary_intel.symbol_count == 0);
+        BUSTER_TEST(arguments, cet_ordinary_att.diagnostic_count == 0 && cet_ordinary_att.bytes.length == sizeof(expected_cet_ordinary) &&
+                                   memcmp(cet_ordinary_att.bytes.pointer, expected_cet_ordinary, sizeof(expected_cet_ordinary)) == 0 &&
+                                   cet_ordinary_att.relocation_count == 0 && cet_ordinary_att.symbol_count == 0);
+        u8 expected_shadow_stack[] = {
+            0x48, 0x0f, 0x38, 0xf6, 0x18,
+            0xf3, 0x48, 0x0f, 0x1e, 0xc9,
+        };
+        AssemblyEncodeResult shadow_stack_intel = assembly_encode(
+            arguments->arena, S8("wrssq qword ptr [rax], rbx\nrdsspq rcx\n"),
+            (AssemblyEncodeOptions){.target = selector_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult shadow_stack_att = assembly_encode(
+            arguments->arena, S8("wrssq %rbx, (%rax)\nrdsspq %rcx\n"),
+            (AssemblyEncodeOptions){.target = selector_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, shadow_stack_intel.diagnostic_count == 0 &&
+                                   shadow_stack_intel.bytes.length == sizeof(expected_shadow_stack) &&
+                                   memcmp(shadow_stack_intel.bytes.pointer, expected_shadow_stack, sizeof(expected_shadow_stack)) == 0 &&
+                                   shadow_stack_intel.relocation_count == 0 && shadow_stack_intel.symbol_count == 0);
+        BUSTER_TEST(arguments, shadow_stack_att.diagnostic_count == 0 && shadow_stack_att.bytes.length == sizeof(expected_shadow_stack) &&
+                                   memcmp(shadow_stack_att.bytes.pointer, expected_shadow_stack, sizeof(expected_shadow_stack)) == 0 &&
+                                   shadow_stack_att.relocation_count == 0 && shadow_stack_att.symbol_count == 0);
+
+        Target apx_cet_target = selector_target;
+        apx_cet_target.cpu_features |= TARGET_CPU_FEATURE_X86_APX;
+        u8 expected_apx_cet[] = {0x62, 0xec, 0xfc, 0x08, 0x66, 0x08};
+        AssemblyEncodeResult apx_cet_intel = assembly_encode(
+            arguments->arena, S8("wrssq qword ptr [r16], r17\n"),
+            (AssemblyEncodeOptions){.target = apx_cet_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult apx_cet_att = assembly_encode(
+            arguments->arena, S8("wrssq %r17, (%r16)\n"),
+            (AssemblyEncodeOptions){.target = apx_cet_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, apx_cet_intel.diagnostic_count == 0 && apx_cet_intel.bytes.length == sizeof(expected_apx_cet) &&
+                                   memcmp(apx_cet_intel.bytes.pointer, expected_apx_cet, sizeof(expected_apx_cet)) == 0 &&
+                                   apx_cet_intel.relocation_count == 0 && apx_cet_intel.symbol_count == 0);
+        BUSTER_TEST(arguments, apx_cet_att.diagnostic_count == 0 && apx_cet_att.bytes.length == sizeof(expected_apx_cet) &&
+                                   memcmp(apx_cet_att.bytes.pointer, expected_apx_cet, sizeof(expected_apx_cet)) == 0 &&
+                                   apx_cet_att.relocation_count == 0 && apx_cet_att.symbol_count == 0);
+
+        Target missing_apx_cet_apx = apx_cet_target;
+        missing_apx_cet_apx.cpu_features &= ~(TargetCpuFeatures)TARGET_CPU_FEATURE_X86_APX;
+        Target missing_apx_cet_shstk = apx_cet_target;
+        missing_apx_cet_shstk.cpu_features &= ~(TargetCpuFeatures)TARGET_CPU_FEATURE_X86_SHSTK;
+        AssemblyEncodeResult missing_apx_cet_apx_intel = assembly_encode(
+            arguments->arena, S8("wrssq qword ptr [r16], r17\n"),
+            (AssemblyEncodeOptions){.target = missing_apx_cet_apx, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult missing_apx_cet_shstk_intel = assembly_encode(
+            arguments->arena, S8("wrssq qword ptr [r16], r17\n"),
+            (AssemblyEncodeOptions){.target = missing_apx_cet_shstk, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult missing_apx_cet_apx_att = assembly_encode(
+            arguments->arena, S8("wrssq %r17, (%r16)\n"),
+            (AssemblyEncodeOptions){.target = missing_apx_cet_apx, .syntax = ASSEMBLY_SYNTAX_ATT});
+        AssemblyEncodeResult missing_apx_cet_shstk_att = assembly_encode(
+            arguments->arena, S8("wrssq %r17, (%r16)\n"),
+            (AssemblyEncodeOptions){.target = missing_apx_cet_shstk, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, missing_apx_cet_apx_intel.diagnostic_count == 1 &&
+                                   missing_apx_cet_apx_intel.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_apx_cet_apx_intel.bytes.length == 0 && missing_apx_cet_apx_intel.relocation_count == 0 &&
+                                   missing_apx_cet_apx_intel.symbol_count == 0);
+        BUSTER_TEST(arguments, missing_apx_cet_shstk_intel.diagnostic_count == 1 &&
+                                   missing_apx_cet_shstk_intel.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_apx_cet_shstk_intel.bytes.length == 0 && missing_apx_cet_shstk_intel.relocation_count == 0 &&
+                                   missing_apx_cet_shstk_intel.symbol_count == 0);
+        BUSTER_TEST(arguments, missing_apx_cet_apx_att.diagnostic_count == 1 &&
+                                   missing_apx_cet_apx_att.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_apx_cet_apx_att.bytes.length == 0 && missing_apx_cet_apx_att.relocation_count == 0 &&
+                                   missing_apx_cet_apx_att.symbol_count == 0);
+        BUSTER_TEST(arguments, missing_apx_cet_shstk_att.diagnostic_count == 1 &&
+                                   missing_apx_cet_shstk_att.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_apx_cet_shstk_att.bytes.length == 0 && missing_apx_cet_shstk_att.relocation_count == 0 &&
+                                   missing_apx_cet_shstk_att.symbol_count == 0);
+
+        Target missing_shstk_target = selector_target;
+        missing_shstk_target.cpu_features &= ~(TargetCpuFeatures)TARGET_CPU_FEATURE_X86_SHSTK;
+        AssemblyEncodeResult missing_shstk = assembly_encode(
+            arguments->arena, S8("wrssq qword ptr [rax], rbx\nrdsspq rcx\n"),
+            (AssemblyEncodeOptions){.target = missing_shstk_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult missing_shstk_att = assembly_encode(
+            arguments->arena, S8("wrssq %rbx, (%rax)\nrdsspq %rcx\n"),
+            (AssemblyEncodeOptions){.target = missing_shstk_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, missing_shstk.diagnostic_count == 2 && missing_shstk.bytes.length == 0 &&
+                                   missing_shstk.relocation_count == 0 && missing_shstk.symbol_count == 0 &&
+                                   missing_shstk.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_shstk.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+        BUSTER_TEST(arguments, missing_shstk_att.diagnostic_count == 2 && missing_shstk_att.bytes.length == 0 &&
+                                   missing_shstk_att.relocation_count == 0 && missing_shstk_att.symbol_count == 0 &&
+                                   missing_shstk_att.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_shstk_att.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+
+        Target missing_ibt_target = selector_target;
+        missing_ibt_target.cpu_features &= ~(TargetCpuFeatures)TARGET_CPU_FEATURE_X86_IBT;
+        AssemblyEncodeResult missing_ibt = assembly_encode(
+            arguments->arena, S8("endbr32\nendbr64\n"),
+            (AssemblyEncodeOptions){.target = missing_ibt_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult missing_ibt_att = assembly_encode(
+            arguments->arena, S8("endbr32\nendbr64\n"),
+            (AssemblyEncodeOptions){.target = missing_ibt_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, missing_ibt.diagnostic_count == 2 && missing_ibt.bytes.length == 0 &&
+                                   missing_ibt.relocation_count == 0 && missing_ibt.symbol_count == 0 &&
+                                   missing_ibt.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_ibt.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+        BUSTER_TEST(arguments, missing_ibt_att.diagnostic_count == 2 && missing_ibt_att.bytes.length == 0 &&
+                                   missing_ibt_att.relocation_count == 0 && missing_ibt_att.symbol_count == 0 &&
+                                   missing_ibt_att.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_ibt_att.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+
+        String8 selector_intel_sources[] = {
+            S8("endbr64\n"),
+            S8("cldemote byte ptr [rax]\n"),
+            S8("prefetchit0 byte ptr [rip + missing_prefetchit]\n"),
+            S8("prefetchrst2 byte ptr [rax]\n"),
+        };
+        String8 selector_att_sources[] = {
+            S8("endbr64\n"),
+            S8("cldemote (%rax)\n"),
+            S8("prefetchit0 missing_prefetchit(%rip)\n"),
+            S8("prefetchrst2 (%rax)\n"),
+        };
+        TargetCpuFeature selector_features[] = {
+            TARGET_CPU_FEATURE_X86_IBT,
+            TARGET_CPU_FEATURE_X86_CLDEMOTE,
+            TARGET_CPU_FEATURE_X86_PREFETCHI,
+            TARGET_CPU_FEATURE_X86_MOVRS,
+        };
+        for (u32 selector_index = 0; selector_index < BUSTER_ARRAY_LENGTH(selector_features); selector_index += 1)
+        {
+            Target missing_selector_target = selector_target;
+            missing_selector_target.cpu_features &= ~(TargetCpuFeatures)selector_features[selector_index];
+            AssemblyEncodeResult missing_selector_intel = assembly_encode(
+                arguments->arena, selector_intel_sources[selector_index],
+                (AssemblyEncodeOptions){.target = missing_selector_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult missing_selector_att = assembly_encode(
+                arguments->arena, selector_att_sources[selector_index],
+                (AssemblyEncodeOptions){.target = missing_selector_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            BUSTER_TEST(arguments, missing_selector_intel.diagnostic_count == 1 &&
+                                       missing_selector_intel.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                       missing_selector_intel.bytes.length == 0 && missing_selector_intel.relocation_count == 0 &&
+                                       missing_selector_intel.symbol_count == 0);
+            BUSTER_TEST(arguments, missing_selector_att.diagnostic_count == 1 &&
+                                       missing_selector_att.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                       missing_selector_att.bytes.length == 0 && missing_selector_att.relocation_count == 0 &&
+                                       missing_selector_att.symbol_count == 0);
+        }
     }
 
     return result;

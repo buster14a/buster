@@ -435,9 +435,9 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
                                         TARGET_CPU_FEATURE_X86_AVX512BITALG;
     TargetCpuFeatures sapphire_rapids = avx512_ice_lake | TARGET_CPU_FEATURE_X86_AVX512BF16 | TARGET_CPU_FEATURE_X86_AVX512FP16 |
                                         TARGET_CPU_FEATURE_X86_AMX_TILE | TARGET_CPU_FEATURE_X86_AMX_INT8 | TARGET_CPU_FEATURE_X86_AMX_BF16 |
-                                        TARGET_CPU_FEATURE_X86_AVX_VNNI;
+                                        TARGET_CPU_FEATURE_X86_AVX_VNNI | TARGET_CPU_FEATURE_X86_CLDEMOTE;
     TargetCpuFeatures granite_rapids = sapphire_rapids | TARGET_CPU_FEATURE_X86_AVX10_1 | TARGET_CPU_FEATURE_X86_AVX10_512 |
-                                       TARGET_CPU_FEATURE_X86_AMX_FP16;
+                                       TARGET_CPU_FEATURE_X86_AMX_FP16 | TARGET_CPU_FEATURE_X86_PREFETCHI;
     TargetCpuFeatures granite_rapids_d = granite_rapids | TARGET_CPU_FEATURE_X86_AMX_COMPLEX;
     switch (model)
     {
@@ -561,10 +561,10 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
         break;
     case CPU_MODEL_INTEL_SIERRAFOREST:
     case CPU_MODEL_INTEL_GRANDRIDGE:
-        result |= avx2_arrowlake;
+        result |= avx2_arrowlake | TARGET_CPU_FEATURE_X86_CLDEMOTE;
         break;
     case CPU_MODEL_INTEL_CLEARWATERFOREST:
-        result |= avx2_arrowlake_s;
+        result |= avx2_arrowlake_s | TARGET_CPU_FEATURE_X86_CLDEMOTE | TARGET_CPU_FEATURE_X86_PREFETCHI;
         break;
     case CPU_MODEL_INTEL_SANDY_BRIDGE:
     case CPU_MODEL_INTEL_IVY_BRIDGE:
@@ -614,7 +614,9 @@ bool target_cpu_features_are_valid(Target target)
                               TARGET_CPU_FEATURE_X86_AVX_VNNI | TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8 | TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16 |
                               TARGET_CPU_FEATURE_X86_AVX_IFMA | TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT | TARGET_CPU_FEATURE_X86_MOVRS |
                               TARGET_CPU_FEATURE_X86_3DNOW | TARGET_CPU_FEATURE_X86_3DNOWA | TARGET_CPU_FEATURE_X86_FMA4 |
-                              TARGET_CPU_FEATURE_X86_LWP | TARGET_CPU_FEATURE_X86_TBM | TARGET_CPU_FEATURE_X86_XOP;
+                              TARGET_CPU_FEATURE_X86_LWP | TARGET_CPU_FEATURE_X86_TBM | TARGET_CPU_FEATURE_X86_XOP |
+                              TARGET_CPU_FEATURE_X86_IBT | TARGET_CPU_FEATURE_X86_CLDEMOTE | TARGET_CPU_FEATURE_X86_PREFETCHI |
+                              TARGET_CPU_FEATURE_X86_SHSTK;
     if ((features & ~known) || !(features & TARGET_CPU_FEATURE_X86_SSE2))
     {
         return false;
@@ -804,15 +806,19 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("avx512vp2intersect"), .feature = TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("avx512vpopcntdq"), .feature = TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("bmi1"), .feature = TARGET_CPU_FEATURE_X86_BMI1, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("cldemote"), .feature = TARGET_CPU_FEATURE_X86_CLDEMOTE, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("cx16"), .feature = TARGET_CPU_FEATURE_X86_CX16, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("fma4"), .feature = TARGET_CPU_FEATURE_X86_FMA4, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("gfni"), .feature = TARGET_CPU_FEATURE_X86_GFNI, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("ibt"), .feature = TARGET_CPU_FEATURE_X86_IBT, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("lwp"), .feature = TARGET_CPU_FEATURE_X86_LWP, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("lzcnt"), .feature = TARGET_CPU_FEATURE_X86_LZCNT, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("movrs"), .feature = TARGET_CPU_FEATURE_X86_MOVRS, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("neon"), .feature = TARGET_CPU_FEATURE_AARCH64_NEON, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("pclmul"), .feature = TARGET_CPU_FEATURE_X86_PCLMUL, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("popcnt"), .feature = TARGET_CPU_FEATURE_X86_POPCNT, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("prefetchi"), .feature = TARGET_CPU_FEATURE_X86_PREFETCHI, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("shstk"), .feature = TARGET_CPU_FEATURE_X86_SHSTK, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sse2"), .feature = TARGET_CPU_FEATURE_X86_SSE2, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sse3"), .feature = TARGET_CPU_FEATURE_X86_SSE3, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("tbm"), .feature = TARGET_CPU_FEATURE_X86_TBM, .arch = CPU_ARCH_X86_64},

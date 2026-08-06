@@ -132,6 +132,27 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
     CpuId leaf_7_1 = input.leaf_7_1;
     bool has_leaf_7 = input.maximum_basic_leaf >= 7;
     bool has_leaf_7_1 = has_leaf_7 && leaf_7_0.eax >= 1;
+    // CPUID.07H:0.EDX[20] advertises CET indirect-branch tracking, which
+    // supplies the ENDBR32/ENDBR64 forms exposed by the assembler metadata.
+    if (has_leaf_7 && (leaf_7_0.edx & (UINT32_C(0x100000))))
+    {
+        result |= TARGET_CPU_FEATURE_X86_IBT;
+    }
+    // CPUID.07H:0.ECX[7] advertises CET shadow stacks.
+    if (has_leaf_7 && (leaf_7_0.ecx & (UINT32_C(0x80))))
+    {
+        result |= TARGET_CPU_FEATURE_X86_SHSTK;
+    }
+    // CPUID.07H:0.ECX[25] advertises CLDEMOTE independently of vector state.
+    if (has_leaf_7 && (leaf_7_0.ecx & (UINT32_C(0x2000000))))
+    {
+        result |= TARGET_CPU_FEATURE_X86_CLDEMOTE;
+    }
+    // CPUID.07H:1.EDX[14] advertises PREFETCHIT0/PREFETCHIT1.
+    if (has_leaf_7_1 && (leaf_7_1.edx & (UINT32_C(0x4000))))
+    {
+        result |= TARGET_CPU_FEATURE_X86_PREFETCHI;
+    }
     bool avx2_usable = false;
     if (has_leaf_7 && (result & TARGET_CPU_FEATURE_X86_AVX) && (leaf_7_0.ebx & (UINT32_C(0x20))))
     {

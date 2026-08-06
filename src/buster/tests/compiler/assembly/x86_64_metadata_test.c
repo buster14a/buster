@@ -2039,6 +2039,50 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     }
 
     {
+        // PREFETCHIT0/1 are 64-bit RIP-relative-only forms.  Keep this
+        // invariant in the typed selector and emitter, not only in assembly
+        // source parsing, so direct metadata callers cannot encode a base
+        // register form.
+        String8 wildcard[1] = {S8("*")};
+        String8 prefetchit_mnemonics[] = {S8("PREFETCHIT0"), S8("PREFETCHIT1")};
+        u8 prefetchit_modrm[] = {0x3d, 0x35};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(prefetchit_mnemonics); index += 1)
+        {
+            BusterX86MetadataPhysicalOperand rip_operand =
+                x86_64_metadata_test_physical_mem_rip(S8("prefetchit_direct_external"), 0, 8);
+            BusterX86MetadataPhysicalOperand base_operand = x86_64_metadata_test_physical_mem_base(0, 8, 0);
+            BusterX86MetadataPhysicalQuery rip_query = x86_64_metadata_test_physical_query(
+                prefetchit_mnemonics[index], &rip_operand, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                BUSTER_ARRAY_LENGTH(wildcard));
+            BusterX86MetadataPhysicalQuery base_query = rip_query;
+            base_query.operands = &base_operand;
+            BusterX86MetadataSelectResult rip_selection = buster_x86_metadata_select_form(rip_query);
+            BusterX86MetadataSelectResult base_selection = buster_x86_metadata_select_form(base_query);
+            u8 output[16] = {0};
+            BusterX86MetadataRelocation relocations[1] = {0};
+            BusterX86MetadataEmitResult rip_emit = x86_64_metadata_test_emit_form(
+                prefetchit_mnemonics[index], rip_selection.form_id, &rip_operand, 1,
+                (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard), output,
+                BUSTER_ARRAY_LENGTH(output), relocations, BUSTER_ARRAY_LENGTH(relocations));
+            BusterX86MetadataEmitResult base_emit = x86_64_metadata_test_emit_form(
+                prefetchit_mnemonics[index], rip_selection.form_id, &base_operand, 1,
+                (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard), output,
+                BUSTER_ARRAY_LENGTH(output), relocations, BUSTER_ARRAY_LENGTH(relocations));
+            BUSTER_TEST(arguments, rip_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                       rip_selection.selected_byte_count == 7 &&
+                                       base_selection.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
+            BUSTER_TEST(arguments, rip_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && rip_emit.byte_count == 7 &&
+                                       rip_emit.relocation_count == 1 && output[0] == 0x0f && output[1] == 0x18 &&
+                                       output[2] == prefetchit_modrm[index] && output[3] == 0 && output[4] == 0 &&
+                                       output[5] == 0 && output[6] == 0 && relocations[0].offset == 3 &&
+                                       relocations[0].width == 4 && relocations[0].kind == BUSTER_X86_METADATA_RELOCATION_PC32 &&
+                                       relocations[0].addend == -4);
+            BUSTER_TEST(arguments, base_emit.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH &&
+                                       base_emit.byte_count == 0 && base_emit.relocation_count == 0);
+        }
+    }
+
+    {
         // Permanent byte oracles cover the legacy/REX, REX2/APX, VEX, XOP,
         // EVEX, AMX, and system families.  The operands deliberately use the
         // public physical identity rather than metadata signatures.
@@ -2538,15 +2582,20 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         u32 endbr64_form_id = UINT32_MAX;
         u32 cldemote_form_id = UINT32_MAX;
         u32 prefetchit0_form_id = UINT32_MAX;
+        u32 prefetchit1_form_id = UINT32_MAX;
         u32 prefetchrst2_form_id = UINT32_MAX;
         bool selector_forms = x86_64_metadata_test_iform_id(S8("ENDBR64"), &endbr64_form_id) &&
                               x86_64_metadata_test_iform_id(S8("CLDEMOTE_MEMu8"), &cldemote_form_id) &&
                               x86_64_metadata_test_iform_id(S8("PREFETCHIT0_MEMu8"), &prefetchit0_form_id) &&
+                              x86_64_metadata_test_iform_id(S8("PREFETCHIT1_MEMu8"), &prefetchit1_form_id) &&
                               x86_64_metadata_test_iform_id(S8("PREFETCHRST2_MEMu8"), &prefetchrst2_form_id);
         BusterX86MetadataPhysicalOperand selector_memory = x86_64_metadata_test_physical_mem_base(0, 8, 0);
+        BusterX86MetadataPhysicalOperand prefetchit_memory = x86_64_metadata_test_physical_mem_rip((String8){0}, 0, 8);
+        prefetchit_memory.memory.has_symbol = false;
         u8 endbr64_bytes[] = {0xf3, 0x0f, 0x1e, 0xfa};
         u8 cldemote_bytes[] = {0x0f, 0x1c, 0x00};
-        u8 prefetchit0_bytes[] = {0x0f, 0x18, 0x38};
+        u8 prefetchit0_bytes[] = {0x0f, 0x18, 0x3d, 0x00, 0x00, 0x00, 0x00};
+        u8 prefetchit1_bytes[] = {0x0f, 0x18, 0x35, 0x00, 0x00, 0x00, 0x00};
         u8 prefetchrst2_bytes[] = {0x0f, 0x18, 0x20};
         BUSTER_TEST(arguments, selector_forms && x86_64_metadata_test_emit_exact(S8("ENDBR64"), endbr64_form_id, 0, 0,
                                                                                     (BusterX86MetadataPhysicalAttributes){0}, wildcard,
@@ -2556,10 +2605,14 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                                                                     (BusterX86MetadataPhysicalAttributes){0}, wildcard,
                                                                                     BUSTER_ARRAY_LENGTH(wildcard), cldemote_bytes,
                                                                                     BUSTER_ARRAY_LENGTH(cldemote_bytes)));
-        BUSTER_TEST(arguments, selector_forms && x86_64_metadata_test_emit_exact(S8("PREFETCHIT0"), prefetchit0_form_id, &selector_memory, 1,
+        BUSTER_TEST(arguments, selector_forms && x86_64_metadata_test_emit_exact(S8("PREFETCHIT0"), prefetchit0_form_id, &prefetchit_memory, 1,
                                                                                     (BusterX86MetadataPhysicalAttributes){0}, wildcard,
                                                                                     BUSTER_ARRAY_LENGTH(wildcard), prefetchit0_bytes,
                                                                                     BUSTER_ARRAY_LENGTH(prefetchit0_bytes)));
+        BUSTER_TEST(arguments, selector_forms && x86_64_metadata_test_emit_exact(S8("PREFETCHIT1"), prefetchit1_form_id, &prefetchit_memory, 1,
+                                                                                    (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                                    BUSTER_ARRAY_LENGTH(wildcard), prefetchit1_bytes,
+                                                                                    BUSTER_ARRAY_LENGTH(prefetchit1_bytes)));
         BUSTER_TEST(arguments, selector_forms && x86_64_metadata_test_emit_exact(S8("PREFETCHRST2"), prefetchrst2_form_id, &selector_memory, 1,
                                                                                     (BusterX86MetadataPhysicalAttributes){0}, wildcard,
                                                                                     BUSTER_ARRAY_LENGTH(wildcard), prefetchrst2_bytes,

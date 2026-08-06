@@ -210,6 +210,8 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_physical_operand_view(BusterX86Gene
                                                                       BusterX86GeneratedOperand operand,
                                                                       u8* physical_class, u16* physical_width_flags);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_string_input_equal(u32 offset, String8 input);
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_input_string_equal(String8 left, String8 right);
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prefetchit_address_valid(BusterX86MetadataPhysicalQuery query);
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validation_fail(BusterX86MetadataValidationResult* result,
                                                               BusterX86MetadataValidationError error, u32 index, u32 detail)
@@ -2865,6 +2867,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     BusterX86MetadataPatternSemantics pattern = {0};
     if (!buster_x86_metadata_emit_parse_pattern(form, &pattern)) return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
     if (pattern.unresolved_blocker) return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
+    if (!buster_x86_metadata_prefetchit_address_valid(query)) return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
     if (buster_x86_metadata_emit_pattern_control_blocker(form, pattern) != BUSTER_X86_METADATA_BLOCKER_NONE)
         return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
     bool requires_dfv = buster_x86_metadata_form_iform_requires_dfv(form);
@@ -3587,6 +3590,20 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataString buster_x86_metadata_apx_feature_stri
     return (BusterX86MetadataString){0};
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prefetchit_address_valid(BusterX86MetadataPhysicalQuery query)
+{
+    bool prefetchit = buster_x86_metadata_input_string_equal(query.mnemonic, S8("prefetchit0")) ||
+                      buster_x86_metadata_input_string_equal(query.mnemonic, S8("prefetchit1"));
+    if (!prefetchit) return true;
+    if (query.operand_count != 1 || query.operands[0].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+    {
+        return false;
+    }
+    BusterX86MetadataPhysicalMemory memory = query.operands[0].memory;
+    u8 address_size = memory.address_size ? memory.address_size : query.address_size ? query.address_size : 64;
+    return address_size == 64 && memory.rip_relative && !memory.has_base && !memory.has_index;
+}
+
 BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataPhysicalQuery query)
 {
     BusterX86MetadataSelectResult result = {
@@ -3967,6 +3984,13 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_canonical_query(BusterX86M
                 .has_displacement = (form.field_flags & BUSTER_X86_METADATA_FIELD_DISPLACEMENT) != 0,
                 .base = {.index = 0, .width = address_size, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
             };
+            bool prefetchit = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("PREFETCHIT0")) ||
+                              buster_x86_metadata_string_input_equal(form.iclass.offset, S8("PREFETCHIT1"));
+            if (prefetchit)
+            {
+                memory.has_base = false;
+                memory.rip_relative = true;
+            }
             if (vsib)
             {
                 u8 vector_class = pattern.vector_length == 512 ? BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM
@@ -5141,6 +5165,18 @@ BUSTER_GLOBAL_LOCAL char8 buster_x86_metadata_lowercase_character(char8 characte
     return character >= 'A' && character <= 'Z' ? (char8)(character - 'A' + 'a') : character;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_input_string_equal(String8 left, String8 right)
+{
+    if (left.length != right.length) return false;
+    for (u32 index = 0; index < left.length; index += 1)
+    {
+        if (buster_x86_metadata_lowercase_character(left.pointer[index]) !=
+            buster_x86_metadata_lowercase_character(right.pointer[index]))
+            return false;
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_query_string_valid(String8 string)
 {
     return string.length <= UINT32_MAX && (!string.length || string.pointer != 0);
@@ -5309,6 +5345,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_canonical_feature_matches(u32 offse
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("AMX_MOVRS")))
         return buster_x86_metadata_feature_input_contains_all(input, S8("amx-tile"), S8("amx-movrs"), S8(""), S8(""));
 
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("APX_F_CET")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("apx"), S8("shstk"), S8(""), S8(""));
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("APX_F")))
         return buster_x86_metadata_feature_input_contains_all(input, S8("apx"), S8(""), S8(""), S8(""));
     if (buster_x86_metadata_pool_string_has_prefix(offset, S8("APX_F_")))
@@ -5382,6 +5420,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_canonical_feature_matches(u32 offse
         return buster_x86_metadata_feature_input_contains_all(input, S8("sse2"), S8(""), S8(""), S8(""));
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SSE3")))
         return buster_x86_metadata_feature_input_contains_all(input, S8("sse3"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("ICACHE_PREFETCH")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("prefetchi"), S8(""), S8(""), S8(""));
 
     // AVX-512 forms are width-sensitive.  Require the corresponding
     // canonical subfeature, and require AVX512VL for the 128/256 encodings.
@@ -5421,6 +5461,16 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_feature_available(BusterX86Gen
     u32 requirement = form.isa_set_offset;
     u32 requirement_length = 0;
     if (!buster_x86_metadata_string_offset_terminated(requirement, &requirement_length)) return false;
+    // The generated CET ISA family contains both indirect-branch tracking and
+    // shadow-stack instructions.  Keep those capabilities separate: ENDBR32/
+    // ENDBR64 use `ibt`, while every other CET row uses `shstk`.
+    if (buster_x86_metadata_string_input_equal(requirement, S8("CET")))
+    {
+        if (buster_x86_metadata_feature_input_contains_literal(input, S8("*"))) return true;
+        bool endbr = buster_x86_metadata_string_input_equal(form.iclass_offset, S8("ENDBR32")) ||
+                     buster_x86_metadata_string_input_equal(form.iclass_offset, S8("ENDBR64"));
+        return buster_x86_metadata_feature_input_contains_literal(input, endbr ? S8("ibt") : S8("shstk"));
+    }
     // Some imported rows have no ISA-set token and use the encoder family as
     // their only feature requirement.  This is a fallback, never an OR with
     // a more specific isa_set: extension cannot authorize a specific ISA row.

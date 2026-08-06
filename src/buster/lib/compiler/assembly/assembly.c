@@ -6064,6 +6064,10 @@ BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, Strin
         TARGET_CPU_FEATURE_X86_LWP,
         TARGET_CPU_FEATURE_X86_TBM,
         TARGET_CPU_FEATURE_X86_XOP,
+        TARGET_CPU_FEATURE_X86_IBT,
+        TARGET_CPU_FEATURE_X86_CLDEMOTE,
+        TARGET_CPU_FEATURE_X86_PREFETCHI,
+        TARGET_CPU_FEATURE_X86_SHSTK,
     };
     if (!names || !capacity)
     {
@@ -6817,6 +6821,33 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                                                      physical + index))
         {
             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+        }
+    }
+    // These metadata forms have a fixed memory element width.  Intel permits
+    // unsized CLRSSBSY/RSTORSSP memory operands, while AT&T leaves the width
+    // implicit for the WRSS/WRUSS rows too.  Normalize the cohort before form
+    // selection so both dialects select the same rows, including APX-F CET.
+    u16 implicit_memory_width = 0;
+    bool cet_unsized_intel = syntax == ASSEMBLY_SYNTAX_INTEL &&
+                             (assembly_word_equal(mnemonic, S8("rstorssp")) || assembly_word_equal(mnemonic, S8("clrssbsy")));
+    bool implicit_att_memory = syntax == ASSEMBLY_SYNTAX_ATT;
+    if (implicit_att_memory && assembly_word_equal(mnemonic, S8("cldemote"))) implicit_memory_width = 8;
+    else if (implicit_att_memory &&
+             (assembly_word_equal(mnemonic, S8("wrssd")) || assembly_word_equal(mnemonic, S8("wrussd"))))
+        implicit_memory_width = 32;
+    else if (implicit_att_memory &&
+             (assembly_word_equal(mnemonic, S8("wrssq")) || assembly_word_equal(mnemonic, S8("wrussq")) ||
+              assembly_word_equal(mnemonic, S8("rstorssp")) || assembly_word_equal(mnemonic, S8("clrssbsy"))))
+        implicit_memory_width = 64;
+    else if (cet_unsized_intel) implicit_memory_width = 64;
+    if (implicit_memory_width)
+    {
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !physical[index].width)
+            {
+                physical[index].width = implicit_memory_width;
+            }
         }
     }
     if (suffix_alias_selected && !assembly_x86_metadata_suffix_width_matches(mnemonic_suffix_info, mnemonic_suffix_width, operands,
