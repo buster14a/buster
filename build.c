@@ -905,6 +905,7 @@ typedef struct CmakeBuildOptions CmakeBuildOptions;
 struct CmakeBuildOptions
 {
     String8 config;
+    u32 parallel_jobs;
     u32 optimize : 1;
     u32 optimize_set : 1;
     u32 quiet : 1;
@@ -1799,12 +1800,19 @@ BUSTER_GLOBAL_LOCAL bool self_host_compare_pe(ByteSlice left, ByteSlice right)
 BUSTER_GLOBAL_LOCAL void build_run_add(Arena* arena, BuildStep* step, String8 build_directory, SliceString8 targets, SliceString8 native_arguments,
                                        CmakeBuildOptions options)
 {
+    String8 parallel_jobs = options.parallel_jobs ? string_format(arena, S8("{u32}"), options.parallel_jobs) : (String8){0};
     GenericRun r = generic_tool_run_add_start(arena, step, &cmake_path, S8("cmake"));
     OsArgumentBuilder* b = &r.builder;
     os_argument_builder_append(b, S8("--build"));
     os_argument_builder_append(b, build_directory);
     os_argument_builder_append(b, S8("--config"));
     os_argument_builder_append(b, cmake_build_config(options));
+
+    if (options.parallel_jobs)
+    {
+        os_argument_builder_append(b, S8("--parallel"));
+        os_argument_builder_append(b, parallel_jobs);
+    }
 
     if (targets.length)
     {
@@ -6544,6 +6552,67 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_selection_is_valid(bool requested
     return !requested || (supported && producer_selected);
 }
 
+typedef struct ReleaseBuildParallelism ReleaseBuildParallelism;
+struct ReleaseBuildParallelism
+{
+    u32 unity_jobs;
+    u32 split_jobs;
+};
+
+BUSTER_GLOBAL_LOCAL ReleaseBuildParallelism release_build_parallelism(u32 thread_count, u32 unity_build_count, u32 split_build_count)
+{
+    thread_count = BUSTER_MAX(thread_count, 1);
+
+    u32 unity_jobs = unity_build_count ? 1 : 0;
+    u32 minimum_job_count = unity_build_count + split_build_count;
+    if (unity_build_count && thread_count >= minimum_job_count + unity_build_count)
+    {
+        unity_jobs = 2;
+    }
+
+    u32 unity_job_count = unity_jobs * unity_build_count;
+    u32 remaining_jobs = thread_count > unity_job_count ? thread_count - unity_job_count : 0;
+    u32 split_jobs = split_build_count ? BUSTER_MAX(remaining_jobs / split_build_count, 1) : 0;
+    return (ReleaseBuildParallelism){.unity_jobs = unity_jobs, .split_jobs = split_jobs};
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult release_build_parallelism_tests(void)
+{
+    typedef struct ReleaseBuildParallelismTest ReleaseBuildParallelismTest;
+    struct ReleaseBuildParallelismTest
+    {
+        u32 thread_count;
+        u32 unity_build_count;
+        u32 split_build_count;
+        u32 expected_unity_jobs;
+        u32 expected_split_jobs;
+    };
+
+    ReleaseBuildParallelismTest tests[] = {
+        {.thread_count = 32, .unity_build_count = 1, .split_build_count = 2, .expected_unity_jobs = 2, .expected_split_jobs = 15},
+        {.thread_count = 32, .unity_build_count = 1, .split_build_count = 3, .expected_unity_jobs = 2, .expected_split_jobs = 10},
+        {.thread_count = 8, .unity_build_count = 1, .split_build_count = 2, .expected_unity_jobs = 2, .expected_split_jobs = 3},
+        {.thread_count = 4, .unity_build_count = 1, .split_build_count = 3, .expected_unity_jobs = 1, .expected_split_jobs = 1},
+        {.thread_count = 2, .unity_build_count = 1, .split_build_count = 2, .expected_unity_jobs = 1, .expected_split_jobs = 1},
+        {.thread_count = 1, .unity_build_count = 1, .split_build_count = 2, .expected_unity_jobs = 1, .expected_split_jobs = 1},
+        {.thread_count = 8, .unity_build_count = 0, .split_build_count = 3, .expected_unity_jobs = 0, .expected_split_jobs = 2},
+        {.thread_count = 8, .unity_build_count = 1, .split_build_count = 0, .expected_unity_jobs = 2, .expected_split_jobs = 0},
+    };
+
+    for (u32 test_i = 0; test_i < BUSTER_ARRAY_LENGTH(tests); test_i += 1)
+    {
+        ReleaseBuildParallelismTest test = tests[test_i];
+        ReleaseBuildParallelism actual = release_build_parallelism(test.thread_count, test.unity_build_count, test.split_build_count);
+        if (actual.unity_jobs != test.expected_unity_jobs || actual.split_jobs != test.expected_split_jobs)
+        {
+            string_print(S8("error: release build parallelism test {u32} failed: unity_jobs={u32}, split_jobs={u32}\n"), test_i, actual.unity_jobs,
+                         actual.split_jobs);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    return PROCESS_RESULT_SUCCESS;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
     ProcessResult time_trace_self_test_result = time_trace_summary_self_test(arena);
@@ -6566,6 +6635,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     if (focused_test_result != PROCESS_RESULT_SUCCESS)
     {
         return focused_test_result;
+    }
+    ProcessResult release_parallelism_test_result = release_build_parallelism_tests();
+    if (release_parallelism_test_result != PROCESS_RESULT_SUCCESS)
+    {
+        return release_parallelism_test_result;
     }
 
     typedef struct TestCombination TestCombination;
@@ -6725,12 +6799,37 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         };
     }
 
+    u32 release_unity_build_count = 0;
+    u32 release_split_build_count = 0;
+    for (u64 combination_i = 0; combination_i < combination_count; combination_i += 1)
+    {
+        TestCombination combination = combinations[combination_i];
+        if (!combination.sanitize && combination.options.optimize)
+        {
+            if (combination.compiler == BUILD_COMPILER_CLANG)
+            {
+                release_unity_build_count += 1;
+            }
+            else
+            {
+                release_split_build_count += 1;
+            }
+        }
+    }
+
+    u32 thread_count = os_get_logical_thread_count();
+    ReleaseBuildParallelism release_parallelism =
+        release_build_parallelism(thread_count, release_unity_build_count, release_split_build_count);
+    string_print(S8("BUSTER_RELEASE_PARALLELISM: threads={u32} unity_builds={u32} unity_jobs={u32} split_builds={u32} split_jobs={u32}\n"), thread_count,
+                 release_unity_build_count, release_parallelism.unity_jobs, release_split_build_count, release_parallelism.split_jobs);
+
     BuildStep* release_build_step = step_add(arena);
     for (u64 combination_i = 0; combination_i < combination_count; combination_i += 1)
     {
         TestCombination combination = combinations[combination_i];
         if (!combination.sanitize && combination.options.optimize)
         {
+            combination.options.parallel_jobs = combination.compiler == BUILD_COMPILER_CLANG ? release_parallelism.unity_jobs : release_parallelism.split_jobs;
             build_run_add(arena, release_build_step, combination.build_directory, (SliceString8){0}, (SliceString8){0}, combination.options);
             if (fanout && fanout_requested && build_artifact_fanout_is_canonical(combination.generate, combination.options))
             {

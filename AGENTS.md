@@ -88,11 +88,11 @@ unsanitized Clang/AppleClang builds use the requested unity build; GCC, Zig,
 MSVC, and every other non-Clang compiler use split translation units in
 Release as well as Debug. TCC is retained only as the bootstrap compiler for
 `build.c` and is omitted from all application/compiler combinations.
-Independent non-sanitized Release builds
-run in parallel. CI Release builds use `-O2`; local Release builds retain the
-toolchain default. Clang static analysis runs only against unsanitized
-Release. GUI/GPU smoke tests run for Debug sanitized and Release
-non-sanitized configurations; other combinations run unit tests only.
+Independent non-sanitized Release builds run in parallel under one logical-CPU
+job budget shared across their Ninja processes. CI Release builds use `-O2`;
+local Release builds retain the toolchain default. Clang static analysis runs
+only against unsanitized Release. GUI/GPU smoke tests run for Debug sanitized
+and Release non-sanitized configurations; other combinations run unit tests only.
 Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
 `--instrument`, `--cc <clang|gcc|zig|cl>` are accepted **only by
 `generate`**; `build` rejects them with an explicit diagnostic.
