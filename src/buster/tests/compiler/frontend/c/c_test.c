@@ -9200,6 +9200,55 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         scratch_end(aarch64_tied_assembly_temporary);
     }
     {
+        TemporalArena aarch64_fixed_assembly_temporary = scratch_begin(0, 0);
+        Target aarch64_fixed_target = target_native;
+        aarch64_fixed_target.cpu_arch = CPU_ARCH_AARCH64;
+        CPreprocessResult aarch64_fixed_tokens = {0};
+        CParseResult aarch64_fixed_parse = {0};
+        CIRLowerResult aarch64_fixed_lowered = c_test_lower_source(
+            aarch64_fixed_assembly_temporary.arena,
+            S8("int aarch64_legacy_fixed(int input) { int output; __asm__(\"\" : \"=a\"(output) : \"a\"(input)); return output; }\n"),
+            S8("aarch64-legacy-fixed.c"), aarch64_fixed_target, &aarch64_fixed_tokens, &aarch64_fixed_parse);
+        BUSTER_TEST(arguments, aarch64_fixed_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aarch64_fixed_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aarch64_fixed_lowered.diagnostic_count == 0);
+        if (aarch64_fixed_lowered.program)
+        {
+            IrModule* module = aarch64_fixed_lowered.program->modules;
+            IrFunction* function = c_test_find_ir_function(module, S8("aarch64_legacy_fixed"));
+            IrInstruction* assembly = 0;
+            if (function)
+            {
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                    {
+                        assembly = function->instructions + instruction_index;
+                        break;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_LOWERED && assembly && assembly->operand_count == 2);
+            if (assembly)
+            {
+                BUSTER_TEST(arguments, (assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_A);
+                BUSTER_TEST(arguments, (assembly->immediates[1] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_A);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(aarch64_fixed_lowered.program, module).error == IR_VALIDATION_NONE);
+        }
+
+        CPreprocessResult aarch64_fixed_tie_tokens = {0};
+        CParseResult aarch64_fixed_tie_parse = {0};
+        CIRLowerResult aarch64_fixed_tie_lowered = c_test_lower_source(
+            aarch64_fixed_assembly_temporary.arena,
+            S8("int aarch64_fixed_tie(int input) { int output; __asm__(\"\" : \"=a\"(output) : \"0\"(input)); return output; }\n"),
+            S8("aarch64-fixed-tie.c"), aarch64_fixed_target, &aarch64_fixed_tie_tokens, &aarch64_fixed_tie_parse);
+        BUSTER_TEST(arguments, aarch64_fixed_tie_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aarch64_fixed_tie_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, aarch64_fixed_tie_lowered.diagnostic_count == 1);
+        scratch_end(aarch64_fixed_assembly_temporary);
+    }
+    {
         TemporalArena label_escape_temporary = scratch_begin(0, 0);
         CPreprocessResult label_escape_tokens = c_preprocess(
             label_escape_temporary.arena,

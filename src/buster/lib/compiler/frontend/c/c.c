@@ -31459,8 +31459,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* buil
         builder->failure_message = S8("malformed asm input constraint");
         return false;
     }
-    if (!matching && ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) >= IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT ||
-                      !c_ir_inline_assembly_constraint_class_supported(builder, constraint)))
+    if (!matching && (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) >= IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
     {
         builder->failure_message = S8("unsupported asm constraint for target");
         return false;
@@ -31514,7 +31513,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* buil
         constraint |= read_write ? IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE : 0;
     }
     if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) >= IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT ||
-        !c_ir_inline_assembly_constraint_class_supported(builder, constraint))
+        (matching && !c_ir_inline_assembly_constraint_class_supported(builder, constraint)))
     {
         builder->failure_message = S8("unsupported asm constraint for target");
         return false;
