@@ -4698,6 +4698,61 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    metadata_rollback.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
                                    metadata_rollback.bytes.length == 1 && metadata_rollback.bytes.pointer[0] == 0x90 &&
                                    metadata_rollback.symbol_count == 0 && metadata_rollback.relocation_count == 0);
+
+        // Public APX ONE syntax omits the source count.  Keep it beside the
+        // explicit-immediate spelling so the metadata fallback cannot confuse
+        // an implicit ONE() operand with an ordinary immediate.
+        u8 expected_apx_rol_one[] = {0xd5, 0x10, 0xd0, 0xc0};
+        u8 expected_apx_rol_immediate[] = {0xd5, 0x10, 0xc0, 0xc0, 0x01};
+        AssemblyEncodeResult apx_rol_one_intel = assembly_encode(
+            arguments->arena, S8("rol r16b\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult apx_rol_one_att = assembly_encode(
+            arguments->arena, S8("rolb %r16b\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        AssemblyEncodeResult apx_rol_immediate_intel = assembly_encode(
+            arguments->arena, S8("rol r16b, 1\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult apx_rol_immediate_att = assembly_encode(
+            arguments->arena, S8("rolb $1, %r16b\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, apx_rol_one_intel.diagnostic_count == 0 &&
+                                   apx_rol_one_intel.bytes.length == sizeof(expected_apx_rol_one) &&
+                                   memcmp(apx_rol_one_intel.bytes.pointer, expected_apx_rol_one, sizeof(expected_apx_rol_one)) == 0);
+        BUSTER_TEST(arguments, apx_rol_one_att.diagnostic_count == 0 &&
+                                   apx_rol_one_att.bytes.length == sizeof(expected_apx_rol_one) &&
+                                   memcmp(apx_rol_one_att.bytes.pointer, expected_apx_rol_one, sizeof(expected_apx_rol_one)) == 0);
+        BUSTER_TEST(arguments, apx_rol_immediate_intel.diagnostic_count == 0 &&
+                                   apx_rol_immediate_intel.bytes.length == sizeof(expected_apx_rol_immediate) &&
+                                   memcmp(apx_rol_immediate_intel.bytes.pointer, expected_apx_rol_immediate,
+                                          sizeof(expected_apx_rol_immediate)) == 0);
+        BUSTER_TEST(arguments, apx_rol_immediate_att.diagnostic_count == 0 &&
+                                   apx_rol_immediate_att.bytes.length == sizeof(expected_apx_rol_immediate) &&
+                                   memcmp(apx_rol_immediate_att.bytes.pointer, expected_apx_rol_immediate,
+                                          sizeof(expected_apx_rol_immediate)) == 0);
+
+        // XED exposes CET, CLDEMOTE, and ICACHE_PREFETCH selectors, but the
+        // public Target feature enum has no corresponding bits yet.  Source
+        // syntax is therefore parsed through the real Intel/AT&T paths and
+        // reports the precise feature seam without claiming public bytes.
+        AssemblyEncodeResult selector_intel = assembly_encode(
+            arguments->arena,
+            S8("endbr64\ncldemote byte ptr [rax]\nprefetchit0 byte ptr [rax]\nprefetchrst2 byte ptr [rax]\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult selector_att = assembly_encode(
+            arguments->arena,
+            S8("endbr64\ncldemote (%rax)\nprefetchit0 (%rax)\nprefetchrst2 (%rax)\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        bool selector_intel_features = selector_intel.diagnostic_count == 4;
+        bool selector_att_features = selector_att.diagnostic_count == 4;
+        for (u32 index = 0; index < selector_intel.diagnostic_count; index += 1)
+            selector_intel_features &= selector_intel.diagnostics[index].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE;
+        for (u32 index = 0; index < selector_att.diagnostic_count; index += 1)
+            selector_att_features &= selector_att.diagnostics[index].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE;
+        BUSTER_TEST(arguments, selector_intel_features && selector_intel.bytes.length == 0 && selector_intel.relocation_count == 0 &&
+                                   selector_intel.symbol_count == 0);
+        BUSTER_TEST(arguments, selector_att_features && selector_att.bytes.length == 0 && selector_att.relocation_count == 0 &&
+                                   selector_att.symbol_count == 0);
     }
 
     return result;

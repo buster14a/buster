@@ -330,6 +330,8 @@ struct BusterX86MetadataPatternSemantics
     u8 immediate_signed;
     u8 immediate_variable;
     u8 selector_immediate;
+    u8 has_implicit_one;
+    u8 has_ignore_66;
     u8 relative_width;
     u8 relative_variable;
     u8 displacement_width;
@@ -1186,25 +1188,63 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("NO_SCC")))
                 pattern.no_scc = 1;
         }
-        else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("IMMUNE")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("IGNORE")) ||
+        else if ((buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("IMMUNE")) &&
+                 !buster_x86_metadata_emit_token_equal(token_buffer, length, S8("IMMUNE66()"))) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("OVERRIDE")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("REMOVE")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("FORCE")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("PREFETCH")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("CET")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("MPX")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("P4")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("CLDEMOTE")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("LZCNT")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("TZCNT")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("IBHF")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("MPXMODE")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("ENCDELETE")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("ONE")))
+                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("ENCDELETE")))
         {
             pattern.has_prefix_control = 1;
             buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
+        }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("ONE()")))
+        {
+            // ONE() is an implicit constant-1 operand.  It contributes no
+            // source operand and no immediate byte; the operand record is
+            // checked below so this recognition cannot turn an unrelated
+            // token into an emitted encoding.
+            pattern.has_implicit_one = 1;
+        }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("IGNORE66()")))
+        {
+            // The canonical source form never synthesizes an optional 66
+            // prefix.  Preserve the token so the control check below can
+            // reject an impossible mandatory-66 combination rather than
+            // silently treating the token as an unrelated spelling.
+            pattern.has_ignore_66 = 1;
+        }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("IMMUNE66()")))
+        {
+            // IMMUNE66() describes an optional operand-size prefix that is
+            // irrelevant to this form.  The normalized mandatory-prefix and
+            // operand-width fields already carry the bytes and source shape;
+            // this control adds neither a source operand nor an encoded byte.
+        }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("LZCNT=1")) ||
+                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("TZCNT=1")))
+        {
+            // The 1-valued XED controls select the mnemonic-specific F3
+            // form.  The normalized iclass and mandatory prefix already
+            // carry that source and byte distinction; the control itself
+            // adds no field to the encoding.
+        }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("CLDEMOTE=1")))
+        {
+            // The normalized REG[0b000] field carries CLDEMOTE's fixed
+            // ModRM.reg selector; the token selects the source mnemonic and
+            // adds no independent byte or operand.
+        }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("CET=1")) ||
+                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("PREFETCHIT=1")) ||
+                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("PREFETCHRST=1")))
+        {
+            // These value-1 selectors choose a source mnemonic/feature form;
+            // their fixed ModRM and mandatory-prefix bytes are already in
+            // the normalized pattern and fields.
         }
         else pattern.has_unsupported_token = 1;
     }
@@ -1236,6 +1276,17 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_element_size(BusterX86MetadataForm form);
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_has_implicit_immediate(BusterX86MetadataForm form)
+{
+    for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+    {
+        BusterX86MetadataOperand operand = {0};
+        if (!buster_x86_metadata_operand(form.id, operand_index, &operand)) return false;
+        if (operand.kind == BUSTER_X86_METADATA_OPERAND_IMMEDIATE && (operand.access & BUSTER_X86_METADATA_ACCESS_IMPLICIT)) return true;
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX86MetadataForm form,
                                                                           BusterX86MetadataPatternSemantics pattern)
 {
@@ -1243,6 +1294,8 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
     // A control token is emittable only when the normalized fields below
     // carry the corresponding constraint into the byte path.
     if (pattern.has_prefix_kind && form.prefix_kind != pattern.prefix_kind)
+        return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
+    if (pattern.has_ignore_66 && pattern.mandatory_prefix == 0x66)
         return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
     if (pattern.has_evex_r4 && form.prefix_kind != BUSTER_X86_METADATA_PREFIX_EVEX)
         return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
@@ -1293,6 +1346,8 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
         return BUSTER_X86_METADATA_BLOCKER_ADDRESSING_FIELDS;
     if (pattern.has_element_size_control && buster_x86_metadata_emit_element_size(form) != pattern.element_size_bytes)
         return BUSTER_X86_METADATA_BLOCKER_ADDRESSING_FIELDS;
+    if (pattern.has_implicit_one && (pattern.immediate_count || !buster_x86_metadata_emit_form_has_implicit_immediate(form)))
+        return BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
     if (pattern.has_apx_control && !(form.apx_flags & BUSTER_X86_METADATA_APX))
         return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
     if (pattern.has_nd && !(form.apx_flags & BUSTER_X86_METADATA_APX_ND))
@@ -3115,8 +3170,12 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
             !physical.reg.high_byte && physical.reg.index >= 4 && physical.reg.index < 8)
             needs_low_byte_rex = true;
     }
-    bool needs_rex = rex_w || has_r || has_x || has_b || needs_low_byte_rex || form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX ||
-                     form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2;
+    // PREFIX_REX identifies the legacy x86-64 row family; it does not by
+    // itself require a byte.  In particular, norexw rows such as CMPXCHG8B
+    // must remain unprefixed when no register/address bit or low-byte escape
+    // requires REX.  REX2 is a distinct two-byte encoding and remains
+    // mandatory for its form family.
+    bool needs_rex = rex_w || has_r || has_x || has_b || needs_low_byte_rex || form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2;
     if (buster_x86_metadata_emit_any_high_byte(bindings, binding_count) && needs_rex)
         return BUSTER_X86_METADATA_ENCODE_HIGH_BYTE_WITH_REX;
     if (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_VEX || form.prefix_kind == BUSTER_X86_METADATA_PREFIX_XOP)
