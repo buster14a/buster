@@ -1723,15 +1723,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        BUSTER_TEST(arguments, audit.emitted_count == 8428 && audit.blocked_count == 2585 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 8428 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 2585);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 8503 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 2208);
+        BUSTER_TEST(arguments, audit.emitted_count == 9614 && audit.blocked_count == 1399 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 9614 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 1399);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 9689 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 1022);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 293, 5, 1549, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1320, 114, 5, 1520, 176, 5220, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {492, 179, 0, 29, 0, 1508, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1320, 114, 5, 1520, 176, 6406, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {492, 179, 0, 29, 0, 322, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -1741,7 +1741,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {8428, 268, 75, 576, 0, 994, 17, 2, 501, 152, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {9614, 268, 75, 576, 0, 261, 17, 2, 48, 152, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -1753,11 +1753,24 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         u32 apx_total = 0;
         u32 apx_emitted = 0;
         u32 apx_blocked = 0;
+        u32 apx_scc_total = 0;
+        u32 apx_scc_emitted = 0;
+        u32 evex_r4_total = 0;
+        u32 evex_r4_emitted = 0;
+        u32 dfv_total = 0;
+        u32 dfv_scc_total = 0;
         u32 emitted_bnd = 0;
         u32 emitted_control = 0;
         u32 emitted_debug = 0;
         u32 emitted_segment = 0;
         bool ledger_rows_consistent = true;
+        bool dfv_scc_semantics_consistent = true;
+        static String8 const scc_tokens[] = {
+            S8_INITIALIZER(" SCC0 "),  S8_INITIALIZER(" SCC1 "),  S8_INITIALIZER(" SCC2 "),  S8_INITIALIZER(" SCC3 "),
+            S8_INITIALIZER(" SCC4 "),  S8_INITIALIZER(" SCC5 "),  S8_INITIALIZER(" SCC6 "),  S8_INITIALIZER(" SCC7 "),
+            S8_INITIALIZER(" SCC8 "),  S8_INITIALIZER(" SCC9 "),  S8_INITIALIZER(" SCC10 "), S8_INITIALIZER(" SCC11 "),
+            S8_INITIALIZER(" SCC12 "), S8_INITIALIZER(" SCC13 "), S8_INITIALIZER(" SCC14 "), S8_INITIALIZER(" SCC15 "),
+        };
         for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
         {
             BusterX86MetadataCoverageLedgerEntry entry = ledger[form_id];
@@ -1781,7 +1794,29 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                 apx_total += 1;
                 apx_emitted += entry.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED;
                 apx_blocked += entry.disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED;
+                if (x86_64_metadata_test_string_contains(form.pattern, S8("EVAPX_SCC")))
+                {
+                    apx_scc_total += 1;
+                    apx_scc_emitted += entry.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED;
+                }
             }
+            if (x86_64_metadata_test_string_contains(form.pattern, S8("EVEXR4_ONE()")))
+            {
+                evex_r4_total += 1;
+                evex_r4_emitted += entry.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED;
+            }
+            bool form_requires_dfv = buster_x86_metadata_form_requires_dfv(form_id);
+            bool pattern_has_evapx_scc = x86_64_metadata_test_string_contains(form.pattern, S8("EVAPX_SCC()"));
+            u32 parsed_scc_count = 0;
+            for (u32 scc_index = 0; scc_index < BUSTER_ARRAY_LENGTH(scc_tokens); scc_index += 1)
+                parsed_scc_count += x86_64_metadata_test_string_contains(form.pattern, scc_tokens[scc_index]);
+            bool parsed_scc = parsed_scc_count == 1;
+            bool form_has_apx_scc = (form.apx_flags & BUSTER_X86_METADATA_APX_SCC) != 0;
+            bool row_dfv_scc_coherent = form_requires_dfv == pattern_has_evapx_scc &&
+                                        pattern_has_evapx_scc == parsed_scc && parsed_scc == form_has_apx_scc;
+            dfv_total += form_requires_dfv;
+            dfv_scc_total += form_requires_dfv && row_dfv_scc_coherent;
+            dfv_scc_semantics_consistent &= row_dfv_scc_coherent;
             if (entry.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED && buster_x86_metadata_form(form_id, &form))
             {
                 // Count visible physical classes only on emitted normalized
@@ -1816,7 +1851,10 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, privileged_blocked == 109);
         BUSTER_TEST(arguments, not64_capable == 0);
         BUSTER_TEST(arguments, apx_total == 2465);
-        BUSTER_TEST(arguments, apx_emitted == 1606 && apx_blocked == 859);
+        BUSTER_TEST(arguments, apx_emitted == 2246 && apx_blocked == 219);
+        BUSTER_TEST(arguments, apx_scc_total == 640 && apx_scc_emitted == 640);
+        BUSTER_TEST(arguments, evex_r4_total == 97 && evex_r4_emitted == 97);
+        BUSTER_TEST(arguments, dfv_total == 640 && dfv_scc_total == 640 && dfv_scc_semantics_consistent);
         BUSTER_TEST(arguments, ledger[10069].blocker == BUSTER_X86_METADATA_BLOCKER_PRIVILEGED && ledger[10069].policy_excluded &&
                                    ledger[10069].encoder_capable);
         BusterX86MetadataForm xop_form = {0};
@@ -2162,6 +2200,40 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCOMXSD"), 4276, round_operands, 2, rounding, wildcard,
                                                                  BUSTER_ARRAY_LENGTH(wildcard), rounding_bytes,
                                                                  BUSTER_ARRAY_LENGTH(rounding_bytes)));
+        u8 fixed_round_len128_plain_bytes[] = {0x62, 0xf1, 0xff, 0x08, 0x2f, 0xc1};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCOMXSD"), 4275, round_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), fixed_round_len128_plain_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(fixed_round_len128_plain_bytes)));
+
+        BusterX86MetadataPhysicalOperand fixed_round_len512_operands[3] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 1, 512),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 2, 512),
+        };
+        BusterX86MetadataPhysicalAttributes fixed_round_len512_rounding = {
+            .decorator_flags = BUSTER_X86_METADATA_DECORATOR_ROUNDING,
+            .rounding_mode = BUSTER_X86_METADATA_ROUNDING_NEAREST,
+        };
+        u8 fixed_round_len512_plain_bytes[] = {0x62, 0xf5, 0x74, 0x48, 0x58, 0xc2};
+        u8 fixed_round_len512_rounding_bytes[] = {0x62, 0xf5, 0x74, 0x18, 0x58, 0xc2};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VADDPH"), 4479, fixed_round_len512_operands, 3,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), fixed_round_len512_plain_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(fixed_round_len512_plain_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VADDPH"), 4480, fixed_round_len512_operands, 3,
+                                                                 fixed_round_len512_rounding, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), fixed_round_len512_rounding_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(fixed_round_len512_rounding_bytes)));
+        BusterX86MetadataPhysicalOperand fixed_round_len512_wrong_width[3] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM, 0, 256),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM, 1, 256),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM, 2, 256),
+        };
+        BusterX86MetadataEmitResult fixed_round_len512_wrong_width_result = x86_64_metadata_test_emit_form(
+            S8("VADDPH"), 4480, fixed_round_len512_wrong_width, 3, fixed_round_len512_rounding, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BUSTER_TEST(arguments, fixed_round_len512_wrong_width_result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS);
 
         BusterX86MetadataPhysicalOperand apx_operands[2] = {
             x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
@@ -2189,6 +2261,89 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             S8("ADD"), 3053, vaddps_operands, 3, (BusterX86MetadataPhysicalAttributes){.no_flags = true}, wildcard,
             BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
         BUSTER_TEST(arguments, no_flags_classic.status != BUSTER_X86_METADATA_ENCODE_SUCCESS);
+
+        BusterX86MetadataPhysicalOperand ccmp_byte_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 2, 8),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 14, 8),
+        };
+        BusterX86MetadataPhysicalAttributes ccmp_dfv0 = {.has_dfv = true, .dfv = 0};
+        BusterX86MetadataPhysicalAttributes ccmp_dfv2 = {.has_dfv = true, .dfv = 2};
+        BusterX86MetadataPhysicalAttributes ccmp_dfv15 = {.has_dfv = true, .dfv = 15};
+        u8 ccmpb_dfv0_bytes[] = {0x62, 0x74, 0x04, 0x02, 0x38, 0xf2};
+        u8 ccmpb_dfv2_bytes[] = {0x62, 0x74, 0x14, 0x02, 0x38, 0xf2};
+        u8 ccmpb_dfv15_bytes[] = {0x62, 0x74, 0x7c, 0x02, 0x38, 0xf2};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("CCMPB"), 779, ccmp_byte_operands, 2,
+                                                                 ccmp_dfv0, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), ccmpb_dfv0_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(ccmpb_dfv0_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("CCMPB"), 779, ccmp_byte_operands, 2,
+                                                                 ccmp_dfv2, wildcard, BUSTER_ARRAY_LENGTH(wildcard), ccmpb_dfv2_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(ccmpb_dfv2_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("CCMPB"), 779, ccmp_byte_operands, 2,
+                                                                 ccmp_dfv15, wildcard, BUSTER_ARRAY_LENGTH(wildcard), ccmpb_dfv15_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(ccmpb_dfv15_bytes)));
+
+        BusterX86MetadataPhysicalOperand ccmp_qword_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 2, 64),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 30, 64),
+        };
+        u8 ccmpl_bytes[] = {0x62, 0x64, 0x84, 0x0c, 0x39, 0xf2};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("CCMPL"), 851, ccmp_qword_operands, 2,
+                                                                 ccmp_dfv0, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), ccmpl_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(ccmpl_bytes)));
+
+        BusterX86MetadataPhysicalOperand ctest_qword_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 2, 64),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 14, 64),
+        };
+        u8 ctestz_bytes[] = {0x62, 0x74, 0x84, 0x04, 0x85, 0xf2};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("CTESTZ"), 1697, ctest_qword_operands, 2,
+                                                                 ccmp_dfv0, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), ctestz_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(ctestz_bytes)));
+
+        BusterX86MetadataEmitResult ccmp_missing_dfv = x86_64_metadata_test_emit_form(
+            S8("CCMPB"), 779, ccmp_byte_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult ccmp_invalid_dfv = x86_64_metadata_test_emit_form(
+            S8("CCMPB"), 779, ccmp_byte_operands, 2,
+            (BusterX86MetadataPhysicalAttributes){.has_dfv = true, .dfv = 16}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult ccmp_nonzero_without_dfv = x86_64_metadata_test_emit_form(
+            S8("CCMPB"), 779, ccmp_byte_operands, 2,
+            (BusterX86MetadataPhysicalAttributes){.dfv = 1}, wildcard, BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult ordinary_form_with_dfv = x86_64_metadata_test_emit_form(
+            S8("ADD"), 559, apx_operands, 2, ccmp_dfv0, wildcard, BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BUSTER_TEST(arguments, ccmp_missing_dfv.status == BUSTER_X86_METADATA_ENCODE_INVALID_INPUT &&
+                                   ccmp_invalid_dfv.status == BUSTER_X86_METADATA_ENCODE_INVALID_INPUT &&
+                                   ccmp_nonzero_without_dfv.status == BUSTER_X86_METADATA_ENCODE_INVALID_INPUT &&
+                                   ordinary_form_with_dfv.status == BUSTER_X86_METADATA_ENCODE_INVALID_INPUT);
+
+        BusterX86MetadataEmitResult ccmp_wrong_operand = x86_64_metadata_test_emit_form(
+            S8("CCMPB"), 779,
+            (BusterX86MetadataPhysicalOperand[2]){
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 2, 128),
+                ccmp_byte_operands[1],
+            },
+            2, ccmp_dfv0, wildcard, BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BUSTER_TEST(arguments, ccmp_wrong_operand.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
+        BusterX86MetadataEmitResult ccmp_decorator = x86_64_metadata_test_emit_form(
+            S8("CCMPB"), 779, ccmp_byte_operands, 2,
+            (BusterX86MetadataPhysicalAttributes){
+                .decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK,
+                .has_mask_register = true,
+                .mask_register = 1,
+                .has_dfv = true,
+                .dfv = 0,
+            },
+            wildcard, BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BUSTER_TEST(arguments, ccmp_decorator.status == BUSTER_X86_METADATA_ENCODE_DECORATOR);
+        String8 no_apx_features[1] = {S8("avx512f")};
+        BusterX86MetadataEmitResult ccmp_feature = x86_64_metadata_test_emit_form(
+            S8("CCMPB"), 779, ccmp_byte_operands, 2, ccmp_dfv0, no_apx_features,
+            BUSTER_ARRAY_LENGTH(no_apx_features), (u8[1]){0}, 0, 0, 0);
+        BUSTER_TEST(arguments, ccmp_feature.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE);
 
         BusterX86MetadataPhysicalOperand kadd_operands[3] = {
             x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK, 1, 64),

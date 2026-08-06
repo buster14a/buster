@@ -6315,6 +6315,41 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_metadata_mnemonic(String8 mnemonic)
     return mnemonic;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_mnemonic_requires_dfv(String8 mnemonic)
+{
+    BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
+    for (u32 position = 0; position < candidates.count; position += 1)
+    {
+        u32 form_id = 0;
+        if (buster_x86_metadata_candidate_at(candidates, position, &form_id) &&
+            buster_x86_metadata_form_requires_dfv(form_id))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_parse_dfv(AssemblyOperand operand, u8* value)
+{
+    if (operand.kind != ASSEMBLY_OPERAND_EXPRESSION || operand.expression.has_symbol)
+    {
+        return false;
+    }
+    if (operand.expression.has_unsigned_addend)
+    {
+        if (operand.expression.unsigned_addend > 15) return false;
+        if (value) *value = (u8)operand.expression.unsigned_addend;
+        return true;
+    }
+    if (operand.expression.addend < 0 || operand.expression.addend > 15)
+    {
+        return false;
+    }
+    if (value) *value = (u8)operand.expression.addend;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_mnemonic_has_visible_operands(String8 mnemonic)
 {
     BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
@@ -6653,6 +6688,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     u32 operand_count = 0;
     u64 operand_start = 0;
     bool relative = assembly_x86_metadata_relative_mnemonic(mnemonic);
+    bool mnemonic_requires_dfv = assembly_x86_metadata_mnemonic_requires_dfv(mnemonic);
+    u32 symbol_count_before_dfv = builder->result.symbol_count;
+    bool has_dfv = false;
+    u8 dfv = 0;
     while (operand_start < operands_text.length)
     {
         if (operand_count >= BUSTER_ARRAY_LENGTH(operands))
@@ -6744,6 +6783,22 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             operand_start = operand_end + 1;
         }
     }
+    if (mnemonic_requires_dfv)
+    {
+        if (!operand_count || !assembly_x86_metadata_parse_dfv(operands[0], &dfv))
+        {
+            // A rejected symbolic DFV must not intern a source symbol as a
+            // side effect of parsing the pseudo-operand.
+            builder->result.symbol_count = symbol_count_before_dfv;
+            return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+        }
+        has_dfv = true;
+        for (u32 index = 1; index < operand_count; index += 1)
+        {
+            operands[index - 1] = operands[index];
+        }
+        operand_count -= 1;
+    }
     if (syntax == ASSEMBLY_SYNTAX_ATT)
     {
         for (u32 left = 0; left < operand_count / 2; left += 1)
@@ -6804,6 +6859,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         .rep = rep,
         .repne = repne,
         .no_flags = no_flags,
+        .dfv = dfv,
+        .has_dfv = has_dfv,
     };
     if (no_flags)
     {

@@ -655,7 +655,9 @@ struct BusterX86MetadataPhysicalAttributes
     bool lock;
     bool rep;
     bool repne;
-    u8 reserved[3];
+    u8 dfv;
+    bool has_dfv;
+    u8 reserved[1];
 };
 
 typedef struct BusterX86MetadataPhysicalQuery BusterX86MetadataPhysicalQuery;
@@ -850,6 +852,11 @@ BUSTER_F_DECL bool buster_x86_metadata_validate(BusterX86MetadataValidationResul
 BUSTER_F_DECL bool buster_x86_metadata_string(u32 offset, BusterX86MetadataString* result);
 BUSTER_F_DECL u8 buster_x86_metadata_string_byte(BusterX86MetadataString string, u32 index);
 BUSTER_F_DECL bool buster_x86_metadata_form(u32 form_id, BusterX86MetadataForm* result);
+// The normalized XED iform carries DFV as a source role while generated
+// visible operands intentionally omit it.  The source assembler uses this
+// cross-translation-unit query to expose that schema fact without mnemonic
+// exceptions.
+BUSTER_F_DECL bool buster_x86_metadata_form_requires_dfv(u32 form_id);
 BUSTER_F_DECL bool buster_x86_metadata_operand(u32 form_id, u32 operand_index, BusterX86MetadataOperand* result);
 BUSTER_F_DECL bool buster_x86_metadata_coverage(u32 coverage_id, BusterX86MetadataCoverage* result);
 // Mnemonic lookup is ASCII case-insensitive and uses the first token of each
