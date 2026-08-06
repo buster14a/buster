@@ -4965,13 +4965,13 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         String8 selector_intel_sources[] = {
             S8("endbr64\n"),
             S8("cldemote byte ptr [rax]\n"),
-            S8("prefetchit0 byte ptr [rip + missing_prefetchit]\n"),
+            S8("prefetchit0 byte ptr [rip + missing_prefetchit0]\nprefetchit1 byte ptr [rip + missing_prefetchit1]\n"),
             S8("prefetchrst2 byte ptr [rax]\n"),
         };
         String8 selector_att_sources[] = {
             S8("endbr64\n"),
             S8("cldemote (%rax)\n"),
-            S8("prefetchit0 missing_prefetchit(%rip)\n"),
+            S8("prefetchit0 missing_prefetchit0(%rip)\nprefetchit1 missing_prefetchit1(%rip)\n"),
             S8("prefetchrst2 (%rax)\n"),
         };
         TargetCpuFeature selector_features[] = {
@@ -4990,12 +4990,17 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
             AssemblyEncodeResult missing_selector_att = assembly_encode(
                 arguments->arena, selector_att_sources[selector_index],
                 (AssemblyEncodeOptions){.target = missing_selector_target, .syntax = ASSEMBLY_SYNTAX_ATT});
-            BUSTER_TEST(arguments, missing_selector_intel.diagnostic_count == 1 &&
+            u32 expected_selector_diagnostics = selector_index == 2 ? 2 : 1;
+            BUSTER_TEST(arguments, missing_selector_intel.diagnostic_count == expected_selector_diagnostics &&
                                        missing_selector_intel.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                       (expected_selector_diagnostics == 1 ||
+                                        missing_selector_intel.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE) &&
                                        missing_selector_intel.bytes.length == 0 && missing_selector_intel.relocation_count == 0 &&
                                        missing_selector_intel.symbol_count == 0);
-            BUSTER_TEST(arguments, missing_selector_att.diagnostic_count == 1 &&
+            BUSTER_TEST(arguments, missing_selector_att.diagnostic_count == expected_selector_diagnostics &&
                                        missing_selector_att.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                       (expected_selector_diagnostics == 1 ||
+                                        missing_selector_att.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE) &&
                                        missing_selector_att.bytes.length == 0 && missing_selector_att.relocation_count == 0 &&
                                        missing_selector_att.symbol_count == 0);
         }
