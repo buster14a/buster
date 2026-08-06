@@ -18650,6 +18650,7 @@ struct CIrLowerInlineAssemblyState
     u32 template_end;
     u32 separator_count;
     u32 operand_count;
+    u32 output_count;
     u32 clobber_count;
     u32 segment_index;
     u32 segment_end;
@@ -31269,50 +31270,255 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_declaration_or_assignment_list_step(CInteger
     c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builder, CToken token, bool output, u64* constraint_out)
+BUSTER_GLOBAL_LOCAL u32 c_ir_inline_assembly_type_class(IrType* type)
 {
-    ByteSlice bytes = {0};
-    if (!c_ir_decode_quoted(builder->arena, token, '"', &bytes))
+    if (!type || !type->layout.resolved || !type->layout.size || type->layout.size > 8)
+    {
+        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
+    }
+    switch (type->kind)
+    {
+    case IR_TYPE_BOOLEAN:
+    case IR_TYPE_INTEGER:
+    case IR_TYPE_ENUM:
+        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER;
+    case IR_TYPE_POINTER:
+        return IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER;
+    case IR_TYPE_VOID:
+    case IR_TYPE_FLOAT:
+    case IR_TYPE_VA_LIST:
+    case IR_TYPE_SLICE:
+    case IR_TYPE_ARRAY:
+    case IR_TYPE_VECTOR:
+    case IR_TYPE_FUNCTION:
+    case IR_TYPE_RANGE:
+    case IR_TYPE_STRUCT:
+    case IR_TYPE_UNION:
+    case IR_TYPE_COUNT:
+        break;
+    }
+    return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_inline_assembly_operand_types_compatible(CIntegerIrBuilder* builder, IrValueId output, IrValueId input)
+{
+    if (!builder || !builder->function || output.value >= builder->function->value_count || input.value >= builder->function->value_count)
     {
         return false;
     }
-    u64 index = 0;
+    IrType* output_type = ir_type_from_id(&builder->program->types, builder->function->values[output.value].canonical_type);
+    IrType* input_type = ir_type_from_id(&builder->program->types, builder->function->values[input.value].canonical_type);
+    u32 output_class = c_ir_inline_assembly_type_class(output_type);
+    u32 input_class = c_ir_inline_assembly_type_class(input_type);
+    return output_class != IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID && output_class == input_class && output_type->layout.size == input_type->layout.size;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_inline_assembly_constraint_class_supported(CIntegerIrBuilder* builder, u64 constraint)
+{
+    if (!builder)
+    {
+        return false;
+    }
+    if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_R)
+    {
+        return builder->target.cpu_arch == CPU_ARCH_X86_64 || builder->target.cpu_arch == CPU_ARCH_AARCH64;
+    }
+    return builder->target.cpu_arch == CPU_ARCH_X86_64 &&
+           (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) <= IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_inline_assembly_decimal_reference(String8 bytes, u32* index_out)
+{
+    if (!bytes.pointer || !bytes.length || !index_out)
+    {
+        return false;
+    }
+    u64 value = 0;
+    for (u64 index = 0; index < bytes.length; index += 1)
+    {
+        u8 digit = (u8)bytes.pointer[index];
+        if (digit < '0' || digit > '9' || value > (UINT32_MAX - (digit - '0')) / 10)
+        {
+            return false;
+        }
+        value = value * 10 + (digit - '0');
+    }
+    *index_out = (u32)value;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, CToken token, bool output,
+                                                         u64* constraint_out)
+{
+    ByteSlice bytes = {0};
+    if (!builder || !state || !constraint_out || !c_ir_decode_quoted(builder->arena, token, '"', &bytes))
+    {
+        return false;
+    }
+    u64 constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
     bool read_write = false;
+    bool matching = false;
+    u32 match_index = UINT32_MAX;
     if (output)
     {
         if (bytes.length != 2 || (bytes.pointer[0] != '=' && bytes.pointer[0] != '+'))
         {
+            builder->failure_message = S8("malformed asm output constraint");
             return false;
         }
         read_write = bytes.pointer[0] == '+';
-        index = 1;
+        switch (bytes.pointer[1])
+        {
+        case 'a':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_A;
+            break;
+        case 'b':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_B;
+            break;
+        case 'c':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_C;
+            break;
+        case 'd':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+            break;
+        case 'r':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_R;
+            break;
+        default:
+            builder->failure_message = S8("unsupported asm output constraint");
+            return false;
+        }
     }
-    else if (bytes.length != 1)
+    else if (bytes.length == 1)
     {
+        switch (bytes.pointer[0])
+        {
+        case 'a':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_A;
+            break;
+        case 'b':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_B;
+            break;
+        case 'c':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_C;
+            break;
+        case 'd':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+            break;
+        case 'r':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_R;
+            break;
+        default:
+        {
+            if (!c_ir_inline_assembly_decimal_reference((String8){.pointer = (char8*)bytes.pointer, .length = bytes.length}, &match_index))
+            {
+                builder->failure_message = S8("malformed asm matching constraint");
+                return false;
+            }
+            matching = true;
+        }
+        break;
+        }
+    }
+    else if (bytes.length > 1 && bytes.pointer[0] >= '0' && bytes.pointer[0] <= '9' &&
+             c_ir_inline_assembly_decimal_reference((String8){.pointer = (char8*)bytes.pointer, .length = bytes.length}, &match_index))
+    {
+        matching = true;
+    }
+    else if (bytes.length >= 3 && bytes.pointer[0] == '[' && bytes.pointer[bytes.length - 1] == ']')
+    {
+        for (u64 index = 1; index + 1 < bytes.length; index += 1)
+        {
+            if (bytes.pointer[index] == '[' || bytes.pointer[index] == ']')
+            {
+                builder->failure_message = S8("malformed asm matching constraint");
+                return false;
+            }
+        }
+        String8 name = {
+            .pointer = (char8*)bytes.pointer + 1,
+            .length = bytes.length - 2,
+        };
+        for (u32 output_index = 0; output_index < state->output_count; output_index += 1)
+        {
+            if (state->operand_names[output_index].length && string_equal(state->operand_names[output_index], name))
+            {
+                match_index = output_index;
+                break;
+            }
+        }
+        if (match_index == UINT32_MAX)
+        {
+            builder->failure_message = S8("asm matching constraint references an unknown output");
+            return false;
+        }
+        matching = true;
+    }
+    else
+    {
+        builder->failure_message = S8("malformed asm input constraint");
         return false;
     }
-    IrInlineAssemblyConstraint constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
-    switch (bytes.pointer[index])
+    if (!matching && (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) >= IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
     {
-    case 'a':
-        constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_A;
-        break;
-    case 'b':
-        constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_B;
-        break;
-    case 'c':
-        constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_C;
-        break;
-    case 'd':
-        constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_D;
-        break;
-    case 'r':
-        constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_R;
-        break;
-    default:
+        builder->failure_message = S8("unsupported asm constraint for target");
         return false;
     }
-    *constraint_out = (u64)constraint | (output ? IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT : 0) | (read_write ? IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE : 0);
+    IrValueId operand = state->operands[state->operand_count];
+    IrType* operand_type = ir_type_from_id(&builder->program->types, builder->function->values[operand.value].canonical_type);
+    if (matching)
+    {
+        if (c_ir_inline_assembly_type_class(operand_type) == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID)
+        {
+            builder->failure_message = S8("asm matching operands must be supported scalar values");
+            return false;
+        }
+        if (match_index >= state->output_count)
+        {
+            builder->failure_message = S8("asm matching constraint references a non-output operand");
+            return false;
+        }
+        u64 output_constraint = state->constraints[match_index];
+        if (!(output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT))
+        {
+            builder->failure_message = S8("asm matching constraint references a non-output operand");
+            return false;
+        }
+        if (output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE)
+        {
+            builder->failure_message = S8("asm matching constraints may not tie to read-write outputs");
+            return false;
+        }
+        for (u32 previous_index = state->output_count; previous_index < state->operand_count; previous_index += 1)
+        {
+            u64 previous_constraint = state->constraints[previous_index];
+            if ((previous_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) &&
+                IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(previous_constraint) == match_index)
+            {
+                builder->failure_message = S8("asm output has more than one matching input");
+                return false;
+            }
+        }
+        if (!c_ir_inline_assembly_operand_types_compatible(builder, state->operands[match_index], operand))
+        {
+            builder->failure_message = S8("asm matching operands have incompatible width or class");
+            return false;
+        }
+        constraint = output_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
+        constraint |= IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH | ((u64)match_index << IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_SHIFT);
+    }
+    else
+    {
+        constraint |= output ? IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT : 0;
+        constraint |= read_write ? IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE : 0;
+    }
+    if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) >= IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT ||
+        (matching && !c_ir_inline_assembly_constraint_class_supported(builder, constraint)))
+    {
+        builder->failure_message = S8("unsupported asm constraint for target");
+        return false;
+    }
+    *constraint_out = constraint;
     return true;
 }
 
@@ -32059,7 +32265,7 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* buil
             }
             state->operands[state->operand_count] = value;
         }
-        if (!c_ir_inline_assembly_constraint(builder, builder->preprocess.tokens[state->constraint_index], state->output,
+        if (!c_ir_inline_assembly_constraint(builder, state, builder->preprocess.tokens[state->constraint_index], state->output,
                                              state->constraints + state->operand_count))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -32086,6 +32292,7 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* buil
             if (state->output)
             {
                 state->output = false;
+                state->output_count = state->operand_count;
                 state->segment_index = state->separator_count >= 2 ? state->separators[1] + 1 : state->close;
                 state->segment_end = state->separator_count >= 3 ? state->separators[2] : state->close;
                 continue;

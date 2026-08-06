@@ -2,6 +2,8 @@ on: [push]
 
 jobs:
   test:
+    # Main accepts only current, green PR head SHAs via fast-forward-only merge.
+    if: ${{ forgejo.ref != 'refs/heads/main' }}
     # Forgejo 12.7 counts this timeout from scheduling, including time waiting for a runner.
     # 120 minutes covers three queued Windows jobs at the observed 22-29 minute runtime
     # (87 minutes) plus the existing <=30 minute execution target.
