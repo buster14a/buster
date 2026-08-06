@@ -11542,16 +11542,34 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_validate_artifact(Arena* arena, String8
     return bytes.length == expected_bytes && string_equal(assembly_import_checksum(arena, bytes), expected_checksum);
 }
 
+// Keep these checked-in anchors independent of the generated manifest: the manifest is derived from the artifacts.
 BUSTER_GLOBAL_LOCAL bool assembly_import_validate_checked_in_x86(Arena* arena, String8* artifacts)
 {
     bool artifact_checks = assembly_import_validate_artifact(arena, artifacts[0], 4660881, S8("ba80aa3be0eb2e6f")) &&
-                           assembly_import_validate_artifact(arena, artifacts[1], 6616876, S8("4dc127e5ded4be5e")) &&
-                           assembly_import_validate_artifact(arena, artifacts[2], 649864, S8("b0a467045a94e220"));
+                           assembly_import_validate_artifact(arena, artifacts[1], 6092260, S8("e6ef83ed59b0ddf3")) &&
+                           assembly_import_validate_artifact(arena, artifacts[2], 392002, S8("78ecc6cfb575213a"));
     bool invariant_checks = assembly_import_line_count(artifacts[0]) == 11013 &&
                             string_contains(artifacts[1], S8("#define BUSTER_X86_GENERATED_FORM_COUNT 11013")) &&
-                            string_contains(artifacts[2], S8("#define BUSTER_X86_GENERATED_COVERAGE_COUNT 11013"));
+                            string_contains(artifacts[1], S8("#define BUSTER_X86_GENERATED_COVERAGE_COUNT 11013"));
     bool valid = artifact_checks && invariant_checks;
     return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_import_validate_checked_in_x86_mutation_self_test(Arena* arena, String8* artifacts)
+{
+    if (!artifacts[0].pointer || !artifacts[0].length)
+    {
+        return false;
+    }
+    char8* mutated_bytes = arena_allocate(arena, char8, artifacts[0].length);
+    memcpy(mutated_bytes, artifacts[0].pointer, artifacts[0].length);
+    mutated_bytes[artifacts[0].length / 2] ^= 1;
+    String8 mutated_artifacts[] = {
+        {.pointer = mutated_bytes, .length = artifacts[0].length},
+        artifacts[1],
+        artifacts[2],
+    };
+    return !assembly_import_validate_checked_in_x86(arena, mutated_artifacts);
 }
 
 BUSTER_GLOBAL_LOCAL bool aarch64_import_reduced_provenance(Arena* arena, String8 input, u64 count)
@@ -16930,6 +16948,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
             {
                 string_print(S8("error: checked-in XED artifact provenance/checksum/count validation failed\n"));
                 result = PROCESS_RESULT_FAILED;
+            }
+            else if (options.audit && !assembly_import_validate_checked_in_x86_mutation_self_test(arena, xed_content))
+            {
+                string_print(S8("error: checked-in XED artifact provenance mutation self-test failed\n"));
+                result = PROCESS_RESULT_FAILED;
+            }
+            else if (options.audit)
+            {
+                string_print(S8("audit: checked-in XED provenance accepted; one-byte copied mutation rejected\n"));
             }
         }
         if (result == PROCESS_RESULT_SUCCESS)
