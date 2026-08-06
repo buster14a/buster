@@ -31,6 +31,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_CMAKE_PROFILE_SUMMARY,
     BUILD_COMMAND_NINJA_LOG_SUMMARY,
     BUILD_COMMAND_TIME_TRACE_SUMMARY,
+    BUILD_COMMAND_TIME_TRACE_SUMMARY_SELF_TEST,
     BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA,
     BUILD_COMMAND_TEST_SELF_HOST,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
@@ -2986,6 +2987,437 @@ BUSTER_GLOBAL_LOCAL String8 json_raw_string(JsonParser* parser, bool* valid)
     return result;
 }
 
+// Summary-only borrowed scanner: this deliberately stays separate from
+// json_raw_string because assembly metadata accepts that parser's legacy
+// escape behavior.
+BUSTER_GLOBAL_LOCAL bool time_trace_json_is_whitespace(char8 c)
+{
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+BUSTER_GLOBAL_LOCAL void time_trace_json_skip_whitespace(JsonParser* parser)
+{
+    while (parser->index < parser->text.length && time_trace_json_is_whitespace(parser->text.pointer[parser->index]))
+    {
+        parser->index += 1;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool time_trace_json_consume(JsonParser* parser, char8 c)
+{
+    time_trace_json_skip_whitespace(parser);
+    bool result = parser->index < parser->text.length && parser->text.pointer[parser->index] == c;
+    if (result)
+    {
+        parser->index += 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool time_trace_json_decode_unicode_escape(String8 text, u64* index, u32* codepoint)
+{
+    if (*index > text.length || text.length - *index < 4)
+    {
+        return false;
+    }
+
+    bool valid = true;
+    u32 value = 0;
+    for (u64 digit_i = 0; digit_i < 4; digit_i += 1)
+    {
+        value = (value << 4) | hexadecimal_digit_value(text.pointer[(*index)++], &valid);
+    }
+    if (!valid)
+    {
+        return false;
+    }
+
+    if (value >= 0xd800 && value <= 0xdbff)
+    {
+        if (*index > text.length || text.length - *index < 6 || text.pointer[*index] != '\\' || text.pointer[*index + 1] != 'u')
+        {
+            return false;
+        }
+        *index += 2;
+
+        bool low_valid = true;
+        u32 low = 0;
+        for (u64 digit_i = 0; digit_i < 4; digit_i += 1)
+        {
+            low = (low << 4) | hexadecimal_digit_value(text.pointer[(*index)++], &low_valid);
+        }
+        if (!low_valid || low < 0xdc00 || low > 0xdfff)
+        {
+            return false;
+        }
+        *codepoint = 0x10000 + ((value - 0xd800) << 10) + (low - 0xdc00);
+        return true;
+    }
+
+    if (value >= 0xdc00 && value <= 0xdfff)
+    {
+        return false;
+    }
+
+    *codepoint = value;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool time_trace_json_decode_escape(String8 text, u64* index, u32* codepoint)
+{
+    if (*index >= text.length)
+    {
+        return false;
+    }
+
+    char8 escape = text.pointer[(*index)++];
+    switch (escape)
+    {
+        break;
+    case '"':
+        *codepoint = '"';
+        break;
+    case '\\':
+        *codepoint = '\\';
+        break;
+    case '/':
+        *codepoint = '/';
+        break;
+    case 'b':
+        *codepoint = '\b';
+        break;
+    case 'f':
+        *codepoint = '\f';
+        break;
+    case 'n':
+        *codepoint = '\n';
+        break;
+    case 'r':
+        *codepoint = '\r';
+        break;
+    case 't':
+        *codepoint = '\t';
+        break;
+    case 'u':
+        return time_trace_json_decode_unicode_escape(text, index, codepoint);
+    default:
+        return false;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL String8 time_trace_json_raw_string(JsonParser* parser, bool* valid, bool* invalid_string)
+{
+    String8 result = {0};
+    time_trace_json_skip_whitespace(parser);
+    if (parser->index >= parser->text.length || parser->text.pointer[parser->index] != '"')
+    {
+        *valid = false;
+        return result;
+    }
+
+    u64 start = parser->index++;
+    bool escaped = false;
+    while (parser->index < parser->text.length)
+    {
+        char8 c = parser->text.pointer[parser->index++];
+        if (escaped)
+        {
+            if (c == 'u')
+            {
+                u32 codepoint = 0;
+                if (!time_trace_json_decode_unicode_escape(parser->text, &parser->index, &codepoint))
+                {
+                    if (invalid_string)
+                    {
+                        *invalid_string = true;
+                    }
+                    *valid = false;
+                    return result;
+                }
+            }
+            else if (c != '"' && c != '\\' && c != '/' && c != 'b' && c != 'f' && c != 'n' && c != 'r' && c != 't')
+            {
+                if (invalid_string)
+                {
+                    *invalid_string = true;
+                }
+                *valid = false;
+                return result;
+            }
+            escaped = false;
+        }
+        else if (c == '\\')
+        {
+            escaped = true;
+        }
+        else if (c == '"')
+        {
+            return string_slice(parser->text, start, parser->index);
+        }
+        else if ((u8)c < 0x20)
+        {
+            *valid = false;
+            return result;
+        }
+    }
+
+    *valid = false;
+    return result;
+}
+
+typedef enum JsonValueFrameState JsonValueFrameState;
+enum JsonValueFrameState
+{
+    JSON_VALUE_FRAME_START,
+    JSON_VALUE_FRAME_OBJECT_KEY,
+    JSON_VALUE_FRAME_OBJECT_COLON,
+    JSON_VALUE_FRAME_VALUE,
+    JSON_VALUE_FRAME_AFTER_VALUE,
+};
+
+typedef struct JsonValueFrame JsonValueFrame;
+struct JsonValueFrame
+{
+    char8 close;
+    JsonValueFrameState state;
+};
+
+BUSTER_GLOBAL_LOCAL bool json_skip_json_scalar(JsonParser* parser, bool* valid)
+{
+    time_trace_json_skip_whitespace(parser);
+    u64 start = parser->index;
+    while (parser->index < parser->text.length)
+    {
+        char8 c = parser->text.pointer[parser->index];
+        if (time_trace_json_is_whitespace(c) || c == ',' || c == ']' || c == '}')
+        {
+            break;
+        }
+        parser->index += 1;
+    }
+
+    if (parser->index == start)
+    {
+        *valid = false;
+        return false;
+    }
+
+    String8 scalar = string_slice(parser->text, start, parser->index);
+    if (string_equal(scalar, S8("true")) || string_equal(scalar, S8("false")) || string_equal(scalar, S8("null")))
+    {
+        return true;
+    }
+
+    u64 index = 0;
+    if (scalar.pointer[index] == '-')
+    {
+        index += 1;
+    }
+    if (index >= scalar.length)
+    {
+        *valid = false;
+        return false;
+    }
+
+    if (scalar.pointer[index] == '0')
+    {
+        index += 1;
+    }
+    else if (scalar.pointer[index] >= '1' && scalar.pointer[index] <= '9')
+    {
+        while (index < scalar.length && code_unit_is_decimal(scalar.pointer[index]))
+        {
+            index += 1;
+        }
+    }
+    else
+    {
+        *valid = false;
+        return false;
+    }
+
+    if (index < scalar.length && scalar.pointer[index] == '.')
+    {
+        index += 1;
+        u64 fraction_start = index;
+        while (index < scalar.length && code_unit_is_decimal(scalar.pointer[index]))
+        {
+            index += 1;
+        }
+        if (index == fraction_start)
+        {
+            *valid = false;
+            return false;
+        }
+    }
+
+    if (index < scalar.length && (scalar.pointer[index] == 'e' || scalar.pointer[index] == 'E'))
+    {
+        index += 1;
+        if (index < scalar.length && (scalar.pointer[index] == '+' || scalar.pointer[index] == '-'))
+        {
+            index += 1;
+        }
+        u64 exponent_start = index;
+        while (index < scalar.length && code_unit_is_decimal(scalar.pointer[index]))
+        {
+            index += 1;
+        }
+        if (index == exponent_start)
+        {
+            *valid = false;
+            return false;
+        }
+    }
+
+    if (index != scalar.length)
+    {
+        *valid = false;
+        return false;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL void json_skip_value_start(JsonParser* parser, JsonValueFrame* frames, u64* depth, bool* completed, bool* valid,
+                                               bool* resource_exhausted)
+{
+    time_trace_json_skip_whitespace(parser);
+    if (parser->index >= parser->text.length)
+    {
+        *valid = false;
+        return;
+    }
+
+    char8 c = parser->text.pointer[parser->index];
+    if (c == '"')
+    {
+        time_trace_json_raw_string(parser, valid, 0);
+        *completed = *valid;
+    }
+    else if (c == '{' || c == '[')
+    {
+        if (*depth == 256)
+        {
+            *valid = false;
+            *resource_exhausted = true;
+            return;
+        }
+
+        parser->index += 1;
+        frames[*depth] = (JsonValueFrame){
+            .close = c == '{' ? '}' : ']',
+            .state = JSON_VALUE_FRAME_START,
+        };
+        *depth += 1;
+    }
+    else
+    {
+        *completed = json_skip_json_scalar(parser, valid);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool json_skip_value_no_alloc(JsonParser* parser, bool* valid, bool* resource_exhausted)
+{
+    JsonValueFrame frames[256];
+    u64 depth = 0;
+    bool completed = false;
+
+    json_skip_value_start(parser, frames, &depth, &completed, valid, resource_exhausted);
+
+    while (*valid)
+    {
+        if (completed)
+        {
+            if (!depth)
+            {
+                return true;
+            }
+
+            JsonValueFrame* parent = &frames[depth - 1];
+            if (parent->state != JSON_VALUE_FRAME_VALUE)
+            {
+                *valid = false;
+                return false;
+            }
+            parent->state = JSON_VALUE_FRAME_AFTER_VALUE;
+            completed = false;
+        }
+
+        if (!depth)
+        {
+            *valid = false;
+            return false;
+        }
+
+        JsonValueFrame* frame = &frames[depth - 1];
+        switch (frame->state)
+        {
+        case JSON_VALUE_FRAME_START:
+            if (time_trace_json_consume(parser, frame->close))
+            {
+                depth -= 1;
+                completed = true;
+            }
+            else if (frame->close == '}')
+            {
+                frame->state = JSON_VALUE_FRAME_OBJECT_KEY;
+            }
+            else
+            {
+                frame->state = JSON_VALUE_FRAME_VALUE;
+            }
+            break;
+        case JSON_VALUE_FRAME_OBJECT_KEY:
+            time_trace_json_raw_string(parser, valid, 0);
+            frame->state = JSON_VALUE_FRAME_OBJECT_COLON;
+            break;
+        case JSON_VALUE_FRAME_OBJECT_COLON:
+            if (time_trace_json_consume(parser, ':'))
+            {
+                frame->state = JSON_VALUE_FRAME_VALUE;
+            }
+            else
+            {
+                *valid = false;
+            }
+            break;
+        case JSON_VALUE_FRAME_VALUE:
+            json_skip_value_start(parser, frames, &depth, &completed, valid, resource_exhausted);
+            break;
+        case JSON_VALUE_FRAME_AFTER_VALUE:
+            if (time_trace_json_consume(parser, ','))
+            {
+                frame->state = frame->close == '}' ? JSON_VALUE_FRAME_OBJECT_KEY : JSON_VALUE_FRAME_VALUE;
+            }
+            else if (time_trace_json_consume(parser, frame->close))
+            {
+                depth -= 1;
+                completed = true;
+            }
+            else
+            {
+                *valid = false;
+            }
+            break;
+        }
+    }
+
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL String8 json_raw_value_no_alloc(JsonParser* parser, bool* valid, bool* resource_exhausted)
+{
+    time_trace_json_skip_whitespace(parser);
+    u64 start = parser->index;
+    String8 result = {0};
+    if (json_skip_value_no_alloc(parser, valid, resource_exhausted))
+    {
+        result = string_slice(parser->text, start, parser->index);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 json_raw_value(JsonParser* parser, bool* valid)
 {
     String8 result = {0};
@@ -4319,6 +4751,31 @@ struct TimeTraceSummaryOptions
     u64 limit;
 };
 
+typedef enum TimeTraceSummaryFailureReason TimeTraceSummaryFailureReason;
+enum TimeTraceSummaryFailureReason
+{
+    TIME_TRACE_SUMMARY_FAILURE_NONE,
+    TIME_TRACE_SUMMARY_FAILURE_RESOURCE,
+    TIME_TRACE_SUMMARY_FAILURE_MALFORMED_JSON,
+    TIME_TRACE_SUMMARY_FAILURE_TRUNCATED_JSON,
+    TIME_TRACE_SUMMARY_FAILURE_TRAILING_JSON,
+    TIME_TRACE_SUMMARY_FAILURE_NON_INTEGER_DURATION,
+    TIME_TRACE_SUMMARY_FAILURE_INVALID_WHITESPACE,
+    TIME_TRACE_SUMMARY_FAILURE_INVALID_STRING,
+    TIME_TRACE_SUMMARY_FAILURE_DURATION_OVERFLOW,
+    TIME_TRACE_SUMMARY_FAILURE_ROW_LIMIT,
+    TIME_TRACE_SUMMARY_FAILURE_NAME_LIMIT,
+    TIME_TRACE_SUMMARY_FAILURE_DEPTH_LIMIT,
+};
+
+typedef struct TimeTraceSummaryOutput TimeTraceSummaryOutput;
+struct TimeTraceSummaryOutput
+{
+    OsFileDescriptor* file;
+    Arena* capture_arena;
+    String8List captured;
+};
+
 typedef struct TimeTraceRow TimeTraceRow;
 struct TimeTraceRow
 {
@@ -4326,45 +4783,142 @@ struct TimeTraceRow
     s64 duration_us;
 };
 
-typedef struct TimeTraceRowNode TimeTraceRowNode;
-struct TimeTraceRowNode
-{
-    TimeTraceRow row;
-    TimeTraceRowNode* next;
-};
-
 typedef struct TimeTraceRowList TimeTraceRowList;
 struct TimeTraceRowList
 {
-    TimeTraceRowNode* first;
-    TimeTraceRowNode* last;
+    TimeTraceRow rows[4096];
+    char8 name_storage[BUSTER_KB(512)];
+    u64 name_storage_position;
     u64 count;
 };
 
-BUSTER_GLOBAL_LOCAL void time_trace_row_list_add(Arena* arena, TimeTraceRowList* list, String8 name, s64 duration_us)
+BUSTER_GLOBAL_LOCAL void time_trace_summary_output_print(TimeTraceSummaryOutput* output, String8 format, ...)
 {
-    for (TimeTraceRowNode* node = list->first; node; node = node->next)
+    va_list variable_arguments;
+    va_start(variable_arguments, format);
+    if (output->capture_arena)
     {
-        if (string_equal(node->row.name, name))
+        String8 text = string_format_va(output->capture_arena, format, variable_arguments);
+        string8_list_push(output->capture_arena, &output->captured, text);
+        if (output->file && text.length)
         {
-            node->row.duration_us += duration_us;
-            return;
+            os_file_write(output->file, BUSTER_SLICE_TO_BYTE_SLICE(text));
+        }
+    }
+    else if (output->file)
+    {
+        TemporalArena scratch = scratch_begin(0, 0);
+        String8 text = string_format_va(scratch.arena, format, variable_arguments);
+        if (text.length)
+        {
+            os_file_write(output->file, BUSTER_SLICE_TO_BYTE_SLICE(text));
+        }
+        scratch_end(scratch);
+    }
+    va_end(variable_arguments);
+}
+
+BUSTER_GLOBAL_LOCAL String8 time_trace_summary_output_text(Arena* arena, TimeTraceSummaryOutput output)
+{
+    u64 length = 0;
+    for (String8Node* node = output.captured.first; node; node = node->next)
+    {
+        if (node->string.length > UINT64_MAX - length)
+        {
+            return (String8){0};
+        }
+        length += node->string.length;
+    }
+
+    if (!length)
+    {
+        return (String8){0};
+    }
+
+    char8* pointer = arena_allocate(arena, char8, length);
+    u64 position = 0;
+    for (String8Node* node = output.captured.first; node; node = node->next)
+    {
+        memcpy(pointer + position, node->string.pointer, node->string.length);
+        position += node->string.length;
+    }
+    return (String8){.pointer = pointer, .length = length};
+}
+
+BUSTER_GLOBAL_LOCAL void time_trace_summary_failure_set(TimeTraceSummaryFailureReason* failure_reason, TimeTraceSummaryFailureReason reason)
+{
+    if (failure_reason)
+    {
+        *failure_reason = reason;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool time_trace_duration_add(s64* destination, s64 duration_us)
+{
+    const s64 s64_max = (s64)((u64)~(u64)0 >> 1);
+    const s64 s64_min = -s64_max - 1;
+    if ((duration_us > 0 && *destination > s64_max - duration_us) || (duration_us < 0 && *destination < s64_min - duration_us))
+    {
+        return false;
+    }
+    *destination += duration_us;
+    return true;
+}
+
+typedef enum TimeTraceRowAddResult TimeTraceRowAddResult;
+enum TimeTraceRowAddResult
+{
+    TIME_TRACE_ROW_ADD_SUCCESS,
+    TIME_TRACE_ROW_ADD_NAME_LIMIT,
+    TIME_TRACE_ROW_ADD_ROW_LIMIT,
+    TIME_TRACE_ROW_ADD_DURATION_OVERFLOW,
+    TIME_TRACE_ROW_ADD_INVALID_NAME,
+};
+
+BUSTER_GLOBAL_LOCAL TimeTraceRowAddResult time_trace_row_list_add(TimeTraceRowList* list, String8 name, s64 duration_us, bool copy_name,
+                                                                   bool* name_retained)
+{
+    if (name_retained)
+    {
+        *name_retained = false;
+    }
+
+    for (u64 row_i = 0; row_i < list->count; row_i += 1)
+    {
+        TimeTraceRow* row = &list->rows[row_i];
+        if (string_equal(row->name, name))
+        {
+            return time_trace_duration_add(&row->duration_us, duration_us) ? TIME_TRACE_ROW_ADD_SUCCESS : TIME_TRACE_ROW_ADD_DURATION_OVERFLOW;
         }
     }
 
-    TimeTraceRowNode* node = arena_allocate(arena, TimeTraceRowNode, 1);
-    *node = (TimeTraceRowNode){.row = {.name = name, .duration_us = duration_us}};
+    if (copy_name)
+    {
+        if (list->name_storage_position > BUSTER_KB(512) || name.length > BUSTER_KB(512) - list->name_storage_position)
+        {
+            return TIME_TRACE_ROW_ADD_NAME_LIMIT;
+        }
+        char8* name_pointer = list->name_storage + list->name_storage_position;
+        memcpy(name_pointer, name.pointer, name.length);
+        name = (String8){.pointer = name_pointer, .length = name.length};
+        list->name_storage_position += name.length;
+    }
 
-    if (list->last)
+    if (list->count == BUSTER_ARRAY_LENGTH(list->rows))
     {
-        list->last->next = node;
+        if (copy_name)
+        {
+            list->name_storage_position -= name.length;
+        }
+        return TIME_TRACE_ROW_ADD_ROW_LIMIT;
     }
-    else
-    {
-        list->first = node;
-    }
-    list->last = node;
+    list->rows[list->count] = (TimeTraceRow){.name = name, .duration_us = duration_us};
     list->count += 1;
+    if (name_retained)
+    {
+        *name_retained = true;
+    }
+    return TIME_TRACE_ROW_ADD_SUCCESS;
 }
 
 BUSTER_GLOBAL_LOCAL int time_trace_row_compare(const void* a, const void* b)
@@ -4377,176 +4931,657 @@ BUSTER_GLOBAL_LOCAL int time_trace_row_compare(const void* a, const void* b)
 typedef struct TimeTraceEvent TimeTraceEvent;
 struct TimeTraceEvent
 {
-    String8 name;
+    String8 raw_name;
     s64 duration_us;
-    char8 phase;
+    u32 phase_is_x : 1;
     u32 has_duration : 1;
+    u32 resource_exhausted : 1;
+    u32 duration_non_integer : 1;
+    u32 invalid_string : 1;
 };
 
-BUSTER_GLOBAL_LOCAL TimeTraceEvent time_trace_parse_event(Arena* arena, JsonParser* parser, bool* valid)
+typedef enum TimeTraceDurationParseResult TimeTraceDurationParseResult;
+enum TimeTraceDurationParseResult
+{
+    TIME_TRACE_DURATION_PARSE_SUCCESS,
+    TIME_TRACE_DURATION_PARSE_INVALID,
+    TIME_TRACE_DURATION_PARSE_NON_INTEGER,
+};
+
+BUSTER_GLOBAL_LOCAL TimeTraceDurationParseResult time_trace_parse_duration(String8 raw, s64* result)
+{
+    const u64 s64_max = (u64)~(u64)0 >> 1;
+    const u64 s64_min_magnitude = s64_max + 1;
+    u64 index = 0;
+    bool negative = false;
+    for (u64 i = 0; i < raw.length; i += 1)
+    {
+        if (raw.pointer[i] == '.' || raw.pointer[i] == 'e' || raw.pointer[i] == 'E')
+        {
+            return TIME_TRACE_DURATION_PARSE_NON_INTEGER;
+        }
+    }
+
+    if (index < raw.length && raw.pointer[index] == '-')
+    {
+        negative = true;
+        index += 1;
+    }
+    if (index >= raw.length)
+    {
+        return TIME_TRACE_DURATION_PARSE_INVALID;
+    }
+
+    u64 limit = negative ? s64_min_magnitude : s64_max;
+    u64 magnitude = 0;
+    u64 integer_start = index;
+    if (raw.pointer[index] == '0')
+    {
+        index += 1;
+    }
+    else if (raw.pointer[index] >= '1' && raw.pointer[index] <= '9')
+    {
+        while (index < raw.length && code_unit_is_decimal(raw.pointer[index]))
+        {
+            u64 digit = (u64)(raw.pointer[index++] - '0');
+            if (magnitude > (limit - digit) / 10)
+            {
+                return TIME_TRACE_DURATION_PARSE_INVALID;
+            }
+            magnitude = magnitude * 10 + digit;
+        }
+    }
+    else
+    {
+        return TIME_TRACE_DURATION_PARSE_INVALID;
+    }
+
+    if (index == integer_start)
+    {
+        return TIME_TRACE_DURATION_PARSE_INVALID;
+    }
+    if (index != raw.length)
+    {
+        return TIME_TRACE_DURATION_PARSE_INVALID;
+    }
+
+    if (negative)
+    {
+        if (magnitude == s64_min_magnitude)
+        {
+            *result = -(s64_max) - 1;
+        }
+        else
+        {
+            *result = -(s64)magnitude;
+        }
+    }
+    else
+    {
+        *result = (s64)magnitude;
+    }
+    return TIME_TRACE_DURATION_PARSE_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool time_trace_json_string_decode_codepoint(String8 raw, u64* index, u32* codepoint, bool* direct_byte)
+{
+    if (raw.length < 2 || raw.pointer[0] != '"' || raw.pointer[raw.length - 1] != '"' || *index >= raw.length - 1)
+    {
+        return false;
+    }
+
+    char8 c = raw.pointer[(*index)++];
+    if (c != '\\')
+    {
+        if (direct_byte)
+        {
+            *direct_byte = true;
+        }
+        *codepoint = (u8)c;
+        return true;
+    }
+
+    if (direct_byte)
+    {
+        *direct_byte = false;
+    }
+
+    return time_trace_json_decode_escape(raw, index, codepoint);
+}
+
+BUSTER_GLOBAL_LOCAL bool time_trace_json_string_has_prefix(String8 raw, String8 prefix)
+{
+    u64 index = 1;
+    for (u64 prefix_i = 0; prefix_i < prefix.length; prefix_i += 1)
+    {
+        u32 codepoint = 0;
+        if (!time_trace_json_string_decode_codepoint(raw, &index, &codepoint, 0) || codepoint != (u8)prefix.pointer[prefix_i])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool time_trace_json_string_is_plain(String8 raw)
+{
+    if (raw.length < 2 || raw.pointer[0] != '"' || raw.pointer[raw.length - 1] != '"')
+    {
+        return false;
+    }
+
+    for (u64 index = 1; index + 1 < raw.length; index += 1)
+    {
+        if (raw.pointer[index] == '\\')
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool time_trace_json_string_equal(String8 raw, String8 wanted)
+{
+    if (raw.length < 2 || raw.pointer[0] != '"' || raw.pointer[raw.length - 1] != '"')
+    {
+        return false;
+    }
+
+    u64 index = 1;
+    for (u64 wanted_i = 0; wanted_i < wanted.length; wanted_i += 1)
+    {
+        u32 codepoint = 0;
+        if (!time_trace_json_string_decode_codepoint(raw, &index, &codepoint, 0) || codepoint != (u8)wanted.pointer[wanted_i])
+        {
+            return false;
+        }
+    }
+    return index == raw.length - 1;
+}
+
+typedef enum TimeTraceJsonStringDecodeResult TimeTraceJsonStringDecodeResult;
+enum TimeTraceJsonStringDecodeResult
+{
+    TIME_TRACE_JSON_STRING_DECODE_SUCCESS,
+    TIME_TRACE_JSON_STRING_DECODE_RESOURCE,
+    TIME_TRACE_JSON_STRING_DECODE_INVALID,
+};
+
+BUSTER_GLOBAL_LOCAL TimeTraceJsonStringDecodeResult time_trace_json_string_decode_into_list(TimeTraceRowList* row_list, String8 raw, String8* result)
+{
+    if (raw.length < 2 || raw.pointer[0] != '"' || raw.pointer[raw.length - 1] != '"')
+    {
+        return TIME_TRACE_JSON_STRING_DECODE_INVALID;
+    }
+
+    u64 start = row_list->name_storage_position;
+    u64 index = 1;
+    while (index < raw.length - 1)
+    {
+        u32 codepoint = 0;
+        bool direct_byte = false;
+        if (!time_trace_json_string_decode_codepoint(raw, &index, &codepoint, &direct_byte))
+        {
+            row_list->name_storage_position = start;
+            return TIME_TRACE_JSON_STRING_DECODE_INVALID;
+        }
+
+        u64 encoded_length = 1;
+        if (direct_byte)
+        {
+            encoded_length = 1;
+        }
+        else if (codepoint <= 0x7f)
+        {
+            encoded_length = 1;
+        }
+        else if (codepoint <= 0x7ff)
+        {
+            encoded_length = 2;
+        }
+        else if (codepoint <= 0xffff)
+        {
+            encoded_length = 3;
+        }
+        else
+        {
+            encoded_length = 4;
+        }
+        if (row_list->name_storage_position > BUSTER_KB(512) || encoded_length > BUSTER_KB(512) - row_list->name_storage_position)
+        {
+            row_list->name_storage_position = start;
+            return TIME_TRACE_JSON_STRING_DECODE_RESOURCE;
+        }
+
+        if (direct_byte)
+        {
+            row_list->name_storage[row_list->name_storage_position++] = raw.pointer[index - 1];
+        }
+        else if (codepoint <= 0x7f)
+        {
+            row_list->name_storage[row_list->name_storage_position++] = (char8)codepoint;
+        }
+        else if (codepoint <= 0x7ff)
+        {
+            row_list->name_storage[row_list->name_storage_position++] = (char8)(0xc0 | (codepoint >> 6));
+            row_list->name_storage[row_list->name_storage_position++] = (char8)(0x80 | (codepoint & 0x3f));
+        }
+        else if (codepoint <= 0xffff)
+        {
+            row_list->name_storage[row_list->name_storage_position++] = (char8)(0xe0 | (codepoint >> 12));
+            row_list->name_storage[row_list->name_storage_position++] = (char8)(0x80 | ((codepoint >> 6) & 0x3f));
+            row_list->name_storage[row_list->name_storage_position++] = (char8)(0x80 | (codepoint & 0x3f));
+        }
+        else
+        {
+            row_list->name_storage[row_list->name_storage_position++] = (char8)(0xf0 | (codepoint >> 18));
+            row_list->name_storage[row_list->name_storage_position++] = (char8)(0x80 | ((codepoint >> 12) & 0x3f));
+            row_list->name_storage[row_list->name_storage_position++] = (char8)(0x80 | ((codepoint >> 6) & 0x3f));
+            row_list->name_storage[row_list->name_storage_position++] = (char8)(0x80 | (codepoint & 0x3f));
+        }
+    }
+
+    *result = (String8){.pointer = row_list->name_storage + start, .length = row_list->name_storage_position - start};
+    return TIME_TRACE_JSON_STRING_DECODE_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL TimeTraceRowAddResult time_trace_row_list_add_raw(TimeTraceRowList* row_list, String8 raw_name, s64 duration_us, bool* valid)
+{
+    if (!time_trace_json_string_has_prefix(raw_name, S8("Total ")))
+    {
+        return TIME_TRACE_ROW_ADD_SUCCESS;
+    }
+
+    if (time_trace_json_string_is_plain(raw_name))
+    {
+        String8 name = string_slice(raw_name, 1, raw_name.length - 1);
+        return time_trace_row_list_add(row_list, name, duration_us, true, 0);
+    }
+
+    u64 name_position = row_list->name_storage_position;
+    String8 name = {0};
+    TimeTraceJsonStringDecodeResult decode_result = time_trace_json_string_decode_into_list(row_list, raw_name, &name);
+    if (decode_result != TIME_TRACE_JSON_STRING_DECODE_SUCCESS)
+    {
+        if (decode_result == TIME_TRACE_JSON_STRING_DECODE_RESOURCE)
+        {
+            return TIME_TRACE_ROW_ADD_NAME_LIMIT;
+        }
+        *valid = false;
+        return TIME_TRACE_ROW_ADD_INVALID_NAME;
+    }
+
+    bool name_retained = false;
+    TimeTraceRowAddResult result = time_trace_row_list_add(row_list, name, duration_us, false, &name_retained);
+    if (!name_retained)
+    {
+        row_list->name_storage_position = name_position;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool time_trace_json_string_is_phase_x(String8 raw)
+{
+    if (raw.length < 2 || raw.pointer[0] != '"' || raw.pointer[raw.length - 1] != '"')
+    {
+        return false;
+    }
+
+    u64 index = 1;
+    u32 codepoint = 0;
+    if (!time_trace_json_string_decode_codepoint(raw, &index, &codepoint, 0))
+    {
+        return false;
+    }
+    return codepoint == (u32)'X' && index == raw.length - 1;
+}
+
+BUSTER_GLOBAL_LOCAL TimeTraceEvent time_trace_parse_event(JsonParser* parser, bool* valid)
 {
     TimeTraceEvent result = {0};
+    bool resource_exhausted = false;
+    bool invalid_string = false;
 
-    if (!json_consume(parser, '{'))
+    if (!time_trace_json_consume(parser, '{'))
     {
         *valid = false;
         return result;
     }
 
+    if (time_trace_json_consume(parser, '}'))
+    {
+        return result;
+    }
+
     for (;;)
     {
-        json_skip_whitespace(parser);
-        if (json_consume(parser, '}'))
-        {
-            break;
-        }
-
-        String8 key = json_parse_string(arena, parser, valid);
-        if (!*valid || !json_consume(parser, ':'))
+        time_trace_json_skip_whitespace(parser);
+        String8 key = time_trace_json_raw_string(parser, valid, &invalid_string);
+        if (!*valid || !time_trace_json_consume(parser, ':'))
         {
             *valid = false;
             break;
         }
 
-        if (string_equal(key, S8("ph")))
+        if (time_trace_json_string_equal(key, S8("ph")))
         {
-            String8 phase = json_parse_string(arena, parser, valid);
-            result.phase = phase.length ? phase.pointer[0] : 0;
+            String8 phase = time_trace_json_raw_string(parser, valid, &invalid_string);
+            if (*valid)
+            {
+                result.phase_is_x = time_trace_json_string_is_phase_x(phase);
+            }
         }
-        else if (string_equal(key, S8("name")))
+        else if (time_trace_json_string_equal(key, S8("name")))
         {
-            result.name = json_parse_string(arena, parser, valid);
+            result.raw_name = time_trace_json_raw_string(parser, valid, &invalid_string);
         }
-        else if (string_equal(key, S8("dur")))
+        else if (time_trace_json_string_equal(key, S8("dur")))
         {
-            result.duration_us = json_parse_s64(parser, valid);
-            result.has_duration = 1;
+            String8 duration = json_raw_value_no_alloc(parser, valid, &resource_exhausted);
+            if (*valid)
+            {
+                TimeTraceDurationParseResult duration_result = time_trace_parse_duration(duration, &result.duration_us);
+                result.has_duration = duration_result == TIME_TRACE_DURATION_PARSE_SUCCESS;
+                if (duration_result == TIME_TRACE_DURATION_PARSE_NON_INTEGER)
+                {
+                    result.duration_non_integer = 1;
+                    *valid = false;
+                }
+                else if (duration_result != TIME_TRACE_DURATION_PARSE_SUCCESS)
+                {
+                    *valid = false;
+                }
+            }
         }
         else
         {
-            json_skip_value(arena, parser, valid);
+            json_raw_value_no_alloc(parser, valid, &resource_exhausted);
         }
 
         if (!*valid)
         {
             break;
         }
-        if (json_consume(parser, ','))
-        {
-            continue;
-        }
-        if (json_consume(parser, '}'))
+        if (time_trace_json_consume(parser, '}'))
         {
             break;
         }
-
-        *valid = false;
-        break;
+        if (!time_trace_json_consume(parser, ','))
+        {
+            *valid = false;
+            break;
+        }
     }
 
+    result.resource_exhausted = resource_exhausted;
+    result.invalid_string = invalid_string;
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(Arena* arena, String8 path, TimeTraceRowList* row_list)
+BUSTER_GLOBAL_LOCAL TimeTraceSummaryFailureReason time_trace_summary_parser_failure_reason(JsonParser* parser, bool invalid_string)
 {
-    ByteSlice bytes = file_read(arena, path, (FileReadOptions){.end_padding = 1});
-    if (!bytes.pointer)
+    if (invalid_string)
     {
-        string_print(S8("error: failed to read {S8}\n"), path);
+        return TIME_TRACE_SUMMARY_FAILURE_INVALID_STRING;
+    }
+    if (parser->index < parser->text.length && (parser->text.pointer[parser->index] == '\f' || parser->text.pointer[parser->index] == '\v'))
+    {
+        return TIME_TRACE_SUMMARY_FAILURE_INVALID_WHITESPACE;
+    }
+    return parser->index >= parser->text.length ? TIME_TRACE_SUMMARY_FAILURE_TRUNCATED_JSON : TIME_TRACE_SUMMARY_FAILURE_MALFORMED_JSON;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(String8 path, TimeTraceRowList* row_list, TimeTraceSummaryOutput* output,
+                                                                TimeTraceSummaryFailureReason* failure_reason)
+{
+    u64 path_arena_size = BUSTER_MB(1);
+    Arena* path_arena = arena_create((ArenaCreation){
+        .reserved_size = path_arena_size,
+        .granularity = BUSTER_KB(64),
+        .initial_size = path_arena_size,
+    });
+    if (!path_arena)
+    {
+        time_trace_summary_output_print(output, S8("error: time_trace_summary could not reserve path storage\n"));
+        time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_RESOURCE);
         return PROCESS_RESULT_FAILED;
     }
 
-    JsonParser parser = {.text = {.pointer = (char8*)bytes.pointer, .length = bytes.length}};
-    if (!json_consume(&parser, '{'))
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    FileMapRead map = {0};
+    String8 map_path = path;
+    if (path.length && path.pointer[0] != '/')
     {
-        string_print(S8("error: failed to parse {S8}: expected a JSON object\n"), path);
-        return PROCESS_RESULT_FAILED;
+        String8 absolute_path = os_path_absolute(path_arena, path, true);
+        if (absolute_path.length)
+        {
+            map_path = absolute_path;
+        }
+    }
+
+    if (map_path.length >= path_arena_size)
+    {
+        time_trace_summary_output_print(output, S8("error: time_trace_summary resource limit while opening {S8}\n"), path);
+        time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_RESOURCE);
+        goto cleanup;
+    }
+
+    map = file_map_read(path_arena, map_path, (FileReadOptions){.map_required = 1});
+    if (!map.bytes.pointer)
+    {
+        time_trace_summary_output_print(output, S8("error: failed to map {S8}\n"), path);
+        time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_RESOURCE);
+        goto cleanup;
+    }
+
+    JsonParser parser = {.text = {.pointer = (char8*)map.bytes.pointer, .length = map.bytes.length}};
+    if (!time_trace_json_consume(&parser, '{'))
+    {
+        time_trace_summary_output_print(output, S8("error: failed to parse {S8}: expected a JSON object\n"), path);
+        time_trace_summary_failure_set(failure_reason, time_trace_summary_parser_failure_reason(&parser, false));
+        goto cleanup;
     }
 
     bool valid = true;
+    if (time_trace_json_consume(&parser, '}'))
+    {
+        result = PROCESS_RESULT_SUCCESS;
+        goto trailing_check;
+    }
+
     for (;;)
     {
-        json_skip_whitespace(&parser);
-        if (json_consume(&parser, '}'))
+        bool invalid_string = false;
+        String8 key = time_trace_json_raw_string(&parser, &valid, &invalid_string);
+        if (!valid || !time_trace_json_consume(&parser, ':'))
         {
-            break;
+            time_trace_summary_output_print(output, S8("error: failed to parse {S8}: expected an object key\n"), path);
+            time_trace_summary_failure_set(failure_reason, time_trace_summary_parser_failure_reason(&parser, invalid_string));
+            goto cleanup;
         }
 
-        String8 key = json_parse_string(arena, &parser, &valid);
-        if (!valid || !json_consume(&parser, ':'))
+        if (time_trace_json_string_equal(key, S8("traceEvents")))
         {
-            string_print(S8("error: failed to parse {S8}: expected an object key\n"), path);
-            return PROCESS_RESULT_FAILED;
-        }
-
-        if (string_equal(key, S8("traceEvents")))
-        {
-            if (!json_consume(&parser, '['))
+            if (!time_trace_json_consume(&parser, '['))
             {
-                string_print(S8("error: failed to parse {S8}: expected traceEvents array\n"), path);
-                return PROCESS_RESULT_FAILED;
+                time_trace_summary_output_print(output, S8("error: failed to parse {S8}: expected traceEvents array\n"), path);
+                time_trace_summary_failure_set(failure_reason, time_trace_summary_parser_failure_reason(&parser, false));
+                goto cleanup;
             }
 
-            for (;;)
+            if (!time_trace_json_consume(&parser, ']'))
             {
-                json_skip_whitespace(&parser);
-                if (json_consume(&parser, ']'))
+                for (;;)
                 {
-                    break;
-                }
+                    TimeTraceEvent event = time_trace_parse_event(&parser, &valid);
+                    if (!valid)
+                    {
+                        if (event.resource_exhausted)
+                        {
+                            time_trace_summary_output_print(output, S8("error: time_trace_summary resource limit while parsing {S8}\n"), path);
+                            time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_DEPTH_LIMIT);
+                        }
+                        else if (event.invalid_string)
+                        {
+                            time_trace_summary_output_print(output, S8("error: failed to parse {S8}: invalid Unicode string escape\n"), path);
+                            time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_INVALID_STRING);
+                        }
+                        else if (event.duration_non_integer)
+                        {
+                            time_trace_summary_output_print(output, S8("error: failed to parse {S8}: duration must be an integer number of microseconds\n"), path);
+                            time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_NON_INTEGER_DURATION);
+                        }
+                        else
+                        {
+                            time_trace_summary_output_print(output, S8("error: failed to parse {S8}: invalid trace event\n"), path);
+                            time_trace_summary_failure_set(failure_reason, time_trace_summary_parser_failure_reason(&parser, false));
+                        }
+                        goto cleanup;
+                    }
 
-                TimeTraceEvent event = time_trace_parse_event(arena, &parser, &valid);
-                if (!valid)
-                {
-                    string_print(S8("error: failed to parse {S8}: invalid trace event\n"), path);
-                    return PROCESS_RESULT_FAILED;
-                }
+                    if (event.phase_is_x && event.has_duration)
+                    {
+                        TimeTraceRowAddResult add_result = time_trace_row_list_add_raw(row_list, event.raw_name, event.duration_us, &valid);
+                        if (!valid)
+                        {
+                            time_trace_summary_output_print(output, S8("error: failed to parse {S8}: invalid trace event name\n"), path);
+                            time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_INVALID_STRING);
+                            goto cleanup;
+                        }
+                        if (add_result == TIME_TRACE_ROW_ADD_NAME_LIMIT)
+                        {
+                            time_trace_summary_output_print(output, S8("error: time_trace_summary resource limit while aggregating {S8}\n"), path);
+                            time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_NAME_LIMIT);
+                            goto cleanup;
+                        }
+                        if (add_result == TIME_TRACE_ROW_ADD_ROW_LIMIT)
+                        {
+                            time_trace_summary_output_print(output, S8("error: time_trace_summary resource limit while aggregating {S8}\n"), path);
+                            time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_ROW_LIMIT);
+                            goto cleanup;
+                        }
+                        if (add_result == TIME_TRACE_ROW_ADD_DURATION_OVERFLOW)
+                        {
+                            time_trace_summary_output_print(output, S8("error: time_trace_summary duration overflow while aggregating {S8}\n"), path);
+                            time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_DURATION_OVERFLOW);
+                            goto cleanup;
+                        }
+                    }
 
-                if (event.phase == 'X' && event.has_duration && string_starts_with_sequence(event.name, S8("Total ")))
-                {
-                    time_trace_row_list_add(arena, row_list, event.name, event.duration_us);
+                    if (time_trace_json_consume(&parser, ']'))
+                    {
+                        break;
+                    }
+                    if (!time_trace_json_consume(&parser, ','))
+                    {
+                        time_trace_summary_output_print(output, S8("error: failed to parse {S8}: expected ',' or ']'\n"), path);
+                        time_trace_summary_failure_set(failure_reason, time_trace_summary_parser_failure_reason(&parser, false));
+                        goto cleanup;
+                    }
                 }
-
-                if (json_consume(&parser, ','))
-                {
-                    continue;
-                }
-                if (json_consume(&parser, ']'))
-                {
-                    break;
-                }
-
-                string_print(S8("error: failed to parse {S8}: expected ',' or ']'\n"), path);
-                return PROCESS_RESULT_FAILED;
             }
         }
         else
         {
-            json_skip_value(arena, &parser, &valid);
+            bool resource_exhausted = false;
+            json_raw_value_no_alloc(&parser, &valid, &resource_exhausted);
             if (!valid)
             {
-                string_print(S8("error: failed to parse {S8}: invalid value\n"), path);
-                return PROCESS_RESULT_FAILED;
+                if (resource_exhausted)
+                {
+                    time_trace_summary_output_print(output, S8("error: time_trace_summary resource limit while parsing {S8}\n"), path);
+                    time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_DEPTH_LIMIT);
+                }
+                else
+                {
+                    time_trace_summary_output_print(output, S8("error: failed to parse {S8}: invalid value\n"), path);
+                    time_trace_summary_failure_set(failure_reason, time_trace_summary_parser_failure_reason(&parser, false));
+                }
+                goto cleanup;
             }
         }
 
-        if (json_consume(&parser, ','))
+        if (time_trace_json_consume(&parser, '}'))
         {
-            continue;
-        }
-        if (json_consume(&parser, '}'))
-        {
+            result = PROCESS_RESULT_SUCCESS;
             break;
         }
-
-        string_print(S8("error: failed to parse {S8}: expected ',' or '}'\n"), path);
-        return PROCESS_RESULT_FAILED;
+        if (!time_trace_json_consume(&parser, ','))
+        {
+            time_trace_summary_output_print(output, S8("error: failed to parse {S8}: expected ',' or '}'\n"), path);
+            time_trace_summary_failure_set(failure_reason, time_trace_summary_parser_failure_reason(&parser, false));
+            goto cleanup;
+        }
     }
 
+trailing_check:
+    time_trace_json_skip_whitespace(&parser);
+    if (parser.index != parser.text.length)
+    {
+        time_trace_summary_output_print(output, S8("error: failed to parse {S8}: trailing JSON data\n"), path);
+        time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_TRAILING_JSON);
+        result = PROCESS_RESULT_FAILED;
+    }
+
+cleanup:
+    file_map_unmap(map);
+    if (!arena_destroy(path_arena, 1))
+    {
+        result = PROCESS_RESULT_FAILED;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL Arena* time_trace_summary_create_accumulator(TimeTraceSummaryOutput* output, TimeTraceSummaryFailureReason* failure_reason)
+{
+    u64 accumulator_granularity = BUSTER_KB(64);
+    u64 accumulator_size = arena_minimum_position;
+    if (sizeof(TimeTraceRowList) > UINT64_MAX - accumulator_size)
+    {
+        time_trace_summary_output_print(output, S8("error: time_trace_summary aggregation storage size overflow\n"));
+        time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_RESOURCE);
+        return 0;
+    }
+    accumulator_size += sizeof(TimeTraceRowList);
+    if (accumulator_size > UINT64_MAX - (accumulator_granularity - 1))
+    {
+        time_trace_summary_output_print(output, S8("error: time_trace_summary aggregation storage alignment overflow\n"));
+        time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_RESOURCE);
+        return 0;
+    }
+    u64 accumulator_reserved_size = align_forward(accumulator_size, accumulator_granularity);
+    Arena* result = arena_create((ArenaCreation){
+        .reserved_size = accumulator_reserved_size,
+        .granularity = accumulator_granularity,
+        .initial_size = accumulator_reserved_size,
+    });
+    if (!result)
+    {
+        time_trace_summary_output_print(output, S8("error: time_trace_summary could not reserve aggregation storage\n"));
+        time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_RESOURCE);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_collect(Arena* accumulator_arena, SliceString8 paths, TimeTraceRowList** row_list_out,
+                                                            TimeTraceSummaryOutput* output, TimeTraceSummaryFailureReason* failure_reason)
+{
+    TimeTraceRowList* row_list = arena_allocate(accumulator_arena, TimeTraceRowList, 1);
+    memset(row_list, 0, sizeof(*row_list));
+    for (u64 i = 0; i < paths.length; i += 1)
+    {
+        ProcessResult file_result = time_trace_summary_parse_file(paths.pointer[i], row_list, output, failure_reason);
+        if (file_result != PROCESS_RESULT_SUCCESS)
+        {
+            return file_result;
+        }
+    }
+    *row_list_out = row_list;
     return PROCESS_RESULT_SUCCESS;
 }
 
-BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_run(Arena* arena, TimeTraceSummaryOptions options)
+BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_run_with_output(TimeTraceSummaryOptions options, TimeTraceSummaryOutput* output,
+                                                                     TimeTraceSummaryFailureReason* failure_reason)
 {
     if (!options.limit)
     {
@@ -4555,50 +5590,455 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_run(Arena* arena, TimeTrace
 
     if (!options.paths.length)
     {
-        string_print(S8("error: time_trace_summary requires at least one -ftime-trace JSON path\n"));
+        time_trace_summary_output_print(output, S8("error: time_trace_summary requires at least one -ftime-trace JSON path\n"));
+        time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_RESOURCE);
         return PROCESS_RESULT_FAILED;
     }
 
-    TimeTraceRowList row_list = {0};
-    for (u64 i = 0; i < options.paths.length; i += 1)
+    Arena* accumulator_arena = time_trace_summary_create_accumulator(output, failure_reason);
+    if (!accumulator_arena)
     {
-        ProcessResult file_result = time_trace_summary_parse_file(arena, options.paths.pointer[i], &row_list);
-        if (file_result != PROCESS_RESULT_SUCCESS)
-        {
-            return file_result;
-        }
+        return PROCESS_RESULT_FAILED;
     }
 
-    if (!row_list.count)
+    TimeTraceRowList* row_list = 0;
+    ProcessResult result = time_trace_summary_collect(accumulator_arena, options.paths, &row_list, output, failure_reason);
+    if (result != PROCESS_RESULT_SUCCESS)
     {
-        string_print(S8("No \"Total *\" time-trace entries found.\n"));
-        return PROCESS_RESULT_SUCCESS;
+        goto cleanup;
     }
 
-    TimeTraceRow* rows = arena_allocate(arena, TimeTraceRow, row_list.count);
-    u64 row_i = 0;
-    for (TimeTraceRowNode* node = row_list.first; node; node = node->next)
+    if (!row_list->count)
     {
-        rows[row_i++] = node->row;
+        time_trace_summary_output_print(output, S8("No \"Total *\" time-trace entries found.\n"));
+        goto cleanup;
     }
-    qsort(rows, row_list.count, sizeof(rows[0]), time_trace_row_compare);
 
-    string_print(S8("Slowest compiler phases across {u64} time-trace file(s):\n"), options.paths.length);
-    u64 limit = BUSTER_MIN(options.limit, row_list.count);
+    TimeTraceRow* rows = row_list->rows;
+    qsort(rows, row_list->count, sizeof(rows[0]), time_trace_row_compare);
+
+    time_trace_summary_output_print(output, S8("Slowest compiler phases across {u64} time-trace file(s):\n"), options.paths.length);
+    u64 limit = BUSTER_MIN(options.limit, row_list->count);
     for (u64 i = 0; i < limit; i += 1)
     {
         TimeTraceRow row = rows[i];
         s64 duration_ms = row.duration_us < 0 ? 0 : row.duration_us / 1000;
-        printf("%6lld ms  %.*s\n", (long long)duration_ms, string8_printf_length(row.name, UINT64_MAX), row.name.pointer ? row.name.pointer : "");
+        time_trace_summary_output_print(output, S8("{s64:width=[ ,6]} ms  {S8}\n"), duration_ms, row.name);
     }
 
+cleanup:
+    if (!arena_destroy(accumulator_arena, 1))
+    {
+        result = PROCESS_RESULT_FAILED;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_run(TimeTraceSummaryOptions options)
+{
+    TimeTraceSummaryOutput output = {.file = os_get_stdout()};
+    TimeTraceSummaryFailureReason failure_reason = TIME_TRACE_SUMMARY_FAILURE_NONE;
+    return time_trace_summary_run_with_output(options, &output, &failure_reason);
+}
+
+BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_write_text(String8 path, String8 text)
+{
+    return file_write(path, (ByteSlice){.pointer = (u8*)text.pointer, .length = text.length});
+}
+
+BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_write_large(String8 path, u64* byte_count)
+{
+    String8 prefix = S8("{\"traceEvents\":[");
+    String8 event = S8("{\"ph\":\"X\",\"name\":\"Total Synthetic\",\"dur\":1,\"args\":{\"padding\":\"012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345\"}}");
+    String8 suffix = S8("]}");
+    u64 event_count = 700000;
+    u64 total_size = prefix.length + suffix.length + event.length * event_count + event_count - 1;
+    if (total_size <= BUSTER_MB(65))
+    {
+        return false;
+    }
+
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    if (!file)
+    {
+        return false;
+    }
+
+    os_file_write(file, (ByteSlice){.pointer = (u8*)prefix.pointer, .length = prefix.length});
+    char8 chunk[BUSTER_KB(4)];
+    u64 chunk_length = 0;
+    for (u64 event_i = 0; event_i < event_count; event_i += 1)
+    {
+        if (event_i)
+        {
+            if (chunk_length == sizeof(chunk))
+            {
+                os_file_write(file, (ByteSlice){.pointer = (u8*)chunk, .length = chunk_length});
+                chunk_length = 0;
+            }
+            chunk[chunk_length++] = ',';
+        }
+        if (chunk_length + event.length > sizeof(chunk))
+        {
+            os_file_write(file, (ByteSlice){.pointer = (u8*)chunk, .length = chunk_length});
+            chunk_length = 0;
+        }
+        memcpy(chunk + chunk_length, event.pointer, event.length);
+        chunk_length += event.length;
+    }
+    if (chunk_length)
+    {
+        os_file_write(file, (ByteSlice){.pointer = (u8*)chunk, .length = chunk_length});
+    }
+    os_file_write(file, (ByteSlice){.pointer = (u8*)suffix.pointer, .length = suffix.length});
+    bool result = os_file_close(file);
+    if (byte_count)
+    {
+        *byte_count = total_size;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_write_unique_rows(Arena* arena, String8 path, u64 row_count)
+{
+    String8 prefix = S8("{\"traceEvents\":[");
+    String8 suffix = S8("]}");
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    if (!file)
+    {
+        return false;
+    }
+
+    os_file_write(file, (ByteSlice){.pointer = (u8*)prefix.pointer, .length = prefix.length});
+    bool result = true;
+    for (u64 row_i = 0; row_i < row_count; row_i += 1)
+    {
+        if (row_i)
+        {
+            char8 comma = ',';
+            os_file_write(file, (ByteSlice){.pointer = (u8*)&comma, .length = 1});
+        }
+        String8 event = string_format(arena, S8("{{\"ph\":\"X\",\"name\":\"Total Row{u64}\",\"dur\":1}}"), row_i);
+        if (!event.pointer)
+        {
+            result = false;
+            break;
+        }
+        os_file_write(file, (ByteSlice){.pointer = (u8*)event.pointer, .length = event.length});
+    }
+    os_file_write(file, (ByteSlice){.pointer = (u8*)suffix.pointer, .length = suffix.length});
+    result = os_file_close(file) && result;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_write_name_cap(String8 path)
+{
+    String8 prefix = S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total ");
+    String8 suffix = S8("\",\"dur\":1}]}");
+    u64 repeated_count = BUSTER_KB(512) - 6 + 1;
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    if (!file)
+    {
+        return false;
+    }
+
+    os_file_write(file, (ByteSlice){.pointer = (u8*)prefix.pointer, .length = prefix.length});
+    char8 chunk[BUSTER_KB(4)];
+    memset(chunk, 'n', sizeof(chunk));
+    while (repeated_count)
+    {
+        u64 write_count = BUSTER_MIN(repeated_count, (u64)sizeof(chunk));
+        os_file_write(file, (ByteSlice){.pointer = (u8*)chunk, .length = write_count});
+        repeated_count -= write_count;
+    }
+    os_file_write(file, (ByteSlice){.pointer = (u8*)suffix.pointer, .length = suffix.length});
+    return os_file_close(file);
+}
+
+BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_write_depth_cap(String8 path)
+{
+    String8 prefix = S8("{\"meta\":");
+    String8 scalar = S8("0");
+    String8 suffix = S8("}");
+    u64 nested_count = 257;
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    if (!file)
+    {
+        return false;
+    }
+
+    os_file_write(file, (ByteSlice){.pointer = (u8*)prefix.pointer, .length = prefix.length});
+    char8 bracket = '[';
+    for (u64 i = 0; i < nested_count; i += 1)
+    {
+        os_file_write(file, (ByteSlice){.pointer = (u8*)&bracket, .length = 1});
+    }
+    os_file_write(file, (ByteSlice){.pointer = (u8*)scalar.pointer, .length = scalar.length});
+    bracket = ']';
+    for (u64 i = 0; i < nested_count; i += 1)
+    {
+        os_file_write(file, (ByteSlice){.pointer = (u8*)&bracket, .length = 1});
+    }
+    os_file_write(file, (ByteSlice){.pointer = (u8*)suffix.pointer, .length = suffix.length});
+    return os_file_close(file);
+}
+
+typedef struct TimeTraceSummarySelfTestFailure TimeTraceSummarySelfTestFailure;
+struct TimeTraceSummarySelfTestFailure
+{
+    String8 path;
+    TimeTraceSummaryFailureReason reason;
+    String8 message;
+};
+
+BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_expect_failure(Arena* arena, TimeTraceSummarySelfTestFailure failure)
+{
+    String8 paths[] = {failure.path};
+    TimeTraceSummaryOutput output = {.capture_arena = arena};
+    TimeTraceSummaryFailureReason actual_reason = TIME_TRACE_SUMMARY_FAILURE_NONE;
+    ProcessResult result = time_trace_summary_run_with_output((TimeTraceSummaryOptions){
+        .paths = {.pointer = paths, .length = BUSTER_ARRAY_LENGTH(paths)},
+        .limit = 5,
+    }, &output, &actual_reason);
+    String8 actual_output = time_trace_summary_output_text(arena, output);
+    String8 expected_output = string_format(arena, failure.message, failure.path);
+    return result != PROCESS_RESULT_SUCCESS && actual_reason == failure.reason && string_equal(actual_output, expected_output);
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_self_test(Arena* arena)
+{
+    String8 directory_name = string_format(arena, S8("time-trace-summary-self-test-{u64}-{u64}"), os_get_current_process_id(), os_now_microseconds());
+    String8 directory = path_join(arena, S8("build"), directory_name);
+    String8 ordinary_a = path_join(arena, directory, S8("ordinary-a.json"));
+    String8 ordinary_b = path_join(arena, directory, S8("ordinary-b.json"));
+    String8 phase = path_join(arena, directory, S8("phase.json"));
+    String8 malformed = path_join(arena, directory, S8("malformed.json"));
+    String8 truncated = path_join(arena, directory, S8("truncated.json"));
+    String8 trailing = path_join(arena, directory, S8("trailing.json"));
+    String8 decimal = path_join(arena, directory, S8("decimal.json"));
+    String8 exponent = path_join(arena, directory, S8("exponent.json"));
+    String8 whitespace_ff = path_join(arena, directory, S8("whitespace-ff.json"));
+    String8 whitespace_vt = path_join(arena, directory, S8("whitespace-vt.json"));
+    String8 duration_overflow = path_join(arena, directory, S8("duration-overflow.json"));
+    String8 row_cap = path_join(arena, directory, S8("row-cap.json"));
+    String8 name_cap = path_join(arena, directory, S8("name-cap.json"));
+    String8 depth_cap = path_join(arena, directory, S8("depth-cap.json"));
+    String8 invalid_surrogate_high = path_join(arena, directory, S8("invalid-surrogate-high.json"));
+    String8 invalid_surrogate_low = path_join(arena, directory, S8("invalid-surrogate-low.json"));
+    String8 large = path_join(arena, directory, S8("large.json"));
+    bool passed = true;
+    bool directory_owned = false;
+
+    // A live native process id is unique, and the monotonic timestamp avoids
+    // reusing a stale directory after that id is recycled. Never delete a
+    // pre-existing candidate: only the process that successfully claimed its
+    // own absent directory may clean it up.
+    if (path_exists(arena, directory))
+    {
+        string_print(S8("error: time_trace_summary self-test directory is already owned: {S8}\n"), directory);
+        return PROCESS_RESULT_FAILED;
+    }
+    make_directory_recursive(arena, directory);
+    directory_owned = path_exists(arena, directory);
+    if (!directory_owned)
+    {
+        string_print(S8("error: time_trace_summary self-test could not claim directory: {S8}\n"), directory);
+        return PROCESS_RESULT_FAILED;
+    }
+    passed = passed && time_trace_summary_self_test_write_text(
+                            ordinary_a,
+                            S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total Backend\",\"dur\":1500},{\"ph\":\"X\",\"name\":\"Total Backend\",\"dur\":500},{\"\\u0070h\":\"X\",\"\\u006eame\":\"Total \\u0046rontend\",\"\\u0064ur\":5,\"args\":{\"nested\":[true,{\"x\":\"y\"}]}},{\"ph\":\"X\",\"name\":\"Total \\ud83d\\ude00\",\"dur\":3}]}"));
+    passed = passed && time_trace_summary_self_test_write_text(
+                            ordinary_b,
+                            S8("{\"traceEvents\":[{\"\\u0070h\":\"X\",\"\\u006eame\":\"Total \\u0042ackend\",\"\\u0064ur\":7},{\"ph\":\"X\",\"name\":\"Total CodeGen\",\"dur\":9},{\"ph\":\"X\",\"name\":\"Total \xf0\x9f\x98\x80\",\"dur\":4}]}"));
+    passed = passed && time_trace_summary_self_test_write_text(
+                            phase,
+                            S8("{\"traceEvents\":[{\"ph\":\"\\u0058\",\"name\":\"Total Phase\",\"dur\":4},{\"ph\":\"X\",\"name\":\"Total Phase\",\"dur\":6},{\"ph\":\"\\u0158\",\"name\":\"Total Ignored\",\"dur\":8},{\"ph\":\"XX\",\"name\":\"Total Ignored2\",\"dur\":16}]}"));
+    passed = passed && time_trace_summary_self_test_write_text(
+                            malformed,
+                            S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total Bad\",\"dur\":1,\"args\":{\"bad\":1,}}]}"));
+    passed = passed && time_trace_summary_self_test_write_text(truncated, S8("{\"traceEvents\":[{\"ph\":\"X\"}"));
+    passed = passed && time_trace_summary_self_test_write_text(trailing, S8("{} trailing"));
+    passed = passed && time_trace_summary_self_test_write_text(decimal, S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total Decimal\",\"dur\":1500.9}]}"));
+    passed = passed && time_trace_summary_self_test_write_text(exponent, S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total Exponent\",\"dur\":2e6}]}"));
+    passed = passed && time_trace_summary_self_test_write_text(whitespace_ff, S8("{\f\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total FF\",\"dur\":1}]}"));
+    passed = passed && time_trace_summary_self_test_write_text(whitespace_vt, S8("{\v\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total VT\",\"dur\":1}]}"));
+    passed = passed && time_trace_summary_self_test_write_text(
+                            duration_overflow,
+                            S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total Overflow\",\"dur\":9223372036854775807},{\"ph\":\"X\",\"name\":\"Total Overflow\",\"dur\":1}]}"));
+    passed = passed && time_trace_summary_self_test_write_unique_rows(arena, row_cap, 4097);
+    passed = passed && time_trace_summary_self_test_write_name_cap(name_cap);
+    passed = passed && time_trace_summary_self_test_write_depth_cap(depth_cap);
+    passed = passed && time_trace_summary_self_test_write_text(
+                            invalid_surrogate_high,
+                            S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total \\ud83d\",\"dur\":1}]}"));
+    passed = passed && time_trace_summary_self_test_write_text(
+                            invalid_surrogate_low,
+                            S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total \\ude00\",\"dur\":1}]}"));
+
+    if (passed)
+    {
+        String8 ordinary_paths[] = {ordinary_a, ordinary_b};
+        TimeTraceSummaryOutput aggregation_output = {.capture_arena = arena};
+        TimeTraceSummaryFailureReason aggregation_failure = TIME_TRACE_SUMMARY_FAILURE_NONE;
+        Arena* accumulator_arena = time_trace_summary_create_accumulator(&aggregation_output, &aggregation_failure);
+        TimeTraceRowList* row_list = 0;
+        if (!accumulator_arena || time_trace_summary_collect(accumulator_arena, (SliceString8){.pointer = ordinary_paths, .length = 2}, &row_list,
+                                                              &aggregation_output, &aggregation_failure) != PROCESS_RESULT_SUCCESS)
+        {
+            passed = false;
+        }
+        else
+        {
+            qsort(row_list->rows, row_list->count, sizeof(row_list->rows[0]), time_trace_row_compare);
+            TimeTraceRow expected[] = {
+                {.name = S8("Total Backend"), .duration_us = 2007},
+                {.name = S8("Total CodeGen"), .duration_us = 9},
+                {.name = S8("Total \xf0\x9f\x98\x80"), .duration_us = 7},
+                {.name = S8("Total Frontend"), .duration_us = 5},
+            };
+            if (row_list->count != BUSTER_ARRAY_LENGTH(expected))
+            {
+                passed = false;
+            }
+            else
+            {
+                for (u64 row_i = 0; row_i < row_list->count; row_i += 1)
+                {
+                    if (!string_equal(row_list->rows[row_i].name, expected[row_i].name) || row_list->rows[row_i].duration_us != expected[row_i].duration_us)
+                    {
+                        passed = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if (accumulator_arena && !arena_destroy(accumulator_arena, 1))
+        {
+            passed = false;
+        }
+
+        String8 phase_paths[] = {phase};
+        aggregation_output = (TimeTraceSummaryOutput){.capture_arena = arena};
+        aggregation_failure = TIME_TRACE_SUMMARY_FAILURE_NONE;
+        accumulator_arena = time_trace_summary_create_accumulator(&aggregation_output, &aggregation_failure);
+        row_list = 0;
+        if (!accumulator_arena || time_trace_summary_collect(accumulator_arena, (SliceString8){.pointer = phase_paths, .length = 1}, &row_list,
+                                                              &aggregation_output, &aggregation_failure) != PROCESS_RESULT_SUCCESS ||
+            row_list->count != 1 || !string_equal(row_list->rows[0].name, S8("Total Phase")) || row_list->rows[0].duration_us != 10)
+        {
+            passed = false;
+        }
+        if (accumulator_arena && !arena_destroy(accumulator_arena, 1))
+        {
+            passed = false;
+        }
+
+        TimeTraceSummaryOutput ordinary_output = {.capture_arena = arena};
+        TimeTraceSummaryFailureReason ordinary_failure = TIME_TRACE_SUMMARY_FAILURE_NONE;
+        ProcessResult ordinary_result = time_trace_summary_run_with_output((TimeTraceSummaryOptions){
+                                                                                .paths = {.pointer = ordinary_paths, .length = 2},
+                                                                                .limit = 3,
+                                                                            },
+                                                                            &ordinary_output, &ordinary_failure);
+        String8 ordinary_output_text = time_trace_summary_output_text(arena, ordinary_output);
+        passed = passed && ordinary_result == PROCESS_RESULT_SUCCESS && ordinary_failure == TIME_TRACE_SUMMARY_FAILURE_NONE &&
+                 string_equal(ordinary_output_text,
+                              S8("Slowest compiler phases across 2 time-trace file(s):\n"
+                                 "     2 ms  Total Backend\n"
+                                 "     0 ms  Total CodeGen\n"
+                                 "     0 ms  Total \xf0\x9f\x98\x80\n"));
+    }
+
+    u64 large_size = 0;
+    passed = passed && time_trace_summary_self_test_write_large(large, &large_size) && large_size > BUSTER_MB(65);
+    if (passed)
+    {
+        String8 large_paths[] = {large};
+        TimeTraceSummaryOutput large_output = {.capture_arena = arena};
+        TimeTraceSummaryFailureReason large_failure = TIME_TRACE_SUMMARY_FAILURE_NONE;
+        ProcessResult large_result = time_trace_summary_run_with_output((TimeTraceSummaryOptions){
+                                                                            .paths = {.pointer = large_paths, .length = 1},
+                                                                            .limit = 1,
+                                                                        },
+                                                                        &large_output, &large_failure);
+        String8 large_output_text = time_trace_summary_output_text(arena, large_output);
+        passed = large_result == PROCESS_RESULT_SUCCESS && large_failure == TIME_TRACE_SUMMARY_FAILURE_NONE &&
+                 string_equal(large_output_text,
+                              S8("Slowest compiler phases across 1 time-trace file(s):\n"
+                                 "   700 ms  Total Synthetic\n"));
+    }
+
+    TimeTraceSummarySelfTestFailure failure_cases[] = {
+        {.path = malformed,
+         .reason = TIME_TRACE_SUMMARY_FAILURE_MALFORMED_JSON,
+         .message = S8("error: failed to parse {S8}: invalid trace event\n")},
+        {.path = truncated,
+         .reason = TIME_TRACE_SUMMARY_FAILURE_TRUNCATED_JSON,
+         .message = S8("error: failed to parse {S8}: expected ',' or ']'\n")},
+        {.path = trailing,
+         .reason = TIME_TRACE_SUMMARY_FAILURE_TRAILING_JSON,
+         .message = S8("error: failed to parse {S8}: trailing JSON data\n")},
+        {.path = decimal,
+         .reason = TIME_TRACE_SUMMARY_FAILURE_NON_INTEGER_DURATION,
+         .message = S8("error: failed to parse {S8}: duration must be an integer number of microseconds\n")},
+        {.path = exponent,
+         .reason = TIME_TRACE_SUMMARY_FAILURE_NON_INTEGER_DURATION,
+         .message = S8("error: failed to parse {S8}: duration must be an integer number of microseconds\n")},
+        {.path = whitespace_ff,
+         .reason = TIME_TRACE_SUMMARY_FAILURE_INVALID_WHITESPACE,
+         .message = S8("error: failed to parse {S8}: expected an object key\n")},
+        {.path = whitespace_vt,
+         .reason = TIME_TRACE_SUMMARY_FAILURE_INVALID_WHITESPACE,
+         .message = S8("error: failed to parse {S8}: expected an object key\n")},
+        {.path = duration_overflow,
+         .reason = TIME_TRACE_SUMMARY_FAILURE_DURATION_OVERFLOW,
+         .message = S8("error: time_trace_summary duration overflow while aggregating {S8}\n")},
+        {.path = row_cap,
+         .reason = TIME_TRACE_SUMMARY_FAILURE_ROW_LIMIT,
+         .message = S8("error: time_trace_summary resource limit while aggregating {S8}\n")},
+        {.path = name_cap,
+         .reason = TIME_TRACE_SUMMARY_FAILURE_NAME_LIMIT,
+         .message = S8("error: time_trace_summary resource limit while aggregating {S8}\n")},
+        {.path = depth_cap,
+         .reason = TIME_TRACE_SUMMARY_FAILURE_DEPTH_LIMIT,
+         .message = S8("error: time_trace_summary resource limit while parsing {S8}\n")},
+        {.path = invalid_surrogate_high,
+         .reason = TIME_TRACE_SUMMARY_FAILURE_INVALID_STRING,
+         .message = S8("error: failed to parse {S8}: invalid Unicode string escape\n")},
+        {.path = invalid_surrogate_low,
+         .reason = TIME_TRACE_SUMMARY_FAILURE_INVALID_STRING,
+         .message = S8("error: failed to parse {S8}: invalid Unicode string escape\n")},
+    };
+    for (u64 failure_i = 0; failure_i < BUSTER_ARRAY_LENGTH(failure_cases); failure_i += 1)
+    {
+        bool failure_passed = time_trace_summary_self_test_expect_failure(arena, failure_cases[failure_i]);
+        passed = passed && failure_passed;
+    }
+
+    if (directory_owned)
+    {
+        remove_path_recursive(arena, directory);
+        if (path_exists(arena, directory))
+        {
+            passed = false;
+        }
+    }
+    if (!passed)
+    {
+        string_print(S8("error: time_trace_summary self-test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("TIME_TRACE_SUMMARY_SELF_TEST passed small=1 multi_file=1 escaped=1 large_bytes={u64} negative_cases={u64} cleanup=1\n"), large_size,
+                 BUSTER_ARRAY_LENGTH(failure_cases));
     return PROCESS_RESULT_SUCCESS;
 }
 
 BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_action(Arena* arena, void* data)
 {
+    BUSTER_UNUSED(arena);
     TimeTraceSummaryOptions* options = (TimeTraceSummaryOptions*)data;
-    return time_trace_summary_run(arena, *options);
+    return time_trace_summary_run(*options);
 }
 
 BUSTER_GLOBAL_LOCAL void time_trace_summary_action_add(Arena* arena, TimeTraceSummaryOptions options)
@@ -5042,6 +6482,12 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_selection_is_valid(bool requested
 
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
+    ProcessResult time_trace_self_test_result = time_trace_summary_self_test(arena);
+    if (time_trace_self_test_result != PROCESS_RESULT_SUCCESS)
+    {
+        return time_trace_self_test_result;
+    }
+
     bool fanout_forced = environment_flag_is_on(S8("BUSTER_TEST_FORCE_ARTIFACT_FANOUT"));
     bool fanout_requested = build_artifact_fanout_requested_for_platform(ci, fanout_forced, BUSTER_MACOS != 0, BUSTER_WINDOWS != 0,
                                                                           BUSTER_CPU_ARCH_X86_64 != 0);
@@ -14474,6 +15920,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_CMAKE_PROFILE_SUMMARY] = S8_INITIALIZER("cmake_profile_summary"),
         [BUILD_COMMAND_NINJA_LOG_SUMMARY] = S8_INITIALIZER("ninja_log_summary"),
         [BUILD_COMMAND_TIME_TRACE_SUMMARY] = S8_INITIALIZER("time_trace_summary"),
+        [BUILD_COMMAND_TIME_TRACE_SUMMARY_SELF_TEST] = S8_INITIALIZER("time_trace_summary_self_test"),
         [BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA] = S8_INITIALIZER("import_assembly_metadata"),
         [BUILD_COMMAND_TEST_SELF_HOST] = S8_INITIALIZER("test_self_host"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
@@ -15211,6 +16658,11 @@ ProcessResult process_arguments(void)
         {
             time_trace_summary_options.paths = string8_list_to_slice(arena, time_trace_summary_paths);
             time_trace_summary_action_add(arena, time_trace_summary_options);
+        }
+        break;
+        case BUILD_COMMAND_TIME_TRACE_SUMMARY_SELF_TEST:
+        {
+            result = time_trace_summary_self_test(arena);
         }
         break;
         case BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA:

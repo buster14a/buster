@@ -76,6 +76,7 @@ shell, CMake, and utility subprocesses.
 
 `build/build` commands: `generate`, `build` (default), `clang_analyze`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
+`time_trace_summary_self_test`,
 `import_assembly_metadata`, `test_self_host`, `test_all_combinations`,
 `test_all_combinations_ci`.
 The combination matrix shares one multi-config build tree across Debug and
