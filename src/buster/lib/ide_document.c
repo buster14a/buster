@@ -17,6 +17,13 @@ typedef enum IdePathKind
     IDE_PATH_OTHER,
 } IdePathKind;
 
+typedef enum IdePathComponentStatus
+{
+    IDE_PATH_COMPONENT_SAFE,
+    IDE_PATH_COMPONENT_MISSING,
+    IDE_PATH_COMPONENT_UNSAFE,
+} IdePathComponentStatus;
+
 typedef struct IdeLoadedFile IdeLoadedFile;
 struct IdeLoadedFile
 {
@@ -392,14 +399,111 @@ BUSTER_GLOBAL_LOCAL bool ide_path_separator(char8 byte)
 #endif
 }
 
-BUSTER_GLOBAL_LOCAL bool ide_path_has_link_component(Arena* arena, String8 root, String8 path)
+BUSTER_GLOBAL_LOCAL IdePathComponentStatus ide_path_component_inspect(Arena* arena, String8 path, IdePathKind* kind_out)
 {
-    if (!arena || !ide_document_path_is_within(root, path))
+    if (kind_out)
     {
-        return true;
+        *kind_out = IDE_PATH_OTHER;
+    }
+    if (!arena || !path.length || !path.pointer)
+    {
+        return IDE_PATH_COMPONENT_UNSAFE;
     }
 
-    char8* prefix = (char8*)arena_allocate_bytes(arena, path.length + 1, BUSTER_ALIGN_OF(char8));
+#if defined(_WIN32)
+    String16 path_w = string16_from_string8(arena, path, true);
+    if (!path_w.pointer)
+    {
+        return IDE_PATH_COMPONENT_UNSAFE;
+    }
+    SetLastError(ERROR_SUCCESS);
+    DWORD attributes = GetFileAttributesW(path_w.pointer);
+    if (attributes == INVALID_FILE_ATTRIBUTES)
+    {
+        DWORD error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+        {
+            if (kind_out)
+            {
+                *kind_out = IDE_PATH_MISSING;
+            }
+            return IDE_PATH_COMPONENT_MISSING;
+        }
+        return IDE_PATH_COMPONENT_UNSAFE;
+    }
+    if (attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+    {
+        if (kind_out)
+        {
+            *kind_out = IDE_PATH_SYMLINK;
+        }
+        return IDE_PATH_COMPONENT_UNSAFE;
+    }
+    if (kind_out)
+    {
+        *kind_out = (attributes & FILE_ATTRIBUTE_DIRECTORY) ? IDE_PATH_DIRECTORY : IDE_PATH_REGULAR;
+    }
+    return IDE_PATH_COMPONENT_SAFE;
+#else
+    struct stat stats = {0};
+    if (lstat((const char*)path.pointer, &stats) != 0)
+    {
+        if (errno == ENOENT || errno == ENOTDIR)
+        {
+            if (kind_out)
+            {
+                *kind_out = IDE_PATH_MISSING;
+            }
+            return IDE_PATH_COMPONENT_MISSING;
+        }
+        return IDE_PATH_COMPONENT_UNSAFE;
+    }
+    if (S_ISLNK(stats.st_mode))
+    {
+        if (kind_out)
+        {
+            *kind_out = IDE_PATH_SYMLINK;
+        }
+        return IDE_PATH_COMPONENT_UNSAFE;
+    }
+    if (kind_out)
+    {
+        if (S_ISDIR(stats.st_mode))
+        {
+            *kind_out = IDE_PATH_DIRECTORY;
+        }
+        else if (S_ISREG(stats.st_mode))
+        {
+            *kind_out = IDE_PATH_REGULAR;
+        }
+        else
+        {
+            *kind_out = IDE_PATH_OTHER;
+        }
+    }
+    return IDE_PATH_COMPONENT_SAFE;
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL IdePathComponentStatus ide_path_component_status(Arena* arena, String8 root, String8 path, bool* missing_final_out)
+{
+    if (missing_final_out)
+    {
+        *missing_final_out = false;
+    }
+    if (!arena || !ide_document_path_is_within(root, path))
+    {
+        return IDE_PATH_COMPONENT_UNSAFE;
+    }
+
+    Arena* conflicts[] = {arena};
+    TemporalArena scratch = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+    char8* prefix = (char8*)arena_allocate_bytes(scratch.arena, path.length + 1, BUSTER_ALIGN_OF(char8));
+    if (!prefix)
+    {
+        scratch_end(scratch);
+        return IDE_PATH_COMPONENT_UNSAFE;
+    }
     memcpy(prefix, path.pointer, path.length);
     prefix[path.length] = 0;
     u64 cursor = root.length;
@@ -425,32 +529,31 @@ BUSTER_GLOBAL_LOCAL bool ide_path_has_link_component(Arena* arena, String8 root,
         }
         if (string_equal(component, S8("..")))
         {
-            return true;
+            scratch_end(scratch);
+            return IDE_PATH_COMPONENT_UNSAFE;
         }
         char8 separator = prefix[cursor];
         prefix[cursor] = 0;
-        IdePathKind kind = ide_path_kind((String8){.pointer = prefix, .length = cursor});
+        IdePathKind kind = IDE_PATH_OTHER;
+        IdePathComponentStatus status = ide_path_component_inspect(scratch.arena, (String8){.pointer = prefix, .length = cursor}, &kind);
         prefix[cursor] = separator;
-        if (kind == IDE_PATH_SYMLINK)
+        if (status != IDE_PATH_COMPONENT_SAFE)
         {
-            return true;
-        }
-        if (kind == IDE_PATH_MISSING)
-        {
-            // A missing final component is allowed so reload/poll can report a
-            // normal deletion. Missing intermediate components cannot be safe.
-            if (cursor < path.length)
+            if (status == IDE_PATH_COMPONENT_MISSING && missing_final_out)
             {
-                return true;
+                *missing_final_out = cursor == path.length;
             }
-            continue;
+            scratch_end(scratch);
+            return status;
         }
         if (cursor < path.length && kind != IDE_PATH_DIRECTORY)
         {
-            return true;
+            scratch_end(scratch);
+            return IDE_PATH_COMPONENT_UNSAFE;
         }
     }
-    return false;
+    scratch_end(scratch);
+    return IDE_PATH_COMPONENT_SAFE;
 }
 
 BUSTER_GLOBAL_LOCAL bool ide_path_has_parent_component(String8 path)
@@ -526,9 +629,20 @@ BUSTER_GLOBAL_LOCAL String8 ide_path_resolve_for_root(Arena* arena, String8 root
 BUSTER_GLOBAL_LOCAL bool ide_file_read(Arena* arena, String8 root, String8 path, IdeLoadedFile* result, IdeDocumentErrorKind* error_out)
 {
     *result = (IdeLoadedFile){0};
-    if (!ide_document_path_is_within(root, path) || ide_path_has_link_component(arena, root, path))
+    if (!ide_document_path_is_within(root, path))
     {
         *error_out = IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT;
+        return false;
+    }
+    IdePathComponentStatus component_status = ide_path_component_status(arena, root, path, 0);
+    if (component_status == IDE_PATH_COMPONENT_UNSAFE)
+    {
+        *error_out = IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT;
+        return false;
+    }
+    if (component_status == IDE_PATH_COMPONENT_MISSING)
+    {
+        *error_out = IDE_DOCUMENT_ERROR_PATH_NOT_FOUND;
         return false;
     }
     IdePathKind kind = ide_path_kind(path);
@@ -753,7 +867,7 @@ BUSTER_GLOBAL_LOCAL bool ide_scan_append(Arena* arena, String8 root, String8* di
     }
     *entry_count += 1;
 
-    if (ide_path_has_link_component(arena, root, entry))
+    if (ide_path_component_status(arena, root, entry, 0) != IDE_PATH_COMPONENT_SAFE)
     {
         return true;
     }
@@ -778,7 +892,8 @@ BUSTER_GLOBAL_LOCAL bool ide_scan_append(Arena* arena, String8 root, String8* di
             return false;
         }
         String8 canonical = ide_document_path_canonical(arena, entry);
-        if (!canonical.length || !ide_document_path_is_within(root, canonical) || ide_path_has_link_component(arena, root, canonical))
+        if (!canonical.length || !ide_document_path_is_within(root, canonical) ||
+            ide_path_component_status(arena, root, canonical, 0) != IDE_PATH_COMPONENT_SAFE)
         {
             return false;
         }
@@ -966,7 +1081,8 @@ BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_model_path_error(Arena* arena, Stri
     String8 canonical = ide_document_path_canonical(arena, candidate);
     if (canonical.length)
     {
-        if (!ide_document_path_is_within(root, canonical) || ide_path_has_link_component(arena, root, canonical))
+        if (!ide_document_path_is_within(root, canonical) ||
+            ide_path_component_status(arena, root, canonical, 0) == IDE_PATH_COMPONENT_UNSAFE)
         {
             return IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT;
         }
@@ -976,7 +1092,8 @@ BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_model_path_error(Arena* arena, Stri
         return IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT;
     }
 
-    if (ide_document_path_is_within(root, candidate) && ide_path_has_link_component(arena, root, candidate))
+    if (ide_document_path_is_within(root, candidate) &&
+        ide_path_component_status(arena, root, candidate, 0) == IDE_PATH_COMPONENT_UNSAFE)
     {
         return IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT;
     }
@@ -1213,15 +1330,21 @@ BUSTER_GLOBAL_LOCAL String8 ide_import_target_path(Arena* arena, String8 root, S
     }
     String8 candidate = ide_path_is_absolute(requested) ? ide_string_copy(arena, requested) : ide_path_join(arena, root, requested, true);
     String8 canonical = ide_document_path_canonical(arena, candidate);
+    bool missing_final = false;
+    IdePathComponentStatus component_status = ide_path_component_status(arena, root, candidate, &missing_final);
+    bool candidate_is_safe_or_missing_leaf = component_status == IDE_PATH_COMPONENT_SAFE ||
+                                              (component_status == IDE_PATH_COMPONENT_MISSING && missing_final);
     if (canonical.length)
     {
-        if (ide_document_path_is_within(root, canonical) && !ide_path_has_link_component(arena, root, candidate))
+        if (ide_document_path_is_within(root, canonical) &&
+            candidate_is_safe_or_missing_leaf)
         {
             return canonical;
         }
         return (String8){0};
     }
-    if (ide_document_path_is_within(root, candidate) && !ide_path_has_link_component(arena, root, candidate))
+    if (ide_document_path_is_within(root, candidate) &&
+        candidate_is_safe_or_missing_leaf)
     {
         return candidate;
     }
@@ -1711,7 +1834,7 @@ BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_build_workspace(Arena* arena, Arena
     {
         String8 security_open = open_candidate;
         if (security_open.length && ide_document_path_is_within(canonical_root, security_open) &&
-            ide_path_has_link_component(arena, canonical_root, security_open))
+            ide_path_component_status(arena, canonical_root, security_open, 0) == IDE_PATH_COMPONENT_UNSAFE)
         {
             return IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT;
         }
@@ -2206,13 +2329,24 @@ BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_stage_open_path(IdeDocumentModel* m
     String8 stable_canonical = {.pointer = canonical_storage, .length = canonical.length};
     bool lexical_inside_root = model->workspace.root_path.length && ide_document_path_is_within(model->workspace.root_path, stable_candidate);
     bool canonical_inside_root = model->workspace.root_path.length && ide_document_path_is_within(model->workspace.root_path, stable_canonical);
+    IdePathComponentStatus candidate_status = lexical_inside_root
+                                                  ? ide_path_component_status(scratch.arena, model->workspace.root_path, stable_candidate, 0)
+                                                  : IDE_PATH_COMPONENT_UNSAFE;
+    IdePathComponentStatus canonical_status = canonical_inside_root
+                                                   ? ide_path_component_status(scratch.arena, model->workspace.root_path, stable_canonical, 0)
+                                                   : IDE_PATH_COMPONENT_UNSAFE;
     if (lexical_inside_root &&
-        ((canonical_inside_root && ide_path_has_link_component(scratch.arena, model->workspace.root_path, stable_canonical)) ||
+        ((canonical_inside_root && canonical_status == IDE_PATH_COMPONENT_UNSAFE) ||
          (!canonical_inside_root && !ide_path_has_parent_component(stable_candidate) &&
-          ide_path_has_link_component(scratch.arena, model->workspace.root_path, stable_candidate))))
+          candidate_status == IDE_PATH_COMPONENT_UNSAFE)))
     {
         scratch_end(scratch);
         return IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT;
+    }
+    if (canonical_inside_root && canonical_status == IDE_PATH_COMPONENT_MISSING)
+    {
+        scratch_end(scratch);
+        return IDE_DOCUMENT_ERROR_PATH_NOT_FOUND;
     }
     IdePathKind target_kind = ide_path_kind(stable_canonical);
     if (target_kind == IDE_PATH_MISSING)
@@ -2226,7 +2360,7 @@ BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_stage_open_path(IdeDocumentModel* m
         return IDE_DOCUMENT_ERROR_NOT_REGULAR_FILE;
     }
     bool same_root = model->workspace.root_path.length && ide_document_path_is_within(model->workspace.root_path, stable_canonical) &&
-                     !ide_path_has_link_component(scratch.arena, model->workspace.root_path, stable_canonical);
+                     canonical_status == IDE_PATH_COMPONENT_SAFE;
 
     if (!same_root && ide_workspace_has_dirty_documents(&model->workspace))
     {
@@ -2700,7 +2834,7 @@ IdeDocumentErrorKind ide_document_model_save(IdeDocumentModel* model, String8 pa
         return IDE_DOCUMENT_ERROR_DOCUMENT_NOT_OPEN;
     }
     if (!ide_document_path_is_within(model->workspace.root_path, current->path) ||
-        ide_path_has_link_component(scratch.arena, model->workspace.root_path, current->path))
+        ide_path_component_status(scratch.arena, model->workspace.root_path, current->path, 0) == IDE_PATH_COMPONENT_UNSAFE)
     {
         scratch_end(scratch);
         return IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT;

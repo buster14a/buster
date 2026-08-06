@@ -17,6 +17,7 @@ BUSTER_F_DECL bool ide_app_test_failed_editor_commit_preserves_buffer(String8 pa
 BUSTER_F_DECL bool ide_app_test_drop_preserves_first(SliceString8 first, SliceString8 second, String8 expected_path);
 BUSTER_F_DECL bool ide_app_test_copy_storage_self(void);
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL String8 ide_document_test_temporary_root(Arena* arena, String8 name)
 {
     String8 temporary = buster_test_temporary_path(arena, name, S8(""));
@@ -55,6 +56,7 @@ BUSTER_GLOBAL_LOCAL String8 ide_document_test_temporary_root(Arena* arena, Strin
     return temporary;
 #endif
 }
+#endif
 
 UnitTestResult ide_document_tests(UnitTestArguments* arguments)
 {
@@ -147,6 +149,27 @@ UnitTestResult ide_document_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, model.workspace.import_count == 2);
         BUSTER_TEST(arguments, has_cycle);
+
+        String8 missing_leaf_import_source = S8("import missing = \"missing-leaf\";\ncode main : fn () s32 { return 0; }\n");
+        String8 missing_parent_import_source =
+            S8("import missing = \"not-created/missing-leaf\";\ncode main : fn () s32 { return 0; }\n");
+        String8 missing_leaf_target = string_format_z(test_arena, S8("{S8}/missing-leaf.bbb"), root);
+        String8 missing_parent_directory = string_format_z(test_arena, S8("{S8}/not-created"), root);
+        os_file_delete(missing_leaf_target);
+        os_directory_delete(missing_parent_directory);
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, a_path, missing_leaf_import_source) == IDE_DOCUMENT_ERROR_NONE);
+        IdeDocumentImport* missing_leaf_import = ide_document_model_import_at(&model, 0);
+        BUSTER_TEST(arguments, missing_leaf_import && missing_leaf_import->state == IDE_DOCUMENT_IMPORT_MISSING &&
+                                  missing_leaf_import->target_path.length != 0);
+        if (missing_leaf_import)
+        {
+            BUSTER_STRING_TEST(arguments, missing_leaf_import->target_path, missing_leaf_target);
+        }
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, a_path, missing_parent_import_source) == IDE_DOCUMENT_ERROR_NONE);
+        IdeDocumentImport* missing_parent_import = ide_document_model_import_at(&model, 0);
+        BUSTER_TEST(arguments, missing_parent_import && missing_parent_import->state == IDE_DOCUMENT_IMPORT_MISSING &&
+                                  missing_parent_import->target_path.length == 0);
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, a_path, a_source) == IDE_DOCUMENT_ERROR_NONE);
 
         BUSTER_TEST(arguments, ide_document_model_open(&model, z_path) == IDE_DOCUMENT_ERROR_NONE);
         BUSTER_TEST(arguments, ide_document_model_open_document_count(&model) == 2);
@@ -620,7 +643,15 @@ UnitTestResult ide_document_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, file_write(outside_file, BUSTER_SLICE_TO_BYTE_SLICE(outside_source)));
         BUSTER_TEST(arguments, symlink((const char*)outside_directory.pointer, (const char*)link_directory.pointer) == 0);
         BUSTER_TEST(arguments, symlink((const char*)outside_directory.pointer, (const char*)nested_link_directory.pointer) == 0);
+        String8 missing_reparse_file = string_format_z(test_arena, S8("{S8}/missing.bbb"), link_directory);
+        String8 reparse_import_source = S8("import missing = \"escape/missing-leaf\";\ncode main : fn () s32 { return 0; }\n");
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, a_path, reparse_import_source) == IDE_DOCUMENT_ERROR_NONE);
+        IdeDocumentImport* reparse_import = ide_document_model_import_at(&model, 0);
+        BUSTER_TEST(arguments, reparse_import && reparse_import->state == IDE_DOCUMENT_IMPORT_MISSING &&
+                                  reparse_import->target_path.length == 0);
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, a_path, a_source) == IDE_DOCUMENT_ERROR_NONE);
         BUSTER_TEST(arguments, ide_document_model_open(&model, escaped_file) == IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT);
+        BUSTER_TEST(arguments, ide_document_model_open(&model, missing_reparse_file) == IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT);
         BUSTER_TEST(arguments, ide_document_model_save(&model, escaped_file) == IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT);
         BUSTER_TEST(arguments, ide_document_model_open(&model, nested_escaped_file) == IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT);
         BUSTER_TEST(arguments, ide_document_model_save(&model, nested_escaped_file) == IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT);
@@ -658,9 +689,17 @@ UnitTestResult ide_document_tests(UnitTestArguments* arguments)
         String16 nested_link_w = string16_from_string8(test_arena, nested_link_directory, true);
         bool created_reparse = CreateSymbolicLinkW(link_w.pointer, outside_w.pointer, SYMBOLIC_LINK_FLAG_DIRECTORY) != 0;
         bool created_nested_reparse = CreateSymbolicLinkW(nested_link_w.pointer, outside_w.pointer, SYMBOLIC_LINK_FLAG_DIRECTORY) != 0;
+        String8 missing_reparse_file = string_format_z(test_arena, S8("{S8}/missing.bbb"), link_directory);
         if (created_reparse)
         {
+            String8 reparse_import_source = S8("import missing = \"escape/missing-leaf\";\ncode main : fn () s32 { return 0; }\n");
+            BUSTER_TEST(arguments, ide_document_model_set_text(&model, a_path, reparse_import_source) == IDE_DOCUMENT_ERROR_NONE);
+            IdeDocumentImport* reparse_import = ide_document_model_import_at(&model, 0);
+            BUSTER_TEST(arguments, reparse_import && reparse_import->state == IDE_DOCUMENT_IMPORT_MISSING &&
+                                      reparse_import->target_path.length == 0);
+            BUSTER_TEST(arguments, ide_document_model_set_text(&model, a_path, a_source) == IDE_DOCUMENT_ERROR_NONE);
             BUSTER_TEST(arguments, ide_document_model_open(&model, escaped_file) == IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT);
+            BUSTER_TEST(arguments, ide_document_model_open(&model, missing_reparse_file) == IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT);
             BUSTER_TEST(arguments, ide_document_model_save(&model, escaped_file) == IDE_DOCUMENT_ERROR_PATH_OUTSIDE_ROOT);
         }
         if (created_nested_reparse)
@@ -756,8 +795,17 @@ UnitTestResult ide_document_tests(UnitTestArguments* arguments)
         String8 root_before_dirty_replacement = model.workspace.root_path;
         String8 clean_source_before_dirty_replacement = clean_active_before_dirty_replacement ? clean_active_before_dirty_replacement->source : (String8){0};
         String8 dirty_source_before_dirty_replacement = dirty_non_active_before_replacement ? dirty_non_active_before_replacement->source : (String8){0};
+#if defined(_WIN32)
+        String8 missing_same_root_path = string_format_z(test_arena, S8("{S8}\\not-created\\missing.bbb"), model.workspace.root_path);
+        String8 missing_final_path = string_format_z(test_arena, S8("{S8}\\missing-final.bbb"), subdirectory);
+#else
         String8 missing_same_root_path = string_format_z(test_arena, S8("{S8}/not-created/missing.bbb"), model.workspace.root_path);
+        String8 missing_final_path = string_format_z(test_arena, S8("{S8}/missing-final.bbb"), subdirectory);
+#endif
+        BUSTER_TEST(arguments, ide_document_path_is_within(model.workspace.root_path, missing_same_root_path));
         BUSTER_TEST(arguments, ide_document_model_open_path(&model, missing_same_root_path) == IDE_DOCUMENT_ERROR_PATH_NOT_FOUND);
+        BUSTER_TEST(arguments, ide_document_path_is_within(model.workspace.root_path, missing_final_path));
+        BUSTER_TEST(arguments, ide_document_model_open_path(&model, missing_final_path) == IDE_DOCUMENT_ERROR_PATH_NOT_FOUND);
         BUSTER_TEST(arguments, model.workspace.documents == documents_before_dirty_replacement &&
                                   ide_document_model_active_document(&model) == clean_active_before_dirty_replacement &&
                                   ide_document_model_find(&model, b_path) == dirty_non_active_before_replacement);
