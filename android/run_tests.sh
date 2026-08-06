@@ -131,14 +131,69 @@ validate_device_before_install() {
     return 0
 }
 
-monitor_pid=
+monitor_reader_pid=
+monitor_producer_pid=
+monitor_fd=
+terminate_monitor_producer() {
+    local force=${1:-0}
+    local pid=${monitor_producer_pid:-}
+    if [[ -z $pid ]] || ! kill -0 "$pid" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # GNU timeout puts the adb command in a private process group. Kill that
+    # group so adb/logcat cannot outlive the timeout process after a terminal
+    # marker, launch failure, interruption, or cleanup.
+    if kill -TERM -- -"$pid" >/dev/null 2>&1; then
+        if [[ $force == 1 ]]; then
+            kill -KILL -- -"$pid" >/dev/null 2>&1 || true
+        fi
+    else
+        kill -TERM "$pid" >/dev/null 2>&1 || true
+        if [[ $force == 1 ]]; then
+            kill -KILL "$pid" >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+monitor_logcat_reader() {
+    local line
+    while IFS= read -r -u "$monitor_fd" line; do
+        printf '%s\n' "$line"
+        if [[ $line =~ BUSTER_ANDROID_TEST_RESULT:([0-9]+)$ ]]; then
+            terminate_monitor_producer
+            if [[ ${BASH_REMATCH[1]} == 0 ]]; then
+                return 10
+            fi
+            return 11
+        fi
+    done
+    return 0
+}
+
+stop_monitor() {
+    if [[ -n ${monitor_reader_pid:-} ]] && kill -0 "$monitor_reader_pid" >/dev/null 2>&1; then
+        kill "$monitor_reader_pid" >/dev/null 2>&1 || true
+        wait "$monitor_reader_pid" 2>/dev/null || true
+    fi
+    monitor_reader_pid=
+
+    if [[ -n ${monitor_producer_pid:-} ]]; then
+        terminate_monitor_producer 1
+        wait "$monitor_producer_pid" 2>/dev/null || true
+    fi
+    monitor_producer_pid=
+
+    if [[ -n ${monitor_fd:-} ]]; then
+        exec {monitor_fd}<&-
+        monitor_fd=
+    fi
+}
+
 cleanup_monitor() {
     local status=$?
     trap - EXIT INT TERM
-    if [[ -n ${monitor_pid:-} ]] && kill -0 "$monitor_pid" >/dev/null 2>&1; then
-        kill "$monitor_pid" >/dev/null 2>&1 || true
-        wait "$monitor_pid" 2>/dev/null || true
-    fi
+    stop_monitor
     adb_with_timeout "$adb_command_timeout_seconds" shell am force-stop "$package" >/dev/null 2>&1 || true
     exit "$status"
 }
@@ -157,14 +212,16 @@ fi
 adb_with_timeout "$adb_command_timeout_seconds" shell am force-stop "$package" >/dev/null 2>&1 || true
 adb_with_timeout "$adb_command_timeout_seconds" logcat -c
 
-timeout "$timeout_seconds" "$adb" "${adb_serial_args[@]}" logcat -v time -s buster:I '*:S' | while IFS= read -r line; do
-    printf '%s\n' "$line"
-    case "$line" in
-        *BUSTER_ANDROID_TEST_RESULT:0*) exit 10 ;;
-        *BUSTER_ANDROID_TEST_RESULT:*) exit 11 ;;
-    esac
-done &
-monitor_pid=$!
+# Keep the log producer and its reader as separately owned processes. A
+# background pipeline only exposes its last (reader) process through $!, so the
+# timeout/adb producer can survive after the reader sees a terminal marker.
+coproc buster_android_logcat {
+    exec timeout --kill-after=1s "${timeout_seconds}s" "$adb" "${adb_serial_args[@]}" logcat -v time -s buster:I '*:S'
+}
+monitor_producer_pid=$buster_android_logcat_PID
+exec {monitor_fd}<&"${buster_android_logcat[0]}"
+monitor_logcat_reader &
+monitor_reader_pid=$!
 
 # NativeActivity does not receive argv from adb, so pass the same test flags used
 # by desktop CI through an intent extra. The app turns this back into argv.
@@ -178,19 +235,35 @@ else
 fi
 if [[ $start_status -ne 0 ]]; then
     echo "error: am start failed with status ${start_status}" >&2
-    kill "$monitor_pid" 2>/dev/null || true
-    wait "$monitor_pid" 2>/dev/null || true
-    monitor_pid=
+    stop_monitor
     print_adb_diagnostics
     exit "$start_status"
 fi
 
-if wait "$monitor_pid"; then
-    status=0
+if wait "$monitor_reader_pid"; then
+    monitor_reader_status=0
 else
-    status=$?
+    monitor_reader_status=$?
 fi
-monitor_pid=
+monitor_reader_pid=
+
+if wait "$monitor_producer_pid" 2>/dev/null; then
+    monitor_producer_status=0
+else
+    monitor_producer_status=$?
+fi
+monitor_producer_pid=
+exec {monitor_fd}<&-
+monitor_fd=
+
+if [[ $monitor_reader_status -eq 10 || $monitor_reader_status -eq 11 ]]; then
+    status=$monitor_reader_status
+elif [[ $monitor_producer_status -ne 0 ]]; then
+    status=$monitor_producer_status
+else
+    echo "error: Android GUI test log monitor ended without a terminal result" >&2
+    status=1
+fi
 
 adb_with_timeout "$adb_command_timeout_seconds" shell am force-stop "$package" >/dev/null 2>&1 || true
 
