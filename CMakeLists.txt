@@ -10,7 +10,7 @@ set (CMAKE_COLOR_DIAGNOSTICS ON)
 include(CheckCCompilerFlag)
 include(CheckCSourceCompiles)
 
-set(BUSTER_CONFIG_TYPES Debug Release RelWithDebInfo MinSizeRel)
+set(BUSTER_CONFIG_TYPES Debug Release)
 
 function(buster_config_is_optimized out_var config)
     if ("${config}" STREQUAL "Release" OR "${config}" STREQUAL "RelWithDebInfo" OR "${config}" STREQUAL "MinSizeRel")

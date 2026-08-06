@@ -204,8 +204,6 @@ BUSTER_GLOBAL_LOCAL bool build_config_is_valid(String8 config)
     String8 configs[] = {
         S8("Debug"),
         S8("Release"),
-        S8("RelWithDebInfo"),
-        S8("MinSizeRel"),
     };
 
     bool result = false;
@@ -876,7 +874,7 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     os_argument_builder_append(b, S8("-G"));
     os_argument_builder_append(b, S8("Ninja Multi-Config"));
     os_argument_builder_append(b, default_build_type_argument);
-    os_argument_builder_append(b, S8("-DCMAKE_CONFIGURATION_TYPES=Debug;Release;RelWithDebInfo;MinSizeRel"));
+    os_argument_builder_append(b, S8("-DCMAKE_CONFIGURATION_TYPES=Debug;Release"));
 
     if (generate.cmake_profile_set)
     {
