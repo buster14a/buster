@@ -10,9 +10,9 @@ jobs:
     # This remains a finite bound and cannot guarantee completion under an unbounded backlog.
     timeout-minutes: 120
     strategy:
-      # A failing runner stops its own job, while the other matrix runners
-      # continue independently and report their own result.
-      fail-fast: false
+      # Once any required runner fails, cancel the remaining matrix jobs for
+      # this SHA because exact-SHA policy requires a fully green replacement.
+      fail-fast: true
       matrix:
         runner: [x86_64-linux-dedicated, x86_64-linux, aarch64-macos-mini, x86_64-windows-znver5]
     name: ${{matrix.runner}}
