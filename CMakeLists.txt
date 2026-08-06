@@ -130,6 +130,25 @@ option(BUSTER_LTO "Enable LTO" OFF)
 option(BUSTER_CHECK_OPTIONAL_WARNINGS "Probe and enable optional compiler warning flags" ON)
 option(BUSTER_DEVELOPER_TARGETS "Enable convenience run/test/debug targets" ON)
 
+set(BUSTER_SANITIZER_REDUCED_DEBUG OFF)
+if (BUSTER_SANITIZE AND NOT WIN32 AND (C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND NOT C_COMPILER_ZIG)
+    # CMake's Debug and RelWithDebInfo defaults add full debug information before
+    # target options. Remove only the exact full -g token so sanitizer builds use
+    # one reduced debug-info mode, while preserving every other flag byte and
+    # leaving the cache untouched when the sanitizer option is later disabled.
+    set(BUSTER_SANITIZER_REDUCED_DEBUG ON)
+    foreach(flag_variable IN ITEMS
+        CMAKE_C_FLAGS
+        CMAKE_C_FLAGS_DEBUG
+        CMAKE_C_FLAGS_RELEASE
+        CMAKE_C_FLAGS_MINSIZEREL
+        CMAKE_C_FLAGS_RELWITHDEBINFO
+    )
+        string(REGEX REPLACE "(^|[ \t])-g([ \t]|$)" "\\1\\2" sanitizer_flags "${${flag_variable}}")
+        set("${flag_variable}" "${sanitizer_flags}")
+    endforeach()
+endif()
+
 set(BUSTER_FUZZ_NO_MAIN_RUNTIME "")
 if (BUSTER_FUZZ_AVAILABLE)
     if (NOT C_COMPILER_CLANG OR C_COMPILER_ZIG OR APPLE)
@@ -674,6 +693,7 @@ message(STATUS "BUSTER_OPTIMIZE: configuration-derived")
 message(STATUS "BUSTER_UNITY_BUILD: ${BUSTER_UNITY_BUILD}")
 message(STATUS "BUSTER_INCLUDE_TESTS: ${BUSTER_INCLUDE_TESTS}")
 message(STATUS "BUSTER_SANITIZE: ${BUSTER_SANITIZE}")
+message(STATUS "BUSTER_SANITIZER_REDUCED_DEBUG: ${BUSTER_SANITIZER_REDUCED_DEBUG}")
 message(STATUS "BUSTER_TIME_TRACE: ${BUSTER_TIME_TRACE}")
 message(STATUS "BUSTER_INSTRUMENT: ${BUSTER_INSTRUMENT}")
 message(STATUS "BUSTER_FUZZ_AVAILABLE: ${BUSTER_FUZZ_AVAILABLE}")
@@ -1476,7 +1496,11 @@ function(executable_add name is_buster_program main_file)
         endif()
 
         if (NOT WIN32)
-            target_compile_options(${name} PRIVATE -g)
+            if (BUSTER_SANITIZER_REDUCED_DEBUG)
+                target_compile_options(${name} PRIVATE -gline-tables-only)
+            else()
+                target_compile_options(${name} PRIVATE -g)
+            endif()
         elseif (C_COMPILER_MSVC)
             target_compile_options(${name} PRIVATE /Zi)
             target_link_options(${name} PRIVATE /DEBUG)
