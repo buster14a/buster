@@ -92,7 +92,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_set_cpu_model(Arena* arena, CompilerDri
     }
     invocation->target.cpu_model = model;
     invocation->target.cpu_features_explicit = false;
-    invocation->target.cpu_features = 0;
+    invocation->target.cpu_features = target_cpu_features_empty();
     return true;
 }
 
@@ -524,11 +524,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             if (override.enable)
             {
-                invocation.target.cpu_features |= (TargetCpuFeatures)feature;
+                invocation.target.cpu_features = target_cpu_features_add(invocation.target.cpu_features, feature);
             }
             else
             {
-                invocation.target.cpu_features &= ~(TargetCpuFeatures)feature;
+                invocation.target.cpu_features = target_cpu_features_remove(invocation.target.cpu_features, feature);
             }
         }
     }

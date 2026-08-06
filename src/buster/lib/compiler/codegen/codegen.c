@@ -543,9 +543,11 @@ Target codegen_target_for_abi(CodegenAbi abi)
               : abi == CODEGEN_ABI_AARCH64_WINDOWS ? OPERATING_SYSTEM_WINDOWS
                                                    : OPERATING_SYSTEM_LINUX,
         .cpu_features_explicit = true,
-        .cpu_features = x86 ? TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AVX2 | TARGET_CPU_FEATURE_X86_AVX512F |
-                                  TARGET_CPU_FEATURE_X86_AVX512VL | TARGET_CPU_FEATURE_X86_AVX512BW
-                            : TARGET_CPU_FEATURE_AARCH64_NEON,
+        .cpu_features = x86 ? target_cpu_features_from_array((TargetCpuFeature const[]){
+                                      TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
+                                      TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F,
+                                      TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW}, 6)
+                            : target_cpu_features_singleton(TARGET_CPU_FEATURE_AARCH64_NEON),
     };
     return result;
 }

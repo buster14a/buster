@@ -1050,13 +1050,15 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     };
     Target avx2_target = baseline_target;
     avx2_target.cpu_features_explicit = true;
-    avx2_target.cpu_features = TARGET_CPU_FEATURE_X86_SSE2 | TARGET_CPU_FEATURE_X86_AVX | TARGET_CPU_FEATURE_X86_AVX2;
+    avx2_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2}, 3);
     Target avx512f_target = avx2_target;
-    avx512f_target.cpu_features |= TARGET_CPU_FEATURE_X86_AVX512F;
+    avx512f_target.cpu_features = target_cpu_features_add(avx512f_target.cpu_features, TARGET_CPU_FEATURE_X86_AVX512F);
     Target avx10_target = avx2_target;
-    avx10_target.cpu_features |= TARGET_CPU_FEATURE_X86_AVX512F | TARGET_CPU_FEATURE_X86_AVX512VL | TARGET_CPU_FEATURE_X86_AVX512BW |
-                                 TARGET_CPU_FEATURE_X86_AVX10_1 | TARGET_CPU_FEATURE_X86_AVX10_2 | TARGET_CPU_FEATURE_X86_AVX10_512 |
-                                 TARGET_CPU_FEATURE_X86_APX;
+    avx10_target.cpu_features = target_cpu_features_union(avx10_target.cpu_features, target_cpu_features_from_array((TargetCpuFeature const[]){
+        TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW,
+        TARGET_CPU_FEATURE_X86_AVX10_1, TARGET_CPU_FEATURE_X86_AVX10_2, TARGET_CPU_FEATURE_X86_AVX10_512,
+        TARGET_CPU_FEATURE_X86_APX}, 7));
     BUSTER_TEST(arguments, target_vector_register_size(baseline_target) == 16);
     BUSTER_TEST(arguments, target_vector_register_size(avx2_target) == 32);
     BUSTER_TEST(arguments, target_vector_register_size(avx10_target) == 64);
@@ -1519,7 +1521,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     Target aarch64_target = target;
     aarch64_target.cpu_arch = CPU_ARCH_AARCH64;
     aarch64_target.cpu_features_explicit = true;
-    aarch64_target.cpu_features = TARGET_CPU_FEATURE_AARCH64_NEON;
+    aarch64_target.cpu_features = target_cpu_features_singleton(TARGET_CPU_FEATURE_AARCH64_NEON);
     BUSTER_TEST(arguments, codegen_debug_frame_offset(40, target, true, 32) == -40);
     BUSTER_TEST(arguments, codegen_debug_frame_offset(40, aarch64_target, false, 32) == 8);
     CodegenFunction aarch64_generated = straight_function ? codegen_generate_function(arguments->arena, &analysis, straight_function, aarch64_target)
@@ -1716,7 +1718,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                                                                      .error = CODEGEN_ERROR_INVALID_IR,
                                                                  };
     Target aarch64_without_neon = aarch64_target;
-    aarch64_without_neon.cpu_features = 0;
+    aarch64_without_neon.cpu_features = target_cpu_features_empty();
     CodegenFunction aarch64_without_neon_generated = vector_function
                                                          ? codegen_generate_function(arguments->arena, &analysis, vector_function, aarch64_without_neon)
                                                          : (CodegenFunction){

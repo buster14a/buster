@@ -2870,7 +2870,7 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_amx_feature_name(AssemblyOpcode opcode)
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_target_has_amx_feature(Target target, AssemblyOpcode opcode)
 {
-    return (target_cpu_features_effective(target) & assembly_x86_amx_feature(opcode)) != 0;
+    return target_cpu_feature_has(target, assembly_x86_amx_feature(opcode));
 }
 
 BUSTER_GLOBAL_LOCAL TargetCpuFeature assembly_x86_mask_feature(AssemblyOpcode opcode)
@@ -6077,7 +6077,7 @@ BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, Strin
     u32 count = 0;
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(feature_bits) && count < capacity; index += 1)
     {
-        if (effective & feature_bits[index])
+        if (target_cpu_features_contains(effective, feature_bits[index]))
         {
             names[count++] = target_cpu_feature_to_string(feature_bits[index]);
         }
