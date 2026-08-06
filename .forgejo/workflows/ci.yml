@@ -1,10 +1,10 @@
 on: [push]
 
-# Stacked pushes to the same ref supersede each other instead of queueing
-# full matrices on the self-hosted runners. Runs on main are never
-# cancelled so each push receives the complete correctness matrix.
+# Main runs use a commit-specific group so different commits can dispatch their
+# complete matrices independently. Non-main pushes share a ref-specific group,
+# so the newest push supersedes an in-progress older run.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
