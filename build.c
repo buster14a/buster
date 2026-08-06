@@ -5244,11 +5244,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     for (u64 combination_i = 0; combination_i < combination_count; combination_i += 1)
     {
         TestCombination combination = combinations[combination_i];
-        if (combination.sanitize || !combination.options.optimize)
-        {
-            build_add(arena, combination.build_directory, (SliceString8){0}, (SliceString8){0}, combination.options);
-        }
-
         String8 test_targets[] = {
             combination.run_app_tests ? S8("test_all") : S8("test_units"),
         };
