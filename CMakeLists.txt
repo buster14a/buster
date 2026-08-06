@@ -962,7 +962,6 @@ set(CLANG_GNU_FAMILY_WARNINGS
     -Wshift-sign-overflow
     -Wsigned-enum-bitfield
     -Wtautological-constant-in-range-compare
-    -Wthread-safety
     -Wunaligned-access
     -Wvector-conversion
 )
