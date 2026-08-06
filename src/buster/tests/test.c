@@ -6,6 +6,7 @@
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/time.h>
+#include <buster/lib/system_headers.h>
 #if BUSTER_CPU_ARCH_X86_64
 #include <buster/lib/x86_64.h>
 #endif
@@ -263,18 +264,153 @@ void buster_test_error(u32 line, String8 function, String8 file_path, String8 fo
     }
 }
 
-String8 buster_test_temporary_path(Arena* arena, String8 name, String8 suffix)
+BUSTER_GLOBAL_LOCAL String8 buster_test_temporary_root;
+BUSTER_GLOBAL_LOCAL u64 buster_test_temporary_root_serial;
+BUSTER_GLOBAL_LOCAL Arena* buster_test_temporary_root_arena;
+BUSTER_GLOBAL_LOCAL UnitTestArguments* buster_test_temporary_arguments;
+BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_failed;
+BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_owned;
+BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_ready;
+
+BUSTER_GLOBAL_LOCAL String8 buster_test_temporary_base(void)
 {
 #if BUSTER_WINDOWS
-    String8 prefix = S8("build/");
+    return S8("build/");
 #elif BUSTER_ANDROID
-    String8 prefix = buster_android_internal_data_path.length ? buster_android_internal_data_path : S8(".");
-    String8 separator = prefix.pointer[prefix.length - 1] == '/' ? S8("") : S8("/");
-    return string_format_z(arena, S8("{S8}{S8}{S8}-{u64}{S8}"), prefix, separator, name, os_get_current_process_id(), suffix);
+    return buster_android_internal_data_path.length ? buster_android_internal_data_path : S8(".");
 #else
-    String8 prefix = S8("/tmp/");
+    return S8("/tmp/");
 #endif
-    return string_format_z(arena, S8("{S8}{S8}-{u64}{S8}"), prefix, name, os_get_current_process_id(), suffix);
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_make_directory(String8 path)
+{
+#if defined(__linux__) || defined(__APPLE__)
+    BUSTER_CHECK(!path.pointer[path.length]);
+    return mkdir((const char*)path.pointer, 0700) == 0;
+#elif defined(_WIN32)
+    TemporalArena scratch = scratch_begin(0, 0);
+    String16 path_w = string16_from_string8(scratch.arena, path, true);
+    bool result = CreateDirectoryW(path_w.pointer, 0) != 0;
+    scratch_end(scratch);
+    return result;
+#else
+    BUSTER_UNUSED(path);
+    return false;
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_create(void)
+{
+    UnitTestArguments* arguments = buster_test_temporary_arguments;
+    Arena* arena = buster_test_temporary_root_arena;
+    if (!arguments || !arena)
+    {
+        string_print(S8("TEST_TEMPORARY_ROOT_SETUP status=failed reason=no active library test run\n"));
+        return false;
+    }
+
+    String8 base = buster_test_temporary_base();
+    String8 separator = base.length && (base.pointer[base.length - 1] == '/' || base.pointer[base.length - 1] == '\\') ? S8("") : S8("/");
+    // The PID separates simultaneous test processes. The serial separates
+    // repeated library_tests calls in one process, and the monotonic clock
+    // prevents a reused PID from selecting an old root in the same boot.
+    u64 process_id = os_get_current_process_id();
+    u64 serial = ++buster_test_temporary_root_serial;
+    u64 timestamp = timestamp_ns_between((TimeDataType)0, timestamp_take());
+    buster_test_temporary_root = string_format_z(arena, S8("{S8}{S8}buster-tests-{u64}-{u64}-{u64}"), base, separator, process_id, serial, timestamp);
+
+    // The shared OS helper intentionally has no status return. The harness
+    // needs exclusive ownership so a collision can never make teardown delete
+    // a foreign directory, so create the leaf with the platform's exclusive
+    // directory primitive and diagnose every failure.
+    if (!buster_test_temporary_root_make_directory(buster_test_temporary_root))
+    {
+        arguments->show(arguments, S8("TEST_TEMPORARY_ROOT_SETUP status=failed path={S8} error={EOs}\n"), buster_test_temporary_root,
+                        os_get_last_error());
+        buster_test_temporary_root = (String8){0};
+        return false;
+    }
+    buster_test_temporary_root_owned = true;
+
+    // Probe the owned root before publishing it to callers. This catches a
+    // read-only or otherwise unusable base without returning an invalid path.
+    String8 probe_path = string_format_z(arena, S8("{S8}/.root-probe"), buster_test_temporary_root);
+    bool probe_contained = string_starts_with_sequence(probe_path, buster_test_temporary_root) && probe_path.length > buster_test_temporary_root.length &&
+                           probe_path.pointer[buster_test_temporary_root.length] == '/';
+    BUSTER_CHECK(probe_contained);
+    OsFileDescriptor* probe = os_file_open(probe_path, (OpenFlags){.read = 1, .write = 1, .create = 1},
+                                           (OpenPermissions){.read = 1, .write = 1});
+    bool result = probe != 0;
+    if (probe)
+    {
+        result = os_file_close(probe) && result;
+        result = os_file_delete(probe_path) && result;
+    }
+
+    if (!result)
+    {
+        arguments->show(arguments, S8("TEST_TEMPORARY_ROOT_SETUP status=failed path={S8} error={EOs}\n"), buster_test_temporary_root,
+                        os_get_last_error());
+        buster_test_temporary_root_ready = false;
+        return false;
+    }
+
+    buster_test_temporary_root_ready = true;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_delete(UnitTestArguments* arguments)
+{
+    String8 root = buster_test_temporary_root;
+    bool result = buster_test_temporary_root_owned && os_directory_delete(root);
+    if (!result)
+    {
+        arguments->show(arguments, S8("TEST_TEMPORARY_ROOT_CLEANUP status=failed path={S8} error={EOs}\n"), root, os_get_last_error());
+    }
+    buster_test_temporary_root = (String8){0};
+    buster_test_temporary_root_owned = false;
+    buster_test_temporary_root_ready = false;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_test_temporary_component_is_safe(String8 component)
+{
+    if (string_equal(component, S8(".")) || string_equal(component, S8("..")))
+    {
+        return false;
+    }
+    for (u64 index = 0; index < component.length; index += 1)
+    {
+        if (component.pointer[index] == '/' || component.pointer[index] == '\\')
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+String8 buster_test_temporary_path(Arena* arena, String8 name, String8 suffix)
+{
+    // Some tests intentionally exec this binary and exit from a child mode.
+    // Create the root lazily so those children do not leave an empty root when
+    // they never request a test artifact; the parent still owns final cleanup.
+    if (!buster_test_temporary_root.length && !buster_test_temporary_root_failed)
+    {
+        buster_test_temporary_root_failed = !buster_test_temporary_root_create();
+    }
+    if (!buster_test_temporary_root_ready)
+    {
+        return (String8){0};
+    }
+
+    BUSTER_CHECK(buster_test_temporary_component_is_safe(name));
+    BUSTER_CHECK(buster_test_temporary_component_is_safe(suffix));
+    String8 result = string_format_z(arena, S8("{S8}/{S8}-{u64}{S8}"), buster_test_temporary_root, name, os_get_current_process_id(), suffix);
+    bool root_contained = string_starts_with_sequence(result, buster_test_temporary_root) && result.length > buster_test_temporary_root.length &&
+                          (result.pointer[buster_test_temporary_root.length] == '/' || result.pointer[buster_test_temporary_root.length] == '\\');
+    BUSTER_CHECK(root_contained);
+    return result;
 }
 
 void default_show(UnitTestArguments* arguments, String8 format, ...)
@@ -341,6 +477,16 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     // read-only table before the first module can create those workers.
     compiler_prewarm();
     BUSTER_CHECK(c_test_lex_compact_tables_ready());
+    // Keep the root path outside the per-descriptor arena rewind points. A
+    // child that exits before requesting a path therefore owns no filesystem
+    // root, while a parent run keeps its root alive until teardown.
+    buster_test_temporary_arguments = arguments;
+    buster_test_temporary_root_arena = arena_create((ArenaCreation){0});
+    buster_test_temporary_root = (String8){0};
+    buster_test_temporary_root_failed = false;
+    buster_test_temporary_root_owned = false;
+    buster_test_temporary_root_ready = false;
+
     bool timing_enabled = program_state != 0 && program_flag_get(PROGRAM_FLAG_VERBOSE);
     if (timing_enabled)
     {
@@ -350,6 +496,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     u64 timing_record_count = 0;
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(test_descriptors); i += 1)
     {
+        BatchTestResult result_before_descriptor = result;
         u64 arena_position = arguments->arena->position;
         if (timing_enabled)
         {
@@ -365,8 +512,35 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
             consume_unit_tests(&result, unit_test_result);
             arena_set_position(arguments->arena, arena_position);
         }
+
+        if (buster_test_temporary_root_failed)
+        {
+            // A failed root makes every later artifact path unusable. Discard
+            // the descriptor's downstream path failures and report exactly
+            // one deterministic harness failure instead, preserving all
+            // aggregate totals completed before this descriptor.
+            result = result_before_descriptor;
+            result.unit_test_count += 1;
+            break;
+        }
     }
-    BUSTER_CHECK(!timing_enabled || timing_record_count == BUSTER_ARRAY_LENGTH(test_descriptors));
+    BUSTER_CHECK(!timing_enabled || buster_test_temporary_root_failed || timing_record_count == BUSTER_ARRAY_LENGTH(test_descriptors));
+
+    bool temporary_root_succeeded = true;
+    if (buster_test_temporary_root.length)
+    {
+        temporary_root_succeeded = buster_test_temporary_root_delete(arguments);
+    }
+    temporary_root_succeeded = temporary_root_succeeded && !buster_test_temporary_root_failed;
+    if (!temporary_root_succeeded && !buster_test_temporary_root_failed)
+    {
+        result.unit_test_count += 1;
+    }
+
+    arena_destroy(buster_test_temporary_root_arena, 1);
+    buster_test_temporary_root_arena = 0;
+    buster_test_temporary_arguments = 0;
+    buster_test_temporary_root_failed = false;
 
     return result;
 }
