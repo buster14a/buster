@@ -518,6 +518,11 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_IBT, TARGET_CPU_FEATURE_X86_CLDEMOTE, TARGET_CPU_FEATURE_X86_PREFETCHI, TARGET_CPU_FEATURE_X86_MOVRS, TARGET_CPU_FEATURE_X86_SHSTK}, 6),
     };
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_metadata_features));
+    Target invalid_xsaves_without_xsave = valid_metadata_features;
+    invalid_xsaves_without_xsave.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_XSAVES}, 2);
+    invalid_xsaves_without_xsave.cpu_features_explicit = true;
+    BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_xsaves_without_xsave));
 
     struct
     {
@@ -564,24 +569,46 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         {S8("ibt"), TARGET_CPU_FEATURE_X86_IBT},
         {S8("cldemote"), TARGET_CPU_FEATURE_X86_CLDEMOTE},
         {S8("fma4"), TARGET_CPU_FEATURE_X86_FMA4},
+        {S8("enqcmd"), TARGET_CPU_FEATURE_X86_ENQCMD},
+        {S8("fred"), TARGET_CPU_FEATURE_X86_FRED},
         {S8("gfni"), TARGET_CPU_FEATURE_X86_GFNI},
+        {S8("hreset"), TARGET_CPU_FEATURE_X86_HRESET},
+        {S8("invlpgb"), TARGET_CPU_FEATURE_X86_INVLPGB},
+        {S8("invpcid"), TARGET_CPU_FEATURE_X86_INVPCID},
+        {S8("keylocker"), TARGET_CPU_FEATURE_X86_KEYLOCKER},
+        {S8("lkgs"), TARGET_CPU_FEATURE_X86_LKGS},
         {S8("lwp"), TARGET_CPU_FEATURE_X86_LWP},
         {S8("movrs"), TARGET_CPU_FEATURE_X86_MOVRS},
+        {S8("msr-imm"), TARGET_CPU_FEATURE_X86_MSR_IMM},
+        {S8("msrlist"), TARGET_CPU_FEATURE_X86_MSRLIST},
+        {S8("monitor"), TARGET_CPU_FEATURE_X86_MONITOR},
+        {S8("movdir64b"), TARGET_CPU_FEATURE_X86_MOVDIR64B},
+        {S8("pbndkb"), TARGET_CPU_FEATURE_X86_PBNDKB},
+        {S8("pconfig"), TARGET_CPU_FEATURE_X86_PCONFIG},
         {S8("pclmul"), TARGET_CPU_FEATURE_X86_PCLMUL},
         {S8("prefetchi"), TARGET_CPU_FEATURE_X86_PREFETCHI},
+        {S8("smap"), TARGET_CPU_FEATURE_X86_SMAP},
+        {S8("sgx"), TARGET_CPU_FEATURE_X86_SGX},
         {S8("shstk"), TARGET_CPU_FEATURE_X86_SHSTK},
+        {S8("snp"), TARGET_CPU_FEATURE_X86_SNP},
         {S8("svm"), TARGET_CPU_FEATURE_X86_SVM},
+        {S8("tdx"), TARGET_CPU_FEATURE_X86_TDX},
         {S8("vaes"), TARGET_CPU_FEATURE_X86_VAES},
         {S8("vpclmulqdq"), TARGET_CPU_FEATURE_X86_VPCLMULQDQ},
         {S8("vmx"), TARGET_CPU_FEATURE_X86_VMX},
         {S8("tbm"), TARGET_CPU_FEATURE_X86_TBM},
+        {S8("wbnoinvd"), TARGET_CPU_FEATURE_X86_WBNOINVD},
+        {S8("wrmsrns"), TARGET_CPU_FEATURE_X86_WRMSRNS},
         {S8("xop"), TARGET_CPU_FEATURE_X86_XOP},
+        {S8("xsave"), TARGET_CPU_FEATURE_X86_XSAVE},
+        {S8("xsaves"), TARGET_CPU_FEATURE_X86_XSAVES},
     };
     for (u32 feature_index = 0; feature_index < BUSTER_ARRAY_LENGTH(feature_names); feature_index += 1)
     {
         BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, feature_names[feature_index].name) == feature_names[feature_index].feature);
         BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(feature_names[feature_index].feature), feature_names[feature_index].name);
     }
+    BUSTER_TEST(arguments, target_cpu_feature_names_are_sorted());
     BUSTER_TEST(arguments, sizeof(TargetCpuFeatures) == TARGET_CPU_FEATURE_WORD_COUNT * sizeof(u64));
     BUSTER_TEST(arguments, TARGET_CPU_FEATURE_BIT_CAPACITY >= 256);
     TargetCpuFeatures second_word_features = target_cpu_features_singleton(TARGET_CPU_FEATURE_X86_SVM);
@@ -619,50 +646,87 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
 #if BUSTER_CPU_ARCH_X86_64
     X86_64CpuFeatureInput full_cpuid = {
         .maximum_basic_leaf = 0x29,
-        .maximum_extended_leaf = 0x80000001,
-        .basic = {.ecx = (UINT32_C(0x1)) | (UINT32_C(0x2)) | (UINT32_C(0x20)) | (UINT32_C(0x2000)) | (UINT32_C(0x800000)) |
-                           (UINT32_C(0x2000000)) | (UINT32_C(0x8000000)) | (UINT32_C(0x10000000))},
+        .maximum_extended_leaf = 0x8000001f,
+        .basic = {.ecx = (UINT32_C(0x1)) | (UINT32_C(0x2)) | (UINT32_C(0x8)) | (UINT32_C(0x20)) | (UINT32_C(0x2000)) | (UINT32_C(0x800000)) |
+                           (UINT32_C(0x2000000)) | (UINT32_C(0x4000000)) | (UINT32_C(0x8000000)) | (UINT32_C(0x10000000))},
         .extended_basic = {.ecx = UINT32_C(0x4) | UINT32_C(0x20) | UINT32_C(0x800) | UINT32_C(0x8000) | UINT32_C(0x10000) | UINT32_C(0x200000),
                            .edx = UINT32_C(0x40000000) | UINT32_C(0x80000000)},
         .leaf_7_0 =
             {
                 .eax = 1,
-                .ebx = (UINT32_C(0x8)) | (UINT32_C(0x20)) | (UINT32_C(0x10000)) | (UINT32_C(0x20000)) | (UINT32_C(0x200000)) |
+                .ebx = (UINT32_C(0x4)) | (UINT32_C(0x8)) | (UINT32_C(0x20)) | (UINT32_C(0x400)) | (UINT32_C(0x10000)) | (UINT32_C(0x20000)) | (UINT32_C(0x200000)) |
+                       (UINT32_C(0x100000)) |
                        (UINT32_C(0x4000000)) | (UINT32_C(0x8000000)) | (UINT32_C(0x10000000)) | (UINT32_C(0x40000000)) | (UINT32_C(0x80000000)),
                 .ecx = (UINT32_C(0x2)) | (UINT32_C(0x40)) | (UINT32_C(0x80)) | (UINT32_C(0x100)) | (UINT32_C(0x200)) | (UINT32_C(0x400)) |
-                       (UINT32_C(0x800)) | (UINT32_C(0x1000)) | (UINT32_C(0x4000)) | (UINT32_C(0x2000000)),
+                       (UINT32_C(0x800000)) | (UINT32_C(0x20000000)) |
+                       (UINT32_C(0x800)) | (UINT32_C(0x1000)) | (UINT32_C(0x4000)) | (UINT32_C(0x2000000)) | (UINT32_C(0x10000000)),
                 .edx = (UINT32_C(0x4)) | (UINT32_C(0x8)) | (UINT32_C(0x100)) | (UINT32_C(0x100000)) | (UINT32_C(0x400000)) | (UINT32_C(0x800000)) |
-                       (UINT32_C(0x1000000)) | (UINT32_C(0x2000000)),
+                       (UINT32_C(0x1000000)) | (UINT32_C(0x2000000)) | (UINT32_C(0x40000)),
             },
         .leaf_7_1 =
             {
-                .eax = (UINT32_C(0x10)) | (UINT32_C(0x20)) | (UINT32_C(0x200000)) | (UINT32_C(0x800000)) | (UINT32_C(0x80000000)),
+                .eax = (UINT32_C(0x10)) | (UINT32_C(0x20)) | (UINT32_C(0x20000)) | (UINT32_C(0x40000)) | (UINT32_C(0x80000)) |
+                       (UINT32_C(0x400000)) | (UINT32_C(0x8000000)) | (UINT32_C(0x200000)) | (UINT32_C(0x800000)) | (UINT32_C(0x80000000)),
                 .edx = (UINT32_C(0x10)) | (UINT32_C(0x20)) | (UINT32_C(0x100)) | (UINT32_C(0x400)) | (UINT32_C(0x4000)) | (UINT32_C(0x80000)) |
                        (UINT32_C(0x200000)),
             },
+        .leaf_d_1 = {.eax = UINT32_C(0x8)},
         .leaf_1e_0 = {.eax = 1},
         .leaf_1e_1 = {.eax = (UINT32_C(0x1)) | (UINT32_C(0x2)) | (UINT32_C(0x4)) | (UINT32_C(0x8)) | (UINT32_C(0x10)) |
                               (UINT32_C(0x40)) | (UINT32_C(0x80)) | (UINT32_C(0x100))},
         .leaf_24_0 = {.eax = 1, .ebx = 2 | (UINT32_C(0x10000)) | (UINT32_C(0x20000)) | (UINT32_C(0x40000))},
         .leaf_24_1 = {.ecx = UINT32_C(0x4)},
         .leaf_29_0 = {.ebx = UINT32_C(0x1)},
+        .extended_8 = {.ebx = UINT32_C(0x8) | UINT32_C(0x200)},
+        .extended_1f = {.eax = UINT32_C(0x10)},
         .xcr0 = UINT64_C(0xe7) | (UINT64_C(0x20000)) | (UINT64_C(0x40000)) | (UINT64_C(0x80000)),
     };
     TargetCpuFeatures full_features = x86_64_cpu_features_from_cpuid(full_cpuid);
-    TargetCpuFeatures full_expected = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SSE3, TARGET_CPU_FEATURE_X86_POPCNT, TARGET_CPU_FEATURE_X86_LZCNT, TARGET_CPU_FEATURE_X86_BMI1, TARGET_CPU_FEATURE_X86_CX16, TARGET_CPU_FEATURE_X86_AES, TARGET_CPU_FEATURE_X86_PCLMUL, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512CD, TARGET_CPU_FEATURE_X86_AVX512DQ, TARGET_CPU_FEATURE_X86_AVX512IFMA, TARGET_CPU_FEATURE_X86_AVX512PF, TARGET_CPU_FEATURE_X86_AVX512ER, TARGET_CPU_FEATURE_X86_AVX512VBMI, TARGET_CPU_FEATURE_X86_AVX512VBMI2, TARGET_CPU_FEATURE_X86_AVX512VNNI, TARGET_CPU_FEATURE_X86_AVX512BITALG, TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ, TARGET_CPU_FEATURE_X86_AVX5124VNNIW, TARGET_CPU_FEATURE_X86_AVX5124FMAPS, TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT, TARGET_CPU_FEATURE_X86_AVX512BF16, TARGET_CPU_FEATURE_X86_AVX512FP16, TARGET_CPU_FEATURE_X86_GFNI, TARGET_CPU_FEATURE_X86_VAES, TARGET_CPU_FEATURE_X86_VPCLMULQDQ, TARGET_CPU_FEATURE_X86_AVX10_1, TARGET_CPU_FEATURE_X86_AVX10_2, TARGET_CPU_FEATURE_X86_AVX10_512, TARGET_CPU_FEATURE_X86_AVX10_V1_AUX, TARGET_CPU_FEATURE_X86_IBT, TARGET_CPU_FEATURE_X86_CLDEMOTE, TARGET_CPU_FEATURE_X86_PREFETCHI, TARGET_CPU_FEATURE_X86_SHSTK, TARGET_CPU_FEATURE_X86_MOVRS, TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF, TARGET_CPU_FEATURE_X86_AMX_TILE, TARGET_CPU_FEATURE_X86_AMX_INT8, TARGET_CPU_FEATURE_X86_AMX_BF16, TARGET_CPU_FEATURE_X86_AMX_FP16, TARGET_CPU_FEATURE_X86_AMX_COMPLEX, TARGET_CPU_FEATURE_X86_AMX_FP8, TARGET_CPU_FEATURE_X86_AMX_AVX512, TARGET_CPU_FEATURE_X86_AMX_MOVRS, TARGET_CPU_FEATURE_X86_AVX_VNNI, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16, TARGET_CPU_FEATURE_X86_AVX_IFMA, TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT, TARGET_CPU_FEATURE_X86_3DNOW, TARGET_CPU_FEATURE_X86_3DNOWA, TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_LWP, TARGET_CPU_FEATURE_X86_TBM, TARGET_CPU_FEATURE_X86_XOP}, 61);
+    TargetCpuFeatures full_expected = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SSE3, TARGET_CPU_FEATURE_X86_POPCNT, TARGET_CPU_FEATURE_X86_LZCNT, TARGET_CPU_FEATURE_X86_BMI1, TARGET_CPU_FEATURE_X86_CX16, TARGET_CPU_FEATURE_X86_AES, TARGET_CPU_FEATURE_X86_PCLMUL, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512CD, TARGET_CPU_FEATURE_X86_AVX512DQ, TARGET_CPU_FEATURE_X86_AVX512IFMA, TARGET_CPU_FEATURE_X86_AVX512PF, TARGET_CPU_FEATURE_X86_AVX512ER, TARGET_CPU_FEATURE_X86_AVX512VBMI, TARGET_CPU_FEATURE_X86_AVX512VBMI2, TARGET_CPU_FEATURE_X86_AVX512VNNI, TARGET_CPU_FEATURE_X86_AVX512BITALG, TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ, TARGET_CPU_FEATURE_X86_AVX5124VNNIW, TARGET_CPU_FEATURE_X86_AVX5124FMAPS, TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT, TARGET_CPU_FEATURE_X86_AVX512BF16, TARGET_CPU_FEATURE_X86_AVX512FP16, TARGET_CPU_FEATURE_X86_GFNI, TARGET_CPU_FEATURE_X86_VAES, TARGET_CPU_FEATURE_X86_VPCLMULQDQ, TARGET_CPU_FEATURE_X86_AVX10_1, TARGET_CPU_FEATURE_X86_AVX10_2, TARGET_CPU_FEATURE_X86_AVX10_512, TARGET_CPU_FEATURE_X86_AVX10_V1_AUX, TARGET_CPU_FEATURE_X86_IBT, TARGET_CPU_FEATURE_X86_CLDEMOTE, TARGET_CPU_FEATURE_X86_PREFETCHI, TARGET_CPU_FEATURE_X86_SHSTK, TARGET_CPU_FEATURE_X86_MOVRS, TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF, TARGET_CPU_FEATURE_X86_AMX_TILE, TARGET_CPU_FEATURE_X86_AMX_INT8, TARGET_CPU_FEATURE_X86_AMX_BF16, TARGET_CPU_FEATURE_X86_AMX_FP16, TARGET_CPU_FEATURE_X86_AMX_COMPLEX, TARGET_CPU_FEATURE_X86_AMX_FP8, TARGET_CPU_FEATURE_X86_AMX_AVX512, TARGET_CPU_FEATURE_X86_AMX_MOVRS, TARGET_CPU_FEATURE_X86_AVX_VNNI, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16, TARGET_CPU_FEATURE_X86_AVX_IFMA, TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT, TARGET_CPU_FEATURE_X86_3DNOW, TARGET_CPU_FEATURE_X86_3DNOWA, TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_LWP, TARGET_CPU_FEATURE_X86_TBM, TARGET_CPU_FEATURE_X86_XOP, TARGET_CPU_FEATURE_X86_MONITOR, TARGET_CPU_FEATURE_X86_XSAVE, TARGET_CPU_FEATURE_X86_SGX, TARGET_CPU_FEATURE_X86_INVPCID, TARGET_CPU_FEATURE_X86_SMAP, TARGET_CPU_FEATURE_X86_KEYLOCKER, TARGET_CPU_FEATURE_X86_ENQCMD, TARGET_CPU_FEATURE_X86_MOVDIR64B, TARGET_CPU_FEATURE_X86_PCONFIG, TARGET_CPU_FEATURE_X86_FRED, TARGET_CPU_FEATURE_X86_LKGS, TARGET_CPU_FEATURE_X86_WRMSRNS, TARGET_CPU_FEATURE_X86_HRESET, TARGET_CPU_FEATURE_X86_MSRLIST, TARGET_CPU_FEATURE_X86_XSAVES, TARGET_CPU_FEATURE_X86_INVLPGB, TARGET_CPU_FEATURE_X86_WBNOINVD, TARGET_CPU_FEATURE_X86_SNP}, 79);
     full_expected = target_cpu_features_add(full_expected, TARGET_CPU_FEATURE_X86_VMX);
     full_expected = target_cpu_features_add(full_expected, TARGET_CPU_FEATURE_X86_SVM);
     BUSTER_TEST(arguments, target_cpu_features_equal(full_features, full_expected));
     BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_VMX));
     BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_SVM));
+    BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_MOVDIR64B));
+    TargetCpuFeatures new_cpuid_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+        TARGET_CPU_FEATURE_X86_MONITOR, TARGET_CPU_FEATURE_X86_XSAVE, TARGET_CPU_FEATURE_X86_XSAVES,
+        TARGET_CPU_FEATURE_X86_INVPCID, TARGET_CPU_FEATURE_X86_SMAP, TARGET_CPU_FEATURE_X86_SGX,
+        TARGET_CPU_FEATURE_X86_ENQCMD, TARGET_CPU_FEATURE_X86_MOVDIR64B, TARGET_CPU_FEATURE_X86_HRESET, TARGET_CPU_FEATURE_X86_KEYLOCKER,
+        TARGET_CPU_FEATURE_X86_PCONFIG, TARGET_CPU_FEATURE_X86_FRED, TARGET_CPU_FEATURE_X86_LKGS,
+        TARGET_CPU_FEATURE_X86_MSRLIST, TARGET_CPU_FEATURE_X86_WRMSRNS, TARGET_CPU_FEATURE_X86_INVLPGB,
+        TARGET_CPU_FEATURE_X86_WBNOINVD, TARGET_CPU_FEATURE_X86_SNP}, 18);
+    BUSTER_TEST(arguments, target_cpu_features_subset(new_cpuid_features, full_features));
     BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_IBT));
     BUSTER_TEST(arguments, target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_SHSTK));
+    X86_64CpuFeatureInput no_new_cpuid = full_cpuid;
+    no_new_cpuid.basic.ecx &= ~(UINT32_C(0x8) | UINT32_C(0x4000000));
+    no_new_cpuid.leaf_d_1.eax &= ~UINT32_C(0x8);
+    no_new_cpuid.leaf_7_0.ebx &= ~(UINT32_C(0x4) | UINT32_C(0x400) | UINT32_C(0x100000));
+    no_new_cpuid.leaf_7_0.ecx &= ~(UINT32_C(0x800000) | UINT32_C(0x10000000) | UINT32_C(0x20000000));
+    no_new_cpuid.leaf_7_0.edx &= ~UINT32_C(0x40000);
+    no_new_cpuid.leaf_7_1.eax &= ~(UINT32_C(0x20000) | UINT32_C(0x40000) | UINT32_C(0x80000) | UINT32_C(0x400000) | UINT32_C(0x8000000));
+    no_new_cpuid.extended_8.ebx &= ~(UINT32_C(0x8) | UINT32_C(0x200));
+    no_new_cpuid.extended_1f.eax &= ~UINT32_C(0x10);
+    BUSTER_TEST(arguments, !target_test_cpu_features_intersect(x86_64_cpu_features_from_cpuid(no_new_cpuid), new_cpuid_features));
+    X86_64CpuFeatureInput xsaves_without_xsave = full_cpuid;
+    xsaves_without_xsave.basic.ecx &= ~UINT32_C(0x4000000);
+    BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(xsaves_without_xsave), TARGET_CPU_FEATURE_X86_XSAVES));
+    X86_64CpuFeatureInput no_basic_leaf_1 = full_cpuid;
+    no_basic_leaf_1.maximum_basic_leaf = 0;
+    BUSTER_TEST(arguments, !target_test_cpu_features_intersect(x86_64_cpu_features_from_cpuid(no_basic_leaf_1),
+                                                               target_cpu_features_from_array((TargetCpuFeature const[]){
+                                                                   TARGET_CPU_FEATURE_X86_VMX, TARGET_CPU_FEATURE_X86_MONITOR,
+                                                                   TARGET_CPU_FEATURE_X86_XSAVE, TARGET_CPU_FEATURE_X86_XSAVES}, 4)));
     X86_64CpuFeatureInput no_vmx_hardware = full_cpuid;
     no_vmx_hardware.basic.ecx &= ~UINT32_C(0x20);
     BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_vmx_hardware), TARGET_CPU_FEATURE_X86_VMX));
     X86_64CpuFeatureInput no_svm_hardware = full_cpuid;
     no_svm_hardware.extended_basic.ecx &= ~UINT32_C(0x4);
     BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_svm_hardware), TARGET_CPU_FEATURE_X86_SVM));
+    X86_64CpuFeatureInput no_movdir64b_hardware = full_cpuid;
+    no_movdir64b_hardware.leaf_7_0.ecx &= ~UINT32_C(0x10000000);
+    BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_movdir64b_hardware), TARGET_CPU_FEATURE_X86_MOVDIR64B));
     X86_64CpuFeatureInput no_ibt_hardware = full_cpuid;
     no_ibt_hardware.leaf_7_0.edx &= ~(UINT32_C(0x100000));
     BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_ibt_hardware), TARGET_CPU_FEATURE_X86_IBT));

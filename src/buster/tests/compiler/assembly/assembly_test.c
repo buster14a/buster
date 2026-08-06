@@ -4703,8 +4703,384 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    string_equal(metadata_bnd.diagnostics[0].message, S8("metadata instruction form is not encodable")));
         AssemblyEncodeResult metadata_debug = assembly_encode(arguments->arena, S8("mov rax, dr0\n"),
                                                                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
-        BUSTER_TEST(arguments, metadata_debug.diagnostic_count == 1 && metadata_debug.bytes.length == 0 &&
-                                   metadata_debug.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+        u8 expected_metadata_debug[] = {0x0f, 0x21, 0xc0};
+        BUSTER_TEST(arguments, metadata_debug.diagnostic_count == 0 && metadata_debug.bytes.length == sizeof(expected_metadata_debug) &&
+                                   memcmp(metadata_debug.bytes.pointer, expected_metadata_debug, sizeof(expected_metadata_debug)) == 0 &&
+                                   metadata_debug.relocation_count == 0 && metadata_debug.symbol_count == 0);
+
+        Target public_invlpgb_target = x86_target;
+        public_invlpgb_target.cpu_model = CPU_MODEL_BASELINE;
+        public_invlpgb_target.cpu_features_explicit = true;
+        public_invlpgb_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_INVLPGB}, 2);
+        String8 public_invlpgb_intel_source = S8("invlpgb\naddr32 invlpgb\n");
+        AssemblyEncodeResult public_invlpgb_intel = assembly_encode(
+            arguments->arena, public_invlpgb_intel_source,
+            (AssemblyEncodeOptions){.target = public_invlpgb_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult public_invlpgb_att = assembly_encode(
+            arguments->arena, public_invlpgb_intel_source,
+            (AssemblyEncodeOptions){.target = public_invlpgb_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        u8 expected_public_invlpgb[] = {0x0f, 0x01, 0xfe, 0x67, 0x0f, 0x01, 0xfe};
+        BUSTER_TEST(arguments, public_invlpgb_intel.diagnostic_count == 0 &&
+                                   public_invlpgb_intel.bytes.length == sizeof(expected_public_invlpgb) &&
+                                   memcmp(public_invlpgb_intel.bytes.pointer, expected_public_invlpgb,
+                                          sizeof(expected_public_invlpgb)) == 0 && public_invlpgb_intel.relocation_count == 0 &&
+                                   public_invlpgb_intel.symbol_count == 0);
+        BUSTER_TEST(arguments, public_invlpgb_att.diagnostic_count == 0 &&
+                                   public_invlpgb_att.bytes.length == sizeof(expected_public_invlpgb) &&
+                                   memcmp(public_invlpgb_att.bytes.pointer, expected_public_invlpgb,
+                                          sizeof(expected_public_invlpgb)) == 0 && public_invlpgb_att.relocation_count == 0 &&
+                                   public_invlpgb_att.symbol_count == 0);
+        Target missing_public_invlpgb = public_invlpgb_target;
+        missing_public_invlpgb.cpu_features = target_cpu_features_remove(missing_public_invlpgb.cpu_features,
+                                                                          TARGET_CPU_FEATURE_X86_INVLPGB);
+        AssemblyEncodeResult missing_public_invlpgb_result = assembly_encode(
+            arguments->arena, S8("invlpgb\n"),
+            (AssemblyEncodeOptions){.target = missing_public_invlpgb, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, missing_public_invlpgb_result.diagnostic_count == 1);
+        BUSTER_TEST(arguments, missing_public_invlpgb_result.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+        BUSTER_TEST(arguments, missing_public_invlpgb_result.bytes.length == 0 && missing_public_invlpgb_result.relocation_count == 0 &&
+                                   missing_public_invlpgb_result.symbol_count == 0);
+        AssemblyEncodeResult duplicate_public_address_prefix = assembly_encode(
+            arguments->arena, S8("addr32 addr32 invlpgb\n"),
+            (AssemblyEncodeOptions){.target = public_invlpgb_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, duplicate_public_address_prefix.diagnostic_count == 1 &&
+                                   duplicate_public_address_prefix.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   duplicate_public_address_prefix.bytes.length == 0 && duplicate_public_address_prefix.relocation_count == 0 &&
+                                   duplicate_public_address_prefix.symbol_count == 0);
+
+        AssemblyEncodeResult public_addr32_wbinvd = assembly_encode(
+            arguments->arena, S8("addr32 wbinvd\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 expected_public_addr32_wbinvd[] = {0x67, 0x0f, 0x09};
+        BUSTER_TEST(arguments, public_addr32_wbinvd.diagnostic_count == 0 &&
+                                   public_addr32_wbinvd.bytes.length == sizeof(expected_public_addr32_wbinvd) &&
+                                   memcmp(public_addr32_wbinvd.bytes.pointer, expected_public_addr32_wbinvd,
+                                          sizeof(expected_public_addr32_wbinvd)) == 0 &&
+                                   public_addr32_wbinvd.relocation_count == 0 && public_addr32_wbinvd.symbol_count == 0);
+        AssemblyEncodeResult public_addr64_wbinvd = assembly_encode(
+            arguments->arena, S8("addr64 wbinvd\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, public_addr64_wbinvd.diagnostic_count == 1 &&
+                                   public_addr64_wbinvd.bytes.length == 0 && public_addr64_wbinvd.relocation_count == 0 &&
+                                   public_addr64_wbinvd.symbol_count == 0);
+        AssemblyEncodeResult duplicate_public_wbinvd_address_prefix = assembly_encode(
+            arguments->arena, S8("addr32 addr32 wbinvd\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, duplicate_public_wbinvd_address_prefix.diagnostic_count == 1 &&
+                                   duplicate_public_wbinvd_address_prefix.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   duplicate_public_wbinvd_address_prefix.bytes.length == 0 &&
+                                   duplicate_public_wbinvd_address_prefix.relocation_count == 0 &&
+                                   duplicate_public_wbinvd_address_prefix.symbol_count == 0);
+
+        Target public_monitor_target = x86_target;
+        public_monitor_target.cpu_model = CPU_MODEL_BASELINE;
+        public_monitor_target.cpu_features_explicit = true;
+        public_monitor_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_MONITOR}, 2);
+        AssemblyEncodeResult public_monitor_intel = assembly_encode(
+            arguments->arena, S8("monitor\naddr32 monitor\n"),
+            (AssemblyEncodeOptions){.target = public_monitor_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult public_monitor_att = assembly_encode(
+            arguments->arena, S8("monitor\naddr32 monitor\n"),
+            (AssemblyEncodeOptions){.target = public_monitor_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        u8 expected_public_monitor[] = {0x0f, 0x01, 0xc8, 0x67, 0x0f, 0x01, 0xc8};
+        BUSTER_TEST(arguments, public_monitor_intel.diagnostic_count == 0 && public_monitor_intel.bytes.length == sizeof(expected_public_monitor) &&
+                                   memcmp(public_monitor_intel.bytes.pointer, expected_public_monitor, sizeof(expected_public_monitor)) == 0);
+        BUSTER_TEST(arguments, public_monitor_att.diagnostic_count == 0 && public_monitor_att.bytes.length == sizeof(expected_public_monitor) &&
+                                   memcmp(public_monitor_att.bytes.pointer, expected_public_monitor, sizeof(expected_public_monitor)) == 0);
+        Target missing_public_monitor = public_monitor_target;
+        missing_public_monitor.cpu_features = target_cpu_features_remove(missing_public_monitor.cpu_features,
+                                                                         TARGET_CPU_FEATURE_X86_MONITOR);
+        AssemblyEncodeResult missing_public_monitor_result = assembly_encode(
+            arguments->arena, S8("monitor\n"),
+            (AssemblyEncodeOptions){.target = missing_public_monitor, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, missing_public_monitor_result.diagnostic_count == 1 &&
+                                   missing_public_monitor_result.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_public_monitor_result.bytes.length == 0 && missing_public_monitor_result.relocation_count == 0 &&
+                                   missing_public_monitor_result.symbol_count == 0);
+
+        AssemblyEncodeResult public_wbinvd = assembly_encode(
+            arguments->arena, S8("wbinvd\nrepne wbinvd\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult public_wbinvd_att = assembly_encode(
+            arguments->arena, S8("wbinvd\nrepne wbinvd\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        u8 expected_public_wbinvd[] = {0x0f, 0x09, 0xf2, 0x0f, 0x09};
+        BUSTER_TEST(arguments, public_wbinvd.diagnostic_count == 0 && public_wbinvd.bytes.length == sizeof(expected_public_wbinvd) &&
+                                   memcmp(public_wbinvd.bytes.pointer, expected_public_wbinvd, sizeof(expected_public_wbinvd)) == 0);
+        BUSTER_TEST(arguments, public_wbinvd_att.diagnostic_count == 0 && public_wbinvd_att.bytes.length == sizeof(expected_public_wbinvd) &&
+                                   memcmp(public_wbinvd_att.bytes.pointer, expected_public_wbinvd, sizeof(expected_public_wbinvd)) == 0);
+        AssemblyEncodeResult public_rep_wbinvd = assembly_encode(
+            arguments->arena, S8("rep wbinvd\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, public_rep_wbinvd.diagnostic_count == 1 &&
+                                   public_rep_wbinvd.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   public_rep_wbinvd.bytes.length == 0 && public_rep_wbinvd.relocation_count == 0 &&
+                                   public_rep_wbinvd.symbol_count == 0);
+        Target public_wbnoinvd_target = x86_target;
+        public_wbnoinvd_target.cpu_model = CPU_MODEL_BASELINE;
+        public_wbnoinvd_target.cpu_features_explicit = true;
+        public_wbnoinvd_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_WBNOINVD}, 2);
+        AssemblyEncodeResult public_wbnoinvd = assembly_encode(
+            arguments->arena, S8("wbnoinvd\n"),
+            (AssemblyEncodeOptions){.target = public_wbnoinvd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 expected_public_wbnoinvd[] = {0xf3, 0x0f, 0x09};
+        BUSTER_TEST(arguments, public_wbnoinvd.diagnostic_count == 0 && public_wbnoinvd.bytes.length == sizeof(expected_public_wbnoinvd) &&
+                                   memcmp(public_wbnoinvd.bytes.pointer, expected_public_wbnoinvd, sizeof(expected_public_wbnoinvd)) == 0);
+        Target missing_public_wbnoinvd = public_wbnoinvd_target;
+        missing_public_wbnoinvd.cpu_features = target_cpu_features_remove(missing_public_wbnoinvd.cpu_features,
+                                                                            TARGET_CPU_FEATURE_X86_WBNOINVD);
+        AssemblyEncodeResult missing_public_wbnoinvd_result = assembly_encode(
+            arguments->arena, S8("wbnoinvd\n"),
+            (AssemblyEncodeOptions){.target = missing_public_wbnoinvd, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, missing_public_wbnoinvd_result.diagnostic_count == 1 &&
+                                   missing_public_wbnoinvd_result.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_public_wbnoinvd_result.bytes.length == 0 &&
+                                   missing_public_wbnoinvd_result.relocation_count == 0 &&
+                                   missing_public_wbnoinvd_result.symbol_count == 0);
+
+        u8 expected_public_control_debug[] = {
+            0x44, 0x0f, 0x22, 0xf8,
+            0x44, 0x0f, 0x20, 0xf8,
+            0x44, 0x0f, 0x23, 0xf8,
+            0x44, 0x0f, 0x21, 0xf8,
+        };
+        AssemblyEncodeResult public_control_debug_intel = assembly_encode(
+            arguments->arena, S8("mov cr15, rax\nmov rax, cr15\nmov dr15, rax\nmov rax, dr15\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult public_control_debug_att = assembly_encode(
+            arguments->arena, S8("movq %rax, %cr15\nmovq %cr15, %rax\nmovq %rax, %dr15\nmovq %dr15, %rax\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, public_control_debug_intel.diagnostic_count == 0 &&
+                                   public_control_debug_intel.bytes.length == sizeof(expected_public_control_debug) &&
+                                   memcmp(public_control_debug_intel.bytes.pointer, expected_public_control_debug,
+                                          sizeof(expected_public_control_debug)) == 0);
+        BUSTER_TEST(arguments, public_control_debug_att.diagnostic_count == 0 &&
+                                   public_control_debug_att.bytes.length == sizeof(expected_public_control_debug) &&
+                                   memcmp(public_control_debug_att.bytes.pointer, expected_public_control_debug,
+                                          sizeof(expected_public_control_debug)) == 0);
+        AssemblyEncodeResult invalid_public_control_debug = assembly_encode(
+            arguments->arena, S8("mov cr16, rax\nmov rax, cr16\nmov dr16, rax\nmov rax, dr16\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, invalid_public_control_debug.diagnostic_count == 4 &&
+                                   invalid_public_control_debug.bytes.length == 0 &&
+                                   invalid_public_control_debug.relocation_count == 0 &&
+                                   invalid_public_control_debug.symbol_count == 0);
+        AssemblyEncodeResult invalid_public_control_debug_egpr = assembly_encode(
+            arguments->arena, S8("mov cr15, r16\nmov r16, cr15\nmov dr15, r16\nmov r16, dr15\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, invalid_public_control_debug_egpr.diagnostic_count == 4);
+        BUSTER_TEST(arguments, invalid_public_control_debug_egpr.bytes.length == 0);
+        BUSTER_TEST(arguments, invalid_public_control_debug_egpr.relocation_count == 0);
+        BUSTER_TEST(arguments, invalid_public_control_debug_egpr.symbol_count == 0);
+
+        Target public_vmx_target = virtualization_target;
+        public_vmx_target.cpu_features = target_cpu_features_remove(public_vmx_target.cpu_features, TARGET_CPU_FEATURE_X86_SVM);
+        AssemblyEncodeResult public_vmcall = assembly_encode(
+            arguments->arena, S8("vmcall\n"),
+            (AssemblyEncodeOptions){.target = public_vmx_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 expected_public_vmcall[] = {0x0f, 0x01, 0xc1};
+        BUSTER_TEST(arguments, public_vmcall.diagnostic_count == 0 && public_vmcall.bytes.length == sizeof(expected_public_vmcall) &&
+                                   memcmp(public_vmcall.bytes.pointer, expected_public_vmcall, sizeof(expected_public_vmcall)) == 0);
+        AssemblyEncodeResult public_vmcall_att = assembly_encode(
+            arguments->arena, S8("vmcall\n"),
+            (AssemblyEncodeOptions){.target = public_vmx_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, public_vmcall_att.diagnostic_count == 0 && public_vmcall_att.bytes.length == sizeof(expected_public_vmcall) &&
+                                   memcmp(public_vmcall_att.bytes.pointer, expected_public_vmcall, sizeof(expected_public_vmcall)) == 0);
+        Target missing_public_vmx = public_vmx_target;
+        missing_public_vmx.cpu_features = target_cpu_features_remove(missing_public_vmx.cpu_features, TARGET_CPU_FEATURE_X86_VMX);
+        AssemblyEncodeResult missing_public_vmx_result = assembly_encode(
+            arguments->arena, S8("vmcall\n"),
+            (AssemblyEncodeOptions){.target = missing_public_vmx, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, missing_public_vmx_result.diagnostic_count == 1 &&
+                                   missing_public_vmx_result.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_public_vmx_result.bytes.length == 0 && missing_public_vmx_result.relocation_count == 0 &&
+                                   missing_public_vmx_result.symbol_count == 0);
+
+        Target public_svm_target = virtualization_target;
+        public_svm_target.cpu_features = target_cpu_features_remove(public_svm_target.cpu_features, TARGET_CPU_FEATURE_X86_VMX);
+        AssemblyEncodeResult public_vmmcall = assembly_encode(
+            arguments->arena, S8("vmmcall\n"),
+            (AssemblyEncodeOptions){.target = public_svm_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 expected_public_vmmcall[] = {0x0f, 0x01, 0xd9};
+        BUSTER_TEST(arguments, public_vmmcall.diagnostic_count == 0 && public_vmmcall.bytes.length == sizeof(expected_public_vmmcall) &&
+                                   memcmp(public_vmmcall.bytes.pointer, expected_public_vmmcall, sizeof(expected_public_vmmcall)) == 0);
+        Target missing_public_svm = public_svm_target;
+        missing_public_svm.cpu_features = target_cpu_features_remove(missing_public_svm.cpu_features, TARGET_CPU_FEATURE_X86_SVM);
+        AssemblyEncodeResult missing_public_svm_result = assembly_encode(
+            arguments->arena, S8("vmmcall\n"),
+            (AssemblyEncodeOptions){.target = missing_public_svm, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, missing_public_svm_result.diagnostic_count == 1 &&
+                                   missing_public_svm_result.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_public_svm_result.bytes.length == 0 && missing_public_svm_result.relocation_count == 0 &&
+                                   missing_public_svm_result.symbol_count == 0);
+        AssemblyEncodeResult public_invlpga = assembly_encode(
+            arguments->arena, S8("invlpga\n"),
+            (AssemblyEncodeOptions){.target = public_svm_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 expected_public_invlpga[] = {0x0f, 0x01, 0xdf};
+        BUSTER_TEST(arguments, public_invlpga.diagnostic_count == 0 && public_invlpga.bytes.length == sizeof(expected_public_invlpga) &&
+                                   memcmp(public_invlpga.bytes.pointer, expected_public_invlpga, sizeof(expected_public_invlpga)) == 0);
+        AssemblyEncodeResult public_svm_att = assembly_encode(
+            arguments->arena, S8("vmmcall\ninvlpga\n"),
+            (AssemblyEncodeOptions){.target = public_svm_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, public_svm_att.diagnostic_count == 0 &&
+                                   public_svm_att.bytes.length == sizeof(expected_public_vmmcall) + sizeof(expected_public_invlpga) &&
+                                   memcmp(public_svm_att.bytes.pointer, expected_public_vmmcall, sizeof(expected_public_vmmcall)) == 0 &&
+                                   memcmp(public_svm_att.bytes.pointer + sizeof(expected_public_vmmcall), expected_public_invlpga,
+                                          sizeof(expected_public_invlpga)) == 0);
+
+        AssemblyEncodeResult public_vm_data_intel = assembly_encode(
+            arguments->arena,
+            S8("vmread qword ptr [rax], rcx\n"
+               "vmread rdx, rcx\n"
+               "vmwrite rcx, qword ptr [rax]\n"
+               "vmwrite rcx, rdx\n"),
+            (AssemblyEncodeOptions){.target = public_vmx_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 expected_public_vm_data[] = {0x0f, 0x78, 0x08, 0x0f, 0x78, 0xca, 0x0f, 0x79, 0x08, 0x0f, 0x79, 0xca};
+        BUSTER_TEST(arguments, public_vm_data_intel.diagnostic_count == 0 &&
+                                   public_vm_data_intel.bytes.length == sizeof(expected_public_vm_data) &&
+                                   memcmp(public_vm_data_intel.bytes.pointer, expected_public_vm_data,
+                                          sizeof(expected_public_vm_data)) == 0);
+        AssemblyEncodeResult public_vm_data_att = assembly_encode(
+            arguments->arena,
+            S8("vmreadq %rcx, (%rax)\n"
+               "vmreadq %rcx, %rdx\n"
+               "vmwriteq (%rax), %rcx\n"
+               "vmwriteq %rdx, %rcx\n"),
+            (AssemblyEncodeOptions){.target = public_vmx_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, public_vm_data_att.diagnostic_count == 0 &&
+                                   public_vm_data_att.bytes.length == sizeof(expected_public_vm_data) &&
+                                   memcmp(public_vm_data_att.bytes.pointer, expected_public_vm_data,
+                                          sizeof(expected_public_vm_data)) == 0);
+        AssemblyEncodeResult missing_public_vm_data = assembly_encode(
+            arguments->arena, S8("vmread qword ptr [rax], rax\nvmwrite rax, qword ptr [rax]\n"),
+            (AssemblyEncodeOptions){.target = missing_public_vmx, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, missing_public_vm_data.diagnostic_count == 2 &&
+                                   missing_public_vm_data.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_public_vm_data.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_public_vm_data.bytes.length == 0 && missing_public_vm_data.relocation_count == 0 &&
+                                   missing_public_vm_data.symbol_count == 0);
+
+        Target public_vmx_advanced_target = advanced_target;
+        public_vmx_advanced_target.cpu_features = target_cpu_features_union(
+            public_vmx_advanced_target.cpu_features,
+            target_cpu_features_from_array((TargetCpuFeature const[]){
+                TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF, TARGET_CPU_FEATURE_X86_VMX}, 2));
+        Target public_vmx_invpcid_target = public_vmx_target;
+        public_vmx_invpcid_target.cpu_features = target_cpu_features_union(
+            public_vmx_invpcid_target.cpu_features,
+            target_cpu_features_singleton(TARGET_CPU_FEATURE_X86_INVPCID));
+        AssemblyEncodeResult public_vmx_memory_intel = assembly_encode(
+            arguments->arena,
+            S8("invpcid rcx, xmmword ptr [rax]\n"
+               "invept rcx, xmmword ptr [rax]\n"
+               "invvpid rcx, xmmword ptr [rax]\n"),
+            (AssemblyEncodeOptions){.target = public_vmx_invpcid_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 expected_public_vmx_memory[] = {
+            0x66, 0x0f, 0x38, 0x82, 0x08,
+            0x66, 0x0f, 0x38, 0x80, 0x08,
+            0x66, 0x0f, 0x38, 0x81, 0x08,
+        };
+        BUSTER_TEST(arguments, public_vmx_memory_intel.diagnostic_count == 0 &&
+                                   public_vmx_memory_intel.bytes.length == sizeof(expected_public_vmx_memory) &&
+                                   memcmp(public_vmx_memory_intel.bytes.pointer, expected_public_vmx_memory,
+                                          sizeof(expected_public_vmx_memory)) == 0);
+        AssemblyEncodeResult public_vmx_memory_att = assembly_encode(
+            arguments->arena,
+            S8("invpcid (%rax), %rcx\n"
+               "invept (%rax), %rcx\n"
+               "invvpid (%rax), %rcx\n"),
+            (AssemblyEncodeOptions){.target = public_vmx_invpcid_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, public_vmx_memory_att.diagnostic_count == 0 &&
+                                   public_vmx_memory_att.bytes.length == sizeof(expected_public_vmx_memory) &&
+                                   memcmp(public_vmx_memory_att.bytes.pointer, expected_public_vmx_memory,
+                                          sizeof(expected_public_vmx_memory)) == 0);
+        AssemblyEncodeResult missing_public_invpcid = assembly_encode(
+            arguments->arena, S8("invpcid rax, xmmword ptr [rax]\n"),
+            (AssemblyEncodeOptions){.target = public_vmx_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, missing_public_invpcid.diagnostic_count == 1 &&
+                                   missing_public_invpcid.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_public_invpcid.bytes.length == 0 && missing_public_invpcid.relocation_count == 0 &&
+                                   missing_public_invpcid.symbol_count == 0);
+        Target missing_public_vmx_memory_target = public_vmx_invpcid_target;
+        missing_public_vmx_memory_target.cpu_features = target_cpu_features_remove(missing_public_vmx_memory_target.cpu_features,
+                                                                                     TARGET_CPU_FEATURE_X86_VMX);
+        AssemblyEncodeResult missing_public_vmx_memory = assembly_encode(
+            arguments->arena, S8("invept rax, xmmword ptr [rax]\ninvvpid rax, xmmword ptr [rax]\n"),
+            (AssemblyEncodeOptions){.target = missing_public_vmx_memory_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, missing_public_vmx_memory.diagnostic_count == 2 &&
+                                   missing_public_vmx_memory.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_public_vmx_memory.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_public_vmx_memory.bytes.length == 0 && missing_public_vmx_memory.relocation_count == 0 &&
+                                   missing_public_vmx_memory.symbol_count == 0);
+
+        AssemblyEncodeResult public_apx_vmx = assembly_encode(
+            arguments->arena,
+            S8("invept r16, xmmword ptr [rax]\ninvvpid r16, xmmword ptr [rax]\n"),
+            (AssemblyEncodeOptions){.target = public_vmx_advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 expected_public_apx_vmx[] = {0x62, 0xe4, 0x7e, 0x08, 0xf0, 0x00, 0x62, 0xe4, 0x7e, 0x08, 0xf1, 0x00};
+        BUSTER_TEST(arguments, public_apx_vmx.diagnostic_count == 0 && public_apx_vmx.bytes.length == sizeof(expected_public_apx_vmx) &&
+                                   memcmp(public_apx_vmx.bytes.pointer, expected_public_apx_vmx,
+                                          sizeof(expected_public_apx_vmx)) == 0);
+        Target public_apx_system_target = public_vmx_advanced_target;
+        public_apx_system_target.cpu_features = target_cpu_features_union(
+            public_apx_system_target.cpu_features,
+            target_cpu_features_from_array((TargetCpuFeature const[]){
+                TARGET_CPU_FEATURE_X86_ENQCMD, TARGET_CPU_FEATURE_X86_INVPCID, TARGET_CPU_FEATURE_X86_MOVDIR64B,
+                TARGET_CPU_FEATURE_X86_MSR_IMM}, 4));
+        AssemblyEncodeResult public_apx_system = assembly_encode(
+            arguments->arena,
+            S8("enqcmds r16, zmmword ptr [rax]\n"
+               "movdir64b r16, zmmword ptr [rax]\n"
+               "invpcid r16, xmmword ptr [rax]\n"
+               "rdmsr r16, 0x1234\n"
+               "wrmsrns 0x1234, r16\n"),
+            (AssemblyEncodeOptions){.target = public_apx_system_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 expected_public_apx_system[] = {
+            0x62, 0xe4, 0x7e, 0x08, 0xf8, 0x00,
+            0x62, 0xe4, 0x7d, 0x08, 0xf8, 0x00,
+            0x62, 0xe4, 0x7e, 0x08, 0xf2, 0x00,
+            0x62, 0xff, 0x7f, 0x08, 0xf6, 0xc0, 0x34, 0x12, 0x00, 0x00,
+            0x62, 0xff, 0x7e, 0x08, 0xf6, 0xc0, 0x34, 0x12, 0x00, 0x00,
+        };
+        BUSTER_TEST(arguments, public_apx_system.diagnostic_count == 0 &&
+                                   public_apx_system.bytes.length == sizeof(expected_public_apx_system) &&
+                                   memcmp(public_apx_system.bytes.pointer, expected_public_apx_system,
+                                          sizeof(expected_public_apx_system)) == 0);
+        Target public_apx_only_target = public_vmx_advanced_target;
+        public_apx_only_target.cpu_features = target_cpu_features_remove(public_apx_only_target.cpu_features,
+                                                                           TARGET_CPU_FEATURE_X86_VMX);
+        AssemblyEncodeResult missing_public_apx_vmx_apx_only = assembly_encode(
+            arguments->arena, S8("invept r16, xmmword ptr [rax]\n"),
+            (AssemblyEncodeOptions){.target = public_apx_only_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, missing_public_apx_vmx_apx_only.diagnostic_count == 1 &&
+                                   missing_public_apx_vmx_apx_only.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_public_apx_vmx_apx_only.bytes.length == 0 &&
+                                   missing_public_apx_vmx_apx_only.relocation_count == 0 &&
+                                   missing_public_apx_vmx_apx_only.symbol_count == 0);
+        Target public_vmx_only_target = public_vmx_target;
+        AssemblyEncodeResult missing_public_apx_vmx_vmx_only = assembly_encode(
+            arguments->arena, S8("invept r16, xmmword ptr [rax]\n"),
+            (AssemblyEncodeOptions){.target = public_vmx_only_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, missing_public_apx_vmx_vmx_only.diagnostic_count == 1 &&
+                                   missing_public_apx_vmx_vmx_only.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   missing_public_apx_vmx_vmx_only.bytes.length == 0 &&
+                                   missing_public_apx_vmx_vmx_only.relocation_count == 0 &&
+                                   missing_public_apx_vmx_vmx_only.symbol_count == 0);
+
+        AssemblyEncodeResult public_msr_intel = assembly_encode(
+            arguments->arena, S8("wrmsr\nrdmsr\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult public_msr_att = assembly_encode(
+            arguments->arena, S8("wrmsr\nrdmsr\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        u8 expected_public_msr[] = {0x0f, 0x30, 0x0f, 0x32};
+        BUSTER_TEST(arguments, public_msr_intel.diagnostic_count == 0 && public_msr_intel.bytes.length == sizeof(expected_public_msr) &&
+                                   memcmp(public_msr_intel.bytes.pointer, expected_public_msr, sizeof(expected_public_msr)) == 0);
+        BUSTER_TEST(arguments, public_msr_att.diagnostic_count == 0 && public_msr_att.bytes.length == sizeof(expected_public_msr) &&
+                                   memcmp(public_msr_att.bytes.pointer, expected_public_msr, sizeof(expected_public_msr)) == 0);
 
         AssemblyEncodeResult metadata_rollback = assembly_encode(
             arguments->arena,

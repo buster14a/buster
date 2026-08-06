@@ -769,6 +769,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_register_parse(String8 text, AssemblySyntax sy
         return true;
     }
 
+    // GNU and LLVM expose the complete four-bit CR/DR encoding domain.  Keep
+    // CR0..CR15 and DR0..DR15 selectable as encodable register numbers; a
+    // processor may still #UD for an architecturally reserved number when
+    // the resulting instruction is executed.
     if (assembly_numbered_register_parse(text, S8("cr"), 15, 64, ASSEMBLY_REGISTER_CONTROL, result) ||
         assembly_numbered_register_parse(text, S8("dr"), 15, 64, ASSEMBLY_REGISTER_DEBUG, result) ||
         assembly_numbered_register_parse(text, S8("bnd"), 3, 128, ASSEMBLY_REGISTER_BND, result))
@@ -6068,14 +6072,38 @@ BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, Strin
         TARGET_CPU_FEATURE_X86_CLDEMOTE,
         TARGET_CPU_FEATURE_X86_PREFETCHI,
         TARGET_CPU_FEATURE_X86_SHSTK,
+        TARGET_CPU_FEATURE_X86_VMX,
+        TARGET_CPU_FEATURE_X86_SVM,
+        TARGET_CPU_FEATURE_X86_ENQCMD,
+        TARGET_CPU_FEATURE_X86_FRED,
+        TARGET_CPU_FEATURE_X86_HRESET,
+        TARGET_CPU_FEATURE_X86_INVLPGB,
+        TARGET_CPU_FEATURE_X86_INVPCID,
+        TARGET_CPU_FEATURE_X86_KEYLOCKER,
+        TARGET_CPU_FEATURE_X86_LKGS,
+        TARGET_CPU_FEATURE_X86_MSR_IMM,
+        TARGET_CPU_FEATURE_X86_MSRLIST,
+        TARGET_CPU_FEATURE_X86_MONITOR,
+        TARGET_CPU_FEATURE_X86_MOVDIR64B,
+        TARGET_CPU_FEATURE_X86_PBNDKB,
+        TARGET_CPU_FEATURE_X86_PCONFIG,
+        TARGET_CPU_FEATURE_X86_SMAP,
+        TARGET_CPU_FEATURE_X86_SGX,
+        TARGET_CPU_FEATURE_X86_SNP,
+        TARGET_CPU_FEATURE_X86_TDX,
+        TARGET_CPU_FEATURE_X86_WBNOINVD,
+        TARGET_CPU_FEATURE_X86_WRMSRNS,
+        TARGET_CPU_FEATURE_X86_XSAVE,
+        TARGET_CPU_FEATURE_X86_XSAVES,
     };
-    if (!names || !capacity)
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(feature_bits) == (u32)TARGET_CPU_FEATURE_COUNT - 3);
+    if (!names || capacity < BUSTER_ARRAY_LENGTH(feature_bits))
     {
         return 0;
     }
     TargetCpuFeatures effective = target_cpu_features_effective(target);
     u32 count = 0;
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(feature_bits) && count < capacity; index += 1)
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(feature_bits); index += 1)
     {
         if (target_cpu_features_contains(effective, feature_bits[index]))
         {
@@ -6600,6 +6628,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     bool lock = false;
     bool rep = false;
     bool repne = false;
+    bool source_address_size_seen = false;
+    u8 source_address_size = 64;
     String8 work = assembly_trim(statement);
     for (;;)
     {
@@ -6618,6 +6648,18 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         else if (assembly_word_equal(prefix, S8("repne")) || assembly_word_equal(prefix, S8("repnz")))
         {
             repne = true;
+        }
+        else if (assembly_word_equal(prefix, S8("addr32")))
+        {
+            if (source_address_size_seen)
+            {
+                // Address-size prefixes are source-level instruction
+                // modifiers.  A duplicate or conflicting modifier must not
+                // silently select a different EAMODE row.
+                return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
+            }
+            source_address_size = 32;
+            source_address_size_seen = true;
         }
         else
         {
@@ -6912,9 +6954,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         attributes.sae = true;
         attributes.decorator_flags |= BUSTER_X86_METADATA_DECORATOR_ROUNDING | BUSTER_X86_METADATA_DECORATOR_SAE;
     }
-    String8 feature_names[64] = {0};
+    String8 feature_names[TARGET_CPU_FEATURE_COUNT] = {0};
     u32 feature_count = assembly_x86_metadata_feature_names(target, feature_names, BUSTER_ARRAY_LENGTH(feature_names));
-    u8 address_size = 64;
+    u8 address_size = source_address_size;
     bool memory_address_size_seen = false;
     for (u32 index = 0; index < operand_count; index += 1)
     {
@@ -6923,6 +6965,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             continue;
         }
         u8 memory_address_size = physical[index].memory.address_size ? physical[index].memory.address_size : 64;
+        if (source_address_size_seen && address_size != memory_address_size)
+        {
+            return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
+        }
         if (memory_address_size_seen && address_size != memory_address_size)
         {
             return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
@@ -7802,7 +7848,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_local_relocation(AssemblyBuilder*
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, AssemblyInstruction* instruction)
 {
-    String8 feature_names[64] = {0};
+    String8 feature_names[TARGET_CPU_FEATURE_COUNT] = {0};
     u32 feature_count = assembly_x86_metadata_feature_names(builder->target, feature_names, BUSTER_ARRAY_LENGTH(feature_names));
     BusterX86MetadataPhysicalOperand operands[5] = {0};
     if (instruction->metadata_operand_count > BUSTER_ARRAY_LENGTH(operands))

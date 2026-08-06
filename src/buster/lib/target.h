@@ -308,10 +308,37 @@ typedef enum TargetCpuFeature
     TARGET_CPU_FEATURE_X86_PREFETCHI,
     // CPUID.07H:0.ECX[7] CET shadow stack.
     TARGET_CPU_FEATURE_X86_SHSTK,
-    // Keep the identities contiguous; SVM is the first feature in the second
-    // storage word so the representation is exercised by native x86 features.
+    // Keep the identities contiguous; VMX is the first feature in the second
+    // storage word and SVM follows it so the representation is exercised by
+    // native x86 features.
     TARGET_CPU_FEATURE_X86_VMX = 64,
     TARGET_CPU_FEATURE_X86_SVM,
+    TARGET_CPU_FEATURE_X86_ENQCMD,
+    TARGET_CPU_FEATURE_X86_FRED,
+    TARGET_CPU_FEATURE_X86_HRESET,
+    TARGET_CPU_FEATURE_X86_INVLPGB,
+    TARGET_CPU_FEATURE_X86_INVPCID,
+    TARGET_CPU_FEATURE_X86_KEYLOCKER,
+    TARGET_CPU_FEATURE_X86_LKGS,
+    // MSR_IMM is an encoding-extension gate without a stable generic CPUID
+    // capability bit in the local architectural interfaces.
+    TARGET_CPU_FEATURE_X86_MSR_IMM,
+    TARGET_CPU_FEATURE_X86_MSRLIST,
+    TARGET_CPU_FEATURE_X86_MONITOR,
+    // CPUID.07H:0.ECX[28] advertises MOVDIR64B/MOVDIRI.
+    TARGET_CPU_FEATURE_X86_MOVDIR64B,
+    // PBNDKB is not paired with a stable generic CPUID capability bit here.
+    TARGET_CPU_FEATURE_X86_PBNDKB,
+    TARGET_CPU_FEATURE_X86_PCONFIG,
+    TARGET_CPU_FEATURE_X86_SMAP,
+    TARGET_CPU_FEATURE_X86_SGX,
+    TARGET_CPU_FEATURE_X86_SNP,
+    // TDX is a guest/platform capability rather than a generic CPU CPUID bit.
+    TARGET_CPU_FEATURE_X86_TDX,
+    TARGET_CPU_FEATURE_X86_WBNOINVD,
+    TARGET_CPU_FEATURE_X86_WRMSRNS,
+    TARGET_CPU_FEATURE_X86_XSAVE,
+    TARGET_CPU_FEATURE_X86_XSAVES,
     TARGET_CPU_FEATURE_COUNT,
 } TargetCpuFeature;
 
@@ -390,6 +417,7 @@ BUSTER_F_DECL bool target_cpu_features_are_valid(Target target);
 BUSTER_F_DECL bool target_cpu_feature_has(Target target, TargetCpuFeature feature);
 BUSTER_F_DECL TargetCpuFeature target_cpu_feature_from_string(CpuArch arch, String8 name);
 BUSTER_F_DECL String8 target_cpu_feature_to_string(TargetCpuFeature feature);
+BUSTER_F_DECL bool target_cpu_feature_names_are_sorted(void);
 BUSTER_F_DECL String8 target_cpu_features_to_string(Arena* arena, Target target);
 BUSTER_F_DECL TargetDataLayout target_data_layout(Target target);
 BUSTER_F_DECL bool target_data_layout_is_valid(TargetDataLayout layout);
