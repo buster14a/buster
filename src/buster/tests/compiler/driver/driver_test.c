@@ -257,7 +257,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_pe_tls_director
 }
 
 #if BUSTER_WINDOWS
-BUSTER_GLOBAL_LOCAL bool compiler_driver_test_process_success(Arena* arena, String8 path)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_process_success(Arena* arena, String8 path)
 {
     String8 run_arguments[] = {path};
     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
