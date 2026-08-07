@@ -202,6 +202,12 @@ enabled.
   success statuses for all four required matrix contexts; the check lives in
   `.forgejo/scripts/ci_main_gate.sh` and uses Forgejo's commit-status API, so a
   merge strategy other than fast-forward cannot silently land an untested tree.
+  The run being gated publishes its own `pending` statuses for those contexts
+  before the gate job starts, so the gate reads the newest *terminal* status per
+  context and ignores `pending`; reading the newest status of any kind only ever
+  sees the gate's own run and can never skip. Every other outcome — a missing
+  context, a non-success verdict, an API failure, or a gate job that failed
+  outright — runs the full matrix.
 
 ## Benchmarking and diagnostics
 

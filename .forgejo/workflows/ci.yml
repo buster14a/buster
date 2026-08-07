@@ -22,8 +22,10 @@ jobs:
     # Main accepts only current, green PR head SHAs via fast-forward-only merge.
     # The gate verifies the exact pushed SHA already carries all required
     # success statuses; otherwise the full matrix runs on the main push.
+    # always() keeps a gate job that failed outright from skipping the matrix:
+    # without it an unmet `needs` skips this job, which would fail open.
     needs: main_gate
-    if: ${{ forgejo.ref != 'refs/heads/main' || needs.main_gate.outputs.tested != 'true' }}
+    if: ${{ always() && (forgejo.ref != 'refs/heads/main' || needs.main_gate.outputs.tested != 'true') }}
     # Forgejo 12.7 counts this timeout from scheduling, including time waiting for a runner.
     # 120 minutes covers three queued Windows jobs at the observed 22-29 minute runtime
     # (87 minutes) plus the existing <=30 minute execution target.
