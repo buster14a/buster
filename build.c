@@ -6745,28 +6745,11 @@ BUSTER_GLOBAL_LOCAL void time_trace_summary_action_add(Arena* arena, TimeTraceSu
 
 // --- test_timing_summary ---------------------------------------------------
 // Diagnostic only: parses the `TEST_MODULE_TIMING` lines `library_tests()`
-// prints under `--verbose=1` (which every CI job already passes) out of a saved
-// matrix run or CI log, aggregates them per module across the configurations in
-// that run, and reports per-module deltas against a stored baseline.
-//
-// This exists because test cost accumulates unnoticed: `x86_64_metadata_tests`
-// grew until it was 60% of all CI test CPU time, and every number needed to
-// catch it in week one was already printed on every run and then thrown away
-// with the log. Recording the history is the whole point.
-//
-// Two properties are deliberate:
-//
-//   * A module's cost is a property of one runner and one configuration, not of
-//     the module. The same `x86_64_metadata_tests` measured 4.4 s in Linux
-//     Release, 138 s in sanitized Debug, and 192 s on a sanitized Debug Windows
-//     runner. Those are three series; a baseline records the runner it was
-//     taken on and refuses to be compared against another, and per-module rows
-//     are only ever compared within the same configuration.
-//   * It never fails. Wall-clock test time is far too noisy to gate on --
-//     identical code measured 290.1 s and 319.8 s for the same matrix on an
-//     otherwise idle 16-thread desktop, a 10% spread -- so there is no
-//     threshold here and no CI failure condition. Record history first; a gate
-//     needs a noise model that does not exist yet.
+// prints under `--verbose=1` out of a saved matrix run or CI log, aggregates
+// them per module across the configurations in that run, and reports
+// per-module deltas against a stored baseline. See AGENTS.md for what it is
+// for and the two properties that must be preserved -- it never gates, and its
+// series are per-runner and per-configuration and are never merged.
 //
 // Configurations are recovered from the build commands the superbuild echoes
 // ahead of each test block (`cmake --build <tree> --config <cfg> --target
