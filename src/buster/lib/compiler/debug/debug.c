@@ -329,29 +329,112 @@ BUSTER_GLOBAL_LOCAL DebugLocation debug_unavailable_location(void)
     };
 }
 
+BUSTER_GLOBAL_LOCAL u32 debug_location_bucket(IrSymbolId symbol, u32 bucket_mask)
+{
+    // Symbol values are dense indexes, but a caller may hand over sparse ones;
+    // mixing keeps the buckets balanced either way.
+    u32 value = symbol.value;
+    value ^= value >> 16;
+    value *= 0x7feb352du;
+    value ^= value >> 15;
+    return value & bucket_mask;
+}
+
+DebugLocationIndex debug_location_index_build(Arena* arena, DebugLocationSeed* locations, u32 location_count)
+{
+    DebugLocationIndex result = {0};
+    if (!arena || !locations || !location_count)
+    {
+        return result;
+    }
+    u32 bucket_count = 1;
+    while (bucket_count < location_count && bucket_count < (1u << 30))
+    {
+        bucket_count <<= 1;
+    }
+    u32 bucket_mask = bucket_count - 1;
+    u32* bucket_ends = arena_allocate(arena, u32, bucket_count);
+    u32* order = arena_allocate(arena, u32, location_count);
+    if (!bucket_ends || !order)
+    {
+        return result;
+    }
+    memset(bucket_ends, 0, sizeof(u32) * bucket_count);
+    for (u32 index = 0; index < location_count; index += 1)
+    {
+        bucket_ends[debug_location_bucket(locations[index].function_symbol, bucket_mask)] += 1;
+    }
+    u32 running = 0;
+    for (u32 bucket = 0; bucket < bucket_count; bucket += 1)
+    {
+        u32 count = bucket_ends[bucket];
+        bucket_ends[bucket] = running;
+        running += count;
+    }
+    // Filling through the exclusive prefix sums advances every entry to its
+    // bucket's end offset, which is exactly what queries need.
+    for (u32 index = 0; index < location_count; index += 1)
+    {
+        order[bucket_ends[debug_location_bucket(locations[index].function_symbol, bucket_mask)]++] = index;
+    }
+    result = (DebugLocationIndex){
+        .locations = locations,
+        .bucket_ends = bucket_ends,
+        .order = order,
+        .bucket_count = bucket_count,
+        .location_count = location_count,
+    };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL DebugLocationIndex* debug_location_index_for(DebugModelInput* input)
+{
+    if (!input || !input->location_index)
+    {
+        return 0;
+    }
+    DebugLocationIndex* index = input->location_index;
+    if (index->locations != input->locations || index->location_count != input->location_count || !index->bucket_count ||
+        !index->bucket_ends || !index->order)
+    {
+        return 0;
+    }
+    return index;
+}
+
 void debug_variable_add_location(Arena* arena, DebugModelInput* input, DebugVariable* variable, IrSymbolId symbol,
                                                      IrLocalId local, u32 start, u32 end)
 {
-    u32 matching_count = 0;
-    if (input && input->locations)
+    DebugLocationIndex* index = debug_location_index_for(input);
+    u32 scan_first = 0;
+    u32 scan_count = input && input->locations ? input->location_count : 0;
+    if (index)
     {
-        for (u32 index = 0; index < input->location_count; index += 1)
+        u32 bucket = debug_location_bucket(symbol, index->bucket_count - 1);
+        scan_first = bucket ? index->bucket_ends[bucket - 1] : 0;
+        scan_count = index->bucket_ends[bucket] - scan_first;
+    }
+    u32 matching_count = 0;
+    for (u32 scan = 0; scan < scan_count; scan += 1)
+    {
+        u32 seed_index = index ? index->order[scan_first + scan] : scan;
+        DebugLocationSeed* seed = input->locations + seed_index;
+        if (debug_symbol_equal(seed->function_symbol, symbol) &&
+            (local.value == IR_ID_UNDERLYING_INVALID || seed->local.value == local.value))
         {
-            DebugLocationSeed* seed = input->locations + index;
-            if (debug_symbol_equal(seed->function_symbol, symbol) &&
-                (local.value == IR_ID_UNDERLYING_INVALID || seed->local.value == local.value))
-            {
-                matching_count += 1;
-            }
+            matching_count += 1;
         }
     }
     variable->locations = arena_allocate(arena, DebugLocationRange, matching_count ? matching_count : 1);
     if (matching_count)
     {
         u32 output_count = 0;
-        for (u32 index = 0; index < input->location_count; index += 1)
+        // The index groups by symbol without reordering within a group, so the
+        // emitted ranges keep their original seed order either way.
+        for (u32 scan = 0; scan < scan_count; scan += 1)
         {
-            DebugLocationSeed* seed = input->locations + index;
+            u32 seed_index = index ? index->order[scan_first + scan] : scan;
+            DebugLocationSeed* seed = input->locations + seed_index;
             if (!debug_symbol_equal(seed->function_symbol, symbol) ||
                 (local.value != IR_ID_UNDERLYING_INVALID && seed->local.value != local.value))
             {
@@ -656,6 +739,12 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
     if (!arena || (input.function_count && !input.functions))
     {
         return result;
+    }
+    DebugLocationIndex location_index = {0};
+    if (!input.location_index)
+    {
+        location_index = debug_location_index_build(arena, input.locations, input.location_count);
+        input.location_index = &location_index;
     }
     if (input.canonical && input.program)
     {

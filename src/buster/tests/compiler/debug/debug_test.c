@@ -41,6 +41,34 @@ UnitTestResult debug_model_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, variable.locations[3].location.kind == DEBUG_LOCATION_CONSTANT && variable.locations[3].location.constant == 42);
     BUSTER_TEST(arguments, variable.locations[4].location.kind == DEBUG_LOCATION_UNAVAILABLE);
 
+    // The symbol index is an accelerator, never a filter: it must reproduce the
+    // linear scan exactly, including seed order, and a stale index must be
+    // rejected rather than silently dropping locations.
+    DebugLocationIndex location_index = debug_location_index_build(arguments->arena, locations, (u32)BUSTER_ARRAY_LENGTH(locations));
+    location_input.location_index = &location_index;
+    DebugVariable indexed_variable = {.local = {.value = 3}};
+    debug_variable_add_location(arguments->arena, &location_input, &indexed_variable, (IrSymbolId){.value = 7}, (IrLocalId){.value = 3}, 0, 40);
+    BUSTER_TEST(arguments, indexed_variable.location_count == variable.location_count);
+    bool indexed_matches = true;
+    for (u32 range_index = 0; range_index < indexed_variable.location_count; range_index += 1)
+    {
+        DebugLocationRange* expected = variable.locations + range_index;
+        DebugLocationRange* actual = indexed_variable.locations + range_index;
+        indexed_matches = indexed_matches && expected->start == actual->start && expected->end == actual->end &&
+                          expected->location.kind == actual->location.kind && expected->location.piece_count == actual->location.piece_count;
+    }
+    BUSTER_TEST(arguments, indexed_matches);
+    DebugVariable missing_variable = {.local = {.value = 3}};
+    debug_variable_add_location(arguments->arena, &location_input, &missing_variable, (IrSymbolId){.value = 9}, (IrLocalId){.value = 3}, 4, 12);
+    BUSTER_TEST(arguments, missing_variable.location_count == 1 && missing_variable.locations[0].location.kind == DEBUG_LOCATION_UNAVAILABLE);
+    DebugLocationIndex stale_index = location_index;
+    stale_index.location_count -= 1;
+    location_input.location_index = &stale_index;
+    DebugVariable stale_variable = {.local = {.value = 3}};
+    debug_variable_add_location(arguments->arena, &location_input, &stale_variable, (IrSymbolId){.value = 7}, (IrLocalId){.value = 3}, 0, 40);
+    BUSTER_TEST(arguments, stale_variable.location_count == BUSTER_ARRAY_LENGTH(locations));
+    location_input.location_index = &location_index;
+
     DebugModel scope_model = {
         .scopes = arena_allocate(arguments->arena, DebugScope, 4),
         .variables = arena_allocate(arguments->arena, DebugVariable, 4),

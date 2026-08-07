@@ -249,6 +249,25 @@ struct DebugLocationSeed
     DebugLocation location;
 };
 
+// Accelerator over a `DebugLocationSeed` array, grouping seed indexes by their
+// owning function symbol.  Every variable needs the seeds of exactly one
+// symbol, and debug info is built for every function by default, so scanning
+// the whole seed array per variable is quadratic across a translation unit.
+typedef struct DebugLocationIndex DebugLocationIndex;
+struct DebugLocationIndex
+{
+    // The exact array this index describes.  Consumers compare it against the
+    // seeds they were handed and fall back to a linear scan on a mismatch, so a
+    // stale index can never silently drop locations.
+    DebugLocationSeed* locations;
+    // `bucket_ends[bucket]` is the end offset of the bucket inside `order`; the
+    // bucket starts at `bucket ? bucket_ends[bucket - 1] : 0`.
+    u32* bucket_ends;
+    u32* order;
+    u32 bucket_count;
+    u32 location_count;
+};
+
 typedef enum DebugVariableKind
 {
     DEBUG_VARIABLE_PARAMETER,
@@ -355,6 +374,10 @@ struct DebugModelInput
     DebugFunctionSeed* functions;
     DebugLocationSeed* locations;
     DebugInlineSeed* inline_sites;
+    // Optional; `debug_model_build` builds one for its own use when a caller
+    // leaves this null.  It is only consulted when it describes exactly the
+    // `locations`/`location_count` pair beside it.
+    DebugLocationIndex* location_index;
     u32 function_count;
     u32 location_count;
     u32 inline_site_count;
@@ -384,6 +407,7 @@ struct DebugModel
     u8 reserved[3];
 };
 
+BUSTER_F_DECL DebugLocationIndex debug_location_index_build(Arena* arena, DebugLocationSeed* locations, u32 location_count);
 BUSTER_F_DECL DebugModel debug_model_build(Arena* arena, DebugModelInput input);
 BUSTER_F_DECL DebugTypeId debug_model_find_canonical_type(DebugModel* model, IrTypeId type);
 BUSTER_F_DECL u32 debug_register_dwarf_number(Target target, DebugRegister reg);
