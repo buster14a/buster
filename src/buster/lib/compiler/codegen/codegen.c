@@ -9491,10 +9491,24 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         bool x64_upper_vector_dirty = false;
         IrValueId x64_last_wide_vector_result = IR_VALUE_ID_INVALID;
         u32 x64_last_wide_vector_size = 0;
+        // Every canonical value owns a frame slot, so an instruction that
+        // consumes its predecessor's result reloads the slot that was just
+        // written. Remember the frame displacement of the last full-width rax
+        // store together with the buffer position immediately after it: while
+        // nothing else has been emitted, rax still holds that slot's contents
+        // and the reload is a no-op. Recording the buffer position is what
+        // makes this safe without tracking clobbers, because any intervening
+        // emission moves the position and invalidates the record. The only
+        // other way to reach that position is a branch, and every branch in
+        // this emitter targets either a block start (reset below) or an offset
+        // inside its own instruction expansion.
+        u64 x64_forwarded_store_end = UINT64_MAX;
+        s32 x64_forwarded_store_displacement = 0;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             IrBlock* emitted_block = function->blocks + block_index;
             block_offsets[block_index] = (u32)buffer.count;
+            x64_forwarded_store_end = UINT64_MAX;
             IrInstructionId instruction_id = emitted_block->first_instruction;
             u32 visited = 0;
             while (instruction_id.value != IR_ID_UNDERLYING_INVALID)
@@ -9540,10 +9554,17 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
 #define C_X64_LOAD(register_opcode, value_id)                                                                                                                  \
     do                                                                                                                                                         \
     {                                                                                                                                                          \
+        u8 c_x64_load_modrm = (u8)(register_opcode);                                                                                                            \
+        s32 c_x64_load_displacement = C_X64_FRAME_DISPLACEMENT(value_offsets[(value_id).value]);                                                               \
+        if (c_x64_load_modrm == 0x85 && buffer.count == x64_forwarded_store_end &&                                                                              \
+            c_x64_load_displacement == x64_forwarded_store_displacement)                                                                                        \
+        {                                                                                                                                                      \
+            break;                                                                                                                                             \
+        }                                                                                                                                                      \
         codegen_emit_u8(&buffer, 0x48);                                                                                                                        \
         codegen_emit_u8(&buffer, 0x8b);                                                                                                                        \
-        codegen_emit_u8(&buffer, (register_opcode));                                                                                                           \
-        codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[(value_id).value]));                                                            \
+        codegen_emit_u8(&buffer, c_x64_load_modrm);                                                                                                            \
+        codegen_emit_u32(&buffer, (u32)c_x64_load_displacement);                                                                                               \
     } while (0)
 #define C_X64_STORE_RESULT()                                                                                                                                   \
     do                                                                                                                                                         \
@@ -9552,6 +9573,11 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         codegen_emit_u8(&buffer, 0x89);                                                                                                                        \
         codegen_emit_u8(&buffer, 0x85);                                                                                                                        \
         codegen_emit_u32(&buffer, (u32)result_displacement);                                                                                                   \
+        if (!buffer.error)                                                                                                                                     \
+        {                                                                                                                                                      \
+            x64_forwarded_store_end = buffer.count;                                                                                                            \
+            x64_forwarded_store_displacement = result_displacement;                                                                                             \
+        }                                                                                                                                                      \
     } while (0)
 #define C_X64_LOAD_FLOAT(register_index, value_id, width)                                                                                                      \
     do                                                                                                                                                         \
@@ -10226,10 +10252,16 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 return result;
                             }
                         }
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0x69);
-                        codegen_emit_u8(&buffer, 0xc9);
-                        codegen_emit_u32(&buffer, (u32)element->layout.size);
+                        // Byte-element indexing scales by one, so the multiply
+                        // is the identity. The following add overwrites flags
+                        // without reading them.
+                        if (element->layout.size != 1)
+                        {
+                            codegen_emit_u8(&buffer, 0x48);
+                            codegen_emit_u8(&buffer, 0x69);
+                            codegen_emit_u8(&buffer, 0xc9);
+                            codegen_emit_u32(&buffer, (u32)element->layout.size);
+                        }
                         codegen_emit_u8(&buffer, 0x48);
                         codegen_emit_u8(&buffer, 0x01);
                         codegen_emit_u8(&buffer, 0xc8);
@@ -10293,9 +10325,15 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             result.error = CODEGEN_ERROR_INVALID_IR;
                             return result;
                         }
-                        codegen_emit_u8(&buffer, 0x48);
-                        codegen_emit_u8(&buffer, 0x05);
-                        codegen_emit_u32(&buffer, (u32)aggregate->fields[field_index].offset);
+                        // The first field of an aggregate sits at offset zero,
+                        // so the address arithmetic is the identity. Only the
+                        // result store follows, and it does not read flags.
+                        if (aggregate->fields[field_index].offset)
+                        {
+                            codegen_emit_u8(&buffer, 0x48);
+                            codegen_emit_u8(&buffer, 0x05);
+                            codegen_emit_u32(&buffer, (u32)aggregate->fields[field_index].offset);
+                        }
                         C_X64_STORE_RESULT();
                     }
                     else if (instruction->opcode == IR_OPCODE_CAST)
