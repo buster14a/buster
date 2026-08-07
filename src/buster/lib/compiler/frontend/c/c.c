@@ -28230,51 +28230,24 @@ BUSTER_GLOBAL_LOCAL bool c_ir_expression_has_root_logical(CIntegerIrBuilder* bui
         start += 1;
         end -= 1;
     }
-    u32 parentheses = 0;
-    u32 brackets = 0;
-    u32 braces = 0;
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(token, S8("(")))
+        CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+        if (scan == C_IR_GROUP_SCAN_SKIPPED)
         {
-            parentheses += 1;
+            continue;
         }
-        else if (c_token_is_punctuator(token, S8(")")))
+        if (scan == C_IR_GROUP_SCAN_UNCLOSED)
         {
-            if (!parentheses)
-            {
-                return false;
-            }
-            parentheses -= 1;
+            return false;
         }
-        else if (c_token_is_punctuator(token, S8("[")))
+        if (c_token_is_punctuator(token, S8(")")) || c_token_is_punctuator(token, S8("]")) || c_token_is_punctuator(token, S8("}")))
         {
-            brackets += 1;
+            return false;
         }
-        else if (c_token_is_punctuator(token, S8("]")))
-        {
-            if (!brackets)
-            {
-                return false;
-            }
-            brackets -= 1;
-        }
-        else if (c_token_is_punctuator(token, S8("{")))
-        {
-            braces += 1;
-        }
-        else if (c_token_is_punctuator(token, S8("}")))
-        {
-            if (!braces)
-            {
-                return false;
-            }
-            braces -= 1;
-        }
-        else if (!parentheses && !brackets && !braces &&
-                 ((c_token_is_punctuator(token, S8("&&")) && !c_ir_label_address_prefix(builder, start, index)) ||
-                  c_token_is_punctuator(token, S8("||"))))
+        if ((c_token_is_punctuator(token, S8("&&")) && !c_ir_label_address_prefix(builder, start, index)) ||
+            c_token_is_punctuator(token, S8("||")))
         {
             return true;
         }
