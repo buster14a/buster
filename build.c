@@ -32,6 +32,8 @@ typedef enum BuildCommand
     BUILD_COMMAND_NINJA_LOG_SUMMARY,
     BUILD_COMMAND_TIME_TRACE_SUMMARY,
     BUILD_COMMAND_TIME_TRACE_SUMMARY_SELF_TEST,
+    BUILD_COMMAND_TEST_TIMING_SUMMARY,
+    BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST,
     BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA,
     BUILD_COMMAND_TEST_SELF_HOST,
     BUILD_COMMAND_SELF_HOST_FROM_EXISTING,
@@ -103,6 +105,9 @@ typedef enum BuildArgument
     BUILD_ARGUMENT_BUILD_DIR,
     BUILD_ARGUMENT_PROVENANCE_RECORD,
     BUILD_ARGUMENT_AUDIT,
+    BUILD_ARGUMENT_BASELINE,
+    BUILD_ARGUMENT_UPDATE_BASELINE,
+    BUILD_ARGUMENT_NO_UPDATE_BASELINE,
     BUILD_ARGUMENT_CC,
     BUILD_ARGUMENT_CLANG,
     BUILD_ARGUMENT_CI,
@@ -147,6 +152,9 @@ BUSTER_GLOBAL_LOCAL String8 build_arguments[] = {
     [BUILD_ARGUMENT_BUILD_DIR] = S8_INITIALIZER("--build-dir"),
     [BUILD_ARGUMENT_PROVENANCE_RECORD] = S8_INITIALIZER("--provenance-record"),
     [BUILD_ARGUMENT_AUDIT] = S8_INITIALIZER("--audit"),
+    [BUILD_ARGUMENT_BASELINE] = S8_INITIALIZER("--baseline"),
+    [BUILD_ARGUMENT_UPDATE_BASELINE] = S8_INITIALIZER("--update-baseline"),
+    [BUILD_ARGUMENT_NO_UPDATE_BASELINE] = S8_INITIALIZER("--no-update-baseline"),
     [BUILD_ARGUMENT_CC] = S8_INITIALIZER("--cc"),
     [BUILD_ARGUMENT_CLANG] = S8_INITIALIZER("--clang"),
     [BUILD_ARGUMENT_CI] = S8_INITIALIZER("--ci"),
@@ -6789,15 +6797,10 @@ enum TestTimingSummaryFailureReason
     TEST_TIMING_SUMMARY_FAILURE_MALFORMED_BASELINE,
     TEST_TIMING_SUMMARY_FAILURE_BASELINE_RUNNER_MISMATCH,
     TEST_TIMING_SUMMARY_FAILURE_BASELINE_WRITE,
-    TEST_TIMING_SUMMARY_FAILURE_ROW_LIMIT,
 };
 
 enum
 {
-    // One (configuration, module) pair per row. The full eight-configuration
-    // matrix produces 232; the cap only exists so a garbage input cannot grow
-    // the arena without bound.
-    TEST_TIMING_SUMMARY_ROW_LIMIT = 4096,
     // A compiler tree runs at most a unit-test and an all-test command.
     TEST_TIMING_SUMMARY_PENDING_LIMIT = 8,
     TEST_TIMING_BASELINE_VERSION = 1,
@@ -7061,7 +7064,7 @@ BUSTER_GLOBAL_LOCAL TestTimingRow* test_timing_row_find(TestTimingRowList* list,
     return 0;
 }
 
-BUSTER_GLOBAL_LOCAL bool test_timing_row_accumulate(Arena* arena, TestTimingRowList* list, TestTimingRow row)
+BUSTER_GLOBAL_LOCAL void test_timing_row_accumulate(Arena* arena, TestTimingRowList* list, TestTimingRow row)
 {
     TestTimingRow* existing = test_timing_row_find(list, row.configuration, row.module);
     if (existing)
@@ -7069,12 +7072,7 @@ BUSTER_GLOBAL_LOCAL bool test_timing_row_accumulate(Arena* arena, TestTimingRowL
         existing->duration_ns += row.duration_ns;
         existing->samples += row.samples;
         existing->failed += row.failed;
-        return true;
-    }
-
-    if (list->count == TEST_TIMING_SUMMARY_ROW_LIMIT)
-    {
-        return false;
+        return;
     }
 
     TestTimingRowNode* node = arena_allocate(arena, TestTimingRowNode, 1);
@@ -7089,7 +7087,6 @@ BUSTER_GLOBAL_LOCAL bool test_timing_row_accumulate(Arena* arena, TestTimingRowL
     }
     list->last = node;
     list->count += 1;
-    return true;
 }
 
 BUSTER_GLOBAL_LOCAL int test_timing_row_compare(const void* a, const void* b)
@@ -7213,19 +7210,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_timing_summary_parse_log(Arena* arena, St
             }
         }
 
-        if (!test_timing_row_accumulate(arena, rows,
-                                        (TestTimingRow){
-                                            .configuration = configuration,
-                                            .module = module,
-                                            .duration_ns = duration_ns,
-                                            .samples = 1,
-                                            .failed = failed,
-                                        }))
-        {
-            summary_output_print(output, S8("error: test_timing_summary resource limit while aggregating {S8}\n"), path);
-            test_timing_summary_failure_set(failure_reason, TEST_TIMING_SUMMARY_FAILURE_ROW_LIMIT);
-            return PROCESS_RESULT_FAILED;
-        }
+        test_timing_row_accumulate(arena, rows,
+                                   (TestTimingRow){
+                                       .configuration = configuration,
+                                       .module = module,
+                                       .duration_ns = duration_ns,
+                                       .samples = 1,
+                                       .failed = failed,
+                                   });
     }
 
     return PROCESS_RESULT_SUCCESS;
@@ -7326,18 +7318,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_timing_baseline_read(Arena* arena, String
             return PROCESS_RESULT_FAILED;
         }
 
-        if (!test_timing_row_accumulate(arena, &baseline->rows,
-                                        (TestTimingRow){
-                                            .configuration = configuration,
-                                            .module = module,
-                                            .duration_ns = duration_ns,
-                                            .samples = samples,
-                                        }))
-        {
-            summary_output_print(output, S8("error: test_timing_summary resource limit while reading {S8}\n"), path);
-            test_timing_summary_failure_set(failure_reason, TEST_TIMING_SUMMARY_FAILURE_ROW_LIMIT);
-            return PROCESS_RESULT_FAILED;
-        }
+        test_timing_row_accumulate(arena, &baseline->rows,
+                                   (TestTimingRow){
+                                       .configuration = configuration,
+                                       .module = module,
+                                       .duration_ns = duration_ns,
+                                       .samples = samples,
+                                   });
     }
 
     if (!version_seen || !baseline->runner.length)
@@ -7631,31 +7618,6 @@ BUSTER_GLOBAL_LOCAL bool test_timing_summary_self_test_expect_failure(Arena* are
     return result != PROCESS_RESULT_SUCCESS && reason == failure.reason && string_equal(actual, failure.message);
 }
 
-BUSTER_GLOBAL_LOCAL bool test_timing_summary_self_test_write_row_cap(Arena* arena, String8 path)
-{
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
-    if (!file)
-    {
-        return false;
-    }
-
-    bool result = true;
-    for (u64 row_i = 0; row_i < TEST_TIMING_SUMMARY_ROW_LIMIT + 1; row_i += 1)
-    {
-        String8 block = string_format(arena,
-                                      S8("cmake --build build/build-cap{u64} --config Debug --target test_units\n"
-                                         "TEST_MODULE_TIMING index=0 module=cap_tests duration_ns=1 passed=1 failed=0 assertions=1 status=pass\n"),
-                                      row_i);
-        if (!block.pointer)
-        {
-            result = false;
-            break;
-        }
-        os_file_write(file, (ByteSlice){.pointer = (u8*)block.pointer, .length = block.length});
-    }
-    return os_file_close(file) && result;
-}
-
 BUSTER_GLOBAL_LOCAL ProcessResult test_timing_summary_self_test(Arena* arena)
 {
     String8 directory = {0};
@@ -7668,7 +7630,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_timing_summary_self_test(Arena* arena)
     String8 runner = S8("self-test-runner");
     String8 matrix = path_join(arena, directory, S8("matrix.log"));
     String8 plain = path_join(arena, directory, S8("plain.log"));
-    String8 row_cap = path_join(arena, directory, S8("row-cap.log"));
     String8 baseline = path_join(arena, directory, S8("baseline.txt"));
     String8 malformed_baseline = path_join(arena, directory, S8("malformed-baseline.txt"));
     String8 foreign_baseline = path_join(arena, directory, S8("foreign-baseline.txt"));
@@ -7705,7 +7666,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_timing_summary_self_test(Arena* arena)
                                                                         "TEST_TIMING_BASELINE_RUNNER other-runner\n"
                                                                         "TEST_TIMING_BASELINE config=cc_gcc-configs_shared:Debug module=arena_tests"
                                                                         " duration_ns=4000000 samples=1\n"));
-    passed = passed && test_timing_summary_self_test_write_row_cap(arena, row_cap);
 
     String8 matrix_paths[] = {matrix};
     String8 plain_paths[] = {plain};
@@ -7798,10 +7758,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_timing_summary_self_test(Arena* arena)
          .baseline = foreign_baseline,
          .reason = TEST_TIMING_SUMMARY_FAILURE_BASELINE_RUNNER_MISMATCH,
          .message = string_format(arena, S8("error: {S8} was recorded on runner other-runner, not self-test-runner\n"), foreign_baseline)},
-        {.log = row_cap,
-         .baseline = baseline,
-         .reason = TEST_TIMING_SUMMARY_FAILURE_ROW_LIMIT,
-         .message = string_format(arena, S8("error: test_timing_summary resource limit while aggregating {S8}\n"), row_cap)},
     };
     for (u64 failure_i = 0; failure_i < BUSTER_ARRAY_LENGTH(failure_cases); failure_i += 1)
     {
@@ -9066,6 +9022,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     if (time_trace_self_test_result != PROCESS_RESULT_SUCCESS)
     {
         return time_trace_self_test_result;
+    }
+    ProcessResult test_timing_self_test_result = test_timing_summary_self_test(arena);
+    if (test_timing_self_test_result != PROCESS_RESULT_SUCCESS)
+    {
+        return test_timing_self_test_result;
     }
 
     bool fanout_forced = environment_flag_is_on(S8("BUSTER_TEST_FORCE_ARTIFACT_FANOUT"));
@@ -18725,6 +18686,8 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_NINJA_LOG_SUMMARY] = S8_INITIALIZER("ninja_log_summary"),
         [BUILD_COMMAND_TIME_TRACE_SUMMARY] = S8_INITIALIZER("time_trace_summary"),
         [BUILD_COMMAND_TIME_TRACE_SUMMARY_SELF_TEST] = S8_INITIALIZER("time_trace_summary_self_test"),
+        [BUILD_COMMAND_TEST_TIMING_SUMMARY] = S8_INITIALIZER("test_timing_summary"),
+        [BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST] = S8_INITIALIZER("test_timing_summary_self_test"),
         [BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA] = S8_INITIALIZER("import_assembly_metadata"),
         [BUILD_COMMAND_TEST_SELF_HOST] = S8_INITIALIZER("test_self_host"),
         [BUILD_COMMAND_SELF_HOST_FROM_EXISTING] = S8_INITIALIZER("self_host_from_existing"),
@@ -18784,8 +18747,10 @@ ProcessResult process_arguments(void)
     CmakeProfileSummaryOptions cmake_profile_summary_options = {.limit = 25};
     NinjaLogSummaryOptions ninja_log_summary_options = {.limit = 25};
     TimeTraceSummaryOptions time_trace_summary_options = {.limit = 25};
+    TestTimingSummaryOptions test_timing_summary_options = {.limit = 25};
     AssemblyImportOptions assembly_import_options = {.output_directory = S8("src/buster/lib/compiler/assembly/generated")};
     String8List time_trace_summary_paths = {0};
+    String8List test_timing_summary_paths = {0};
     String8List generate_cmake_arguments = {0};
     String8List build_targets = {0};
     String8List native_arguments = {0};
@@ -18879,6 +18844,11 @@ ProcessResult process_arguments(void)
                 string8_list_push(arena, &time_trace_summary_paths, argument);
                 argument_i += 1;
             }
+            else if (command == BUILD_COMMAND_TEST_TIMING_SUMMARY && !string_starts_with_sequence(argument, S8("--")))
+            {
+                string8_list_push(arena, &test_timing_summary_paths, argument);
+                argument_i += 1;
+            }
             else if (command == BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA && !string_starts_with_sequence(argument, S8("--")))
             {
                 if (!assembly_import_options.xed_datafiles_set)
@@ -18943,6 +18913,35 @@ ProcessResult process_arguments(void)
             {
                 assembly_import_options.audit = 1;
                 argument_i += 1;
+            }
+            else
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        break;
+        case BUILD_ARGUMENT_BASELINE:
+        {
+            String8 value = {0};
+            if (command == BUILD_COMMAND_TEST_TIMING_SUMMARY &&
+                build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &value))
+            {
+                test_timing_summary_options.baseline = value;
+            }
+            else
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
+        }
+        break;
+        case BUILD_ARGUMENT_UPDATE_BASELINE:
+        case BUILD_ARGUMENT_NO_UPDATE_BASELINE:
+        {
+            bool value = build_argument == BUILD_ARGUMENT_UPDATE_BASELINE;
+            if (command == BUILD_COMMAND_TEST_TIMING_SUMMARY &&
+                build_argument_read_optional_bool(arguments, &argument_i, argument_has_value, argument_value, &value))
+            {
+                test_timing_summary_options.update_baseline = value;
             }
             else
             {
@@ -19072,8 +19071,8 @@ ProcessResult process_arguments(void)
         case BUILD_ARGUMENT_LIMIT:
         {
             String8 candidate_limit = {0};
-            bool is_summary_command =
-                command == BUILD_COMMAND_CMAKE_PROFILE_SUMMARY || command == BUILD_COMMAND_NINJA_LOG_SUMMARY || command == BUILD_COMMAND_TIME_TRACE_SUMMARY;
+            bool is_summary_command = command == BUILD_COMMAND_CMAKE_PROFILE_SUMMARY || command == BUILD_COMMAND_NINJA_LOG_SUMMARY ||
+                                      command == BUILD_COMMAND_TIME_TRACE_SUMMARY || command == BUILD_COMMAND_TEST_TIMING_SUMMARY;
             if (is_summary_command && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &candidate_limit))
             {
                 IntegerParsingU64 parsed_limit = string8_parse_u64_decimal(candidate_limit.pointer);
@@ -19090,6 +19089,9 @@ ProcessResult process_arguments(void)
                         break;
                     case BUILD_COMMAND_TIME_TRACE_SUMMARY:
                         time_trace_summary_options.limit = parsed_limit.value;
+                        break;
+                    case BUILD_COMMAND_TEST_TIMING_SUMMARY:
+                        test_timing_summary_options.limit = parsed_limit.value;
                         break;
                     default:
                         BUSTER_UNREACHABLE();
@@ -19509,6 +19511,17 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TIME_TRACE_SUMMARY_SELF_TEST:
         {
             result = time_trace_summary_self_test(arena);
+        }
+        break;
+        case BUILD_COMMAND_TEST_TIMING_SUMMARY:
+        {
+            test_timing_summary_options.paths = string8_list_to_slice(arena, test_timing_summary_paths);
+            test_timing_summary_action_add(arena, test_timing_summary_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST:
+        {
+            result = test_timing_summary_self_test(arena);
         }
         break;
         case BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA:
