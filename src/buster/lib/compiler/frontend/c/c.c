@@ -15051,6 +15051,61 @@ BUSTER_GLOBAL_LOCAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builde
     return c_ir_matching_delimiter(builder->preprocess, open, end, opening, closing);
 }
 
+typedef enum CIrGroupScan
+{
+    C_IR_GROUP_SCAN_NOT_OPEN,
+    C_IR_GROUP_SCAN_SKIPPED,
+    C_IR_GROUP_SCAN_UNCLOSED,
+} CIrGroupScan;
+
+/* Steps a top-level token scan over a whole `(`/`[`/`{` group in one hop instead of counting
+   every nested token, so scans that look for a top-level separator stay linear in the number
+   of top-level tokens rather than quadratic in expression nesting depth. `C_IR_GROUP_SCAN_UNCLOSED`
+   means the group at `*index_in_out` has no match before `end`; a well-nested body can never
+   return to that group's level again, so no later token in the range is top level. */
+BUSTER_GLOBAL_LOCAL CIrGroupScan c_ir_scan_delimiter_group(CIntegerIrBuilder* builder, u32* index_in_out, u32 end)
+{
+    CToken token = builder->preprocess.tokens[*index_in_out];
+    if (token.kind != C_TOKEN_PUNCTUATOR || token.spelling.length != 1)
+    {
+        return C_IR_GROUP_SCAN_NOT_OPEN;
+    }
+    String8 opening = {0};
+    String8 closing = {0};
+    switch (token.spelling.pointer[0])
+    {
+    case '(':
+    {
+        opening = S8("(");
+        closing = S8(")");
+        break;
+    }
+    case '[':
+    {
+        opening = S8("[");
+        closing = S8("]");
+        break;
+    }
+    case '{':
+    {
+        opening = S8("{");
+        closing = S8("}");
+        break;
+    }
+    default:
+    {
+        return C_IR_GROUP_SCAN_NOT_OPEN;
+    }
+    }
+    u32 close = c_ir_matching_delimiter_cached(builder, *index_in_out, end, opening, closing);
+    if (close >= end)
+    {
+        return C_IR_GROUP_SCAN_UNCLOSED;
+    }
+    *index_in_out = close;
+    return C_IR_GROUP_SCAN_SKIPPED;
+}
+
 BUSTER_GLOBAL_LOCAL IrInstruction c_ir_instruction_initialize(IrOpcode opcode, IrTypeId type, IrSourceRange source)
 {
     return (IrInstruction){
@@ -28326,51 +28381,25 @@ BUSTER_GLOBAL_LOCAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 s
         start += 1;
         end -= 1;
     }
-    u32 parentheses = 0;
-    u32 brackets = 0;
-    u32 braces = 0;
     u32 found_question = UINT32_MAX;
     u32 nested_questions = 0;
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(token, S8("(")))
+        CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+        if (scan == C_IR_GROUP_SCAN_SKIPPED)
         {
-            parentheses += 1;
+            continue;
         }
-        else if (c_token_is_punctuator(token, S8(")")))
+        if (scan == C_IR_GROUP_SCAN_UNCLOSED)
         {
-            if (!parentheses)
-            {
-                return false;
-            }
-            parentheses -= 1;
+            return false;
         }
-        else if (c_token_is_punctuator(token, S8("[")))
+        if (c_token_is_punctuator(token, S8(")")) || c_token_is_punctuator(token, S8("]")) || c_token_is_punctuator(token, S8("}")))
         {
-            brackets += 1;
+            return false;
         }
-        else if (c_token_is_punctuator(token, S8("]")))
-        {
-            if (!brackets)
-            {
-                return false;
-            }
-            brackets -= 1;
-        }
-        else if (c_token_is_punctuator(token, S8("{")))
-        {
-            braces += 1;
-        }
-        else if (c_token_is_punctuator(token, S8("}")))
-        {
-            if (!braces)
-            {
-                return false;
-            }
-            braces -= 1;
-        }
-        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(token, S8("?")))
+        if (c_token_is_punctuator(token, S8("?")))
         {
             if (found_question == UINT32_MAX)
             {
@@ -28381,7 +28410,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 s
                 nested_questions += 1;
             }
         }
-        else if (!parentheses && !brackets && !braces && found_question != UINT32_MAX && c_token_is_punctuator(token, S8(":")))
+        else if (found_question != UINT32_MAX && c_token_is_punctuator(token, S8(":")))
         {
             if (nested_questions)
             {
@@ -28419,38 +28448,20 @@ BUSTER_GLOBAL_LOCAL void c_ir_expression_core_range(CIntegerIrBuilder* builder, 
             end -= 1;
             narrowed = true;
         }
-        u32 parentheses = 0;
-        u32 brackets = 0;
-        u32 braces = 0;
         u32 last_comma = UINT32_MAX;
         for (u32 index = start; index < end; index += 1)
         {
             CToken token = builder->preprocess.tokens[index];
-            if (c_token_is_punctuator(token, S8("(")))
+            CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+            if (scan == C_IR_GROUP_SCAN_SKIPPED)
             {
-                parentheses += 1;
+                continue;
             }
-            else if (c_token_is_punctuator(token, S8(")")) && parentheses)
+            if (scan == C_IR_GROUP_SCAN_UNCLOSED)
             {
-                parentheses -= 1;
+                break;
             }
-            else if (c_token_is_punctuator(token, S8("[")))
-            {
-                brackets += 1;
-            }
-            else if (c_token_is_punctuator(token, S8("]")) && brackets)
-            {
-                brackets -= 1;
-            }
-            else if (c_token_is_punctuator(token, S8("{")))
-            {
-                braces += 1;
-            }
-            else if (c_token_is_punctuator(token, S8("}")) && braces)
-            {
-                braces -= 1;
-            }
-            else if (!parentheses && !brackets && !braces && c_token_is_punctuator(token, S8(",")))
+            if (c_token_is_punctuator(token, S8(",")))
             {
                 last_comma = index;
             }
@@ -28499,47 +28510,22 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt
         }
     }
     {
-        u32 parentheses = 0;
-        u32 brackets = 0;
-        u32 braces = 0;
         for (u32 index = start; index < end; index += 1)
         {
             CToken token = builder->preprocess.tokens[index];
-            if (c_token_is_punctuator(token, S8("(")))
+            CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+            if (scan == C_IR_GROUP_SCAN_SKIPPED)
             {
-                parentheses += 1;
                 continue;
             }
-            if (c_token_is_punctuator(token, S8(")")) && parentheses)
+            if (scan == C_IR_GROUP_SCAN_UNCLOSED)
             {
-                parentheses -= 1;
-                continue;
+                break;
             }
-            if (c_token_is_punctuator(token, S8("[")))
-            {
-                brackets += 1;
-                continue;
-            }
-            if (c_token_is_punctuator(token, S8("]")) && brackets)
-            {
-                brackets -= 1;
-                continue;
-            }
-            if (c_token_is_punctuator(token, S8("{")))
-            {
-                braces += 1;
-                continue;
-            }
-            if (c_token_is_punctuator(token, S8("}")) && braces)
-            {
-                braces -= 1;
-                continue;
-            }
-            if (!parentheses && !brackets && !braces &&
-                (c_token_is_punctuator(token, S8("==")) || c_token_is_punctuator(token, S8("!=")) || c_token_is_punctuator(token, S8("<")) ||
-                 c_token_is_punctuator(token, S8("<=")) || c_token_is_punctuator(token, S8(">")) || c_token_is_punctuator(token, S8(">=")) ||
+            if (c_token_is_punctuator(token, S8("==")) || c_token_is_punctuator(token, S8("!=")) || c_token_is_punctuator(token, S8("<")) ||
+                c_token_is_punctuator(token, S8("<=")) || c_token_is_punctuator(token, S8(">")) || c_token_is_punctuator(token, S8(">=")) ||
                 (c_token_is_punctuator(token, S8("&&")) && !c_ir_label_address_prefix(builder, start, index)) ||
-                 c_token_is_punctuator(token, S8("||")) || (index == start && c_token_is_punctuator(token, S8("!")))))
+                c_token_is_punctuator(token, S8("||")) || (index == start && c_token_is_punctuator(token, S8("!"))))
             {
                 return builder->s32_type;
             }
