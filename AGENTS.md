@@ -76,7 +76,8 @@ shell, CMake, and utility subprocesses.
 
 `build/build` commands: `generate`, `build` (default), `clang_analyze`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
-`time_trace_summary_self_test`,
+`time_trace_summary_self_test`, `test_timing_summary`,
+`test_timing_summary_self_test`,
 `import_assembly_metadata`, `test_self_host`, `test_all_combinations`,
 `test_all_combinations_ci`; `self_host_from_existing` is an internal
 build-driver worker command used only by the pooled artifact-fanout target.
@@ -244,6 +245,35 @@ enabled.
   `Total InstantiateFunction`, ...), summed across every file given. These
   commands are diagnostics for humans to inspect when aggregate numbers
   suggest a regression, and can be run from CI or locally.
+- **`test_timing_summary <test-log>... [--limit N] [--baseline <path>]
+  [--update-baseline]`** answers *where test time goes*, the counterpart to
+  the two commands above. It parses the `TEST_MODULE_TIMING` lines
+  `library_tests()` already prints under `--verbose=1` (which every CI job
+  passes) out of a saved matrix run or CI log, reports each module's total
+  across the configurations in that run with its share of the whole, then the
+  slowest individual (configuration, module) rows with their deltas against a
+  stored baseline. `--update-baseline` records the current run.
+  This exists because test cost accumulates silently: `x86_64_metadata_tests`
+  reached 60% of all CI test CPU time before anyone noticed, and every number
+  needed to catch it in week one was already printed on every run and
+  discarded with the log.
+  Two properties are deliberate and should be preserved. **It is a diagnostic,
+  not a gate** — it has no thresholds and no CI failure condition, because
+  wall-clock test time is far too noisy to gate on (identical code measured
+  290.1 s and 319.8 s for the same matrix on an idle 16-thread desktop, a 10%
+  spread); recording history first is the right order, and a gate would need a
+  noise model that does not exist yet. **Series are per-runner and
+  per-configuration and are never merged** — the same module measured 4.4 s in
+  Linux Release, 138 s in sanitized Debug and 192 s on a sanitized Debug
+  Windows runner, so a baseline records the runner it was taken on and refuses
+  to be compared against another, every runner keys its own baseline (none is
+  excluded, including shared or noisy ones), and rows are only compared within
+  the same configuration. The runner name defaults to `<platform>-<arch>` and
+  is overridable with `BUSTER_TEST_TIMING_RUNNER`; the default baseline path is
+  `build/test-timing-baseline-<runner>.txt`. Configurations are recovered from
+  the build commands the superbuild echoes ahead of each test block; timing
+  rows with no command line in front of them are attributed to numbered
+  `unknown:<n>` series rather than merged.
 
 ## Latest performance audit notes
 
