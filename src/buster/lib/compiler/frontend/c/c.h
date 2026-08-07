@@ -517,6 +517,7 @@ struct CParseResult
     CEntityId* entity_lookup_buckets;
     CEntityId* typedef_lookup_buckets;
     CIdentifierUse* identifier_uses;
+    u32* identifier_use_by_token;
     CDiagnostic* diagnostics;
     CDeferredStaticAssert* deferred_static_asserts;
     u32 declaration_count;
@@ -542,6 +543,7 @@ struct CParseResult
     u32 scope_capacity;
     u32 entity_lookup_bucket_count;
     u32 identifier_use_capacity;
+    u32 identifier_use_by_token_capacity;
     u32 diagnostic_capacity;
     u32 deferred_static_assert_capacity;
 };

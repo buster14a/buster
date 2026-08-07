@@ -3756,6 +3756,17 @@ BUSTER_GLOBAL_LOCAL void c_parse_diagnostic(CParseResult* result, CSourceLocatio
     };
 }
 
+// Identifier uses are looked up by token index from parsing, semantic queries, and IR lowering.
+// `identifier_use_by_token` keeps the first use recorded for each token so those lookups stay
+// constant time instead of rescanning every use recorded so far.
+BUSTER_GLOBAL_LOCAL u32 c_parse_identifier_use_index(CParseResult* result, u32 token_index)
+{
+    if (token_index >= result->identifier_use_by_token_capacity)
+    {
+        return C_ID_UNDERLYING_INVALID;
+    }
+    return result->identifier_use_by_token[token_index];
+}
 
 typedef struct CTypeParseFrame CTypeParseFrame;
 typedef struct CTypeParseMachine CTypeParseMachine;
@@ -4785,14 +4796,10 @@ BUSTER_GLOBAL_LOCAL bool c_parse_direct_expression_type(Arena* arena, CPreproces
         return false;
     }
     CEntityId entity_id = C_ENTITY_ID_INVALID;
-    for (u32 use_index = 0; use_index < result->identifier_use_count; use_index += 1)
+    u32 base_use_index = c_parse_identifier_use_index(result, base_start);
+    if (base_use_index != C_ID_UNDERLYING_INVALID)
     {
-        CIdentifierUse use = result->identifier_uses[use_index];
-        if (use.token_index == base_start)
-        {
-            entity_id = use.entity;
-            break;
-        }
+        entity_id = result->identifier_uses[base_use_index].entity;
     }
     CScopeId lookup_scope = scope;
     if (lookup_scope.value == C_ID_UNDERLYING_INVALID && result->scope_count)
@@ -10705,11 +10712,16 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_identifier(Arena* arena, CParseResult* res
     CToken token = preprocess.tokens[token_index];
     CEntityId entity = c_parse_lookup_entity(result, scope, token.spelling);
     BUSTER_CHECK(result->identifier_use_count < result->identifier_use_capacity);
-    result->identifier_uses[result->identifier_use_count++] = (CIdentifierUse){
+    u32 use_index = result->identifier_use_count++;
+    result->identifier_uses[use_index] = (CIdentifierUse){
         .token_index = token_index,
         .entity = entity,
         .scope = scope,
     };
+    if (token_index < result->identifier_use_by_token_capacity && result->identifier_use_by_token[token_index] == C_ID_UNDERLYING_INVALID)
+    {
+        result->identifier_use_by_token[token_index] = use_index;
+    }
     bool predefined_function_name = string_equal(token.spelling, S8("__func__")) || string_equal(token.spelling, S8("__FUNCTION__")) ||
                                     string_equal(token.spelling, S8("__PRETTY_FUNCTION__")) || string_equal(token.spelling, S8("__builtin_va_start")) ||
                                     string_equal(token.spelling, S8("__va_start")) ||
@@ -10729,14 +10741,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_identifier(Arena* arena, CParseResult* res
 
 BUSTER_GLOBAL_LOCAL bool c_parse_identifier_is_bound(CParseResult* result, u32 token_index)
 {
-    for (u32 use_index = 0; use_index < result->identifier_use_count; use_index += 1)
-    {
-        if (result->identifier_uses[use_index].token_index == token_index)
-        {
-            return true;
-        }
-    }
-    return false;
+    return c_parse_identifier_use_index(result, token_index) != C_ID_UNDERLYING_INVALID;
 }
 
 BUSTER_GLOBAL_LOCAL void c_parse_bind_array_bound_identifiers(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start,
@@ -13229,6 +13234,7 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
     result.entity_capacity = identifier_count + 1;
     result.scope_capacity = open_brace_count + open_parenthesis_count + for_count + 1;
     result.identifier_use_capacity = identifier_count + 1;
+    result.identifier_use_by_token_capacity = token_count + 1;
     result.deferred_static_assert_capacity = token_count + 1;
     result.diagnostic_capacity = token_count + 1;
     result.declarations = arena_allocate(arena, CDeclaration, result.declaration_capacity);
@@ -13252,6 +13258,8 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
     result.typedef_lookup_buckets = arena_allocate(arena, CEntityId, result.entity_lookup_bucket_count);
     memset(result.typedef_lookup_buckets, 0xff, sizeof(*result.typedef_lookup_buckets) * result.entity_lookup_bucket_count);
     result.identifier_uses = arena_allocate(arena, CIdentifierUse, result.identifier_use_capacity);
+    result.identifier_use_by_token = arena_allocate(arena, u32, result.identifier_use_by_token_capacity);
+    memset(result.identifier_use_by_token, 0xff, sizeof(*result.identifier_use_by_token) * result.identifier_use_by_token_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
     BUSTER_CHECK(result.scope_count < result.scope_capacity);
     result.scopes[result.scope_count++] = (CScope){
@@ -35109,13 +35117,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrB
                             continue;
                         }
                         CEntityId entity = C_ENTITY_ID_INVALID;
-                        for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
+                        u32 use_index = c_parse_identifier_use_index(&parse, token_index);
+                        if (use_index != C_ID_UNDERLYING_INVALID)
                         {
-                            if (parse.identifier_uses[use_index].token_index == token_index)
-                            {
-                                entity = parse.identifier_uses[use_index].entity;
-                                break;
-                            }
+                            entity = parse.identifier_uses[use_index].entity;
                         }
                         if (entity.value == C_ID_UNDERLYING_INVALID)
                         {
@@ -38503,13 +38508,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDe
         if (end >= start + 2 && c_token_is_punctuator(preprocess.tokens[start], S8("&")) && preprocess.tokens[start + 1].kind == C_TOKEN_IDENTIFIER)
         {
             CEntityId entity = C_ENTITY_ID_INVALID;
-            for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
+            u32 use_index = c_parse_identifier_use_index(&parse, start + 1);
+            if (use_index != C_ID_UNDERLYING_INVALID)
             {
-                if (parse.identifier_uses[use_index].token_index == start + 1)
-                {
-                    entity = parse.identifier_uses[use_index].entity;
-                    break;
-                }
+                entity = parse.identifier_uses[use_index].entity;
             }
             if (entity.value == C_ID_UNDERLYING_INVALID)
             {
@@ -38578,13 +38580,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDe
         if (identifier_index + 1 == end && preprocess.tokens[identifier_index].kind == C_TOKEN_IDENTIFIER)
         {
             CEntityId entity = C_ENTITY_ID_INVALID;
-            for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
+            u32 use_index = c_parse_identifier_use_index(&parse, identifier_index);
+            if (use_index != C_ID_UNDERLYING_INVALID)
             {
-                if (parse.identifier_uses[use_index].token_index == identifier_index)
-                {
-                    entity = parse.identifier_uses[use_index].entity;
-                    break;
-                }
+                entity = parse.identifier_uses[use_index].entity;
             }
             if (entity.value == IR_ID_UNDERLYING_INVALID)
             {
