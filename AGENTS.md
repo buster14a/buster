@@ -102,8 +102,17 @@ at a time without nested oversubscription. Larger hosts retain the weighted
 allocator: split trees share at least two logical CPUs per admission slot while
 unity trees use one job. Tests then run concurrently in the same bounded pool,
 with each tree's quota passed through `BUSTER_TEST_JOBS`; future multithreaded test work
-must honor that limit. Set `BUSTER_MATRIX_DIRECT=1` only to diagnose the
-retained legacy scheduler. When artifact fan-out is enabled on the supported
+must honor that limit. Trees are declared longest-first — sanitized Debug,
+sanitized Release, the unity Release tree that also runs `clang_analyze`, trees
+covering two configurations, then the rest — because Ninja admits ready edges
+from a shared pool in declaration order and a fresh CI checkout has no
+`.ninja_log` for its critical-path scheduler to learn from. Set
+`BUSTER_MATRIX_DIRECT=1` only to diagnose the retained legacy scheduler,
+`BUSTER_MATRIX_NO_TREE_ORDER=1` to restore the previous declaration order, and
+`BUSTER_MATRIX_THREADS=<n>` to state a CPU budget instead of the detected one
+(`get_nprocs()` ignores CPU affinity, so `taskset` alone cannot reproduce a
+small runner's admission behavior). The last two exist so the ordering can be
+A/B measured on one host. When artifact fan-out is enabled on the supported
 desktop CI platforms, the canonical trusted Clang Release tree also gets a
 self-host worker in this same pool. The build-driver boundary is mandatory:
 capture provenance, clean the canonical Release producer, then start the outer

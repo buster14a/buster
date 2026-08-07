@@ -7499,6 +7499,46 @@ BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_outer_jobs(u32 thread_count, u32 tree_
     return BUSTER_MIN(split_tree_limit, tree_count);
 }
 
+// Ninja admits ready edges from a shared pool in declaration order, and a fresh
+// CI checkout has no `.ninja_log` for its critical-path scheduler to learn from.
+// Declaring the longest trees first therefore decides whether the slowest test
+// command starts as soon as its compile finishes or waits behind shorter trees.
+// The ranking follows the measured cost ordering: sanitized Debug dominates,
+// then sanitized Release, then the unity Release tree that also runs
+// clang_analyze, then trees that test two configurations, then the rest.
+BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_tree_schedule_rank(bool sanitize, bool optimize, bool unity_only, u32 combination_count)
+{
+    if (sanitize)
+    {
+        return optimize ? 3 : 4;
+    }
+    if (unity_only)
+    {
+        return 2;
+    }
+    return combination_count > 1 ? 1 : 0;
+}
+
+// Stable insertion sort: equal ranks keep the compiler/configuration order the
+// matrix loop produced, so the manifest stays deterministic across hosts.
+BUSTER_GLOBAL_LOCAL void matrix_superbuild_order_trees(MatrixTestTree* trees, u32* ranks, u32 tree_count)
+{
+    for (u32 tree_i = 1; tree_i < tree_count; tree_i += 1)
+    {
+        MatrixTestTree tree = trees[tree_i];
+        u32 rank = ranks[tree_i];
+        u32 position = tree_i;
+        while (position > 0 && ranks[position - 1] < rank)
+        {
+            trees[position] = trees[position - 1];
+            ranks[position] = ranks[position - 1];
+            position -= 1;
+        }
+        trees[position] = tree;
+        ranks[position] = rank;
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void matrix_superbuild_allocate_jobs(MatrixTestTree* trees, u32 tree_count, u32 thread_count)
 {
     thread_count = BUSTER_MAX(thread_count, 1);
@@ -7603,8 +7643,61 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
                                                            MatrixTestCombination* combinations, MatrixSuperbuildSelfHostPlan self_host,
                                                            bool verbose, bool quiet);
 
+BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_ordering_tests(void)
+{
+    // Ranks follow the measured per-tree cost ordering on both Linux and Windows.
+    if (matrix_superbuild_tree_schedule_rank(true, false, false, 1) != 4 ||
+        matrix_superbuild_tree_schedule_rank(true, true, false, 1) != 3 ||
+        matrix_superbuild_tree_schedule_rank(false, true, true, 1) != 2 ||
+        matrix_superbuild_tree_schedule_rank(false, false, false, 2) != 1 ||
+        matrix_superbuild_tree_schedule_rank(false, false, false, 1) != 0)
+    {
+        string_print(S8("error: superbuild tree schedule rank policy changed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    // The Linux matrix order the combination loop produces, longest-pole last.
+    MatrixTestTree trees[6] = {
+        {.build_directory = S8("clang-debug")},
+        {.build_directory = S8("clang-release"), .unity_only = 1},
+        {.build_directory = S8("clang-sanitize-debug")},
+        {.build_directory = S8("clang-sanitize-release")},
+        {.build_directory = S8("gcc-shared"), .combination_count = 2},
+        {.build_directory = S8("zig-shared"), .combination_count = 2},
+    };
+    u32 ranks[BUSTER_ARRAY_LENGTH(trees)] = {0, 2, 4, 3, 1, 1};
+    matrix_superbuild_order_trees(trees, ranks, BUSTER_ARRAY_LENGTH(trees));
+    String8 expected[] = {
+        S8_INITIALIZER("clang-sanitize-debug"), S8_INITIALIZER("clang-sanitize-release"), S8_INITIALIZER("clang-release"),
+        S8_INITIALIZER("gcc-shared"),           S8_INITIALIZER("zig-shared"),             S8_INITIALIZER("clang-debug"),
+    };
+    for (u32 tree_i = 0; tree_i < BUSTER_ARRAY_LENGTH(trees); tree_i += 1)
+    {
+        if (!string_equal(trees[tree_i].build_directory, expected[tree_i]))
+        {
+            string_print(S8("error: superbuild tree ordering test failed at {u32}: {S8}\n"), tree_i, trees[tree_i].build_directory);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+
+    // Equal ranks must keep their original relative order so the manifest is
+    // deterministic; gcc-shared and zig-shared both rank 1 above.
+    if (!string_equal(trees[3].build_directory, S8("gcc-shared")) || !string_equal(trees[4].build_directory, S8("zig-shared")))
+    {
+        string_print(S8("error: superbuild tree ordering is not stable for equal ranks\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    return PROCESS_RESULT_SUCCESS;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* arena)
 {
+    ProcessResult ordering_result = matrix_superbuild_ordering_tests();
+    if (ordering_result != PROCESS_RESULT_SUCCESS)
+    {
+        return ordering_result;
+    }
+
     MatrixTestTree linux_trees[6] = {
         {.build_directory = S8("linux-debug")},
         {.build_directory = S8("linux-canonical"), .unity_only = 1},
@@ -8010,6 +8103,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         }
     }
 
+    // Declare the longest trees first so their test commands enter the shared
+    // pool as soon as their compile finishes instead of queueing behind shorter
+    // trees. Ordering happens before job allocation and before the fan-out tree
+    // index is resolved by build directory, so both stay consistent.
+    u32 tree_ranks[BUSTER_ARRAY_LENGTH(trees)] = {0};
+    for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
+    {
+        MatrixTestCombination first = combinations[trees[tree_i].combination_indices[0]];
+        tree_ranks[tree_i] = matrix_superbuild_tree_schedule_rank(first.sanitize, first.options.optimize, trees[tree_i].unity_only,
+                                                                 trees[tree_i].combination_count);
+    }
+    if (!environment_flag_is_on(S8("BUSTER_MATRIX_NO_TREE_ORDER")))
+    {
+        matrix_superbuild_order_trees(trees, tree_ranks, tree_count);
+    }
+
     BuildArtifactFanout* fanout = 0;
     u32 fanout_tree_index = tree_count;
     String8 ide_name =
@@ -8059,7 +8168,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         return PROCESS_RESULT_FAILED;
     }
 
-    u32 thread_count = os_get_logical_thread_count();
+    // `get_nprocs()` ignores CPU affinity, so the only way to reproduce a small
+    // runner's admission behaviour on a large host is to state the budget.
+    u32 thread_count = (u32)environment_positive_u64_or(S8("BUSTER_MATRIX_THREADS"), os_get_logical_thread_count());
     String8 superbuild_directory = {0};
     if (!direct_matrix)
     {
