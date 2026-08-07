@@ -274,6 +274,64 @@ enabled.
   the build commands the superbuild echoes ahead of each test block; timing
   rows with no command line in front of them are attributed to numbered
   `unknown:<n>` series rather than merged.
+- **Sampling the sanitized (ASan+UBSan) Debug tree with `perf` works.** It is
+  the CI critical path, so it is the configuration most worth profiling. Record
+  it exactly like any other build; there is no sanitizer-specific obstacle:
+
+  ```sh
+  ./build.sh generate --sanitize && ./build.sh build -t ide
+  LD_PRELOAD= perf record -F 999 -g --call-graph fp -o asan.data \
+      -- ./build/Debug/ide test --verbose=1
+  ```
+
+  Four things must be right, and each one silently produces a *plausible but
+  wrong* profile when it is not:
+  - **Clear `LD_PRELOAD`.** With one inherited (NoMachine sets
+    `LD_PRELOAD=/usr/NX/lib/libnxegl.so`), the shared ASan runtime is not first
+    in the initial library list, the process aborts inside `ld.so` before
+    `main`, and the capture is ~12 samples that are ~100% of *user-space* time
+    in `ld-linux-x86-64.so.2` with no ASan symbols. That result is not a
+    symbolization failure and not evidence that ASan defeats sampling — it is
+    an empty profile of the dynamic loader. `CMakeLists.txt` already composes
+    the runtime ahead of any inherited `LD_PRELOAD` for its own test targets;
+    only ad-hoc command lines need the `LD_PRELOAD=` prefix.
+  - **Run on a quiet machine.** A contended host produces the same visual
+    signature — few samples, attribution smeared into the loader and the
+    scheduler. Confirm the sample count and the `TEST_MODULE_TIMING` line agree
+    with a serial run before reading anything into the histogram.
+  - **`--call-graph fp` is correct and cheap here.** Debug is `-O0` and the
+    sanitizer runtime keeps frame pointers, so frame-pointer unwinding resolves
+    from inside `libclang_rt.asan` back into buster code. This matters because
+    the sanitizer cost has to be charged to the buster function that provokes
+    it; a leaf-only profile just says "memcpy".
+  - **Do not use `perf script -F srcline` (or `-F ip,sym,srcline`) for line
+    attribution.** It resolves the raw return address, which points *after* the
+    call, so it reports the following line — measured on this tree it shifts
+    call sites by 1–2 lines (real `c_test.c:7227` is reported as `7229`, real
+    `7229` as `7230`) and prints `:0` for ~69% of frames. Extract
+    `sym+offset` instead and symbolize the byte before the return address:
+
+    ```sh
+    perf script -i asan.data --no-demangle -F comm,ip,sym,symoff,dso
+    # static vaddr = (readelf -sW addr of sym) + offset; then
+    #   llvm-symbolizer --functions=linkage --demangle  <<< "CODE build/Debug/ide 0x<vaddr-1>"
+    ```
+
+    Use `sym+symoff`, not `-F dsoff`: `dsoff` is a **file** offset while
+    `llvm-symbolizer` wants a **virtual** address, and for a clang PIE the two
+    differ by `p_vaddr - p_offset` of the text segment (`0x1000` for
+    `build/Debug/ide`). Feeding `dsoff` straight to `llvm-symbolizer` yields
+    wrong-but-believable source lines. This is the same class of mistake as
+    `perf report` mis-symbolizing buster-produced `ET_EXEC` images by
+    `-0x400000`; clang-built binaries are PIE and symbolize normally once the
+    right address space is used.
+- **Validate any profiling method against a non-sampling ground truth before
+  trusting it.** The cheap one here is direct timing: bracket the call sites
+  under suspicion with `timestamp_take()`/`timestamp_ns_between()` and print
+  through `arguments->show`, then compare against the sampled shares of the
+  same process. Confirm the extracted return addresses too — each one must
+  disassemble to the instruction immediately after a `call` to the callee the
+  callchain names (`objdump -d --start-address=... --stop-address=...`).
 
 ## Latest performance audit notes
 
