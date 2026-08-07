@@ -1,9 +1,29 @@
 on: [push]
 
 jobs:
+  main_gate:
+    name: Main tested-SHA gate
+    runs-on: x86_64-linux
+    outputs:
+      tested: ${{ steps.gate.outputs.tested }}
+    steps:
+      - name: Checkout
+        uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check merged SHA statuses
+        id: gate
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          TOKEN: ${{ github.token }}
+        run: bash .forgejo/scripts/ci_main_gate.sh
   test:
     # Main accepts only current, green PR head SHAs via fast-forward-only merge.
-    if: ${{ forgejo.ref != 'refs/heads/main' }}
+    # The gate verifies the exact pushed SHA already carries all required
+    # success statuses; otherwise the full matrix runs on the main push.
+    needs: main_gate
+    if: ${{ forgejo.ref != 'refs/heads/main' || needs.main_gate.outputs.tested != 'true' }}
     # Forgejo 12.7 counts this timeout from scheduling, including time waiting for a runner.
     # 120 minutes covers three queued Windows jobs at the observed 22-29 minute runtime
     # (87 minutes) plus the existing <=30 minute execution target.

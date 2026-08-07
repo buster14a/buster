@@ -197,6 +197,10 @@ enabled.
 - CI (`.forgejo/workflows/ci.yml`, Forgejo not GitHub) runs
   `./build.sh test_all_combinations_ci` on Linux/macOS/Windows plus
   Debug+Release on an Android emulator and the iOS simulator, on every push.
+  Main-push CI is skipped only when the exact pushed SHA already carries current
+  success statuses for all four required matrix contexts; the check lives in
+  `.forgejo/scripts/ci_main_gate.sh` and uses Forgejo's commit-status API, so a
+  merge strategy other than fast-forward cannot silently land an untested tree.
 
 ## Benchmarking and diagnostics
 
