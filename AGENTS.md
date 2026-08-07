@@ -83,12 +83,14 @@ build-driver worker command used only by the pooled artifact-fanout target.
 The combination matrix shares one multi-config build tree across Debug and
 Release when their configure-time policy matches. Clang's fuzz-enabled Debug
 sanitized and Release non-sanitized configurations use dedicated trees;
-sanitizer rows are otherwise Clang-only. GCC and Zig cover unsanitized Debug
-and Release, and MSVC covers Debug and Release on Windows. Only optimized,
-unsanitized Clang/AppleClang builds use the requested unity build; GCC, Zig,
-MSVC, and every other non-Clang compiler use split translation units in
-Release as well as Debug. TCC is retained only as the bootstrap compiler for
-`build.c` and is omitted from all application/compiler combinations.
+dedicated trees generate only the configuration they use, while shared trees
+keep Debug and Release in one cross-config Ninja graph. Sanitizer rows are
+otherwise Clang-only. GCC and Zig cover unsanitized Debug and Release, and
+MSVC covers Debug and Release on Windows. Only optimized, unsanitized
+Clang/AppleClang builds use the requested unity build; GCC, Zig, MSVC, and
+every other non-Clang compiler use split translation units in Release as well
+as Debug. TCC is retained only as the bootstrap compiler for `build.c` and is
+omitted from all application/compiler combinations.
 The matrix configures its compiler trees in parallel, then uses
 `cmake/superbuild/CMakeLists.txt` for one outer `cmake --build` invocation.
 Each shared compiler tree builds Debug and Release through one cross-config

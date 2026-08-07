@@ -406,6 +406,7 @@ struct Generate
 {
     String8 build_directory;
     String8 config;
+    String8 configuration_types;
     String8 cc;
     String8 linker;
     String8 cmake_profile;
@@ -833,6 +834,8 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     String8 developer_targets = cmake_flag(arena, S8("BUSTER_DEVELOPER_TARGETS"), generate.developer_targets);
     String8 linker_argument = cmake_string(arena, S8("CMAKE_LINKER_TYPE"), linker);
     String8 default_build_type_argument = cmake_string(arena, S8("CMAKE_DEFAULT_BUILD_TYPE"), build_config);
+    String8 configuration_types_argument = string_format(arena, S8("-DCMAKE_CONFIGURATION_TYPES={S8}"),
+                                                         generate.configuration_types.pointer ? generate.configuration_types : S8("Debug;Release"));
     String8 profiling_output_argument = {0};
     if (generate.cmake_profile_set)
     {
@@ -879,7 +882,7 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     os_argument_builder_append(b, S8("-G"));
     os_argument_builder_append(b, S8("Ninja Multi-Config"));
     os_argument_builder_append(b, default_build_type_argument);
-    os_argument_builder_append(b, S8("-DCMAKE_CONFIGURATION_TYPES=Debug;Release"));
+    os_argument_builder_append(b, configuration_types_argument);
     if (generate.cross_configs)
     {
         os_argument_builder_append(b, S8("-DCMAKE_CROSS_CONFIGS=all"));
@@ -8010,10 +8013,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
                 };
 
                 String8 build_directory = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(build_directory_parts), true);
+                String8 configuration_types = optimize_count > 1 ? S8("Debug;Release") : (first_optimize ? S8("Release") : S8("Debug"));
                 String8 cmake_profile_path = path_join(arena, build_directory, S8("cmake-profile.json"));
 
                 Generate generate = {
                     .build_directory = build_directory,
+                    .configuration_types = configuration_types,
                     .cmake_profile = cmake_profile_path,
                     .cmake_profile_summary_limit = cmake_profile_summary_limit,
                     .compiler = compiler,
