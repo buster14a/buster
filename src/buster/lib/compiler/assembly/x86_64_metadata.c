@@ -21,60 +21,228 @@
 // call and a dispatch. Reading a form therefore re-walks that machinery for
 // each field, and finding a string's length re-walks it for each byte.
 //
-// Decode each table once into a flat cache and index it directly afterwards.
+// Decode every table once into flat caches and index them directly afterwards.
 // The caches live here rather than in the generated header, which keeps the
 // generated source exactly as pointer-free and initialization-free as before.
-// Filling is lazy so a translation unit that never touches x86 metadata pays
-// nothing, and each table is independent so touching one does not decode the
-// others.
+// Filling is lazy, so a run that never touches x86 metadata pays nothing.
+//
+// One decode covers every table. Per-table laziness was measured and bought
+// nothing: the lookup indexes yield string-pool offsets and form ids, so a
+// consumer that reaches any table reaches most of them.
+//
+// Record validity is computed here too. The tables are immutable, so a record
+// that validates once validates forever, and the public accessors would
+// otherwise re-run `validate_form_record` on every single lookup -- the top
+// cost of a Release test run once the raw decode was cached.
+// `buster_x86_metadata_validate_table` still validates with diagnostics, and
+// `buster_x86_metadata_validate_patch` still validates the mutated copy it
+// builds, so neither loses coverage.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validate_form_record(const BusterX86GeneratedForm* form, u32 index,
+                                                                 BusterX86MetadataValidationResult* result);
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validate_coverage_record(const BusterX86GeneratedCoverage* coverage, u32 index,
+                                                                     BusterX86MetadataValidationResult* result);
+
 BUSTER_GLOBAL_LOCAL char8 buster_x86_metadata_pool_bytes[BUSTER_X86_GENERATED_STRING_POOL_SIZE];
-BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pool_decoded;
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedForm buster_x86_metadata_form_records[BUSTER_X86_GENERATED_FORM_COUNT];
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_records_valid[BUSTER_X86_GENERATED_FORM_COUNT];
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedOperand buster_x86_metadata_operand_records[BUSTER_X86_GENERATED_OPERAND_COUNT];
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedCoverage buster_x86_metadata_coverage_records[BUSTER_X86_GENERATED_COVERAGE_COUNT];
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_records_valid[BUSTER_X86_GENERATED_COVERAGE_COUNT];
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedTextRange buster_x86_metadata_mnemonic_ranges[BUSTER_X86_GENERATED_MNEMONIC_RANGE_COUNT];
+BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_mnemonic_candidates[BUSTER_X86_GENERATED_MNEMONIC_CANDIDATE_COUNT];
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedTextRange buster_x86_metadata_iclass_ranges[BUSTER_X86_GENERATED_ICLASS_RANGE_COUNT];
+BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_iclass_candidates[BUSTER_X86_GENERATED_ICLASS_CANDIDATE_COUNT];
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedTextRange buster_x86_metadata_iform_ranges[BUSTER_X86_GENERATED_IFORM_RANGE_COUNT];
+BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_iform_candidates[BUSTER_X86_GENERATED_IFORM_CANDIDATE_COUNT];
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedHashRange buster_x86_metadata_form_hash_ranges[BUSTER_X86_GENERATED_FORM_HASH_RANGE_COUNT];
+BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_form_hash_candidates[BUSTER_X86_GENERATED_FORM_HASH_CANDIDATE_COUNT];
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedHashRange buster_x86_metadata_coverage_hash_ranges[BUSTER_X86_GENERATED_COVERAGE_HASH_RANGE_COUNT];
+BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_coverage_hash_candidates[BUSTER_X86_GENERATED_COVERAGE_HASH_CANDIDATE_COUNT];
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_tables_decoded;
+
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables(void)
+{
+    if (buster_x86_metadata_tables_decoded)
+    {
+        return;
+    }
+    for (u64 index = 0; index < BUSTER_X86_GENERATED_STRING_POOL_SIZE; index += 1)
+    {
+        buster_x86_metadata_pool_bytes[index] = buster_x86_generated_string_byte(index);
+    }
+    for (u32 index = 0; index < BUSTER_X86_GENERATED_OPERAND_COUNT; index += 1)
+    {
+        buster_x86_metadata_operand_records[index] = buster_x86_generated_operand_at(index);
+    }
+    for (u32 index = 0; index < BUSTER_X86_GENERATED_MNEMONIC_RANGE_COUNT; index += 1)
+    {
+        buster_x86_metadata_mnemonic_ranges[index] = buster_x86_generated_mnemonic_range_at(index);
+    }
+    for (u32 index = 0; index < BUSTER_X86_GENERATED_MNEMONIC_CANDIDATE_COUNT; index += 1)
+    {
+        buster_x86_metadata_mnemonic_candidates[index] = buster_x86_generated_mnemonic_candidate_at(index);
+    }
+    for (u32 index = 0; index < BUSTER_X86_GENERATED_ICLASS_RANGE_COUNT; index += 1)
+    {
+        buster_x86_metadata_iclass_ranges[index] = buster_x86_generated_iclass_range_at(index);
+    }
+    for (u32 index = 0; index < BUSTER_X86_GENERATED_ICLASS_CANDIDATE_COUNT; index += 1)
+    {
+        buster_x86_metadata_iclass_candidates[index] = buster_x86_generated_iclass_candidate_at(index);
+    }
+    for (u32 index = 0; index < BUSTER_X86_GENERATED_IFORM_RANGE_COUNT; index += 1)
+    {
+        buster_x86_metadata_iform_ranges[index] = buster_x86_generated_iform_range_at(index);
+    }
+    for (u32 index = 0; index < BUSTER_X86_GENERATED_IFORM_CANDIDATE_COUNT; index += 1)
+    {
+        buster_x86_metadata_iform_candidates[index] = buster_x86_generated_iform_candidate_at(index);
+    }
+    for (u32 index = 0; index < BUSTER_X86_GENERATED_FORM_HASH_RANGE_COUNT; index += 1)
+    {
+        buster_x86_metadata_form_hash_ranges[index] = buster_x86_generated_form_hash_range_at(index);
+    }
+    for (u32 index = 0; index < BUSTER_X86_GENERATED_FORM_HASH_CANDIDATE_COUNT; index += 1)
+    {
+        buster_x86_metadata_form_hash_candidates[index] = buster_x86_generated_form_hash_candidate_at(index);
+    }
+    for (u32 index = 0; index < BUSTER_X86_GENERATED_COVERAGE_HASH_RANGE_COUNT; index += 1)
+    {
+        buster_x86_metadata_coverage_hash_ranges[index] = buster_x86_generated_coverage_hash_range_at(index);
+    }
+    for (u32 index = 0; index < BUSTER_X86_GENERATED_COVERAGE_HASH_CANDIDATE_COUNT; index += 1)
+    {
+        buster_x86_metadata_coverage_hash_candidates[index] = buster_x86_generated_coverage_hash_candidate_at(index);
+    }
+    // Records must be readable before they are validated: validation resolves
+    // string offsets through the pool and operand ranges through the operand
+    // table, both filled above.
+    for (u32 index = 0; index < BUSTER_X86_GENERATED_FORM_COUNT; index += 1)
+    {
+        buster_x86_metadata_form_records[index] = buster_x86_generated_form_at(index);
+    }
+    for (u32 index = 0; index < BUSTER_X86_GENERATED_COVERAGE_COUNT; index += 1)
+    {
+        buster_x86_metadata_coverage_records[index] = buster_x86_generated_coverage_at(index);
+    }
+    // Set before validating, not after: validation reads records and strings
+    // back through the accessors above, which call this function again. The
+    // tables are complete at this point, so the re-entrant calls must return
+    // immediately instead of decoding a second time.
+    buster_x86_metadata_tables_decoded = true;
+    for (u32 index = 0; index < BUSTER_X86_GENERATED_FORM_COUNT; index += 1)
+    {
+        buster_x86_metadata_form_records_valid[index] = buster_x86_metadata_validate_form_record(&buster_x86_metadata_form_records[index], index, 0);
+    }
+    for (u32 index = 0; index < BUSTER_X86_GENERATED_COVERAGE_COUNT; index += 1)
+    {
+        buster_x86_metadata_coverage_records_valid[index] =
+            buster_x86_metadata_validate_coverage_record(&buster_x86_metadata_coverage_records[index], index, 0);
+    }
+}
 
 BUSTER_GLOBAL_LOCAL char8 buster_x86_metadata_pool_byte(u64 logical)
 {
-    if (!buster_x86_metadata_pool_decoded)
-    {
-        for (u64 index = 0; index < BUSTER_X86_GENERATED_STRING_POOL_SIZE; index += 1)
-        {
-            buster_x86_metadata_pool_bytes[index] = buster_x86_generated_string_byte(index);
-        }
-        buster_x86_metadata_pool_decoded = true;
-    }
+    buster_x86_metadata_decode_tables();
     return logical < BUSTER_X86_GENERATED_STRING_POOL_SIZE ? buster_x86_metadata_pool_bytes[logical] : (char8)0;
 }
 
-BUSTER_GLOBAL_LOCAL BusterX86GeneratedForm buster_x86_metadata_form_records[BUSTER_X86_GENERATED_FORM_COUNT];
-BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_records_decoded;
-
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedForm buster_x86_metadata_form_record(u32 index)
 {
-    if (!buster_x86_metadata_form_records_decoded)
-    {
-        for (u32 form_index = 0; form_index < BUSTER_X86_GENERATED_FORM_COUNT; form_index += 1)
-        {
-            buster_x86_metadata_form_records[form_index] = buster_x86_generated_form_at(form_index);
-        }
-        buster_x86_metadata_form_records_decoded = true;
-    }
+    buster_x86_metadata_decode_tables();
     BusterX86GeneratedForm empty = {0};
     return index < BUSTER_X86_GENERATED_FORM_COUNT ? buster_x86_metadata_form_records[index] : empty;
 }
 
-BUSTER_GLOBAL_LOCAL BusterX86GeneratedOperand buster_x86_metadata_operand_records[BUSTER_X86_GENERATED_OPERAND_COUNT];
-BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_operand_records_decoded;
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_record_valid(u32 index)
+{
+    buster_x86_metadata_decode_tables();
+    return index < BUSTER_X86_GENERATED_FORM_COUNT && buster_x86_metadata_form_records_valid[index];
+}
 
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedOperand buster_x86_metadata_operand_record(u32 index)
 {
-    if (!buster_x86_metadata_operand_records_decoded)
-    {
-        for (u32 operand_index = 0; operand_index < BUSTER_X86_GENERATED_OPERAND_COUNT; operand_index += 1)
-        {
-            buster_x86_metadata_operand_records[operand_index] = buster_x86_generated_operand_at(operand_index);
-        }
-        buster_x86_metadata_operand_records_decoded = true;
-    }
+    buster_x86_metadata_decode_tables();
     BusterX86GeneratedOperand empty = {0};
     return index < BUSTER_X86_GENERATED_OPERAND_COUNT ? buster_x86_metadata_operand_records[index] : empty;
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedCoverage buster_x86_metadata_coverage_record(u32 index)
+{
+    buster_x86_metadata_decode_tables();
+    BusterX86GeneratedCoverage empty = {0};
+    return index < BUSTER_X86_GENERATED_COVERAGE_COUNT ? buster_x86_metadata_coverage_records[index] : empty;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_record_valid(u32 index)
+{
+    buster_x86_metadata_decode_tables();
+    return index < BUSTER_X86_GENERATED_COVERAGE_COUNT && buster_x86_metadata_coverage_records_valid[index];
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedTextRange buster_x86_metadata_mnemonic_range(u32 index)
+{
+    buster_x86_metadata_decode_tables();
+    BusterX86GeneratedTextRange empty = {0};
+    return index < BUSTER_X86_GENERATED_MNEMONIC_RANGE_COUNT ? buster_x86_metadata_mnemonic_ranges[index] : empty;
+}
+
+BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_mnemonic_candidate(u32 index)
+{
+    buster_x86_metadata_decode_tables();
+    return index < BUSTER_X86_GENERATED_MNEMONIC_CANDIDATE_COUNT ? buster_x86_metadata_mnemonic_candidates[index] : 0;
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedTextRange buster_x86_metadata_iclass_range(u32 index)
+{
+    buster_x86_metadata_decode_tables();
+    BusterX86GeneratedTextRange empty = {0};
+    return index < BUSTER_X86_GENERATED_ICLASS_RANGE_COUNT ? buster_x86_metadata_iclass_ranges[index] : empty;
+}
+
+BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_iclass_candidate(u32 index)
+{
+    buster_x86_metadata_decode_tables();
+    return index < BUSTER_X86_GENERATED_ICLASS_CANDIDATE_COUNT ? buster_x86_metadata_iclass_candidates[index] : 0;
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedTextRange buster_x86_metadata_iform_range(u32 index)
+{
+    buster_x86_metadata_decode_tables();
+    BusterX86GeneratedTextRange empty = {0};
+    return index < BUSTER_X86_GENERATED_IFORM_RANGE_COUNT ? buster_x86_metadata_iform_ranges[index] : empty;
+}
+
+BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_iform_candidate(u32 index)
+{
+    buster_x86_metadata_decode_tables();
+    return index < BUSTER_X86_GENERATED_IFORM_CANDIDATE_COUNT ? buster_x86_metadata_iform_candidates[index] : 0;
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedHashRange buster_x86_metadata_form_hash_range(u32 index)
+{
+    buster_x86_metadata_decode_tables();
+    BusterX86GeneratedHashRange empty = {0};
+    return index < BUSTER_X86_GENERATED_FORM_HASH_RANGE_COUNT ? buster_x86_metadata_form_hash_ranges[index] : empty;
+}
+
+BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_form_hash_candidate(u32 index)
+{
+    buster_x86_metadata_decode_tables();
+    return index < BUSTER_X86_GENERATED_FORM_HASH_CANDIDATE_COUNT ? buster_x86_metadata_form_hash_candidates[index] : 0;
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedHashRange buster_x86_metadata_coverage_hash_range(u32 index)
+{
+    buster_x86_metadata_decode_tables();
+    BusterX86GeneratedHashRange empty = {0};
+    return index < BUSTER_X86_GENERATED_COVERAGE_HASH_RANGE_COUNT ? buster_x86_metadata_coverage_hash_ranges[index] : empty;
+}
+
+BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_coverage_hash_candidate(u32 index)
+{
+    buster_x86_metadata_decode_tables();
+    return index < BUSTER_X86_GENERATED_COVERAGE_HASH_CANDIDATE_COUNT ? buster_x86_metadata_coverage_hash_candidates[index] : 0;
 }
 
 // These values cross the generated-table boundary through the public ABI.
@@ -4651,9 +4819,9 @@ BUSTER_GLOBAL_LOCAL BusterX86GeneratedTextRange buster_x86_metadata_text_range_a
 {
     switch (kind)
     {
-        case BUSTER_X86_METADATA_INDEX_MNEMONIC: return buster_x86_generated_mnemonic_range_at(index);
-        case BUSTER_X86_METADATA_INDEX_ICLASS: return buster_x86_generated_iclass_range_at(index);
-        case BUSTER_X86_METADATA_INDEX_IFORM: return buster_x86_generated_iform_range_at(index);
+        case BUSTER_X86_METADATA_INDEX_MNEMONIC: return buster_x86_metadata_mnemonic_range(index);
+        case BUSTER_X86_METADATA_INDEX_ICLASS: return buster_x86_metadata_iclass_range(index);
+        case BUSTER_X86_METADATA_INDEX_IFORM: return buster_x86_metadata_iform_range(index);
         default: return (BusterX86GeneratedTextRange){0};
     }
 }
@@ -4662,9 +4830,9 @@ BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_text_candidate_at(u32 kind, u32 inde
 {
     switch (kind)
     {
-        case BUSTER_X86_METADATA_INDEX_MNEMONIC: return buster_x86_generated_mnemonic_candidate_at(index);
-        case BUSTER_X86_METADATA_INDEX_ICLASS: return buster_x86_generated_iclass_candidate_at(index);
-        case BUSTER_X86_METADATA_INDEX_IFORM: return buster_x86_generated_iform_candidate_at(index);
+        case BUSTER_X86_METADATA_INDEX_MNEMONIC: return buster_x86_metadata_mnemonic_candidate(index);
+        case BUSTER_X86_METADATA_INDEX_ICLASS: return buster_x86_metadata_iclass_candidate(index);
+        case BUSTER_X86_METADATA_INDEX_IFORM: return buster_x86_metadata_iform_candidate(index);
         default: return UINT32_MAX;
     }
 }
@@ -4879,14 +5047,14 @@ BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_hash_candidate_count(u32 kind)
 
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedHashRange buster_x86_metadata_hash_range_at(u32 kind, u32 index)
 {
-    return kind == BUSTER_X86_METADATA_INDEX_FORM_HASH ? buster_x86_generated_form_hash_range_at(index)
-                                                       : buster_x86_generated_coverage_hash_range_at(index);
+    return kind == BUSTER_X86_METADATA_INDEX_FORM_HASH ? buster_x86_metadata_form_hash_range(index)
+                                                       : buster_x86_metadata_coverage_hash_range(index);
 }
 
 BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_hash_candidate_at(u32 kind, u32 index)
 {
-    return kind == BUSTER_X86_METADATA_INDEX_FORM_HASH ? buster_x86_generated_form_hash_candidate_at(index)
-                                                       : buster_x86_generated_coverage_hash_candidate_at(index);
+    return kind == BUSTER_X86_METADATA_INDEX_FORM_HASH ? buster_x86_metadata_form_hash_candidate(index)
+                                                       : buster_x86_metadata_coverage_hash_candidate(index);
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validate_hash_index(u32 kind, BusterX86MetadataValidationResult* result)
@@ -4927,7 +5095,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validate_hash_index(u32 kind, Buste
             }
             else
             {
-                BusterX86GeneratedCoverage coverage = buster_x86_generated_coverage_at(id);
+                BusterX86GeneratedCoverage coverage = buster_x86_metadata_coverage_record(id);
                 if (coverage.source_hash != range.key)
                 {
                     return buster_x86_metadata_validation_fail(result, BUSTER_X86_METADATA_VALIDATION_INDEX_CAPACITY, range_index, id);
@@ -5130,7 +5298,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validate_table(BusterX86MetadataVal
     }
     for (u32 index = 0; index < BUSTER_X86_GENERATED_COVERAGE_COUNT; index += 1)
     {
-        BusterX86GeneratedCoverage coverage = buster_x86_generated_coverage_at(index);
+        BusterX86GeneratedCoverage coverage = buster_x86_metadata_coverage_record(index);
         if (!buster_x86_metadata_validate_coverage_record(&coverage, index, result)) return false;
         if (coverage.normalized_form_id != index)
         {
@@ -5188,7 +5356,7 @@ BusterX86MetadataCounts buster_x86_metadata_counts(void)
     };
     for (u32 index = 0; index < BUSTER_X86_GENERATED_COVERAGE_COUNT; index += 1)
     {
-        BusterX86GeneratedCoverage coverage = buster_x86_generated_coverage_at(index);
+        BusterX86GeneratedCoverage coverage = buster_x86_metadata_coverage_record(index);
         if (coverage.coverage_class < BUSTER_X86_METADATA_COVERAGE_COUNT) result.coverage_class_counts[coverage.coverage_class] += 1;
         if (coverage.reason_id < BUSTER_X86_METADATA_REASON_COUNT) result.reason_counts[coverage.reason_id] += 1;
     }
@@ -5216,7 +5384,7 @@ bool buster_x86_metadata_form(u32 form_id, BusterX86MetadataForm* result)
 {
     if (!result || form_id >= BUSTER_X86_GENERATED_FORM_COUNT) return false;
     BusterX86GeneratedForm form = buster_x86_metadata_form_record(form_id);
-    if (!buster_x86_metadata_validate_form_record(&form, form_id, 0)) return false;
+    if (!buster_x86_metadata_form_record_valid(form_id)) return false;
     buster_x86_metadata_copy_form(form, form_id, result);
     return true;
 }
@@ -5231,7 +5399,7 @@ bool buster_x86_metadata_operand(u32 form_id, u32 operand_index, BusterX86Metada
 {
     if (!result || form_id >= BUSTER_X86_GENERATED_FORM_COUNT) return false;
     BusterX86GeneratedForm form = buster_x86_metadata_form_record(form_id);
-    if (!buster_x86_metadata_validate_form_record(&form, form_id, 0) || operand_index >= form.operand_count ||
+    if (!buster_x86_metadata_form_record_valid(form_id) || operand_index >= form.operand_count ||
         form.operand_first > BUSTER_X86_GENERATED_OPERAND_COUNT || operand_index >= BUSTER_X86_GENERATED_OPERAND_COUNT - form.operand_first)
     {
         return false;
@@ -5252,10 +5420,10 @@ bool buster_x86_metadata_operand(u32 form_id, u32 operand_index, BusterX86Metada
 bool buster_x86_metadata_coverage(u32 coverage_id, BusterX86MetadataCoverage* result)
 {
     if (!result || coverage_id >= BUSTER_X86_GENERATED_COVERAGE_COUNT) return false;
-    BusterX86GeneratedCoverage coverage = buster_x86_generated_coverage_at(coverage_id);
-    if (!buster_x86_metadata_validate_coverage_record(&coverage, coverage_id, 0) || coverage.normalized_form_id != coverage_id) return false;
+    BusterX86GeneratedCoverage coverage = buster_x86_metadata_coverage_record(coverage_id);
+    if (!buster_x86_metadata_coverage_record_valid(coverage_id) || coverage.normalized_form_id != coverage_id) return false;
     BusterX86GeneratedForm form = buster_x86_metadata_form_record(coverage.normalized_form_id);
-    if (!buster_x86_metadata_validate_form_record(&form, coverage.normalized_form_id, 0) || coverage.source_hash != form.stable_hash ||
+    if (!buster_x86_metadata_form_record_valid(coverage.normalized_form_id) || coverage.source_hash != form.stable_hash ||
         coverage.source_offset != form.source_offset || coverage.reason_id != form.reason_id || coverage.reason_offset != form.reason_offset ||
         coverage.coverage_class != form.coverage_class || coverage.encoder_family != form.encoder_family || coverage.test_class != form.test_class)
     {
@@ -5405,7 +5573,7 @@ bool buster_x86_metadata_candidate_at(BusterX86MetadataCandidateRange candidates
     u32 id = buster_x86_metadata_text_candidate_at(candidates.index_kind, candidates.first + position);
     if (candidates.index_kind == BUSTER_X86_METADATA_INDEX_FORM_HASH)
     {
-        id = buster_x86_generated_form_hash_candidate_at(candidates.first + position);
+        id = buster_x86_metadata_form_hash_candidate(candidates.first + position);
     }
     if (id == UINT32_MAX || id >= BUSTER_X86_GENERATED_FORM_COUNT) return false;
     *form_id = id;
@@ -5419,7 +5587,7 @@ bool buster_x86_metadata_coverage_candidate_at(BusterX86MetadataCoverageRange ca
     {
         return false;
     }
-    u32 id = buster_x86_generated_coverage_hash_candidate_at(candidates.first + position);
+    u32 id = buster_x86_metadata_coverage_hash_candidate(candidates.first + position);
     if (id == UINT32_MAX || id >= BUSTER_X86_GENERATED_COVERAGE_COUNT) return false;
     *coverage_id = id;
     return true;
@@ -6473,7 +6641,7 @@ BusterX86MetadataResolveResult buster_x86_metadata_resolve(BusterX86MetadataReso
         last_id = form_id;
         last_id_valid = true;
         BusterX86GeneratedForm form = buster_x86_metadata_form_record(form_id);
-        if (!buster_x86_metadata_validate_form_record(&form, form_id, 0))
+        if (!buster_x86_metadata_form_record_valid(form_id))
         {
             metadata_invalid = true;
             continue;
@@ -6668,7 +6836,7 @@ bool buster_x86_metadata_validate_patch(BusterX86MetadataValidationPatch patch, 
     {
         return buster_x86_metadata_validation_fail(result, BUSTER_X86_METADATA_VALIDATION_COUNT, patch.index, 0);
     }
-    BusterX86GeneratedCoverage coverage = buster_x86_generated_coverage_at(patch.index);
+    BusterX86GeneratedCoverage coverage = buster_x86_metadata_coverage_record(patch.index);
     switch (patch.kind)
     {
         case BUSTER_X86_METADATA_PATCH_COVERAGE_SOURCE_HASH: coverage.source_hash = patch.value; break;
