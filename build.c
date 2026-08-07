@@ -5332,6 +5332,88 @@ BUSTER_GLOBAL_LOCAL void ninja_log_summary_action_add(Arena* arena, NinjaLogSumm
     };
 }
 
+// --- summary output capture -----------------------------------------------
+// Shared by the summary diagnostics below. A summary normally writes straight
+// to a file descriptor; a self-test instead supplies a capture arena so it can
+// compare the exact rendered report, which is the only way to cover column
+// layout and rounding.
+
+typedef struct SummaryOutput SummaryOutput;
+struct SummaryOutput
+{
+    OsFileDescriptor* file;
+    Arena* capture_arena;
+    String8List captured;
+};
+
+BUSTER_GLOBAL_LOCAL void summary_output_print(SummaryOutput* output, String8 format, ...)
+{
+    va_list variable_arguments;
+    va_start(variable_arguments, format);
+    if (output->capture_arena)
+    {
+        String8 text = string_format_va(output->capture_arena, format, variable_arguments);
+        string8_list_push(output->capture_arena, &output->captured, text);
+        if (output->file && text.length)
+        {
+            os_file_write(output->file, BUSTER_SLICE_TO_BYTE_SLICE(text));
+        }
+    }
+    else if (output->file)
+    {
+        TemporalArena scratch = scratch_begin(0, 0);
+        String8 text = string_format_va(scratch.arena, format, variable_arguments);
+        if (text.length)
+        {
+            os_file_write(output->file, BUSTER_SLICE_TO_BYTE_SLICE(text));
+        }
+        scratch_end(scratch);
+    }
+    va_end(variable_arguments);
+}
+
+BUSTER_GLOBAL_LOCAL String8 summary_output_text(Arena* arena, SummaryOutput output)
+{
+    u64 length = 0;
+    for (String8Node* node = output.captured.first; node; node = node->next)
+    {
+        if (node->string.length > UINT64_MAX - length)
+        {
+            return (String8){0};
+        }
+        length += node->string.length;
+    }
+
+    if (!length)
+    {
+        return (String8){0};
+    }
+
+    char8* pointer = arena_allocate(arena, char8, length);
+    u64 position = 0;
+    for (String8Node* node = output.captured.first; node; node = node->next)
+    {
+        memcpy(pointer + position, node->string.pointer, node->string.length);
+        position += node->string.length;
+    }
+    return (String8){.pointer = pointer, .length = length};
+}
+
+// Pads `string` on the right so a report can align a text column; the format
+// language only knows how to pad integers.
+BUSTER_GLOBAL_LOCAL String8 summary_pad_right(Arena* arena, String8 string, u64 width)
+{
+    if (string.length >= width)
+    {
+        return string;
+    }
+
+    char8* pointer = arena_allocate(arena, char8, width);
+    memcpy(pointer, string.pointer, string.length);
+    memset(pointer + string.length, ' ', width - string.length);
+    return (String8){.pointer = pointer, .length = width};
+}
+
 // --- time_trace_summary ---------------------------------------------------
 // Diagnostic only: parses one or more clang -ftime-trace JSON files (see
 // BUSTER_TIME_TRACE) and reports the slowest "Total *" rollups clang itself
@@ -5364,14 +5446,6 @@ enum TimeTraceSummaryFailureReason
     TIME_TRACE_SUMMARY_FAILURE_DEPTH_LIMIT,
 };
 
-typedef struct TimeTraceSummaryOutput TimeTraceSummaryOutput;
-struct TimeTraceSummaryOutput
-{
-    OsFileDescriptor* file;
-    Arena* capture_arena;
-    String8List captured;
-};
-
 typedef struct TimeTraceRow TimeTraceRow;
 struct TimeTraceRow
 {
@@ -5387,59 +5461,6 @@ struct TimeTraceRowList
     u64 name_storage_position;
     u64 count;
 };
-
-BUSTER_GLOBAL_LOCAL void time_trace_summary_output_print(TimeTraceSummaryOutput* output, String8 format, ...)
-{
-    va_list variable_arguments;
-    va_start(variable_arguments, format);
-    if (output->capture_arena)
-    {
-        String8 text = string_format_va(output->capture_arena, format, variable_arguments);
-        string8_list_push(output->capture_arena, &output->captured, text);
-        if (output->file && text.length)
-        {
-            os_file_write(output->file, BUSTER_SLICE_TO_BYTE_SLICE(text));
-        }
-    }
-    else if (output->file)
-    {
-        TemporalArena scratch = scratch_begin(0, 0);
-        String8 text = string_format_va(scratch.arena, format, variable_arguments);
-        if (text.length)
-        {
-            os_file_write(output->file, BUSTER_SLICE_TO_BYTE_SLICE(text));
-        }
-        scratch_end(scratch);
-    }
-    va_end(variable_arguments);
-}
-
-BUSTER_GLOBAL_LOCAL String8 time_trace_summary_output_text(Arena* arena, TimeTraceSummaryOutput output)
-{
-    u64 length = 0;
-    for (String8Node* node = output.captured.first; node; node = node->next)
-    {
-        if (node->string.length > UINT64_MAX - length)
-        {
-            return (String8){0};
-        }
-        length += node->string.length;
-    }
-
-    if (!length)
-    {
-        return (String8){0};
-    }
-
-    char8* pointer = arena_allocate(arena, char8, length);
-    u64 position = 0;
-    for (String8Node* node = output.captured.first; node; node = node->next)
-    {
-        memcpy(pointer + position, node->string.pointer, node->string.length);
-        position += node->string.length;
-    }
-    return (String8){.pointer = pointer, .length = length};
-}
 
 BUSTER_GLOBAL_LOCAL void time_trace_summary_failure_set(TimeTraceSummaryFailureReason* failure_reason, TimeTraceSummaryFailureReason reason)
 {
@@ -5927,7 +5948,7 @@ BUSTER_GLOBAL_LOCAL TimeTraceSummaryFailureReason time_trace_summary_parser_fail
     return parser->index >= parser->text.length ? TIME_TRACE_SUMMARY_FAILURE_TRUNCATED_JSON : TIME_TRACE_SUMMARY_FAILURE_MALFORMED_JSON;
 }
 
-BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(String8 path, TimeTraceRowList* row_list, TimeTraceSummaryOutput* output,
+BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(String8 path, TimeTraceRowList* row_list, SummaryOutput* output,
                                                                 TimeTraceSummaryFailureReason* failure_reason)
 {
     u64 path_arena_size = BUSTER_MB(1);
@@ -5938,7 +5959,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(String8 path, Ti
     });
     if (!path_arena)
     {
-        time_trace_summary_output_print(output, S8("error: time_trace_summary could not reserve path storage\n"));
+        summary_output_print(output, S8("error: time_trace_summary could not reserve path storage\n"));
         time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_RESOURCE);
         return PROCESS_RESULT_FAILED;
     }
@@ -5957,7 +5978,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(String8 path, Ti
 
     if (map_path.length >= path_arena_size)
     {
-        time_trace_summary_output_print(output, S8("error: time_trace_summary resource limit while opening {S8}\n"), path);
+        summary_output_print(output, S8("error: time_trace_summary resource limit while opening {S8}\n"), path);
         time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_RESOURCE);
         goto cleanup;
     }
@@ -5965,7 +5986,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(String8 path, Ti
     map = file_map_read(path_arena, map_path, (FileReadOptions){.map_required = 1});
     if (!map.bytes.pointer)
     {
-        time_trace_summary_output_print(output, S8("error: failed to map {S8}\n"), path);
+        summary_output_print(output, S8("error: failed to map {S8}\n"), path);
         time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_RESOURCE);
         goto cleanup;
     }
@@ -5973,7 +5994,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(String8 path, Ti
     JsonParser parser = {.text = {.pointer = (char8*)map.bytes.pointer, .length = map.bytes.length}};
     if (!time_trace_json_consume(&parser, '{'))
     {
-        time_trace_summary_output_print(output, S8("error: failed to parse {S8}: expected a JSON object\n"), path);
+        summary_output_print(output, S8("error: failed to parse {S8}: expected a JSON object\n"), path);
         time_trace_summary_failure_set(failure_reason, time_trace_summary_parser_failure_reason(&parser, false));
         goto cleanup;
     }
@@ -5991,7 +6012,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(String8 path, Ti
         String8 key = time_trace_json_raw_string(&parser, &valid, &invalid_string);
         if (!valid || !time_trace_json_consume(&parser, ':'))
         {
-            time_trace_summary_output_print(output, S8("error: failed to parse {S8}: expected an object key\n"), path);
+            summary_output_print(output, S8("error: failed to parse {S8}: expected an object key\n"), path);
             time_trace_summary_failure_set(failure_reason, time_trace_summary_parser_failure_reason(&parser, invalid_string));
             goto cleanup;
         }
@@ -6000,7 +6021,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(String8 path, Ti
         {
             if (!time_trace_json_consume(&parser, '['))
             {
-                time_trace_summary_output_print(output, S8("error: failed to parse {S8}: expected traceEvents array\n"), path);
+                summary_output_print(output, S8("error: failed to parse {S8}: expected traceEvents array\n"), path);
                 time_trace_summary_failure_set(failure_reason, time_trace_summary_parser_failure_reason(&parser, false));
                 goto cleanup;
             }
@@ -6014,22 +6035,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(String8 path, Ti
                     {
                         if (event.resource_exhausted)
                         {
-                            time_trace_summary_output_print(output, S8("error: time_trace_summary resource limit while parsing {S8}\n"), path);
+                            summary_output_print(output, S8("error: time_trace_summary resource limit while parsing {S8}\n"), path);
                             time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_DEPTH_LIMIT);
                         }
                         else if (event.invalid_string)
                         {
-                            time_trace_summary_output_print(output, S8("error: failed to parse {S8}: invalid Unicode string escape\n"), path);
+                            summary_output_print(output, S8("error: failed to parse {S8}: invalid Unicode string escape\n"), path);
                             time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_INVALID_STRING);
                         }
                         else if (event.duration_non_integer)
                         {
-                            time_trace_summary_output_print(output, S8("error: failed to parse {S8}: duration must be an integer number of microseconds\n"), path);
+                            summary_output_print(output, S8("error: failed to parse {S8}: duration must be an integer number of microseconds\n"), path);
                             time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_NON_INTEGER_DURATION);
                         }
                         else
                         {
-                            time_trace_summary_output_print(output, S8("error: failed to parse {S8}: invalid trace event\n"), path);
+                            summary_output_print(output, S8("error: failed to parse {S8}: invalid trace event\n"), path);
                             time_trace_summary_failure_set(failure_reason, time_trace_summary_parser_failure_reason(&parser, false));
                         }
                         goto cleanup;
@@ -6040,25 +6061,25 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(String8 path, Ti
                         TimeTraceRowAddResult add_result = time_trace_row_list_add_raw(row_list, event.raw_name, event.duration_us, &valid);
                         if (!valid)
                         {
-                            time_trace_summary_output_print(output, S8("error: failed to parse {S8}: invalid trace event name\n"), path);
+                            summary_output_print(output, S8("error: failed to parse {S8}: invalid trace event name\n"), path);
                             time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_INVALID_STRING);
                             goto cleanup;
                         }
                         if (add_result == TIME_TRACE_ROW_ADD_NAME_LIMIT)
                         {
-                            time_trace_summary_output_print(output, S8("error: time_trace_summary resource limit while aggregating {S8}\n"), path);
+                            summary_output_print(output, S8("error: time_trace_summary resource limit while aggregating {S8}\n"), path);
                             time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_NAME_LIMIT);
                             goto cleanup;
                         }
                         if (add_result == TIME_TRACE_ROW_ADD_ROW_LIMIT)
                         {
-                            time_trace_summary_output_print(output, S8("error: time_trace_summary resource limit while aggregating {S8}\n"), path);
+                            summary_output_print(output, S8("error: time_trace_summary resource limit while aggregating {S8}\n"), path);
                             time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_ROW_LIMIT);
                             goto cleanup;
                         }
                         if (add_result == TIME_TRACE_ROW_ADD_DURATION_OVERFLOW)
                         {
-                            time_trace_summary_output_print(output, S8("error: time_trace_summary duration overflow while aggregating {S8}\n"), path);
+                            summary_output_print(output, S8("error: time_trace_summary duration overflow while aggregating {S8}\n"), path);
                             time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_DURATION_OVERFLOW);
                             goto cleanup;
                         }
@@ -6070,7 +6091,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(String8 path, Ti
                     }
                     if (!time_trace_json_consume(&parser, ','))
                     {
-                        time_trace_summary_output_print(output, S8("error: failed to parse {S8}: expected ',' or ']'\n"), path);
+                        summary_output_print(output, S8("error: failed to parse {S8}: expected ',' or ']'\n"), path);
                         time_trace_summary_failure_set(failure_reason, time_trace_summary_parser_failure_reason(&parser, false));
                         goto cleanup;
                     }
@@ -6085,12 +6106,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(String8 path, Ti
             {
                 if (resource_exhausted)
                 {
-                    time_trace_summary_output_print(output, S8("error: time_trace_summary resource limit while parsing {S8}\n"), path);
+                    summary_output_print(output, S8("error: time_trace_summary resource limit while parsing {S8}\n"), path);
                     time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_DEPTH_LIMIT);
                 }
                 else
                 {
-                    time_trace_summary_output_print(output, S8("error: failed to parse {S8}: invalid value\n"), path);
+                    summary_output_print(output, S8("error: failed to parse {S8}: invalid value\n"), path);
                     time_trace_summary_failure_set(failure_reason, time_trace_summary_parser_failure_reason(&parser, false));
                 }
                 goto cleanup;
@@ -6104,7 +6125,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_parse_file(String8 path, Ti
         }
         if (!time_trace_json_consume(&parser, ','))
         {
-            time_trace_summary_output_print(output, S8("error: failed to parse {S8}: expected ',' or '}'\n"), path);
+            summary_output_print(output, S8("error: failed to parse {S8}: expected ',' or '}'\n"), path);
             time_trace_summary_failure_set(failure_reason, time_trace_summary_parser_failure_reason(&parser, false));
             goto cleanup;
         }
@@ -6114,7 +6135,7 @@ trailing_check:
     time_trace_json_skip_whitespace(&parser);
     if (parser.index != parser.text.length)
     {
-        time_trace_summary_output_print(output, S8("error: failed to parse {S8}: trailing JSON data\n"), path);
+        summary_output_print(output, S8("error: failed to parse {S8}: trailing JSON data\n"), path);
         time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_TRAILING_JSON);
         result = PROCESS_RESULT_FAILED;
     }
@@ -6128,20 +6149,20 @@ cleanup:
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL Arena* time_trace_summary_create_accumulator(TimeTraceSummaryOutput* output, TimeTraceSummaryFailureReason* failure_reason)
+BUSTER_GLOBAL_LOCAL Arena* time_trace_summary_create_accumulator(SummaryOutput* output, TimeTraceSummaryFailureReason* failure_reason)
 {
     u64 accumulator_granularity = BUSTER_KB(64);
     u64 accumulator_size = arena_minimum_position;
     if (sizeof(TimeTraceRowList) > UINT64_MAX - accumulator_size)
     {
-        time_trace_summary_output_print(output, S8("error: time_trace_summary aggregation storage size overflow\n"));
+        summary_output_print(output, S8("error: time_trace_summary aggregation storage size overflow\n"));
         time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_RESOURCE);
         return 0;
     }
     accumulator_size += sizeof(TimeTraceRowList);
     if (accumulator_size > UINT64_MAX - (accumulator_granularity - 1))
     {
-        time_trace_summary_output_print(output, S8("error: time_trace_summary aggregation storage alignment overflow\n"));
+        summary_output_print(output, S8("error: time_trace_summary aggregation storage alignment overflow\n"));
         time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_RESOURCE);
         return 0;
     }
@@ -6153,14 +6174,14 @@ BUSTER_GLOBAL_LOCAL Arena* time_trace_summary_create_accumulator(TimeTraceSummar
     });
     if (!result)
     {
-        time_trace_summary_output_print(output, S8("error: time_trace_summary could not reserve aggregation storage\n"));
+        summary_output_print(output, S8("error: time_trace_summary could not reserve aggregation storage\n"));
         time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_RESOURCE);
     }
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_collect(Arena* accumulator_arena, SliceString8 paths, TimeTraceRowList** row_list_out,
-                                                            TimeTraceSummaryOutput* output, TimeTraceSummaryFailureReason* failure_reason)
+                                                            SummaryOutput* output, TimeTraceSummaryFailureReason* failure_reason)
 {
     TimeTraceRowList* row_list = arena_allocate(accumulator_arena, TimeTraceRowList, 1);
     memset(row_list, 0, sizeof(*row_list));
@@ -6176,7 +6197,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_collect(Arena* accumulator_
     return PROCESS_RESULT_SUCCESS;
 }
 
-BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_run_with_output(TimeTraceSummaryOptions options, TimeTraceSummaryOutput* output,
+BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_run_with_output(TimeTraceSummaryOptions options, SummaryOutput* output,
                                                                      TimeTraceSummaryFailureReason* failure_reason)
 {
     if (!options.limit)
@@ -6186,7 +6207,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_run_with_output(TimeTraceSu
 
     if (!options.paths.length)
     {
-        time_trace_summary_output_print(output, S8("error: time_trace_summary requires at least one -ftime-trace JSON path\n"));
+        summary_output_print(output, S8("error: time_trace_summary requires at least one -ftime-trace JSON path\n"));
         time_trace_summary_failure_set(failure_reason, TIME_TRACE_SUMMARY_FAILURE_RESOURCE);
         return PROCESS_RESULT_FAILED;
     }
@@ -6206,20 +6227,20 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_run_with_output(TimeTraceSu
 
     if (!row_list->count)
     {
-        time_trace_summary_output_print(output, S8("No \"Total *\" time-trace entries found.\n"));
+        summary_output_print(output, S8("No \"Total *\" time-trace entries found.\n"));
         goto cleanup;
     }
 
     TimeTraceRow* rows = row_list->rows;
     qsort(rows, row_list->count, sizeof(rows[0]), time_trace_row_compare);
 
-    time_trace_summary_output_print(output, S8("Slowest compiler phases across {u64} time-trace file(s):\n"), options.paths.length);
+    summary_output_print(output, S8("Slowest compiler phases across {u64} time-trace file(s):\n"), options.paths.length);
     u64 limit = BUSTER_MIN(options.limit, row_list->count);
     for (u64 i = 0; i < limit; i += 1)
     {
         TimeTraceRow row = rows[i];
         s64 duration_ms = row.duration_us < 0 ? 0 : row.duration_us / 1000;
-        time_trace_summary_output_print(output, S8("{s64:width=[ ,6]} ms  {S8}\n"), duration_ms, row.name);
+        summary_output_print(output, S8("{s64:width=[ ,6]} ms  {S8}\n"), duration_ms, row.name);
     }
 
 cleanup:
@@ -6232,12 +6253,12 @@ cleanup:
 
 BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_run(TimeTraceSummaryOptions options)
 {
-    TimeTraceSummaryOutput output = {.file = os_get_stdout()};
+    SummaryOutput output = {.file = os_get_stdout()};
     TimeTraceSummaryFailureReason failure_reason = TIME_TRACE_SUMMARY_FAILURE_NONE;
     return time_trace_summary_run_with_output(options, &output, &failure_reason);
 }
 
-BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_write_text(String8 path, String8 text)
+BUSTER_GLOBAL_LOCAL bool summary_self_test_write_text(String8 path, String8 text)
 {
     return file_write(path, (ByteSlice){.pointer = (u8*)text.pointer, .length = text.length});
 }
@@ -6390,26 +6411,26 @@ struct TimeTraceSummarySelfTestFailure
 BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_expect_failure(Arena* arena, TimeTraceSummarySelfTestFailure failure)
 {
     String8 paths[] = {failure.path};
-    TimeTraceSummaryOutput output = {.capture_arena = arena};
+    SummaryOutput output = {.capture_arena = arena};
     TimeTraceSummaryFailureReason actual_reason = TIME_TRACE_SUMMARY_FAILURE_NONE;
     ProcessResult result = time_trace_summary_run_with_output((TimeTraceSummaryOptions){
         .paths = {.pointer = paths, .length = BUSTER_ARRAY_LENGTH(paths)},
         .limit = 5,
     }, &output, &actual_reason);
-    String8 actual_output = time_trace_summary_output_text(arena, output);
+    String8 actual_output = summary_output_text(arena, output);
     String8 expected_output = string_format(arena, failure.message, failure.path);
     return result != PROCESS_RESULT_SUCCESS && actual_reason == failure.reason && string_equal(actual_output, expected_output);
 }
 
-typedef enum TimeTraceSummaryDirectoryClaimResult TimeTraceSummaryDirectoryClaimResult;
-enum TimeTraceSummaryDirectoryClaimResult
+typedef enum SummaryDirectoryClaimResult SummaryDirectoryClaimResult;
+enum SummaryDirectoryClaimResult
 {
-    TIME_TRACE_SUMMARY_DIRECTORY_CLAIMED,
-    TIME_TRACE_SUMMARY_DIRECTORY_ALREADY_EXISTS,
-    TIME_TRACE_SUMMARY_DIRECTORY_ERROR,
+    SUMMARY_DIRECTORY_CLAIMED,
+    SUMMARY_DIRECTORY_ALREADY_EXISTS,
+    SUMMARY_DIRECTORY_ERROR,
 };
 
-BUSTER_GLOBAL_LOCAL TimeTraceSummaryDirectoryClaimResult time_trace_summary_self_test_directory_claim(String8 path)
+BUSTER_GLOBAL_LOCAL SummaryDirectoryClaimResult summary_self_test_directory_claim(String8 path)
 {
 #if BUSTER_WINDOWS
     TemporalArena temp = scratch_begin(0, 0);
@@ -6419,41 +6440,41 @@ BUSTER_GLOBAL_LOCAL TimeTraceSummaryDirectoryClaimResult time_trace_summary_self
     scratch_end(temp);
     if (created)
     {
-        return TIME_TRACE_SUMMARY_DIRECTORY_CLAIMED;
+        return SUMMARY_DIRECTORY_CLAIMED;
     }
-    return error == ERROR_ALREADY_EXISTS ? TIME_TRACE_SUMMARY_DIRECTORY_ALREADY_EXISTS : TIME_TRACE_SUMMARY_DIRECTORY_ERROR;
+    return error == ERROR_ALREADY_EXISTS ? SUMMARY_DIRECTORY_ALREADY_EXISTS : SUMMARY_DIRECTORY_ERROR;
 #elif BUSTER_LINUX || BUSTER_MACOS
     if (mkdir((const char*)path.pointer, 0755) == 0)
     {
-        return TIME_TRACE_SUMMARY_DIRECTORY_CLAIMED;
+        return SUMMARY_DIRECTORY_CLAIMED;
     }
-    return errno == EEXIST ? TIME_TRACE_SUMMARY_DIRECTORY_ALREADY_EXISTS : TIME_TRACE_SUMMARY_DIRECTORY_ERROR;
+    return errno == EEXIST ? SUMMARY_DIRECTORY_ALREADY_EXISTS : SUMMARY_DIRECTORY_ERROR;
 #else
     BUSTER_UNUSED(path);
-    return TIME_TRACE_SUMMARY_DIRECTORY_ERROR;
+    return SUMMARY_DIRECTORY_ERROR;
 #endif
 }
 
-BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_claim_directory(Arena* arena, String8* directory_out)
+BUSTER_GLOBAL_LOCAL bool summary_self_test_claim_directory(Arena* arena, String8 name, String8* directory_out)
 {
     enum
     {
-        TIME_TRACE_SUMMARY_SELF_TEST_DIRECTORY_ATTEMPTS = 32,
+        SUMMARY_SELF_TEST_DIRECTORY_ATTEMPTS = 32,
     };
     make_directory_recursive(arena, S8("build"));
     u64 process_id = os_get_current_process_id();
     u64 timestamp = os_now_microseconds();
-    for (u64 attempt = 0; attempt < TIME_TRACE_SUMMARY_SELF_TEST_DIRECTORY_ATTEMPTS; attempt += 1)
+    for (u64 attempt = 0; attempt < SUMMARY_SELF_TEST_DIRECTORY_ATTEMPTS; attempt += 1)
     {
-        String8 directory_name = string_format(arena, S8("time-trace-summary-self-test-{u64}-{u64}-{u64}"), process_id, timestamp, attempt);
+        String8 directory_name = string_format(arena, S8("{S8}-self-test-{u64}-{u64}-{u64}"), name, process_id, timestamp, attempt);
         String8 directory = path_join(arena, S8("build"), directory_name);
-        TimeTraceSummaryDirectoryClaimResult claim_result = time_trace_summary_self_test_directory_claim(directory);
-        if (claim_result == TIME_TRACE_SUMMARY_DIRECTORY_CLAIMED)
+        SummaryDirectoryClaimResult claim_result = summary_self_test_directory_claim(directory);
+        if (claim_result == SUMMARY_DIRECTORY_CLAIMED)
         {
             *directory_out = directory;
             return true;
         }
-        if (claim_result == TIME_TRACE_SUMMARY_DIRECTORY_ERROR)
+        if (claim_result == SUMMARY_DIRECTORY_ERROR)
         {
             break;
         }
@@ -6464,7 +6485,7 @@ BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_claim_directory(Arena* are
 BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_self_test(Arena* arena)
 {
     String8 directory = {0};
-    bool directory_owned = time_trace_summary_self_test_claim_directory(arena, &directory);
+    bool directory_owned = summary_self_test_claim_directory(arena, S8("time-trace-summary"), &directory);
     if (!directory_owned)
     {
         string_print(S8("error: time_trace_summary self-test could not claim an exclusive directory\n"));
@@ -6492,58 +6513,58 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_self_test(Arena* arena)
     String8 existing_candidate = path_join(arena, directory, S8("already-exists"));
     String8 existing_sentinel = path_join(arena, existing_candidate, S8("sentinel.txt"));
     make_directory_recursive(arena, existing_candidate);
-    bool existing_sentinel_written = time_trace_summary_self_test_write_text(existing_sentinel, S8("preserve"));
-    TimeTraceSummaryDirectoryClaimResult existing_claim = TIME_TRACE_SUMMARY_DIRECTORY_ERROR;
+    bool existing_sentinel_written = summary_self_test_write_text(existing_sentinel, S8("preserve"));
+    SummaryDirectoryClaimResult existing_claim = SUMMARY_DIRECTORY_ERROR;
     if (existing_sentinel_written)
     {
-        existing_claim = time_trace_summary_self_test_directory_claim(existing_candidate);
+        existing_claim = summary_self_test_directory_claim(existing_candidate);
     }
     ByteSlice existing_contents = {0};
-    if (existing_claim == TIME_TRACE_SUMMARY_DIRECTORY_ALREADY_EXISTS)
+    if (existing_claim == SUMMARY_DIRECTORY_ALREADY_EXISTS)
     {
         existing_contents = file_read(arena, existing_sentinel, (FileReadOptions){.map_required = 0});
     }
     String8 preserved_text = S8("preserve");
-    bool existing_candidate_preserved = existing_claim == TIME_TRACE_SUMMARY_DIRECTORY_ALREADY_EXISTS && existing_contents.pointer &&
+    bool existing_candidate_preserved = existing_claim == SUMMARY_DIRECTORY_ALREADY_EXISTS && existing_contents.pointer &&
                                         existing_contents.length == preserved_text.length &&
                                         memcmp(existing_contents.pointer, preserved_text.pointer, preserved_text.length) == 0;
     passed = passed && existing_candidate_preserved;
 
-    passed = passed && time_trace_summary_self_test_write_text(
+    passed = passed && summary_self_test_write_text(
                             ordinary_a,
                             S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total Backend\",\"dur\":1500},{\"ph\":\"X\",\"name\":\"Total Backend\",\"dur\":500},{\"\\u0070h\":\"X\",\"\\u006eame\":\"Total \\u0046rontend\",\"\\u0064ur\":5,\"args\":{\"nested\":[true,{\"x\":\"y\"}]}},{\"ph\":\"X\",\"name\":\"Total \\ud83d\\ude00\",\"dur\":3}]}"));
-    passed = passed && time_trace_summary_self_test_write_text(
+    passed = passed && summary_self_test_write_text(
                             ordinary_b,
                             S8("{\"traceEvents\":[{\"\\u0070h\":\"X\",\"\\u006eame\":\"Total \\u0042ackend\",\"\\u0064ur\":7},{\"ph\":\"X\",\"name\":\"Total CodeGen\",\"dur\":9},{\"ph\":\"X\",\"name\":\"Total \xf0\x9f\x98\x80\",\"dur\":4}]}"));
-    passed = passed && time_trace_summary_self_test_write_text(
+    passed = passed && summary_self_test_write_text(
                             phase,
                             S8("{\"traceEvents\":[{\"ph\":\"\\u0058\",\"name\":\"Total Phase\",\"dur\":4},{\"ph\":\"X\",\"name\":\"Total Phase\",\"dur\":6},{\"ph\":\"\\u0158\",\"name\":\"Total Ignored\",\"dur\":8},{\"ph\":\"XX\",\"name\":\"Total Ignored2\",\"dur\":16}]}"));
-    passed = passed && time_trace_summary_self_test_write_text(
+    passed = passed && summary_self_test_write_text(
                             malformed,
                             S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total Bad\",\"dur\":1,\"args\":{\"bad\":1,}}]}"));
-    passed = passed && time_trace_summary_self_test_write_text(truncated, S8("{\"traceEvents\":[{\"ph\":\"X\"}"));
-    passed = passed && time_trace_summary_self_test_write_text(trailing, S8("{} trailing"));
-    passed = passed && time_trace_summary_self_test_write_text(decimal, S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total Decimal\",\"dur\":1500.9}]}"));
-    passed = passed && time_trace_summary_self_test_write_text(exponent, S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total Exponent\",\"dur\":2e6}]}"));
-    passed = passed && time_trace_summary_self_test_write_text(whitespace_ff, S8("{\f\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total FF\",\"dur\":1}]}"));
-    passed = passed && time_trace_summary_self_test_write_text(whitespace_vt, S8("{\v\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total VT\",\"dur\":1}]}"));
-    passed = passed && time_trace_summary_self_test_write_text(
+    passed = passed && summary_self_test_write_text(truncated, S8("{\"traceEvents\":[{\"ph\":\"X\"}"));
+    passed = passed && summary_self_test_write_text(trailing, S8("{} trailing"));
+    passed = passed && summary_self_test_write_text(decimal, S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total Decimal\",\"dur\":1500.9}]}"));
+    passed = passed && summary_self_test_write_text(exponent, S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total Exponent\",\"dur\":2e6}]}"));
+    passed = passed && summary_self_test_write_text(whitespace_ff, S8("{\f\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total FF\",\"dur\":1}]}"));
+    passed = passed && summary_self_test_write_text(whitespace_vt, S8("{\v\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total VT\",\"dur\":1}]}"));
+    passed = passed && summary_self_test_write_text(
                             duration_overflow,
                             S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total Overflow\",\"dur\":9223372036854775807},{\"ph\":\"X\",\"name\":\"Total Overflow\",\"dur\":1}]}"));
     passed = passed && time_trace_summary_self_test_write_unique_rows(arena, row_cap, 4097);
     passed = passed && time_trace_summary_self_test_write_name_cap(name_cap);
     passed = passed && time_trace_summary_self_test_write_depth_cap(depth_cap);
-    passed = passed && time_trace_summary_self_test_write_text(
+    passed = passed && summary_self_test_write_text(
                             invalid_surrogate_high,
                             S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total \\ud83d\",\"dur\":1}]}"));
-    passed = passed && time_trace_summary_self_test_write_text(
+    passed = passed && summary_self_test_write_text(
                             invalid_surrogate_low,
                             S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total \\ude00\",\"dur\":1}]}"));
 
     if (passed)
     {
         String8 ordinary_paths[] = {ordinary_a, ordinary_b};
-        TimeTraceSummaryOutput aggregation_output = {.capture_arena = arena};
+        SummaryOutput aggregation_output = {.capture_arena = arena};
         TimeTraceSummaryFailureReason aggregation_failure = TIME_TRACE_SUMMARY_FAILURE_NONE;
         Arena* accumulator_arena = time_trace_summary_create_accumulator(&aggregation_output, &aggregation_failure);
         TimeTraceRowList* row_list = 0;
@@ -6583,7 +6604,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_self_test(Arena* arena)
         }
 
         String8 phase_paths[] = {phase};
-        aggregation_output = (TimeTraceSummaryOutput){.capture_arena = arena};
+        aggregation_output = (SummaryOutput){.capture_arena = arena};
         aggregation_failure = TIME_TRACE_SUMMARY_FAILURE_NONE;
         accumulator_arena = time_trace_summary_create_accumulator(&aggregation_output, &aggregation_failure);
         row_list = 0;
@@ -6598,14 +6619,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_self_test(Arena* arena)
             passed = false;
         }
 
-        TimeTraceSummaryOutput ordinary_output = {.capture_arena = arena};
+        SummaryOutput ordinary_output = {.capture_arena = arena};
         TimeTraceSummaryFailureReason ordinary_failure = TIME_TRACE_SUMMARY_FAILURE_NONE;
         ProcessResult ordinary_result = time_trace_summary_run_with_output((TimeTraceSummaryOptions){
                                                                                 .paths = {.pointer = ordinary_paths, .length = 2},
                                                                                 .limit = 3,
                                                                             },
                                                                             &ordinary_output, &ordinary_failure);
-        String8 ordinary_output_text = time_trace_summary_output_text(arena, ordinary_output);
+        String8 ordinary_output_text = summary_output_text(arena, ordinary_output);
         passed = passed && ordinary_result == PROCESS_RESULT_SUCCESS && ordinary_failure == TIME_TRACE_SUMMARY_FAILURE_NONE &&
                  string_equal(ordinary_output_text,
                               S8("Slowest compiler phases across 2 time-trace file(s):\n"
@@ -6619,14 +6640,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_self_test(Arena* arena)
     if (passed)
     {
         String8 large_paths[] = {large};
-        TimeTraceSummaryOutput large_output = {.capture_arena = arena};
+        SummaryOutput large_output = {.capture_arena = arena};
         TimeTraceSummaryFailureReason large_failure = TIME_TRACE_SUMMARY_FAILURE_NONE;
         ProcessResult large_result = time_trace_summary_run_with_output((TimeTraceSummaryOptions){
                                                                             .paths = {.pointer = large_paths, .length = 1},
                                                                             .limit = 1,
                                                                         },
                                                                         &large_output, &large_failure);
-        String8 large_output_text = time_trace_summary_output_text(arena, large_output);
+        String8 large_output_text = summary_output_text(arena, large_output);
         passed = large_result == PROCESS_RESULT_SUCCESS && large_failure == TIME_TRACE_SUMMARY_FAILURE_NONE &&
                  string_equal(large_output_text,
                               S8("Slowest compiler phases across 1 time-trace file(s):\n"
@@ -6710,6 +6731,1112 @@ BUSTER_GLOBAL_LOCAL void time_trace_summary_action_add(Arena* arena, TimeTraceSu
 
     *run = (ProcessRun){
         .callback = time_trace_summary_action,
+        .callback_data = options_copy,
+    };
+}
+
+// --- test_timing_summary ---------------------------------------------------
+// Diagnostic only: parses the `TEST_MODULE_TIMING` lines `library_tests()`
+// prints under `--verbose=1` (which every CI job already passes) out of a saved
+// matrix run or CI log, aggregates them per module across the configurations in
+// that run, and reports per-module deltas against a stored baseline.
+//
+// This exists because test cost accumulates unnoticed: `x86_64_metadata_tests`
+// grew until it was 60% of all CI test CPU time, and every number needed to
+// catch it in week one was already printed on every run and then thrown away
+// with the log. Recording the history is the whole point.
+//
+// Two properties are deliberate:
+//
+//   * A module's cost is a property of one runner and one configuration, not of
+//     the module. The same `x86_64_metadata_tests` measured 4.4 s in Linux
+//     Release, 138 s in sanitized Debug, and 192 s on a sanitized Debug Windows
+//     runner. Those are three series; a baseline records the runner it was
+//     taken on and refuses to be compared against another, and per-module rows
+//     are only ever compared within the same configuration.
+//   * It never fails. Wall-clock test time is far too noisy to gate on --
+//     identical code measured 290.1 s and 319.8 s for the same matrix on an
+//     otherwise idle 16-thread desktop, a 10% spread -- so there is no
+//     threshold here and no CI failure condition. Record history first; a gate
+//     needs a noise model that does not exist yet.
+//
+// Configurations are recovered from the build commands the superbuild echoes
+// ahead of each test block (`cmake --build <tree> --config <cfg> --target
+// test_units`). Ninja buffers an edge's output and prints it on completion, so
+// a block is contiguous, and each new command line replaces the pending
+// configuration list rather than appending to it -- a test that printed no
+// timing rows can therefore only lose its own block, never shift every block
+// after it. Timing rows with no command line in front of them (a saved plain
+// `ide test` run) are attributed to a numbered `unknown:<n>` configuration so
+// that separate runs still never merge.
+
+typedef struct TestTimingSummaryOptions TestTimingSummaryOptions;
+struct TestTimingSummaryOptions
+{
+    SliceString8 paths;
+    String8 baseline;
+    String8 runner;
+    u64 limit;
+    u32 update_baseline : 1;
+};
+
+typedef enum TestTimingSummaryFailureReason TestTimingSummaryFailureReason;
+enum TestTimingSummaryFailureReason
+{
+    TEST_TIMING_SUMMARY_FAILURE_NONE,
+    TEST_TIMING_SUMMARY_FAILURE_RESOURCE,
+    TEST_TIMING_SUMMARY_FAILURE_UNREADABLE_LOG,
+    TEST_TIMING_SUMMARY_FAILURE_MALFORMED_BASELINE,
+    TEST_TIMING_SUMMARY_FAILURE_BASELINE_RUNNER_MISMATCH,
+    TEST_TIMING_SUMMARY_FAILURE_BASELINE_WRITE,
+    TEST_TIMING_SUMMARY_FAILURE_ROW_LIMIT,
+};
+
+enum
+{
+    // One (configuration, module) pair per row. The full eight-configuration
+    // matrix produces 232; the cap only exists so a garbage input cannot grow
+    // the arena without bound.
+    TEST_TIMING_SUMMARY_ROW_LIMIT = 4096,
+    // A compiler tree runs at most a unit-test and an all-test command.
+    TEST_TIMING_SUMMARY_PENDING_LIMIT = 8,
+    TEST_TIMING_BASELINE_VERSION = 1,
+};
+
+typedef struct TestTimingRow TestTimingRow;
+struct TestTimingRow
+{
+    String8 configuration;
+    String8 module;
+    u64 duration_ns;
+    u64 samples;
+    u64 failed;
+    u64 baseline_ns;
+    u32 has_baseline : 1;
+};
+
+typedef struct TestTimingRowNode TestTimingRowNode;
+struct TestTimingRowNode
+{
+    TestTimingRow row;
+    TestTimingRowNode* next;
+};
+
+typedef struct TestTimingRowList TestTimingRowList;
+struct TestTimingRowList
+{
+    TestTimingRowNode* first;
+    TestTimingRowNode* last;
+    u64 count;
+};
+
+typedef struct TestTimingModuleTotal TestTimingModuleTotal;
+struct TestTimingModuleTotal
+{
+    String8 module;
+    u64 duration_ns;
+    u64 configurations;
+};
+
+typedef struct TestTimingBaseline TestTimingBaseline;
+struct TestTimingBaseline
+{
+    String8 runner;
+    TestTimingRowList rows;
+    u32 present : 1;
+};
+
+BUSTER_GLOBAL_LOCAL void test_timing_summary_failure_set(TestTimingSummaryFailureReason* failure_reason, TestTimingSummaryFailureReason reason)
+{
+    if (failure_reason)
+    {
+        *failure_reason = reason;
+    }
+}
+
+// A baseline belongs to the machine that recorded it. Every runner keys its own
+// series, and none is excluded from tracking -- including a shared or noisy one,
+// whose noise is itself worth having on record.
+BUSTER_GLOBAL_LOCAL String8 test_timing_summary_runner_name(Arena* arena)
+{
+    String8 configured = os_get_environment_variable(S8("BUSTER_TEST_TIMING_RUNNER"));
+    if (configured.pointer && configured.length)
+    {
+        return configured;
+    }
+
+#if BUSTER_WINDOWS
+    String8 platform = S8("windows");
+#elif BUSTER_MACOS
+    String8 platform = S8("macos");
+#elif BUSTER_LINUX
+    String8 platform = S8("linux");
+#else
+    String8 platform = S8("unknown");
+#endif
+
+#if BUSTER_CPU_ARCH_X86_64
+    String8 architecture = S8("x86_64");
+#elif BUSTER_CPU_ARCH_AARCH64
+    String8 architecture = S8("aarch64");
+#else
+    String8 architecture = S8("unknown");
+#endif
+
+    return string_format(arena, S8("{S8}-{S8}"), platform, architecture);
+}
+
+BUSTER_GLOBAL_LOCAL String8 test_timing_summary_default_baseline(Arena* arena, String8 runner)
+{
+    return path_join(arena, S8("build"), string_format(arena, S8("test-timing-baseline-{S8}.txt"), runner));
+}
+
+// Splits one whitespace-delimited token off the front of `text`.
+BUSTER_GLOBAL_LOCAL bool test_timing_next_token(String8* text, String8* token)
+{
+    u64 start = 0;
+    while (start < text->length && (text->pointer[start] == ' ' || text->pointer[start] == '\t' || text->pointer[start] == '\r'))
+    {
+        start += 1;
+    }
+    if (start == text->length)
+    {
+        *text = (String8){0};
+        return false;
+    }
+
+    u64 end = start;
+    while (end < text->length && text->pointer[end] != ' ' && text->pointer[end] != '\t' && text->pointer[end] != '\r')
+    {
+        end += 1;
+    }
+
+    *token = string_slice(*text, start, end);
+    *text = string_slice(*text, end, text->length);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool test_timing_next_line(String8* text, String8* line)
+{
+    if (!text->length)
+    {
+        return false;
+    }
+
+    u64 newline_index = string_first_code_unit(*text, '\n');
+    bool is_last_line = newline_index == BUSTER_STRING_NO_MATCH;
+    u64 line_end = is_last_line ? text->length : newline_index;
+    *line = string_slice(*text, 0, line_end);
+    *text = is_last_line ? (String8){0} : string_slice(*text, line_end + 1, text->length);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool test_timing_split_field(String8 token, String8* key, String8* value)
+{
+    u64 equals_index = string_first_code_unit(token, '=');
+    if (equals_index == BUSTER_STRING_NO_MATCH)
+    {
+        return false;
+    }
+
+    *key = string_slice(token, 0, equals_index);
+    *value = string_slice(token, equals_index + 1, token.length);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool test_timing_parse_u64(String8 value, u64* result)
+{
+    if (!value.length)
+    {
+        return false;
+    }
+
+    IntegerParsingU64 parsed = string8_parse_u64_decimal(value.pointer);
+    if (parsed.length != value.length)
+    {
+        return false;
+    }
+
+    *result = parsed.value;
+    return true;
+}
+
+// `build/build-ci_on-cc_gcc-...-configs_shared` plus `Release` becomes
+// `ci_on-cc_gcc-...-configs_shared:Release`. The leading directory and the
+// `build-` prefix carry no identity and would only differ between checkouts.
+BUSTER_GLOBAL_LOCAL String8 test_timing_configuration_key(Arena* arena, String8 build_directory, String8 config)
+{
+    String8 name = build_directory;
+    for (u64 i = name.length; i > 0; i -= 1)
+    {
+        char8 code_unit = name.pointer[i - 1];
+        if (code_unit == '/' || code_unit == '\\')
+        {
+            name = string_slice(name, i, name.length);
+            break;
+        }
+    }
+    if (string_starts_with_sequence(name, S8("build-")))
+    {
+        name = string_slice(name, 6, name.length);
+    }
+    return string_format(arena, S8("{S8}:{S8}"), name, config);
+}
+
+BUSTER_GLOBAL_LOCAL bool test_timing_target_runs_tests(String8 target)
+{
+    return string_equal(target, S8("test_units")) || string_equal(target, S8("test_all"));
+}
+
+// Collects the (build directory, configuration) pairs of every test command on
+// one echoed command line. A tree that runs both a unit-test and an all-test
+// command emits them as one `&&`-joined line, so a line can describe more than
+// one configuration and their order is the order the runs appear in.
+BUSTER_GLOBAL_LOCAL u64 test_timing_scan_command_line(Arena* arena, String8 line, String8* pending, u64 pending_limit)
+{
+    String8 rest = line;
+    String8 token = {0};
+    String8 build_directory = {0};
+    String8 config = {0};
+    bool expect_build_directory = false;
+    bool expect_config = false;
+    bool in_targets = false;
+    u64 count = 0;
+
+    while (test_timing_next_token(&rest, &token))
+    {
+        if (string_equal(token, S8("--build")))
+        {
+            expect_build_directory = true;
+            expect_config = false;
+            in_targets = false;
+        }
+        else if (string_equal(token, S8("--config")))
+        {
+            expect_config = true;
+            expect_build_directory = false;
+            in_targets = false;
+        }
+        else if (string_equal(token, S8("--target")))
+        {
+            expect_build_directory = false;
+            expect_config = false;
+            in_targets = true;
+        }
+        else if (expect_build_directory)
+        {
+            build_directory = token;
+            expect_build_directory = false;
+        }
+        else if (expect_config)
+        {
+            config = token;
+            expect_config = false;
+        }
+        else if (in_targets)
+        {
+            if (string_starts_with_sequence(token, S8("-")))
+            {
+                in_targets = false;
+            }
+            else if (test_timing_target_runs_tests(token) && build_directory.length && config.length && count < pending_limit)
+            {
+                pending[count++] = test_timing_configuration_key(arena, build_directory, config);
+            }
+        }
+    }
+
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL TestTimingRow* test_timing_row_find(TestTimingRowList* list, String8 configuration, String8 module)
+{
+    for (TestTimingRowNode* node = list->first; node; node = node->next)
+    {
+        if (string_equal(node->row.configuration, configuration) && string_equal(node->row.module, module))
+        {
+            return &node->row;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool test_timing_row_accumulate(Arena* arena, TestTimingRowList* list, TestTimingRow row)
+{
+    TestTimingRow* existing = test_timing_row_find(list, row.configuration, row.module);
+    if (existing)
+    {
+        existing->duration_ns += row.duration_ns;
+        existing->samples += row.samples;
+        existing->failed += row.failed;
+        return true;
+    }
+
+    if (list->count == TEST_TIMING_SUMMARY_ROW_LIMIT)
+    {
+        return false;
+    }
+
+    TestTimingRowNode* node = arena_allocate(arena, TestTimingRowNode, 1);
+    *node = (TestTimingRowNode){.row = row};
+    if (list->last)
+    {
+        list->last->next = node;
+    }
+    else
+    {
+        list->first = node;
+    }
+    list->last = node;
+    list->count += 1;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL int test_timing_row_compare(const void* a, const void* b)
+{
+    const TestTimingRow* left = (const TestTimingRow*)a;
+    const TestTimingRow* right = (const TestTimingRow*)b;
+    return (left->duration_ns < right->duration_ns) - (left->duration_ns > right->duration_ns);
+}
+
+BUSTER_GLOBAL_LOCAL int test_timing_module_total_compare(const void* a, const void* b)
+{
+    const TestTimingModuleTotal* left = (const TestTimingModuleTotal*)a;
+    const TestTimingModuleTotal* right = (const TestTimingModuleTotal*)b;
+    return (left->duration_ns < right->duration_ns) - (left->duration_ns > right->duration_ns);
+}
+
+BUSTER_GLOBAL_LOCAL u64 test_timing_duration_ms(u64 duration_ns)
+{
+    return (duration_ns + 500000) / 1000000;
+}
+
+// Tenths of a percent of `total`, rounded. Durations are nanoseconds, so the
+// numerator stays far below the 64-bit range for any plausible test run.
+BUSTER_GLOBAL_LOCAL u64 test_timing_share_tenths(u64 part, u64 total)
+{
+    if (!total || part > (UINT64_MAX - total / 2) / 1000)
+    {
+        return 0;
+    }
+    return (part * 1000 + total / 2) / total;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_timing_summary_parse_log(Arena* arena, String8 path, TestTimingRowList* rows, SummaryOutput* output,
+                                                               TestTimingSummaryFailureReason* failure_reason)
+{
+    ByteSlice bytes = file_read(arena, path, (FileReadOptions){.end_padding = 1});
+    if (!bytes.pointer)
+    {
+        summary_output_print(output, S8("error: failed to read {S8}\n"), path);
+        test_timing_summary_failure_set(failure_reason, TEST_TIMING_SUMMARY_FAILURE_UNREADABLE_LOG);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 text = BYTE_SLICE_TO_STRING(8, bytes);
+    String8 pending[TEST_TIMING_SUMMARY_PENDING_LIMIT] = {0};
+    u64 pending_count = 0;
+    u64 pending_index = 0;
+    String8 configuration = {0};
+    u64 unknown_count = 0;
+    u64 previous_index = 0;
+    String8 line = {0};
+
+    while (test_timing_next_line(&text, &line))
+    {
+        if (!string_starts_with_sequence(line, S8("TEST_MODULE_TIMING ")))
+        {
+            u64 found = test_timing_scan_command_line(arena, line, pending, BUSTER_ARRAY_LENGTH(pending));
+            if (found)
+            {
+                pending_count = found;
+                pending_index = 0;
+            }
+            continue;
+        }
+
+        String8 rest = string_slice(line, 0, line.length);
+        String8 token = {0};
+        String8 module = {0};
+        u64 index = 0;
+        u64 duration_ns = 0;
+        u64 failed = 0;
+        bool has_index = false;
+        bool has_duration = false;
+
+        while (test_timing_next_token(&rest, &token))
+        {
+            String8 key = {0};
+            String8 value = {0};
+            if (!test_timing_split_field(token, &key, &value))
+            {
+                continue;
+            }
+
+            if (string_equal(key, S8("index")))
+            {
+                has_index = test_timing_parse_u64(value, &index);
+            }
+            else if (string_equal(key, S8("module")))
+            {
+                module = value;
+            }
+            else if (string_equal(key, S8("duration_ns")))
+            {
+                has_duration = test_timing_parse_u64(value, &duration_ns);
+            }
+            else if (string_equal(key, S8("failed")))
+            {
+                test_timing_parse_u64(value, &failed);
+            }
+        }
+
+        if (!has_index || !has_duration || !module.length)
+        {
+            continue;
+        }
+
+        // Module indexes restart at zero for every `ide test` process, which is
+        // the only in-band marker of where one configuration's run ends and the
+        // next begins.
+        bool run_started = !configuration.length || index <= previous_index;
+        previous_index = index;
+        if (run_started)
+        {
+            if (pending_index < pending_count)
+            {
+                configuration = pending[pending_index++];
+            }
+            else
+            {
+                configuration = string_format(arena, S8("unknown:{u64}"), unknown_count++);
+            }
+        }
+
+        if (!test_timing_row_accumulate(arena, rows,
+                                        (TestTimingRow){
+                                            .configuration = configuration,
+                                            .module = module,
+                                            .duration_ns = duration_ns,
+                                            .samples = 1,
+                                            .failed = failed,
+                                        }))
+        {
+            summary_output_print(output, S8("error: test_timing_summary resource limit while aggregating {S8}\n"), path);
+            test_timing_summary_failure_set(failure_reason, TEST_TIMING_SUMMARY_FAILURE_ROW_LIMIT);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_timing_baseline_read(Arena* arena, String8 path, String8 runner, TestTimingBaseline* baseline,
+                                                            SummaryOutput* output, TestTimingSummaryFailureReason* failure_reason)
+{
+    ByteSlice bytes = file_read(arena, path, (FileReadOptions){.end_padding = 1});
+    if (!bytes.pointer)
+    {
+        // A missing baseline is the ordinary first run, not an error.
+        return PROCESS_RESULT_SUCCESS;
+    }
+
+    String8 text = BYTE_SLICE_TO_STRING(8, bytes);
+    String8 line = {0};
+    bool version_seen = false;
+
+    while (test_timing_next_line(&text, &line))
+    {
+        String8 rest = line;
+        String8 token = {0};
+        if (!test_timing_next_token(&rest, &token) || string_starts_with_sequence(token, S8("#")))
+        {
+            continue;
+        }
+
+        if (string_equal(token, S8("TEST_TIMING_BASELINE_VERSION")))
+        {
+            u64 version = 0;
+            if (!test_timing_next_token(&rest, &token) || !test_timing_parse_u64(token, &version) || version != TEST_TIMING_BASELINE_VERSION)
+            {
+                summary_output_print(output, S8("error: {S8} is not a version {u64} test timing baseline\n"), path,
+                                     (u64)TEST_TIMING_BASELINE_VERSION);
+                test_timing_summary_failure_set(failure_reason, TEST_TIMING_SUMMARY_FAILURE_MALFORMED_BASELINE);
+                return PROCESS_RESULT_FAILED;
+            }
+            version_seen = true;
+            continue;
+        }
+
+        if (string_equal(token, S8("TEST_TIMING_BASELINE_RUNNER")))
+        {
+            if (!test_timing_next_token(&rest, &token))
+            {
+                summary_output_print(output, S8("error: {S8} has no baseline runner\n"), path);
+                test_timing_summary_failure_set(failure_reason, TEST_TIMING_SUMMARY_FAILURE_MALFORMED_BASELINE);
+                return PROCESS_RESULT_FAILED;
+            }
+            baseline->runner = token;
+            continue;
+        }
+
+        if (!string_equal(token, S8("TEST_TIMING_BASELINE")))
+        {
+            summary_output_print(output, S8("error: {S8} has an unrecognized baseline record\n"), path);
+            test_timing_summary_failure_set(failure_reason, TEST_TIMING_SUMMARY_FAILURE_MALFORMED_BASELINE);
+            return PROCESS_RESULT_FAILED;
+        }
+
+        String8 configuration = {0};
+        String8 module = {0};
+        u64 duration_ns = 0;
+        u64 samples = 0;
+        bool has_duration = false;
+        while (test_timing_next_token(&rest, &token))
+        {
+            String8 key = {0};
+            String8 value = {0};
+            if (!test_timing_split_field(token, &key, &value))
+            {
+                continue;
+            }
+
+            if (string_equal(key, S8("config")))
+            {
+                configuration = value;
+            }
+            else if (string_equal(key, S8("module")))
+            {
+                module = value;
+            }
+            else if (string_equal(key, S8("duration_ns")))
+            {
+                has_duration = test_timing_parse_u64(value, &duration_ns);
+            }
+            else if (string_equal(key, S8("samples")))
+            {
+                test_timing_parse_u64(value, &samples);
+            }
+        }
+
+        if (!configuration.length || !module.length || !has_duration)
+        {
+            summary_output_print(output, S8("error: {S8} has an incomplete baseline record\n"), path);
+            test_timing_summary_failure_set(failure_reason, TEST_TIMING_SUMMARY_FAILURE_MALFORMED_BASELINE);
+            return PROCESS_RESULT_FAILED;
+        }
+
+        if (!test_timing_row_accumulate(arena, &baseline->rows,
+                                        (TestTimingRow){
+                                            .configuration = configuration,
+                                            .module = module,
+                                            .duration_ns = duration_ns,
+                                            .samples = samples,
+                                        }))
+        {
+            summary_output_print(output, S8("error: test_timing_summary resource limit while reading {S8}\n"), path);
+            test_timing_summary_failure_set(failure_reason, TEST_TIMING_SUMMARY_FAILURE_ROW_LIMIT);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+
+    if (!version_seen || !baseline->runner.length)
+    {
+        summary_output_print(output, S8("error: {S8} is missing its baseline version or runner header\n"), path);
+        test_timing_summary_failure_set(failure_reason, TEST_TIMING_SUMMARY_FAILURE_MALFORMED_BASELINE);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    // Merging runners would average a 4.4 s Linux Release module with a 192 s
+    // Windows sanitized Debug one and describe neither.
+    if (!string_equal(baseline->runner, runner))
+    {
+        summary_output_print(output, S8("error: {S8} was recorded on runner {S8}, not {S8}\n"), path, baseline->runner, runner);
+        test_timing_summary_failure_set(failure_reason, TEST_TIMING_SUMMARY_FAILURE_BASELINE_RUNNER_MISMATCH);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    baseline->present = 1;
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_timing_baseline_write(Arena* arena, String8 path, String8 runner, TestTimingRow* rows, u64 row_count,
+                                                             SummaryOutput* output, TestTimingSummaryFailureReason* failure_reason)
+{
+    String8List lines = {0};
+    string8_list_push(arena, &lines, string_format(arena, S8("TEST_TIMING_BASELINE_VERSION {u64}\n"), (u64)TEST_TIMING_BASELINE_VERSION));
+    string8_list_push(arena, &lines, string_format(arena, S8("TEST_TIMING_BASELINE_RUNNER {S8}\n"), runner));
+    for (u64 row_i = 0; row_i < row_count; row_i += 1)
+    {
+        TestTimingRow row = rows[row_i];
+        string8_list_push(arena, &lines,
+                          string_format(arena, S8("TEST_TIMING_BASELINE config={S8} module={S8} duration_ns={u64} samples={u64}\n"), row.configuration,
+                                        row.module, row.duration_ns, row.samples));
+    }
+
+    String8 contents = string_join_arena(arena, string8_list_to_slice(arena, lines), false);
+    String8 parent = path_parent(arena, path);
+    if (parent.length)
+    {
+        make_directory_recursive(arena, parent);
+    }
+
+    if (!file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(contents)))
+    {
+        summary_output_print(output, S8("error: failed to write {S8}\n"), path);
+        test_timing_summary_failure_set(failure_reason, TEST_TIMING_SUMMARY_FAILURE_BASELINE_WRITE);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_timing_summary_run_with_output(Arena* arena, TestTimingSummaryOptions options, SummaryOutput* output,
+                                                                      TestTimingSummaryFailureReason* failure_reason)
+{
+    if (!options.limit)
+    {
+        options.limit = 25;
+    }
+
+    if (!options.paths.length)
+    {
+        summary_output_print(output, S8("error: test_timing_summary requires at least one test log path\n"));
+        test_timing_summary_failure_set(failure_reason, TEST_TIMING_SUMMARY_FAILURE_RESOURCE);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 runner = options.runner.length ? options.runner : test_timing_summary_runner_name(arena);
+    String8 baseline_path = options.baseline.length ? options.baseline : test_timing_summary_default_baseline(arena, runner);
+
+    TestTimingRowList row_list = {0};
+    for (u64 path_i = 0; path_i < options.paths.length; path_i += 1)
+    {
+        ProcessResult parse_result = test_timing_summary_parse_log(arena, options.paths.pointer[path_i], &row_list, output, failure_reason);
+        if (parse_result != PROCESS_RESULT_SUCCESS)
+        {
+            return parse_result;
+        }
+    }
+
+    if (!row_list.count)
+    {
+        summary_output_print(output, S8("No TEST_MODULE_TIMING rows found; test logs must come from a --verbose=1 run.\n"));
+        return PROCESS_RESULT_SUCCESS;
+    }
+
+    TestTimingBaseline baseline = {0};
+    ProcessResult baseline_result = test_timing_baseline_read(arena, baseline_path, runner, &baseline, output, failure_reason);
+    if (baseline_result != PROCESS_RESULT_SUCCESS)
+    {
+        return baseline_result;
+    }
+
+    TestTimingRow* rows = arena_allocate(arena, TestTimingRow, row_list.count);
+    TestTimingModuleTotal* module_totals = arena_allocate(arena, TestTimingModuleTotal, row_list.count);
+    String8* configurations = arena_allocate(arena, String8, row_list.count);
+    u64 row_count = 0;
+    u64 module_count = 0;
+    u64 configuration_count = 0;
+    u64 total_ns = 0;
+    u64 failed_modules = 0;
+    u64 slower = 0;
+    u64 faster = 0;
+    u64 unchanged = 0;
+    u64 added = 0;
+
+    for (TestTimingRowNode* node = row_list.first; node; node = node->next)
+    {
+        TestTimingRow row = node->row;
+        TestTimingRow* baseline_row = test_timing_row_find(&baseline.rows, row.configuration, row.module);
+        if (baseline_row)
+        {
+            row.baseline_ns = baseline_row->duration_ns;
+            row.has_baseline = 1;
+        }
+
+        if (baseline.present)
+        {
+            if (!row.has_baseline)
+            {
+                added += 1;
+            }
+            else if (row.duration_ns > row.baseline_ns)
+            {
+                slower += 1;
+            }
+            else if (row.duration_ns < row.baseline_ns)
+            {
+                faster += 1;
+            }
+            else
+            {
+                unchanged += 1;
+            }
+        }
+
+        total_ns += row.duration_ns;
+        failed_modules += row.failed != 0;
+
+        u64 module_i = 0;
+        for (; module_i < module_count; module_i += 1)
+        {
+            if (string_equal(module_totals[module_i].module, row.module))
+            {
+                break;
+            }
+        }
+        if (module_i == module_count)
+        {
+            module_totals[module_count++] = (TestTimingModuleTotal){.module = row.module};
+        }
+        module_totals[module_i].duration_ns += row.duration_ns;
+        module_totals[module_i].configurations += 1;
+
+        u64 configuration_i = 0;
+        for (; configuration_i < configuration_count; configuration_i += 1)
+        {
+            if (string_equal(configurations[configuration_i], row.configuration))
+            {
+                break;
+            }
+        }
+        if (configuration_i == configuration_count)
+        {
+            configurations[configuration_count++] = row.configuration;
+        }
+
+        rows[row_count++] = row;
+    }
+
+    u64 missing = 0;
+    for (TestTimingRowNode* node = baseline.rows.first; baseline.present && node; node = node->next)
+    {
+        missing += test_timing_row_find(&row_list, node->row.configuration, node->row.module) == 0;
+    }
+
+    qsort(module_totals, module_count, sizeof(module_totals[0]), test_timing_module_total_compare);
+    qsort(rows, row_count, sizeof(rows[0]), test_timing_row_compare);
+
+    // The headline number is the module's total across every configuration in
+    // the run: that cross-configuration share is what turns "this module is a
+    // bit slow" into "this module is most of the matrix".
+    summary_output_print(output, S8("Slowest test modules across {u64} configuration(s) in {u64} log file(s):\n"), configuration_count,
+                         options.paths.length);
+    u64 module_limit = BUSTER_MIN(options.limit, module_count);
+    for (u64 module_i = 0; module_i < module_limit; module_i += 1)
+    {
+        TestTimingModuleTotal total = module_totals[module_i];
+        u64 share = test_timing_share_tenths(total.duration_ns, total_ns);
+        summary_output_print(output, S8("{u64:width=[ ,7]} ms  {u64:width=[ ,3]}.{u64}%  {S8}{u64} configuration(s)\n"),
+                             test_timing_duration_ms(total.duration_ns), share / 10, share % 10, summary_pad_right(arena, total.module, 34),
+                             total.configurations);
+    }
+
+    summary_output_print(output, S8("Slowest per-configuration test modules:\n"));
+    u64 row_limit = BUSTER_MIN(options.limit, row_count);
+    for (u64 row_i = 0; row_i < row_limit; row_i += 1)
+    {
+        TestTimingRow row = rows[row_i];
+        String8 annotation = S8("");
+        if (baseline.present && !row.has_baseline)
+        {
+            annotation = S8("  (new)");
+        }
+        else if (baseline.present)
+        {
+            bool grew = row.duration_ns >= row.baseline_ns;
+            u64 delta_ns = grew ? row.duration_ns - row.baseline_ns : row.baseline_ns - row.duration_ns;
+            u64 delta_share = test_timing_share_tenths(delta_ns, row.baseline_ns);
+            annotation = string_format(arena, S8("  base {u64} ms  {S8}{u64}.{u64}%"), test_timing_duration_ms(row.baseline_ns), grew ? S8("+") : S8("-"),
+                                       delta_share / 10, delta_share % 10);
+        }
+        summary_output_print(output, S8("{u64:width=[ ,7]} ms  {S8}{S8}{S8}\n"), test_timing_duration_ms(row.duration_ns),
+                             summary_pad_right(arena, row.module, 34), row.configuration, annotation);
+    }
+
+    summary_output_print(output, S8("TEST_TIMING_SUMMARY runner={S8} configurations={u64} modules={u64} rows={u64} total_ms={u64} failed_modules={u64}\n"),
+                         runner, configuration_count, module_count, row_count, test_timing_duration_ms(total_ns), failed_modules);
+    if (baseline.present)
+    {
+        summary_output_print(output, S8("TEST_TIMING_BASELINE_COMPARISON path={S8} slower={u64} faster={u64} unchanged={u64} new={u64} missing={u64}\n"),
+                             baseline_path, slower, faster, unchanged, added, missing);
+    }
+    else
+    {
+        summary_output_print(output, S8("No stored baseline at {S8}; pass --update-baseline to record one.\n"), baseline_path);
+    }
+
+    if (options.update_baseline)
+    {
+        ProcessResult write_result = test_timing_baseline_write(arena, baseline_path, runner, rows, row_count, output, failure_reason);
+        if (write_result != PROCESS_RESULT_SUCCESS)
+        {
+            return write_result;
+        }
+        summary_output_print(output, S8("Recorded {u64} baseline row(s) for runner {S8} at {S8}\n"), row_count, runner, baseline_path);
+    }
+
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_timing_summary_run(Arena* arena, TestTimingSummaryOptions options)
+{
+    SummaryOutput output = {.file = os_get_stdout()};
+    TestTimingSummaryFailureReason failure_reason = TEST_TIMING_SUMMARY_FAILURE_NONE;
+    return test_timing_summary_run_with_output(arena, options, &output, &failure_reason);
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_timing_summary_action(Arena* arena, void* data)
+{
+    TestTimingSummaryOptions* options = (TestTimingSummaryOptions*)data;
+    return test_timing_summary_run(arena, *options);
+}
+
+typedef struct TestTimingSummarySelfTestFailure TestTimingSummarySelfTestFailure;
+struct TestTimingSummarySelfTestFailure
+{
+    String8 log;
+    String8 baseline;
+    TestTimingSummaryFailureReason reason;
+    String8 message;
+};
+
+// The self-test pins the rendered report, not just the parsed numbers: column
+// layout, millisecond rounding and percentage rounding are exactly the parts a
+// refactor breaks silently.
+BUSTER_GLOBAL_LOCAL bool test_timing_summary_self_test_expect(Arena* arena, TestTimingSummaryOptions options, String8 expected)
+{
+    SummaryOutput output = {.capture_arena = arena};
+    TestTimingSummaryFailureReason reason = TEST_TIMING_SUMMARY_FAILURE_NONE;
+    ProcessResult result = test_timing_summary_run_with_output(arena, options, &output, &reason);
+    String8 actual = summary_output_text(arena, output);
+    return result == PROCESS_RESULT_SUCCESS && reason == TEST_TIMING_SUMMARY_FAILURE_NONE && string_equal(actual, expected);
+}
+
+BUSTER_GLOBAL_LOCAL bool test_timing_summary_self_test_expect_failure(Arena* arena, String8 runner, TestTimingSummarySelfTestFailure failure)
+{
+    String8 paths[] = {failure.log};
+    SummaryOutput output = {.capture_arena = arena};
+    TestTimingSummaryFailureReason reason = TEST_TIMING_SUMMARY_FAILURE_NONE;
+    ProcessResult result = test_timing_summary_run_with_output(arena,
+                                                               (TestTimingSummaryOptions){
+                                                                   .paths = {.pointer = paths, .length = BUSTER_ARRAY_LENGTH(paths)},
+                                                                   .baseline = failure.baseline,
+                                                                   .runner = runner,
+                                                                   .limit = 5,
+                                                               },
+                                                               &output, &reason);
+    String8 actual = summary_output_text(arena, output);
+    return result != PROCESS_RESULT_SUCCESS && reason == failure.reason && string_equal(actual, failure.message);
+}
+
+BUSTER_GLOBAL_LOCAL bool test_timing_summary_self_test_write_row_cap(Arena* arena, String8 path)
+{
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    if (!file)
+    {
+        return false;
+    }
+
+    bool result = true;
+    for (u64 row_i = 0; row_i < TEST_TIMING_SUMMARY_ROW_LIMIT + 1; row_i += 1)
+    {
+        String8 block = string_format(arena,
+                                      S8("cmake --build build/build-cap{u64} --config Debug --target test_units\n"
+                                         "TEST_MODULE_TIMING index=0 module=cap_tests duration_ns=1 passed=1 failed=0 assertions=1 status=pass\n"),
+                                      row_i);
+        if (!block.pointer)
+        {
+            result = false;
+            break;
+        }
+        os_file_write(file, (ByteSlice){.pointer = (u8*)block.pointer, .length = block.length});
+    }
+    return os_file_close(file) && result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_timing_summary_self_test(Arena* arena)
+{
+    String8 directory = {0};
+    if (!summary_self_test_claim_directory(arena, S8("test-timing-summary"), &directory))
+    {
+        string_print(S8("error: test_timing_summary self-test could not claim an exclusive directory\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    String8 runner = S8("self-test-runner");
+    String8 matrix = path_join(arena, directory, S8("matrix.log"));
+    String8 plain = path_join(arena, directory, S8("plain.log"));
+    String8 row_cap = path_join(arena, directory, S8("row-cap.log"));
+    String8 baseline = path_join(arena, directory, S8("baseline.txt"));
+    String8 malformed_baseline = path_join(arena, directory, S8("malformed-baseline.txt"));
+    String8 foreign_baseline = path_join(arena, directory, S8("foreign-baseline.txt"));
+    String8 missing_log = path_join(arena, directory, S8("missing.log"));
+    bool passed = true;
+
+    // One `&&`-joined command line covering two configurations of a shared
+    // tree, then a second tree, exactly as the superbuild echoes them; the
+    // interleaved non-test command lines must not disturb the attribution.
+    passed = passed &&
+             summary_self_test_write_text(
+                 matrix,
+                 S8("[1/4] cd /src && cmake --build build/build-cc_gcc-configs_shared --config Debug --target ide:Debug ide:Release --parallel 3\n"
+                    "[2/4] cd /src && cmake -E env BUSTER_TEST_JOBS=3 cmake --build build/build-cc_gcc-configs_shared --config Debug --target test_units"
+                    " && cmake -E env BUSTER_TEST_JOBS=3 cmake --build build/build-cc_gcc-configs_shared --config Release --target test_all\n"
+                    "[1/1] Run unit tests\n"
+                    "TEST_MODULE_TIMING index=0 module=arena_tests duration_ns=4000000 passed=4 failed=0 assertions=4 status=pass\n"
+                    "TEST_MODULE_TIMING index=1 module=slow_tests duration_ns=60000000 passed=2 failed=0 assertions=2 status=pass\n"
+                    "TEST_MODULE_TIMING index=0 module=arena_tests duration_ns=2000000 passed=4 failed=0 assertions=4 status=pass\n"
+                    "TEST_MODULE_TIMING index=1 module=slow_tests duration_ns=30000000 passed=1 failed=1 assertions=2 status=fail\n"
+                    "[3/4] cd /src && cmake --build build/build-cc_clang-sanitize_on --config Debug --target test_units\n"
+                    "TEST_MODULE_TIMING index=0 module=arena_tests duration_ns=6000000 passed=4 failed=0 assertions=4 status=pass\n"
+                    "TEST_MODULE_TIMING index=1 module=slow_tests duration_ns=98000000 passed=2 failed=0 assertions=2 status=pass\n"
+                    "[4/4] cd /src && cmake --build build/build-cc_clang-sanitize_on --config Debug --target clang_analyze\n"));
+    // A saved plain `ide test --verbose=1` run has no command line in front of
+    // it; its two runs must stay two series rather than merging into one.
+    passed = passed && summary_self_test_write_text(
+                           plain, S8("TEST_MODULE_TIMING index=0 module=arena_tests duration_ns=1400000 passed=4 failed=0 assertions=4 status=pass\n"
+                                     "TEST_MODULE_TIMING index=0 module=arena_tests duration_ns=1600000 passed=4 failed=0 assertions=4 status=pass\n"));
+    passed = passed && summary_self_test_write_text(malformed_baseline, S8("TEST_TIMING_BASELINE_VERSION 1\n"
+                                                                          "TEST_TIMING_BASELINE_RUNNER self-test-runner\n"
+                                                                          "TEST_TIMING_BASELINE config=cc_gcc-configs_shared:Debug module=arena_tests\n"));
+    passed = passed && summary_self_test_write_text(foreign_baseline, S8("TEST_TIMING_BASELINE_VERSION 1\n"
+                                                                        "TEST_TIMING_BASELINE_RUNNER other-runner\n"
+                                                                        "TEST_TIMING_BASELINE config=cc_gcc-configs_shared:Debug module=arena_tests"
+                                                                        " duration_ns=4000000 samples=1\n"));
+    passed = passed && test_timing_summary_self_test_write_row_cap(arena, row_cap);
+
+    String8 matrix_paths[] = {matrix};
+    String8 plain_paths[] = {plain};
+
+    TestTimingSummaryOptions matrix_options = {
+        .paths = {.pointer = matrix_paths, .length = BUSTER_ARRAY_LENGTH(matrix_paths)},
+        .baseline = baseline,
+        .runner = runner,
+        .limit = 2,
+    };
+    TestTimingSummaryOptions record_options = matrix_options;
+    record_options.limit = 1;
+    record_options.update_baseline = 1;
+    TestTimingSummaryOptions replay_options = matrix_options;
+    replay_options.limit = 1;
+    TestTimingSummaryOptions plain_options = {
+        .paths = {.pointer = plain_paths, .length = BUSTER_ARRAY_LENGTH(plain_paths)},
+        .baseline = baseline,
+        .runner = runner,
+        .limit = 2,
+    };
+
+    // First run: no baseline yet, so no deltas and an explicit invitation to
+    // record one. 200 ms total; slow_tests is 94% of it across 3 series.
+    passed = passed &&
+             test_timing_summary_self_test_expect(
+                 arena, matrix_options,
+                 string_format(arena,
+                               S8("Slowest test modules across 3 configuration(s) in 1 log file(s):\n"
+                                  "    188 ms   94.0%  slow_tests                        3 configuration(s)\n"
+                                  "     12 ms    6.0%  arena_tests                       3 configuration(s)\n"
+                                  "Slowest per-configuration test modules:\n"
+                                  "     98 ms  slow_tests                        cc_clang-sanitize_on:Debug\n"
+                                  "     60 ms  slow_tests                        cc_gcc-configs_shared:Debug\n"
+                                  "TEST_TIMING_SUMMARY runner=self-test-runner configurations=3 modules=2 rows=6 total_ms=200 failed_modules=1\n"
+                                  "No stored baseline at {S8}; pass --update-baseline to record one.\n"),
+                               baseline));
+
+    // Record the baseline, then replay the same log: every row must match
+    // exactly, which is also the round-trip test for the stored format.
+    passed = passed &&
+             test_timing_summary_self_test_expect(
+                 arena, record_options,
+                 string_format(arena,
+                               S8("Slowest test modules across 3 configuration(s) in 1 log file(s):\n"
+                                  "    188 ms   94.0%  slow_tests                        3 configuration(s)\n"
+                                  "Slowest per-configuration test modules:\n"
+                                  "     98 ms  slow_tests                        cc_clang-sanitize_on:Debug\n"
+                                  "TEST_TIMING_SUMMARY runner=self-test-runner configurations=3 modules=2 rows=6 total_ms=200 failed_modules=1\n"
+                                  "No stored baseline at {S8}; pass --update-baseline to record one.\n"
+                                  "Recorded 6 baseline row(s) for runner self-test-runner at {S8}\n"),
+                               baseline, baseline));
+    passed = passed &&
+             test_timing_summary_self_test_expect(
+                 arena, replay_options,
+                 string_format(arena,
+                               S8("Slowest test modules across 3 configuration(s) in 1 log file(s):\n"
+                                  "    188 ms   94.0%  slow_tests                        3 configuration(s)\n"
+                                  "Slowest per-configuration test modules:\n"
+                                  "     98 ms  slow_tests                        cc_clang-sanitize_on:Debug  base 98 ms  +0.0%\n"
+                                  "TEST_TIMING_SUMMARY runner=self-test-runner configurations=3 modules=2 rows=6 total_ms=200 failed_modules=1\n"
+                                  "TEST_TIMING_BASELINE_COMPARISON path={S8} slower=0 faster=0 unchanged=6 new=0 missing=0\n"),
+                               baseline));
+
+    // A different run against that baseline: a module absent from it is new,
+    // and its own series is the only thing it is compared against.
+    passed = passed &&
+             test_timing_summary_self_test_expect(
+                 arena, plain_options,
+                 string_format(arena,
+                               S8("Slowest test modules across 2 configuration(s) in 1 log file(s):\n"
+                                  "      3 ms  100.0%  arena_tests                       2 configuration(s)\n"
+                                  "Slowest per-configuration test modules:\n"
+                                  "      2 ms  arena_tests                       unknown:1  (new)\n"
+                                  "      1 ms  arena_tests                       unknown:0  (new)\n"
+                                  "TEST_TIMING_SUMMARY runner=self-test-runner configurations=2 modules=1 rows=2 total_ms=3 failed_modules=0\n"
+                                  "TEST_TIMING_BASELINE_COMPARISON path={S8} slower=0 faster=0 unchanged=0 new=2 missing=6\n"),
+                               baseline));
+
+    TestTimingSummarySelfTestFailure failure_cases[] = {
+        {.log = missing_log,
+         .baseline = baseline,
+         .reason = TEST_TIMING_SUMMARY_FAILURE_UNREADABLE_LOG,
+         .message = string_format(arena, S8("error: failed to read {S8}\n"), missing_log)},
+        {.log = matrix,
+         .baseline = malformed_baseline,
+         .reason = TEST_TIMING_SUMMARY_FAILURE_MALFORMED_BASELINE,
+         .message = string_format(arena, S8("error: {S8} has an incomplete baseline record\n"), malformed_baseline)},
+        {.log = matrix,
+         .baseline = foreign_baseline,
+         .reason = TEST_TIMING_SUMMARY_FAILURE_BASELINE_RUNNER_MISMATCH,
+         .message = string_format(arena, S8("error: {S8} was recorded on runner other-runner, not self-test-runner\n"), foreign_baseline)},
+        {.log = row_cap,
+         .baseline = baseline,
+         .reason = TEST_TIMING_SUMMARY_FAILURE_ROW_LIMIT,
+         .message = string_format(arena, S8("error: test_timing_summary resource limit while aggregating {S8}\n"), row_cap)},
+    };
+    for (u64 failure_i = 0; failure_i < BUSTER_ARRAY_LENGTH(failure_cases); failure_i += 1)
+    {
+        passed = passed && test_timing_summary_self_test_expect_failure(arena, runner, failure_cases[failure_i]);
+    }
+
+    SummaryOutput empty_output = {.capture_arena = arena};
+    TestTimingSummaryFailureReason empty_reason = TEST_TIMING_SUMMARY_FAILURE_NONE;
+    passed = passed && test_timing_summary_run_with_output(arena, (TestTimingSummaryOptions){.runner = runner}, &empty_output, &empty_reason) !=
+                           PROCESS_RESULT_SUCCESS &&
+             empty_reason == TEST_TIMING_SUMMARY_FAILURE_RESOURCE;
+
+    if (!os_directory_delete(directory))
+    {
+        passed = false;
+    }
+    if (!passed)
+    {
+        string_print(S8("error: test_timing_summary self-test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("TEST_TIMING_SUMMARY_SELF_TEST passed attribution=1 aggregation=1 baseline_round_trip=1 negative_cases={u64} cleanup=1\n"),
+                 BUSTER_ARRAY_LENGTH(failure_cases) + 1);
+    return PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void test_timing_summary_action_add(Arena* arena, TestTimingSummaryOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TestTimingSummaryOptions* options_copy = arena_allocate(arena, TestTimingSummaryOptions, 1);
+    *options_copy = options;
+
+    *run = (ProcessRun){
+        .callback = test_timing_summary_action,
         .callback_data = options_copy,
     };
 }
