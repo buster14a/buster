@@ -30,7 +30,19 @@
 
 #if BUSTER_UNITY_BUILD
 #if BUSTER_INCLUDE_TESTS
+// Test bodies are half the optimizer's work in this translation unit and none
+// of its runtime cost: what the test modules spend their time in is production
+// code, which stays optimized. Optimizing them anyway costs ~11 seconds of
+// every Release build. Splitting them into their own translation unit is not
+// the answer -- the Windows runner builds every tree with one job, so it would
+// gain no parallelism, and clang_analyze is ~6x slower over split sources.
+#if BUSTER_COMPILER_CLANG
+#pragma clang attribute push (__attribute__((optnone)), apply_to=function)
+#endif
 #include <buster/tests/test.c>
+#if BUSTER_COMPILER_CLANG
+#pragma clang attribute pop
+#endif
 #endif
 #include <buster/lib/arena.c>
 #include <buster/lib/integer.c>
