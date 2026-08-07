@@ -12,6 +12,10 @@
 #if BUSTER_LINUX || BUSTER_APPLE
 #include <dirent.h>
 #endif
+#if BUSTER_LINUX
+#include <linux/perf_event.h>
+#include <sys/syscall.h>
+#endif
 
 #include <buster/lib/string.c>
 #include <buster/lib/os.c>
@@ -54,6 +58,69 @@ typedef enum ProcessRunFlag
     PROCESS_RUN_FLAG_CLANG_ANALYZE = (1u << 4),
 } ProcessRunFlag;
 
+// --- instruction counter -------------------------------------------------
+// Compile throughput regresses invisibly. A change that only *adds* source can
+// push a latent quadratic past a threshold: `x86 metadata: decode the generated
+// tables once` grew the unity translation unit by ~107 lines and cost self-host
+// stage 1 28.8% (32.56 G -> 41.92 G instructions) through a quadratic in debug
+// location seeding, and nothing caught it because only test time was measured.
+//
+// Wall time is far too noisy to notice that: identical code measured 290.1 s and
+// 319.8 s for the same matrix on an idle 16-thread desktop. Instructions retired
+// is contention-immune and reproducible to a few thousand across runs, so report
+// it beside the existing wall-clock line for every timed step.
+//
+// Linux-only. This needs hardware counters and there is no cheap portable
+// equivalent; the counter simply stays closed elsewhere and nothing is printed.
+// `inherit` makes the counter cover processes spawned after it is enabled, and
+// an exited child's count is folded into this process, so reading either side of
+// a spawn/wait pair yields that child's instruction count without the build
+// driver needing to hook fork.
+//
+// One counter covers the whole process tree, so a step's delta is exact only
+// while it is the sole child running. That holds for the steps this exists to
+// watch -- the self-host stages and CMake generation are sequential -- but
+// concurrent steps overlap and each reported delta then includes its siblings.
+// Compare `Self-host stage 1` across commits; do not read the matrix rows as
+// per-step totals.
+BUSTER_GLOBAL_LOCAL int instruction_counter_descriptor = -1;
+
+BUSTER_GLOBAL_LOCAL void instruction_counter_open(void)
+{
+#if BUSTER_LINUX
+    struct perf_event_attr attributes;
+    memset(&attributes, 0, sizeof(attributes));
+    attributes.type = PERF_TYPE_HARDWARE;
+    attributes.size = sizeof(attributes);
+    attributes.config = PERF_COUNT_HW_INSTRUCTIONS;
+    attributes.inherit = 1;
+    attributes.exclude_kernel = 1;
+    attributes.exclude_hv = 1;
+    // pid 0 / cpu -1: this task and its descendants, on any CPU. Failure is
+    // ordinary (perf_event_paranoid, containers, no PMU) and must never be fatal.
+    long descriptor = syscall(__NR_perf_event_open, &attributes, 0, -1, -1, 0);
+    instruction_counter_descriptor = descriptor < 0 ? -1 : (int)descriptor;
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL u64 instruction_counter_read(void)
+{
+#if BUSTER_LINUX
+    if (instruction_counter_descriptor < 0)
+    {
+        return 0;
+    }
+    u64 value = 0;
+    if (read(instruction_counter_descriptor, &value, sizeof(value)) != (ssize_t)sizeof(value))
+    {
+        return 0;
+    }
+    return value;
+#else
+    return 0;
+#endif
+}
+
 struct ProcessRun
 {
     SliceString8 arguments;
@@ -65,6 +132,7 @@ struct ProcessRun
     String8 timing_description;
     String8 timing_configuration;
     u64 start_us;
+    u64 start_instructions;
     u32 flags;
     BuildActionCallback* callback;
     void* callback_data;
@@ -19645,6 +19713,8 @@ ProcessResult entry_point(void)
 
     u32 thread_count = os_get_logical_thread_count();
 
+    instruction_counter_open();
+
     run_metaprogram();
 
     for (BuildStep* step = build_graph->first_step; step; step = step->next)
@@ -19678,6 +19748,15 @@ ProcessResult entry_point(void)
                                string8_printf_length(wait->timing_configuration, UINT64_MAX),
                                wait->timing_configuration.pointer ? wait->timing_configuration.pointer : "", (unsigned long long)seconds_whole,
                                (unsigned long long)seconds_fraction, (unsigned long long)elapsed_ns);
+                        u64 instructions = instruction_counter_read();
+                        if (instructions > wait->start_instructions)
+                        {
+                            printf("STEP_INSTRUCTIONS %.*s%.*s instructions=%llu\n", string8_printf_length(wait->timing_description, UINT64_MAX),
+                                   wait->timing_description.pointer ? wait->timing_description.pointer : "",
+                                   string8_printf_length(wait->timing_configuration, UINT64_MAX),
+                                   wait->timing_configuration.pointer ? wait->timing_configuration.pointer : "",
+                                   (unsigned long long)(instructions - wait->start_instructions));
+                        }
                     }
 
                     if (result == PROCESS_RESULT_SUCCESS && wait_result != PROCESS_RESULT_SUCCESS)
@@ -19701,6 +19780,7 @@ ProcessResult entry_point(void)
             else
             {
                 run->start_us = os_now_microseconds();
+                run->start_instructions = instruction_counter_read();
                 run->spawn = process_run_spawn(arena, run);
                 pending_count += 1;
 
@@ -19720,6 +19800,15 @@ ProcessResult entry_point(void)
                                    string8_printf_length(wait->timing_configuration, UINT64_MAX),
                                    wait->timing_configuration.pointer ? wait->timing_configuration.pointer : "", (unsigned long long)seconds_whole,
                                    (unsigned long long)seconds_fraction, (unsigned long long)elapsed_ns);
+                            u64 instructions = instruction_counter_read();
+                            if (instructions > wait->start_instructions)
+                            {
+                                printf("STEP_INSTRUCTIONS %.*s%.*s instructions=%llu\n", string8_printf_length(wait->timing_description, UINT64_MAX),
+                                       wait->timing_description.pointer ? wait->timing_description.pointer : "",
+                                       string8_printf_length(wait->timing_configuration, UINT64_MAX),
+                                       wait->timing_configuration.pointer ? wait->timing_configuration.pointer : "",
+                                       (unsigned long long)(instructions - wait->start_instructions));
+                            }
                         }
 
                         if (result == PROCESS_RESULT_SUCCESS && wait_result != PROCESS_RESULT_SUCCESS)

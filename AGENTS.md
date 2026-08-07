@@ -240,6 +240,20 @@ enabled.
   `BENCH_IO_FILE`/`BENCH_PARSE_FILE` lines per test file, slowest first. The
   mode prefix is part of every diagnostic line so phase and per-file timings
   cannot be confused between the filesystem and preloaded runs.
+- **`STEP_INSTRUCTIONS` lines** report instructions retired for every build step
+  that already reports wall time, printed straight after its `took ... seconds`
+  line. The one to watch is `Self-host stage 1`, which is compile throughput on
+  the complete unity translation unit: it is contention-immune and reproducible
+  to a few thousand instructions, where wall time on an idle 16-thread desktop
+  varies about 10% run to run. Compare it across commits — a change that only
+  *adds* source can regress it sharply through a latent quadratic, which is
+  invisible to test-time measurement. Linux-only: this needs hardware counters
+  and there is no cheap portable equivalent, so nothing is printed elsewhere or
+  when `perf_event_open` is unavailable, and its absence is never an error. One
+  counter covers the process tree, so a step's number is exact only while it is
+  the sole child running; that holds for the sequential self-host stages and
+  CMake generation, but concurrent matrix steps overlap and must not be read as
+  per-step totals.
 - **`ninja_log_summary <build-dir> [--limit N]`** and **`time_trace_summary
   <json-path>... [--limit N]`** (both new `build/build` commands, same
   shape as `cmake_profile_summary` — see `build.c`) are diagnostics for
