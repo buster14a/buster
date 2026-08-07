@@ -15,6 +15,68 @@
 #pragma GCC diagnostic pop
 #endif
 
+// The generated tables stay pointer-free so Buster itself can consume them:
+// the string pool is a switch over 422 flat chunks and the numeric blobs add a
+// base64 group decode on top of a 560-way switch, so every single byte costs a
+// call and a dispatch. Reading a form therefore re-walks that machinery for
+// each field, and finding a string's length re-walks it for each byte.
+//
+// Decode each table once into a flat cache and index it directly afterwards.
+// The caches live here rather than in the generated header, which keeps the
+// generated source exactly as pointer-free and initialization-free as before.
+// Filling is lazy so a translation unit that never touches x86 metadata pays
+// nothing, and each table is independent so touching one does not decode the
+// others.
+BUSTER_GLOBAL_LOCAL char8 buster_x86_metadata_pool_bytes[BUSTER_X86_GENERATED_STRING_POOL_SIZE];
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pool_decoded;
+
+BUSTER_GLOBAL_LOCAL char8 buster_x86_metadata_pool_byte(u64 logical)
+{
+    if (!buster_x86_metadata_pool_decoded)
+    {
+        for (u64 index = 0; index < BUSTER_X86_GENERATED_STRING_POOL_SIZE; index += 1)
+        {
+            buster_x86_metadata_pool_bytes[index] = buster_x86_generated_string_byte(index);
+        }
+        buster_x86_metadata_pool_decoded = true;
+    }
+    return logical < BUSTER_X86_GENERATED_STRING_POOL_SIZE ? buster_x86_metadata_pool_bytes[logical] : (char8)0;
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedForm buster_x86_metadata_form_records[BUSTER_X86_GENERATED_FORM_COUNT];
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_records_decoded;
+
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedForm buster_x86_metadata_form_record(u32 index)
+{
+    if (!buster_x86_metadata_form_records_decoded)
+    {
+        for (u32 form_index = 0; form_index < BUSTER_X86_GENERATED_FORM_COUNT; form_index += 1)
+        {
+            buster_x86_metadata_form_records[form_index] = buster_x86_generated_form_at(form_index);
+        }
+        buster_x86_metadata_form_records_decoded = true;
+    }
+    BusterX86GeneratedForm empty = {0};
+    return index < BUSTER_X86_GENERATED_FORM_COUNT ? buster_x86_metadata_form_records[index] : empty;
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedOperand buster_x86_metadata_operand_records[BUSTER_X86_GENERATED_OPERAND_COUNT];
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_operand_records_decoded;
+
+BUSTER_GLOBAL_LOCAL BusterX86GeneratedOperand buster_x86_metadata_operand_record(u32 index)
+{
+    if (!buster_x86_metadata_operand_records_decoded)
+    {
+        for (u32 operand_index = 0; operand_index < BUSTER_X86_GENERATED_OPERAND_COUNT; operand_index += 1)
+        {
+            buster_x86_metadata_operand_records[operand_index] = buster_x86_generated_operand_at(operand_index);
+        }
+        buster_x86_metadata_operand_records_decoded = true;
+    }
+    BusterX86GeneratedOperand empty = {0};
+    return index < BUSTER_X86_GENERATED_OPERAND_COUNT ? buster_x86_metadata_operand_records[index] : empty;
+}
+
 // These values cross the generated-table boundary through the public ABI.
 // Keep every direct cast/copy tied to a compile-time schema check so a
 // generator enum reorder fails here instead of changing runtime meaning.
@@ -232,7 +294,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_string_offset_terminated(u32 offset
     u32 result = 0;
     while (offset <= BUSTER_X86_GENERATED_STRING_POOL_SIZE - result)
     {
-        if (buster_x86_generated_string_byte((u64)offset + result) == 0)
+        if (buster_x86_metadata_pool_byte((u64)offset + result) == 0)
         {
             if (length)
             {
@@ -260,8 +322,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_string_equal_offsets(u32 first_offs
     }
     for (u32 index = 0; index < first_length; index += 1)
     {
-        if (buster_x86_generated_string_byte((u64)first_offset + index) !=
-            buster_x86_generated_string_byte((u64)second_offset + index))
+        if (buster_x86_metadata_pool_byte((u64)first_offset + index) !=
+            buster_x86_metadata_pool_byte((u64)second_offset + index))
         {
             return false;
         }
@@ -280,7 +342,7 @@ BUSTER_GLOBAL_LOCAL u64 buster_x86_metadata_hash_string(u32 offset, bool* valid)
     u8 bytes[BUSTER_X86_METADATA_HASH_STRING_CAPACITY] = {0};
     for (u32 index = 0; index < length; index += 1)
     {
-        bytes[index] = (u8)buster_x86_generated_string_byte((u64)offset + index);
+        bytes[index] = (u8)buster_x86_metadata_pool_byte((u64)offset + index);
     }
     static const u8 empty[] = {0};
     u8 const* pointer = length ? bytes : empty;
@@ -2981,7 +3043,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
             query_uses_egpr |= physical.memory.has_index && !physical.memory.vsib && physical.memory.index.index >= 16;
         }
     }
-    BusterX86GeneratedForm generated = buster_x86_generated_form_at(form.id);
+    BusterX86GeneratedForm generated = buster_x86_metadata_form_record(form.id);
     if (!buster_x86_metadata_form_coverage_allowed(generated, (BusterX86MetadataResolveQuery){
                                                         .include_privileged = query.include_privileged,
                                                         .include_not64 = query.include_not64,
@@ -3696,7 +3758,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataString buster_x86_metadata_apx_feature_stri
 {
     for (u32 form_id = 0; form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
     {
-        BusterX86GeneratedForm generated = buster_x86_generated_form_at(form_id);
+        BusterX86GeneratedForm generated = buster_x86_metadata_form_record(form_id);
         if (buster_x86_metadata_string_input_equal(generated.isa_set_offset, S8("APX_F")))
         {
             BusterX86MetadataString result = {0};
@@ -3839,7 +3901,7 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
         if (!buster_x86_metadata_candidate_at(candidates, position, &form_id)) continue;
         BusterX86MetadataForm form = {0};
         if (!buster_x86_metadata_form(form_id, &form)) continue;
-        BusterX86GeneratedForm generated = buster_x86_generated_form_at(form_id);
+        BusterX86GeneratedForm generated = buster_x86_metadata_form_record(form_id);
         BusterX86MetadataResolveQuery filter_query = {
             .include_privileged = query.include_privileged,
             .include_not64 = query.include_not64,
@@ -3959,7 +4021,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_mnemonic_matches(String8 
 BUSTER_GLOBAL_LOCAL BusterX86MetadataString buster_x86_metadata_emit_required_feature(
     BusterX86MetadataPhysicalQuery query, BusterX86MetadataForm form)
 {
-    BusterX86GeneratedForm generated = buster_x86_generated_form_at(form.id);
+    BusterX86GeneratedForm generated = buster_x86_metadata_form_record(form.id);
     BusterX86MetadataResolveQuery policy_query = {
         .execution_mode = query.execution_mode,
         .include_privileged = query.include_privileged,
@@ -4612,7 +4674,7 @@ BUSTER_GLOBAL_LOCAL int buster_x86_metadata_compare_pool_string(u32 offset, cons
     u32 index = 0;
     while (index < length)
     {
-        char8 left = buster_x86_generated_string_byte((u64)offset + index);
+        char8 left = buster_x86_metadata_pool_byte((u64)offset + index);
         if (!left)
         {
             return -1;
@@ -4623,7 +4685,7 @@ BUSTER_GLOBAL_LOCAL int buster_x86_metadata_compare_pool_string(u32 offset, cons
         }
         index += 1;
     }
-    return buster_x86_generated_string_byte((u64)offset + length) == 0 ? 0 : 1;
+    return buster_x86_metadata_pool_byte((u64)offset + length) == 0 ? 0 : 1;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_is_space(char8 character)
@@ -4642,8 +4704,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_lowercase_pool_strings_equal(u32 fi
     }
     for (u32 index = 0; index < first_length; index += 1)
     {
-        char8 first = buster_x86_generated_string_byte((u64)first_offset + index);
-        char8 second = buster_x86_generated_string_byte((u64)second_offset + index);
+        char8 first = buster_x86_metadata_pool_byte((u64)first_offset + index);
+        char8 second = buster_x86_metadata_pool_byte((u64)second_offset + index);
         if (first >= 'A' && first <= 'Z') first = (char8)(first - 'A' + 'a');
         if (second >= 'A' && second <= 'Z') second = (char8)(second - 'A' + 'a');
         if (first != second) return false;
@@ -4661,7 +4723,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_source_key_matches(const Buste
     char8 key[256] = {0};
     for (u32 index = 0; index < key_length; index += 1)
     {
-        key[index] = buster_x86_generated_string_byte((u64)key_offset + index);
+        key[index] = buster_x86_metadata_pool_byte((u64)key_offset + index);
     }
     u32 source_offsets[] = {form->disasm_intel_offset, form->disasm_attsv_offset, form->disasm_offset};
     bool had_source = false;
@@ -4674,13 +4736,13 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_source_key_matches(const Buste
         }
         u32 start = 0;
         while (start < source_length &&
-               buster_x86_metadata_is_space(buster_x86_generated_string_byte((u64)source_offsets[source_index] + start)))
+               buster_x86_metadata_is_space(buster_x86_metadata_pool_byte((u64)source_offsets[source_index] + start)))
         {
             start += 1;
         }
         u32 end = start;
         while (end < source_length &&
-               !buster_x86_metadata_is_space(buster_x86_generated_string_byte((u64)source_offsets[source_index] + end)))
+               !buster_x86_metadata_is_space(buster_x86_metadata_pool_byte((u64)source_offsets[source_index] + end)))
         {
             end += 1;
         }
@@ -4696,7 +4758,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_source_key_matches(const Buste
         bool equal = true;
         for (u32 index = 0; index < key_length; index += 1)
         {
-            char8 character = buster_x86_generated_string_byte((u64)source_offsets[source_index] + start + index);
+            char8 character = buster_x86_metadata_pool_byte((u64)source_offsets[source_index] + start + index);
             if (character >= 'A' && character <= 'Z')
             {
                 character = (char8)(character - 'A' + 'a');
@@ -4717,7 +4779,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_source_key_matches(const Buste
         }
         for (u32 index = 0; index < key_length; index += 1)
         {
-            char8 character = buster_x86_generated_string_byte((u64)form->iclass_offset + index);
+            char8 character = buster_x86_metadata_pool_byte((u64)form->iclass_offset + index);
             if (character >= 'A' && character <= 'Z')
             {
                 character = (char8)(character - 'A' + 'a');
@@ -4762,8 +4824,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validate_text_index(u32 kind, Buste
             int comparison = 0;
             for (u32 index = 0; index < count; index += 1)
             {
-                char8 left = buster_x86_generated_string_byte((u64)previous_key + index);
-                char8 right = buster_x86_generated_string_byte((u64)range.key_offset + index);
+                char8 left = buster_x86_metadata_pool_byte((u64)previous_key + index);
+                char8 right = buster_x86_metadata_pool_byte((u64)range.key_offset + index);
                 if (left != right)
                 {
                     comparison = left > right ? 1 : -1;
@@ -4788,7 +4850,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validate_text_index(u32 kind, Buste
             {
                 return buster_x86_metadata_validation_fail(result, BUSTER_X86_METADATA_VALIDATION_INDEX_CAPACITY, range_index, candidate_index);
             }
-            BusterX86GeneratedForm form = buster_x86_generated_form_at(id);
+            BusterX86GeneratedForm form = buster_x86_metadata_form_record(id);
             bool key_matches = kind == BUSTER_X86_METADATA_INDEX_MNEMONIC
                                    ? buster_x86_metadata_form_source_key_matches(&form, range.key_offset)
                                    : buster_x86_metadata_lowercase_pool_strings_equal(
@@ -4857,7 +4919,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validate_hash_index(u32 kind, Buste
             }
             if (kind == BUSTER_X86_METADATA_INDEX_FORM_HASH)
             {
-                BusterX86GeneratedForm form = buster_x86_generated_form_at(id);
+                BusterX86GeneratedForm form = buster_x86_metadata_form_record(id);
                 if (form.stable_hash != range.key)
                 {
                     return buster_x86_metadata_validation_fail(result, BUSTER_X86_METADATA_VALIDATION_INDEX_CAPACITY, range_index, id);
@@ -5031,7 +5093,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_matches_filter(BusterX86Genera
             (filter.operand_shape_count && form.operand_count != filter.operand_shape_count)) return false;
         for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
         {
-            BusterX86GeneratedOperand operand = buster_x86_generated_operand_at(form.operand_first + operand_index);
+            BusterX86GeneratedOperand operand = buster_x86_metadata_operand_record(form.operand_first + operand_index);
             visible_count += operand.visible != 0;
             if (filter.operand_shape_count)
             {
@@ -5058,12 +5120,12 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validate_table(BusterX86MetadataVal
     }
     for (u32 index = 0; index < BUSTER_X86_GENERATED_OPERAND_COUNT; index += 1)
     {
-        BusterX86GeneratedOperand operand = buster_x86_generated_operand_at(index);
+        BusterX86GeneratedOperand operand = buster_x86_metadata_operand_record(index);
         if (!buster_x86_metadata_validate_operand_record(&operand, index, result)) return false;
     }
     for (u32 index = 0; index < BUSTER_X86_GENERATED_FORM_COUNT; index += 1)
     {
-        BusterX86GeneratedForm form = buster_x86_generated_form_at(index);
+        BusterX86GeneratedForm form = buster_x86_metadata_form_record(index);
         if (!buster_x86_metadata_validate_form_record(&form, index, result)) return false;
     }
     for (u32 index = 0; index < BUSTER_X86_GENERATED_COVERAGE_COUNT; index += 1)
@@ -5075,7 +5137,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validate_table(BusterX86MetadataVal
             return buster_x86_metadata_validation_fail(result, BUSTER_X86_METADATA_VALIDATION_COVERAGE_FORM_ID, index,
                                                        coverage.normalized_form_id);
         }
-        BusterX86GeneratedForm form = buster_x86_generated_form_at(coverage.normalized_form_id);
+        BusterX86GeneratedForm form = buster_x86_metadata_form_record(coverage.normalized_form_id);
         if (coverage.source_hash != form.stable_hash || coverage.source_offset != form.source_offset)
         {
             return buster_x86_metadata_validation_fail(result, BUSTER_X86_METADATA_VALIDATION_COVERAGE_SOURCE, index,
@@ -5112,7 +5174,7 @@ u32 buster_x86_metadata_normalized_form_count(void)
     u32 count = 0;
     for (u32 index = 0; index < BUSTER_X86_GENERATED_FORM_COUNT; index += 1)
     {
-        count += buster_x86_generated_form_at(index).coverage_class == BUSTER_X86_GENERATED_COVERAGE_NORMALIZED;
+        count += buster_x86_metadata_form_record(index).coverage_class == BUSTER_X86_GENERATED_COVERAGE_NORMALIZED;
     }
     return count;
 }
@@ -5147,13 +5209,13 @@ bool buster_x86_metadata_string(u32 offset, BusterX86MetadataString* result)
 
 u8 buster_x86_metadata_string_byte(BusterX86MetadataString string, u32 index)
 {
-    return index < string.length ? (u8)buster_x86_generated_string_byte((u64)string.offset + index) : 0;
+    return index < string.length ? (u8)buster_x86_metadata_pool_byte((u64)string.offset + index) : 0;
 }
 
 bool buster_x86_metadata_form(u32 form_id, BusterX86MetadataForm* result)
 {
     if (!result || form_id >= BUSTER_X86_GENERATED_FORM_COUNT) return false;
-    BusterX86GeneratedForm form = buster_x86_generated_form_at(form_id);
+    BusterX86GeneratedForm form = buster_x86_metadata_form_record(form_id);
     if (!buster_x86_metadata_validate_form_record(&form, form_id, 0)) return false;
     buster_x86_metadata_copy_form(form, form_id, result);
     return true;
@@ -5168,13 +5230,13 @@ bool buster_x86_metadata_form_requires_dfv(u32 form_id)
 bool buster_x86_metadata_operand(u32 form_id, u32 operand_index, BusterX86MetadataOperand* result)
 {
     if (!result || form_id >= BUSTER_X86_GENERATED_FORM_COUNT) return false;
-    BusterX86GeneratedForm form = buster_x86_generated_form_at(form_id);
+    BusterX86GeneratedForm form = buster_x86_metadata_form_record(form_id);
     if (!buster_x86_metadata_validate_form_record(&form, form_id, 0) || operand_index >= form.operand_count ||
         form.operand_first > BUSTER_X86_GENERATED_OPERAND_COUNT || operand_index >= BUSTER_X86_GENERATED_OPERAND_COUNT - form.operand_first)
     {
         return false;
     }
-    BusterX86GeneratedOperand operand = buster_x86_generated_operand_at(form.operand_first + operand_index);
+    BusterX86GeneratedOperand operand = buster_x86_metadata_operand_record(form.operand_first + operand_index);
     if (!buster_x86_metadata_validate_operand_record(&operand, form.operand_first + operand_index, 0)) return false;
     u8 physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_NONE;
     u16 physical_width_flags = BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN;
@@ -5192,7 +5254,7 @@ bool buster_x86_metadata_coverage(u32 coverage_id, BusterX86MetadataCoverage* re
     if (!result || coverage_id >= BUSTER_X86_GENERATED_COVERAGE_COUNT) return false;
     BusterX86GeneratedCoverage coverage = buster_x86_generated_coverage_at(coverage_id);
     if (!buster_x86_metadata_validate_coverage_record(&coverage, coverage_id, 0) || coverage.normalized_form_id != coverage_id) return false;
-    BusterX86GeneratedForm form = buster_x86_generated_form_at(coverage.normalized_form_id);
+    BusterX86GeneratedForm form = buster_x86_metadata_form_record(coverage.normalized_form_id);
     if (!buster_x86_metadata_validate_form_record(&form, coverage.normalized_form_id, 0) || coverage.source_hash != form.stable_hash ||
         coverage.source_offset != form.source_offset || coverage.reason_id != form.reason_id || coverage.reason_offset != form.reason_offset ||
         coverage.coverage_class != form.coverage_class || coverage.encoder_family != form.encoder_family || coverage.test_class != form.test_class)
@@ -5377,7 +5439,7 @@ bool buster_x86_metadata_candidate_next(BusterX86MetadataCandidateIterator* iter
         u32 id = 0;
         u32 position = iterator->position++;
         if (!buster_x86_metadata_candidate_at(iterator->candidates, position, &id)) return false;
-        BusterX86GeneratedForm form = buster_x86_generated_form_at(id);
+        BusterX86GeneratedForm form = buster_x86_metadata_form_record(id);
         if (buster_x86_metadata_form_matches_filter(form, iterator->filter))
         {
             *form_id = id;
@@ -5415,7 +5477,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_string_input_equal(u32 offset, Stri
     if (!buster_x86_metadata_string_offset_terminated(offset, &length) || length != input.length) return false;
     for (u32 index = 0; index < length; index += 1)
     {
-        char8 left = buster_x86_generated_string_byte((u64)offset + index);
+        char8 left = buster_x86_metadata_pool_byte((u64)offset + index);
         char8 right = input.pointer[index];
         if (buster_x86_metadata_lowercase_character(left) != buster_x86_metadata_lowercase_character(right)) return false;
     }
@@ -5433,7 +5495,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pool_string_has_prefix(u32 offset, 
     if (!buster_x86_metadata_string_offset_terminated(offset, &length) || prefix.length > length) return false;
     for (u32 index = 0; index < prefix.length; index += 1)
     {
-        char8 left = buster_x86_generated_string_byte((u64)offset + index);
+        char8 left = buster_x86_metadata_pool_byte((u64)offset + index);
         char8 right = prefix.pointer[index];
         if (buster_x86_metadata_lowercase_character(left) != buster_x86_metadata_lowercase_character(right)) return false;
     }
@@ -5447,7 +5509,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pool_string_has_suffix(u32 offset, 
     u32 first = length - (u32)suffix.length;
     for (u32 index = 0; index < suffix.length; index += 1)
     {
-        char8 left = buster_x86_generated_string_byte((u64)offset + first + index);
+        char8 left = buster_x86_metadata_pool_byte((u64)offset + first + index);
         char8 right = suffix.pointer[index];
         if (buster_x86_metadata_lowercase_character(left) != buster_x86_metadata_lowercase_character(right)) return false;
     }
@@ -5463,7 +5525,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pool_string_contains(u32 offset, St
         bool equal = true;
         for (u32 index = 0; index < needle.length; index += 1)
         {
-            char8 left = buster_x86_generated_string_byte((u64)offset + first + index);
+            char8 left = buster_x86_metadata_pool_byte((u64)offset + first + index);
             char8 right = needle.pointer[index];
             if (buster_x86_metadata_lowercase_character(left) != buster_x86_metadata_lowercase_character(right))
             {
@@ -5777,7 +5839,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_atom_base_equal(u32 offset, String8
     {
         for (u32 index = 0; index < candidate_end; index += 1)
         {
-            if (buster_x86_generated_string_byte((u64)offset + index) == '_')
+            if (buster_x86_metadata_pool_byte((u64)offset + index) == '_')
             {
                 candidate_end = index;
                 break;
@@ -5796,8 +5858,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_atom_base_equal(u32 offset, String8
              kind == BUSTER_X86_METADATA_OPERAND_RELATIVE || kind == BUSTER_X86_METADATA_OPERAND_ABSOLUTE ||
              kind == BUSTER_X86_METADATA_OPERAND_BASE || kind == BUSTER_X86_METADATA_OPERAND_SEGMENT)
     {
-        while (candidate_end && buster_x86_generated_string_byte((u64)offset + candidate_end - 1) >= '0' &&
-               buster_x86_generated_string_byte((u64)offset + candidate_end - 1) <= '9')
+        while (candidate_end && buster_x86_metadata_pool_byte((u64)offset + candidate_end - 1) >= '0' &&
+               buster_x86_metadata_pool_byte((u64)offset + candidate_end - 1) <= '9')
         {
             candidate_end -= 1;
         }
@@ -5806,7 +5868,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_atom_base_equal(u32 offset, String8
     if (candidate_end != input_end) return false;
     for (u32 index = 0; index < candidate_end; index += 1)
     {
-        char8 left = buster_x86_generated_string_byte((u64)offset + index);
+        char8 left = buster_x86_metadata_pool_byte((u64)offset + index);
         char8 right = input.pointer[index];
         if (buster_x86_metadata_lowercase_character(left) != buster_x86_metadata_lowercase_character(right)) return false;
     }
@@ -6230,7 +6292,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_operand_signatures_match(Buste
     *has_memory = false;
     for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
     {
-        BusterX86GeneratedOperand operand = buster_x86_generated_operand_at(form.operand_first + operand_index);
+        BusterX86GeneratedOperand operand = buster_x86_metadata_operand_record(form.operand_first + operand_index);
         if (!buster_x86_metadata_validate_operand_record(&operand, form.operand_first + operand_index, 0)) return false;
         bool selected_operand = query.include_implicit || operand.visible;
         if (selected_operand && operand.kind == BUSTER_X86_GENERATED_OPERAND_MEMORY) *has_memory = true;
@@ -6410,7 +6472,7 @@ BusterX86MetadataResolveResult buster_x86_metadata_resolve(BusterX86MetadataReso
         }
         last_id = form_id;
         last_id_valid = true;
-        BusterX86GeneratedForm form = buster_x86_generated_form_at(form_id);
+        BusterX86GeneratedForm form = buster_x86_metadata_form_record(form_id);
         if (!buster_x86_metadata_validate_form_record(&form, form_id, 0))
         {
             metadata_invalid = true;
@@ -6540,7 +6602,7 @@ bool buster_x86_metadata_validate_patch(BusterX86MetadataValidationPatch patch, 
         {
             return buster_x86_metadata_validation_fail(result, BUSTER_X86_METADATA_VALIDATION_COUNT, patch.index, 0);
         }
-        BusterX86GeneratedForm form = buster_x86_generated_form_at(patch.index);
+        BusterX86GeneratedForm form = buster_x86_metadata_form_record(patch.index);
         switch (patch.kind)
         {
             case BUSTER_X86_METADATA_PATCH_FORM_SOURCE_OFFSET: form.source_offset = (u32)patch.value; break;
@@ -6581,7 +6643,7 @@ bool buster_x86_metadata_validate_patch(BusterX86MetadataValidationPatch patch, 
         {
             return buster_x86_metadata_validation_fail(result, BUSTER_X86_METADATA_VALIDATION_COUNT, patch.index, 0);
         }
-        BusterX86GeneratedOperand operand = buster_x86_generated_operand_at(patch.index);
+        BusterX86GeneratedOperand operand = buster_x86_metadata_operand_record(patch.index);
         if (patch.kind == BUSTER_X86_METADATA_PATCH_OPERAND_RESERVED)
         {
             operand.reserved[0] = (u8)patch.value;
@@ -6625,7 +6687,7 @@ bool buster_x86_metadata_validate_patch(BusterX86MetadataValidationPatch patch, 
         return buster_x86_metadata_validation_fail(result, BUSTER_X86_METADATA_VALIDATION_COVERAGE_FORM_ID, patch.index,
                                                    coverage.normalized_form_id);
     }
-    BusterX86GeneratedForm form = buster_x86_generated_form_at(coverage.normalized_form_id);
+    BusterX86GeneratedForm form = buster_x86_metadata_form_record(coverage.normalized_form_id);
     if (coverage.source_hash != form.stable_hash || coverage.source_offset != form.source_offset)
     {
         return buster_x86_metadata_validation_fail(result, BUSTER_X86_METADATA_VALIDATION_COVERAGE_SOURCE, patch.index,
