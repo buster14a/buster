@@ -14015,6 +14015,7 @@ struct CIrPointerTypeCache
     u8* contains_pointer;
     u32 capacity;
     u32 contains_pointer_count;
+    u32 zero_reference_limit;
 };
 
 BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_pointer_type(IrProgram* program, CIrPointerTypeCache* cache, IrTypeId element)
@@ -15276,15 +15277,23 @@ BUSTER_GLOBAL_LOCAL bool c_ir_type_contains_pointer(CIntegerIrBuilder* builder, 
     u32 count = types->count < cache->capacity ? types->count : cache->capacity;
     if (cache->contains_pointer_count < count)
     {
-        for (u32 type_index = cache->contains_pointer_count; type_index < count; type_index += 1)
+        u32 resolved = cache->contains_pointer_count;
+        for (u32 type_index = resolved; type_index < count; type_index += 1)
         {
             cache->contains_pointer[type_index] = 0;
         }
+        /* The resolved prefix is already a fixed point, and an IR type never gains or changes
+           references after it is added, so a resolved zero entry can only flip once a type it
+           already references becomes one. Every such flip must originate in the newly added
+           range, and only an entry reaching into that range can observe it. Scanning the new
+           range alone is therefore exact whenever no resolved zero entry references an index at
+           or above the resolved boundary, which zero_reference_limit records. */
+        u32 start = cache->zero_reference_limit > resolved ? 0 : resolved;
         bool changed = true;
         while (changed)
         {
             changed = false;
-            for (u32 type_index = 0; type_index < count; type_index += 1)
+            for (u32 type_index = start; type_index < count; type_index += 1)
             {
                 if (cache->contains_pointer[type_index])
                 {
@@ -15292,30 +15301,40 @@ BUSTER_GLOBAL_LOCAL bool c_ir_type_contains_pointer(CIntegerIrBuilder* builder, 
                 }
                 IrType* type = types->types + type_index;
                 bool contains = type->kind == IR_TYPE_POINTER;
+                u32 reference_limit = 0;
                 if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_SLICE || type->kind == IR_TYPE_RANGE)
                 {
                     contains = type->element_type.value < count && cache->contains_pointer[type->element_type.value];
+                    reference_limit = type->element_type.value < cache->capacity ? type->element_type.value + 1 : 0;
                 }
                 else if (type->kind == IR_TYPE_FUNCTION)
                 {
                     contains = type->return_type.value < count && cache->contains_pointer[type->return_type.value];
+                    reference_limit = type->return_type.value < cache->capacity ? type->return_type.value + 1 : 0;
                     for (u32 parameter_index = 0; parameter_index < type->parameter_count; parameter_index += 1)
                     {
-                        contains |= type->parameter_types[parameter_index].value < count &&
-                                    cache->contains_pointer[type->parameter_types[parameter_index].value];
+                        u32 parameter = type->parameter_types[parameter_index].value;
+                        contains |= parameter < count && cache->contains_pointer[parameter];
+                        reference_limit = parameter < cache->capacity && parameter + 1 > reference_limit ? parameter + 1 : reference_limit;
                     }
                 }
                 else if (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
                 {
                     for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
                     {
-                        contains |= type->fields[field_index].type.value < count && cache->contains_pointer[type->fields[field_index].type.value];
+                        u32 field = type->fields[field_index].type.value;
+                        contains |= field < count && cache->contains_pointer[field];
+                        reference_limit = field < cache->capacity && field + 1 > reference_limit ? field + 1 : reference_limit;
                     }
                 }
                 if (contains)
                 {
                     cache->contains_pointer[type_index] = 1;
                     changed = true;
+                }
+                else if (reference_limit > cache->zero_reference_limit)
+                {
+                    cache->zero_reference_limit = reference_limit;
                 }
             }
         }
