@@ -60,7 +60,7 @@ BUSTER_GLOBAL_LOCAL BusterX86GeneratedHashRange buster_x86_metadata_coverage_has
 BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_coverage_hash_candidates[BUSTER_X86_GENERATED_COVERAGE_HASH_CANDIDATE_COUNT];
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_tables_decoded;
 
-BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables(void)
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
 {
     if (buster_x86_metadata_tables_decoded)
     {
@@ -138,6 +138,18 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables(void)
     {
         buster_x86_metadata_coverage_records_valid[index] =
             buster_x86_metadata_validate_coverage_record(&buster_x86_metadata_coverage_records[index], index, 0);
+    }
+}
+
+// Every accessor below self-initializes, and the string accessors run one call
+// per byte, so the already-decoded test is on the hot path of the whole
+// metadata module while the decode itself happens once. Keep the test inline
+// and leave only the first call paying for an out-of-line frame.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE void buster_x86_metadata_decode_tables(void)
+{
+    if (!buster_x86_metadata_tables_decoded)
+    {
+        buster_x86_metadata_decode_tables_once();
     }
 }
 

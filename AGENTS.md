@@ -355,6 +355,57 @@ enabled.
 
 ## Latest performance audit notes
 
+`2026-08-08` (Linux x86_64, sanitized Debug clang, `perf record -F 999
+--call-graph fp`, `25650` samples, instruction counts from `perf stat -e
+instructions`). Supersedes the shares in the `2026-08-07` entry below, whose
+mechanism was fixed by `23a574e`: `CToken` no longer crosses the spelling
+predicates by value, and ASan memcpy shadow scanning is `8.8%` of the run
+rather than half of `c_frontend_tests`.
+
+- **A lazily-decoded table's guard cost 20% of the whole test suite.**
+  `buster_x86_metadata_decode_tables` decodes once behind
+  `buster_x86_metadata_tables_decoded`, but every accessor called it
+  out-of-line, including the per-byte string accessors, so the decode was free
+  and the already-decoded test was not. Splitting it into a `BUSTER_INLINE`
+  test plus a cold `buster_x86_metadata_decode_tables_once` body moved the run
+  from `678.81 G` to `537.66 G` instructions (`-20.8%`) and `32.93 s` to
+  `25.80 s`; `x86_64_metadata_tests` `14.90 s` to `8.25 s` (`-45%`) and
+  `assembly_tests` `1.10 s` to `0.66 s` (`-40%`). Self-hosting stays at the
+  byte-identical fixed point. Look for this shape wherever a self-initializing
+  accessor is called per byte or per record.
+- Module shares after that change: `c_frontend_tests` `61.6%` (`15.79 s`),
+  `x86_64_metadata_tests` `31.8%` (`8.25 s`), `assembly_tests` `2.6%`. Before
+  it the two were effectively tied (`15.79 s` against `14.90 s`), so
+  "`c_frontend_tests` is the largest cost" became true only once the metadata
+  module was fixed.
+- **The sanitized tree runs UBSan as well as ASan, so each instrumented
+  struct-field access costs roughly 20 instructions** — an inline
+  `__ubsan_handle_type_mismatch_v1` null/alignment test plus an ASan shadow
+  test. `c_token_is_punctuator` is 94 instructions and `string_equal` is 274.
+  The consequence is counter-intuitive and was measured three times: **splitting
+  an aggregate into separate field accesses is slower than passing it by
+  value**, because the by-value copy is one instrumented `memcpy` while each
+  field read pays the full pair of checks. Against a `678.81 G` baseline, a
+  length/first-byte fast path in `c_token_spelling_equal` measured `695.19 G`,
+  the same path with `BUSTER_INLINE` on both predicates `701.03 G`, and routing
+  the comparison through a scalar-argument helper `577.96 G` against the
+  `537.66 G` state it was applied to. All three were reverted. Do not retry a
+  local rewrite of these predicates; only removing the comparison entirely wins.
+- The remaining `c_frontend_tests` cost is concentrated in one predicate:
+  `c_token_is_punctuator` reaching `string_equal` is `14.1%` of the whole run,
+  `~19%` counting its own frame and `string_equal`'s ASan fake stack. It is
+  queried from `999` call sites over a closed set of 31 punctuators. The fix
+  that works is a `CPunctuator` id on the token, reducing the test to one
+  scalar compare: the id fits without growing `CToken` past 48 bytes by
+  narrowing `pack_alignment` to `u16`, and `c_punctuator_length` already
+  matches the punctuator the id would name. Token pasting also constructs
+  punctuator tokens, so any such change needs the self-host fixed point to
+  verify it.
+- Self-host stage ratio, for the canonical codegen path that runs no register
+  allocation: stage 1 `3.45 s` / `29.50 G` instructions, stage 2 `37.96 s` /
+  `442.85 G`. That is `11.0x` by wall time but `15.0x` by instructions retired;
+  quote the instruction ratio, since wall time on this host varies ~10%.
+
 `2026-08-07` (Linux x86_64, sanitized Debug clang, `perf record -F 999
 --call-graph fp` on a quiet host, `65466` samples). This is the CI critical
 path; `ide test` totals `~65 s` here:
