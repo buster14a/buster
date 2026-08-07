@@ -991,6 +991,7 @@ set(CLANG_GNU_FAMILY_OPTIONAL_WARNING_CANDIDATES
     -Whigher-precision-for-complex-division
     -Wimplicit-void-ptr-cast
     -Wshift-bool
+    -Wthread-safety
     -Wunique-object-duplication
 )
 

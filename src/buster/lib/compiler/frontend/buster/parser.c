@@ -200,25 +200,29 @@ BUSTER_GLOBAL_LOCAL u64 tokenizer_utf8_sequence_length(const char8* restrict it,
 }
 
 BUSTER_GLOBAL_LOCAL void tokenizer_emit_token(Arena* arena, TokenizerResult* restrict result, Token** restrict token_start, u64* restrict token_count,
-                                              TokenId id, u64 length)
+                                              TokenId id, u64 length, bool overflow)
 {
+    bool first_chunk = true;
     do
     {
+        TokenId emitted_id = overflow && !first_chunk ? TOKEN_ERROR : id;
+
         u32 chunk_length = (u32)BUSTER_MIN(length, (u64)TOKEN_MAX_LENGTH);
         Token* token = arena_allocate(arena, Token, 1);
         if (!*token_start)
         {
             *token_start = token;
         }
-        *token = (Token){.id = id};
+        *token = (Token){.id = emitted_id};
         token_length_set(token, chunk_length);
         *token_count += 1;
         length -= chunk_length;
 
-        if (id == TOKEN_ERROR)
+        if (emitted_id == TOKEN_ERROR)
         {
             result->error_count += 1;
         }
+        first_chunk = false;
     } while (length);
 }
 
@@ -230,7 +234,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
 
     if (file_length > UINT32_MAX)
     {
-        tokenizer_emit_token(arena, &result, &token_start, &token_count, TOKEN_EOF, 0);
+        tokenizer_emit_token(arena, &result, &token_start, &token_count, TOKEN_EOF, 0, false);
         result.tokens = token_start;
         result.token_count = 1;
         result.error_count = 1;
@@ -800,29 +804,16 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
 
         const char8* restrict end = it;
         u64 length = (u64)(end - start);
-        tokenizer_emit_token(arena, &result, &token_start, &token_count, id, length);
+        tokenizer_emit_token(arena, &result, &token_start, &token_count, id, length, length > TOKEN_MAX_LENGTH);
     }
 
-    tokenizer_emit_token(arena, &result, &token_start, &token_count, TOKEN_EOF, 0);
+    tokenizer_emit_token(arena, &result, &token_start, &token_count, TOKEN_EOF, 0, false);
 
     result.tokens = token_start;
 
     BUSTER_CHECK(token_count <= UINT32_MAX);
     result.token_count = (u32)token_count;
     return result;
-}
-
-String8 get_token_content(const char8* source, Token* restrict tokens, u32 lexer_token_index)
-{
-    u64 offset = 0;
-    for (u32 i = 0; i < lexer_token_index; i += 1)
-    {
-        offset += token_length_get(&tokens[i]);
-    }
-    return (String8){
-        .pointer = (char8*)source + offset,
-        .length = token_length_get(&tokens[lexer_token_index]),
-    };
 }
 
 typedef enum ParserStateId
@@ -7242,7 +7233,7 @@ BUSTER_GLOBAL_LOCAL bool parser_bench_load_source(Arena* arena, ParserBenchSourc
     *source = (ParserBenchSource){0};
     source->mapped_file = file_map_read(arena, path, (FileReadOptions){0});
     source->source = BYTE_SLICE_TO_STRING(8, source->mapped_file.bytes);
-    source->loaded = source->source.pointer != 0 && source->source.length != 0;
+    source->loaded = source->source.pointer != 0;
     return source->loaded;
 }
 

@@ -9485,9 +9485,25 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 }
             }
         }
+        if (function->instruction_count > UINT32_MAX / 2)
+        {
+            result.error = CODEGEN_ERROR_CAPACITY;
+            return result;
+        }
+        u32 branch_patch_capacity = function->instruction_count * 2;
         u32* block_offsets = arena_allocate(arena, u32, function->block_count);
-        CCanonicalBranchPatch* branch_patches = arena_allocate(arena, CCanonicalBranchPatch, function->instruction_count * 2);
+        CCanonicalBranchPatch* branch_patches = arena_allocate(arena, CCanonicalBranchPatch, branch_patch_capacity);
         u32 branch_patch_count = 0;
+#define C_BRANCH_PATCH_PUSH(...)                                                                                                                               \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        if (branch_patch_count >= branch_patch_capacity)                                                                                                       \
+        {                                                                                                                                                      \
+            result.error = CODEGEN_ERROR_CAPACITY;                                                                                                             \
+            return result;                                                                                                                                     \
+        }                                                                                                                                                      \
+        branch_patches[branch_patch_count++] = (__VA_ARGS__);                                                                                                  \
+    } while (0)
         bool x64_upper_vector_dirty = false;
         IrValueId x64_last_wide_vector_result = IR_VALUE_ID_INVALID;
         u32 x64_last_wide_vector_size = 0;
@@ -12183,21 +12199,21 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         codegen_emit_u8(&buffer, 0x48);
                         codegen_emit_u8(&buffer, 0x8d);
                         codegen_emit_u8(&buffer, 0x05);
-                        branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                        C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                             .target = instruction->targets[0],
                             .offset = (u32)buffer.count,
                             .label_address = true,
-                        };
+                        });
                         codegen_emit_u32(&buffer, 0);
                         C_X64_STORE_RESULT();
                     }
                     else if (instruction->opcode == IR_OPCODE_BRANCH)
                     {
                         codegen_emit_u8(&buffer, 0xe9);
-                        branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                        C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                             .target = instruction->targets[0],
                             .offset = (u32)buffer.count,
-                        };
+                        });
                         codegen_emit_u32(&buffer, 0);
                     }
                     else if (instruction->opcode == IR_OPCODE_BRANCH_IF)
@@ -12208,16 +12224,16 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         codegen_emit_u8(&buffer, 0xc0);
                         codegen_emit_u8(&buffer, 0x0f);
                         codegen_emit_u8(&buffer, 0x85);
-                        branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                        C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                             .target = instruction->targets[0],
                             .offset = (u32)buffer.count,
-                        };
+                        });
                         codegen_emit_u32(&buffer, 0);
                         codegen_emit_u8(&buffer, 0xe9);
-                        branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                        C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                             .target = instruction->targets[1],
                             .offset = (u32)buffer.count,
-                        };
+                        });
                         codegen_emit_u32(&buffer, 0);
                     }
                     else if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH)
@@ -12244,18 +12260,18 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             codegen_emit_u8(&buffer, 0xc8);
                             codegen_emit_u8(&buffer, 0x0f);
                             codegen_emit_u8(&buffer, 0x84);
-                            branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                            C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                                 .target = instruction->targets[case_index],
                                 .offset = (u32)buffer.count,
                                 .conditional = true,
-                            };
+                            });
                             codegen_emit_u32(&buffer, 0);
                         }
                         codegen_emit_u8(&buffer, 0xe9);
-                        branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                        C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                             .target = instruction->targets[instruction->target_count - 1],
                             .offset = (u32)buffer.count,
-                        };
+                        });
                         codegen_emit_u32(&buffer, 0);
                     }
                     else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY)
@@ -12602,19 +12618,19 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         if (jump_label)
                         {
                             codegen_emit_u8(&buffer, 0xe9);
-                            branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                            C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                                 .target = instruction->targets[jump_target_index],
                                 .offset = (u32)buffer.count,
-                            };
+                            });
                             codegen_emit_u32(&buffer, 0);
                         }
                         else if (instruction->target_count)
                         {
                             codegen_emit_u8(&buffer, 0xe9);
-                            branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                            C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                                 .target = instruction->targets[0],
                                 .offset = (u32)buffer.count,
-                            };
+                            });
                             codegen_emit_u32(&buffer, 0);
                         }
                     }
@@ -14509,12 +14525,12 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             result.error = CODEGEN_ERROR_INVALID_IR;
                             return result;
                         }
-                        branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                        C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                             .target = instruction->targets[0],
                             .offset = (u32)buffer.count,
                             .aarch64 = true,
                             .label_address = true,
-                        };
+                        });
                         branch_patches[branch_patch_count - 1].secondary_offset = (u32)buffer.count + 4;
                         // Materialize the byte delta from this ADR to the
                         // target block.  Unlike ADRP, this remains correct
@@ -14531,11 +14547,11 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     }
                     else if (instruction->opcode == IR_OPCODE_BRANCH)
                     {
-                        branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                        C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                             .target = instruction->targets[0],
                             .offset = (u32)buffer.count,
                             .aarch64 = true,
-                        };
+                        });
                         codegen_emit_u32(&buffer, 0x14000000);
                     }
                     else if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH)
@@ -14553,17 +14569,17 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         C_A64_LOAD(9, instruction->operands[0]);
                         codegen_emit_u32(&buffer, 0xf100013f);
                         codegen_emit_u32(&buffer, 0x54000040);
-                        branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                        C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                             .target = instruction->targets[0],
                             .offset = (u32)buffer.count,
                             .aarch64 = true,
-                        };
+                        });
                         codegen_emit_u32(&buffer, 0x14000000);
-                        branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                        C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                             .target = instruction->targets[1],
                             .offset = (u32)buffer.count,
                             .aarch64 = true,
-                        };
+                        });
                         codegen_emit_u32(&buffer, 0x14000000);
                     }
                     else if (instruction->opcode == IR_OPCODE_SWITCH)
@@ -14578,18 +14594,18 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             codegen_emit_u32(&buffer, 0xf2e0000a | ((u32)((immediate >> 48) & 0xffff) << 5));
                             codegen_emit_u32(&buffer, 0xeb0a013f);
                             codegen_emit_u32(&buffer, 0x54000041);
-                            branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                            C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                                 .target = instruction->targets[case_index],
                                 .offset = (u32)buffer.count,
                                 .aarch64 = true,
-                            };
+                            });
                             codegen_emit_u32(&buffer, 0x14000000);
                         }
-                        branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                        C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                             .target = instruction->targets[instruction->target_count - 1],
                             .offset = (u32)buffer.count,
                             .aarch64 = true,
-                        };
+                        });
                         codegen_emit_u32(&buffer, 0x14000000);
                     }
                     else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY)
@@ -14781,20 +14797,20 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         }
                         if (jump_label)
                         {
-                            branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                            C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                                 .target = instruction->targets[jump_target_index],
                                 .offset = (u32)buffer.count,
                                 .aarch64 = true,
-                            };
+                            });
                             codegen_emit_u32(&buffer, 0x14000000);
                         }
                         else if (instruction->target_count)
                         {
-                            branch_patches[branch_patch_count++] = (CCanonicalBranchPatch){
+                            C_BRANCH_PATCH_PUSH((CCanonicalBranchPatch){
                                 .target = instruction->targets[0],
                                 .offset = (u32)buffer.count,
                                 .aarch64 = true,
-                            };
+                            });
                             codegen_emit_u32(&buffer, 0x14000000);
                         }
                     }
@@ -14932,6 +14948,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     }
 #undef C_A64_STORE
 #undef C_A64_LOAD
+#undef C_BRANCH_PATCH_PUSH
                 }
                 if (buffer.error != CODEGEN_ERROR_NONE)
                 {

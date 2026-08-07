@@ -402,6 +402,8 @@ UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
+    Arena* expression_arena = arena_create((ArenaCreation){0});
+    BUSTER_CHECK(expression_arena);
     u64 position = arena->position;
 
     {
@@ -417,6 +419,45 @@ UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, tokenizer.error_count == 1);
         BUSTER_TEST(arguments, tokenizer.token_count == 1);
         BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_EOF);
+        arena->position = position;
+    }
+
+    // Regression: a single lexeme longer than the 24-bit token length limit
+    // must be reported as an error instead of being silently split into
+    // multiple normal tokens.
+    {
+        u64 source_length = (u64)TOKEN_MAX_LENGTH + 1;
+        char8* source = arena_allocate(arena, char8, source_length);
+        memset(source, 'a', source_length);
+        TokenizerResult tokenizer = tokenize(arena, source, source_length);
+        BUSTER_TEST(arguments, tokenizer.error_count == 1);
+        BUSTER_TEST(arguments, tokenizer.token_count == 3);
+        BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_IDENTIFIER);
+        BUSTER_TEST(arguments, token_length_get(&tokenizer.tokens[0]) == TOKEN_MAX_LENGTH);
+        BUSTER_TEST(arguments, tokenizer.tokens[1].id == TOKEN_ERROR);
+        BUSTER_TEST(arguments, token_length_get(&tokenizer.tokens[1]) == 1);
+        BUSTER_TEST(arguments, tokenizer.tokens[2].id == TOKEN_EOF);
+        arena->position = position;
+    }
+
+    // A string literal over the token length limit keeps its original kind
+    // for the representable prefix and reports the overflow remainder as an
+    // error token.
+    {
+        u64 string_length = (u64)TOKEN_MAX_LENGTH + 2;
+        char8* source = arena_allocate(arena, char8, string_length);
+        source[0] = '"';
+        memset(source + 1, 'a', string_length - 2);
+        source[string_length - 1] = '"';
+        TokenizerResult tokenizer = tokenize(arena, source, string_length);
+        ParserResult parsed = parser_parse(arena, expression_arena, (String8){source, string_length}, tokenizer);
+        BUSTER_TEST(arguments, tokenizer.error_count == 1);
+        BUSTER_TEST(arguments, tokenizer.token_count == 3);
+        BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_STRING_LITERAL);
+        BUSTER_TEST(arguments, token_length_get(&tokenizer.tokens[0]) == TOKEN_MAX_LENGTH);
+        BUSTER_TEST(arguments, tokenizer.tokens[1].id == TOKEN_ERROR);
+        BUSTER_TEST(arguments, tokenizer.tokens[2].id == TOKEN_EOF);
+        BUSTER_TEST(arguments, parsed.diagnostic_count >= 1);
         arena->position = position;
     }
 
@@ -702,6 +743,23 @@ UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, all_byte_pairs_pass);
     }
 
+    // Regression: an empty source must parse as a valid empty program rather
+    // than being treated as a load failure by the bench corpus path.
+    {
+        String8 source = {0};
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, tokenizer.token_count == 1);
+        BUSTER_TEST(arguments, tokenizer.tokens[0].id == TOKEN_EOF);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parsed.code_count == 0);
+        BUSTER_TEST(arguments, parsed.type_declaration_count == 0);
+        BUSTER_TEST(arguments, parsed.import_count == 0);
+        arena->position = position;
+    }
+
+    bool expression_arena_destroyed = arena_destroy(expression_arena, 1);
+    BUSTER_CHECK(expression_arena_destroyed);
     return result;
 }
 

@@ -99,11 +99,9 @@ typedef u8 TokenId;
 typedef struct Token Token;
 struct Token
 {
-    u8 length_bytes[3];
+    u32 length : 24;
     TokenId id;
 };
-
-BUSTER_CT_CHECK(sizeof(Token) == sizeof(u32));
 
 enum
 {
@@ -112,16 +110,14 @@ enum
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE u32 token_length_get(Token* restrict token)
 {
-    u32 result = ((u32)token->length_bytes[0] << 0) | ((u32)token->length_bytes[1] << 8) | ((u32)token->length_bytes[2] << 16);
+    u32 result = token->length;
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE void token_length_set(Token* restrict token, u32 length)
 {
     BUSTER_CHECK(length <= TOKEN_MAX_LENGTH);
-    token->length_bytes[0] = (u8)(length >> 0);
-    token->length_bytes[1] = (u8)(length >> 8);
-    token->length_bytes[2] = (u8)(length >> 16);
+    token->length = length & TOKEN_MAX_LENGTH;
 }
 
 typedef struct TokenizerResult TokenizerResult;
@@ -765,7 +761,6 @@ struct LineAndColumn
 
 BUSTER_F_DECL TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length);
 BUSTER_F_DECL ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 source, TokenizerResult tokenizer);
-BUSTER_F_DECL String8 get_token_content(const char8* source, Token* restrict tokens, u32 lexer_token_index);
 
 #if BUSTER_INSTRUMENT
 typedef struct ParserBenchFileResult ParserBenchFileResult;

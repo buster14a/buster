@@ -207,7 +207,7 @@ BUSTER_COLD bool is_debugger_present(void)
         BOOL os_result = IsDebuggerPresent();
         program_state->_is_debugger_present = os_result != 0;
 #else
-        BUSTER_TODO();
+#error is_debugger_present requires a supported platform
 #endif
     }
 
