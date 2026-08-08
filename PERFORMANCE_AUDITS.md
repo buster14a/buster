@@ -87,9 +87,14 @@ recorded as ranked structural proposals below.
   L1, intern into a flat open-addressing table, store the u32 id in the
   token. Macro lookup becomes an id-indexed array load; keyword and builtin
   tests become integer range compares (intern keywords and builtin names
-  first, in enum order); scope lookups key on u32. Until it lands, a one-byte
-  `spelling.pointer[0] == '_'` prefilter in front of the builtin ladder is
-  the cheap stopgap.
+  first, in enum order); scope lookups key on u32. The obvious stopgap —
+  a one-byte `spelling.pointer[0] == '_'` prefilter in front of the builtin
+  ladder — was tried on the merged tree and **measured negative** (stage 1
+  `5.1378 G` to `5.1436 G`, `+5.8 M`): `string_equal` already
+  short-circuits on length, so the ladder costs ~25 register compares for
+  an ordinary identifier while the gate adds a dependent byte load per
+  identifier token. Do not retry the prefilter; only the id-compare
+  restructuring pays here.
 - **Proposal 3 — shrink `CToken` 48 B to 16** (u32 source offset replacing
   the `spelling` pointer, u32 length, u8 kind, u16 punctuator, plus the
   proposal-2 symbol id): the lexer allocates `48 B x (source bytes + 1)` of
