@@ -1233,8 +1233,18 @@ BUSTER_GLOBAL_LOCAL CToken c_macro_builtin_token(Arena* arena, CMacro* first, u8
 {
     if (builtin == C_MACRO_BUILTIN_LINE)
     {
+        char8* digits = arena_allocate(arena, char8, 11);
+        u32 value = first->builtin_line;
+        u32 length = 0;
+        do
+        {
+            digits[9 - length] = (char8)('0' + value % 10);
+            value /= 10;
+            length += 1;
+        } while (value);
+        digits[10] = 0;
         return (CToken){
-            .spelling = string_format(arena, S8("{u32}"), first->builtin_line),
+            .spelling = {.pointer = digits + 10 - length, .length = length},
             .location = location,
             .kind = C_TOKEN_PREPROCESSING_NUMBER,
         };
