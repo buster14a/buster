@@ -7821,33 +7821,33 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, asm_goto_count == 1);
                 if (label_address && label_address->result.value < labels_function->value_count)
                 {
-                    IrValue* label_value = labels_function->values + label_address->result.value;
-                    BUSTER_TEST(arguments, label_value->is_label_value);
-                    BUSTER_TEST(arguments, ir_label_provenance_valid(label_value) && label_value->label_block_count == 1 &&
+                    IrValueLabelMetadata* label_value = ir_value_label_metadata_find(labels_function, label_address->result);
+                    BUSTER_TEST(arguments, label_value && label_value->is_label_value);
+                    BUSTER_TEST(arguments, label_value && ir_label_provenance_valid(label_value) && label_value->label_block_count == 1 &&
                                              label_address->target_count == 1 && label_value->label_blocks[0].value == label_address->targets[0].value);
                 }
                 if (indirect_branch && indirect_branch->operand_count == 1 && indirect_branch->target_count >= 1 &&
                     indirect_branch->operands[0].value < labels_function->value_count)
                 {
-                    IrValue* target_value = labels_function->values + indirect_branch->operands[0].value;
-                    BUSTER_TEST(arguments, target_value->is_label_value);
-                    bool target_in_successors = ir_label_provenance_valid(target_value) &&
-                                                indirect_branch->target_count == target_value->label_block_count;
-                    for (u32 label_index = 0; target_in_successors && label_index < target_value->label_block_count; label_index += 1)
+                    IrValueLabelMetadata target_value = ir_value_label_metadata(labels_function, indirect_branch->operands[0]);
+                    BUSTER_TEST(arguments, target_value.is_label_value);
+                    bool target_in_successors = ir_label_provenance_valid(&target_value) &&
+                                                indirect_branch->target_count == target_value.label_block_count;
+                    for (u32 label_index = 0; target_in_successors && label_index < target_value.label_block_count; label_index += 1)
                     {
                         bool found = false;
                         for (u32 target_index = 0; target_index < indirect_branch->target_count; target_index += 1)
                         {
-                            found |= indirect_branch->targets[target_index].value == target_value->label_blocks[label_index].value;
+                            found |= indirect_branch->targets[target_index].value == target_value.label_blocks[label_index].value;
                         }
                         target_in_successors &= found;
                     }
                     for (u32 target_index = 0; target_in_successors && target_index < indirect_branch->target_count; target_index += 1)
                     {
                         bool found = false;
-                        for (u32 label_index = 0; label_index < target_value->label_block_count; label_index += 1)
+                        for (u32 label_index = 0; label_index < target_value.label_block_count; label_index += 1)
                         {
-                            found |= indirect_branch->targets[target_index].value == target_value->label_blocks[label_index].value;
+                            found |= indirect_branch->targets[target_index].value == target_value.label_blocks[label_index].value;
                         }
                         target_in_successors &= found;
                     }
@@ -7916,7 +7916,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                         BUSTER_TEST(arguments, invalid_type.error != IR_VALIDATION_NONE);
                         label_address->canonical_type = saved_type;
                     }
-                    IrValue* label_value = label_address->result.value < labels_function->value_count ? labels_function->values + label_address->result.value : 0;
+                    IrValueLabelMetadata* label_value =
+                        label_address->result.value < labels_function->value_count ? ir_value_label_metadata_find(labels_function, label_address->result) : 0;
                     if (label_value && label_value->label_block_count == 1 && label_value->label_blocks && labels_function->block_count > 1)
                     {
                         IrBlockId alternate = IR_BLOCK_ID_INVALID;
@@ -8043,9 +8044,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                         indirect_count += 1;
                         if (instruction->operand_count == 1 && instruction->operands[0].value < function->value_count)
                         {
-                            IrValue* target = function->values + instruction->operands[0].value;
-                            set_valued_indirect_count += target->label_block_count == 2 && instruction->target_count == 2;
-                            if (target->label_block_count == 2 && instruction->target_count == 2)
+                            IrValueLabelMetadata target = ir_value_label_metadata(function, instruction->operands[0]);
+                            set_valued_indirect_count += target.label_block_count == 2 && instruction->target_count == 2;
+                            if (target.label_block_count == 2 && instruction->target_count == 2)
                             {
                                 set_valued_indirect = instruction;
                                 conditional_set_count += string_equal(function->name, S8("conditional_labels"));
@@ -8053,16 +8054,16 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                 copied_table_set_count += string_equal(function->name, S8("copied_table_labels"));
                                 overwritten_table_set_count += string_equal(function->name, S8("overwritten_table_labels"));
                             }
-                            if (target->label_block_count == 1 && instruction->target_count == 1)
+                            if (target.label_block_count == 1 && instruction->target_count == 1)
                             {
                                 typedef_indirect_count += string_equal(function->name, S8("typedef_labels"));
                             }
-                            for (u32 label_index = 0; label_index < target->label_block_count; label_index += 1)
+                            for (u32 label_index = 0; label_index < target.label_block_count; label_index += 1)
                             {
                                 bool found = false;
                                 for (u32 target_index = 0; target_index < instruction->target_count; target_index += 1)
                                 {
-                                    found |= instruction->targets[target_index].value == target->label_blocks[label_index].value;
+                                    found |= instruction->targets[target_index].value == target.label_blocks[label_index].value;
                                 }
                                 BUSTER_TEST(arguments, found);
                             }
@@ -8128,9 +8129,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             for (u32 function_index = 0; function_index < module->function_count && !mutable_path; function_index += 1)
             {
                 IrFunction* function = module->functions + function_index;
-                for (u32 value_index = 0; value_index < function->value_count && !mutable_path; value_index += 1)
+                for (u32 entry_index = 0; entry_index < function->label_metadata_count && !mutable_path; entry_index += 1)
                 {
-                    IrValue* value = function->values + value_index;
+                    IrValueLabelMetadata* value = function->label_metadata + entry_index;
                     if (value->label_path_count && value->label_paths && value->label_paths[0].size)
                     {
                         mutable_path = value->label_paths;
@@ -8244,7 +8245,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         IrBlockId scalar_blocks_a[] = {scalar_a};
         IrBlockId scalar_blocks_b[] = {scalar_b};
         IrBlockId scalar_blocks_union[] = {scalar_a, scalar_b};
-        IrValue scalar_values[3] = {
+        IrValue scalar_values[3] = {0};
+        IrValueId scalar_metadata_values[3] = {{.value = 0}, {.value = 1}, {.value = 2}};
+        IrValueLabelMetadata scalar_metadata[3] = {
             [0] = {.is_label_value = true, .label_blocks = scalar_blocks_a, .label_block_count = 1},
             [1] = {.is_label_value = true, .label_blocks = scalar_blocks_b, .label_block_count = 1},
             [2] = {.has_label_provenance = true, .label_blocks = scalar_blocks_union, .label_block_count = 2},
@@ -8257,7 +8260,11 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             .value = {.value = 2},
             .incoming_count = 2,
         };
-        IrFunction scalar_function = {.values = scalar_values, .value_count = BUSTER_ARRAY_LENGTH(scalar_values)};
+        IrFunction scalar_function = {.values = scalar_values,
+                                      .value_count = BUSTER_ARRAY_LENGTH(scalar_values),
+                                      .label_metadata_values = scalar_metadata_values,
+                                      .label_metadata = scalar_metadata,
+                                      .label_metadata_count = BUSTER_ARRAY_LENGTH(scalar_metadata)};
         BUSTER_TEST(arguments, ir_label_block_parameter_provenance_valid(&scalar_function, &scalar_parameter));
         scalar_blocks_union[1] = (IrBlockId){.value = 17};
         BUSTER_TEST(arguments, !ir_label_block_parameter_provenance_valid(&scalar_function, &scalar_parameter));
@@ -8278,7 +8285,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             .size = 8,
             .label_block_count = 2,
         };
-        IrValue aggregate_values[3] = {
+        IrValue aggregate_values[3] = {0};
+        IrValueId aggregate_metadata_values[3] = {{.value = 0}, {.value = 1}, {.value = 2}};
+        IrValueLabelMetadata aggregate_metadata[3] = {
             [0] = {.has_label_provenance = true, .label_blocks = scalar_blocks_a, .label_block_count = 1, .label_paths = &aggregate_path_a, .label_path_count = 1},
             [1] = {.has_label_provenance = true, .label_blocks = scalar_blocks_b, .label_block_count = 1, .label_paths = &aggregate_path_b, .label_path_count = 1},
             [2] = {.has_label_provenance = true,
@@ -8295,7 +8304,11 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             .value = {.value = 2},
             .incoming_count = 2,
         };
-        IrFunction aggregate_function = {.values = aggregate_values, .value_count = BUSTER_ARRAY_LENGTH(aggregate_values)};
+        IrFunction aggregate_function = {.values = aggregate_values,
+                                         .value_count = BUSTER_ARRAY_LENGTH(aggregate_values),
+                                         .label_metadata_values = aggregate_metadata_values,
+                                         .label_metadata = aggregate_metadata,
+                                         .label_metadata_count = BUSTER_ARRAY_LENGTH(aggregate_metadata)};
         BUSTER_TEST(arguments, ir_label_block_parameter_provenance_valid(&aggregate_function, &aggregate_parameter));
     }
     {
@@ -8653,8 +8666,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                     {
                         continue;
                     }
-                    IrValue* operand = function->values + instruction->operands[0].value;
-                    IrValue saved = *operand;
+                    IrValueLabelMetadata* operand =
+                        ir_value_label_metadata_ensure(label_provenance_mutation_temporary.arena, function, instruction->operands[0]);
+                    IrValueLabelMetadata saved = *operand;
                     operand->is_label_value = false;
                     operand->has_label_provenance = true;
                     operand->has_non_label_provenance = false;
@@ -9348,17 +9362,17 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                     if (indirect_branch->operand_count == 1 && indirect_branch->operands && indirect_branch->target_count == 2 && indirect_branch->targets &&
                         indirect_branch->operands[0].value < function->value_count)
                     {
-                        IrValue* target = function->values + indirect_branch->operands[0].value;
-                        BUSTER_TEST(arguments, ir_label_provenance_valid(target));
-                        BUSTER_TEST(arguments, target->label_block_count == 2 && target->label_blocks != 0);
-                        if (target->label_block_count == 2 && target->label_blocks)
+                        IrValueLabelMetadata target = ir_value_label_metadata(function, indirect_branch->operands[0]);
+                        BUSTER_TEST(arguments, ir_label_provenance_valid(&target));
+                        BUSTER_TEST(arguments, target.label_block_count == 2 && target.label_blocks != 0);
+                        if (target.label_block_count == 2 && target.label_blocks)
                         {
-                            for (u32 label_index = 0; label_index < target->label_block_count; label_index += 1)
+                            for (u32 label_index = 0; label_index < target.label_block_count; label_index += 1)
                             {
                                 bool found = false;
                                 for (u32 target_index = 0; target_index < indirect_branch->target_count; target_index += 1)
                                 {
-                                    found |= target->label_blocks[label_index].value == indirect_branch->targets[target_index].value;
+                                    found |= target.label_blocks[label_index].value == indirect_branch->targets[target_index].value;
                                 }
                                 BUSTER_TEST(arguments, found);
                             }
@@ -9395,8 +9409,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 IrInstruction* instruction = function->instructions + instruction_index;
                 if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH && instruction->operand_count == 1 && instruction->operands[0].value < function->value_count)
                 {
-                    IrValue* target = function->values + instruction->operands[0].value;
-                    cfg_set |= target->label_block_count == 2 && instruction->target_count == 2;
+                    IrValueLabelMetadata target = ir_value_label_metadata(function, instruction->operands[0]);
+                    cfg_set |= target.label_block_count == 2 && instruction->target_count == 2;
                 }
             }
             BUSTER_TEST(arguments, ir_validate_canonical_module(cfg_label_storage_lowered.program,

@@ -275,14 +275,25 @@ struct IrValue
     u32 alignment;
     bool is_read_only;
     bool points_to_read_only;
+    u8 reserved[2];
+};
+
+// Label metadata is populated only for values involved in address-of-label
+// provenance tracking, so it lives in a sparse per-function side table
+// (IrFunction label_metadata_values/label_metadata, sorted by value id)
+// instead of occupying every IrValue. An absent entry means all-zero
+// metadata.
+typedef struct IrValueLabelMetadata IrValueLabelMetadata;
+struct IrValueLabelMetadata
+{
+    IrBlockId* label_blocks;
+    IrLabelProvenancePath* label_paths;
+    u32 label_block_count;
+    u32 label_path_count;
     bool is_label_value;
     bool has_label_provenance;
     bool has_non_label_provenance;
     u8 reserved;
-    IrBlockId* label_blocks;
-    u32 label_block_count;
-    IrLabelProvenancePath* label_paths;
-    u32 label_path_count;
 };
 
 typedef struct IrIncoming IrIncoming;
@@ -453,6 +464,8 @@ struct IrFunction
     IrValueId* local_places;
     bool* local_uses_memory;
     IrDebugLocal* debug_locals;
+    IrValueId* label_metadata_values;
+    IrValueLabelMetadata* label_metadata;
     u32 block_count;
     u32 block_capacity;
     u32 instruction_count;
@@ -461,6 +474,8 @@ struct IrFunction
     u32 value_capacity;
     u32 local_count;
     u32 debug_local_count;
+    u32 label_metadata_count;
+    u32 label_metadata_capacity;
     IrFunctionState state;
 };
 
@@ -550,17 +565,20 @@ BUSTER_F_DECL IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrG
 BUSTER_F_DECL IrBlock* ir_function_add_block(Arena* arena, IrFunction* function, IrBlock block);
 BUSTER_F_DECL IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue value);
 BUSTER_F_DECL IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, IrInstruction instruction);
-BUSTER_F_DECL bool ir_label_provenance_valid(IrValue* value);
-BUSTER_F_DECL bool ir_label_storage_provenance_valid(IrValue* value);
+BUSTER_F_DECL IrValueLabelMetadata* ir_value_label_metadata_find(IrFunction* function, IrValueId value);
+BUSTER_F_DECL IrValueLabelMetadata ir_value_label_metadata(IrFunction* function, IrValueId value);
+BUSTER_F_DECL IrValueLabelMetadata* ir_value_label_metadata_ensure(Arena* arena, IrFunction* function, IrValueId value);
+BUSTER_F_DECL bool ir_label_provenance_valid(IrValueLabelMetadata* value);
+BUSTER_F_DECL bool ir_label_storage_provenance_valid(IrValueLabelMetadata* value);
 BUSTER_F_DECL bool ir_block_id_array_unique(IrBlockId* blocks, u32 count);
-BUSTER_F_DECL bool ir_label_provenance_contains(IrValue* value, IrBlockId block);
-BUSTER_F_DECL void ir_label_provenance_copy(Arena* arena, IrValue* destination, IrValue* source);
-BUSTER_F_DECL void ir_label_provenance_union(Arena* arena, IrValue* destination, IrValue* source);
-BUSTER_F_DECL void ir_label_storage_provenance_copy(Arena* arena, IrValue* destination, IrValue* source);
-BUSTER_F_DECL void ir_label_storage_provenance_union(Arena* arena, IrValue* destination, IrValue* source);
-BUSTER_F_DECL void ir_label_provenance_load(Arena* arena, IrValue* destination, IrValue* source);
-BUSTER_F_DECL bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrValue* value);
-BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFunction* function, IrValue* value);
+BUSTER_F_DECL bool ir_label_provenance_contains(IrValueLabelMetadata* value, IrBlockId block);
+BUSTER_F_DECL void ir_label_provenance_copy(Arena* arena, IrFunction* function, IrValueId destination, IrValueId source);
+BUSTER_F_DECL void ir_label_provenance_union(Arena* arena, IrFunction* function, IrValueId destination, IrValueId source);
+BUSTER_F_DECL void ir_label_storage_provenance_copy(Arena* arena, IrFunction* function, IrValueId destination, IrValueId source);
+BUSTER_F_DECL void ir_label_storage_provenance_union(Arena* arena, IrFunction* function, IrValueId destination, IrValueId source);
+BUSTER_F_DECL void ir_label_provenance_load(Arena* arena, IrFunction* function, IrValueId destination, IrValueId source);
+BUSTER_F_DECL bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrValueId value);
+BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFunction* function, IrValueId value);
 BUSTER_F_DECL bool ir_label_block_parameter_provenance_valid(IrFunction* function, IrBlockParameter* parameter);
 BUSTER_F_DECL u32 ir_inline_assembly_label_operand_base(IrInstruction* instruction);
 BUSTER_F_DECL bool ir_inline_assembly_jump_target(IrInstruction* instruction, String8 literal, String8 prefix, u32* target_index_out);

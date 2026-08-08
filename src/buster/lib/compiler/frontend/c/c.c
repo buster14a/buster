@@ -15749,7 +15749,12 @@ struct CIntegerIrBuilder
     bool returns_void;
     bool preparing_calls;
     bool va_list_builtin_operand;
-    u8 reserved[2];
+    // Label metadata is tracked only when the body can produce label values
+    // (an address-of-label expression, or a referenced global carrying
+    // label-address relocations). Everything else skips the whole apparatus,
+    // which keeps the per-function label-metadata side table empty.
+    bool label_metadata_enabled;
+    u8 reserved[1];
 };
 
 BUSTER_GLOBAL_LOCAL CScopeId c_ir_current_scope(CIntegerIrBuilder* builder)
@@ -16211,23 +16216,19 @@ BUSTER_GLOBAL_LOCAL IrInstruction c_ir_instruction_initialize(IrOpcode opcode, I
 
 BUSTER_GLOBAL_LOCAL bool c_ir_value_integer_constant_evaluate(CIntegerIrBuilder* builder, IrValueId root, u64* result_out);
 
-BUSTER_GLOBAL_LOCAL void c_ir_label_metadata_clear(IrValue* value)
+BUSTER_GLOBAL_LOCAL void c_ir_label_metadata_clear(CIntegerIrBuilder* builder, IrValueId value)
 {
-    if (!value)
+    IrValueLabelMetadata* entry = ir_value_label_metadata_find(builder->function, value);
+    if (entry)
     {
-        return;
+        *entry = (IrValueLabelMetadata){0};
     }
-    value->is_label_value = false;
-    value->has_label_provenance = false;
-    value->has_non_label_provenance = false;
-    value->label_blocks = 0;
-    value->label_block_count = 0;
-    value->label_paths = 0;
-    value->label_path_count = 0;
 }
 
-BUSTER_GLOBAL_LOCAL void c_ir_label_metadata_rebuild_summary(Arena* arena, IrValue* value)
+BUSTER_GLOBAL_LOCAL void c_ir_label_metadata_rebuild_summary(CIntegerIrBuilder* builder, IrValueId value_id)
 {
+    Arena* arena = builder->arena;
+    IrValueLabelMetadata* value = ir_value_label_metadata_find(builder->function, value_id);
     if (!value)
     {
         return;
@@ -16272,10 +16273,16 @@ BUSTER_GLOBAL_LOCAL void c_ir_label_metadata_rebuild_summary(Arena* arena, IrVal
     }
 }
 
-BUSTER_GLOBAL_LOCAL void c_ir_label_metadata_append_path(Arena* arena, IrValue* destination, u64 offset, u64 size, IrBlockId* blocks,
+BUSTER_GLOBAL_LOCAL void c_ir_label_metadata_append_path(CIntegerIrBuilder* builder, IrValueId destination_id, u64 offset, u64 size, IrBlockId* blocks,
                                                           u32 block_count, bool is_non_label)
 {
-    if (!destination || (!is_non_label && (!blocks || !block_count)))
+    Arena* arena = builder->arena;
+    if (destination_id.value >= builder->function->value_count || (!is_non_label && (!blocks || !block_count)))
+    {
+        return;
+    }
+    IrValueLabelMetadata* destination = ir_value_label_metadata_ensure(arena, builder->function, destination_id);
+    if (!destination)
     {
         return;
     }
@@ -16421,38 +16428,51 @@ BUSTER_GLOBAL_LOCAL bool c_ir_type_contains_pointer(CIntegerIrBuilder* builder, 
     return cache->contains_pointer[root.value] != 0;
 }
 
-BUSTER_GLOBAL_LOCAL void c_ir_label_metadata_append_source(CIntegerIrBuilder* builder, IrValue* destination, IrValue* source, u64 base_offset,
+BUSTER_GLOBAL_LOCAL void c_ir_label_metadata_append_source(CIntegerIrBuilder* builder, IrValueId destination_id, IrValueId source_id, u64 base_offset,
                                                             u64 source_size)
 {
-    if (!destination || !source)
+    if (destination_id.value >= builder->function->value_count || source_id.value >= builder->function->value_count)
     {
         return;
     }
-    if (source->label_path_count)
+    IrValueLabelMetadata source = ir_value_label_metadata(builder->function, source_id);
+    IrTypeId source_canonical_type = builder->function->values[source_id.value].canonical_type;
+    if (source.label_path_count)
     {
-        destination->has_non_label_provenance |= source->has_non_label_provenance;
-        for (u32 path_index = 0; path_index < source->label_path_count; path_index += 1)
+        if (source.has_non_label_provenance)
         {
-            IrLabelProvenancePath* path = source->label_paths + path_index;
+            IrValueLabelMetadata* destination = ir_value_label_metadata_ensure(builder->arena, builder->function, destination_id);
+            if (destination)
+            {
+                destination->has_non_label_provenance = true;
+            }
+        }
+        for (u32 path_index = 0; path_index < source.label_path_count; path_index += 1)
+        {
+            IrLabelProvenancePath* path = source.label_paths + path_index;
             if (base_offset <= UINT64_MAX - path->offset)
             {
-                c_ir_label_metadata_append_path(builder->arena, destination, base_offset + path->offset, path->size, path->label_blocks,
+                c_ir_label_metadata_append_path(builder, destination_id, base_offset + path->offset, path->size, path->label_blocks,
                                                  path->label_block_count, path->is_non_label);
             }
         }
         return;
     }
-    if (source->is_label_value || source->has_label_provenance)
+    if (source.is_label_value || source.has_label_provenance)
     {
-        c_ir_label_metadata_append_path(builder->arena, destination, base_offset, source_size, source->label_blocks, source->label_block_count, false);
+        c_ir_label_metadata_append_path(builder, destination_id, base_offset, source_size, source.label_blocks, source.label_block_count, false);
     }
-    else if (source->has_non_label_provenance || c_ir_type_contains_pointer(builder, source->canonical_type))
+    else if (source.has_non_label_provenance || c_ir_type_contains_pointer(builder, source_canonical_type))
     {
-        destination->has_non_label_provenance = true;
-        IrType* source_type = c_ir_value_type(builder, source);
+        IrValueLabelMetadata* destination = ir_value_label_metadata_ensure(builder->arena, builder->function, destination_id);
+        if (destination)
+        {
+            destination->has_non_label_provenance = true;
+        }
+        IrType* source_type = ir_type_from_id(&builder->program->types, source_canonical_type);
         if (source_type && source_type->kind == IR_TYPE_POINTER && base_offset <= UINT64_MAX - source_size)
         {
-            c_ir_label_metadata_append_path(builder->arena, destination, base_offset, source_size, 0, 0, true);
+            c_ir_label_metadata_append_path(builder, destination_id, base_offset, source_size, 0, 0, true);
         }
     }
 }
@@ -16534,7 +16554,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_label_place_location(CIntegerIrBuilder* builder, I
 
 BUSTER_GLOBAL_LOCAL void c_ir_label_metadata_copy_for_place(CIntegerIrBuilder* builder, IrValueId place)
 {
-    if (!builder || !builder->function || !builder->function->values || place.value >= builder->function->value_count)
+    if (!builder || !builder->function || !builder->function->values || place.value >= builder->function->value_count ||
+        !builder->label_metadata_enabled)
     {
         return;
     }
@@ -16544,20 +16565,15 @@ BUSTER_GLOBAL_LOCAL void c_ir_label_metadata_copy_for_place(CIntegerIrBuilder* b
     bool exact = false;
     if (!c_ir_label_place_location(builder, place, &root, &offset, &size, &exact) || root.value >= builder->function->value_count)
     {
-        c_ir_label_metadata_clear(builder->function->values + place.value);
+        c_ir_label_metadata_clear(builder, place);
         return;
     }
     if (root.value == place.value)
     {
         return;
     }
-    IrValue* destination = builder->function->values + place.value;
-    IrValue* source = builder->function->values + root.value;
-    if (!destination || !source)
-    {
-        return;
-    }
-    c_ir_label_metadata_clear(destination);
+    IrValueLabelMetadata source = ir_value_label_metadata(builder->function, root);
+    c_ir_label_metadata_clear(builder, place);
     if (!exact)
     {
         // A field selected from a dynamic aggregate element still has a
@@ -16600,24 +16616,34 @@ BUSTER_GLOBAL_LOCAL void c_ir_label_metadata_copy_for_place(CIntegerIrBuilder* b
                 u64 base_size = 0;
                 bool base_exact = false;
                 c_ir_label_place_location(builder, base, &base_root, &base_offset, &base_size, &base_exact);
-                IrValue* base_source = base_root.value < builder->function->value_count ? builder->function->values + base_root.value : 0;
-                bool base_has_label = base_source && (base_source->is_label_value || base_source->has_label_provenance || base_source->label_path_count);
+                IrValueLabelMetadata base_source = base_root.value < builder->function->value_count
+                                                       ? ir_value_label_metadata(builder->function, base_root)
+                                                       : (IrValueLabelMetadata){0};
+                bool base_has_label = base_source.is_label_value || base_source.has_label_provenance || base_source.label_path_count;
                 if (base_has_label)
                 {
-                    destination->has_non_label_provenance = true;
+                    IrValueLabelMetadata* destination = ir_value_label_metadata_ensure(builder->arena, builder->function, place);
+                    if (destination)
+                    {
+                        destination->has_non_label_provenance = true;
+                    }
                     builder->failure_message = S8("dynamic indexing of label-containing aggregate elements is unsupported");
                     return;
                 }
             }
             dynamic_cursor = base;
         }
-        IrType* selected_type = c_ir_value_type(builder, destination);
+        IrType* selected_type = ir_type_from_id(&builder->program->types, builder->function->values[place.value].canonical_type);
         bool aggregate_element = selected_type &&
                                  (selected_type->kind == IR_TYPE_ARRAY || selected_type->kind == IR_TYPE_STRUCT || selected_type->kind == IR_TYPE_UNION);
-        bool root_contains_label = source->is_label_value || source->has_label_provenance || source->label_path_count != 0;
+        bool root_contains_label = source.is_label_value || source.has_label_provenance || source.label_path_count != 0;
         if (aggregate_element && root_contains_label)
         {
-            destination->has_non_label_provenance = true;
+            IrValueLabelMetadata* destination = ir_value_label_metadata_ensure(builder->arena, builder->function, place);
+            if (destination)
+            {
+                destination->has_non_label_provenance = true;
+            }
             builder->failure_message = S8("dynamic indexing of label-containing aggregate elements is unsupported");
             return;
         }
@@ -16625,27 +16651,41 @@ BUSTER_GLOBAL_LOCAL void c_ir_label_metadata_copy_for_place(CIntegerIrBuilder* b
         // is one scalar place, so retain the union of possible label blocks
         // at offset zero rather than copying aggregate offsets into the
         // scalar's metadata.
-        destination->has_non_label_provenance = source->has_non_label_provenance;
-        if (source->label_path_count)
+        if (source.has_non_label_provenance)
         {
-            for (u32 path_index = 0; path_index < source->label_path_count; path_index += 1)
+            IrValueLabelMetadata* destination = ir_value_label_metadata_ensure(builder->arena, builder->function, place);
+            if (destination)
             {
-                IrLabelProvenancePath* path = source->label_paths + path_index;
-                c_ir_label_metadata_append_path(builder->arena, destination, 0, size, path->label_blocks, path->label_block_count,
+                destination->has_non_label_provenance = true;
+            }
+        }
+        if (source.label_path_count)
+        {
+            for (u32 path_index = 0; path_index < source.label_path_count; path_index += 1)
+            {
+                IrLabelProvenancePath* path = source.label_paths + path_index;
+                c_ir_label_metadata_append_path(builder, place, 0, size, path->label_blocks, path->label_block_count,
                                                  path->is_non_label);
             }
         }
-        else if (source->is_label_value || source->has_label_provenance)
+        else if (source.is_label_value || source.has_label_provenance)
         {
-            c_ir_label_metadata_append_path(builder->arena, destination, 0, size, source->label_blocks, source->label_block_count, false);
+            c_ir_label_metadata_append_path(builder, place, 0, size, source.label_blocks, source.label_block_count, false);
         }
-        c_ir_label_metadata_rebuild_summary(builder->arena, destination);
+        c_ir_label_metadata_rebuild_summary(builder, place);
         return;
     }
-    destination->has_non_label_provenance = source->label_path_count ? false : source->has_non_label_provenance;
-    for (u32 path_index = 0; path_index < source->label_path_count; path_index += 1)
+    if (!source.label_path_count && source.has_non_label_provenance)
     {
-        IrLabelProvenancePath* path = source->label_paths + path_index;
+        IrValueLabelMetadata* destination = ir_value_label_metadata_ensure(builder->arena, builder->function, place);
+        if (destination)
+        {
+            destination->has_non_label_provenance = true;
+        }
+    }
+    for (u32 path_index = 0; path_index < source.label_path_count; path_index += 1)
+    {
+        IrLabelProvenancePath* path = source.label_paths + path_index;
         bool begins = path->offset >= offset;
         bool path_end_valid = path->offset <= UINT64_MAX - path->size;
         u64 path_end = path_end_valid ? path->offset + path->size : UINT64_MAX;
@@ -16653,11 +16693,11 @@ BUSTER_GLOBAL_LOCAL void c_ir_label_metadata_copy_for_place(CIntegerIrBuilder* b
         u64 destination_end = destination_end_valid ? offset + size : UINT64_MAX;
         if (begins && path_end_valid && destination_end_valid && path_end <= destination_end)
         {
-            c_ir_label_metadata_append_path(builder->arena, destination, path->offset - offset, path->size, path->label_blocks,
+            c_ir_label_metadata_append_path(builder, place, path->offset - offset, path->size, path->label_blocks,
                                              path->label_block_count, path->is_non_label);
         }
     }
-    c_ir_label_metadata_rebuild_summary(builder->arena, destination);
+    c_ir_label_metadata_rebuild_summary(builder, place);
 }
 
 // Reserves one array in the lowering scratch arena and advances `position`
@@ -16680,7 +16720,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_label_metadata_reserve(Arena* arena, u64* position
 
 BUSTER_GLOBAL_LOCAL bool c_ir_label_metadata_store_for_place(CIntegerIrBuilder* builder, IrValueId place, IrValueId source_value)
 {
-    if (place.value >= builder->function->value_count || source_value.value >= builder->function->value_count)
+    if (place.value >= builder->function->value_count || source_value.value >= builder->function->value_count || !builder->label_metadata_enabled)
     {
         return true;
     }
@@ -16739,16 +16779,23 @@ BUSTER_GLOBAL_LOCAL bool c_ir_label_metadata_store_for_place(CIntegerIrBuilder* 
     {
         return true;
     }
-    IrValue* root_value = builder->function->values + root.value;
-    IrValue* source = builder->function->values + source_value.value;
-    IrLabelProvenancePath* old_paths = root_value->label_paths;
-    u32 old_count = root_value->label_path_count;
-    bool old_non_label = root_value->has_non_label_provenance;
+    IrValueLabelMetadata old_root = ir_value_label_metadata(builder->function, root);
+    IrValueLabelMetadata source_metadata = ir_value_label_metadata(builder->function, source_value);
+    IrLabelProvenancePath* old_paths = old_root.label_paths;
+    u32 old_count = old_root.label_path_count;
+    bool old_non_label = old_root.has_non_label_provenance;
     bool preserve_branch_alternative = builder->label_metadata_store_valid && root.value < builder->label_metadata_store_capacity &&
                                        builder->label_metadata_store_valid[root.value] &&
                                        builder->label_metadata_store_blocks[root.value].value != builder->current_block.value;
-    c_ir_label_metadata_clear(root_value);
-    root_value->has_non_label_provenance = old_non_label;
+    c_ir_label_metadata_clear(builder, root);
+    if (old_non_label)
+    {
+        IrValueLabelMetadata* root_entry = ir_value_label_metadata_ensure(builder->arena, builder->function, root);
+        if (root_entry)
+        {
+            root_entry->has_non_label_provenance = true;
+        }
+    }
     if (exact)
     {
         for (u32 path_index = 0; path_index < old_count; path_index += 1)
@@ -16761,18 +16808,18 @@ BUSTER_GLOBAL_LOCAL bool c_ir_label_metadata_store_for_place(CIntegerIrBuilder* 
             bool overlaps = path_end_valid && destination_end_valid && path->offset < destination_end && offset < path_end;
             if (!overlaps || preserve_branch_alternative)
             {
-                c_ir_label_metadata_append_path(builder->arena, root_value, path->offset, path->size, path->label_blocks,
+                c_ir_label_metadata_append_path(builder, root, path->offset, path->size, path->label_blocks,
                                                  path->label_block_count, path->is_non_label);
             }
         }
-        c_ir_label_metadata_append_source(builder, root_value, source, offset, size);
+        c_ir_label_metadata_append_source(builder, root, source_value, offset, size);
     }
     else
     {
         for (u32 path_index = 0; path_index < old_count; path_index += 1)
         {
             IrLabelProvenancePath* path = old_paths + path_index;
-            c_ir_label_metadata_append_path(builder->arena, root_value, path->offset, path->size, path->label_blocks,
+            c_ir_label_metadata_append_path(builder, root, path->offset, path->size, path->label_blocks,
                                              path->label_block_count, path->is_non_label);
         }
         bool dynamic_index_applied = false;
@@ -16802,29 +16849,35 @@ BUSTER_GLOBAL_LOCAL bool c_ir_label_metadata_store_for_place(CIntegerIrBuilder* 
                 for (u64 element_index = 0; element_index < base_type->element_count; element_index += 1)
                 {
                     u64 element_offset = base_offset + element_index * element_type->layout.size;
-                    c_ir_label_metadata_append_source(builder, root_value, source, element_offset, element_type->layout.size);
+                    c_ir_label_metadata_append_source(builder, root, source_value, element_offset, element_type->layout.size);
                 }
                 dynamic_index_applied = true;
             }
         }
         if (!dynamic_index_applied)
         {
-            bool source_contains_label = source->is_label_value || source->has_label_provenance || source->label_path_count != 0;
-            if (source_contains_label || root_value->label_path_count || root_value->has_label_provenance)
+            bool source_contains_label = source_metadata.is_label_value || source_metadata.has_label_provenance || source_metadata.label_path_count != 0;
+            IrValueLabelMetadata current_root = ir_value_label_metadata(builder->function, root);
+            if (source_contains_label || current_root.label_path_count || current_root.has_label_provenance)
             {
-                c_ir_label_metadata_clear(root_value);
-                root_value->has_non_label_provenance = true;
+                c_ir_label_metadata_clear(builder, root);
+                IrValueLabelMetadata* root_entry = ir_value_label_metadata_ensure(builder->arena, builder->function, root);
+                if (root_entry)
+                {
+                    root_entry->has_non_label_provenance = true;
+                }
                 builder->failure_message = S8("dynamic label-containing array store exceeds bounded provenance tracking capacity");
             }
             else
             {
                 u64 source_size = builder->program->data_layout.pointer.size;
-                c_ir_label_metadata_append_source(builder, root_value, source, 0, source_size);
+                c_ir_label_metadata_append_source(builder, root, source_value, 0, source_size);
             }
         }
     }
-    c_ir_label_metadata_rebuild_summary(builder->arena, root_value);
-    bool root_contains_label = root_value->is_label_value || root_value->has_label_provenance || root_value->label_path_count != 0;
+    c_ir_label_metadata_rebuild_summary(builder, root);
+    IrValueLabelMetadata summarized_root = ir_value_label_metadata(builder->function, root);
+    bool root_contains_label = summarized_root.is_label_value || summarized_root.has_label_provenance || summarized_root.label_path_count != 0;
     if (builder->label_metadata_store_valid && root.value < builder->label_metadata_store_capacity)
     {
         builder->label_metadata_store_blocks[root.value] = builder->current_block;
@@ -16869,9 +16922,9 @@ BUSTER_GLOBAL_LOCAL bool c_ir_label_metadata_store_for_place(CIntegerIrBuilder* 
             {
                 continue;
             }
-            IrValue* candidate = builder->function->values + value_index;
-            if (!root_contains_label && !candidate->label_path_count && !candidate->is_label_value && !candidate->has_label_provenance &&
-                !candidate->has_non_label_provenance)
+            IrValueLabelMetadata candidate = ir_value_label_metadata(builder->function, (IrValueId){.value = value_index});
+            if (!root_contains_label && !candidate.label_path_count && !candidate.is_label_value && !candidate.has_label_provenance &&
+                !candidate.has_non_label_provenance)
             {
                 continue;
             }
@@ -16885,9 +16938,9 @@ BUSTER_GLOBAL_LOCAL bool c_ir_label_metadata_store_for_place(CIntegerIrBuilder* 
         {
             continue;
         }
-        IrValue* candidate = builder->function->values + value_index;
-        if (!root_contains_label && !candidate->label_path_count && !candidate->is_label_value && !candidate->has_label_provenance &&
-            !candidate->has_non_label_provenance)
+        IrValueLabelMetadata candidate = ir_value_label_metadata(builder->function, (IrValueId){.value = value_index});
+        if (!root_contains_label && !candidate.label_path_count && !candidate.is_label_value && !candidate.has_label_provenance &&
+            !candidate.has_non_label_provenance)
         {
             continue;
         }
@@ -16911,39 +16964,38 @@ BUSTER_GLOBAL_LOCAL IrInstructionId c_ir_append_instruction(CIntegerIrBuilder* b
         return IR_INSTRUCTION_ID_INVALID;
     }
     IrBlock* block = &builder->function->blocks[builder->current_block.value];
-    if (instruction.result.value < builder->function->value_count)
+    if (builder->label_metadata_enabled && instruction.result.value < builder->function->value_count)
     {
-        IrValue* result = builder->function->values + instruction.result.value;
+        IrValueId result = instruction.result;
         if ((instruction.opcode == IR_OPCODE_LOAD || instruction.opcode == IR_OPCODE_ATOMIC_LOAD) && instruction.operand_count >= 1 && instruction.operands &&
             instruction.operands[0].value < builder->function->value_count)
         {
-            IrValue* place = builder->function->values + instruction.operands[0].value;
+            IrValueId place = instruction.operands[0];
             IrType* result_type = ir_type_from_id(&builder->program->types, instruction.canonical_type);
             bool aggregate = result_type && (result_type->kind == IR_TYPE_ARRAY || result_type->kind == IR_TYPE_STRUCT || result_type->kind == IR_TYPE_UNION);
             if (aggregate)
             {
-                c_ir_label_metadata_clear(result);
+                c_ir_label_metadata_clear(builder, result);
                 c_ir_label_metadata_append_source(builder, result, place, 0, result_type->layout.size);
-                c_ir_label_metadata_rebuild_summary(builder->arena, result);
+                c_ir_label_metadata_rebuild_summary(builder, result);
             }
             else
             {
-                ir_label_provenance_load(builder->arena, result, place);
+                ir_label_provenance_load(builder->arena, builder->function, result, place);
             }
         }
         else if (instruction.opcode == IR_OPCODE_CAST && instruction.operand_count >= 1 && instruction.operands &&
                  instruction.operands[0].value < builder->function->value_count)
         {
-            ir_label_provenance_copy(builder->arena, result, builder->function->values + instruction.operands[0].value);
+            ir_label_provenance_copy(builder->arena, builder->function, result, instruction.operands[0]);
         }
         else if (instruction.opcode == IR_OPCODE_ARRAY || instruction.opcode == IR_OPCODE_AGGREGATE)
         {
-            c_ir_label_metadata_clear(result);
+            c_ir_label_metadata_clear(builder, result);
             for (u32 operand_index = 0; operand_index < instruction.operand_count; operand_index += 1)
             {
                 if (instruction.operands && instruction.operands[operand_index].value < builder->function->value_count)
                 {
-                    IrValue* source = builder->function->values + instruction.operands[operand_index].value;
                     IrType* aggregate = ir_type_from_id(&builder->program->types, instruction.canonical_type);
                     u64 offset = 0;
                     u64 size = 0;
@@ -16964,10 +17016,10 @@ BUSTER_GLOBAL_LOCAL IrInstructionId c_ir_append_instruction(CIntegerIrBuilder* b
                         offset = field->offset;
                         size = ir_type_from_id(&builder->program->types, field->type)->layout.size;
                     }
-                    c_ir_label_metadata_append_source(builder, result, source, offset, size);
+                    c_ir_label_metadata_append_source(builder, result, instruction.operands[operand_index], offset, size);
                 }
             }
-            c_ir_label_metadata_rebuild_summary(builder->arena, result);
+            c_ir_label_metadata_rebuild_summary(builder, result);
         }
     }
     IrInstructionId id = ir_function_add_instruction(builder->arena, builder->function, instruction);
@@ -17002,9 +17054,13 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_add_result(CIntegerIrBuilder* builder, IrType
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void c_ir_copy_label_provenance(CIntegerIrBuilder* builder, IrValue* destination, IrValue* source)
+BUSTER_GLOBAL_LOCAL void c_ir_copy_label_provenance(CIntegerIrBuilder* builder, IrValueId destination, IrValueId source)
 {
-    ir_label_provenance_copy(builder->arena, destination, source);
+    if (!builder->label_metadata_enabled)
+    {
+        return;
+    }
+    ir_label_provenance_copy(builder->arena, builder->function, destination, source);
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_is_computed_goto_target(CIntegerIrBuilder* builder, IrValueId value)
@@ -17013,10 +17069,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_is_computed_goto_target(CIntegerIrBuilder* builder
     {
         return false;
     }
-    IrValue* label = builder->function->values + value.value;
-    IrType* type = ir_type_from_id(&builder->program->types, label->canonical_type);
-    return label->is_label_value && !label->has_label_provenance && !label->label_paths && !label->label_path_count && label->label_blocks &&
-           label->label_block_count && type && type->kind == IR_TYPE_POINTER && type->element_type.value == builder->void_type.value;
+    IrValueLabelMetadata label = ir_value_label_metadata(builder->function, value);
+    IrType* type = ir_type_from_id(&builder->program->types, builder->function->values[value.value].canonical_type);
+    return label.is_label_value && !label.has_label_provenance && !label.label_paths && !label.label_path_count && label.label_blocks &&
+           label.label_block_count && type && type->kind == IR_TYPE_POINTER && type->element_type.value == builder->void_type.value;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_is_computed_goto_storage_target(CIntegerIrBuilder* builder, IrValueId value)
@@ -17025,9 +17081,9 @@ BUSTER_GLOBAL_LOCAL bool c_ir_is_computed_goto_storage_target(CIntegerIrBuilder*
     {
         return false;
     }
-    IrValue* label = builder->function->values + value.value;
-    IrType* type = ir_type_from_id(&builder->program->types, label->canonical_type);
-    return (label->has_label_provenance || label->is_label_value) && label->label_blocks && label->label_block_count && type &&
+    IrValueLabelMetadata label = ir_value_label_metadata(builder->function, value);
+    IrType* type = ir_type_from_id(&builder->program->types, builder->function->values[value.value].canonical_type);
+    return (label.has_label_provenance || label.is_label_value) && label.label_blocks && label.label_block_count && type &&
            type->kind == IR_TYPE_POINTER && type->element_type.value == builder->void_type.value;
 }
 
@@ -17037,14 +17093,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_value_contains_label_provenance(CIntegerIrBuilder*
     {
         return false;
     }
-    IrValue* source = builder->function->values + value.value;
-    if (source->is_label_value || source->has_label_provenance)
+    IrValueLabelMetadata source = ir_value_label_metadata(builder->function, value);
+    if (source.is_label_value || source.has_label_provenance)
     {
         return true;
     }
-    for (u32 path_index = 0; path_index < source->label_path_count; path_index += 1)
+    for (u32 path_index = 0; path_index < source.label_path_count; path_index += 1)
     {
-        IrLabelProvenancePath* path = source->label_paths + path_index;
+        IrLabelProvenancePath* path = source.label_paths + path_index;
         if (!path->is_non_label && path->label_block_count != 0)
         {
             return true;
@@ -17277,7 +17333,6 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_global_place(CIntegerIrBuilder* builder,
     instruction.result = place;
     IrInstructionId id = c_ir_append_instruction(builder, instruction);
     builder->function->values[place.value].definition = id;
-    IrValue* place_value = builder->function->values + place.value;
     for (u32 global_index = 0; global_index < builder->module->global_count; global_index += 1)
     {
         IrGlobal* global = builder->module->globals + global_index;
@@ -17292,11 +17347,12 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_global_place(CIntegerIrBuilder* builder,
             {
                 continue;
             }
+            builder->label_metadata_enabled = true;
             IrBlockId* blocks = arena_allocate(builder->arena, IrBlockId, 1);
             blocks[0] = relocation->label_block;
-            c_ir_label_metadata_append_path(builder->arena, place_value, relocation->offset, builder->program->data_layout.pointer.size, blocks, 1, false);
+            c_ir_label_metadata_append_path(builder, place, relocation->offset, builder->program->data_layout.pointer.size, blocks, 1, false);
         }
-        c_ir_label_metadata_rebuild_summary(builder->arena, place_value);
+        c_ir_label_metadata_rebuild_summary(builder, place);
         break;
     }
     return place;
@@ -17332,7 +17388,10 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntege
     {
         c_ir_label_metadata_copy_for_place(builder, local->place);
         builder->function->values[result.value].points_to_read_only = builder->function->values[local->place.value].points_to_read_only;
-        ir_label_provenance_load(builder->arena, builder->function->values + result.value, builder->function->values + local->place.value);
+        if (builder->label_metadata_enabled)
+        {
+            ir_label_provenance_load(builder->arena, builder->function, result, local->place);
+        }
     }
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, 1);
     operands[0] = local->place;
@@ -17403,7 +17462,10 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builde
     {
         c_ir_label_metadata_copy_for_place(builder, place);
         builder->function->values[result.value].points_to_read_only = builder->function->values[place.value].points_to_read_only;
-        ir_label_provenance_load(builder->arena, builder->function->values + result.value, builder->function->values + place.value);
+        if (builder->label_metadata_enabled)
+        {
+            ir_label_provenance_load(builder->arena, builder->function, result, place);
+        }
     }
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, 1);
     operands[0] = place;
@@ -17500,7 +17562,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_cast_instruction(CIntegerIrBuilder* buil
     if (value.value < builder->function->value_count)
     {
         builder->function->values[result.value].points_to_read_only = builder->function->values[value.value].points_to_read_only;
-        c_ir_copy_label_provenance(builder, builder->function->values + result.value, builder->function->values + value.value);
+        c_ir_copy_label_provenance(builder, result, value);
     }
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, 1);
     operands[0] = value;
@@ -17662,8 +17724,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrVal
     {
         return false;
     }
-    bool label_value = value.value < builder->function->value_count && builder->function->values[value.value].is_label_value;
-    bool aggregate_label_value = value.value < builder->function->value_count && builder->function->values[value.value].has_label_provenance;
+    IrValueLabelMetadata stored_metadata =
+        value.value < builder->function->value_count ? ir_value_label_metadata(builder->function, value) : (IrValueLabelMetadata){0};
+    bool label_value = stored_metadata.is_label_value;
+    bool aggregate_label_value = stored_metadata.has_label_provenance;
     if ((label_value || aggregate_label_value) && c_ir_place_may_have_static_storage(builder, place))
     {
         builder->failure_message = S8("a label address may not be stored in static storage");
@@ -18013,8 +18077,12 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_address_of_place(CIntegerIrBuilder* buil
         // alias.  Forget the label identity before publishing the address so
         // any later computed goto is rejected instead of dispatching through
         // stale metadata.
-        c_ir_label_metadata_clear(builder->function->values + root.value);
-        builder->function->values[root.value].has_non_label_provenance = true;
+        c_ir_label_metadata_clear(builder, root);
+        IrValueLabelMetadata* root_entry = ir_value_label_metadata_ensure(builder->arena, builder->function, root);
+        if (root_entry)
+        {
+            root_entry->has_non_label_provenance = true;
+        }
     }
     IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, element_type);
     IrValueId result = c_ir_add_result(builder, pointer_type);
@@ -18037,10 +18105,12 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_label_address(CIntegerIrBuilder* builder
     {
         return result;
     }
-    builder->function->values[result.value].is_label_value = true;
-    builder->function->values[result.value].label_blocks = arena_allocate(builder->arena, IrBlockId, 1);
-    builder->function->values[result.value].label_blocks[0] = label;
-    builder->function->values[result.value].label_block_count = 1;
+    builder->label_metadata_enabled = true;
+    IrValueLabelMetadata* result_entry = ir_value_label_metadata_ensure(builder->arena, builder->function, result);
+    result_entry->is_label_value = true;
+    result_entry->label_blocks = arena_allocate(builder->arena, IrBlockId, 1);
+    result_entry->label_blocks[0] = label;
+    result_entry->label_block_count = 1;
     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_LABEL_ADDRESS, pointer_type, source);
     instruction.targets = arena_allocate(builder->arena, IrBlockId, 1);
     instruction.targets[0] = label;
@@ -23503,7 +23573,7 @@ BUSTER_GLOBAL_LOCAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CInte
                 return C_IR_PREPARED_CALL_STEP_FAILED;
             }
             IrValueId value = child_value;
-            if (value.value < builder->function->value_count && builder->function->values[value.value].is_label_value)
+            if (value.value < builder->function->value_count && ir_value_label_metadata(builder->function, value).is_label_value)
             {
                 builder->failure_message = S8("a label address may not be passed to a function");
                 return C_IR_PREPARED_CALL_STEP_FAILED;
@@ -31412,7 +31482,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_emit_computed_goto_cleanup_dispatch(CIntegerIrBuil
     }
     IrType* target_type = ir_type_from_id(&builder->program->types, builder->function->values[target.value].canonical_type);
     IrBlockId* cleanup_blocks = arena_allocate(builder->arena, IrBlockId, target_count);
-    bool needs_dispatch = builder->function->values[target.value].has_non_label_provenance || !c_ir_is_computed_goto_target(builder, target);
+    bool needs_dispatch = ir_value_label_metadata(builder->function, target).has_non_label_provenance || !c_ir_is_computed_goto_target(builder, target);
     for (u32 target_index = 0; target_index < target_count; target_index += 1)
     {
         CIrLabel* label = 0;
@@ -33719,6 +33789,20 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, 
     for (u32 index = declaration.body_start; index < body_end; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
+        // Address-of-label is the only body construct that creates label
+        // metadata, so its presence decides up front whether the tracking
+        // apparatus runs for this function. A variable sharing a label's
+        // name after a logical && only costs a spurious enable.
+        if (!builder->label_metadata_enabled && c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) && index + 1 < body_end &&
+            builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 label_name = builder->preprocess.tokens[index + 1].spelling;
+            if (c_ir_label_find(state->labels, state->label_count, label_name) ||
+                c_ir_label_find(builder->labels, builder->label_count, label_name))
+            {
+                builder->label_metadata_enabled = true;
+            }
+        }
         if (token.kind != C_TOKEN_IDENTIFIER)
         {
             continue;
@@ -33870,12 +33954,12 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                 }
                 return false;
             }
-            IrValue* target_value = builder->function->values + target.value;
-            IrBlockId* targets = arena_allocate(builder->arena, IrBlockId, target_value->label_block_count);
+            IrValueLabelMetadata target_value = ir_value_label_metadata(builder->function, target);
+            IrBlockId* targets = arena_allocate(builder->arena, IrBlockId, target_value.label_block_count);
             u32 target_count = 0;
-            for (u32 label_index = 0; label_index < target_value->label_block_count; label_index += 1)
+            for (u32 label_index = 0; label_index < target_value.label_block_count; label_index += 1)
             {
-                IrBlockId label = target_value->label_blocks[label_index];
+                IrBlockId label = target_value.label_blocks[label_index];
                 bool duplicate = false;
                 for (u32 previous = 0; previous < target_count; previous += 1)
                 {

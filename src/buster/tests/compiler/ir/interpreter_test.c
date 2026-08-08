@@ -201,37 +201,50 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_test_static_label_dispatch(Arena* arena,
     u32 original_instruction_count = function->instruction_count;
     IrInstruction original_branch = function->instructions[branch_id.value];
     IrInstructionId original_next = original_branch.next;
+    u32 original_label_metadata_count = function->label_metadata_count;
     IrValue global_value = {
         .type = table_type,
         .canonical_type = canonical_table_type,
         .category = IR_VALUE_PLACE,
-        .has_label_provenance = true,
-        .label_blocks = storage_blocks,
-        .label_block_count = 2,
-        .label_paths = storage_paths,
-        .label_path_count = 2,
     };
     IrValueId global_value_id = ir_function_add_value(arena, function, global_value);
     IrValue index_value = {
         .type = pointer_type,
         .canonical_type = canonical_pointer_type,
         .category = IR_VALUE_PLACE,
-        .has_label_provenance = true,
-        .label_blocks = arena_allocate(arena, IrBlockId, 1),
-        .label_block_count = 1,
-        .label_paths = arena_allocate(arena, IrLabelProvenancePath, 1),
-        .label_path_count = 1,
     };
     IrValueId index_value_id = ir_function_add_value(arena, function, index_value);
     IrValue load_value = {
         .type = pointer_type,
         .canonical_type = canonical_pointer_type,
         .category = IR_VALUE_VALUE,
-        .is_label_value = true,
-        .label_blocks = index_value.label_blocks,
-        .label_block_count = 1,
     };
     IrValueId load_value_id = ir_function_add_value(arena, function, load_value);
+    IrBlockId* index_blocks = arena_allocate(arena, IrBlockId, 1);
+    IrLabelProvenancePath* index_paths = arena_allocate(arena, IrLabelProvenancePath, 1);
+    if (global_value_id.value != IR_ID_UNDERLYING_INVALID && index_value_id.value != IR_ID_UNDERLYING_INVALID &&
+        load_value_id.value != IR_ID_UNDERLYING_INVALID)
+    {
+        *ir_value_label_metadata_ensure(arena, function, global_value_id) = (IrValueLabelMetadata){
+            .has_label_provenance = true,
+            .label_blocks = storage_blocks,
+            .label_block_count = 2,
+            .label_paths = storage_paths,
+            .label_path_count = 2,
+        };
+        *ir_value_label_metadata_ensure(arena, function, index_value_id) = (IrValueLabelMetadata){
+            .has_label_provenance = true,
+            .label_blocks = index_blocks,
+            .label_block_count = 1,
+            .label_paths = index_paths,
+            .label_path_count = 1,
+        };
+        *ir_value_label_metadata_ensure(arena, function, load_value_id) = (IrValueLabelMetadata){
+            .is_label_value = true,
+            .label_blocks = index_blocks,
+            .label_block_count = 1,
+        };
+    }
     IrValue constant_value = {
         .type = target.analysis->types.builtin.u32_type,
         .canonical_type = canonical_pointer_type,
@@ -333,14 +346,16 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_test_static_label_dispatch(Arena* arena,
         for (u32 selection = 0; selection < 2; selection += 1)
         {
             function->instructions[constant_instruction_id.value].immediates[0] = selection;
-            function->values[index_value_id.value].label_blocks[0] = branch_targets[selection];
-            function->values[index_value_id.value].label_paths[0] = (IrLabelProvenancePath){
-                .label_blocks = function->values[index_value_id.value].label_blocks,
+            IrValueLabelMetadata* index_metadata = ir_value_label_metadata_find(function, index_value_id);
+            IrValueLabelMetadata* load_metadata = ir_value_label_metadata_find(function, load_value_id);
+            index_metadata->label_blocks[0] = branch_targets[selection];
+            index_metadata->label_paths[0] = (IrLabelProvenancePath){
+                .label_blocks = index_metadata->label_blocks,
                 .offset = 0,
                 .size = 8,
                 .label_block_count = 1,
             };
-            function->values[load_value_id.value].label_blocks[0] = branch_targets[selection];
+            load_metadata->label_blocks[0] = branch_targets[selection];
             branch->targets[0] = branch_targets[selection];
             IrExecutionArgument arguments[] = {
                 {.bits = selection ? 8 : 3},
@@ -354,6 +369,7 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_test_static_label_dispatch(Arena* arena,
     function->instructions[branch_id.value] = original_branch;
     function->value_count = original_value_count;
     function->instruction_count = original_instruction_count;
+    function->label_metadata_count = original_label_metadata_count;
     if (previous.value == IR_ID_UNDERLYING_INVALID)
     {
         branch_block->first_instruction = branch_id;
@@ -834,16 +850,19 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
             label_instruction.targets = arena_allocate(arguments->arena, IrBlockId, 1);
             label_instruction.result = IR_VALUE_ID_INVALID;
             label_instruction.next = branch_id;
+            u32 original_choose_label_metadata_count = choose_function->label_metadata_count;
             IrValue label_value = {
                 .type = analysis_void_pointer,
                 .canonical_type = canonical_void_pointer,
                 .definition = IR_INSTRUCTION_ID_INVALID,
                 .category = IR_VALUE_VALUE,
+            };
+            IrValueId label_value_id = ir_function_add_value(arguments->arena, choose_function, label_value);
+            *ir_value_label_metadata_ensure(arguments->arena, choose_function, label_value_id) = (IrValueLabelMetadata){
                 .is_label_value = true,
                 .label_block_count = 1,
                 .label_blocks = label_instruction.targets,
             };
-            IrValueId label_value_id = ir_function_add_value(arguments->arena, choose_function, label_value);
             IrInstructionId label_instruction_id = ir_function_add_instruction(arguments->arena, choose_function, label_instruction);
             choose_function->values[label_value_id.value].definition = label_instruction_id;
             choose_function->instructions[label_instruction_id.value].result = label_value_id;
@@ -877,7 +896,7 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
             for (u32 target_index = 0; target_index < 2; target_index += 1)
             {
                 branch->targets[0] = branch_targets[target_index];
-                choose_function->values[label_value_id.value].label_blocks[0] = branch_targets[target_index];
+                ir_value_label_metadata_find(choose_function, label_value_id)->label_blocks[0] = branch_targets[target_index];
                 choose_function->instructions[label_instruction_id.value].targets[0] = branch_targets[target_index];
                 IrExecutionArgument dispatch_arguments[] = {
                     {.bits = target_index ? 8 : 3},
@@ -889,16 +908,18 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, dispatched.trap == IR_EXECUTION_TRAP_NONE);
                 BUSTER_TEST(arguments, dispatched.has_value && dispatched.bits == (target_index ? 5 : 7));
             }
-            bool saved_non_label_provenance = choose_function->values[label_value_id.value].has_non_label_provenance;
-            choose_function->values[label_value_id.value].has_non_label_provenance = true;
+            IrValueLabelMetadata* label_metadata = ir_value_label_metadata_find(choose_function, label_value_id);
+            bool saved_non_label_provenance = label_metadata->has_non_label_provenance;
+            label_metadata->has_non_label_provenance = true;
             IrExecutionResult non_label_dispatch =
                 ir_execute(expression_arena, &scalar_program_analysis, &scalar_program, choose_entity->id, ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0,
                            (IrExecutionOptions){0});
             BUSTER_TEST(arguments, non_label_dispatch.trap == IR_EXECUTION_TRAP_INVALID_PROGRAM);
-            choose_function->values[label_value_id.value].has_non_label_provenance = saved_non_label_provenance;
+            label_metadata->has_non_label_provenance = saved_non_label_provenance;
             choose_function->instructions[branch_id.value] = original_branch;
             choose_function->instruction_count = original_instruction_count;
             choose_function->value_count = original_value_count;
+            choose_function->label_metadata_count = original_choose_label_metadata_count;
             if (previous.value == IR_ID_UNDERLYING_INVALID)
             {
                 linked_block->first_instruction = branch_id;

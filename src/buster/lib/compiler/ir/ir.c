@@ -301,7 +301,91 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_inline_assembly_valid(IrProgram* program, 
     return valid;
 }
 
-bool ir_label_provenance_valid(IrValue* value)
+IrValueLabelMetadata* ir_value_label_metadata_find(IrFunction* function, IrValueId value)
+{
+    if (!function || !function->label_metadata_count)
+    {
+        return 0;
+    }
+    u32 low = 0;
+    u32 high = function->label_metadata_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (function->label_metadata_values[middle].value < value.value)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    if (low < function->label_metadata_count && function->label_metadata_values[low].value == value.value)
+    {
+        return function->label_metadata + low;
+    }
+    return 0;
+}
+
+IrValueLabelMetadata ir_value_label_metadata(IrFunction* function, IrValueId value)
+{
+    IrValueLabelMetadata* entry = ir_value_label_metadata_find(function, value);
+    IrValueLabelMetadata zero = {0};
+    return entry ? *entry : zero;
+}
+
+IrValueLabelMetadata* ir_value_label_metadata_ensure(Arena* arena, IrFunction* function, IrValueId value)
+{
+    if (!arena || !function)
+    {
+        return 0;
+    }
+    u32 low = 0;
+    u32 high = function->label_metadata_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (function->label_metadata_values[middle].value < value.value)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    if (low < function->label_metadata_count && function->label_metadata_values[low].value == value.value)
+    {
+        return function->label_metadata + low;
+    }
+    if (function->label_metadata_count == function->label_metadata_capacity)
+    {
+        u32 new_capacity = function->label_metadata_capacity ? function->label_metadata_capacity * 2 : 8;
+        IrValueId* new_values = arena_allocate(arena, IrValueId, new_capacity);
+        IrValueLabelMetadata* new_entries = arena_allocate(arena, IrValueLabelMetadata, new_capacity);
+        if (function->label_metadata_count)
+        {
+            memcpy(new_values, function->label_metadata_values, sizeof(*new_values) * function->label_metadata_count);
+            memcpy(new_entries, function->label_metadata, sizeof(*new_entries) * function->label_metadata_count);
+        }
+        function->label_metadata_values = new_values;
+        function->label_metadata = new_entries;
+        function->label_metadata_capacity = new_capacity;
+    }
+    u32 tail = function->label_metadata_count - low;
+    if (tail)
+    {
+        memmove(function->label_metadata_values + low + 1, function->label_metadata_values + low, sizeof(*function->label_metadata_values) * tail);
+        memmove(function->label_metadata + low + 1, function->label_metadata + low, sizeof(*function->label_metadata) * tail);
+    }
+    function->label_metadata_values[low] = value;
+    function->label_metadata[low] = (IrValueLabelMetadata){0};
+    function->label_metadata_count += 1;
+    return function->label_metadata + low;
+}
+
+bool ir_label_provenance_valid(IrValueLabelMetadata* value)
 {
     if (!value || !value->is_label_value || value->has_label_provenance || value->has_non_label_provenance || !value->label_block_count || !value->label_blocks)
     {
@@ -320,7 +404,7 @@ bool ir_label_provenance_valid(IrValue* value)
     return true;
 }
 
-bool ir_label_storage_provenance_valid(IrValue* value)
+bool ir_label_storage_provenance_valid(IrValueLabelMetadata* value)
 {
     if (!value || !value->has_label_provenance || value->is_label_value || !value->label_block_count || !value->label_blocks)
     {
@@ -389,7 +473,7 @@ BUSTER_GLOBAL_LOCAL IrFunction* ir_module_function_for_symbol(IrModule* module, 
     return 0;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_label_block_set_contains(IrValue* value, IrBlockId block)
+BUSTER_GLOBAL_LOCAL bool ir_label_block_set_contains(IrValueLabelMetadata* value, IrBlockId block)
 {
     if (!value || !value->label_blocks)
     {
@@ -421,7 +505,7 @@ BUSTER_GLOBAL_LOCAL bool ir_label_path_contains_block(IrLabelProvenancePath* pat
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_label_block_sets_equal(IrValue* left, IrValue* right)
+BUSTER_GLOBAL_LOCAL bool ir_label_block_sets_equal(IrValueLabelMetadata* left, IrValueLabelMetadata* right)
 {
     if (!left || !right || left->label_block_count != right->label_block_count)
     {
@@ -444,9 +528,12 @@ BUSTER_GLOBAL_LOCAL bool ir_label_block_sets_equal(IrValue* left, IrValue* right
     return true;
 }
 
-BUSTER_F_DECL bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrValue* value)
+BUSTER_F_DECL bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrValueId value_id)
 {
-    IrType* value_type = program && value ? ir_type_from_id(&program->types, value->canonical_type) : 0;
+    IrValue* value_slot = function && value_id.value < function->value_count ? function->values + value_id.value : 0;
+    IrValueLabelMetadata metadata = ir_value_label_metadata(function, value_id);
+    IrValueLabelMetadata* value = value_slot ? &metadata : 0;
+    IrType* value_type = program && value_slot ? ir_type_from_id(&program->types, value_slot->canonical_type) : 0;
     u64 pointer_size = program ? program->data_layout.pointer.size : 0;
     bool valid = function && value && (!program || (value_type && value_type->layout.resolved)) && (value->label_block_count != 0) == (value->label_blocks != 0) &&
            (value->label_path_count != 0) == (value->label_paths != 0) &&
@@ -514,7 +601,7 @@ BUSTER_F_DECL bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction*
     return valid;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_label_block_set_subset(IrValue* subset, IrValue* superset)
+BUSTER_GLOBAL_LOCAL bool ir_label_block_set_subset(IrValueLabelMetadata* subset, IrValueLabelMetadata* superset)
 {
     if (!subset || !superset)
     {
@@ -530,7 +617,7 @@ BUSTER_GLOBAL_LOCAL bool ir_label_block_set_subset(IrValue* subset, IrValue* sup
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_value_has_non_label_path(IrValue* value)
+BUSTER_GLOBAL_LOCAL bool ir_value_has_non_label_path(IrValueLabelMetadata* value)
 {
     if (!value)
     {
@@ -565,7 +652,7 @@ BUSTER_GLOBAL_LOCAL bool ir_label_path_blocks_equal(IrLabelProvenancePath* left,
     return left && right && ir_label_path_blocks_subset(left, right) && ir_label_path_blocks_subset(right, left);
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_label_metadata_paths_transfer_exact(IrValue* result, IrValue* source, u64 base_offset, u64 base_size)
+BUSTER_GLOBAL_LOCAL bool ir_label_metadata_paths_transfer_exact(IrValueLabelMetadata* result, IrValueLabelMetadata* source, u64 base_offset, u64 base_size)
 {
     if (!result || !source || base_offset > UINT64_MAX - base_size)
     {
@@ -643,7 +730,7 @@ BUSTER_GLOBAL_LOCAL bool ir_constant_index_value(IrFunction* function, IrValueId
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_label_metadata_has_label(IrValue* value)
+BUSTER_GLOBAL_LOCAL bool ir_label_metadata_has_label(IrValueLabelMetadata* value)
 {
     if (!value)
     {
@@ -663,7 +750,7 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_has_label(IrValue* value)
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_label_metadata_storage_transfer_valid(IrProgram* program, IrValue* result, IrValue* source)
+BUSTER_GLOBAL_LOCAL bool ir_label_metadata_storage_transfer_valid(IrProgram* program, IrValueLabelMetadata* result, IrValueLabelMetadata* source)
 {
     BUSTER_UNUSED(program);
     if (!result || !source || result->is_label_value)
@@ -689,7 +776,7 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_storage_transfer_valid(IrProgram* pro
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_label_metadata_dynamic_index_transfer_valid(IrValue* result, IrValue* source, u64 array_size, u64 element_size)
+BUSTER_GLOBAL_LOCAL bool ir_label_metadata_dynamic_index_transfer_valid(IrValueLabelMetadata* result, IrValueLabelMetadata* source, u64 array_size, u64 element_size)
 {
     if (!result || !source)
     {
@@ -792,7 +879,8 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_dynamic_index_transfer_valid(IrValue*
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_label_metadata_aggregate_transfer_valid(IrProgram* program, IrFunction* function, IrInstruction* definition, IrValue* result)
+BUSTER_GLOBAL_LOCAL bool ir_label_metadata_aggregate_transfer_valid(IrProgram* program, IrFunction* function, IrInstruction* definition,
+                                                                     IrValueLabelMetadata* result)
 {
     if (!program || !function || !definition || !result || result->is_label_value)
     {
@@ -806,8 +894,8 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_aggregate_transfer_valid(IrProgram* p
         {
             return false;
         }
-        IrValue* source = function->values + definition->operands[operand_index].value;
-        source_has_label |= ir_label_metadata_has_label(source);
+        IrValueLabelMetadata source = ir_value_label_metadata(function, definition->operands[operand_index]);
+        source_has_label |= ir_label_metadata_has_label(&source);
     }
     if (!result_has_label && !source_has_label)
     {
@@ -827,8 +915,9 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_aggregate_transfer_valid(IrProgram* p
         {
             return false;
         }
-        IrValue* source = function->values + definition->operands[operand_index].value;
-        IrType* source_type = ir_type_from_id(&program->types, source->canonical_type);
+        IrValueLabelMetadata source_metadata = ir_value_label_metadata(function, definition->operands[operand_index]);
+        IrValueLabelMetadata* source = &source_metadata;
+        IrType* source_type = ir_type_from_id(&program->types, function->values[definition->operands[operand_index].value].canonical_type);
         u64 base_offset = 0;
         u64 source_size = 0;
         if (definition->opcode == IR_OPCODE_ARRAY)
@@ -937,7 +1026,8 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_aggregate_transfer_valid(IrProgram* p
         bool found = false;
         for (u32 operand_index = 0; operand_index < definition->operand_count && !found; operand_index += 1)
         {
-            IrValue* source = function->values + definition->operands[operand_index].value;
+            IrValueLabelMetadata source_metadata = ir_value_label_metadata(function, definition->operands[operand_index]);
+            IrValueLabelMetadata* source = &source_metadata;
             u64 base_offset = 0;
             u64 source_size = 0;
             if (definition->opcode == IR_OPCODE_ARRAY)
@@ -993,20 +1083,25 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_aggregate_transfer_valid(IrProgram* p
     return true;
 }
 
-BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFunction* function, IrValue* result)
+BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFunction* function, IrValueId value_id)
 {
-    if (!function || !result)
+    IrValue* result_slot = function && value_id.value < function->value_count ? function->values + value_id.value : 0;
+    if (!function || !result_slot)
     {
         return false;
     }
-    if (result->definition.value >= function->instruction_count)
+    if (result_slot->definition.value >= function->instruction_count)
     {
         return true;
     }
-    IrInstruction* definition = function->instructions + result->definition.value;
-    IrValue* first = definition->operand_count && definition->operands && definition->operands[0].value < function->value_count
-                         ? function->values + definition->operands[0].value
-                         : 0;
+    IrValueLabelMetadata result_metadata = ir_value_label_metadata(function, value_id);
+    IrValueLabelMetadata* result = &result_metadata;
+    IrInstruction* definition = function->instructions + result_slot->definition.value;
+    IrValue* first_slot = definition->operand_count && definition->operands && definition->operands[0].value < function->value_count
+                              ? function->values + definition->operands[0].value
+                              : 0;
+    IrValueLabelMetadata first_metadata = first_slot ? ir_value_label_metadata(function, definition->operands[0]) : (IrValueLabelMetadata){0};
+    IrValueLabelMetadata* first = first_slot ? &first_metadata : 0;
     switch (definition->opcode)
     {
     case IR_OPCODE_ADDRESS_OF:
@@ -1031,7 +1126,7 @@ BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFuncti
         {
             return true;
         }
-        IrType* load_source_type = program ? ir_type_from_id(&program->types, first->canonical_type) : 0;
+        IrType* load_source_type = program ? ir_type_from_id(&program->types, first_slot->canonical_type) : 0;
         return !program || !load_source_type || !load_source_type->layout.resolved ||
                ir_label_metadata_paths_transfer_exact(result, first, 0, load_source_type->layout.size);
     case IR_OPCODE_CAST:
@@ -1041,8 +1136,8 @@ BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFuncti
         }
         if (ir_label_metadata_has_label(first) || ir_label_metadata_has_label(result))
         {
-            if (!program || !ir_canonical_void_pointer_type(program, first->canonical_type) ||
-                !ir_canonical_void_pointer_type(program, result->canonical_type) || first->canonical_type.value != result->canonical_type.value ||
+            if (!program || !ir_canonical_void_pointer_type(program, first_slot->canonical_type) ||
+                !ir_canonical_void_pointer_type(program, result_slot->canonical_type) || first_slot->canonical_type.value != result_slot->canonical_type.value ||
                 definition->conversion_operation != IR_CONVERSION_IDENTITY)
             {
                 return false;
@@ -1061,7 +1156,7 @@ BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFuncti
         {
             return true;
         }
-        IrType* cast_source_type = program ? ir_type_from_id(&program->types, first->canonical_type) : 0;
+        IrType* cast_source_type = program ? ir_type_from_id(&program->types, first_slot->canonical_type) : 0;
         return !program || !cast_source_type || !cast_source_type->layout.resolved ||
                ir_label_metadata_paths_transfer_exact(result, first, 0, cast_source_type->layout.size);
     case IR_OPCODE_FIELD:
@@ -1078,7 +1173,7 @@ BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFuncti
             return !ir_label_metadata_has_label(result) || (ir_label_metadata_has_label(first) && ir_label_block_set_subset(result, first));
         }
         {
-            IrType* aggregate = ir_type_from_id(&program->types, first->canonical_type);
+            IrType* aggregate = ir_type_from_id(&program->types, first_slot->canonical_type);
             u64 field_index = definition->immediate_count == 1 && definition->immediates ? definition->immediates[0] : UINT64_MAX;
             if (!aggregate || (aggregate->kind != IR_TYPE_STRUCT && aggregate->kind != IR_TYPE_UNION) || field_index >= aggregate->field_count)
             {
@@ -1119,7 +1214,7 @@ BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFuncti
             return !ir_label_metadata_has_label(result) || (ir_label_metadata_has_label(first) && ir_label_block_set_subset(result, first));
         }
         {
-            IrType* base_type = ir_type_from_id(&program->types, first->canonical_type);
+            IrType* base_type = ir_type_from_id(&program->types, first_slot->canonical_type);
             IrType* element_type = base_type ? ir_type_from_id(&program->types, base_type->element_type) : 0;
             u64 index = 0;
             bool constant = definition->operand_count == 2 && definition->operands && ir_constant_index_value(function, definition->operands[1], &index);
@@ -1194,7 +1289,8 @@ BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFuncti
             {
                 if (definition->operands && definition->operands[operand_index].value < function->value_count)
                 {
-                    found = ir_label_block_set_contains(function->values + definition->operands[operand_index].value, result->label_blocks[block_index]);
+                    IrValueLabelMetadata operand_metadata = ir_value_label_metadata(function, definition->operands[operand_index]);
+                    found = ir_label_block_set_contains(&operand_metadata, result->label_blocks[block_index]);
                 }
             }
             if (!found)
@@ -1223,7 +1319,8 @@ BUSTER_F_DECL bool ir_label_block_parameter_provenance_valid(IrFunction* functio
     {
         return false;
     }
-    IrValue* destination = function->values + parameter->value.value;
+    IrValueLabelMetadata destination_metadata = ir_value_label_metadata(function, parameter->value);
+    IrValueLabelMetadata* destination = &destination_metadata;
     bool incoming_non_label = false;
     bool incoming_label = false;
     bool all_incoming_pure_labels = true;
@@ -1235,7 +1332,8 @@ BUSTER_F_DECL bool ir_label_block_parameter_provenance_valid(IrFunction* functio
         {
             return false;
         }
-        IrValue* source = function->values + incoming->value.value;
+        IrValueLabelMetadata source_metadata = ir_value_label_metadata(function, incoming->value);
+        IrValueLabelMetadata* source = &source_metadata;
         bool source_non_label = source->has_non_label_provenance;
         for (u32 path_index = 0; path_index < source->label_path_count; path_index += 1)
         {
@@ -1251,8 +1349,8 @@ BUSTER_F_DECL bool ir_label_block_parameter_provenance_valid(IrFunction* functio
             bool found = false;
             for (IrIncoming* previous = parameter->first_incoming; previous && previous != incoming; previous = previous->next)
             {
-                IrValue* previous_source = previous->value.value < function->value_count ? function->values + previous->value.value : 0;
-                found |= previous_source && ir_label_block_set_contains(previous_source, source->label_blocks[block_index]);
+                IrValueLabelMetadata previous_metadata = ir_value_label_metadata(function, previous->value);
+                found |= previous->value.value < function->value_count && ir_label_block_set_contains(&previous_metadata, source->label_blocks[block_index]);
             }
             if (!found)
             {
@@ -1306,8 +1404,8 @@ BUSTER_F_DECL bool ir_label_block_parameter_provenance_valid(IrFunction* functio
         bool found = false;
         for (IrIncoming* incoming = parameter->first_incoming; incoming && !found; incoming = incoming->next)
         {
-            IrValue* source = incoming->value.value < function->value_count ? function->values + incoming->value.value : 0;
-            found = source && ir_label_block_set_contains(source, destination->label_blocks[destination_block_index]);
+            IrValueLabelMetadata source_metadata = ir_value_label_metadata(function, incoming->value);
+            found = incoming->value.value < function->value_count && ir_label_block_set_contains(&source_metadata, destination->label_blocks[destination_block_index]);
         }
         if (!found)
         {
@@ -1326,10 +1424,11 @@ BUSTER_F_DECL bool ir_label_block_parameter_provenance_valid(IrFunction* functio
         bool incoming_label_path = false;
         for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
         {
-            IrValue* source = incoming->value.value < function->value_count ? function->values + incoming->value.value : 0;
-            for (u32 path_index = 0; source && path_index < source->label_path_count; path_index += 1)
+            IrValueLabelMetadata source = incoming->value.value < function->value_count ? ir_value_label_metadata(function, incoming->value)
+                                                                                        : (IrValueLabelMetadata){0};
+            for (u32 path_index = 0; path_index < source.label_path_count; path_index += 1)
             {
-                IrLabelProvenancePath* source_path = source->label_paths + path_index;
+                IrLabelProvenancePath* source_path = source.label_paths + path_index;
                 if (source_path->offset == destination_path->offset && source_path->size == destination_path->size)
                 {
                     incoming_path = true;
@@ -1349,10 +1448,11 @@ BUSTER_F_DECL bool ir_label_block_parameter_provenance_valid(IrFunction* functio
                 bool found = false;
                 for (IrIncoming* incoming = parameter->first_incoming; incoming && !found; incoming = incoming->next)
                 {
-                    IrValue* source = incoming->value.value < function->value_count ? function->values + incoming->value.value : 0;
-                    for (u32 path_index = 0; source && path_index < source->label_path_count; path_index += 1)
+                    IrValueLabelMetadata source = incoming->value.value < function->value_count ? ir_value_label_metadata(function, incoming->value)
+                                                                                                : (IrValueLabelMetadata){0};
+                    for (u32 path_index = 0; path_index < source.label_path_count; path_index += 1)
                     {
-                        IrLabelProvenancePath* source_path = source->label_paths + path_index;
+                        IrLabelProvenancePath* source_path = source.label_paths + path_index;
                         found |= source_path->offset == destination_path->offset && source_path->size == destination_path->size && !source_path->is_non_label &&
                                  ir_label_path_contains_block(source_path, destination_path->label_blocks[block_index]);
                     }
@@ -1367,7 +1467,7 @@ BUSTER_F_DECL bool ir_label_block_parameter_provenance_valid(IrFunction* functio
     return true;
 }
 
-bool ir_label_provenance_contains(IrValue* value, IrBlockId block)
+bool ir_label_provenance_contains(IrValueLabelMetadata* value, IrBlockId block)
 {
     if (!ir_label_provenance_valid(value))
     {
@@ -1383,28 +1483,39 @@ bool ir_label_provenance_contains(IrValue* value, IrBlockId block)
     return false;
 }
 
-void ir_label_provenance_union(Arena* arena, IrValue* destination, IrValue* source)
+void ir_label_provenance_union(Arena* arena, IrFunction* function, IrValueId destination_id, IrValueId source_id)
 {
-    if (!arena || !destination || !source)
+    if (!arena || !function || destination_id.value >= function->value_count || source_id.value >= function->value_count)
     {
         return;
     }
-    destination->has_non_label_provenance |= source->has_non_label_provenance;
-    if (!source->is_label_value || !source->label_block_count || !source->label_blocks)
+    IrValueLabelMetadata source = ir_value_label_metadata(function, source_id);
+    bool source_blocks_present = source.is_label_value && source.label_block_count && source.label_blocks;
+    if (!source.has_non_label_provenance && !source_blocks_present)
+    {
+        return;
+    }
+    IrValueLabelMetadata* destination = ir_value_label_metadata_ensure(arena, function, destination_id);
+    if (!destination)
+    {
+        return;
+    }
+    destination->has_non_label_provenance |= source.has_non_label_provenance;
+    if (!source_blocks_present)
     {
         return;
     }
     u32 existing_count = destination->is_label_value && destination->label_blocks ? destination->label_block_count : 0;
-    u32 capacity = existing_count + source->label_block_count;
+    u32 capacity = existing_count + source.label_block_count;
     IrBlockId* blocks = arena_allocate(arena, IrBlockId, capacity);
     u32 count = 0;
     for (u32 index = 0; index < existing_count; index += 1)
     {
         blocks[count++] = destination->label_blocks[index];
     }
-    for (u32 source_index = 0; source_index < source->label_block_count; source_index += 1)
+    for (u32 source_index = 0; source_index < source.label_block_count; source_index += 1)
     {
-        IrBlockId block = source->label_blocks[source_index];
+        IrBlockId block = source.label_blocks[source_index];
         bool found = false;
         for (u32 index = 0; index < count; index += 1)
         {
@@ -1415,7 +1526,7 @@ void ir_label_provenance_union(Arena* arena, IrValue* destination, IrValue* sour
             blocks[count++] = block;
         }
     }
-    bool has_non_label = destination->has_non_label_provenance || source->has_non_label_provenance;
+    bool has_non_label = destination->has_non_label_provenance || source.has_non_label_provenance;
     destination->is_label_value = count != 0;
     destination->has_label_provenance = false;
     destination->has_non_label_provenance = has_non_label;
@@ -1425,36 +1536,43 @@ void ir_label_provenance_union(Arena* arena, IrValue* destination, IrValue* sour
     destination->label_path_count = 0;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_label_storage_union_source(Arena* arena, IrValue* destination, IrValue* source);
+BUSTER_GLOBAL_LOCAL void ir_label_storage_union_source(Arena* arena, IrFunction* function, IrValueId destination_id, IrValueId source_id);
 
-void ir_label_provenance_copy(Arena* arena, IrValue* destination, IrValue* source)
+void ir_label_provenance_copy(Arena* arena, IrFunction* function, IrValueId destination_id, IrValueId source_id)
 {
-    if (!destination)
+    if (!function || destination_id.value >= function->value_count)
     {
         return;
     }
-    destination->is_label_value = false;
-    destination->has_label_provenance = false;
-    destination->has_non_label_provenance = false;
-    destination->label_blocks = 0;
-    destination->label_block_count = 0;
-    destination->label_paths = 0;
-    destination->label_path_count = 0;
-    if (source)
+    IrValueLabelMetadata* existing = ir_value_label_metadata_find(function, destination_id);
+    if (existing)
     {
-        destination->has_non_label_provenance = source->has_non_label_provenance;
-        if (source->has_label_provenance || source->label_path_count)
+        *existing = (IrValueLabelMetadata){0};
+    }
+    if (source_id.value >= function->value_count)
+    {
+        return;
+    }
+    IrValueLabelMetadata source = ir_value_label_metadata(function, source_id);
+    if (source.has_non_label_provenance)
+    {
+        IrValueLabelMetadata* destination = arena ? ir_value_label_metadata_ensure(arena, function, destination_id) : existing;
+        if (destination)
         {
-            ir_label_storage_union_source(arena, destination, source);
+            destination->has_non_label_provenance = true;
         }
-        else
-        {
-            ir_label_provenance_union(arena, destination, source);
-        }
+    }
+    if (source.has_label_provenance || source.label_path_count)
+    {
+        ir_label_storage_union_source(arena, function, destination_id, source_id);
+    }
+    else
+    {
+        ir_label_provenance_union(arena, function, destination_id, source_id);
     }
 }
 
-BUSTER_GLOBAL_LOCAL void ir_label_storage_path_append(Arena* arena, IrValue* destination, IrLabelProvenancePath* source_path)
+BUSTER_GLOBAL_LOCAL void ir_label_storage_path_append(Arena* arena, IrValueLabelMetadata* destination, IrLabelProvenancePath* source_path)
 {
     if (!arena || !destination || !source_path)
     {
@@ -1514,22 +1632,31 @@ BUSTER_GLOBAL_LOCAL void ir_label_storage_path_append(Arena* arena, IrValue* des
     destination->label_path_count += 1;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_label_storage_union_source(Arena* arena, IrValue* destination, IrValue* source)
+BUSTER_GLOBAL_LOCAL void ir_label_storage_union_source(Arena* arena, IrFunction* function, IrValueId destination_id, IrValueId source_id)
 {
-    if (!arena || !destination || !source)
+    if (!arena || !function || destination_id.value >= function->value_count || source_id.value >= function->value_count)
+    {
+        return;
+    }
+    IrValueLabelMetadata source = ir_value_label_metadata(function, source_id);
+    bool source_blocks_present = (source.is_label_value || source.has_label_provenance) && source.label_block_count && source.label_blocks;
+    bool source_has_content = source.has_non_label_provenance || source.label_path_count || source_blocks_present;
+    IrValueLabelMetadata* destination =
+        source_has_content ? ir_value_label_metadata_ensure(arena, function, destination_id) : ir_value_label_metadata_find(function, destination_id);
+    if (!destination)
     {
         return;
     }
     // Preserve ordinary-pointer alternatives even when the source contributes
     // no label blocks; otherwise a later load can become falsely label-only.
-    destination->has_non_label_provenance |= source->has_non_label_provenance;
-    for (u32 path_index = 0; path_index < source->label_path_count; path_index += 1)
+    destination->has_non_label_provenance |= source.has_non_label_provenance;
+    for (u32 path_index = 0; path_index < source.label_path_count; path_index += 1)
     {
-        IrLabelProvenancePath* source_path = source->label_paths + path_index;
+        IrLabelProvenancePath* source_path = source.label_paths + path_index;
         destination->has_non_label_provenance |= source_path->is_non_label;
         ir_label_storage_path_append(arena, destination, source_path);
     }
-    if ((!source->is_label_value && !source->has_label_provenance) || !source->label_block_count || !source->label_blocks)
+    if (!source_blocks_present)
     {
         if (destination->is_label_value && destination->has_non_label_provenance)
         {
@@ -1542,15 +1669,15 @@ BUSTER_GLOBAL_LOCAL void ir_label_storage_union_source(Arena* arena, IrValue* de
                                                                                            : destination->is_label_value && destination->label_blocks
                                                                                                  ? destination->label_block_count
                                                                                                  : 0;
-    IrBlockId* blocks = arena_allocate(arena, IrBlockId, existing_count + source->label_block_count);
+    IrBlockId* blocks = arena_allocate(arena, IrBlockId, existing_count + source.label_block_count);
     u32 count = 0;
     for (u32 index = 0; index < existing_count; index += 1)
     {
         blocks[count++] = destination->label_blocks[index];
     }
-    for (u32 source_index = 0; source_index < source->label_block_count; source_index += 1)
+    for (u32 source_index = 0; source_index < source.label_block_count; source_index += 1)
     {
-        IrBlockId block = source->label_blocks[source_index];
+        IrBlockId block = source.label_blocks[source_index];
         bool found = false;
         for (u32 index = 0; index < count; index += 1)
         {
@@ -1567,60 +1694,74 @@ BUSTER_GLOBAL_LOCAL void ir_label_storage_union_source(Arena* arena, IrValue* de
     destination->label_block_count = count;
 }
 
-void ir_label_storage_provenance_union(Arena* arena, IrValue* destination, IrValue* source)
+void ir_label_storage_provenance_union(Arena* arena, IrFunction* function, IrValueId destination_id, IrValueId source_id)
 {
-    ir_label_storage_union_source(arena, destination, source);
+    ir_label_storage_union_source(arena, function, destination_id, source_id);
 }
 
-void ir_label_storage_provenance_copy(Arena* arena, IrValue* destination, IrValue* source)
+void ir_label_storage_provenance_copy(Arena* arena, IrFunction* function, IrValueId destination_id, IrValueId source_id)
 {
-    if (!destination)
+    if (!function || destination_id.value >= function->value_count)
     {
         return;
     }
-    destination->is_label_value = false;
-    destination->has_label_provenance = false;
-    destination->has_non_label_provenance = false;
-    destination->label_blocks = 0;
-    destination->label_block_count = 0;
-    destination->label_paths = 0;
-    destination->label_path_count = 0;
-    ir_label_storage_union_source(arena, destination, source);
+    IrValueLabelMetadata* existing = ir_value_label_metadata_find(function, destination_id);
+    if (existing)
+    {
+        *existing = (IrValueLabelMetadata){0};
+    }
+    ir_label_storage_union_source(arena, function, destination_id, source_id);
 }
 
-void ir_label_provenance_load(Arena* arena, IrValue* destination, IrValue* source)
+void ir_label_provenance_load(Arena* arena, IrFunction* function, IrValueId destination_id, IrValueId source_id)
 {
-    if (!destination)
+    if (!function || destination_id.value >= function->value_count)
     {
         return;
     }
-    destination->is_label_value = false;
-    destination->has_label_provenance = false;
-    destination->has_non_label_provenance = source ? source->has_non_label_provenance : false;
-    destination->label_blocks = 0;
-    destination->label_block_count = 0;
-    destination->label_paths = 0;
-    destination->label_path_count = 0;
-    if (!arena || !source || !source->label_block_count || !source->label_blocks)
+    IrValueLabelMetadata* existing = ir_value_label_metadata_find(function, destination_id);
+    if (existing)
+    {
+        *existing = (IrValueLabelMetadata){0};
+    }
+    if (source_id.value >= function->value_count)
     {
         return;
     }
-    bool scalar_label_paths = !source->has_non_label_provenance;
-    for (u32 path_index = 0; scalar_label_paths && path_index < source->label_path_count; path_index += 1)
+    IrValueLabelMetadata source = ir_value_label_metadata(function, source_id);
+    if (source.has_non_label_provenance)
     {
-        IrLabelProvenancePath* path = source->label_paths + path_index;
+        IrValueLabelMetadata* non_label_destination = arena ? ir_value_label_metadata_ensure(arena, function, destination_id) : existing;
+        if (non_label_destination)
+        {
+            non_label_destination->has_non_label_provenance = true;
+        }
+    }
+    if (!arena || !source.label_block_count || !source.label_blocks)
+    {
+        return;
+    }
+    bool scalar_label_paths = !source.has_non_label_provenance;
+    for (u32 path_index = 0; scalar_label_paths && path_index < source.label_path_count; path_index += 1)
+    {
+        IrLabelProvenancePath* path = source.label_paths + path_index;
         scalar_label_paths = !path->is_non_label && path->offset == 0 && path->label_block_count != 0;
     }
     if (scalar_label_paths)
     {
+        IrValueLabelMetadata* destination = ir_value_label_metadata_ensure(arena, function, destination_id);
+        if (!destination)
+        {
+            return;
+        }
         destination->is_label_value = true;
-        destination->label_blocks = arena_allocate(arena, IrBlockId, source->label_block_count);
-        memcpy(destination->label_blocks, source->label_blocks, sizeof(IrBlockId) * source->label_block_count);
-        destination->label_block_count = source->label_block_count;
+        destination->label_blocks = arena_allocate(arena, IrBlockId, source.label_block_count);
+        memcpy(destination->label_blocks, source.label_blocks, sizeof(IrBlockId) * source.label_block_count);
+        destination->label_block_count = source.label_block_count;
     }
     else
     {
-        ir_label_storage_provenance_copy(arena, destination, source);
+        ir_label_storage_provenance_copy(arena, function, destination_id, source_id);
     }
 }
 
@@ -1865,27 +2006,29 @@ BUSTER_GLOBAL_LOCAL void ir_block_parameter_incoming_add(IrBuilder* builder, IrB
     parameter->incoming_count += 1;
     if (value.value < builder->function->value_count && parameter->value.value < builder->function->value_count)
     {
-        IrValue* destination = builder->function->values + parameter->value.value;
-        IrValue* source = builder->function->values + value.value;
-        bool source_storage = source->has_label_provenance || source->label_path_count || source->has_non_label_provenance;
-        bool destination_storage = destination->has_label_provenance || destination->label_path_count || destination->has_non_label_provenance;
-        if (!source_storage && !destination_storage && source->is_label_value)
+        IrValueLabelMetadata* destination = ir_value_label_metadata_find(builder->function, parameter->value);
+        IrValueLabelMetadata source = ir_value_label_metadata(builder->function, value);
+        bool source_storage = source.has_label_provenance || source.label_path_count || source.has_non_label_provenance;
+        bool destination_storage =
+            destination && (destination->has_label_provenance || destination->label_path_count || destination->has_non_label_provenance);
+        if (!source_storage && !destination_storage && source.is_label_value)
         {
-            ir_label_provenance_union(builder->result_arena, destination, source);
+            ir_label_provenance_union(builder->result_arena, builder->function, parameter->value, value);
         }
         else
         {
-            if (destination->is_label_value)
+            if (destination && destination->is_label_value)
             {
                 destination->is_label_value = false;
                 destination->has_label_provenance = destination->label_block_count != 0;
             }
-            ir_label_storage_union_source(builder->result_arena, destination, source);
+            ir_label_storage_union_source(builder->result_arena, builder->function, parameter->value, value);
         }
         // A label-only incoming edge may be added after an ordinary pointer
         // edge.  The union helper deliberately keeps the block set, but a
         // mixed value is storage provenance, never a pure LABEL_ADDRESS value.
-        if (destination->is_label_value && destination->has_non_label_provenance)
+        destination = ir_value_label_metadata_find(builder->function, parameter->value);
+        if (destination && destination->is_label_value && destination->has_non_label_provenance)
         {
             destination->is_label_value = false;
             destination->has_label_provenance = destination->label_block_count != 0;
@@ -4965,7 +5108,9 @@ BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(AnalysisResult* analysis
     if (instruction->opcode == IR_OPCODE_LABEL_ADDRESS)
     {
         AnalysisType* type = analysis_type_from_id(analysis, instruction->type);
-        IrValue* result = instruction->result.value < function->value_count ? function->values + instruction->result.value : 0;
+        bool result_in_range = instruction->result.value < function->value_count;
+        IrValueLabelMetadata result_metadata = result_in_range ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
+        IrValueLabelMetadata* result = result_in_range ? &result_metadata : 0;
         return type && type->kind == ANALYSIS_TYPE_POINTER && instruction->operand_count == 0 && instruction->target_count == 1 &&
                instruction->targets && instruction->targets[0].value < function->block_count && instruction->immediate_count == 0 &&
                instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value < function->value_count &&
@@ -4976,10 +5121,12 @@ BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(AnalysisResult* analysis
     if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH)
     {
         AnalysisType* type = analysis_type_from_id(analysis, instruction->type);
-        IrValue* operand = instruction->operand_count == 1 && instruction->operands && instruction->operands[0].value < function->value_count
-                               ? function->values + instruction->operands[0].value
-                               : 0;
-        AnalysisType* operand_type = operand ? analysis_type_from_id(analysis, operand->type) : 0;
+        IrValue* operand_slot = instruction->operand_count == 1 && instruction->operands && instruction->operands[0].value < function->value_count
+                                    ? function->values + instruction->operands[0].value
+                                    : 0;
+        IrValueLabelMetadata operand_metadata = operand_slot ? ir_value_label_metadata(function, instruction->operands[0]) : (IrValueLabelMetadata){0};
+        IrValueLabelMetadata* operand = operand_slot ? &operand_metadata : 0;
+        AnalysisType* operand_type = operand_slot ? analysis_type_from_id(analysis, operand_slot->type) : 0;
         bool label_targets = operand && ir_label_provenance_valid(operand) && instruction->targets && instruction->target_count == operand->label_block_count &&
                              instruction->target_count != 0 && ir_block_id_array_unique(instruction->targets, instruction->target_count);
         for (u32 label_index = 0; label_targets && label_index < operand->label_block_count; label_index += 1)
@@ -5000,7 +5147,7 @@ BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(AnalysisResult* analysis
             }
             label_targets &= found;
         }
-        return type && type->kind == ANALYSIS_TYPE_VOID && operand_type && ir_analysis_void_pointer_type(analysis, operand->type) && !operand->has_non_label_provenance && label_targets &&
+        return type && type->kind == ANALYSIS_TYPE_VOID && operand_type && ir_analysis_void_pointer_type(analysis, operand_slot->type) && !operand->has_non_label_provenance && label_targets &&
                instruction->operand_count == 1 && instruction->target_count != 0 && instruction->immediate_count == 0 &&
                instruction->result.value == IR_ID_UNDERLYING_INVALID;
     }
@@ -5215,17 +5362,19 @@ IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module
         for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
         {
             IrValue* value = function->values + value_index;
-            if ((value->is_label_value && !value->has_label_provenance && !value->has_non_label_provenance && !ir_label_provenance_valid(value)) ||
-                (value->has_label_provenance && !ir_label_storage_provenance_valid(value)) ||
-                !ir_label_metadata_transfer_valid(0, function, value) || !ir_label_metadata_shape_valid(0, function, value))
+            IrValueId value_id = {.value = value_index};
+            IrValueLabelMetadata metadata = ir_value_label_metadata(function, value_id);
+            if ((metadata.is_label_value && !metadata.has_label_provenance && !metadata.has_non_label_provenance && !ir_label_provenance_valid(&metadata)) ||
+                (metadata.has_label_provenance && !ir_label_storage_provenance_valid(&metadata)) ||
+                !ir_label_metadata_transfer_valid(0, function, value_id) || !ir_label_metadata_shape_valid(0, function, value_id))
             {
                 return ir_validation_error(IR_VALIDATION_OPERATION, function, IR_BLOCK_ID_INVALID, value->definition);
             }
-            if (ir_label_provenance_valid(value) || ir_label_storage_provenance_valid(value))
+            if (ir_label_provenance_valid(&metadata) || ir_label_storage_provenance_valid(&metadata))
             {
-                for (u32 label_index = 0; label_index < value->label_block_count; label_index += 1)
+                for (u32 label_index = 0; label_index < metadata.label_block_count; label_index += 1)
                 {
-                    if (value->label_blocks[label_index].value >= function->block_count)
+                    if (metadata.label_blocks[label_index].value >= function->block_count)
                     {
                         return ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, IR_BLOCK_ID_INVALID, value->definition);
                     }
@@ -5547,23 +5696,25 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
         for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
         {
             IrValue* value = function->values + value_index;
+            IrValueId value_id = {.value = value_index};
             IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
             if (!value_type || value->definition.value >= function->instruction_count)
             {
                 return ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, value->definition);
             }
-            bool transfer_valid = ir_label_metadata_transfer_valid(program, function, value);
-            bool shape_valid = ir_label_metadata_shape_valid(program, function, value);
-            if ((value->is_label_value && !value->has_label_provenance && !value->has_non_label_provenance && !ir_label_provenance_valid(value)) ||
-                (value->has_label_provenance && !ir_label_storage_provenance_valid(value)) || !transfer_valid || !shape_valid)
+            IrValueLabelMetadata metadata = ir_value_label_metadata(function, value_id);
+            bool transfer_valid = ir_label_metadata_transfer_valid(program, function, value_id);
+            bool shape_valid = ir_label_metadata_shape_valid(program, function, value_id);
+            if ((metadata.is_label_value && !metadata.has_label_provenance && !metadata.has_non_label_provenance && !ir_label_provenance_valid(&metadata)) ||
+                (metadata.has_label_provenance && !ir_label_storage_provenance_valid(&metadata)) || !transfer_valid || !shape_valid)
             {
                 return ir_validation_error(IR_VALIDATION_OPERATION, function, IR_BLOCK_ID_INVALID, value->definition);
             }
-            if (ir_label_provenance_valid(value) || ir_label_storage_provenance_valid(value))
+            if (ir_label_provenance_valid(&metadata) || ir_label_storage_provenance_valid(&metadata))
             {
-                for (u32 label_index = 0; label_index < value->label_block_count; label_index += 1)
+                for (u32 label_index = 0; label_index < metadata.label_block_count; label_index += 1)
                 {
-                    if (value->label_blocks[label_index].value >= function->block_count)
+                    if (metadata.label_blocks[label_index].value >= function->block_count)
                     {
                         return ir_validation_error(IR_VALIDATION_BRANCH_TARGET, function, IR_BLOCK_ID_INVALID, value->definition);
                     }
@@ -5897,9 +6048,10 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                     IrValue* object = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
                     IrType* pointer = ir_type_from_id(&program->types, instruction->canonical_type);
                     IrValue* result_value = instruction->result.value < function->value_count ? function->values + instruction->result.value : 0;
+                    IrValueLabelMetadata result_metadata = result_value ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
                     if (!object || object->category != IR_VALUE_PLACE || !pointer || pointer->kind != IR_TYPE_POINTER ||
                         pointer->element_type.value != object->canonical_type.value || instruction->result.value == IR_ID_UNDERLYING_INVALID || !result_value ||
-                        (result_value->is_label_value || result_value->has_label_provenance || result_value->label_blocks || result_value->label_block_count))
+                        (result_metadata.is_label_value || result_metadata.has_label_provenance || result_metadata.label_blocks || result_metadata.label_block_count))
                     {
                         return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
@@ -5909,9 +6061,11 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                     IrValue* address = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
                     IrType* pointer = address ? ir_type_from_id(&program->types, address->canonical_type) : 0;
                     IrValue* place = instruction->result.value < function->value_count ? function->values + instruction->result.value : 0;
+                    IrValueLabelMetadata address_metadata = address ? ir_value_label_metadata(function, instruction->operands[0]) : (IrValueLabelMetadata){0};
+                    IrValueLabelMetadata place_metadata = place ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
                     if (!address || address->category != IR_VALUE_VALUE || !pointer || pointer->kind != IR_TYPE_POINTER ||
                         pointer->element_type.value != instruction->canonical_type.value || !place || place->category != IR_VALUE_PLACE ||
-                        ir_label_metadata_has_label(address) || ir_label_metadata_has_label(place))
+                        ir_label_metadata_has_label(&address_metadata) || ir_label_metadata_has_label(&place_metadata))
                     {
                         return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
@@ -5991,13 +6145,18 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                 else if (instruction->opcode == IR_OPCODE_CAST)
                 {
                     IrType* destination = ir_type_from_id(&program->types, instruction->canonical_type);
-                    IrValue* operand = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
-                    IrType* source = operand ? ir_type_from_id(&program->types, operand->canonical_type) : 0;
-                    IrValue* label_result = instruction->result.value < function->value_count ? function->values + instruction->result.value : 0;
+                    IrValue* operand_slot = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
+                    IrType* source = operand_slot ? ir_type_from_id(&program->types, operand_slot->canonical_type) : 0;
+                    bool result_in_range = instruction->result.value < function->value_count;
+                    IrValueLabelMetadata operand_metadata =
+                        operand_slot ? ir_value_label_metadata(function, instruction->operands[0]) : (IrValueLabelMetadata){0};
+                    IrValueLabelMetadata result_metadata = result_in_range ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
+                    IrValueLabelMetadata* operand = operand_slot ? &operand_metadata : 0;
+                    IrValueLabelMetadata* label_result = result_in_range ? &result_metadata : 0;
                     bool label_conversion_valid = true;
                     if ((operand && ir_label_metadata_has_label(operand)) || (label_result && ir_label_metadata_has_label(label_result)))
                     {
-                        label_conversion_valid = operand && source && destination && ir_canonical_void_pointer_type(program, operand->canonical_type) &&
+                        label_conversion_valid = operand && source && destination && ir_canonical_void_pointer_type(program, operand_slot->canonical_type) &&
                                                  ir_canonical_void_pointer_type(program, instruction->canonical_type) && source->id.value == destination->id.value &&
                                                  instruction->conversion_operation == IR_CONVERSION_IDENTITY && label_result &&
                                                  ir_label_provenance_valid(operand) && ir_label_provenance_valid(label_result) &&
@@ -6130,7 +6289,9 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                 else if (instruction->opcode == IR_OPCODE_LABEL_ADDRESS)
                 {
                     IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    IrValue* label_result = instruction->result.value < function->value_count ? function->values + instruction->result.value : 0;
+                    bool result_in_range = instruction->result.value < function->value_count;
+                    IrValueLabelMetadata result_metadata = result_in_range ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
+                    IrValueLabelMetadata* label_result = result_in_range ? &result_metadata : 0;
                     bool valid = type && ir_canonical_void_pointer_type(program, instruction->canonical_type) && instruction->operand_count == 0 && instruction->target_count == 1 &&
                                  instruction->targets && instruction->targets[0].value < function->block_count && instruction->immediate_count == 0 &&
                                  label_result && instruction->result.value != IR_ID_UNDERLYING_INVALID && !label_result->has_non_label_provenance &&
@@ -6171,11 +6332,13 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                 }
                 else if (instruction->opcode == IR_OPCODE_INDIRECT_BRANCH)
                 {
-                    IrValue* target = instruction->operand_count == 1 && instruction->operands && instruction->operands[0].value < function->value_count
-                                          ? function->values + instruction->operands[0].value
-                                          : 0;
-                    IrType* target_type = target ? ir_type_from_id(&program->types, target->canonical_type) : 0;
-                    bool valid = target && target_type && ir_canonical_void_pointer_type(program, target->canonical_type) && !target->has_non_label_provenance &&
+                    IrValue* target_slot = instruction->operand_count == 1 && instruction->operands && instruction->operands[0].value < function->value_count
+                                               ? function->values + instruction->operands[0].value
+                                               : 0;
+                    IrValueLabelMetadata target_metadata = target_slot ? ir_value_label_metadata(function, instruction->operands[0]) : (IrValueLabelMetadata){0};
+                    IrValueLabelMetadata* target = target_slot ? &target_metadata : 0;
+                    IrType* target_type = target_slot ? ir_type_from_id(&program->types, target_slot->canonical_type) : 0;
+                    bool valid = target && target_type && ir_canonical_void_pointer_type(program, target_slot->canonical_type) && !target->has_non_label_provenance &&
                                  ir_label_provenance_valid(target) && instruction->target_count == target->label_block_count &&
                                  instruction->operand_count == 1 && instruction->target_count != 0 && instruction->targets &&
                                  instruction->result.value == IR_ID_UNDERLYING_INVALID && ir_block_id_array_unique(instruction->targets, instruction->target_count);

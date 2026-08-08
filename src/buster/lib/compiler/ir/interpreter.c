@@ -1095,7 +1095,10 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_instruction_shape_valid(IrExecutionFrame
     {
         AnalysisType* type = analysis_type_from_id(frame->analysis, instruction->type);
         AnalysisType* element = type && type->kind == ANALYSIS_TYPE_POINTER ? analysis_type_from_id(frame->analysis, type->as.element_type) : 0;
-        IrValue* result = instruction->result.value < frame->function->value_count ? frame->function->values + instruction->result.value : 0;
+        bool result_in_range = instruction->result.value < frame->function->value_count;
+        IrValueLabelMetadata result_metadata =
+            result_in_range ? ir_value_label_metadata(frame->function, instruction->result) : (IrValueLabelMetadata){0};
+        IrValueLabelMetadata* result = result_in_range ? &result_metadata : 0;
         return instruction->operand_count == 0 && instruction->target_count == 1 && instruction->targets && instruction->targets[0].value < frame->function->block_count &&
                instruction->immediate_count == 0 && instruction->result.value != IR_ID_UNDERLYING_INVALID && result && element &&
                element->kind == ANALYSIS_TYPE_VOID && !result->has_non_label_provenance && !result->has_label_provenance && !result->label_paths &&
@@ -1110,10 +1113,13 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_instruction_shape_valid(IrExecutionFrame
         return instruction->operand_count == 1 && instruction->immediate_count != UINT32_MAX && instruction->target_count == instruction->immediate_count + 1;
     case IR_OPCODE_INDIRECT_BRANCH:
     {
-        IrValue* target_value = instruction->operand_count == 1 && instruction->operands && instruction->operands[0].value < frame->function->value_count
-                                    ? frame->function->values + instruction->operands[0].value
-                                    : 0;
-        AnalysisType* target_type = target_value ? analysis_type_from_id(frame->analysis, target_value->type) : 0;
+        IrValue* target_slot = instruction->operand_count == 1 && instruction->operands && instruction->operands[0].value < frame->function->value_count
+                                   ? frame->function->values + instruction->operands[0].value
+                                   : 0;
+        IrValueLabelMetadata target_metadata =
+            target_slot ? ir_value_label_metadata(frame->function, instruction->operands[0]) : (IrValueLabelMetadata){0};
+        IrValueLabelMetadata* target_value = target_slot ? &target_metadata : 0;
+        AnalysisType* target_type = target_slot ? analysis_type_from_id(frame->analysis, target_slot->type) : 0;
         AnalysisType* target_element = target_type && target_type->kind == ANALYSIS_TYPE_POINTER
                                            ? analysis_type_from_id(frame->analysis, target_type->as.element_type)
                                            : 0;
@@ -1182,8 +1188,8 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_function_shape_valid(IrExecutionTarget t
         // its scalar tests; canonical layout checks belong to the canonical
         // module validator.  The transfer/shape checks remain active here so
         // forged label metadata is still rejected before execution.
-        if (!ir_label_metadata_shape_valid(0, function, function->values + value_index) ||
-            !ir_label_metadata_transfer_valid(0, function, function->values + value_index))
+        if (!ir_label_metadata_shape_valid(0, function, (IrValueId){.value = value_index}) ||
+            !ir_label_metadata_transfer_valid(0, function, (IrValueId){.value = value_index}))
         {
             return false;
         }
