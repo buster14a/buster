@@ -54,6 +54,7 @@ struct X86_64EncodedInstruction
 };
 
 BUSTER_F_DECL CpuModel cpu_detect_model_x86_64(void);
+BUSTER_F_DECL String8 x86_64_cpu_brand_string(char8* buffer, u64 capacity);
 BUSTER_F_DECL TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input);
 BUSTER_F_DECL TargetCpuFeatures cpu_detect_features_x86_64(void);
 BUSTER_F_DECL X86_64EncodedInstruction x86_64_encode_register_operation(X86_64RegisterOperation operation, u32 target_register, u32 source_register);

@@ -34,6 +34,22 @@ BUSTER_GLOBAL_LOCAL u64 xgetbv(u32 index)
 #endif
 }
 
+String8 x86_64_cpu_brand_string(char8* buffer, u64 capacity)
+{
+    u64 length = 0;
+    if (capacity >= 48 && cpuid(UINT32_C(0x80000000), 0).eax >= UINT32_C(0x80000004))
+    {
+        for (u32 leaf_index = 0; leaf_index < 3; leaf_index += 1)
+        {
+            CpuId leaf = cpuid(UINT32_C(0x80000002) + leaf_index, 0);
+            u32 words[4] = { leaf.eax, leaf.ebx, leaf.ecx, leaf.edx };
+            memcpy(buffer + leaf_index * 16, words, sizeof(words));
+        }
+        length = 48;
+    }
+    return (String8){ .pointer = buffer, .length = length };
+}
+
 X86_64EncodedInstruction x86_64_encode_register_operation(X86_64RegisterOperation operation, u32 target_register, u32 source_register)
 {
     X86_64EncodedInstruction result = {0};

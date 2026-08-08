@@ -463,3 +463,18 @@ CpuModel cpu_detect_model_aarch64(void)
 
     return result;
 }
+
+String8 aarch64_cpu_brand_string(char8* buffer, u64 capacity)
+{
+    u64 length = 0;
+#if defined(__APPLE__)
+    size_t size = (size_t)capacity;
+    if (sysctlbyname("machdep.cpu.brand_string", buffer, &size, 0, 0) == 0)
+    {
+        length = (u64)size;
+    }
+#else
+    BUSTER_UNUSED(capacity);
+#endif
+    return (String8){ .pointer = buffer, .length = length };
+}

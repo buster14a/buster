@@ -1942,6 +1942,34 @@ u64 os_get_page_size(void)
     return page_size;
 }
 
+u64 os_get_physical_memory_size(void)
+{
+    u64 result = 0;
+#if defined(__linux__)
+    struct sysinfo info;
+    memset(&info, 0, sizeof(info));
+    if (sysinfo(&info) == 0)
+    {
+        result = (u64)info.totalram * (u64)info.mem_unit;
+    }
+#elif defined(__APPLE__)
+    u64 memory_size = 0;
+    size_t size = sizeof(memory_size);
+    if (sysctlbyname("hw.memsize", &memory_size, &size, 0, 0) == 0)
+    {
+        result = memory_size;
+    }
+#else
+    MEMORYSTATUSEX status = {0};
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status))
+    {
+        result = status.ullTotalPhys;
+    }
+#endif
+    return result;
+}
+
 u64 os_get_current_process_id(void)
 {
 #if defined(__linux__) || defined(__APPLE__)

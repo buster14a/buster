@@ -119,6 +119,9 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 #endif
     }
 
+    // Physical-memory size feeds the build driver's MACHINE_INFO line.
+    BUSTER_TEST(arguments, os_get_physical_memory_size() > 0);
+
 #if defined(__APPLE__)
     BUSTER_TEST(arguments, !os_apple_process_is_traced(0));
     BUSTER_TEST(arguments, os_apple_process_is_traced(P_TRACED));

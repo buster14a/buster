@@ -971,6 +971,19 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     });
     BUSTER_TEST(arguments, !linux_arm_layout.plain_char_is_signed);
     BUSTER_TEST(arguments, target_data_layout_is_valid(linux_arm_layout));
+
+    // The MACHINE_INFO brand string: trimmed, buffer-bounded, and non-empty
+    // on the hosts whose CI runners report one (x86-64 cpuid, Apple sysctl).
+    {
+        char8 cpu_name_buffer[128];
+        String8 cpu_name = cpu_brand_string_os(cpu_name_buffer, sizeof(cpu_name_buffer));
+        BUSTER_TEST(arguments, cpu_name.length <= sizeof(cpu_name_buffer));
+        bool trimmed = !cpu_name.length || (cpu_name.pointer[0] != ' ' && cpu_name.pointer[cpu_name.length - 1] != ' ' && cpu_name.pointer[cpu_name.length - 1] != 0);
+        BUSTER_TEST(arguments, trimmed);
+#if BUSTER_CPU_ARCH_X86_64 || defined(__APPLE__)
+        BUSTER_TEST(arguments, cpu_name.length > 0);
+#endif
+    }
     return result;
 }
 #endif

@@ -427,6 +427,9 @@ BUSTER_F_DECL String8 target_to_string(Arena* arena, Target target);
 BUSTER_F_DECL String8 cpu_arch_to_string_os(CpuArch arch);
 BUSTER_F_DECL String8 operating_system_to_string_os(OperatingSystem os);
 BUSTER_F_DECL String8 cpu_model_to_string_os(CpuModel model);
+// The OS/hardware-reported marketing name ("AMD Ryzen 9 7940HS w/ Radeon
+// 780M Graphics"), trimmed, aliasing `buffer`; empty when unavailable.
+BUSTER_F_DECL String8 cpu_brand_string_os(char8* buffer, u64 capacity);
 BUSTER_F_DECL TargetParseResult target_parse_triple(String8 triple);
 
 

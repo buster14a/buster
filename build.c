@@ -18973,6 +18973,26 @@ BUSTER_GLOBAL_LOCAL void assembly_import_action_add(Arena* arena, AssemblyImport
     *run = (ProcessRun){.callback = assembly_import_action, .callback_data = options_copy};
 }
 
+// One greppable line describing the machine a CI or self-host run executed
+// on, so logged numbers can always be attributed to their hardware.
+BUSTER_GLOBAL_LOCAL void machine_info_print(void)
+{
+    char8 cpu_name_buffer[128];
+    String8 cpu_name = cpu_brand_string_os(cpu_name_buffer, sizeof(cpu_name_buffer));
+    if (!cpu_name.length)
+    {
+        cpu_name = S8("unknown");
+    }
+#if BUSTER_CPU_ARCH_X86_64
+    CpuArch native_arch = CPU_ARCH_X86_64;
+#else
+    CpuArch native_arch = CPU_ARCH_AARCH64;
+#endif
+    String8 model = cpu_model_to_string_os(cpu_detect_model());
+    string_print(S8("MACHINE_INFO arch={S8} cpu=\"{S8}\" model={S8} cores={u32} ram_mib={u64}\n"), cpu_arch_to_string_os(native_arch), cpu_name, model,
+                 os_get_logical_thread_count(), os_get_physical_memory_size() >> 20);
+}
+
 ProcessResult process_arguments(void)
 {
     ProcessResult result = PROCESS_RESULT_SUCCESS;
@@ -19846,6 +19866,7 @@ ProcessResult process_arguments(void)
         break;
         case BUILD_COMMAND_TEST_SELF_HOST:
         {
+            machine_info_print();
             result = self_host_add(arena, build_directory, options, generate);
         }
         break;
@@ -19857,6 +19878,7 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI:
         {
+            machine_info_print();
             bool ci = command == BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI;
             result = test_all(arena, ci, options);
         }
