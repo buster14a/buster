@@ -388,6 +388,73 @@ enabled.
 
 ## Latest performance audit notes
 
+`2026-08-08c` (Linux x86_64, same method as `2026-08-08b`: `perf record -F 999
+--call-graph fp`, instruction counts from `STEP_INSTRUCTIONS` and `perf stat -e
+instructions`, every quoted number from a clang-built binary; buster-compiled
+stage executables were used for fixed-point validation only). Seven commits:
+stage 1 `16.999 G` to `12.713 G` instructions (`-25.2%`, wall `2.38 s` to
+`1.83 s`), sanitized `ide test` `331.97 G` to `246.05 G` (`-25.9%`), Release
+`ide test` `21.70 G` to `15.21 G` (`-29.9%`), at the byte-identical fixed point
+with all 29 modules passing in Release and sanitized Debug and `ide bench`
+unchanged (`BENCH_IO` median `~272 us`, `BENCH_PARSE` median `~98 us`,
+`files=61`).
+
+- **Four more translation-unit quadratics in `c_lower_to_ir`, all the shape the
+  previous entries predicted** — a per-item query answered by rescanning a
+  whole table. In fix order, with stage 1 after each: the per-function local
+  count scanned every entity per lowered definition (`13.2%` of samples; one
+  bucketing pass, `16.999 G` to `16.813 G` but wall `-11%` — the scan was
+  memory-bound, so the win is time, not instructions); the string-literal
+  array-bound inference scanned every declaration per unresolved array type
+  from inside the round/pass/type fixpoint nest (CSR bucket of object
+  declarations by type, `16.813 G` to `15.213 G`); five symbol/global passes
+  joined declarations to entities by rescanning all declarations per entity
+  (one CSR by entity, `15.213 G` to `14.371 G`); and
+  `c_parse_scope_for_token` answered "deepest scope under root holding this
+  token" by scanning every scope in the unit and walking each candidate's
+  ancestors (`4.3%` of samples but `11.6%` of instructions — a
+  children-by-parent index descended from the root instead, `14.371 G` to
+  `12.706 G`; the during-parse static-assert caller keeps the linear scan
+  because scopes are still growing there). Sample share and instruction share
+  disagree in both directions across these — profile *and* count.
+- **The x86 metadata module's remaining cost was rescanning and re-deriving
+  static data per query.** Three commits, sanitized `ide test` after each:
+  `string_offset_terminated` re-found each string's NUL by linear scan per
+  call, mostly `physical_register_view` asking the same atom's length once per
+  literal in its ~50-entry chain — a distance-to-NUL table filled in one
+  backward pass at decode makes it one read (`331.97 G` to `306.80 G`);
+  `copy_form` re-tokenized the form's whole pattern to normalize
+  prefix/family metadata and filtering ran it per candidate per iteration —
+  normalized forms are now cached per id (`306.80 G` to `277.32 G`); emit and
+  coverage paths still re-parsed patterns per call and the test helper
+  `x86_64_metadata_test_string_contains` compared all needle bytes at every
+  offset — pattern semantics are memoized per form id behind a seed-field
+  guard (a fabricated or edited form parses fresh) and the probe rejects on
+  the first byte (`277.32 G` to `246.05 G`). `x86_64_metadata_tests`:
+  sanitized `5.77 s` to `1.59 s`, Release `529 ms` to `166 ms`.
+- Stage-1 profile after all fixes is genuinely flat: `c_lower_to_ir` fell from
+  `26%` of samples to under `1.2%`, and no function exceeds `5%` (`c_lex`
+  `4.9%`, `codegen_generate_canonical_module` `4.8%`,
+  `object_from_canonical_codegen_module` `4.6%`). Sanitized shape:
+  `__asan_memcpy` `~21%` (diffuse), `string_equal` `8.3%`
+  (`c_parse_apply_vector_attribute` `2.4%`, `c_ir_type_name_prefix` `1.9%`,
+  `c_parse_aggregate_lookup` `1.6%`), `c_ir_lower_assignment_statement_step`
+  `5.0%`, `c_token_is_punctuator` `4.4%`.
+- **Known remaining find, deliberately not taken:** `c_parse_aggregate_lookup`
+  scans every type per tag lookup during parsing. It needs an incrementally
+  maintained `(kind, tag)` hash index in `CParseResult` (the
+  `entity_lookup_buckets`/`typedef_lookup_buckets` pattern), returning the
+  oldest match; worth ~1.6% sanitized plus some parse-time stage 1. The
+  remaining `string_equal` sites are spelling predicates — re-read the
+  `2026-08-08` warning before touching them; only removing comparisons wins.
+- Reference points for the next audit, all clang-built: stage 1 `12.713 G`,
+  sanitized `ide test` `246.05 G` (`c_frontend_tests` `9.6 s`,
+  `x86_64_metadata_tests` `1.6 s`), Release `ide test` `15.21 G`
+  (`c_frontend_tests` `780-870 ms` run-to-run — quote instructions, not this
+  wall spread), Release `BENCH_IO` median `272-280 us`, `BENCH_PARSE` median
+  `98-100 us` at `files=61`. Stage 2 fell `262.2 G` to `187.7 G` — quoted as
+  self-hosting validation only, since it runs on a buster-compiled stage 1.
+
 `2026-08-08b` (Linux x86_64, `perf record -F 999 --call-graph fp`, instruction
 counts from `STEP_INSTRUCTIONS` and `perf stat -e instructions`). Two
 configurations were audited together for the first time: **compile throughput**
