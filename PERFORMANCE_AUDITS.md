@@ -23,10 +23,13 @@ worktree's baseline is the `2026-08-08i` tree. Landed after
 `2026-08-08l`, so this entry sits above it; the reference points at the end
 of this entry are re-measured on the merged tree and are the ones the next
 audit starts from. AGENTS.md now records the
-microarchitecture tuning target: Zen 4 / Zen 5, `-march=native` already on
-GNU-family builds, intrinsics must keep guarded scalar fallbacks because the
-self-hosted stages compile without vendor headers.) One change taken and
-measured, the rest recorded as ranked structural proposals below.
+microarchitecture tuning target — design for Zen 5's native 512-bit width,
+Zen 4 must break even at its double-pumped AVX2-equivalent throughput,
+`-march=native` already on GNU-family builds, intrinsics keep guarded
+scalar fallbacks because the self-hosted stages compile without vendor
+headers — plus the Validark-lineage SIMD lexing/parsing method vocabulary
+this entry's proposal 4 builds on.) One change taken and measured, the rest
+recorded as ranked structural proposals below.
 
 - **The buster tokenizer paid one `arena_allocate` call per 4-byte token.**
   `arena_allocate_bytes` held 17.6% of `ide bench` cycles and
@@ -98,24 +101,47 @@ measured, the rest recorded as ranked structural proposals below.
   from the existing checkpoint tables (same eager-metadata shape the IrValue
   table removed). Pervasive `spelling` consumers make this the widest
   refactor of the three; sequence it with proposal 2.
-- **Proposal 4 — block classification for `c_lex` (and the buster
-  `tokenize`), not more in-loop SWAR.** `c_lex` is 4.2% of stage-1 cycles
-  but **9.4% of branch misses — the #1 mispredictor**; on the bench side
-  `tokenize` holds 31% of cycles post-fix. `2026-08-08i` already measured
-  that SWAR probes *inside* the per-token loop go negative (comment scan
-  `+12 M`, whitespace run `+6 M`) — the structural version classifies the
-  whole translated buffer once: 64-byte AVX-512 blocks producing bitmasks
-  (whitespace, newline, identifier-continue via VPERMB nibble tables,
-  quote/backslash, punctuator starts), token boundaries then come from mask
-  arithmetic and `tzcnt` iteration with no per-byte dispatch. Zen 4/5 run
-  VPERMB/VPCMPEQB at full rate; guard behind `__AVX512BW__`-family checks
-  with the current scalar loop as the fallback (self-host and MSVC compile
-  it; performance is only quoted clang-built). The same pass can emit the
-  spelling/delimiter position streams `c_parse_position_index_build`
-  rebuilds today (1.0% cycles, 2.5% of misses). Fold `c_translate_source`'s
-  SWAR probe into the same block walk. `ide bench`'s keyword ladder
-  (`__memcmp_evex` 3.2% of bench cycles) wants the proposal-2 treatment —
-  perfect-hash or intern, one probe per identifier.
+- **Proposal 4 — compaction lexing for `c_lex` and the buster `tokenize`
+  (Deus-Lex-Machina design), not more in-loop SWAR.** `c_lex` is 4.2% of
+  stage-1 cycles but **9.4% of branch misses — the #1 mispredictor**; on
+  the bench side `tokenize` holds 31% of cycles post-fix. `2026-08-08i`
+  already measured that SWAR probes *inside* the per-token loop go negative
+  (comment scan `+12 M`, whitespace run `+6 M`) — the structural version is
+  Validark's (see the AGENTS.md method bullet, added alongside this
+  amendment): classify each 64-byte chunk into per-class `k`-mask
+  bitstrings in lockstep, derive start/end transition masks, then
+  `vpcompressb` an iota vector through them and subtract — every token
+  extent in the chunk materializes at once, kinds by masked broadcast
+  compressed with the same starts mask, no per-byte dispatch at all.
+  `vpcompressb` runs ~9 cycles on Zen 4 and ~5 on Zen 5 (Salter's own
+  numbers), so the design already pays on this host and roughly doubles on
+  the Zen 5 runner; guard behind `__AVX512VBMI2__`-family checks with the
+  current scalar loops as self-host/MSVC fallback. The reference
+  implementation reached 2.75x mainline-Zig tokenizer throughput with 2.47x
+  less token memory. Multi-char punctuators use the bit-channel `vpshufb`
+  NFA; keyword, builtin, and bench keyword-ladder recognition
+  (`__memcmp_evex` 3.2% of bench cycles) use the
+  `((len << 14) ^ first2) * last2 >> 8` perfect hash + one padded wide
+  compare instead of ladders. The same pass emits the spelling/delimiter
+  position streams `c_parse_position_index_build` rebuilds today (1.0%
+  cycles, 2.5% of misses) and subsumes `c_translate_source`'s SWAR probe.
+  Sentinel padding (leading newline, trailing quote/NUL, 64-byte-aligned
+  overallocation) deletes the hot-loop bounds checks on both lexers
+  independently of the SIMD work — cheap to take early. Sequencing note:
+  proposals 3 and 4 are one coherent `c_lex` rewrite, not two — the
+  compaction emitter should write the 16-B tokens directly (and on the
+  buster side can shrink `Token` 4 B -> 2 B kind+length with a 0-length
+  wide escape); locations drop out in favor of retained newline bitmasks
+  popcounted on demand, which replaces the eager 24-B `CSourceLocation`
+  more cheaply than checkpoint re-walks. The C parse side still needs
+  random token access (position/delimiter indexes), so `CToken` keeps a
+  u32 source offset — the buster side alone can go lengths-only.
+  **Zen 5 retarget note:** the stage-1 ranking is unchanged by targeting
+  Zen 5's native width — flattening still leads because stage 1 is
+  L1d/fault-bound and wider vectors do not touch that — but this proposal's
+  ceiling doubles on Zen 5 hardware, and the compaction lexer is itself a
+  memory-shrink change (2–16 B tokens, no eager locations), so it attacks
+  both limits at once.
 - **Proposal 5 — fuse the three canonical-codegen instruction scans**
   (`codegen_canonical_direct_call_uses`, `x64_function_saves_rbx`, and the
   per-call `x64_call_layout` rediscovery — 14.4%/6.8%/13.5% of the module's

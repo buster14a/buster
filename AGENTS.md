@@ -429,20 +429,75 @@ history.
   stages must stay deterministic — write results into slots indexed by work
   item, never by completion order — so the self-hosting fixed point stays
   byte-identical at any lane count.
-- **Microarchitecture tuning target: AMD Zen 4 and Zen 5, for now.** The main
+- **Microarchitecture tuning target: design for Zen 5's native 512-bit
+  width; Zen 4 must break even, Zen 5 collects the upside.** The main
   development machine is a Ryzen 9 7940HS (Zen 4) and the CI x86-64 runners
-  cover both generations (the Windows runner is a Zen 5 box), so single-thread
-  throughput decisions — SIMD width, table sizes, branch-vs-cmov trades — are
-  made for and measured on these cores. GNU-family builds compile with
-  `-march=native`, so clang-built binaries on these hosts already have
-  AVX-512 (VL/BW/DQ/VBMI/VBMI2) available; Zen 4 executes 512-bit ops
-  double-pumped over 256-bit datapaths while Zen 5 has native 512-bit units,
-  so prefer kernels whose win survives at 256-bit effective width. Explicit
-  intrinsics must stay behind feature/compiler guards with a scalar or SWAR
-  fallback: MSVC builds carry no `-march`, aarch64 (macOS/Android/iOS) must
-  keep building, and the self-hosted `ide cc` stages compile the same tree
-  without vendor headers — performance is only ever quoted from clang-built
-  binaries, so fallback paths need correctness, not speed.
+  cover both generations (the Windows runner is a Zen 5 box), so
+  single-thread throughput decisions — SIMD width, table sizes,
+  branch-vs-cmov trades — are made for and measured on these cores.
+  GNU-family builds compile with `-march=native`, so clang-built binaries on
+  these hosts already have AVX-512 (VL/BW/DQ/VBMI/VBMI2) available. Write
+  kernels at full 512-bit width: Zen 4 executes them double-pumped over its
+  256-bit datapaths at AVX2-equivalent bytes per cycle with fewer
+  instructions retired — no downclocking, no penalty, just no width upside —
+  while Zen 5's native 512-bit units roughly double the same code's
+  throughput. A kernel therefore has to justify itself at Zen 4's effective
+  width and is validated there, but its shape (masks, compaction, permutes)
+  is chosen for Zen 5. Watch the exceptions on Zen 4: the few instructions
+  whose 512-bit form costs more than 2x the 256-bit form (check uops.info
+  before leaning on exotic two-source permutes; `vpcompressb` is safe at
+  ~9 cycles Zen 4 / ~5 cycles Zen 5), store-throughput-bound kernels (one
+  256-bit store per cycle on Zen 4), and unaligned 64-byte loads — keep hot
+  streamed buffers 64-byte aligned. Explicit intrinsics must stay behind
+  feature/compiler guards with a scalar or SWAR fallback: MSVC builds carry
+  no `-march`, aarch64 (macOS/Android/iOS) must keep building, and the
+  self-hosted `ide cc` stages compile the same tree without vendor headers —
+  performance is only ever quoted from clang-built binaries, so fallback
+  paths need correctness, not speed.
+- **SIMD lexing/parsing method: the Validark lineage.** The buster-language
+  parser began as a scalar port of Niles Salter's (Validark's) Accelerated
+  Zig Parser — local checkout `~/dev/Accelerated-Zig-Parser`, upstream
+  `github.com/Validark/Accelerated-Zig-Parser` — and that work plus
+  validark.dev (start with `posts/deus-lex-machina` and
+  `posts/eine-kleine-vectorized-classification`) and the three Utah Zig
+  talks (YouTube `oN8LDpWuPWw`, `FDiUKafPs0U`, `NM1FNB5nagk`) are
+  project-endorsed inspiration: when accelerating lexing/parsing, reach for
+  these techniques first and keep new code compatible with their shapes.
+  The core vocabulary: (1) per-64-byte-chunk classification — every class
+  (whitespace, newline/CR, alpha/digit/underscore, quotes, backslash,
+  slash, operator chars) becomes one comparison into a `k`-mask bitstring,
+  all classes over the same chunk in lockstep sharing one load; (2) token
+  extents by mask arithmetic — starts `x & ~(x << 1)`, ends
+  `x & ~(x >> 1)`, then either cursor queries (shift by cursor, count
+  trailing ones — one tzcnt replaces an unpredictable byte loop) or full
+  vector compaction: `vpcompressb` an iota vector through the starts and
+  ends masks, subtract, and every token length in the chunk materializes at
+  once; kinds come from masked broadcasts into a kinds vector compressed by
+  the same starts mask, interleaved with lengths on store; (3) charset
+  membership via nibble-decomposed `vpshufb`/`vpermb` tables —
+  `table[c & 0xF] & (1 << (c >> 4))` per lane, the upper-nibble
+  powers-of-two vector shared across charsets, `vptestmb` folding the AND
+  and test on AVX-512; (4) multi-character operators as a bit-channel
+  `vpshufb` NFA: three per-position tables whose looked-up bytes AND
+  together so each of the 8 bit-channels legalizes one family of 2-/3-char
+  sequences, plus a short effectively-branchless reconciliation of
+  overlaps; (5) keyword and builtin recognition by perfect hash, never a
+  memcmp ladder — `((len << 14) ^ first_two_bytes) * last_two_bytes >> 8`
+  to 7 bits, Bagwell array-mapped compression (two u64 bitmaps + popcount
+  rank) into a dense table of length-padded entries validated by a single
+  wide compare, with compile/startup-time collision checks so editing the
+  keyword set stays safe; (6) sentinels instead of bounds checks — a
+  leading newline, trailing quote/NUL sentinels, and chunk-aligned
+  overallocation let the hot loops drop every length test; (7) upper-bound
+  allocation plus post-scan shrink instead of grow-and-check (the
+  `2026-08-08k` tokenizer change is this trick alone, `-21.6%` bench
+  instructions); (8) length-based token streams — kind + length with a
+  0-length escape to a wide length, no per-token start offsets or eagerly
+  materialized line/column, offsets rebuilt by a running cursor and line
+  numbers recovered by popcount over retained newline bitmasks. Escape-run
+  parity uses the simdjson backslash algorithm (simdjson PR #2042 has the
+  current best form). All of it sits behind the guard rules of the tuning
+  target above; scalar fallbacks keep the exact current semantics.
 - **Warnings are errors** under a very large warning set (see
   `GNU_FAMILY_WARNINGS` in `CMakeLists.txt`), and code must stay clean under
   Clang, GCC, Zig cc, and MSVC. TCC is required only to compile/bootstrap the
