@@ -5296,6 +5296,29 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_copy_form(BusterX86GeneratedForm so
     }
 }
 
+// buster_x86_metadata_copy_form re-tokenizes the form's whole pattern string
+// to normalize prefix/family metadata, and its callers run it per query --
+// filtering alone parses every candidate form's pattern on every iteration.
+// The result depends only on the decoded record and its id, so normalize each
+// form once and copy the cached value out afterwards.
+BUSTER_GLOBAL_LOCAL BusterX86MetadataForm buster_x86_metadata_normalized_forms[BUSTER_X86_GENERATED_FORM_COUNT];
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_normalized_forms_cached[BUSTER_X86_GENERATED_FORM_COUNT];
+
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_normalized_form(u32 form_id, BusterX86MetadataForm* result)
+{
+    if (form_id >= BUSTER_X86_GENERATED_FORM_COUNT)
+    {
+        *result = (BusterX86MetadataForm){0};
+        return;
+    }
+    if (!buster_x86_metadata_normalized_forms_cached[form_id])
+    {
+        buster_x86_metadata_copy_form(buster_x86_metadata_form_record(form_id), form_id, &buster_x86_metadata_normalized_forms[form_id]);
+        buster_x86_metadata_normalized_forms_cached[form_id] = true;
+    }
+    *result = buster_x86_metadata_normalized_forms[form_id];
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_is_64_bit(BusterX86GeneratedForm form)
 {
     u16 mode = form.mode_flags;
@@ -5303,10 +5326,10 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_is_64_bit(BusterX86GeneratedFo
     return !(mode & BUSTER_X86_GENERATED_MODE_NOT64) && (!mode_bits || (mode_bits & BUSTER_X86_GENERATED_MODE_64));
 }
 
-BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_matches_filter(BusterX86GeneratedForm form, BusterX86MetadataFilter filter)
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_matches_filter(u32 form_id, BusterX86GeneratedForm form, BusterX86MetadataFilter filter)
 {
     BusterX86MetadataForm normalized = {0};
-    buster_x86_metadata_copy_form(form, 0, &normalized);
+    buster_x86_metadata_normalized_form(form_id, &normalized);
     u8 coverage_class = form.coverage_class;
     if (filter.require_64_bit && !buster_x86_metadata_form_is_64_bit(form)) return false;
     if (filter.exclude_not64 && (coverage_class == BUSTER_X86_GENERATED_COVERAGE_NOT64 || form.mode_flags & BUSTER_X86_GENERATED_MODE_NOT64)) return false;
@@ -5448,9 +5471,8 @@ u8 buster_x86_metadata_string_byte(BusterX86MetadataString string, u32 index)
 bool buster_x86_metadata_form(u32 form_id, BusterX86MetadataForm* result)
 {
     if (!result || form_id >= BUSTER_X86_GENERATED_FORM_COUNT) return false;
-    BusterX86GeneratedForm form = buster_x86_metadata_form_record(form_id);
     if (!buster_x86_metadata_form_record_valid(form_id)) return false;
-    buster_x86_metadata_copy_form(form, form_id, result);
+    buster_x86_metadata_normalized_form(form_id, result);
     return true;
 }
 
@@ -5499,7 +5521,7 @@ bool buster_x86_metadata_coverage(u32 coverage_id, BusterX86MetadataCoverage* re
     // checks above, then expose the same pattern-derived normalized family as
     // buster_x86_metadata_form() and the capability ledger.
     BusterX86MetadataForm normalized = {0};
-    buster_x86_metadata_copy_form(form, coverage.normalized_form_id, &normalized);
+    buster_x86_metadata_normalized_form(coverage.normalized_form_id, &normalized);
     *result = (BusterX86MetadataCoverage){
         .id = coverage_id, .source_hash = coverage.source_hash, .source = buster_x86_metadata_string_unchecked(coverage.source_offset),
         .normalized_form_id = coverage.normalized_form_id, .coverage_class = coverage.coverage_class,
@@ -5673,7 +5695,7 @@ bool buster_x86_metadata_candidate_next(BusterX86MetadataCandidateIterator* iter
         u32 position = iterator->position++;
         if (!buster_x86_metadata_candidate_at(iterator->candidates, position, &id)) return false;
         BusterX86GeneratedForm form = buster_x86_metadata_form_record(id);
-        if (buster_x86_metadata_form_matches_filter(form, iterator->filter))
+        if (buster_x86_metadata_form_matches_filter(id, form, iterator->filter))
         {
             *form_id = id;
             return true;
