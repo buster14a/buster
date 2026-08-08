@@ -14798,6 +14798,13 @@ struct CIntegerIrBuilder
     u32 local_capacity;
     IrBlockId* label_metadata_store_blocks;
     bool* label_metadata_store_valid;
+    // Places bucketed by the root they resolve to, so a store can refresh the
+    // other places over its root without scanning every value in the function.
+    // Intrusive singly-linked lists: label_place_head is indexed by root value
+    // and label_place_next by member value, both UINT32_MAX terminated.
+    u32* label_place_head;
+    u32* label_place_next;
+    u32 label_place_indexed_count;
     u32 label_metadata_store_capacity;
     IrValueId* cleanup_flags;
     CEntityId* cleanup_entities;
@@ -15726,6 +15733,24 @@ BUSTER_GLOBAL_LOCAL void c_ir_label_metadata_copy_for_place(CIntegerIrBuilder* b
     c_ir_label_metadata_rebuild_summary(builder->arena, destination);
 }
 
+// Reserves one array in the lowering scratch arena and advances `position`
+// past it, refusing anything that would overflow or leave the reservation.
+// Each array the store metadata grows needs the identical check.
+BUSTER_GLOBAL_LOCAL bool c_ir_label_metadata_reserve(Arena* arena, u64* position, u64 alignment, u64 bytes)
+{
+    if (!arena || !alignment || alignment - 1 > UINT64_MAX - *position)
+    {
+        return false;
+    }
+    u64 aligned = (*position + alignment - 1) & ~(alignment - 1);
+    if (aligned > arena->reserved_size || bytes > arena->reserved_size - aligned)
+    {
+        return false;
+    }
+    *position = aligned + bytes;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_ir_label_metadata_store_for_place(CIntegerIrBuilder* builder, IrValueId place, IrValueId source_value)
 {
     if (place.value >= builder->function->value_count || source_value.value >= builder->function->value_count)
@@ -15741,56 +15766,42 @@ BUSTER_GLOBAL_LOCAL bool c_ir_label_metadata_store_for_place(CIntegerIrBuilder* 
             builder->failure_message = S8("C IR label metadata capacity is not representable");
             return false;
         }
-        u64 block_bytes = (u64)sizeof(IrBlockId) * new_capacity;
-        u64 valid_bytes = (u64)sizeof(bool) * new_capacity;
-        u64 position = builder->scratch_arena->position;
-        u64 alignment = BUSTER_ALIGN_OF(IrBlockId);
-        if (!alignment || alignment - 1 > UINT64_MAX - position)
+        Arena* scratch = builder->scratch_arena;
+        u64 position = scratch->position;
+        bool reserved = c_ir_label_metadata_reserve(scratch, &position, BUSTER_ALIGN_OF(IrBlockId), (u64)sizeof(IrBlockId) * new_capacity) &&
+                        c_ir_label_metadata_reserve(scratch, &position, BUSTER_ALIGN_OF(bool), (u64)sizeof(bool) * new_capacity) &&
+                        c_ir_label_metadata_reserve(scratch, &position, BUSTER_ALIGN_OF(u32), (u64)sizeof(u32) * new_capacity) &&
+                        c_ir_label_metadata_reserve(scratch, &position, BUSTER_ALIGN_OF(u32), (u64)sizeof(u32) * new_capacity);
+        if (!reserved || !scratch->granularity || scratch->granularity - 1 > UINT64_MAX - position)
         {
             builder->failure_message = S8("C IR label metadata capacity exceeds the lowering scratch reservation");
             return false;
         }
-        u64 blocks_position = (position + alignment - 1) & ~(alignment - 1);
-        if (blocks_position > builder->scratch_arena->reserved_size || block_bytes > builder->scratch_arena->reserved_size - blocks_position)
+        u64 committed_end = (position + scratch->granularity - 1) & ~(scratch->granularity - 1);
+        if (committed_end < position || committed_end > scratch->reserved_size)
         {
             builder->failure_message = S8("C IR label metadata capacity exceeds the lowering scratch reservation");
             return false;
         }
-        position = blocks_position + block_bytes;
-        alignment = BUSTER_ALIGN_OF(bool);
-        if (!alignment || alignment - 1 > UINT64_MAX - position)
-        {
-            builder->failure_message = S8("C IR label metadata capacity exceeds the lowering scratch reservation");
-            return false;
-        }
-        u64 valid_position = (position + alignment - 1) & ~(alignment - 1);
-        if (valid_position > builder->scratch_arena->reserved_size || valid_bytes > builder->scratch_arena->reserved_size - valid_position)
-        {
-            builder->failure_message = S8("C IR label metadata capacity exceeds the lowering scratch reservation");
-            return false;
-        }
-        u64 valid_end = valid_position + valid_bytes;
-        if (!builder->scratch_arena->granularity || builder->scratch_arena->granularity - 1 > UINT64_MAX - valid_end)
-        {
-            builder->failure_message = S8("C IR label metadata capacity exceeds the lowering scratch reservation");
-            return false;
-        }
-        u64 committed_end = (valid_end + builder->scratch_arena->granularity - 1) & ~(builder->scratch_arena->granularity - 1);
-        if (committed_end < valid_end || committed_end > builder->scratch_arena->reserved_size)
-        {
-            builder->failure_message = S8("C IR label metadata capacity exceeds the lowering scratch reservation");
-            return false;
-        }
-        IrBlockId* blocks = arena_allocate(builder->scratch_arena, IrBlockId, new_capacity);
-        bool* valid = arena_allocate(builder->scratch_arena, bool, new_capacity);
-        if (old_capacity && builder->label_metadata_store_blocks && builder->label_metadata_store_valid)
+        IrBlockId* blocks = arena_allocate(scratch, IrBlockId, new_capacity);
+        bool* valid = arena_allocate(scratch, bool, new_capacity);
+        u32* place_head = arena_allocate(scratch, u32, new_capacity);
+        u32* place_next = arena_allocate(scratch, u32, new_capacity);
+        if (old_capacity && builder->label_metadata_store_blocks && builder->label_metadata_store_valid && builder->label_place_head &&
+            builder->label_place_next)
         {
             memcpy(blocks, builder->label_metadata_store_blocks, sizeof(*blocks) * old_capacity);
             memcpy(valid, builder->label_metadata_store_valid, sizeof(*valid) * old_capacity);
+            memcpy(place_head, builder->label_place_head, sizeof(*place_head) * old_capacity);
+            memcpy(place_next, builder->label_place_next, sizeof(*place_next) * old_capacity);
         }
         memset(valid + old_capacity, 0, sizeof(*valid) * (new_capacity - old_capacity));
+        memset(place_head + old_capacity, 0xff, sizeof(*place_head) * (new_capacity - old_capacity));
+        memset(place_next + old_capacity, 0xff, sizeof(*place_next) * (new_capacity - old_capacity));
         builder->label_metadata_store_blocks = blocks;
         builder->label_metadata_store_valid = valid;
+        builder->label_place_head = place_head;
+        builder->label_place_next = place_next;
         builder->label_metadata_store_capacity = new_capacity;
     }
     IrValueId root = place;
@@ -15895,6 +15906,51 @@ BUSTER_GLOBAL_LOCAL bool c_ir_label_metadata_store_for_place(CIntegerIrBuilder* 
     if (place.value != root.value)
     {
         c_ir_label_metadata_copy_for_place(builder, place);
+    }
+    // Refresh the other places that resolve to this root.  A place's root is
+    // fixed once its defining instruction exists -- definitions and canonical
+    // types are written once, right after the value is created, and no store
+    // can run in between -- so each value is located once and filed under its
+    // root instead of being relocated on every store.  Walking every value per
+    // store made this O(values * stores) per function.
+    bool bucketed = builder->label_place_head && builder->label_place_next && builder->function->value_count <= builder->label_metadata_store_capacity;
+    if (bucketed)
+    {
+        for (u32 value_index = builder->label_place_indexed_count; value_index < builder->function->value_count; value_index += 1)
+        {
+            builder->label_place_next[value_index] = UINT32_MAX;
+            if (builder->function->values[value_index].category != IR_VALUE_PLACE)
+            {
+                continue;
+            }
+            IrValueId member_root = IR_VALUE_ID_INVALID;
+            u64 member_offset = 0;
+            u64 member_size = 0;
+            bool member_exact = false;
+            if (!c_ir_label_place_location(builder, (IrValueId){.value = value_index}, &member_root, &member_offset, &member_size, &member_exact) ||
+                member_root.value >= builder->function->value_count)
+            {
+                continue;
+            }
+            builder->label_place_next[value_index] = builder->label_place_head[member_root.value];
+            builder->label_place_head[member_root.value] = value_index;
+        }
+        builder->label_place_indexed_count = builder->function->value_count;
+        for (u32 value_index = builder->label_place_head[root.value]; value_index != UINT32_MAX; value_index = builder->label_place_next[value_index])
+        {
+            if (value_index == root.value)
+            {
+                continue;
+            }
+            IrValue* candidate = builder->function->values + value_index;
+            if (!root_contains_label && !candidate->label_path_count && !candidate->is_label_value && !candidate->has_label_provenance &&
+                !candidate->has_non_label_provenance)
+            {
+                continue;
+            }
+            c_ir_label_metadata_copy_for_place(builder, (IrValueId){.value = value_index});
+        }
+        return true;
     }
     for (u32 value_index = 0; value_index < builder->function->value_count; value_index += 1)
     {
@@ -40723,6 +40779,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .local_capacity = local_capacity ? (u32)local_capacity : 1,
             .label_metadata_store_blocks = arena_allocate(lowering_temporary.arena, IrBlockId, (u32)lowering_capacity),
             .label_metadata_store_valid = arena_allocate(lowering_temporary.arena, bool, (u32)lowering_capacity),
+            .label_place_head = arena_allocate(lowering_temporary.arena, u32, (u32)lowering_capacity),
+            .label_place_next = arena_allocate(lowering_temporary.arena, u32, (u32)lowering_capacity),
             .label_metadata_store_capacity = (u32)lowering_capacity,
             .cleanup_flags = cleanup_offsets[declaration_index + 1] != cleanup_offsets[declaration_index]
                                  ? arena_allocate(lowering_temporary.arena, IrValueId, cleanup_offsets[declaration_index + 1] - cleanup_offsets[declaration_index])
@@ -40748,6 +40806,10 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             builder.matching_delimiters[token_offset] = UINT32_MAX;
         }
         memset(builder.label_metadata_store_valid, 0, sizeof(*builder.label_metadata_store_valid) * (u32)lowering_capacity);
+        // Empty buckets; label_place_indexed_count starts at zero so the first
+        // store in this function files every value it finds.
+        memset(builder.label_place_head, 0xff, sizeof(*builder.label_place_head) * (u32)lowering_capacity);
+        memset(builder.label_place_next, 0xff, sizeof(*builder.label_place_next) * (u32)lowering_capacity);
         bool delimiters_valid = c_ir_build_delimiter_index(&builder);
         if (!delimiters_valid)
         {
