@@ -9608,10 +9608,11 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     instruction_id = instruction->next;
                     continue;
                 }
-                if (instruction->canonical_source.source.value != IR_ID_UNDERLYING_INVALID)
+                IrSourceRange canonical_source = ir_instruction_canonical_source(function, instruction_id);
+                if (canonical_source.source.value != IR_ID_UNDERLYING_INVALID)
                 {
                     codegen_record_line(result.line_entries, &result.line_entry_count, line_entry_capacity, (u32)buffer.count,
-                                        instruction->canonical_source.source.value, instruction->canonical_source.line, instruction->canonical_source.column);
+                                        canonical_source.source.value, canonical_source.line, canonical_source.column);
                 }
                 if (x64_upper_vector_dirty && !codegen_canonical_x64_instruction_preserves_wide_vector(program, instruction) &&
                     !codegen_canonical_x64_instruction_uses_wide_vector(program, function, instruction, target))

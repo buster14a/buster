@@ -747,7 +747,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
                     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
                     {
                         BUSTER_TEST(arguments, function->instructions[instruction_index].canonical_type.value != IR_ID_UNDERLYING_INVALID);
-                        BUSTER_TEST(arguments, function->instructions[instruction_index].canonical_source.source.value != IR_ID_UNDERLYING_INVALID);
+                        BUSTER_TEST(arguments, ir_instruction_canonical_source(function, function->instructions[instruction_index].id).source.value != IR_ID_UNDERLYING_INVALID);
                     }
                 }
             }

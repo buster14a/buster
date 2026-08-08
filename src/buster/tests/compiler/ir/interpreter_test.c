@@ -274,7 +274,7 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_test_static_label_dispatch(Arena* arena,
         .result = global_value_id,
         .opcode = IR_OPCODE_GLOBAL,
     };
-    IrInstructionId global_instruction_id = ir_function_add_instruction(arena, function, global_instruction);
+    IrInstructionId global_instruction_id = ir_function_add_instruction(arena, function, global_instruction, (IrSourceRange){0});
     IrInstruction constant_instruction = {
         .type = constant_value.type,
         .canonical_type = constant_value.canonical_type,
@@ -283,7 +283,7 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_test_static_label_dispatch(Arena* arena,
         .result = constant_value_id,
         .opcode = IR_OPCODE_CONSTANT_INTEGER,
     };
-    IrInstructionId constant_instruction_id = ir_function_add_instruction(arena, function, constant_instruction);
+    IrInstructionId constant_instruction_id = ir_function_add_instruction(arena, function, constant_instruction, (IrSourceRange){0});
     IrInstruction index_instruction = {
         .operands = arena_allocate(arena, IrValueId, 2),
         .type = pointer_type,
@@ -294,7 +294,7 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_test_static_label_dispatch(Arena* arena,
     };
     index_instruction.operands[0] = global_value_id;
     index_instruction.operands[1] = constant_value_id;
-    IrInstructionId index_instruction_id = ir_function_add_instruction(arena, function, index_instruction);
+    IrInstructionId index_instruction_id = ir_function_add_instruction(arena, function, index_instruction, (IrSourceRange){0});
     IrInstruction load_instruction = {
         .operands = arena_allocate(arena, IrValueId, 1),
         .type = pointer_type,
@@ -304,7 +304,7 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_test_static_label_dispatch(Arena* arena,
         .operand_count = 1,
     };
     load_instruction.operands[0] = index_value_id;
-    IrInstructionId load_instruction_id = ir_function_add_instruction(arena, function, load_instruction);
+    IrInstructionId load_instruction_id = ir_function_add_instruction(arena, function, load_instruction, (IrSourceRange){0});
     bool valid = global_instruction_id.value != IR_ID_UNDERLYING_INVALID && constant_instruction_id.value != IR_ID_UNDERLYING_INVALID &&
                  index_instruction_id.value != IR_ID_UNDERLYING_INVALID && load_instruction_id.value != IR_ID_UNDERLYING_INVALID;
     IrInstructionId previous = IR_INSTRUCTION_ID_INVALID;
@@ -863,7 +863,7 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
                 .label_block_count = 1,
                 .label_blocks = label_instruction.targets,
             };
-            IrInstructionId label_instruction_id = ir_function_add_instruction(arguments->arena, choose_function, label_instruction);
+            IrInstructionId label_instruction_id = ir_function_add_instruction(arguments->arena, choose_function, label_instruction, (IrSourceRange){0});
             choose_function->values[label_value_id.value].definition = label_instruction_id;
             choose_function->instructions[label_instruction_id.value].result = label_value_id;
             IrBlock* linked_block = choose_function->blocks + branch_block->id.value;

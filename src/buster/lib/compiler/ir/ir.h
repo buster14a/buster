@@ -350,7 +350,6 @@ struct IrInstruction
     IrValueId* operands;
     IrBlockId* targets;
     u64* immediates;
-    IrSourceRange canonical_source;
     AnalysisTypeId type;
     AnalysisEntityId entity;
     AnalysisInstantiationId instantiation;
@@ -480,6 +479,11 @@ struct IrFunction
     IrInstructionId* extra_instructions;
     IrInstructionExtra* extras;
     ParserSourceRange* instruction_sources;
+    // Dense parallel array: the canonical source range for every
+    // instruction, filled by the appenders (C frontend) or the canonical
+    // mapping pass (buster frontend). Kept out of the row like the parser
+    // range: consumers that want it index by instruction id.
+    IrSourceRange* instruction_canonical_sources;
     u32 block_count;
     u32 block_capacity;
     u32 instruction_count;
@@ -580,7 +584,7 @@ BUSTER_F_DECL IrFunction* ir_module_add_function(Arena* arena, IrModule* module,
 BUSTER_F_DECL IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrGlobal global);
 BUSTER_F_DECL IrBlock* ir_function_add_block(Arena* arena, IrFunction* function, IrBlock block);
 BUSTER_F_DECL IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue value);
-BUSTER_F_DECL IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, IrInstruction instruction);
+BUSTER_F_DECL IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, IrInstruction instruction, IrSourceRange canonical_source);
 BUSTER_F_DECL IrValueLabelMetadata* ir_value_label_metadata_find(IrFunction* function, IrValueId value);
 BUSTER_F_DECL IrValueLabelMetadata ir_value_label_metadata(IrFunction* function, IrValueId value);
 BUSTER_F_DECL IrValueLabelMetadata* ir_value_label_metadata_ensure(Arena* arena, IrFunction* function, IrValueId value);
@@ -590,6 +594,7 @@ BUSTER_F_DECL IrInstructionExtra* ir_instruction_extra_ensure(Arena* arena, IrFu
 // The buster-frontend source range for one instruction; zero when the
 // function's dense source array is absent (canonical C functions).
 BUSTER_F_DECL ParserSourceRange ir_instruction_source(IrFunction* function, IrInstructionId instruction);
+BUSTER_F_DECL IrSourceRange ir_instruction_canonical_source(IrFunction* function, IrInstructionId instruction);
 BUSTER_F_DECL bool ir_label_provenance_valid(IrValueLabelMetadata* value);
 BUSTER_F_DECL bool ir_label_storage_provenance_valid(IrValueLabelMetadata* value);
 BUSTER_F_DECL bool ir_block_id_array_unique(IrBlockId* blocks, u32 count);

@@ -429,6 +429,15 @@ ParserSourceRange ir_instruction_source(IrFunction* function, IrInstructionId in
     return function->instruction_sources[instruction.value];
 }
 
+IrSourceRange ir_instruction_canonical_source(IrFunction* function, IrInstructionId instruction)
+{
+    if (!function || !function->instruction_canonical_sources || instruction.value >= function->instruction_count)
+    {
+        return (IrSourceRange){0};
+    }
+    return function->instruction_canonical_sources[instruction.value];
+}
+
 IrValueLabelMetadata* ir_value_label_metadata_ensure(Arena* arena, IrFunction* function, IrValueId value)
 {
     if (!arena || !function)
@@ -3714,6 +3723,8 @@ BUSTER_GLOBAL_LOCAL void ir_lower_function(Arena* result_arena, Arena* scratch_a
     function->instructions = arena_allocate(result_arena, IrInstruction, function->instruction_capacity);
     function->instruction_sources = arena_allocate(result_arena, ParserSourceRange, function->instruction_capacity);
     memset(function->instruction_sources, 0, sizeof(*function->instruction_sources) * function->instruction_capacity);
+    function->instruction_canonical_sources = arena_allocate(result_arena, IrSourceRange, function->instruction_capacity);
+    memset(function->instruction_canonical_sources, 0, sizeof(*function->instruction_canonical_sources) * function->instruction_capacity);
     function->values = arena_allocate(result_arena, IrValue, function->value_capacity);
     function->local_places = arena_allocate(result_arena, IrValueId, function->local_count);
     function->local_uses_memory = arena_allocate(result_arena, bool, function->local_count);
@@ -4716,7 +4727,7 @@ IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue valu
     return id;
 }
 
-IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, IrInstruction instruction)
+IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, IrInstruction instruction, IrSourceRange canonical_source)
 {
     if (!arena || !function)
     {
@@ -4737,6 +4748,15 @@ IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, 
             memcpy(sources, function->instruction_sources, sizeof(*sources) * function->instruction_count);
             function->instruction_sources = sources;
         }
+        {
+            IrSourceRange* canonical_sources = arena_allocate(arena, IrSourceRange, capacity);
+            memset(canonical_sources, 0, sizeof(*canonical_sources) * capacity);
+            if (function->instruction_canonical_sources)
+            {
+                memcpy(canonical_sources, function->instruction_canonical_sources, sizeof(*canonical_sources) * function->instruction_count);
+            }
+            function->instruction_canonical_sources = canonical_sources;
+        }
         function->instructions = instructions;
         function->instruction_capacity = capacity;
     }
@@ -4745,6 +4765,10 @@ IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, 
     };
     instruction.id = id;
     function->instructions[id.value] = instruction;
+    if (function->instruction_canonical_sources)
+    {
+        function->instruction_canonical_sources[id.value] = canonical_source;
+    }
     return id;
 }
 
@@ -5092,7 +5116,7 @@ BUSTER_GLOBAL_LOCAL void ir_program_canonicalize_module(IrProgram* program, Anal
         {
             IrInstruction* instruction = function->instructions + instruction_index;
             instruction->canonical_type = ir_program_type_map(program, module_analysis->module.id, instruction->type);
-            instruction->canonical_source = ir_source_range_from_parser(source, ir_instruction_source(function, instruction->id));
+            function->instruction_canonical_sources[instruction->id.value] = ir_source_range_from_parser(source, ir_instruction_source(function, instruction->id));
             instruction->canonical_local = instruction->local.value == ANALYSIS_ID_UNDERLYING_INVALID ? IR_LOCAL_ID_INVALID
                                                                                                       : (IrLocalId){
                                                                                                             .value = instruction->local.value,
