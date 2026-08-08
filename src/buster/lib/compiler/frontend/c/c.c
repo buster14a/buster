@@ -40648,6 +40648,18 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         scratch_end(temporary);
         return result;
     }
+    // Counting a definition's locals by scanning every entity per function is
+    // quadratic in the translation unit; bucket the counts in one pass instead.
+    u32* declaration_local_counts = arena_allocate(temporary_arena, u32, parse.declaration_count);
+    memset(declaration_local_counts, 0, sizeof(*declaration_local_counts) * parse.declaration_count);
+    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    {
+        CEntity* entity = parse.entities + entity_index;
+        if (entity->kind == C_ENTITY_LOCAL && entity->declaration_index < parse.declaration_count)
+        {
+            declaration_local_counts[entity->declaration_index] += 1;
+        }
+    }
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
@@ -40689,12 +40701,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             continue;
         }
         TemporalArena lowering_temporary = arena_begin_temporal(lowering_arena);
-        u64 local_capacity = signatures[declaration_index].parameter_count;
-        for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
-        {
-            CEntity entity = parse.entities[entity_index];
-            local_capacity += entity.kind == C_ENTITY_LOCAL && entity.declaration_index == declaration_index;
-        }
+        u64 local_capacity = (u64)signatures[declaration_index].parameter_count + declaration_local_counts[declaration_index];
         u64 prepared_call_capacity = 0;
         u64 prepared_control_expression_capacity = 0;
         u32 body_end = declaration.body_start + declaration.body_token_count;
