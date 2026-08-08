@@ -43,6 +43,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validate_coverage_record(const Bust
                                                                      BusterX86MetadataValidationResult* result);
 
 BUSTER_GLOBAL_LOCAL char8 buster_x86_metadata_pool_bytes[BUSTER_X86_GENERATED_STRING_POOL_SIZE];
+// Distance from each pool byte to its terminating NUL (UINT32_MAX when none
+// follows), so asking a string's length is one read instead of a byte scan --
+// consumers ask per record and per literal comparison, which rescanned the
+// same strings constantly.
+BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_pool_nul_distances[BUSTER_X86_GENERATED_STRING_POOL_SIZE];
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedForm buster_x86_metadata_form_records[BUSTER_X86_GENERATED_FORM_COUNT];
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_records_valid[BUSTER_X86_GENERATED_FORM_COUNT];
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedOperand buster_x86_metadata_operand_records[BUSTER_X86_GENERATED_OPERAND_COUNT];
@@ -69,6 +74,20 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
     for (u64 index = 0; index < BUSTER_X86_GENERATED_STRING_POOL_SIZE; index += 1)
     {
         buster_x86_metadata_pool_bytes[index] = buster_x86_generated_string_byte(index);
+    }
+    u32 nul_distance = UINT32_MAX;
+    for (u64 index = BUSTER_X86_GENERATED_STRING_POOL_SIZE; index; index -= 1)
+    {
+        u64 position = index - 1;
+        if (buster_x86_metadata_pool_bytes[position] == 0)
+        {
+            nul_distance = 0;
+        }
+        else if (nul_distance != UINT32_MAX)
+        {
+            nul_distance += 1;
+        }
+        buster_x86_metadata_pool_nul_distances[position] = nul_distance;
     }
     for (u32 index = 0; index < BUSTER_X86_GENERATED_OPERAND_COUNT; index += 1)
     {
@@ -491,23 +510,21 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validation_fail(BusterX86MetadataVa
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_string_offset_terminated(u32 offset, u32* length)
 {
+    buster_x86_metadata_decode_tables();
     if (offset >= BUSTER_X86_GENERATED_STRING_POOL_SIZE)
     {
         return false;
     }
-    String8 tail = buster_x86_metadata_pool_span(offset, BUSTER_X86_GENERATED_STRING_POOL_SIZE - offset);
-    for (u32 result = 0; result < tail.length; result += 1)
+    u32 distance = buster_x86_metadata_pool_nul_distances[offset];
+    if (distance == UINT32_MAX)
     {
-        if (tail.pointer[result] == 0)
-        {
-            if (length)
-            {
-                *length = result;
-            }
-            return true;
-        }
+        return false;
     }
-    return false;
+    if (length)
+    {
+        *length = distance;
+    }
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_string_equal_offsets(u32 first_offset, u32 second_offset)
