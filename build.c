@@ -7848,7 +7848,7 @@ BUSTER_GLOBAL_LOCAL void test_timing_summary_action_add(Arena* arena, TestTiming
     };
 }
 
-BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_requested_for_platform(bool ci, bool forced, bool macos, bool windows, bool x86_64);
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_requested_for_platform(bool ci, bool forced, bool linux_host, bool macos, bool windows, bool x86_64);
 BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_consumer_supported_for_platform(bool linux_host, bool macos, bool windows, bool x86_64);
 BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_selection_is_valid(bool requested, bool supported, bool producer_selected);
 BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_cleanup_action(Arena* arena, void* data);
@@ -7879,16 +7879,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
         string_print(S8("error: artifact fan-out canonical-combination test failed\n"));
         return PROCESS_RESULT_FAILED;
     }
-    if (build_artifact_fanout_requested_for_platform(false, false, false, false, true) ||
-        !build_artifact_fanout_requested_for_platform(true, false, true, false, false) ||
-        !build_artifact_fanout_requested_for_platform(true, false, false, true, true) ||
-        build_artifact_fanout_requested_for_platform(true, false, false, true, false) ||
-        !build_artifact_fanout_requested_for_platform(false, true, false, false, true) ||
+    if (build_artifact_fanout_requested_for_platform(false, false, true, false, false, true) ||
+        !build_artifact_fanout_requested_for_platform(true, false, false, true, false, false) ||
+        !build_artifact_fanout_requested_for_platform(true, false, false, false, true, true) ||
+        build_artifact_fanout_requested_for_platform(true, false, false, false, true, false) ||
+        !build_artifact_fanout_requested_for_platform(true, false, true, false, false, true) ||
+        build_artifact_fanout_requested_for_platform(true, false, true, false, false, false) ||
+        build_artifact_fanout_requested_for_platform(true, false, false, false, false, true) ||
+        !build_artifact_fanout_requested_for_platform(false, true, false, false, false, true) ||
         !build_artifact_fanout_consumer_supported_for_platform(true, false, false, true) ||
         !build_artifact_fanout_consumer_supported_for_platform(false, true, false, false) ||
         !build_artifact_fanout_consumer_supported_for_platform(false, false, true, true) ||
         build_artifact_fanout_consumer_supported_for_platform(false, false, true, false) ||
-        !build_artifact_fanout_requested_for_platform(false, true, false, false, true) ||
         build_artifact_fanout_selection_is_valid(true, true, false) || build_artifact_fanout_selection_is_valid(true, false, true) ||
         !build_artifact_fanout_selection_is_valid(false, false, false) ||
         !build_artifact_fanout_selection_is_valid(true, true, true))
@@ -8501,9 +8503,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
     return PROCESS_RESULT_SUCCESS;
 }
 
-BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_requested_for_platform(bool ci, bool forced, bool macos, bool windows, bool x86_64)
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_requested_for_platform(bool ci, bool forced, bool linux_host, bool macos, bool windows, bool x86_64)
 {
-    return forced || (ci && (macos || (windows && x86_64)));
+    return forced || (ci && (macos || (x86_64 && (linux_host || windows))));
 }
 
 BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_consumer_supported_for_platform(bool linux_host, bool macos, bool windows, bool x86_64)
@@ -9081,8 +9083,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     }
 
     bool fanout_forced = environment_flag_is_on(S8("BUSTER_TEST_FORCE_ARTIFACT_FANOUT"));
-    bool fanout_requested = build_artifact_fanout_requested_for_platform(ci, fanout_forced, BUSTER_MACOS != 0, BUSTER_WINDOWS != 0,
-                                                                          BUSTER_CPU_ARCH_X86_64 != 0);
+    bool fanout_requested = build_artifact_fanout_requested_for_platform(ci, fanout_forced, BUSTER_LINUX != 0, BUSTER_MACOS != 0,
+                                                                          BUSTER_WINDOWS != 0, BUSTER_CPU_ARCH_X86_64 != 0);
     bool fanout_supported = build_artifact_fanout_consumer_supported_for_platform(BUSTER_LINUX != 0, BUSTER_MACOS != 0, BUSTER_WINDOWS != 0,
                                                                                      BUSTER_CPU_ARCH_X86_64 != 0);
     if (fanout_requested && !fanout_supported)
