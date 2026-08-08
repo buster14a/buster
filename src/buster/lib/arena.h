@@ -5,7 +5,11 @@ struct ArenaFlags
 {
     u64 execute : 1;
     u64 lock_pages : 1;
-    u64 flags : 62;
+    // Opt-in to the destroy-side reuse pool for non-default reservation
+    // sizes. A reused arena hands out dirty bytes, so only creation sites
+    // whose consumers never assume freshly zeroed pages may set this.
+    u64 pool_reuse : 1;
+    u64 flags : 61;
 };
 
 typedef struct Arena Arena;

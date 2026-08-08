@@ -106,23 +106,27 @@ BUSTER_GLOBAL_LOCAL bool arena_destroy_extended(Arena* arena, u64 count, u64 res
 // arena_create skips the unmap/remap pair and the kernel's first-touch page
 // zeroing. A reused arena hands out dirty bytes — the same contract
 // arena_reset_to_start already imposes on every allocation site. The parked
-// arena's first buffer bytes hold the pool link; non-default shapes
-// (multi-arena reservations, execute or locked pages, custom reserve sizes)
-// and entries past the cap unmap exactly as before.
+// arena's first buffer bytes hold the pool link and its header keeps the
+// reservation size the reuse match reads. Non-default reservation sizes
+// join only through the opt-in pool_reuse flag, because a consumer of a
+// custom-size arena may still assume freshly zeroed pages; reuse always
+// requires an exact reservation-size match, so differently shaped arenas
+// never satisfy each other's requests. Multi-arena reservations, execute or
+// locked pages, and entries past the cap unmap exactly as before.
 #define ARENA_POOL_LIMIT 16
 BUSTER_THREAD_LOCAL_DECL Arena* arena_pool_head;
 BUSTER_THREAD_LOCAL_DECL u64 arena_pool_count;
 
-BUSTER_GLOBAL_LOCAL bool arena_pool_shape(u64 reserved_size, u64 count, ArenaFlags flags)
+BUSTER_GLOBAL_LOCAL bool arena_pool_eligible(u64 reserved_size, u64 count, ArenaFlags flags)
 {
-    return count == 1 && reserved_size == default_reserve_size && !flags.execute && !flags.lock_pages;
+    return count == 1 && !flags.execute && !flags.lock_pages && (reserved_size == default_reserve_size || flags.pool_reuse);
 }
 
 bool arena_destroy(Arena* arena, u64 count)
 {
     count = count == 0 ? 1 : count;
     u64 reserved_size = arena->reserved_size;
-    if (arena_pool_shape(reserved_size, count, arena->flags) && arena_pool_count < ARENA_POOL_LIMIT)
+    if (arena_pool_eligible(reserved_size, count, arena->flags) && arena_pool_count < ARENA_POOL_LIMIT)
     {
         *(Arena**)((u8*)arena + arena_minimum_position) = arena_pool_head;
         arena_pool_head = arena;
@@ -144,30 +148,46 @@ Arena* arena_create(ArenaCreation original_creation)
     BUSTER_CHECK(creation.initial_size >= arena_minimum_position);
     BUSTER_CHECK(creation.initial_size <= individual_reserved_size);
 
-    if (arena_pool_shape(individual_reserved_size, count, creation.flags) && arena_pool_head)
+    if (arena_pool_eligible(individual_reserved_size, count, creation.flags))
     {
-        Arena* pooled = arena_pool_head;
-        arena_pool_head = *(Arena**)((u8*)pooled + arena_minimum_position);
-        arena_pool_count -= 1;
-        u64 committed = pooled->os_position;
-        bool committed_enough = committed >= creation.initial_size;
-        if (!committed_enough)
+        Arena* previous = 0;
+        for (Arena* pooled = arena_pool_head; pooled; previous = pooled, pooled = *(Arena**)((u8*)pooled + arena_minimum_position))
         {
-            committed_enough = os_commit(pooled, creation.initial_size, (ProtectionFlags){.read = 1, .write = 1}, false);
-            committed = creation.initial_size;
+            if (pooled->reserved_size != individual_reserved_size)
+            {
+                continue;
+            }
+            Arena* next = *(Arena**)((u8*)pooled + arena_minimum_position);
+            if (previous)
+            {
+                *(Arena**)((u8*)previous + arena_minimum_position) = next;
+            }
+            else
+            {
+                arena_pool_head = next;
+            }
+            arena_pool_count -= 1;
+            u64 committed = pooled->os_position;
+            bool committed_enough = committed >= creation.initial_size;
+            if (!committed_enough)
+            {
+                committed_enough = os_commit(pooled, creation.initial_size, (ProtectionFlags){.read = 1, .write = 1}, false);
+                committed = creation.initial_size;
+            }
+            if (committed_enough)
+            {
+                *pooled = (Arena){
+                    .reserved_size = individual_reserved_size,
+                    .position = arena_minimum_position,
+                    .os_position = committed,
+                    .granularity = creation.granularity,
+                    .flags = creation.flags,
+                };
+                return pooled;
+            }
+            arena_destroy_extended(pooled, 1, individual_reserved_size);
+            break;
         }
-        if (committed_enough)
-        {
-            *pooled = (Arena){
-                .reserved_size = individual_reserved_size,
-                .position = arena_minimum_position,
-                .os_position = committed,
-                .granularity = creation.granularity,
-                .flags = creation.flags,
-            };
-            return pooled;
-        }
-        arena_destroy_extended(pooled, 1, individual_reserved_size);
     }
 
     ProtectionFlags protection_flags = {.read = 1, .write = 1, .execute = creation.flags.execute};

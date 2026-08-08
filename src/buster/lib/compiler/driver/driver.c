@@ -1967,6 +1967,12 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         Arena* unit_arena = arena_create((ArenaCreation){
             .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
+            // Per-unit arenas churn once per translation unit (and once per
+            // driver test fixture); reusing the parked mapping keeps its
+            // already-faulted pages instead of paying mmap + first-touch
+            // zeroing + munmap every time. The C pipeline never assumes
+            // zeroed arena memory.
+            .flags = {.pool_reuse = 1},
         });
         if (!unit_arena)
         {
