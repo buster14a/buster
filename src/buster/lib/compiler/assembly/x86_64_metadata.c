@@ -144,8 +144,11 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
 // Every accessor below self-initializes, and the string accessors run one call
 // per byte, so the already-decoded test is on the hot path of the whole
 // metadata module while the decode itself happens once. Keep the test inline
-// and leave only the first call paying for an out-of-line frame.
-BUSTER_GLOBAL_LOCAL BUSTER_INLINE void buster_x86_metadata_decode_tables(void)
+// and leave only the first call paying for an out-of-line frame.  This has to
+// be BUSTER_ALWAYS_INLINE rather than BUSTER_INLINE: the latter expands to
+// nothing without optimization, which left the guard out of line in exactly
+// the sanitized Debug tree this exists for.
+BUSTER_GLOBAL_LOCAL BUSTER_ALWAYS_INLINE void buster_x86_metadata_decode_tables(void)
 {
     if (!buster_x86_metadata_tables_decoded)
     {

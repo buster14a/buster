@@ -182,12 +182,21 @@
 #define BUSTER_TYPE_EQUAL(T1, T2) __is_same(T1, T2)
 #define BUSTER_UNDERLYING_TYPE(E) __underlying_type(E)
 
-#if BUSTER_OPTIMIZE
+// BUSTER_INLINE is advisory: it expands to nothing in unoptimized builds, so a
+// hot guard marked with it still costs a call in Debug -- which is the
+// configuration CI spends its time in.  BUSTER_ALWAYS_INLINE holds in every
+// configuration.  Reserve it for one-test guards on per-byte or per-record
+// paths, where an out-of-line frame costs more than the body; a large body
+// forced inline everywhere makes Debug builds slower to compile and harder to
+// step through.
 #if BUSTER_COMPILER_MSVC
-#define BUSTER_INLINE __forceinline
+#define BUSTER_ALWAYS_INLINE __forceinline
 #else
-#define BUSTER_INLINE __attribute__((always_inline)) inline
+#define BUSTER_ALWAYS_INLINE __attribute__((always_inline)) inline
 #endif
+
+#if BUSTER_OPTIMIZE
+#define BUSTER_INLINE BUSTER_ALWAYS_INLINE
 #else
 #define BUSTER_INLINE
 #endif
