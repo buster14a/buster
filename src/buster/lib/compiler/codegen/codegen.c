@@ -9192,6 +9192,16 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         }
         u32* value_offsets = arena_allocate(arena, u32, function->value_count);
         u8* direct_call_uses = codegen_canonical_direct_call_uses(arena, function);
+        // The Windows x64 sizing pass below already computes every call's
+        // layout to find the outgoing stack area; keep those layouts so the
+        // emission pass reuses them instead of recomputing per call. Other
+        // ABIs compute layouts once during emission exactly as before.
+        CodegenCanonicalCallLayout** call_layout_cache = 0;
+        if (target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_WINDOWS)
+        {
+            call_layout_cache = arena_allocate(arena, CodegenCanonicalCallLayout*, function->instruction_count);
+            memset(call_layout_cache, 0, sizeof(*call_layout_cache) * function->instruction_count);
+        }
         // Keep the x28 frame-base save in the directly encodable ARM64
         // Windows unwind range. Ordinary values start after its reserved slot.
         u64 value_bytes = windows_aarch64 ? 16 : 0;
@@ -9331,14 +9341,16 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 {
                     continue;
                 }
-                CodegenCanonicalCallLayout call_layout = {0};
-                CodegenError call_error = codegen_canonical_x64_call_layout(arena, program, function, instruction, result.abi, &call_layout);
+                CodegenCanonicalCallLayout* call_layout = arena_allocate(arena, CodegenCanonicalCallLayout, 1);
+                *call_layout = (CodegenCanonicalCallLayout){0};
+                CodegenError call_error = codegen_canonical_x64_call_layout(arena, program, function, instruction, result.abi, call_layout);
                 if (call_error != CODEGEN_ERROR_NONE)
                 {
                     result.error = call_error;
                     return result;
                 }
-                windows_outgoing_size = BUSTER_MAX(windows_outgoing_size, call_layout.windows_stack_size);
+                call_layout_cache[instruction_index] = call_layout;
+                windows_outgoing_size = BUSTER_MAX(windows_outgoing_size, call_layout->windows_stack_size);
             }
             if (frame_size > UINT32_MAX - windows_outgoing_size)
             {
@@ -11326,12 +11338,20 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     else if (instruction->opcode == IR_OPCODE_CALL)
                     {
                         CodegenCanonicalCallLayout call_layout = {0};
-                        CodegenError call_error =
-                            codegen_canonical_x64_call_layout(arena, program, function, instruction, result.abi, &call_layout);
-                        if (call_error != CODEGEN_ERROR_NONE)
+                        u32 call_instruction_index = (u32)(instruction - function->instructions);
+                        if (call_layout_cache && call_layout_cache[call_instruction_index])
                         {
-                            result.error = call_error;
-                            return result;
+                            call_layout = *call_layout_cache[call_instruction_index];
+                        }
+                        else
+                        {
+                            CodegenError call_error =
+                                codegen_canonical_x64_call_layout(arena, program, function, instruction, result.abi, &call_layout);
+                            if (call_error != CODEGEN_ERROR_NONE)
+                            {
+                                result.error = call_error;
+                                return result;
+                            }
                         }
                         static u8 const system_v[] = {
                             7, 6, 2, 1, 8, 9,
