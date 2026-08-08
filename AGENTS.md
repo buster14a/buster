@@ -412,6 +412,23 @@ history.
   Use direct calls, loops, switches, and explicit work structures. Function
   pointer values may model the program being compiled, but the compiler itself
   must not execute through them.
+- **Parallelism target: SPMD across threads, SIMD within each thread.**
+  Implementation code is written multi-core-by-default in the lane model of
+  Ryan Fleury's raddebugger (`lane_run`, `lane_index`/`lane_count`,
+  `lane_range`, `lane_sync`, `lane_broadcast` in `<buster/lib/os.h>`): every
+  lane of a gang runs the same code, narrows serial work with
+  `if (lane_index() == 0)`, and splits parallel work by `lane_range` or an
+  atomic take-index — not through job systems, task queues, or callbacks.
+  Lane-style code must degrade to serial: `BUSTER_SINGLE_THREADED` builds and
+  one-lane gangs run the identical path with no threads and no separate serial
+  variant. Within a lane, prefer wide data parallelism in the style of Daniel
+  Lemire's simdjson kernels — process data in blocks, classify with tables and
+  bitmasks, iterate set bits — over per-element branching, and shape data the
+  way Casey Muratori advocates: flat index-linked arrays in arenas transformed
+  by batch passes, not pointer graphs walked element-at-a-time. Parallel
+  stages must stay deterministic — write results into slots indexed by work
+  item, never by completion order — so the self-hosting fixed point stays
+  byte-identical at any lane count.
 - **Warnings are errors** under a very large warning set (see
   `GNU_FAMILY_WARNINGS` in `CMakeLists.txt`), and code must stay clean under
   Clang, GCC, Zig cc, and MSVC. TCC is required only to compile/bootstrap the
