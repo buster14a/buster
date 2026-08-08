@@ -7181,7 +7181,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 conditional_return_count += opcode == IR_OPCODE_RETURN;
             }
             BUSTER_TEST(arguments, conditional_branch_count >= C_IR_CONDITIONAL_STRESS_DEPTH * 2);
-            BUSTER_TEST(arguments, conditional_branch_if_count >= C_IR_CONDITIONAL_STRESS_DEPTH);
+            // Constant conditions lower to unconditional branches, so the folded
+            // '1 ?' conditions must not leave any conditional branches behind.
+            BUSTER_TEST(arguments, conditional_branch_if_count == 0);
             BUSTER_TEST(arguments, conditional_return_count == 1);
             BUSTER_TEST(arguments,
                         ir_validate_canonical_module(conditional_lowered.program, conditional_lowered.program->modules).error == IR_VALIDATION_NONE);

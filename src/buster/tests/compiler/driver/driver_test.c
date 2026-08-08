@@ -1677,6 +1677,38 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_case_range_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    String8 c_infinite_loop_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-infinite-loop"),
+#if BUSTER_WINDOWS
+                                                                          S8(".exe"));
+#else
+                                                                          S8(""));
+#endif
+    String8 c_infinite_loop_command_line[] = {
+        S8("-std=gnu23"),
+        S8("-o"),
+        c_infinite_loop_executable_path,
+        S8("tests/basic_c_infinite_loop.c"),
+    };
+    CompilerDriverResult c_infinite_loop = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_infinite_loop_command_line)));
+    BUSTER_TEST(arguments, c_infinite_loop.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_infinite_loop.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_infinite_loop_run_arguments[] = {
+            c_infinite_loop_executable_path,
+        };
+        ProcessSpawnResult c_infinite_loop_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_infinite_loop_run_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_infinite_loop_spawn.handle != 0);
+        if (c_infinite_loop_spawn.handle)
+        {
+            ProcessWaitResult c_infinite_loop_wait = os_process_wait_sync(arguments->arena, c_infinite_loop_spawn);
+            BUSTER_TEST(arguments, c_infinite_loop_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     String8 c_artifact_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-frontend-artifacts"),
 #if BUSTER_WINDOWS
                                                                      S8(".exe"));

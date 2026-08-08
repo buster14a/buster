@@ -28041,22 +28041,29 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
         }
         if (task.start == task.end)
         {
-            IrValueId condition = c_ir_emit_integer(builder, (CToken){
-                                                                 .spelling = S8("1"),
-                                                                 .kind = C_TOKEN_PREPROCESSING_NUMBER,
-                                                             });
-            condition = c_ir_truth_value(builder, condition, frame->as.condition.source);
-            IrBlockId targets[2] = {
-                task.true_block,
-                task.false_block,
-            };
-            if (condition.value == IR_ID_UNDERLYING_INVALID ||
-                !c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, frame->as.condition.source))
+            if (!c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &task.true_block, 1, frame->as.condition.source))
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
             continue;
+        }
+        if (task.start + 1 == task.end)
+        {
+            CToken leaf = builder->preprocess.tokens[task.start];
+            bool literal = leaf.kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                           (leaf.kind == C_TOKEN_IDENTIFIER && (string_equal(leaf.spelling, S8("true")) || string_equal(leaf.spelling, S8("false"))));
+            u64 constant = 0;
+            if (literal && c_ir_constant_condition_evaluate(builder, task.start, task.end, &constant))
+            {
+                IrBlockId target = constant ? task.true_block : task.false_block;
+                if (!c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &target, 1, frame->as.condition.source))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                continue;
+            }
         }
         u32 conditional_start = 0;
         u32 conditional_question = 0;
