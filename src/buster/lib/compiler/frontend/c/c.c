@@ -39629,6 +39629,39 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                  });
     }
     bool* flexible_array_types = arena_allocate(temporary_arena, bool, parse.type_count);
+    // The string-literal bound inference below asks for the object
+    // declarations of one type; scanning every declaration per unresolved
+    // array type is quadratic in the translation unit, so bucket the object
+    // declarations by type once.  Declarations never change inside the round
+    // loop, and each bucket keeps ascending declaration order, so walking a
+    // bucket visits the same declarations the full scan did.
+    u32* object_declarations_by_type_offsets = arena_allocate(temporary_arena, u32, (u64)parse.type_count + 1);
+    memset(object_declarations_by_type_offsets, 0, sizeof(*object_declarations_by_type_offsets) * ((u64)parse.type_count + 1));
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        CDeclaration* declaration = parse.declarations + declaration_index;
+        if (declaration->kind == C_DECLARATION_OBJECT && declaration->type.value < parse.type_count)
+        {
+            object_declarations_by_type_offsets[declaration->type.value + 1] += 1;
+        }
+    }
+    for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
+    {
+        object_declarations_by_type_offsets[type_index + 1] += object_declarations_by_type_offsets[type_index];
+    }
+    u32* object_declarations_by_type = arena_allocate(temporary_arena, u32, object_declarations_by_type_offsets[parse.type_count]);
+    u32* object_declarations_by_type_cursors = arena_allocate(temporary_arena, u32, parse.type_count);
+    memset(object_declarations_by_type_cursors, 0, sizeof(*object_declarations_by_type_cursors) * parse.type_count);
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        CDeclaration* declaration = parse.declarations + declaration_index;
+        if (declaration->kind == C_DECLARATION_OBJECT && declaration->type.value < parse.type_count)
+        {
+            u32 type_value = declaration->type.value;
+            object_declarations_by_type[object_declarations_by_type_offsets[type_value] + object_declarations_by_type_cursors[type_value]] = declaration_index;
+            object_declarations_by_type_cursors[type_value] += 1;
+        }
+    }
     for (u32 type_mapping_round = 0; type_mapping_round < 2; type_mapping_round += 1)
     {
         // Rebuilt each round because c_ir_infer_incomplete_array_bounds below
@@ -39952,13 +39985,10 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 }
                 if (!count_resolved && !bound.is_star && bound.token_count == 0)
                 {
-                    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+                    u32 bucket_end = object_declarations_by_type_offsets[type_index + 1];
+                    for (u32 bucket_index = object_declarations_by_type_offsets[type_index]; bucket_index < bucket_end; bucket_index += 1)
                     {
-                        CDeclaration declaration = parse.declarations[declaration_index];
-                        if (declaration.type.value != type_index || declaration.kind != C_DECLARATION_OBJECT)
-                        {
-                            continue;
-                        }
+                        CDeclaration declaration = parse.declarations[object_declarations_by_type[bucket_index]];
                         u32 initializer_start = 0;
                         u32 initializer_end = 0;
                         if (!c_ir_declaration_initializer_range(preprocess, declaration, &initializer_start, &initializer_end) ||
