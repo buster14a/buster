@@ -600,23 +600,37 @@ CodegenAbiSignature codegen_classify_signature_with_arguments(Arena* arena, Anal
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL Target codegen_abi_targets[CODEGEN_ABI_COUNT];
+BUSTER_GLOBAL_LOCAL bool codegen_abi_targets_built;
+
+// Called per aggregate-ABI classification, so the feature-array fold is
+// cached per abi instead of re-run on every query.
 Target codegen_target_for_abi(CodegenAbi abi)
 {
-    bool x86 = abi == CODEGEN_ABI_X86_64_SYSTEM_V || abi == CODEGEN_ABI_X86_64_WINDOWS;
-    Target result = {
-        .cpu_arch = x86 ? CPU_ARCH_X86_64 : CPU_ARCH_AARCH64,
-        .os = abi == CODEGEN_ABI_X86_64_WINDOWS    ? OPERATING_SYSTEM_WINDOWS
-              : abi == CODEGEN_ABI_AARCH64_DARWIN  ? OPERATING_SYSTEM_MACOS
-              : abi == CODEGEN_ABI_AARCH64_WINDOWS ? OPERATING_SYSTEM_WINDOWS
-                                                   : OPERATING_SYSTEM_LINUX,
-        .cpu_features_explicit = true,
-        .cpu_features = x86 ? target_cpu_features_from_array((TargetCpuFeature const[]){
-                                      TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
-                                      TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F,
-                                      TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW}, 6)
-                            : target_cpu_features_singleton(TARGET_CPU_FEATURE_AARCH64_NEON),
-    };
-    return result;
+    if (!codegen_abi_targets_built)
+    {
+        for (u32 abi_index = 0; abi_index < CODEGEN_ABI_COUNT; abi_index += 1)
+        {
+            bool x86 = abi_index == CODEGEN_ABI_X86_64_SYSTEM_V || abi_index == CODEGEN_ABI_X86_64_WINDOWS;
+            codegen_abi_targets[abi_index] = (Target){
+                .cpu_arch = x86 ? CPU_ARCH_X86_64 : CPU_ARCH_AARCH64,
+                .os = abi_index == CODEGEN_ABI_X86_64_WINDOWS    ? OPERATING_SYSTEM_WINDOWS
+                      : abi_index == CODEGEN_ABI_AARCH64_DARWIN  ? OPERATING_SYSTEM_MACOS
+                      : abi_index == CODEGEN_ABI_AARCH64_WINDOWS ? OPERATING_SYSTEM_WINDOWS
+                                                                 : OPERATING_SYSTEM_LINUX,
+                .cpu_features_explicit = true,
+                .cpu_features = x86 ? target_cpu_features_from_array((TargetCpuFeature const[]){
+                                              TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
+                                              TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F,
+                                              TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW}, 6)
+                                    : target_cpu_features_singleton(TARGET_CPU_FEATURE_AARCH64_NEON),
+            };
+        }
+        codegen_abi_targets_built = true;
+    }
+    // An out-of-range abi used to fall through every x86/Windows/Darwin test,
+    // which is exactly the AAPCS64 row.
+    return codegen_abi_targets[(u32)abi < CODEGEN_ABI_COUNT ? (u32)abi : CODEGEN_ABI_AARCH64_AAPCS64];
 }
 
 BUSTER_GLOBAL_LOCAL CodegenAbiSignature codegen_classify_signature_for_target(Arena* arena, AnalysisResult* analysis, AnalysisTypeId function_type_id,

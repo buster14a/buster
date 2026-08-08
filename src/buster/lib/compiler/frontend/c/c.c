@@ -166,6 +166,56 @@ BUSTER_GLOBAL_LOCAL CTranslatedSource c_translate_source(Arena* arena, String8 s
     bool run_broken = true;
     while (input < source.length)
     {
+        // Bulk path: a run of bytes containing no '\r', '\n', or '\\' keeps
+        // line/column linear, so it copies through whole and only the three
+        // special bytes fall into the scalar handling below. The probe is
+        // SWAR zero-in-word detection, eight bytes per step.
+        u64 plain_end = input;
+        while (plain_end + 8 <= source.length)
+        {
+            u64 word;
+            memcpy(&word, source.pointer + plain_end, sizeof(word));
+            u64 carriage = word ^ UINT64_C(0x0D0D0D0D0D0D0D0D);
+            u64 newline = word ^ UINT64_C(0x0A0A0A0A0A0A0A0A);
+            u64 backslash = word ^ UINT64_C(0x5C5C5C5C5C5C5C5C);
+            u64 low = UINT64_C(0x0101010101010101);
+            u64 high = UINT64_C(0x8080808080808080);
+            u64 found = (((carriage - low) & ~carriage) | ((newline - low) & ~newline) | ((backslash - low) & ~backslash)) & high;
+            if (found)
+            {
+                break;
+            }
+            plain_end += 8;
+        }
+        while (plain_end < source.length)
+        {
+            char8 probe = source.pointer[plain_end];
+            if (probe == '\r' || probe == '\n' || probe == '\\')
+            {
+                break;
+            }
+            plain_end += 1;
+        }
+        if (plain_end > input)
+        {
+            if (run_broken)
+            {
+                checkpoints[checkpoint_count] = (CSourceLocation){
+                    .offset = input,
+                    .line = line,
+                    .column = column,
+                };
+                checkpoint_offsets[checkpoint_count] = (u32)output;
+                checkpoint_count += 1;
+                run_broken = false;
+            }
+            u64 plain_length = plain_end - input;
+            memcpy(translated + output, source.pointer + input, plain_length);
+            output += plain_length;
+            column += (u32)plain_length;
+            input = plain_end;
+            continue;
+        }
         char8 character = source.pointer[input];
         u64 newline_length = 0;
         if (character == '\r')
@@ -670,6 +720,13 @@ struct CMacroDefinition
     bool pragma_like;
 };
 
+typedef enum CMacroBuiltin
+{
+    C_MACRO_BUILTIN_NONE,
+    C_MACRO_BUILTIN_LINE,
+    C_MACRO_BUILTIN_FILE,
+} CMacroBuiltin;
+
 struct CMacro
 {
     CMacro* next;
@@ -680,6 +737,13 @@ struct CMacro
     u32 bucket_count;
     u32 hash_count;
     bool disabled;
+    u8 builtin;
+    // Head-of-list state for the lazy builtin macros: the main preprocess
+    // loop stores the current logical line and path here each iteration, and
+    // __LINE__/__FILE__ materialize their replacement from it only when
+    // actually expanded.
+    u32 builtin_line;
+    String8 builtin_path;
 };
 
 typedef struct CMacroPushMacro CMacroPushMacro;
@@ -1165,9 +1229,50 @@ BUSTER_GLOBAL_LOCAL bool c_macro_is_paste(CToken token)
     return c_token_is_punctuator(&token, C_PUNCTUATOR_HASH_HASH);
 }
 
-BUSTER_GLOBAL_LOCAL bool c_macro_replacement_tokens(Arena* arena, CMacro* macro, CMacroArgument* arguments, CSourceLocation location, CPreprocessResult* result,
-                                                    CToken** tokens_out, u32* token_count_out)
+BUSTER_GLOBAL_LOCAL CToken c_macro_builtin_token(Arena* arena, CMacro* first, u8 builtin, CSourceLocation location)
 {
+    if (builtin == C_MACRO_BUILTIN_LINE)
+    {
+        return (CToken){
+            .spelling = string_format(arena, S8("{u32}"), first->builtin_line),
+            .location = location,
+            .kind = C_TOKEN_PREPROCESSING_NUMBER,
+        };
+    }
+    String8 path = first->builtin_path;
+    u64 capacity = path.length * 2 + 3;
+    char8* quoted = arena_allocate(arena, char8, capacity);
+    u64 output = 0;
+    quoted[output++] = '"';
+    for (u64 index = 0; index < path.length; index += 1)
+    {
+        char8 character = path.pointer[index];
+        if (character == '\\' || character == '"')
+        {
+            quoted[output++] = '\\';
+        }
+        quoted[output++] = character;
+    }
+    quoted[output++] = '"';
+    quoted[output] = 0;
+    return (CToken){
+        .spelling = {.pointer = quoted, .length = output},
+        .location = location,
+        .kind = C_TOKEN_STRING_LITERAL,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL bool c_macro_replacement_tokens(Arena* arena, CMacro* first, CMacro* macro, CMacroArgument* arguments, CSourceLocation location,
+                                                    CPreprocessResult* result, CToken** tokens_out, u32* token_count_out)
+{
+    if (macro->builtin)
+    {
+        CToken* builtin_token = arena_allocate(arena, CToken, 1);
+        builtin_token[0] = c_macro_builtin_token(arena, first, macro->builtin, location);
+        *tokens_out = builtin_token;
+        *token_count_out = 1;
+        return true;
+    }
     u64 capacity = macro->definition.replacement_count + 1;
     for (u32 replacement_index = 0; replacement_index < macro->definition.replacement_count; replacement_index += 1)
     {
@@ -1399,7 +1504,7 @@ BUSTER_GLOBAL_LOCAL bool c_preprocess_expand(Arena* arena, CMacro* first_macro, 
             CToken invocation = continuation->invocation;
             CToken* replacement_tokens = macro->definition.replacement;
             u32 replacement_count = macro->definition.replacement_count;
-            if (!c_macro_replacement_tokens(arena, macro, continuation->arguments, invocation.location, result, &replacement_tokens, &replacement_count))
+            if (!c_macro_replacement_tokens(arena, first_macro, macro, continuation->arguments, invocation.location, result, &replacement_tokens, &replacement_count))
             {
                 return false;
             }
@@ -1485,7 +1590,7 @@ BUSTER_GLOBAL_LOCAL bool c_preprocess_expand(Arena* arena, CMacro* first_macro, 
         }
         CToken* replacement_tokens = macro->definition.replacement;
         u32 replacement_count = macro->definition.replacement_count;
-        if (!c_macro_replacement_tokens(arena, macro, arguments, token.location, result, &replacement_tokens, &replacement_count))
+        if (!c_macro_replacement_tokens(arena, first_macro, macro, arguments, token.location, result, &replacement_tokens, &replacement_count))
         {
             return false;
         }
@@ -3045,42 +3150,17 @@ BUSTER_GLOBAL_LOCAL void c_preprocess_command_definitions(Arena* arena, CPreproc
     }
 }
 
+// __LINE__ and __FILE__ are defined once as builtin-kind macros; the main
+// preprocess loop refreshes the head-of-list line/path state each iteration
+// and c_macro_replacement_tokens materializes the value only on expansion.
 BUSTER_GLOBAL_LOCAL void c_preprocess_builtins(Arena* arena, CMacro** first_macro, CMacro** last_macro, String8 path, CSourceLocation location)
 {
-    String8 line = string_format(arena, S8("{u32}"), location.line);
-    CToken* line_replacement = arena_allocate(arena, CToken, 1);
-    line_replacement[0] = (CToken){
-        .spelling = line,
-        .location = location,
-        .kind = C_TOKEN_PREPROCESSING_NUMBER,
-    };
-    c_macro_define(arena, first_macro, last_macro, S8("__LINE__"), line_replacement, 1, 0, 0, false, false);
-    u64 capacity = path.length * 2 + 3;
-    char8* quoted = arena_allocate(arena, char8, capacity);
-    u64 output = 0;
-    quoted[output++] = '"';
-    for (u64 index = 0; index < path.length; index += 1)
-    {
-        char8 character = path.pointer[index];
-        if (character == '\\' || character == '"')
-        {
-            quoted[output++] = '\\';
-        }
-        quoted[output++] = character;
-    }
-    quoted[output++] = '"';
-    quoted[output] = 0;
-    CToken* file_replacement = arena_allocate(arena, CToken, 1);
-    file_replacement[0] = (CToken){
-        .spelling =
-            {
-                .pointer = quoted,
-                .length = output,
-            },
-        .location = location,
-        .kind = C_TOKEN_STRING_LITERAL,
-    };
-    c_macro_define(arena, first_macro, last_macro, S8("__FILE__"), file_replacement, 1, 0, 0, false, false);
+    CMacro* line_macro = c_macro_define(arena, first_macro, last_macro, S8("__LINE__"), 0, 0, 0, 0, false, false);
+    line_macro->builtin = C_MACRO_BUILTIN_LINE;
+    CMacro* file_macro = c_macro_define(arena, first_macro, last_macro, S8("__FILE__"), 0, 0, 0, 0, false, false);
+    file_macro->builtin = C_MACRO_BUILTIN_FILE;
+    (*first_macro)->builtin_line = location.line;
+    (*first_macro)->builtin_path = path;
 }
 
 BUSTER_GLOBAL_LOCAL void c_preprocess_define_directive(Arena* arena, CLexResult lex, u64* token_index, CMacro** first_macro, CMacro** last_macro,
@@ -3560,6 +3640,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     CPreprocessFileTable file_table = {0};
     c_preprocess_file_index(arena, &file_table, root_frame.logical_path);
     u32 include_depth_limit = options.include_depth_limit ? options.include_depth_limit : 256;
+    c_preprocess_builtins(arena, &first_macro, &last_macro, root_frame.logical_path,
+                          (CSourceLocation){.line = 1, .column = 1});
     String8* once_paths = arena_allocate(arena, String8, source.length + 1);
     u32 once_path_count = 0;
     CPreprocessPragmaContext pragma_context = {
@@ -3581,7 +3663,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         bool line_start = source_frame->line_start;
         CToken token = lex.tokens[token_index];
         CSourceLocation logical_location = c_preprocess_logical_location(source_frame, token.location);
-        c_preprocess_builtins(arena, &first_macro, &last_macro, source_frame->logical_path, logical_location);
+        first_macro->builtin_line = logical_location.line;
+        first_macro->builtin_path = source_frame->logical_path;
         if (token.kind == C_TOKEN_END_OF_FILE)
         {
             while (conditional != source_frame->conditional_base)
@@ -3791,7 +3874,9 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                     else
                     {
                         CMacro* macro = c_macro_find(first_macro, lex.tokens[token_index].spelling);
-                        if (macro)
+                        // The per-line rebuild used to redefine __LINE__/__FILE__ right
+                        // after any #undef, so builtins stay effectively un-undefinable.
+                        if (macro && !macro->builtin)
                         {
                             macro->definition.defined = false;
                         }
@@ -11339,9 +11424,10 @@ BUSTER_GLOBAL_LOCAL void c_parse_scope_add_entity(CParseResult* result, CScopeId
 
 CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name)
 {
+    u64 name_hash = c_macro_name_hash(name);
     while (scope.value != C_ID_UNDERLYING_INVALID)
     {
-        u64 hash = c_macro_name_hash(name);
+        u64 hash = name_hash;
         hash ^= (u64)scope.value + UINT64_C(0x9e3779b97f4a7c15) + (hash << 6) + (hash >> 2);
         u32 bucket = (u32)hash & (result->entity_lookup_bucket_count - 1);
         CEntityId entity = result->entity_lookup_buckets[bucket];
@@ -12874,32 +12960,32 @@ BUSTER_GLOBAL_LOCAL bool c_parse_asm_operand_name_token(CPreprocessResult prepro
     }
     for (u32 index = template_end; index < close; index += 1)
     {
-        CToken token = preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        u32 punctuator = preprocess.tokens[index].punctuator;
+        if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
         {
             parentheses += 1;
         }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
+        else if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS && parentheses)
         {
             parentheses -= 1;
         }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        else if (punctuator == C_PUNCTUATOR_LEFT_BRACKET)
         {
             brackets += 1;
         }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
+        else if (punctuator == C_PUNCTUATOR_RIGHT_BRACKET && brackets)
         {
             brackets -= 1;
         }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        else if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
         {
             braces += 1;
         }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
+        else if (punctuator == C_PUNCTUATOR_RIGHT_BRACE && braces)
         {
             braces -= 1;
         }
-        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+        else if (!parentheses && !brackets && !braces && punctuator == C_PUNCTUATOR_COLON)
         {
             if (separator_count >= BUSTER_ARRAY_LENGTH(separators))
             {
@@ -12932,32 +13018,32 @@ BUSTER_GLOBAL_LOCAL bool c_parse_asm_operand_name_token(CPreprocessResult prepro
         braces = 0;
         for (u32 index = start; index <= token_index && index < end; index += 1)
         {
-            CToken token = preprocess.tokens[index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            u32 punctuator = preprocess.tokens[index].punctuator;
+            if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
             {
                 parentheses += 1;
             }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
+            else if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS && parentheses)
             {
                 parentheses -= 1;
             }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+            else if (punctuator == C_PUNCTUATOR_LEFT_BRACKET)
             {
                 brackets += 1;
             }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
+            else if (punctuator == C_PUNCTUATOR_RIGHT_BRACKET && brackets)
             {
                 brackets -= 1;
             }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+            else if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
             {
                 braces += 1;
             }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && braces)
+            else if (punctuator == C_PUNCTUATOR_RIGHT_BRACE && braces)
             {
                 braces -= 1;
             }
-            else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+            else if (!parentheses && !brackets && !braces && punctuator == C_PUNCTUATOR_COMMA)
             {
                 segment_start = index + 1;
             }
@@ -14679,6 +14765,10 @@ struct CIrTypeContext
     IrProgram* program;
     Target target;
     IrTypeId scalar_types[C_TYPE_COUNT];
+    // Largest u64 that fits the scalar integer type of each C kind, filled
+    // when the type is created; zero means "not a cached integer kind" and
+    // literal-fit queries take the type-table path instead.
+    u64 literal_limits[C_TYPE_COUNT];
 };
 
 BUSTER_GLOBAL_LOCAL String8 c_ir_scalar_type_name(CTypeKind kind)
@@ -14900,6 +14990,12 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind
                                                               .is_nullptr = kind == C_TYPE_NULLPTR,
                                                           });
     context->scalar_types[kind] = type;
+    if (ir_kind == IR_TYPE_INTEGER)
+    {
+        context->literal_limits[kind] = bit_width >= 64 ? (is_signed ? (u64)INT64_MAX : UINT64_MAX)
+                                        : is_signed     ? (((u64)1 << (bit_width - 1)) - 1)
+                                                        : (((u64)1 << bit_width) - 1);
+    }
     return type;
 }
 
@@ -15596,6 +15692,7 @@ struct CIntegerIrBuilder
     CIrSignature* signatures;
     IrTypeId* c_type_ir_map;
     IrTypeId* scalar_types;
+    u64* literal_limits;
     IrTypeId s32_type;
     IrTypeId size_type;
     IrTypeId ptrdiff_type;
@@ -16043,37 +16140,31 @@ typedef enum CIrGroupScan
    return to that group's level again, so no later token in the range is top level. */
 BUSTER_GLOBAL_LOCAL CIrGroupScan c_ir_scan_delimiter_group(CIntegerIrBuilder* builder, u32* index_in_out, u32 end)
 {
-    CToken token = builder->preprocess.tokens[*index_in_out];
-    if (token.kind != C_TOKEN_PUNCTUATOR || token.spelling.length != 1)
-    {
-        return C_IR_GROUP_SCAN_NOT_OPEN;
-    }
-    CPunctuator opening = C_PUNCTUATOR_NONE;
-    CPunctuator closing = C_PUNCTUATOR_NONE;
-    switch (token.spelling.pointer[0])
-    {
-    case '(':
+    // The punctuator id alone answers the question (digraph spellings carry
+    // distinct ids, so `<%` stays excluded exactly like the old
+    // one-character-spelling test), and reading it through the pointer avoids
+    // copying the whole token per scanned position.
+    u32 punctuator = builder->preprocess.tokens[*index_in_out].punctuator;
+    CPunctuator opening;
+    CPunctuator closing;
+    if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS)
     {
         opening = C_PUNCTUATOR_LEFT_PARENTHESIS;
         closing = C_PUNCTUATOR_RIGHT_PARENTHESIS;
-        break;
     }
-    case '[':
+    else if (punctuator == C_PUNCTUATOR_LEFT_BRACKET)
     {
         opening = C_PUNCTUATOR_LEFT_BRACKET;
         closing = C_PUNCTUATOR_RIGHT_BRACKET;
-        break;
     }
-    case '{':
+    else if (punctuator == C_PUNCTUATOR_LEFT_BRACE)
     {
         opening = C_PUNCTUATOR_LEFT_BRACE;
         closing = C_PUNCTUATOR_RIGHT_BRACE;
-        break;
     }
-    default:
+    else
     {
         return C_IR_GROUP_SCAN_NOT_OPEN;
-    }
     }
     u32 close = c_ir_matching_delimiter_cached(builder, *index_in_out, end, opening, closing);
     if (close >= end)
@@ -18082,6 +18173,11 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTy
 
 BUSTER_GLOBAL_LOCAL bool c_ir_integer_literal_fits(CIntegerIrBuilder* builder, CTypeKind kind, u64 value)
 {
+    u64 limit = builder->literal_limits[kind];
+    if (limit)
+    {
+        return value <= limit;
+    }
     IrTypeId type = builder->scalar_types[kind];
     IrType* integer = ir_type_from_id(&builder->program->types, type);
     if (!integer || integer->kind != IR_TYPE_INTEGER)
@@ -29454,7 +29550,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 s
     u32 nested_questions = 0;
     for (u32 index = start; index < end; index += 1)
     {
-        CToken token = builder->preprocess.tokens[index];
+        u32 punctuator = builder->preprocess.tokens[index].punctuator;
         CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
         if (scan == C_IR_GROUP_SCAN_SKIPPED)
         {
@@ -29464,12 +29560,11 @@ BUSTER_GLOBAL_LOCAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 s
         {
             return false;
         }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
-            c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || punctuator == C_PUNCTUATOR_RIGHT_BRACKET || punctuator == C_PUNCTUATOR_RIGHT_BRACE)
         {
             return false;
         }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+        if (punctuator == C_PUNCTUATOR_QUESTION)
         {
             if (found_question == UINT32_MAX)
             {
@@ -29480,7 +29575,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 s
                 nested_questions += 1;
             }
         }
-        else if (found_question != UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+        else if (found_question != UINT32_MAX && punctuator == C_PUNCTUATOR_COLON)
         {
             if (nested_questions)
             {
@@ -29521,7 +29616,7 @@ BUSTER_GLOBAL_LOCAL void c_ir_expression_core_range(CIntegerIrBuilder* builder, 
         u32 last_comma = UINT32_MAX;
         for (u32 index = start; index < end; index += 1)
         {
-            CToken token = builder->preprocess.tokens[index];
+            u32 punctuator = builder->preprocess.tokens[index].punctuator;
             CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
             if (scan == C_IR_GROUP_SCAN_SKIPPED)
             {
@@ -29531,7 +29626,7 @@ BUSTER_GLOBAL_LOCAL void c_ir_expression_core_range(CIntegerIrBuilder* builder, 
             {
                 break;
             }
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+            if (punctuator == C_PUNCTUATOR_COMMA)
             {
                 last_comma = index;
             }
@@ -40457,6 +40552,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         .pointer_types = &pointer_types,
         .c_type_ir_map = c_type_ir_map,
         .scalar_types = type_context.scalar_types,
+        .literal_limits = type_context.literal_limits,
         .s32_type = s32_type,
         .size_type = size_type,
         .ptrdiff_type = ptrdiff_type,
@@ -41714,6 +41810,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .signatures = signatures,
             .c_type_ir_map = c_type_ir_map,
             .scalar_types = type_context.scalar_types,
+            .literal_limits = type_context.literal_limits,
             .s32_type = s32_type,
             .size_type = size_type,
             .ptrdiff_type = ptrdiff_type,

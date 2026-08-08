@@ -560,14 +560,14 @@ BUSTER_GLOBAL_LOCAL u64 buster_x86_metadata_hash_string(u32 offset, bool* valid)
         *valid = false;
         return 0;
     }
-    u8 bytes[BUSTER_X86_METADATA_HASH_STRING_CAPACITY] = {0};
     String8 span = buster_x86_metadata_pool_span(offset, length);
-    for (u32 index = 0; index < span.length; index += 1)
+    if (span.length != length)
     {
-        bytes[index] = (u8)span.pointer[index];
+        *valid = false;
+        return 0;
     }
     static const u8 empty[] = {0};
-    u8 const* pointer = length ? bytes : empty;
+    u8 const* pointer = length ? (u8 const*)span.pointer : empty;
     return buster_hash_64((u8*)pointer, length);
 }
 
