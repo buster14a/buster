@@ -12,6 +12,70 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09b` (Linux x86_64, Zen 4 7940HS; the operand/target/immediate
+pools + build/consume SoA row split that `2026-08-09a` scoped as the top
+lever, taken as its own session — every number clang-built on a quiet
+machine, cycles as medians of 5 runs. **Measured negative on the stage-1
+instruction gate in all three variants tried; not merged.** The complete,
+fully green implementation is preserved on branch
+`claude/gallant-lederberg-4b8b2f` for reference or revival.)
+
+- **What was built.** `IrInstruction` shrank from the 112-byte stored row to
+  a transient build descriptor; storage became a 56-byte consumer row
+  (operand/target/immediate pointers + u16 counts, `canonical_type`,
+  `symbol`, `next`, `result`, one opcode-keyed u16 `operation` slot
+  replacing the four conversion/unary/binary/atomic enums, u8 memory
+  orders, packed flags, `id` dropped in favor of the array index) plus a
+  24-byte `IrInstructionBuild` parallel array carrying the build-time-only
+  fields (`type`, `entity`, `instantiation`, `local`, `canonical_local`).
+  All ~900 access sites across ir.c, c.c, codegen.c, interpreter.c,
+  driver.c and the four test files were converted through accessors with
+  the delete-the-field enumeration method; opcode-keyed operation
+  accessors keep the old COUNT-sentinel semantics exactly.
+- **Three variants, three misses (stage 1 baseline `4.9958 G`
+  instructions / `2516.6 M` cycles / `241.6 k` minor faults / `146.3 M`
+  L1d load misses):**
+  - per-function pools + u32 offsets in a 40-byte row (the shape 09a
+    proposed): `5.19-5.21 G` (`+4.0-4.4%`), the extra load+lea on every
+    pooled-array access dominates;
+  - pools + pointers-into-pool in a 56-byte row (growth rebases rows):
+    `5.148 G` (`+3.0%`), cycles dead neutral;
+  - no pools, 56-byte pointer row + cold split only (the landed-on-branch
+    form): **`5.099 G` (`+2.1%`), cycles `2502.7 M` (`-0.55%`), minor
+    faults `236.6 k` (`-2.1%`), L1d `138.9 M` (`-5.0%`)**; stage 2
+    `72.31 G` (`+2.0%`, validation only), `ide bench` unchanged
+    (tokenizer/parser untouched), fixed point deterministic, all 16371
+    Release and 15519 sanitized tests pass.
+- **Why it loses on the gate.** A fixed-workload cross-check (new binary
+  compiling the old tree) attributes ~`+186 M` of the pooled variant to
+  compiler efficiency and only ~`+15 M` to the tree's own source growth.
+  Stage 1 appends 991,693 instructions (1.41 M operand/target/immediate
+  elements; the capacity-seeded pools never grew once), so the append path
+  itself can only account for ~40 M — the rest is smeared across every
+  consumer in per-access indirection (offset variants) or per-append
+  packing/cold-array work, and no single profile symbol carries it. The
+  cache story is real but too small to pay: `-5-7%` L1d misses buys back
+  only ~0.5% cycles at this workload's IPC (~2.0), and the wall-clock win
+  is inside the run-to-run noise the audit protocol refuses to gate on.
+- **Traps paid for, in method order:** a variable-size `memcpy` per
+  appended instruction is a libc call — element loops on tiny counts are
+  `-31 M` by themselves; instruction-event `perf record -c` per-symbol
+  diffs swing `±50 M` per symbol from layout/attribution churn between
+  binaries (`c_ir_unsupported_gnu_construct` showed `+59 M` in one diff
+  and `-55 M` in the next; only totals and probe counters were
+  trustworthy); and `./build.sh test_all` behind a `tail` pipe reports
+  success while ninja failed — the AGENTS.md "never behind a pipe" rule
+  applies to the runner's own summary lines too.
+- **What survives for the next session:** the accessor surface and the
+  descriptor/row separation on the branch are exactly the seam a future
+  SoA pass needs if a consumer ever becomes bandwidth-bound (a batch
+  SIMD validator or DWARF walk would flip this trade); the u16-count and
+  packed-operation encodings were verified safe against the whole corpus;
+  and the malformed-IR test shapes now have pointer-form equivalents.
+  Reference points stay those of `2026-08-09a`: stage 1 `4.998 G` /
+  `~242 k` faults / `~145.7 M` L1d, `ide bench` `409.8 M`, `IrInstruction`
+  112 bytes, stage 2 `70.9 G` validation only.
+
 `2026-08-09a` (Linux x86_64, Zen 4 7940HS; the first 2026-08-08k follow-up
 batch, on the merged tree — every number clang-built, measured
 change-by-change).
