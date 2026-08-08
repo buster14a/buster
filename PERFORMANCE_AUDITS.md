@@ -12,6 +12,56 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-08j` (Linux x86_64; the IrValue label-metadata side table — the
+structural item every audit since `2026-08-08g` listed as THE open shape
+change, done as its own change per the `2026-08-08h` warning. Every number
+from a clang-built binary). Stage 1 `5.473 G` to `5.292 G` instructions
+(`-3.3%`, minor faults `287.1 k` to `274.2 k`), Release `ide test` `7.273 G`
+to `7.047 G` (`-3.1%`, faults `85.9 k` to `84.6 k`), sanitized `ide test`
+`103.677 G` to `101.006 G` (`-2.6%`), `ide bench` instruction-neutral
+(`713.0 M`), byte-identical fixed point (`SELF_HOST deterministic
+bytes=28718824`), all 29 modules in Release, sanitized Debug, GCC, and Zig
+trees. Stage 2 `80.0 G` to `78.7 G`, validation only.
+
+- **IrValue shrank 64 to 24 bytes.** The seven address-of-label provenance
+  fields (`is_label_value`, `has_label_provenance`, `has_non_label_provenance`,
+  `label_blocks`/count, `label_paths`/count) moved into `IrValueLabelMetadata`
+  entries in a per-function side table sorted by value id
+  (`ir_value_label_metadata_find`/`_ensure` plus a by-value getter that
+  returns zero metadata for absent entries). Every validator and provenance
+  helper keeps its exact logic reading through the table — including the
+  `!first` operand rejections in `ir_label_metadata_transfer_valid` and the
+  LABEL_ADDRESS/INDIRECT_BRANCH shape rules — so forged-metadata tests and
+  malformed-IR validation behave identically; only the storage moved.
+- **The C frontend now tracks label metadata only when the function can
+  produce a label value.** `c_ir_lower_body_initialize`'s existing
+  task-capacity token walk also spots `&&` followed by an identifier naming a
+  defined label (a variable sharing a label's name after a logical `&&` only
+  costs a spurious enable), and referencing a global that carries
+  label-address relocations enables tracking lazily. Everything else skips
+  the apparatus: no non-label provenance paths for ordinary pointer stores,
+  no `c_ir_label_metadata_store_for_place` root walks per store
+  (`emit_store_place`'s 95%-metadata cost), no per-function
+  `label_metadata_store_*` scratch arrays (13 bytes/value zeroed or
+  0xff-filled), and empty tables make the per-value label checks in both
+  validators nearly free (`transfer_valid` was `13 ms`/run). Functions with
+  label addresses run the identical tracking from the first statement, so
+  mixing rejections and the dynamic-index failure messages are unchanged
+  there. The observable delta in label-free functions: metadata-path soft
+  `failure_message` text can no longer be planted, and the tracking-capacity
+  hard failure cannot trigger.
+- Remaining leads carried from `2026-08-08i`, all still open: routing the
+  per-include c_lex arenas through the arena reuse pool (the rest of the
+  memory-touch tax), the generated-blob chunk-pointer table (`*_blob_char`
+  560-case switch, ~`20 ms`/test + cc), `c_ir_query_execute` (`41.5 ms`
+  exclusive; memo negative in 08-08e), the `c_parse_type_layout`
+  rollback-poisoned persistent cache, and fusing the three per-function
+  codegen scans.
+- Reference points for the next audit, all clang-built: stage 1 `5.292 G`
+  instructions / `~1.1 s` wall / `~274 k` minor faults, Release `ide test`
+  `7.047 G` / `~84.6 k` faults, sanitized `ide test` `101.006 G`,
+  `ide bench` `713.0 M` per run. Stage 2 `78.7 G`, validation only.
+
 `2026-08-08i` (Linux x86_64; started from the two 18:1x Superluminal captures
 of Release `ide test` and the stage-1 `ide cc`, analyzed with
 `SuperluminalCmd llm` per-line annotations plus full call-graph traversal —
