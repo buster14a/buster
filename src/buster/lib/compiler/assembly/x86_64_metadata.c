@@ -829,9 +829,36 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_emit_set_fixed_rounding_length(Bust
     pattern->vector_length = length;
 }
 
+// Pattern semantics per form id, filled the first time the owning normalized
+// form is parsed.  The parse seeds itself from these form fields as well as
+// the pattern text, so a cached entry is served only when every one of them
+// matches the normalized form the entry was parsed from; a fabricated or
+// edited form falls back to a fresh parse.
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPatternSemantics buster_x86_metadata_pattern_semantics_cache[BUSTER_X86_GENERATED_FORM_COUNT];
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pattern_semantics_cached[BUSTER_X86_GENERATED_FORM_COUNT];
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pattern_semantics_results[BUSTER_X86_GENERATED_FORM_COUNT];
+BUSTER_GLOBAL_LOCAL BusterX86MetadataForm buster_x86_metadata_normalized_forms[BUSTER_X86_GENERATED_FORM_COUNT];
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_normalized_forms_cached[BUSTER_X86_GENERATED_FORM_COUNT];
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pattern_seed_equal(BusterX86MetadataForm form, BusterX86MetadataForm cached)
+{
+    return form.pattern.offset == cached.pattern.offset && form.pattern.length == cached.pattern.length &&
+           form.mandatory_prefix == cached.mandatory_prefix && form.map == cached.map && form.prefix_kind == cached.prefix_kind &&
+           form.immediate_width == cached.immediate_width && form.immediate_signed == cached.immediate_signed &&
+           form.relocation_base == cached.relocation_base && form.displacement_width == cached.displacement_width &&
+           form.field_flags == cached.field_flags;
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86MetadataForm form,
                                                                   BusterX86MetadataPatternSemantics* result)
 {
+    bool cacheable = form.id < BUSTER_X86_GENERATED_FORM_COUNT && buster_x86_metadata_normalized_forms_cached[form.id] &&
+                     buster_x86_metadata_pattern_seed_equal(form, buster_x86_metadata_normalized_forms[form.id]);
+    if (cacheable && buster_x86_metadata_pattern_semantics_cached[form.id])
+    {
+        *result = buster_x86_metadata_pattern_semantics_cache[form.id];
+        return buster_x86_metadata_pattern_semantics_results[form.id];
+    }
     BusterX86MetadataPatternSemantics pattern;
     memset(&pattern, 0, sizeof(pattern));
     pattern.mandatory_prefix = form.mandatory_prefix;
@@ -1601,6 +1628,12 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
         pattern.has_sib = 0;
     }
     *result = pattern;
+    if (cacheable)
+    {
+        buster_x86_metadata_pattern_semantics_cache[form.id] = pattern;
+        buster_x86_metadata_pattern_semantics_results[form.id] = !pattern.has_unsupported_token;
+        buster_x86_metadata_pattern_semantics_cached[form.id] = true;
+    }
     return !pattern.has_unsupported_token;
 }
 
@@ -5300,10 +5333,8 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_copy_form(BusterX86GeneratedForm so
 // to normalize prefix/family metadata, and its callers run it per query --
 // filtering alone parses every candidate form's pattern on every iteration.
 // The result depends only on the decoded record and its id, so normalize each
-// form once and copy the cached value out afterwards.
-BUSTER_GLOBAL_LOCAL BusterX86MetadataForm buster_x86_metadata_normalized_forms[BUSTER_X86_GENERATED_FORM_COUNT];
-BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_normalized_forms_cached[BUSTER_X86_GENERATED_FORM_COUNT];
-
+// form once and copy the cached value out afterwards.  The cache arrays are
+// declared beside the pattern-semantics cache above emit_parse_pattern.
 BUSTER_GLOBAL_LOCAL void buster_x86_metadata_normalized_form(u32 form_id, BusterX86MetadataForm* result)
 {
     if (form_id >= BUSTER_X86_GENERATED_FORM_COUNT)

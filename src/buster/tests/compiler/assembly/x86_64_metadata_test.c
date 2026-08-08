@@ -18,9 +18,13 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_string_contains(BusterX86MetadataS
     if (span.length < needle.length) return false;
     for (u32 offset = 0; offset + needle.length <= span.length; offset += 1)
     {
+        if ((u8)span.pointer[offset] != (u8)needle.pointer[0])
+        {
+            continue;
+        }
         bool equal = true;
-        for (u32 index = 0; index < needle.length; index += 1)
-            equal &= (u8)span.pointer[offset + index] == (u8)needle.pointer[index];
+        for (u32 index = 1; index < needle.length && equal; index += 1)
+            equal = (u8)span.pointer[offset + index] == (u8)needle.pointer[index];
         if (equal) return true;
     }
     return false;
