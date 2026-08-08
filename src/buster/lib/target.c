@@ -1207,12 +1207,12 @@ String8 cpu_arch_to_string_os(CpuArch arch)
 
 String8 cpu_brand_string_os(char8* buffer, u64 capacity)
 {
-    String8 result = { .pointer = buffer };
 #if BUSTER_CPU_ARCH_X86_64
-    result = x86_64_cpu_brand_string(buffer, capacity);
+    String8 result = x86_64_cpu_brand_string(buffer, capacity);
 #elif BUSTER_CPU_ARCH_AARCH64
-    result = aarch64_cpu_brand_string(buffer, capacity);
+    String8 result = aarch64_cpu_brand_string(buffer, capacity);
 #else
+    String8 result = { .pointer = buffer };
     BUSTER_UNUSED(capacity);
 #endif
     while (result.length && (result.pointer[result.length - 1] == 0 || result.pointer[result.length - 1] == ' '))
