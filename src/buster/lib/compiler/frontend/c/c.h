@@ -174,6 +174,10 @@ struct CLexResult
     CDiagnostic* diagnostics;
     u64 token_count;
     u64 diagnostic_count;
+    // Cursor into the translated source's location checkpoints; token and
+    // diagnostic pushes ask for locations at non-decreasing offsets, so the
+    // lookup amortizes to one advance instead of a search.
+    u32 location_cursor;
 };
 
 typedef struct CPreprocessorDefinition CPreprocessorDefinition;
@@ -619,6 +623,9 @@ struct CParseResult
     CAggregateLookup* aggregate_lookup;
     CIdentifierUse* identifier_uses;
     u32* identifier_use_by_token;
+    // Lazily computed per-token spelling-predicate bits, indexed like
+    // identifier_use_by_token; see C_TOKEN_CLASS_* in c.c.
+    u8* token_classes;
     // Children of each scope in ascending scope order, built by
     // c_parse_index_scope_children once scopes are final; zero when absent.
     // c_parse_scope_for_token descends this index instead of scanning every

@@ -6223,8 +6223,66 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_physical_width_from_token(u32 offset
     return BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN;
 }
 
+// The register view is a pure function of the operand's atom and width
+// offsets into the immutable decoded pool (variable-width GPR atoms read the
+// width token), but the resolver below answers it with ~60 case-insensitive
+// literal probes. Memoize per (atom, width) pair: the distinct pairs number a
+// few hundred, and coverage queries ask for the same ones per operand of
+// every form.
+enum
+{
+    BUSTER_X86_METADATA_PHYSICAL_VIEW_SLOT_COUNT = 2048,
+};
+
+typedef struct BusterX86MetadataPhysicalViewSlot BusterX86MetadataPhysicalViewSlot;
+struct BusterX86MetadataPhysicalViewSlot
+{
+    u32 atom_offset;
+    u32 width_offset;
+    u16 width_flags;
+    u8 physical_class;
+    u8 used;
+};
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalViewSlot buster_x86_metadata_physical_view_slots[BUSTER_X86_METADATA_PHYSICAL_VIEW_SLOT_COUNT];
+BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_physical_view_fill;
+
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_physical_register_view_resolve(BusterX86GeneratedOperand operand, u8* physical_class,
+                                                                              u16* physical_width_flags);
+
 BUSTER_GLOBAL_LOCAL void buster_x86_metadata_physical_register_view(BusterX86GeneratedOperand operand, u8* physical_class,
                                                                       u16* physical_width_flags)
+{
+    u32 atom_offset = operand.atom_offset;
+    u32 width_offset = operand.width_offset;
+    u32 mask = BUSTER_X86_METADATA_PHYSICAL_VIEW_SLOT_COUNT - 1;
+    u32 slot_index = ((atom_offset * 2654435761u) ^ (width_offset * 40503u)) & mask;
+    BusterX86MetadataPhysicalViewSlot* slot = buster_x86_metadata_physical_view_slots + slot_index;
+    while (slot->used)
+    {
+        if (slot->atom_offset == atom_offset && slot->width_offset == width_offset)
+        {
+            *physical_class = slot->physical_class;
+            *physical_width_flags = slot->width_flags;
+            return;
+        }
+        slot_index = (slot_index + 1) & mask;
+        slot = buster_x86_metadata_physical_view_slots + slot_index;
+    }
+    buster_x86_metadata_physical_register_view_resolve(operand, physical_class, physical_width_flags);
+    if (buster_x86_metadata_physical_view_fill < BUSTER_X86_METADATA_PHYSICAL_VIEW_SLOT_COUNT / 2)
+    {
+        buster_x86_metadata_physical_view_fill += 1;
+        slot->used = 1;
+        slot->atom_offset = atom_offset;
+        slot->width_offset = width_offset;
+        slot->physical_class = *physical_class;
+        slot->width_flags = *physical_width_flags;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_physical_register_view_resolve(BusterX86GeneratedOperand operand, u8* physical_class,
+                                                                              u16* physical_width_flags)
 {
     *physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_UNKNOWN;
     *physical_width_flags = BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN;

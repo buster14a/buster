@@ -1953,13 +1953,30 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         u32 cohort_not64[BUSTER_ARRAY_LENGTH(cohort_tokens)] = {0};
         u32 cohort_capable[BUSTER_ARRAY_LENGTH(cohort_tokens)] = {0};
         u32 cohort_emitted[BUSTER_ARRAY_LENGTH(cohort_tokens)] = {0};
+        // Both cohort sweeps below need the same per-form token answers, so
+        // resolve each form's pattern against the nine tokens once.
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(cohort_tokens) <= 16);
+        u16* cohort_masks = arena_allocate(arguments->arena, u16, audit.entry_count ? audit.entry_count : 1);
+        for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
+        {
+            cohort_masks[form_id] = 0;
+            BusterX86MetadataForm form = {0};
+            if (!buster_x86_metadata_form(form_id, &form)) continue;
+            for (u32 cohort = 0; cohort < BUSTER_ARRAY_LENGTH(cohort_tokens); cohort += 1)
+            {
+                if (x86_64_metadata_test_pattern_has_token(form.pattern, cohort_tokens[cohort]))
+                {
+                    cohort_masks[form_id] |= (u16)(1u << cohort);
+                }
+            }
+        }
         for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
         {
             BusterX86MetadataForm form = {0};
             if (!buster_x86_metadata_form(form_id, &form)) continue;
             for (u32 cohort = 0; cohort < BUSTER_ARRAY_LENGTH(cohort_tokens); cohort += 1)
             {
-                if (x86_64_metadata_test_pattern_has_token(form.pattern, cohort_tokens[cohort]))
+                if (cohort_masks[form_id] & (1u << cohort))
                 {
                     cohort_all_counts[cohort] += 1;
                     cohort_counts[cohort] += form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED;
@@ -1980,7 +1997,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             if (!buster_x86_metadata_form(form_id, &form)) continue;
             for (u32 cohort = 0; cohort < BUSTER_ARRAY_LENGTH(cohort_tokens); cohort += 1)
             {
-                if (!x86_64_metadata_test_pattern_has_token(form.pattern, cohort_tokens[cohort])) continue;
+                if (!(cohort_masks[form_id] & (1u << cohort))) continue;
                 BusterX86MetadataCoverageLedgerEntry entry = ledger[form_id];
                 bool row_consistent = form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
                                        entry.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
@@ -2244,8 +2261,13 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             bool form_requires_dfv = buster_x86_metadata_form_requires_dfv(form_id);
             bool pattern_has_evapx_scc = x86_64_metadata_test_string_contains(form.pattern, S8("EVAPX_SCC()"));
             u32 parsed_scc_count = 0;
-            for (u32 scc_index = 0; scc_index < BUSTER_ARRAY_LENGTH(scc_tokens); scc_index += 1)
-                parsed_scc_count += x86_64_metadata_test_string_contains(form.pattern, scc_tokens[scc_index]);
+            // Every scc token contains " SCC", so one probe clears the sixteen
+            // token scans for the forms (nearly all) with no SCC atom at all.
+            if (x86_64_metadata_test_string_contains(form.pattern, S8(" SCC")))
+            {
+                for (u32 scc_index = 0; scc_index < BUSTER_ARRAY_LENGTH(scc_tokens); scc_index += 1)
+                    parsed_scc_count += x86_64_metadata_test_string_contains(form.pattern, scc_tokens[scc_index]);
+            }
             bool parsed_scc = parsed_scc_count == 1;
             bool form_has_apx_scc = (form.apx_flags & BUSTER_X86_METADATA_APX_SCC) != 0;
             bool row_dfv_scc_coherent = form_requires_dfv == pattern_has_evapx_scc &&

@@ -5,11 +5,19 @@
 #include <buster/lib/hash.h>
 #include <buster/lib/string.h>
 
+// Locations are recorded as checkpoints instead of one entry per translated
+// byte: within a run the original offset and the column both advance one per
+// output byte and the line is constant, so a checkpoint is needed only where
+// that linearity breaks — the byte after a newline and the byte after a line
+// splice. This is what keeps the lexer from writing a 16-byte location for
+// every byte of every include it translates.
 typedef struct CTranslatedSource CTranslatedSource;
 struct CTranslatedSource
 {
     String8 source;
-    CSourceLocation* locations;
+    CSourceLocation* checkpoints;
+    u32* checkpoint_offsets;
+    u32 checkpoint_count;
 };
 
 BUSTER_GLOBAL_LOCAL bool c_ir_decode_character_value(Arena* arena, CToken token, Target target, u64* value_out, CTypeKind* kind_out);
@@ -36,6 +44,48 @@ BUSTER_GLOBAL_LOCAL bool c_identifier_continue(char8 character)
     return c_identifier_start(character) || c_ascii_digit(character);
 }
 
+// One byte per character value: nonzero when the character continues an
+// identifier. Built from c_identifier_continue at first use so the two can
+// never drift; the lexer's identifier run scan ANDs eight entries per step
+// instead of branching per byte.
+BUSTER_GLOBAL_LOCAL u8 c_identifier_continue_table[256];
+BUSTER_GLOBAL_LOCAL bool c_identifier_continue_table_built;
+
+BUSTER_GLOBAL_LOCAL void c_identifier_continue_table_build(void)
+{
+    for (u32 character = 0; character < 256; character += 1)
+    {
+        c_identifier_continue_table[character] = c_identifier_continue((char8)character) ? 1 : 0;
+    }
+    c_identifier_continue_table_built = true;
+}
+
+BUSTER_GLOBAL_LOCAL u64 c_identifier_run_end(String8 source, u64 offset)
+{
+    if (!c_identifier_continue_table_built)
+    {
+        c_identifier_continue_table_build();
+    }
+    const u8* bytes = (const u8*)source.pointer;
+    while (offset + 8 <= source.length)
+    {
+        u8 all = c_identifier_continue_table[bytes[offset]] & c_identifier_continue_table[bytes[offset + 1]] &
+                 c_identifier_continue_table[bytes[offset + 2]] & c_identifier_continue_table[bytes[offset + 3]] &
+                 c_identifier_continue_table[bytes[offset + 4]] & c_identifier_continue_table[bytes[offset + 5]] &
+                 c_identifier_continue_table[bytes[offset + 6]] & c_identifier_continue_table[bytes[offset + 7]];
+        if (!all)
+        {
+            break;
+        }
+        offset += 8;
+    }
+    while (offset < source.length && c_identifier_continue_table[bytes[offset]])
+    {
+        offset += 1;
+    }
+    return offset;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_horizontal_whitespace(char8 character)
 {
     switch (character)
@@ -57,12 +107,21 @@ BUSTER_GLOBAL_LOCAL bool c_horizontal_whitespace(char8 character)
 BUSTER_GLOBAL_LOCAL CTranslatedSource c_translate_source(Arena* arena, String8 source)
 {
     CTranslatedSource result = {0};
+    if (source.length > UINT32_MAX - 2)
+    {
+        return result;
+    }
     char8* translated = arena_allocate(arena, char8, source.length + 1);
-    CSourceLocation* locations = arena_allocate(arena, CSourceLocation, source.length + 1);
+    CSourceLocation* checkpoints = arena_allocate(arena, CSourceLocation, source.length + 2);
+    u32* checkpoint_offsets = arena_allocate(arena, u32, source.length + 2);
+    u32 checkpoint_count = 0;
     u64 input = 0;
     u64 output = 0;
     u32 line = 1;
     u32 column = 1;
+    // The next output byte starts a new linear run; initially true so the
+    // first byte records the first checkpoint.
+    bool run_broken = true;
     while (input < source.length)
     {
         char8 character = source.pointer[input];
@@ -91,20 +150,28 @@ BUSTER_GLOBAL_LOCAL CTranslatedSource c_translate_source(Arena* arena, String8 s
                 input += splice_length;
                 line += 1;
                 column = 1;
+                run_broken = true;
                 continue;
             }
         }
-        locations[output] = (CSourceLocation){
-            .offset = input,
-            .line = line,
-            .column = column,
-        };
+        if (run_broken)
+        {
+            checkpoints[checkpoint_count] = (CSourceLocation){
+                .offset = input,
+                .line = line,
+                .column = column,
+            };
+            checkpoint_offsets[checkpoint_count] = (u32)output;
+            checkpoint_count += 1;
+            run_broken = false;
+        }
         if (newline_length)
         {
             translated[output++] = '\n';
             input += newline_length;
             line += 1;
             column = 1;
+            run_broken = true;
         }
         else
         {
@@ -114,28 +181,56 @@ BUSTER_GLOBAL_LOCAL CTranslatedSource c_translate_source(Arena* arena, String8 s
         }
     }
     translated[output] = 0;
-    locations[output] = (CSourceLocation){
+    checkpoints[checkpoint_count] = (CSourceLocation){
         .offset = source.length,
         .line = line,
         .column = column,
     };
+    checkpoint_offsets[checkpoint_count] = (u32)output;
+    checkpoint_count += 1;
     result.source = (String8){
         .pointer = translated,
         .length = output,
     };
-    result.locations = locations;
+    result.checkpoints = checkpoints;
+    result.checkpoint_offsets = checkpoint_offsets;
+    result.checkpoint_count = checkpoint_count;
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL CSourceLocation c_translated_location(CLexResult* result, CTranslatedSource translated, u64 offset)
+{
+    if (!translated.checkpoint_count)
+    {
+        return (CSourceLocation){0};
+    }
+    u32 cursor = result->location_cursor;
+    while (cursor + 1 < translated.checkpoint_count && translated.checkpoint_offsets[cursor + 1] <= offset)
+    {
+        cursor += 1;
+    }
+    while (cursor && translated.checkpoint_offsets[cursor] > offset)
+    {
+        cursor -= 1;
+    }
+    result->location_cursor = cursor;
+    CSourceLocation location = translated.checkpoints[cursor];
+    u64 delta = offset - translated.checkpoint_offsets[cursor];
+    location.offset += delta;
+    location.column += (u32)delta;
+    return location;
 }
 
 BUSTER_GLOBAL_LOCAL void c_token_push(CLexResult* result, CTranslatedSource translated, u64 start, u64 end, CTokenKind kind, CPunctuator punctuator)
 {
+    CSourceLocation location = c_translated_location(result, translated, start);
     result->tokens[result->token_count++] = (CToken){
         .spelling =
             {
                 .pointer = translated.source.pointer + start,
                 .length = end - start,
             },
-        .location = translated.locations[start],
+        .location = location,
         .kind = kind,
         .punctuator = (u16)punctuator,
     };
@@ -155,7 +250,7 @@ BUSTER_GLOBAL_LOCAL void c_diagnostic_push(CLexResult* result, Arena* diagnostic
     }
     result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
         .message = message,
-        .location = translated.locations[offset],
+        .location = c_translated_location(result, translated, offset),
         .kind = kind,
         .severity = C_DIAGNOSTIC_ERROR,
     };
@@ -460,11 +555,8 @@ CLexResult c_lex(Arena* arena, String8 source)
         }
         if (c_identifier_start(character))
         {
-            u64 start = offset++;
-            while (offset < translated.source.length && c_identifier_continue(translated.source.pointer[offset]))
-            {
-                offset += 1;
-            }
+            u64 start = offset;
+            offset = c_identifier_run_end(translated.source, offset + 1);
             c_token_push(&result, translated, start, offset, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
             continue;
         }
@@ -3909,6 +4001,73 @@ BUSTER_GLOBAL_LOCAL bool c_declaration_keyword_for_dialect(String8 spelling, CPr
              (string_equal(spelling, S8("true")) || string_equal(spelling, S8("false")) || string_equal(spelling, S8("nullptr")) ||
               string_equal(spelling, S8("alignof")) || string_equal(spelling, S8("constexpr")) || string_equal(spelling, S8("typeof_unqual")))) ||
            ((c_preprocess_dialect_is_gnu(dialect) || c_preprocess_dialect_is_c23(dialect)) && string_equal(spelling, S8("typeof")));
+}
+
+// Spelling predicates the parser's scan loops ask per token, per scan, cached
+// as one class byte per token index. Token spellings are fixed once
+// preprocessing finishes, so the byte is computed at most once per token no
+// matter how many declaration scans revisit it, and speculative-parse
+// rollbacks cannot invalidate it.
+enum
+{
+    C_TOKEN_CLASS_COMPUTED = 1 << 0,
+    C_TOKEN_CLASS_DECLARATION_KEYWORD = 1 << 1,
+    C_TOKEN_CLASS_C23_EXTRA_KEYWORD = 1 << 2,
+    C_TOKEN_CLASS_TYPEOF = 1 << 3,
+    C_TOKEN_CLASS_VECTOR_SIZE = 1 << 4,
+};
+
+BUSTER_GLOBAL_LOCAL u8 c_parse_token_class_compute(String8 spelling)
+{
+    u8 token_class = C_TOKEN_CLASS_COMPUTED;
+    if (c_declaration_keyword(spelling))
+    {
+        token_class |= C_TOKEN_CLASS_DECLARATION_KEYWORD;
+    }
+    if (string_equal(spelling, S8("true")) || string_equal(spelling, S8("false")) || string_equal(spelling, S8("nullptr")) ||
+        string_equal(spelling, S8("alignof")) || string_equal(spelling, S8("constexpr")) || string_equal(spelling, S8("typeof_unqual")))
+    {
+        token_class |= C_TOKEN_CLASS_C23_EXTRA_KEYWORD;
+    }
+    if (string_equal(spelling, S8("typeof")))
+    {
+        token_class |= C_TOKEN_CLASS_TYPEOF;
+    }
+    if (string_equal(spelling, S8("vector_size")) || string_equal(spelling, S8("__vector_size")) || string_equal(spelling, S8("__vector_size__")))
+    {
+        token_class |= C_TOKEN_CLASS_VECTOR_SIZE;
+    }
+    return token_class;
+}
+
+BUSTER_GLOBAL_LOCAL u8 c_parse_token_class(CParseResult* result, CPreprocessResult preprocess, u32 token_index)
+{
+    if (!result->token_classes || token_index >= result->identifier_use_by_token_capacity)
+    {
+        return c_parse_token_class_compute(preprocess.tokens[token_index].spelling);
+    }
+    u8 token_class = result->token_classes[token_index];
+    if (!(token_class & C_TOKEN_CLASS_COMPUTED))
+    {
+        token_class = c_parse_token_class_compute(preprocess.tokens[token_index].spelling);
+        result->token_classes[token_index] = token_class;
+    }
+    return token_class;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_parse_declaration_keyword_at(CParseResult* result, CPreprocessResult preprocess, u32 token_index)
+{
+    u8 token_class = c_parse_token_class(result, preprocess, token_index);
+    if (token_class & C_TOKEN_CLASS_DECLARATION_KEYWORD)
+    {
+        return true;
+    }
+    if (c_preprocess_dialect_is_c23(preprocess.dialect) && (token_class & C_TOKEN_CLASS_C23_EXTRA_KEYWORD))
+    {
+        return true;
+    }
+    return (c_preprocess_dialect_is_gnu(preprocess.dialect) || c_preprocess_dialect_is_c23(preprocess.dialect)) &&
+           (token_class & C_TOKEN_CLASS_TYPEOF);
 }
 
 BUSTER_GLOBAL_LOCAL void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message)
@@ -8151,8 +8310,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_apply_vector_attribute(CParseResult* result,
     for (u32 index = start; index + 3 < end; index += 1)
     {
         if (preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER ||
-            (!string_equal(preprocess.tokens[index].spelling, S8("vector_size")) && !string_equal(preprocess.tokens[index].spelling, S8("__vector_size")) &&
-             !string_equal(preprocess.tokens[index].spelling, S8("__vector_size__"))) ||
+            !(c_parse_token_class(result, preprocess, index) & C_TOKEN_CLASS_VECTOR_SIZE) ||
             !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
             preprocess.tokens[index + 2].kind != C_TOKEN_PREPROCESSING_NUMBER ||
             !c_token_is_punctuator(&preprocess.tokens[index + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
@@ -11054,7 +11212,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_array_bound_identifiers(Arena* arena, CPar
             }
             continue;
         }
-        if (!bracket_depth || token.kind != C_TOKEN_IDENTIFIER || c_declaration_keyword_for_dialect(token.spelling, preprocess.dialect) ||
+        if (!bracket_depth || token.kind != C_TOKEN_IDENTIFIER || c_parse_declaration_keyword_at(result, preprocess, token_index) ||
             c_parse_identifier_is_bound(result, token_index))
         {
             continue;
@@ -11579,7 +11737,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_auto_initializer_identifiers(Arena* arena,
                         (string_equal(preprocess.tokens[use_index - 1].spelling, S8("struct")) ||
                          string_equal(preprocess.tokens[use_index - 1].spelling, S8("union")) ||
                          string_equal(preprocess.tokens[use_index - 1].spelling, S8("enum")));
-        if (use.kind == C_TOKEN_IDENTIFIER && !c_declaration_keyword_for_dialect(use.spelling, preprocess.dialect) && !member && !tag_name &&
+        if (use.kind == C_TOKEN_IDENTIFIER && !c_parse_declaration_keyword_at(result, preprocess, use_index) && !member && !tag_name &&
                 !(use_index && c_parse_label_address_prefix_with_typedef(result, preprocess, scope, start, use_index - 1)) &&
                 !c_parse_identifier_is_bound(result, use_index))
         {
@@ -12104,7 +12262,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_local_declarations(CTypeParseMachine* machine, 
                 use_index > initializer_start && preprocess.tokens[use_index - 1].kind == C_TOKEN_IDENTIFIER &&
                 (string_equal(preprocess.tokens[use_index - 1].spelling, S8("struct")) ||
                  string_equal(preprocess.tokens[use_index - 1].spelling, S8("union")) || string_equal(preprocess.tokens[use_index - 1].spelling, S8("enum")));
-            if (use.kind == C_TOKEN_IDENTIFIER && !c_declaration_keyword_for_dialect(use.spelling, preprocess.dialect) && !member && !tag_name &&
+            if (use.kind == C_TOKEN_IDENTIFIER && !c_parse_declaration_keyword_at(result, preprocess, use_index) && !member && !tag_name &&
                 !(use_index && c_parse_label_address_prefix_with_typedef(result, preprocess, scope, initializer_start, use_index - 1)) &&
                 !c_parse_identifier_is_bound(result, use_index))
             {
@@ -12804,7 +12962,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_function_body(CTypeParseMachine* machine, 
         bool asm_goto_label = asm_goto_label_start != UINT32_MAX && index >= asm_goto_label_start && index < asm_goto_label_end;
         bool asm_operand_name = asm_operand_range_start != UINT32_MAX &&
                                 c_parse_asm_operand_name_token(preprocess, asm_operand_range_start, asm_operand_range_end, index);
-        if (token.kind == C_TOKEN_IDENTIFIER && !c_declaration_keyword_for_dialect(token.spelling, preprocess.dialect) && !member && !tag_name && !label &&
+        if (token.kind == C_TOKEN_IDENTIFIER && !c_parse_declaration_keyword_at(result, preprocess, index) && !member && !tag_name && !label &&
             !goto_target && !label_address && !asm_goto_label && !asm_operand_name)
         {
             c_parse_bind_identifier(result_arena, result, preprocess, scope_stack[scope_count - 1], index);
@@ -13644,6 +13802,8 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
     result.identifier_uses = arena_allocate(arena, CIdentifierUse, result.identifier_use_capacity);
     result.identifier_use_by_token = arena_allocate(arena, u32, result.identifier_use_by_token_capacity);
     memset(result.identifier_use_by_token, 0xff, sizeof(*result.identifier_use_by_token) * result.identifier_use_by_token_capacity);
+    result.token_classes = arena_allocate(arena, u8, result.identifier_use_by_token_capacity);
+    memset(result.token_classes, 0, sizeof(*result.token_classes) * result.identifier_use_by_token_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
     BUSTER_CHECK(result.scope_count < result.scope_capacity);
     result.scopes[result.scope_count++] = (CScope){
@@ -14398,11 +14558,27 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind
     return type;
 }
 
+typedef struct CIrArrayTypeSlot CIrArrayTypeSlot;
+struct CIrArrayTypeSlot
+{
+    u64 element_count;
+    IrTypeId element;
+    IrTypeId id;
+    bool used;
+};
+
 typedef struct CIrPointerTypeCache CIrPointerTypeCache;
 struct CIrPointerTypeCache
 {
     IrTypeId* by_element;
     u8* contains_pointer;
+    // (element, count) -> oldest non-atomic array type, maintained by the same
+    // watermark sweep as by_element so array requests stop rescanning the
+    // whole type table per call. Sized to twice the type capacity, so it can
+    // never exceed half full and probes always terminate.
+    CIrArrayTypeSlot* array_slots;
+    u32 array_slot_mask;
+    u32 array_sweep_watermark;
     u32 capacity;
     u32 contains_pointer_count;
     u32 zero_reference_limit;
@@ -14411,6 +14587,40 @@ struct CIrPointerTypeCache
     // instead of rescanning the whole table per query.
     u32 sweep_watermark;
 };
+
+BUSTER_GLOBAL_LOCAL CIrArrayTypeSlot* c_ir_array_type_slot(CIrPointerTypeCache* cache, IrTypeId element, u64 element_count)
+{
+    u32 mask = cache->array_slot_mask;
+    u32 slot_index = (u32)(((element.value * 2654435761u) ^ (element_count * 40503u)) & mask);
+    CIrArrayTypeSlot* slot = cache->array_slots + slot_index;
+    while (slot->used && (slot->element.value != element.value || slot->element_count != element_count))
+    {
+        slot_index = (slot_index + 1) & mask;
+        slot = cache->array_slots + slot_index;
+    }
+    return slot;
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_array_type_sweep(IrProgram* program, CIrPointerTypeCache* cache)
+{
+    for (u32 type_index = cache->array_sweep_watermark; type_index < program->types.count; type_index += 1)
+    {
+        IrType* type = &program->types.types[type_index];
+        if (type->is_atomic || type->kind != IR_TYPE_ARRAY)
+        {
+            continue;
+        }
+        CIrArrayTypeSlot* slot = c_ir_array_type_slot(cache, type->element_type, type->element_count);
+        if (!slot->used)
+        {
+            slot->used = true;
+            slot->element = type->element_type;
+            slot->element_count = type->element_count;
+            slot->id = type->id;
+        }
+    }
+    cache->array_sweep_watermark = program->types.count;
+}
 
 BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_pointer_type(IrProgram* program, CIrPointerTypeCache* cache, IrTypeId element)
 {
@@ -14458,34 +14668,40 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_pointer_type(IrProgram* program, CIrPointe
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_array_type(IrProgram* program, IrTypeId element, u64 element_count)
+BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_array_type(IrProgram* program, CIrPointerTypeCache* cache, IrTypeId element, u64 element_count)
 {
     IrType* element_type = ir_type_from_id(&program->types, element);
     if (!element_type || !element_type->layout.resolved || (element_count && element_type->layout.size > UINT64_MAX / element_count))
     {
         return IR_TYPE_ID_INVALID;
     }
-    for (u32 type_index = 0; type_index < program->types.count; type_index += 1)
+    c_ir_array_type_sweep(program, cache);
+    CIrArrayTypeSlot* slot = c_ir_array_type_slot(cache, element, element_count);
+    if (slot->used)
     {
-        IrType* type = &program->types.types[type_index];
-        if (!type->is_atomic && type->kind == IR_TYPE_ARRAY && type->element_type.value == element.value && type->element_count == element_count)
-        {
-            return type->id;
-        }
+        return slot->id;
     }
-    return ir_program_add_type(program, (IrType){
-                                            .name = S8("array"),
-                                            .element_type = element,
-                                            .return_type = IR_TYPE_ID_INVALID,
-                                            .layout =
-                                                {
-                                                    .size = element_type->layout.size * element_count,
-                                                    .alignment = element_type->layout.alignment,
-                                                    .resolved = true,
-                                                },
-                                            .kind = IR_TYPE_ARRAY,
-                                            .element_count = element_count,
-                                        });
+    IrTypeId result = ir_program_add_type(program, (IrType){
+                                                       .name = S8("array"),
+                                                       .element_type = element,
+                                                       .return_type = IR_TYPE_ID_INVALID,
+                                                       .layout =
+                                                           {
+                                                               .size = element_type->layout.size * element_count,
+                                                               .alignment = element_type->layout.alignment,
+                                                               .resolved = true,
+                                                           },
+                                                       .kind = IR_TYPE_ARRAY,
+                                                       .element_count = element_count,
+                                                   });
+    if (result.value != IR_ID_UNDERLYING_INVALID)
+    {
+        slot->used = true;
+        slot->element = element;
+        slot->element_count = element_count;
+        slot->id = result;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_atomic_type(IrProgram* program, IrTypeId unqualified)
@@ -24608,7 +24824,7 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, I
     }
     while (array_count)
     {
-        type = c_ir_add_array_type(builder->program, type, array_counts[--array_count]);
+        type = c_ir_add_array_type(builder->program, builder->pointer_types, type, array_counts[--array_count]);
         if (type.value == IR_ID_UNDERLYING_INVALID)
         {
             return type;
@@ -24796,7 +25012,7 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_compound_literal_type_attempt(CIntegerIrBuilde
     {
         return IR_TYPE_ID_INVALID;
     }
-    return c_ir_add_array_type(builder->program, element, element_count);
+    return c_ir_add_array_type(builder->program, builder->pointer_types, element, element_count);
 }
 
 BUSTER_GLOBAL_LOCAL IrTypeId c_ir_compound_literal_type(CIntegerIrBuilder* builder, u32 type_start, u32 type_end, u32 initializer_open, u32 initializer_close)
@@ -39684,9 +39900,16 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         cleanup_entities[cleanup_index] = (CEntityId){.value = entity_index};
         cleanup_entity_entries[entity_index] = cleanup_index;
     }
+    u64 array_slot_count = 16;
+    while (array_slot_count < (u64)program->types.capacity * 2 + 1)
+    {
+        array_slot_count <<= 1;
+    }
     CIrPointerTypeCache pointer_types = {
         .by_element = arena_allocate(arena, IrTypeId, program->types.capacity),
         .contains_pointer = arena_allocate(arena, u8, program->types.capacity),
+        .array_slots = arena_allocate(arena, CIrArrayTypeSlot, array_slot_count),
+        .array_slot_mask = (u32)(array_slot_count - 1),
         .capacity = program->types.capacity,
     };
     for (u32 type_index = 0; type_index < pointer_types.capacity; type_index += 1)
@@ -39694,6 +39917,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         pointer_types.by_element[type_index] = IR_TYPE_ID_INVALID;
         pointer_types.contains_pointer[type_index] = 0;
     }
+    memset(pointer_types.array_slots, 0, sizeof(*pointer_types.array_slots) * array_slot_count);
     CIrTypeContext type_context = {
         .program = program,
         .target = target,

@@ -45,6 +45,46 @@ BUSTER_GLOBAL_LOCAL bool tokenizer_is_identifier_continue(u8 ch)
     return result;
 }
 
+// One byte per character value, built from tokenizer_is_identifier_continue at
+// first use so the two cannot drift. The identifier scan ANDs eight entries
+// per step instead of branching per byte.
+BUSTER_GLOBAL_LOCAL u8 tokenizer_identifier_continue_table[256];
+BUSTER_GLOBAL_LOCAL bool tokenizer_identifier_continue_table_built;
+
+BUSTER_GLOBAL_LOCAL void tokenizer_identifier_continue_table_build(void)
+{
+    for (u32 ch = 0; ch < 256; ch += 1)
+    {
+        tokenizer_identifier_continue_table[ch] = tokenizer_is_identifier_continue((u8)ch) ? 1 : 0;
+    }
+    tokenizer_identifier_continue_table_built = true;
+}
+
+BUSTER_GLOBAL_LOCAL const char8* tokenizer_identifier_run_end(const char8* it, const char8* top)
+{
+    if (!tokenizer_identifier_continue_table_built)
+    {
+        tokenizer_identifier_continue_table_build();
+    }
+    while (top - it >= 8)
+    {
+        u8 all = tokenizer_identifier_continue_table[(u8)it[0]] & tokenizer_identifier_continue_table[(u8)it[1]] &
+                 tokenizer_identifier_continue_table[(u8)it[2]] & tokenizer_identifier_continue_table[(u8)it[3]] &
+                 tokenizer_identifier_continue_table[(u8)it[4]] & tokenizer_identifier_continue_table[(u8)it[5]] &
+                 tokenizer_identifier_continue_table[(u8)it[6]] & tokenizer_identifier_continue_table[(u8)it[7]];
+        if (!all)
+        {
+            break;
+        }
+        it += 8;
+    }
+    while (it < top && tokenizer_identifier_continue_table[(u8)*it])
+    {
+        it += 1;
+    }
+    return it;
+}
+
 BUSTER_GLOBAL_LOCAL bool tokenizer_is_integer_digit(IntegerFormat format, u8 ch)
 {
     bool result = false;
@@ -257,10 +297,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
         BUSTER_SWITCH_ALPHA_LOWER:
         case '_':
         {
-            while (it < top && tokenizer_is_identifier_continue((u8)*it))
-            {
-                it += 1;
-            }
+            it = tokenizer_identifier_run_end(it, top);
 
             String8 identifier = string_from_pointer_length(start, (u64)(it - start));
             if (it < top && *it == '?' && (string_equal(identifier, S8("and")) || string_equal(identifier, S8("or"))))
