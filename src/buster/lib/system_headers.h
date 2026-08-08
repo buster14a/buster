@@ -69,10 +69,23 @@ struct OsEntity
             ThreadCallback* callback;
             void* argument;
         } thread;
+        // Generation-counting barrier over a mutex and a condition variable:
+        // pthread_barrier_t does not exist on Apple platforms, so every
+        // platform shares this one algorithm instead. Single-threaded builds
+        // compile the barrier out entirely; tcc's own minimal Win32 headers
+        // predate CONDITION_VARIABLE, and the tcc-built build.c bootstrap is
+        // always single-threaded.
+#if !BUSTER_SINGLE_THREADED
+        struct
+        {
+            CRITICAL_SECTION mutex;
+            CONDITION_VARIABLE condition;
+            u64 generation;
+            u32 threshold;
+            u32 arrived;
+        } barrier;
+#endif
 //         pthread_mutex_t mutex;
-// #if 0
-//         pthread_barrier_t barrier;
-// #endif
 //         struct
 //         {
 //             pthread_cond_t handle;
@@ -86,8 +99,15 @@ struct OsEntity
             void* argument;
         } thread;
         pthread_mutex_t mutex;
-#if 0
-        pthread_barrier_t barrier;
+#if !BUSTER_SINGLE_THREADED
+        struct
+        {
+            pthread_mutex_t mutex;
+            pthread_cond_t condition;
+            u64 generation;
+            u32 threshold;
+            u32 arrived;
+        } barrier;
 #endif
         struct
         {

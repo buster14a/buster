@@ -3,6 +3,61 @@
 #include <buster/lib/file.h>
 #include <buster/lib/time.h>
 
+enum
+{
+    OS_TEST_LANE_MAX_COUNT = 8,
+    OS_TEST_LANE_ITEM_COUNT = 1003,
+};
+
+typedef struct OsTestLaneState OsTestLaneState;
+struct OsTestLaneState
+{
+    u64 items[OS_TEST_LANE_ITEM_COUNT];
+    u8 taken[OS_TEST_LANE_ITEM_COUNT];
+    u64 observed_counts[OS_TEST_LANE_MAX_COUNT];
+    u64 sums_after_sync[OS_TEST_LANE_MAX_COUNT];
+    u64 broadcast_received[OS_TEST_LANE_MAX_COUNT];
+    AtomicU64 sum;
+    AtomicU64 take_index;
+};
+
+// Runs once on every lane. Test macros are not thread-safe, so lanes only
+// record what they observe; the caller checks after the gang has joined.
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_lane_gang(void* argument)
+{
+    OsTestLaneState* state = (OsTestLaneState*)argument;
+    u64 index = lane_index();
+    state->observed_counts[index] = lane_count();
+
+    LaneRange range = lane_range(OS_TEST_LANE_ITEM_COUNT);
+    u64 local_sum = 0;
+    for (u64 i = range.start; i < range.end; i += 1)
+    {
+        local_sum += state->items[i];
+    }
+    atomic_u64_add(&state->sum, local_sum);
+    lane_sync();
+    state->sums_after_sync[index] = state->sum;
+
+    u64 broadcast_value = 0;
+    if (index == 0)
+    {
+        broadcast_value = 0x1234567890abcdefull;
+    }
+    lane_broadcast(&broadcast_value, sizeof(broadcast_value), 0);
+    state->broadcast_received[index] = broadcast_value;
+
+    for (;;)
+    {
+        u64 item = atomic_u64_increment(&state->take_index);
+        if (item >= OS_TEST_LANE_ITEM_COUNT)
+        {
+            break;
+        }
+        state->taken[item] += 1;
+    }
+}
+
 UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -351,6 +406,118 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, timestamp_ns_between(start, end) == (u64)7200 * 1000 * 1000 * 1000);
     }
 #endif
+
+    // Outside a gang the selected thread context answers as the only lane, so
+    // lane-style code must run serially without a separate path.
+    {
+        BUSTER_TEST(arguments, lane_index() == 0);
+        BUSTER_TEST(arguments, lane_count() == 1);
+        lane_sync();
+        u64 kept = 41;
+        lane_broadcast(&kept, sizeof(kept), 0);
+        BUSTER_TEST(arguments, kept == 41);
+        LaneRange whole = lane_range(17);
+        BUSTER_TEST(arguments, whole.start == 0 && whole.end == 17);
+
+        AtomicU64 counter = 7;
+        BUSTER_TEST(arguments, atomic_u64_increment(&counter) == 7);
+        BUSTER_TEST(arguments, atomic_u64_add(&counter, 5) == 8);
+        BUSTER_TEST(arguments, counter == 13);
+    }
+
+    // lane_range must hand out contiguous shares that cover the input exactly,
+    // with sizes differing by at most one item. The context is faked per lane
+    // so the partition can be checked without spawning threads.
+    {
+        ThreadContext* thread_context = thread_context_selected();
+        LaneContext saved = thread_context->lane_context;
+        u64 item_counts[] = {0, 1, 7, 64, 100};
+        u64 lane_counts[] = {1, 3, 8};
+        bool partitions_valid = true;
+        for (EACH_ARRAY_INDEX(i, item_counts))
+        {
+            for (EACH_ARRAY_INDEX(j, lane_counts))
+            {
+                u64 previous_end = 0;
+                u64 minimum_length = UINT64_MAX;
+                u64 maximum_length = 0;
+                for (u64 lane = 0; lane < lane_counts[j]; lane += 1)
+                {
+                    thread_context->lane_context = (LaneContext){
+                        .lane_index = lane,
+                        .lane_count = lane_counts[j],
+                    };
+                    LaneRange range = lane_range(item_counts[i]);
+                    partitions_valid = partitions_valid && range.start == previous_end && range.end >= range.start;
+                    previous_end = range.end;
+                    u64 length = range.end - range.start;
+                    minimum_length = BUSTER_MIN(minimum_length, length);
+                    maximum_length = BUSTER_MAX(maximum_length, length);
+                }
+                partitions_valid = partitions_valid && previous_end == item_counts[i] && maximum_length - minimum_length <= 1;
+            }
+        }
+        thread_context->lane_context = saved;
+        BUSTER_TEST(arguments, partitions_valid);
+    }
+
+    // A gang: partitioned sum, barrier visibility, broadcast from lane 0, and
+    // dynamic work distribution through an atomic take-index. Single-threaded
+    // builds run the same code as a one-lane gang.
+    {
+        Arena* arena = arguments->arena;
+        u64 position = arena->position;
+
+#if BUSTER_SINGLE_THREADED
+        u64 lanes = 1;
+#else
+        u64 lanes = BUSTER_MIN((u64)4, (u64)os_get_logical_thread_count());
+        String8 jobs_text = os_get_environment_variable(S8("BUSTER_TEST_JOBS"));
+        if (jobs_text.length)
+        {
+            IntegerParsingU64 parsed = string8_parse_u64_decimal(jobs_text.pointer);
+            if (parsed.length == jobs_text.length && parsed.value)
+            {
+                lanes = BUSTER_MIN(lanes, parsed.value);
+            }
+        }
+        lanes = BUSTER_MAX(lanes, (u64)1);
+#endif
+
+        OsTestLaneState* state = arena_allocate(arena, OsTestLaneState, 1);
+        memset(state, 0, sizeof(*state));
+        u64 expected_sum = 0;
+        for (u64 i = 0; i < OS_TEST_LANE_ITEM_COUNT; i += 1)
+        {
+            state->items[i] = i + 1;
+            expected_sum += i + 1;
+        }
+
+        lane_run(lanes, &os_test_lane_gang, state);
+
+        BUSTER_TEST(arguments, state->sum == expected_sum);
+        BUSTER_TEST(arguments, state->take_index >= OS_TEST_LANE_ITEM_COUNT);
+        bool lanes_observed_gang = true;
+        for (u64 lane = 0; lane < lanes; lane += 1)
+        {
+            lanes_observed_gang = lanes_observed_gang && state->observed_counts[lane] == lanes;
+            lanes_observed_gang = lanes_observed_gang && state->sums_after_sync[lane] == expected_sum;
+            lanes_observed_gang = lanes_observed_gang && state->broadcast_received[lane] == 0x1234567890abcdefull;
+        }
+        BUSTER_TEST(arguments, lanes_observed_gang);
+        bool each_item_taken_once = true;
+        for (u64 i = 0; i < OS_TEST_LANE_ITEM_COUNT; i += 1)
+        {
+            each_item_taken_once = each_item_taken_once && state->taken[i] == 1;
+        }
+        BUSTER_TEST(arguments, each_item_taken_once);
+
+        // The gang left the caller's lane context untouched.
+        BUSTER_TEST(arguments, lane_index() == 0);
+        BUSTER_TEST(arguments, lane_count() == 1);
+
+        arena->position = position;
+    }
 
     return result;
 }

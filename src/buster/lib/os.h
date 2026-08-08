@@ -153,6 +153,31 @@ BUSTER_F_DECL OsFileDescriptor* os_get_standard_stream(StandardStream stream);
 BUSTER_F_DECL OsThreadHandle* os_thread_create(ThreadCreateOptions options);
 BUSTER_F_DECL bool os_thread_join(OsThreadHandle* handle);
 
+// Single-threaded builds compile the barrier out entirely: nothing in them
+// can ever wait on one, and the tcc bootstrap's own Win32 headers and import
+// list predate condition variables.
+#if !BUSTER_SINGLE_THREADED
+BUSTER_F_DECL OsBarrierHandle* os_barrier_create(u32 thread_count);
+BUSTER_F_DECL void os_barrier_wait(OsBarrierHandle* handle);
+BUSTER_F_DECL void os_barrier_destroy(OsBarrierHandle* handle);
+#endif
+
+// C11 _Atomic where the compiler provides it. Single-threaded builds use a
+// plain u64 so tcc never sees the qualifier, and MSVC builds do the same
+// because its C atomics are still experimental; the Interlocked implementation
+// works on the plain type. _Atomic u64 and u64 share size and alignment on
+// every supported target, so struct layout does not depend on the choice.
+#if BUSTER_SINGLE_THREADED || BUSTER_COMPILER_MSVC
+typedef u64 AtomicU64;
+#else
+typedef _Atomic u64 AtomicU64;
+#endif
+
+// Both return the value the address held before the addition. In
+// single-threaded builds they compile to plain arithmetic.
+BUSTER_F_DECL u64 atomic_u64_increment(AtomicU64* address);
+BUSTER_F_DECL u64 atomic_u64_add(AtomicU64* address, u64 addend);
+
 typedef enum ProgramFlag
 {
     PROGRAM_FLAG_VERBOSE,
@@ -190,6 +215,13 @@ struct LaneContext
     u64 lane_count;
     OsBarrierHandle* barrier;
     u64* broadcast_memory;
+};
+
+typedef struct LaneRange LaneRange;
+struct LaneRange
+{
+    u64 start;
+    u64 end;
 };
 
 typedef struct ThreadContext ThreadContext;
@@ -254,6 +286,29 @@ BUSTER_F_DECL ThreadContext* thread_context_selected(void);
 BUSTER_F_DECL void thread_context_select(ThreadContext* context);
 BUSTER_F_DECL void thread_context_release(ThreadContext* context);
 BUSTER_F_DECL Arena* thread_context_get_scratch(Arena** conflicts, u64 count);
+
+// Lanes: every thread of a gang runs the same code and asks for its share of
+// the work, mirroring GPU threads. Outside a gang the selected thread context
+// answers as the only lane, so lane-style code degrades to serial without a
+// separate path.
+BUSTER_F_DECL u64 lane_index(void);
+BUSTER_F_DECL u64 lane_count(void);
+// Barrier across the gang. A one-lane gang returns immediately.
+BUSTER_F_DECL void lane_sync(void);
+// Barrier that also copies up to 8 bytes from the source lane's value to every
+// other lane's value.
+BUSTER_F_DECL void lane_broadcast(void* value_pointer, u64 value_size, u64 source_lane_index);
+// This lane's contiguous share of [0, item_count). Concatenating every lane's
+// range in lane order reproduces [0, item_count) exactly; share sizes differ
+// by at most one item.
+BUSTER_F_DECL LaneRange lane_range(u64 item_count);
+// Runs callback(argument) once on every lane of a fresh gang and returns when
+// all lanes have finished. A requested count of zero asks for one lane per
+// logical processor. Single-threaded builds and one-lane requests run the
+// callback on the calling thread without spawning anything. The caller's own
+// lane context is saved and restored, so gangs may run from inside narrowed
+// sections of an outer gang.
+BUSTER_F_DECL void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument);
 
 BUSTER_F_DECL void flag_set_ex(u64* flag_pointer, u64 flag_count, u64 flag_index, bool flag_value);
 BUSTER_F_DECL bool flag_get_ex(u64* flag_pointer, u64 flag_count, u64 flag_index);
