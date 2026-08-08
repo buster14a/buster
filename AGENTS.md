@@ -388,73 +388,97 @@ enabled.
 
 ## Latest performance audit notes
 
-`2026-08-08b` (Linux x86_64, **compile throughput**, clang-built Release `ide`
-compiling the unity TU, `perf record -F 999 --call-graph fp`, `3054` samples
-before / `2688` after, instruction counts from `STEP_INSTRUCTIONS`). Every
-number here is measured on a clang-built binary; buster-compiled stage
-executables are self-hosting validation only and none of their timings are
-quoted. This is the first audit of `Self-host stage 1` rather than of `ide
-test`, and the two configurations disagree about where the time is.
+`2026-08-08b` (Linux x86_64, `perf record -F 999 --call-graph fp`, instruction
+counts from `STEP_INSTRUCTIONS` and `perf stat -e instructions`). Two
+configurations were audited together for the first time: **compile throughput**
+(clang-built Release `ide` compiling the unity TU, the `Self-host stage 1` step)
+and the sanitized Debug `ide test` CI critical path. Every number here comes
+from a clang-built binary; buster-compiled stage executables are self-hosting
+validation only and none of their timings are quoted. Net result across six
+commits: stage 1 `27.436 G` to `17.000 G` instructions (`-38.0%`, `3.19 s` to
+`2.16 s`) and sanitized `ide test` `430.25 G` to `332.16 G` (`-22.8%`), at the
+byte-identical self-host fixed point with all 29 modules passing in both
+configurations and `ide bench` unchanged throughout.
 
-- **A flexible-array-member query cost 23% of compile throughput.**
-  `c_ir_type_is_flexible_array` answered "is this array type some struct's
-  flexible array member?" by scanning every type and every member of every
-  aggregate, and it sat at depth 5 inside the `type_mapping_round` / `pass` /
-  `type_index` fixpoint nest in `c_lower_to_ir` — so a whole-type-table scan
-  ran per unbounded array type per pass. It was `21.2%` of the entire compile,
-  inlined into `c_lower_to_ir`, which was `39.2%` of the run. Replacing it with
-  `c_ir_collect_flexible_array_types`, one marking pass whose result is read by
-  index, moved `Self-host stage 1` from `27.436 G` to `21.216 G` instructions
-  (`-22.7%`) and `3.19 s` to `2.59 s`; `c_lower_to_ir` fell to `19.2%`.
-  Self-hosting stays at the byte-identical fixed point and all 29 modules pass
-  in Release and sanitized Debug. The set is rebuilt once per
-  `type_mapping_round` because `c_ir_infer_incomplete_array_bounds` can give a
-  bound an inferred count between rounds; nothing inside the `pass` loop edits
-  types, members, or bounds.
-- Shares after that change, out of `21.216 G`: `c_lower_to_ir` `19.2%`,
-  `c_ir_function_signature` `5.5%`, `c_ir_emit_store_place` `5.0%`,
-  `c_ir_label_place_location` `4.0%`, `c_ir_incomplete_array_has_initializer`
-  `4.0%`, `c_lex` `3.5%`, `c_ir_body_task_set_loop_cleanup_targets` `3.4%`.
-- **Three more whole-table scans are visible and all have the same shape.**
-  Each is a query answered by re-deriving a global property per item:
-  - `c_ir_label_metadata_store_for_place` ends with a scan of every value in
-    the function, calling `c_ir_label_place_location` per candidate place, and
-    it runs on *every store*. Charging `c_ir_label_place_location` to it, that
-    is `8.5%` of the compile — and it is also the largest single buster frame
-    in the sanitized test run at `7.5%`, so it is the one hotspot both
-    configurations share and the highest-value remaining target.
-  - `c_ir_function_signature` calls `ir_prepare_program_abi`, which sweeps
-    every type in the program, once per function declaration: `5.4%`. The
-    sweep is idempotent after the first resolution, so a prefix cursor advanced
-    only past types that actually resolved would make it incremental without
-    changing which types get retried.
-  - `c_ir_incomplete_array_has_initializer` scans every declaration and every
-    entity, and `c_ir_infer_incomplete_array_bounds` calls it once per array
-    type: `4.0%`.
-- **`BUSTER_INLINE` is defined to nothing when `BUSTER_OPTIMIZE` is off**
-  (`src/buster/lib/base.h`), so the inline already-decoded test that `c343ab8`
-  added to `buster_x86_metadata_decode_tables` does not exist in the sanitized
-  Debug tree — `nm` still shows an out-of-line `buster_x86_metadata_decode_tables`
-  and it is `3.2%` of `ide test` there. That commit's sanitized win came from
-  moving the decode *body* out of the guard frame (a smaller `-O0` frame costs
-  less ASan stack poisoning), not from inlining. Do not assume a `BUSTER_INLINE`
-  fix reaches the configuration CI spends its time in.
-- The remaining `x86_64_metadata_tests` cost is structural rather than a single
-  bug: `buster_x86_metadata_pool_byte` `4.6%`, `buster_x86_metadata_emit_token_equal`
-  `4.2%`, `x86_64_metadata_test_string_contains` `3.9%`,
-  `buster_x86_metadata_string_byte` `3.8%`, `buster_x86_metadata_decode_tables`
-  `3.2%`, `buster_x86_metadata_emit_token_starts_with` `2.3%`,
-  `buster_x86_metadata_string_offset_terminated` `2.3%` — roughly `27%` of the
-  sanitized run spent one out-of-line call per byte over a `1.7 MB` string pool,
-  each call re-testing the decode guard. `string_offset_terminated` finds a NUL
-  one `pool_byte` call at a time. A span-returning accessor would retire most of
-  it.
-- Reference points for the next audit, all clang-built: sanitized Debug
-  `ide test` `430.25 G` instructions / `20.78 s`, `c_frontend_tests` `10.80 s`
-  (`52%`) against `x86_64_metadata_tests` `8.26 s` (`40%`), everything else
-  under `8%`. Release `ide test`: `c_frontend_tests` `856 ms`,
-  `x86_64_metadata_tests` `804 ms`. Release `ide bench`: `BENCH_IO` median
-  `264 us`, `BENCH_PARSE` median `92.7 us`.
+- **Five whole-table scans, four of them quadratic, in one audit.** Each was a
+  query answered by re-deriving a global property per item, and each is the
+  shape the `2026-08-08` entry below told the next audit to look for. In the
+  order they were fixed, with the stage 1 instruction count after each:
+  - `c_ir_type_is_flexible_array` scanned every type and every member of every
+    aggregate, from depth 5 inside the `type_mapping_round` / `pass` /
+    `type_index` fixpoint nest — `21.2%` of the compile on its own.
+    `c_ir_collect_flexible_array_types` marks the set once per round.
+    `27.436 G` to `21.216 G` (`-22.7%`).
+  - `c_ir_incomplete_array_has_initializer` scanned every declaration and every
+    entity, once per array type. Now indexed by type in one pass.
+    `21.216 G` to `20.549 G` (`-3.1%`).
+  - `c_ir_function_signature` called `ir_prepare_program_abi`, sweeping every
+    type in the program, once per function declaration. Removed outright:
+    every ABI read outside the resolver goes through `ir_type_abi_value`,
+    which resolves on demand, so the sweep was pre-warming only. `20.549 G` to
+    `19.666 G` (`-4.3%`).
+  - `c_ir_label_metadata_store_for_place` scanned every value in the function
+    on every store, relocating each place to ask whether it shared the root
+    just written. Places are now filed once into an intrusive list headed by
+    their root. `19.672 G` to `17.000 G` (`-13.6%`), and sanitized `ide test`
+    `366.44 G` to `332.16 G` (`-9.4%`) — it was the one hotspot both
+    configurations shared.
+  - `x86_64_metadata` string consumers read the pool one
+    `buster_x86_metadata_string_byte` call per byte. See below.
+- **The optimizer's inline hint does not exist in the tree CI measures.**
+  `BUSTER_INLINE` expanded to nothing when `BUSTER_OPTIMIZE` was off, so the
+  already-decoded guard `c343ab8` added to `buster_x86_metadata_decode_tables`
+  was still an out-of-line call in sanitized Debug, at `3.2%` of `ide test`.
+  That commit's sanitized win came from shrinking the guard's `-O0` frame, not
+  from inlining. `BUSTER_ALWAYS_INLINE` now holds in every configuration and
+  `BUSTER_INLINE` is defined in terms of it; `nm` on the sanitized Debug `ide`
+  no longer lists the guard. Worth `-0.9%`. Reserve the new spelling for
+  one-test guards on per-byte or per-record paths — forcing a large body inline
+  everywhere costs Debug compile time and steppability.
+- **The decoded string pool is contiguous, so stop reading it a byte at a
+  time.** The one-time decode already flattens the chunked generated pool into
+  a host array, but every consumer still went `string_byte` -> `pool_byte` ->
+  the decode guard: three calls per byte over a `1.7 MB` pool, roughly `27%` of
+  the sanitized run across substring searches, NUL scans, and the pattern
+  tokenizer that walks all `11013` forms. `buster_x86_metadata_pool_span` /
+  `_string_span` hand out a view once. Sanitized `ide test` `424.46 G` to
+  `366.44 G` (`-13.7%`), `x86_64_metadata_tests` `8.21 s` to `5.17 s` (`-37%`).
+  `string_span` is public because the metadata tests are a separate translation
+  unit in non-unity builds.
+- **A correct incremental fix can still be worthless; measure it.** The first
+  attempt at the ABI sweep resumed from the longest already-resolved prefix,
+  which is sound because a resolved ABI is never invalidated. It measured
+  `-0.2%` and left `c_ir_function_signature` at `6.1%` of the profile, because
+  `ir_resolve_type_abi` returns without resolving when a type's layout is
+  unresolved, so one early incomplete type pins the prefix near zero. Profiling
+  after the change, not just before it, is what caught this.
+- Shares after all six commits, stage 1 out of `17.000 G`: `c_lower_to_ir`
+  `24.3%`, `c_lex` `4.6%`, `c_ir_body_task_set_loop_cleanup_targets` `4.1%`,
+  `object_from_canonical_codegen_module` `3.9%`,
+  `codegen_generate_canonical_module` `3.6%`, `c_ir_lower_frame_fallback`
+  `2.8%`. No single quadratic dominates any more and the profile is flat.
+- Shares after all six commits, sanitized `ide test` out of `332.16 G`:
+  `__asan_memcpy` `19.5%`, `string_equal` `7.1%`,
+  `buster_x86_metadata_string_offset_terminated` `6.4%`,
+  `buster_x86_metadata_emit_token_equal` `5.7%`,
+  `x86_64_metadata_test_string_contains` `4.2%`,
+  `c_ir_lower_assignment_statement_step` `4.1%`, `c_token_is_punctuator`
+  `2.7%`. Module totals `c_frontend_tests` `8.70 s` and
+  `x86_64_metadata_tests` `5.23 s`. `string_offset_terminated` *rose* in share
+  because the run shrank around it: it re-finds a NUL from an offset every time
+  a record's string length is wanted, and caching the length in the decoded
+  record is the obvious next step.
+- Reference points for the next audit, all clang-built: Release `ide test`
+  `c_frontend_tests` `693 ms`, `x86_64_metadata_tests` `517 ms`. Release
+  `ide bench` `BENCH_IO` median `263 us`, `BENCH_PARSE` median `92 us` — both
+  unchanged by every commit here, which is the expected result and was checked
+  each time rather than assumed.
+- Process note: `--sanitize` is a sticky `generate`-time flag. A measurement
+  script that runs the sanitized pass last and then measures Release without
+  `--no-sanitize` silently profiles a sanitized tree; self-host aborts in
+  `ld.so` and Release test times triple. Also do not build while a measurement
+  runs — two overlapping runs produce plausible wall times that are pure
+  contention. Instruction counts survive both mistakes; wall times do not.
 
 `2026-08-08` (Linux x86_64, sanitized Debug clang, `perf record -F 999
 --call-graph fp`, `25650` samples, instruction counts from `perf stat -e
