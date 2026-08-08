@@ -495,9 +495,9 @@ struct Sliceu64
 #define BUSTER_ARRAY_TO_SLICE(arr) {.pointer = (arr), .length = BUSTER_ARRAY_LENGTH(arr)}
 #define BUSTER_ARRAY_TO_BYTE_SLICE(arr) ((ByteSlice){.pointer = (u8*)(arr), .length = sizeof(arr)})
 
-#define BUSTER_GB(x) (u64)(1024) * BUSTER_MB(x)
-#define BUSTER_MB(x) (u64)(1024) * BUSTER_KB(x)
-#define BUSTER_KB(x) (u64)(1024) * (x)
+#define BUSTER_GB(x) ((u64)(1024) * BUSTER_MB(x))
+#define BUSTER_MB(x) ((u64)(1024) * BUSTER_KB(x))
+#define BUSTER_KB(x) ((u64)(1024) * (x))
 
 typedef struct IntegerParsingU64 IntegerParsingU64;
 struct IntegerParsingU64
