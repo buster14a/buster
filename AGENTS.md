@@ -127,6 +127,23 @@ environment provenance record before validating and snapshotting the artifact,
 runs the existing direct fixed-point workflow without starting an inner Ninja
 process, and remains disabled for the direct scheduler and unsupported platforms.
 CI Release builds use `-O2`; local Release builds retain the toolchain default.
+Local builds make the optimized tree profilable, which CMake's defaults do not:
+`BUSTER_DEBUG_INFO` emits debug information in the configurations that carry no
+`-g` (`Release`, `MinSizeRel`) and `BUSTER_FRAME_POINTERS` adds
+`-fno-omit-frame-pointer` to every optimized configuration. Both default to off
+under `--ci` and on everywhere else, and both are overridable with
+`./build.sh generate -DBUSTER_DEBUG_INFO=ON|OFF -DBUSTER_FRAME_POINTERS=ON|OFF`.
+`Debug` and `RelWithDebInfo` already carry `-g` from the CMake defaults, `Debug`
+is `-O0` and keeps frame pointers anyway, and sanitized trees keep their own
+reduced `-gline-tables-only` mode, so neither option disturbs them. MSVC is
+excluded from the frame-pointer option because `/Oy` has no x64 meaning.
+Measured on Clang 22/Linux x86-64: debug information does not change code
+generation and costs compile time and artifact size only (unity Release
+`ide.c` 37.3 s -> 46.5 s, `ide` 11.4 MiB -> 19.1 MiB); frame pointers do change
+code generation but cost 0.065% of instructions on a unity self-compile
+(29.5037 G -> 29.5227 G) with no wall-clock difference above run-to-run noise
+and no change to the parser benchmark. CI opts out of both because it profiles
+nothing and pays the compile time.
 Clang static analysis runs only against unsanitized Release. GUI/GPU smoke
 tests run for Debug sanitized and Release non-sanitized configurations; other
 combinations run unit tests only.
@@ -294,6 +311,22 @@ enabled.
   the build commands the superbuild echoes ahead of each test block; timing
   rows with no command line in front of them are attributed to numbered
   `unknown:<n>` series rather than merged.
+- **The local Release tree is profilable as built.** `BUSTER_DEBUG_INFO` and
+  `BUSTER_FRAME_POINTERS` are both on by default outside `--ci`, so
+  `./build.sh build --config Release -t ide` produces a `-O3` binary that
+  symbolizes to source lines and unwinds through `--call-graph fp`, the same
+  cheap unwinding the sanitized Debug tree allows. Superluminal reads it
+  directly. Record it like any other build:
+
+  ```sh
+  ./build.sh build --config Release -t ide
+  perf record -F 999 -g --call-graph fp -o release.data -- ./build/Release/ide bench
+  ```
+
+  The `perf script`/`llvm-symbolizer` rules below apply unchanged; the Release
+  binary is a clang PIE like the Debug one. Pass
+  `-DBUSTER_FRAME_POINTERS=OFF` when the point of the measurement is the
+  frame-pointer cost itself, or when reproducing a CI Release number exactly.
 - **Sampling the sanitized (ASan+UBSan) Debug tree with `perf` works.** It is
   the CI critical path, so it is the configuration most worth profiling. Record
   it exactly like any other build; there is no sanitizer-specific obstacle:

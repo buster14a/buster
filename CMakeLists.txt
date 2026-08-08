@@ -130,6 +130,23 @@ option(BUSTER_LTO "Enable LTO" OFF)
 option(BUSTER_CHECK_OPTIONAL_WARNINGS "Probe and enable optional compiler warning flags" ON)
 option(BUSTER_DEVELOPER_TARGETS "Enable convenience run/test/debug targets" ON)
 
+# An optimized build is what is worth profiling and is exactly the one CMake
+# leaves unprofilable: Release and MinSizeRel carry no -g, and -O3 omits frame
+# pointers. Both defaults are inverted for developer builds and left alone in
+# CI, which profiles nothing and pays the whole cost. Measured on Clang
+# 22/Linux x86-64: debug information costs ~25% of the unity translation unit's
+# compile time (37.3 s -> 46.5 s for Release ide.c) plus ~8 MiB of artifact but
+# does not change code generation; frame pointers change code generation but
+# cost 0.065% of instructions on a unity self-compile (29.5037 G -> 29.5227 G)
+# with no measurable wall-clock difference.
+if (BUSTER_CI)
+    set(BUSTER_PROFILING_DEFAULT OFF)
+else()
+    set(BUSTER_PROFILING_DEFAULT ON)
+endif()
+option(BUSTER_DEBUG_INFO "Emit debug information in optimized configurations" ${BUSTER_PROFILING_DEFAULT})
+option(BUSTER_FRAME_POINTERS "Keep frame pointers in optimized configurations" ${BUSTER_PROFILING_DEFAULT})
+
 set(BUSTER_SANITIZER_REDUCED_DEBUG OFF)
 if (BUSTER_SANITIZE AND NOT WIN32 AND (C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND NOT C_COMPILER_ZIG)
     # CMake's Debug and RelWithDebInfo defaults add full debug information before
@@ -694,6 +711,8 @@ message(STATUS "BUSTER_UNITY_BUILD: ${BUSTER_UNITY_BUILD}")
 message(STATUS "BUSTER_INCLUDE_TESTS: ${BUSTER_INCLUDE_TESTS}")
 message(STATUS "BUSTER_SANITIZE: ${BUSTER_SANITIZE}")
 message(STATUS "BUSTER_SANITIZER_REDUCED_DEBUG: ${BUSTER_SANITIZER_REDUCED_DEBUG}")
+message(STATUS "BUSTER_DEBUG_INFO: ${BUSTER_DEBUG_INFO}")
+message(STATUS "BUSTER_FRAME_POINTERS: ${BUSTER_FRAME_POINTERS}")
 message(STATUS "BUSTER_TIME_TRACE: ${BUSTER_TIME_TRACE}")
 message(STATUS "BUSTER_INSTRUMENT: ${BUSTER_INSTRUMENT}")
 message(STATUS "BUSTER_FUZZ_AVAILABLE: ${BUSTER_FUZZ_AVAILABLE}")
@@ -1466,6 +1485,31 @@ function(executable_add name is_buster_program main_file)
         target_compile_options(${name} PRIVATE ${MSVC_FAMILY_OPTIONS})
         target_compile_options(${name} PRIVATE ${MSVC_FAMILY_WARNINGS})
         target_compile_options(${name} PRIVATE ${MSVC_FAMILY_DISABLE_WARNINGS})
+    endif()
+
+    # Release and MinSizeRel are the configurations CMake leaves without debug
+    # information; Debug and RelWithDebInfo already carry -g from the defaults,
+    # and a sanitized build picks its own mode further below.
+    if (BUSTER_DEBUG_INFO AND NOT BUSTER_SANITIZE)
+        set(debug_info_config "$<OR:$<CONFIG:Release>,$<CONFIG:MinSizeRel>>")
+        if (C_COMPILER_MSVC_FAMILIY)
+            target_compile_options(${name} PRIVATE "$<${debug_info_config}:/Zi>")
+            target_link_options(${name} PRIVATE "$<${debug_info_config}:/DEBUG>")
+        elseif (WIN32 AND C_COMPILER_GNU_FAMILY AND NOT C_COMPILER_TCC)
+            # Windows builds target the MSVC ABI, so debuggers and Superluminal
+            # read CodeView from the objects and a PDB from the linker.
+            target_compile_options(${name} PRIVATE "$<${debug_info_config}:-g>" "$<${debug_info_config}:-gcodeview>")
+            target_link_options(${name} PRIVATE "$<${debug_info_config}:LINKER:/DEBUG>")
+        elseif (C_COMPILER_GNU_FAMILY AND NOT C_COMPILER_TCC)
+            target_compile_options(${name} PRIVATE "$<${debug_info_config}:-g>")
+        endif()
+    endif()
+
+    # Frame pointers let a sampling profiler unwind the optimized tree without
+    # DWARF CFI. Debug is -O0 and keeps them already; MSVC is omitted because
+    # /Oy has no x64 meaning and Windows unwinds through the PDB instead.
+    if (BUSTER_FRAME_POINTERS AND C_COMPILER_GNU_FAMILY AND NOT C_COMPILER_TCC)
+        target_compile_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:-fno-omit-frame-pointer>")
     endif()
 
     if (NOT ${BUSTER_CROSS_COMPILE})
