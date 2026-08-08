@@ -14311,7 +14311,10 @@ BUSTER_GLOBAL_LOCAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram
     }
     result.parameter_types = arena_allocate(arena, IrTypeId, result.parameter_count);
     IrType* canonical_return = ir_type_from_id(&program->types, result.return_type);
-    ir_prepare_program_abi(program, ir_abi_convention_for_target(target));
+    // No eager whole-program ABI sweep here.  Every read of a type's ABI goes
+    // through ir_type_abi_value, which resolves the type on demand, so this
+    // was pre-warming only -- and running it once per function declaration
+    // made signature lowering cost O(functions * types).
     result.body_supported = canonical_return && canonical_return->layout.resolved &&
                              (canonical_return->kind == IR_TYPE_VOID ||
                               ((canonical_return->kind != IR_TYPE_FLOAT || canonical_return->bit_width <= 64) &&
