@@ -126,6 +126,17 @@ static _Bool pointer_compound_boolean_offset(void)
     return pointer == &values[1];
 }
 
+static _Bool pointer_unsigned_backward_offset(unsigned int backward)
+{
+    char bytes[12] = {0};
+    char* end = bytes + 10;
+    char* moved = end - backward;
+    unsigned long long wide = 6;
+    unsigned short narrow = 2;
+    end -= backward;
+    return moved == &bytes[7] && end == &bytes[7] && (moved + 3) - wide == &bytes[4] && moved - narrow == &bytes[5];
+}
+
 static int indexed_postfix_value(void)
 {
     int offsets[] = {10};
@@ -573,7 +584,8 @@ int main(void)
            (wide >> 36 == 16) + ((wide | 3) == (((unsigned long long)1 << 40) | 3)) + (wide > 0xffffffff) + (pair_sum((struct WidePair){5, 7}) == 12) +
            (pair_sum(pair_make(11, 13)) == 24) + (large_sum((struct LargeValue){2, 3, 5}) == 10) + (large_sum(made) == 31) + (big.values[14] == 123) +
            (flags_sum(packed_flags) == 16) + (sum_nine(1, 2, 3, 4, 5, 6, 7, 8, 9) == 45) + (variadic_sum(3, 4, 5, 6) == 15) + (invoke_callback(&holder) == 9) +
-           (global_callbacks[0](4) == 5) + pointer_compound_boolean_offset() + indexed_postfix_value() + (matrix_element(matrix, 1, 1) == 4) +
+           (global_callbacks[0](4) == 5) + pointer_compound_boolean_offset() + pointer_unsigned_backward_offset(3) + indexed_postfix_value() +
+           (matrix_element(matrix, 1, 1) == 4) +
            conditional_chain(0, 1, &value) + conditional_integer_promotion(1, &value) + ((value ? matrix[0][1] : matrix[1][0]) == 2) +
            ((__typeof__(value))5 == 5) + (pair_sum(value ? (struct WidePair){1, 2} : (struct WidePair){3, 4}) == 3) +
            (incomplete_array_compound_literal() == 291) + (invoke_local_function_pointer() == 42) + (global_member_holder.value == 37) +
@@ -584,5 +596,5 @@ int main(void)
            8 * (0ULL - (unsigned long long)(-9223372036854775807LL - 1) == 9223372036854775808ULL) + 16 * ((-10LL - 1) == -11LL) +
            32 * (9223372036854775807LL == 0x7fffffffffffffffLL) + 64 * (-9223372036854775807LL == (long long)0x8000000000000001ULL) +
            2 * initialized_integer_arrays() + unicode_exception_paths() + unicode_index_conditions() + narrow_unsigned_conversions() +
-           (integer_width_mask(32) == 0xffffffffULL) + indirect_variadic_struct_argument() + zero_storage_round_trip() - 471;
+           (integer_width_mask(32) == 0xffffffffULL) + indirect_variadic_struct_argument() + zero_storage_round_trip() - 472;
 }

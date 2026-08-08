@@ -24574,6 +24574,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CCondi
                 {
                     return false;
                 }
+                // Negate at pointer width: a narrower index is extended by its own signedness first, so an
+                // unsigned index does not wrap to a huge positive offset when the index instruction zero-extends it.
+                index = c_ir_emit_cast(builder, index, builder->ptrdiff_type, source);
+                if (index.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+                index_type = builder->ptrdiff_type;
                 IrValueId negated = c_ir_add_result(builder, index_type);
                 IrInstruction negate = c_ir_instruction_initialize(IR_OPCODE_UNARY, index_type, source);
                 negate.operands = arena_allocate(builder->arena, IrValueId, 1);
