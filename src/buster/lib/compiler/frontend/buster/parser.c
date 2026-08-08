@@ -282,6 +282,69 @@ BUSTER_GLOBAL_LOCAL u64 tokenizer_utf8_sequence_length(const char8* restrict it,
     return result;
 }
 
+// Keyword recognition is a perfect hash in the Accelerated-Zig-Parser style
+// (see the AGENTS.md SIMD lexing/parsing method notes): the identifier's
+// length and its first and last byte pairs map every keyword to a distinct
+// slot, so one stored candidate is verified with a single string compare
+// instead of the previous 23-entry string_equal ladder. Every keyword is at
+// least two bytes, so lookups gate on length >= 2 and both pair loads stay
+// inside the identifier. The table is built on first use from
+// tokenizer_keyword_names with the same loads the lookup performs, and the
+// build checks the hash stays perfect, so editing the keyword set (or a
+// byte-order difference) cannot silently break recognition.
+BUSTER_GLOBAL_LOCAL String8 const tokenizer_keyword_names[] = {
+    [TOKEN_KEYWORD_FUNCTION - first_keyword] = S8_INITIALIZER("fn"),
+    [TOKEN_KEYWORD_IF - first_keyword] = S8_INITIALIZER("if"),
+    [TOKEN_KEYWORD_ELSE - first_keyword] = S8_INITIALIZER("else"),
+    [TOKEN_KEYWORD_SWITCH - first_keyword] = S8_INITIALIZER("switch"),
+    [TOKEN_KEYWORD_RETURN - first_keyword] = S8_INITIALIZER("return"),
+    [TOKEN_KEYWORD_BREAK - first_keyword] = S8_INITIALIZER("break"),
+    [TOKEN_KEYWORD_CONTINUE - first_keyword] = S8_INITIALIZER("continue"),
+    [TOKEN_KEYWORD_FOR - first_keyword] = S8_INITIALIZER("for"),
+    [TOKEN_KEYWORD_WHILE - first_keyword] = S8_INITIALIZER("while"),
+    [TOKEN_KEYWORD_LOOP - first_keyword] = S8_INITIALIZER("loop"),
+    [TOKEN_KEYWORD_CODE - first_keyword] = S8_INITIALIZER("code"),
+    [TOKEN_KEYWORD_DATA - first_keyword] = S8_INITIALIZER("data"),
+    [TOKEN_KEYWORD_TYPE - first_keyword] = S8_INITIALIZER("type"),
+    [TOKEN_KEYWORD_IMPORT - first_keyword] = S8_INITIALIZER("import"),
+    [TOKEN_KEYWORD_STRUCT - first_keyword] = S8_INITIALIZER("struct"),
+    [TOKEN_KEYWORD_UNION - first_keyword] = S8_INITIALIZER("union"),
+    [TOKEN_KEYWORD_ENUM - first_keyword] = S8_INITIALIZER("enum"),
+    [TOKEN_KEYWORD_VECTOR - first_keyword] = S8_INITIALIZER("vector"),
+    [TOKEN_KEYWORD_AND - first_keyword] = S8_INITIALIZER("and"),
+    [TOKEN_KEYWORD_OR - first_keyword] = S8_INITIALIZER("or"),
+    [TOKEN_KEYWORD_AND_SHORT_CIRCUIT - first_keyword] = S8_INITIALIZER("and?"),
+    [TOKEN_KEYWORD_OR_SHORT_CIRCUIT - first_keyword] = S8_INITIALIZER("or?"),
+    [TOKEN_KEYWORD_UNDEFINED - first_keyword] = S8_INITIALIZER("undefined"),
+};
+
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(tokenizer_keyword_names) == KEYWORD_COUNT);
+
+BUSTER_GLOBAL_LOCAL u8 tokenizer_keyword_slots[128];
+BUSTER_GLOBAL_LOCAL bool tokenizer_keyword_slots_built;
+
+BUSTER_GLOBAL_LOCAL u32 tokenizer_keyword_hash(const char8* pointer, u64 length)
+{
+    u16 first_two;
+    u16 last_two;
+    memcpy(&first_two, pointer, sizeof(first_two));
+    memcpy(&last_two, pointer + length - 2, sizeof(last_two));
+    return (((((u32)length << 9) ^ first_two) * last_two) >> 8) & (u32)(BUSTER_ARRAY_LENGTH(tokenizer_keyword_slots) - 1);
+}
+
+BUSTER_GLOBAL_LOCAL void tokenizer_keyword_slots_build(void)
+{
+    for (u32 keyword_index = 0; keyword_index < KEYWORD_COUNT; keyword_index += 1)
+    {
+        String8 keyword = tokenizer_keyword_names[keyword_index];
+        BUSTER_CHECK(keyword.length >= 2);
+        u32 slot = tokenizer_keyword_hash(keyword.pointer, keyword.length);
+        BUSTER_CHECK(!tokenizer_keyword_slots[slot]);
+        tokenizer_keyword_slots[slot] = (u8)(keyword_index + 1);
+    }
+    tokenizer_keyword_slots_built = true;
+}
+
 BUSTER_GLOBAL_LOCAL void tokenizer_emit_token(TokenizerResult* restrict result, Token* restrict tokens, u64* restrict token_count,
                                               TokenId id, u64 length, bool overflow)
 {
@@ -353,50 +416,18 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                 identifier.length += 1;
             }
 
-            BUSTER_GLOBAL_LOCAL String8 keyword_names[] = {
-                [TOKEN_KEYWORD_FUNCTION - first_keyword] = S8_INITIALIZER("fn"),
-                [TOKEN_KEYWORD_IF - first_keyword] = S8_INITIALIZER("if"),
-                [TOKEN_KEYWORD_ELSE - first_keyword] = S8_INITIALIZER("else"),
-                [TOKEN_KEYWORD_SWITCH - first_keyword] = S8_INITIALIZER("switch"),
-                [TOKEN_KEYWORD_RETURN - first_keyword] = S8_INITIALIZER("return"),
-                [TOKEN_KEYWORD_BREAK - first_keyword] = S8_INITIALIZER("break"),
-                [TOKEN_KEYWORD_CONTINUE - first_keyword] = S8_INITIALIZER("continue"),
-                [TOKEN_KEYWORD_FOR - first_keyword] = S8_INITIALIZER("for"),
-                [TOKEN_KEYWORD_WHILE - first_keyword] = S8_INITIALIZER("while"),
-                [TOKEN_KEYWORD_LOOP - first_keyword] = S8_INITIALIZER("loop"),
-                [TOKEN_KEYWORD_CODE - first_keyword] = S8_INITIALIZER("code"),
-                [TOKEN_KEYWORD_DATA - first_keyword] = S8_INITIALIZER("data"),
-                [TOKEN_KEYWORD_TYPE - first_keyword] = S8_INITIALIZER("type"),
-                [TOKEN_KEYWORD_IMPORT - first_keyword] = S8_INITIALIZER("import"),
-                [TOKEN_KEYWORD_STRUCT - first_keyword] = S8_INITIALIZER("struct"),
-                [TOKEN_KEYWORD_UNION - first_keyword] = S8_INITIALIZER("union"),
-                [TOKEN_KEYWORD_ENUM - first_keyword] = S8_INITIALIZER("enum"),
-                [TOKEN_KEYWORD_VECTOR - first_keyword] = S8_INITIALIZER("vector"),
-                [TOKEN_KEYWORD_AND - first_keyword] = S8_INITIALIZER("and"),
-                [TOKEN_KEYWORD_OR - first_keyword] = S8_INITIALIZER("or"),
-                [TOKEN_KEYWORD_AND_SHORT_CIRCUIT - first_keyword] = S8_INITIALIZER("and?"),
-                [TOKEN_KEYWORD_OR_SHORT_CIRCUIT - first_keyword] = S8_INITIALIZER("or?"),
-                [TOKEN_KEYWORD_UNDEFINED - first_keyword] = S8_INITIALIZER("undefined"),
-            };
-
-            BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(keyword_names) == KEYWORD_COUNT);
-
-            u64 i;
-            for (i = 0; i < KEYWORD_COUNT; i += 1)
+            if (identifier.length >= 2)
             {
-                if (string_equal(identifier, keyword_names[i]))
+                if (!tokenizer_keyword_slots_built)
                 {
-                    break;
+                    tokenizer_keyword_slots_build();
                 }
-            }
-
-            if (i == KEYWORD_COUNT)
-            {
-                id = identifier.length == 1 && identifier.pointer[0] == '_' ? TOKEN_UNDERSCORE : TOKEN_IDENTIFIER;
+                u32 slot = tokenizer_keyword_slots[tokenizer_keyword_hash(identifier.pointer, identifier.length)];
+                id = slot && string_equal(identifier, tokenizer_keyword_names[slot - 1]) ? (TokenId)((slot - 1) + (u64)first_keyword) : TOKEN_IDENTIFIER;
             }
             else
             {
-                id = (TokenId)(i + (u64)first_keyword);
+                id = identifier.pointer[0] == '_' ? TOKEN_UNDERSCORE : TOKEN_IDENTIFIER;
             }
         }
         break;
