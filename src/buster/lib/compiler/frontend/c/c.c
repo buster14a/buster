@@ -36449,13 +36449,71 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_initializer_array_count(CIntegerIrBuilder* b
     return success;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_incomplete_array_has_initializer(CIntegerIrBuilder* builder, u32 type_index, u32* start_out, u32* end_out, CScopeId* scope_out)
+// The initializer that gives an incomplete array its bound is found by type,
+// so both directions of the search are indexed by type once instead of
+// rescanning every declaration and every entity per array type.  Declarations
+// still win over entities, and the lowest index still wins within each, so the
+// answer is the same one the linear search returned.
+typedef struct CIrIncompleteArrayInitializerIndex CIrIncompleteArrayInitializerIndex;
+struct CIrIncompleteArrayInitializerIndex
 {
-    for (u32 declaration_index = 0; declaration_index < builder->parse.declaration_count; declaration_index += 1)
+    u32* first_declaration;
+    u32* first_entity;
+    u32 type_count;
+};
+
+BUSTER_GLOBAL_LOCAL void c_ir_index_incomplete_array_initializers(CIntegerIrBuilder* builder, CIrIncompleteArrayInitializerIndex* index)
+{
+    u32 type_count = builder->parse.type_count;
+    index->type_count = type_count;
+    index->first_declaration = arena_allocate(builder->temporary_arena, u32, type_count);
+    index->first_entity = arena_allocate(builder->temporary_arena, u32, type_count);
+    if (!type_count || !index->first_declaration || !index->first_entity)
+    {
+        index->type_count = 0;
+        return;
+    }
+    memset(index->first_declaration, 0xff, sizeof(*index->first_declaration) * type_count);
+    memset(index->first_entity, 0xff, sizeof(*index->first_entity) * type_count);
+    for (u32 declaration_index = builder->parse.declaration_count; declaration_index; declaration_index -= 1)
+    {
+        CDeclaration declaration = builder->parse.declarations[declaration_index - 1];
+        if (declaration.kind == C_DECLARATION_OBJECT && declaration.type.value < type_count &&
+            c_ir_declaration_initializer_range(builder->preprocess, declaration, &(u32){0}, &(u32){0}))
+        {
+            index->first_declaration[declaration.type.value] = declaration_index - 1;
+        }
+    }
+    for (u32 entity_index = builder->parse.entity_count; entity_index; entity_index -= 1)
+    {
+        CEntity* entity = builder->parse.entities + entity_index - 1;
+        if (entity->kind != C_ENTITY_LOCAL || entity->type.value >= type_count || !entity->declaration_token_count)
+        {
+            continue;
+        }
+        CDeclaration declaration = {
+            .token_start = entity->declaration_token_start,
+            .token_count = entity->declaration_token_count,
+        };
+        if (c_ir_declaration_initializer_range(builder->preprocess, declaration, &(u32){0}, &(u32){0}))
+        {
+            index->first_entity[entity->type.value] = entity_index - 1;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_incomplete_array_has_initializer(CIntegerIrBuilder* builder, CIrIncompleteArrayInitializerIndex const* index, u32 type_index,
+                                                                u32* start_out, u32* end_out, CScopeId* scope_out)
+{
+    if (type_index >= index->type_count)
+    {
+        return false;
+    }
+    u32 declaration_index = index->first_declaration[type_index];
+    if (declaration_index != UINT32_MAX)
     {
         CDeclaration declaration = builder->parse.declarations[declaration_index];
-        if (declaration.kind == C_DECLARATION_OBJECT && declaration.type.value == type_index &&
-            c_ir_declaration_initializer_range(builder->preprocess, declaration, start_out, end_out))
+        if (c_ir_declaration_initializer_range(builder->preprocess, declaration, start_out, end_out))
         {
             if (scope_out)
             {
@@ -36464,13 +36522,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_incomplete_array_has_initializer(CIntegerIrBuilder
             return true;
         }
     }
-    for (u32 entity_index = 0; entity_index < builder->parse.entity_count; entity_index += 1)
+    u32 entity_index = index->first_entity[type_index];
+    if (entity_index != UINT32_MAX)
     {
         CEntity* entity = builder->parse.entities + entity_index;
-        if (entity->kind != C_ENTITY_LOCAL || entity->type.value != type_index || !entity->declaration_token_count)
-        {
-            continue;
-        }
         CDeclaration declaration = {
             .token_start = entity->declaration_token_start,
             .token_count = entity->declaration_token_count,
@@ -36489,6 +36544,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_incomplete_array_has_initializer(CIntegerIrBuilder
 
 BUSTER_GLOBAL_LOCAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* builder, CIRLowerResult* result)
 {
+    CIrIncompleteArrayInitializerIndex initializer_index = {0};
+    c_ir_index_incomplete_array_initializers(builder, &initializer_index);
     bool* candidates = arena_allocate(builder->temporary_arena, bool, builder->parse.type_count);
     memset(candidates, 0, sizeof(*candidates) * builder->parse.type_count);
     for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
@@ -36500,7 +36557,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* b
         }
         CArrayBound bound = builder->parse.array_bounds[type->array_bound];
         candidates[type_index] = !bound.token_count && !bound.is_star && !bound.has_inferred_count &&
-                                 c_ir_incomplete_array_has_initializer(builder, type_index, &(u32){0}, &(u32){0}, &(CScopeId){0});
+                                 c_ir_incomplete_array_has_initializer(builder, &initializer_index, type_index, &(u32){0}, &(u32){0}, &(CScopeId){0});
         if (candidates[type_index])
         {
             builder->c_type_ir_map[type_index] = IR_TYPE_ID_INVALID;
@@ -36523,7 +36580,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* b
         u32 initializer_end = 0;
         CScopeId initializer_scope = C_SCOPE_ID_INVALID;
         if (!element || !element->layout.resolved ||
-            !c_ir_incomplete_array_has_initializer(builder, type_index, &initializer_start, &initializer_end, &initializer_scope))
+            !c_ir_incomplete_array_has_initializer(builder, &initializer_index, type_index, &initializer_start, &initializer_end, &initializer_scope))
         {
             continue;
         }
