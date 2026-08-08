@@ -12,6 +12,43 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-08f` (Linux x86_64; the finds came from two fresh Superluminal
+captures — the stage-1 compile and, for the first time, `ide test` itself —
+cross-checked with perf + `llvm-symbolizer --inlines` because the hot step
+functions are fully inlined and the capture attributes only their call lines.
+Every number from a clang-built binary). One fix: Release `ide test`
+`10.259 G` to `9.148 G` instructions (`-10.8%`, `c_frontend_tests` `428 ms`
+to `386 ms`) and sanitized `ide test` `170.937 G` to `141.964 G` (`-17.0%`),
+at the byte-identical fixed point with all 29 modules passing in both
+configurations and GCC warning-clean. Stage 1 `8.498 G` to `8.548 G`
+(`+0.6%`) — the accepted cost of the index build below on the unity TU.
+
+- **Two "does this range contain spelling X" scans were ~10% of the Release
+  test run.** The `ide test` capture put `c_type_parse_machine_run` first at
+  `83.7 ms` exclusive and `c_parse_apply_vector_attribute` at `37.6 ms`;
+  inline-aware symbolization placed the machine's time on the `_Alignas`
+  parameter sweep and the vector-attribute call. Both asked the same question
+  per declaration scan over overlapping token ranges. `CTokenPositionIndex`
+  now records the sorted token positions of the two rare spellings once per
+  parse (built lazily from the fixed token stream, header behind a stable
+  pointer so speculative rollbacks cannot rewind or rebuild it), and both
+  queries became a binary search returning the same lowest-position match the
+  linear scans found. Sanitized fell `17%` because each scanned token was an
+  out-of-line `-O0` predicate call there. The `+0.6%` stage-1 instruction
+  cost is the one-time class computation for every identifier token of the
+  unity TU; its Release-test return is 20x that.
+- **Remaining shape, for the next audit:** the test capture shows
+  `kernel_init_pages` `44.5 ms` plus `__zap_vma_range` `15 ms` inside
+  `ide test` — per-test arena create/destroy churn, a different fault source
+  than stage 1's, untouched. Stage 1's fault attribution is now diffuse
+  (`c_ir_emit_local` `21 ms`, `debug_model_build` `15 ms`, lexer arrays
+  `~34 ms`) — each needs its own array-shape change; no single fix remains.
+  After the position index, the Release-test profile top is
+  `c_type_parse_machine_run` `10.9%` (now genuinely the machine's own step
+  dispatch), `c_ir_query_execute` `8.3%` (the retry-shaped machine, negative
+  memo result recorded in `2026-08-08e`), and `c_lower_to_ir` `7.2%` with its
+  cost smeared across call sites — structural work, not scan removal.
+
 `2026-08-08e` (Linux x86_64, method of `2026-08-08d`; every quoted number from
 a clang-built binary, `perf stat -e instructions,minor-faults` plus the same
 `perf record`/annotate flow, buster-built stages fixed-point validation only).

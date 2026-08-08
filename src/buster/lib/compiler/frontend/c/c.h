@@ -603,6 +603,21 @@ struct CAggregateLookup
     bool saturated;
 };
 
+// Sorted token positions of the rare spellings whose "does this range contain
+// one" queries the type-parse machine re-asks per declaration scan. Built at
+// most once per parse from the fixed token stream; the header lives outside
+// the checkpointed CParseResult body via a stable pointer so speculative
+// rollbacks can neither invalidate it nor force a rebuild.
+typedef struct CTokenPositionIndex CTokenPositionIndex;
+struct CTokenPositionIndex
+{
+    u32* vector_size_positions;
+    u32* alignas_positions;
+    u32 vector_size_count;
+    u32 alignas_count;
+    bool built;
+};
+
 typedef struct CParseResult CParseResult;
 struct CParseResult
 {
@@ -621,6 +636,7 @@ struct CParseResult
     CEntityId* entity_lookup_buckets;
     CEntityId* typedef_lookup_buckets;
     CAggregateLookup* aggregate_lookup;
+    CTokenPositionIndex* position_index;
     CIdentifierUse* identifier_uses;
     u32* identifier_use_by_token;
     // Lazily computed per-token spelling-predicate bits, indexed like

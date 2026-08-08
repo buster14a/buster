@@ -4015,6 +4015,7 @@ enum
     C_TOKEN_CLASS_C23_EXTRA_KEYWORD = 1 << 2,
     C_TOKEN_CLASS_TYPEOF = 1 << 3,
     C_TOKEN_CLASS_VECTOR_SIZE = 1 << 4,
+    C_TOKEN_CLASS_ALIGNAS = 1 << 5,
 };
 
 BUSTER_GLOBAL_LOCAL u8 c_parse_token_class_compute(String8 spelling)
@@ -4037,6 +4038,10 @@ BUSTER_GLOBAL_LOCAL u8 c_parse_token_class_compute(String8 spelling)
     {
         token_class |= C_TOKEN_CLASS_VECTOR_SIZE;
     }
+    if (string_equal(spelling, S8("_Alignas")))
+    {
+        token_class |= C_TOKEN_CLASS_ALIGNAS;
+    }
     return token_class;
 }
 
@@ -4053,6 +4058,68 @@ BUSTER_GLOBAL_LOCAL u8 c_parse_token_class(CParseResult* result, CPreprocessResu
         result->token_classes[token_index] = token_class;
     }
     return token_class;
+}
+
+BUSTER_GLOBAL_LOCAL void c_parse_position_index_build(CParseResult* result, CPreprocessResult preprocess)
+{
+    CTokenPositionIndex* index = result->position_index;
+    u32 vector_size_count = 0;
+    u32 alignas_count = 0;
+    for (u64 token_index = 0; token_index < preprocess.token_count; token_index += 1)
+    {
+        if (preprocess.tokens[token_index].kind != C_TOKEN_IDENTIFIER)
+        {
+            continue;
+        }
+        u8 token_class = c_parse_token_class(result, preprocess, (u32)token_index);
+        vector_size_count += (token_class & C_TOKEN_CLASS_VECTOR_SIZE) != 0;
+        alignas_count += (token_class & C_TOKEN_CLASS_ALIGNAS) != 0;
+    }
+    index->vector_size_positions = arena_allocate(result->arena, u32, vector_size_count ? vector_size_count : 1);
+    index->alignas_positions = arena_allocate(result->arena, u32, alignas_count ? alignas_count : 1);
+    for (u64 token_index = 0; token_index < preprocess.token_count; token_index += 1)
+    {
+        if (preprocess.tokens[token_index].kind != C_TOKEN_IDENTIFIER)
+        {
+            continue;
+        }
+        u8 token_class = c_parse_token_class(result, preprocess, (u32)token_index);
+        if (token_class & C_TOKEN_CLASS_VECTOR_SIZE)
+        {
+            index->vector_size_positions[index->vector_size_count++] = (u32)token_index;
+        }
+        if (token_class & C_TOKEN_CLASS_ALIGNAS)
+        {
+            index->alignas_positions[index->alignas_count++] = (u32)token_index;
+        }
+    }
+    index->built = true;
+}
+
+// First recorded position in [start, end), or UINT32_MAX. Positions are
+// stored ascending, so the lowest match is the same one the removed linear
+// scans found first.
+BUSTER_GLOBAL_LOCAL u32 c_parse_first_position_in_range(u32* positions, u32 count, u32 start, u32 end)
+{
+    u32 low = 0;
+    u32 high = count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (positions[middle] < start)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    if (low < count && positions[low] < end)
+    {
+        return positions[low];
+    }
+    return UINT32_MAX;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_parse_declaration_keyword_at(CParseResult* result, CPreprocessResult preprocess, u32 token_index)
@@ -8307,18 +8374,47 @@ BUSTER_GLOBAL_LOCAL bool c_parse_attribute_unsigned(String8 spelling, u32* value
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_apply_vector_attribute(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32 start, u32 end)
 {
     u32 vector_byte_size = 0;
-    for (u32 index = start; index + 3 < end; index += 1)
+    if (result->position_index && !result->position_index->built)
     {
-        if (preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER ||
-            !(c_parse_token_class(result, preprocess, index) & C_TOKEN_CLASS_VECTOR_SIZE) ||
-            !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
-            preprocess.tokens[index + 2].kind != C_TOKEN_PREPROCESSING_NUMBER ||
-            !c_token_is_punctuator(&preprocess.tokens[index + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
-            !c_parse_attribute_unsigned(preprocess.tokens[index + 2].spelling, &vector_byte_size))
+        c_parse_position_index_build(result, preprocess);
+    }
+    if (result->position_index)
+    {
+        u32 cursor = start;
+        while (cursor + 3 < end)
         {
-            continue;
+            u32 index =
+                c_parse_first_position_in_range(result->position_index->vector_size_positions, result->position_index->vector_size_count, cursor, end - 3);
+            if (index == UINT32_MAX)
+            {
+                break;
+            }
+            if (c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                preprocess.tokens[index + 2].kind == C_TOKEN_PREPROCESSING_NUMBER &&
+                c_token_is_punctuator(&preprocess.tokens[index + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                c_parse_attribute_unsigned(preprocess.tokens[index + 2].spelling, &vector_byte_size))
+            {
+                break;
+            }
+            vector_byte_size = 0;
+            cursor = index + 1;
         }
-        break;
+    }
+    else
+    {
+        for (u32 index = start; index + 3 < end; index += 1)
+        {
+            if (preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER ||
+                !(c_parse_token_class_compute(preprocess.tokens[index].spelling) & C_TOKEN_CLASS_VECTOR_SIZE) ||
+                !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                preprocess.tokens[index + 2].kind != C_TOKEN_PREPROCESSING_NUMBER ||
+                !c_token_is_punctuator(&preprocess.tokens[index + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                !c_parse_attribute_unsigned(preprocess.tokens[index + 2].spelling, &vector_byte_size))
+            {
+                continue;
+            }
+            break;
+        }
     }
     if (!vector_byte_size)
     {
@@ -9218,16 +9314,33 @@ BUSTER_GLOBAL_LOCAL void c_type_parse_parameter_step(CTypeParseMachine* machine,
     CPreprocessResult preprocess = frame->preprocess;
     if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN)
     {
-        for (u32 index = frame->start; index < frame->end; index += 1)
+        if (result->position_index && !result->position_index->built)
         {
-            if (preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER && preprocess.tokens[index].spelling.length == S8("_Alignas").length &&
-                string_equal(preprocess.tokens[index].spelling, S8("_Alignas")))
+            c_parse_position_index_build(result, preprocess);
+        }
+        u32 alignas_index = UINT32_MAX;
+        if (result->position_index)
+        {
+            alignas_index =
+                c_parse_first_position_in_range(result->position_index->alignas_positions, result->position_index->alignas_count, frame->start, frame->end);
+        }
+        else
+        {
+            for (u32 index = frame->start; index < frame->end; index += 1)
             {
-                c_parse_diagnostic(result, preprocess.tokens[index].location, C_DIAGNOSTIC_INVALID_ALIGNMENT,
-                                   S8("alignment specifier cannot be applied to a parameter"));
-                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
-                return;
+                if (preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER && string_equal(preprocess.tokens[index].spelling, S8("_Alignas")))
+                {
+                    alignas_index = index;
+                    break;
+                }
             }
+        }
+        if (alignas_index != UINT32_MAX)
+        {
+            c_parse_diagnostic(result, preprocess.tokens[alignas_index].location, C_DIAGNOSTIC_INVALID_ALIGNMENT,
+                               S8("alignment specifier cannot be applied to a parameter"));
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+            return;
         }
         frame->stage = C_TYPE_PARSE_STAGE_CHILD;
         if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
@@ -13799,6 +13912,8 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
         };
         memset(result.aggregate_lookup->slots, 0, sizeof(*result.aggregate_lookup->slots) * aggregate_slot_count);
     }
+    result.position_index = arena_allocate(arena, CTokenPositionIndex, 1);
+    *result.position_index = (CTokenPositionIndex){0};
     result.identifier_uses = arena_allocate(arena, CIdentifierUse, result.identifier_use_capacity);
     result.identifier_use_by_token = arena_allocate(arena, u32, result.identifier_use_by_token_capacity);
     memset(result.identifier_use_by_token, 0xff, sizeof(*result.identifier_use_by_token) * result.identifier_use_by_token_capacity);
