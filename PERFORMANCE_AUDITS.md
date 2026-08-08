@@ -12,6 +12,131 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-08k` (Linux x86_64, Zen 4 7940HS; a vectorization/branch-removal/
+data-flattening survey — cycles, branch-miss, and L1d-miss `perf record`
+profiles of the clang-built Release stage-1 `ide cc` and `ide bench`, plus
+`perf stat` counter baselines; every number clang-built. Ran concurrently
+with the `2026-08-08j` IrValue side-table branch, so its four claimed leads —
+arena reuse-pool routing, blob chunk table, `c_ir_query_execute`,
+`c_parse_type_layout` cache — were deliberately not touched here; this
+worktree's baseline is the `2026-08-08i` tree. Landed after
+`2026-08-08l`, so this entry sits above it; the reference points at the end
+of this entry are re-measured on the merged tree and are the ones the next
+audit starts from. AGENTS.md now records the
+microarchitecture tuning target: Zen 4 / Zen 5, `-march=native` already on
+GNU-family builds, intrinsics must keep guarded scalar fallbacks because the
+self-hosted stages compile without vendor headers.) One change taken and
+measured, the rest recorded as ranked structural proposals below.
+
+- **The buster tokenizer paid one `arena_allocate` call per 4-byte token.**
+  `arena_allocate_bytes` held 17.6% of `ide bench` cycles and
+  `tokenizer_emit_token` another 9.6% — pure per-token call overhead around a
+  15-instruction bump allocator. Every scan step consumes at least one source
+  byte, so `file_length + 1` bounds the token count including EOF: the array
+  is now reserved once, tokens are stored through a cursor, and the unused
+  tail is handed back via `arena_set_position`. **`ide bench` 713.0 M to
+  559.1 M instructions (`-21.6%`), `BENCH_PARSE` median 95122 to 81987 ns
+  (`-13.8%`), `BENCH_IO` median 274195 to 261601 ns**; post-change
+  `arena_allocate_bytes` fell to 4.1% and the emit helper inlined away.
+  Stage 1 instruction-neutral (5.4728 G vs 5.4721 G — the tokenizer is not on
+  the `cc` path), byte-identical fixed point (`SELF_HOST deterministic
+  bytes=28704320`), all 16356 Release tests and all 29 sanitized Debug
+  modules pass.
+- **Counter shape of stage 1, for targeting (clang Release, this host):**
+  5.472 G instructions / 3.108 G cycles (IPC 1.76), 1.035 G branches with
+  18.5 M misses (1.79% — ≈8% of cycles at Zen 4's ~13-cycle redirect), and
+  **168.6 M L1d-load misses**; 0.49 s of the 1.16 s wall is sys (the known
+  fault plumbing). Memory touch, not branch misses and not scalar compute, is
+  the stage-1 ceiling — data flattening ranks above SIMD kernels below.
+  `ide bench` by contrast runs IPC 3.45 at 0.83% miss rate: compute-shaped,
+  so its levers are call/branch removal in `tokenize`/`parser_parse`.
+- **Proposal 1 — flatten `IrInstruction` (216 B/row today, measured via
+  `ptype /o`): the single biggest open structural lever.** Six raw pointers
+  (`operands`/`targets`/`immediates`/`label_names`/`operand_names`/
+  `clobbers`), a 16-B `String8 literal`, a 16-B `ParserSourceRange`, a 32-B
+  `IrSourceRange`, and ~17 id/enum words per instruction. Every consumer
+  walks these rows linearly: `codegen_generate_canonical_module` (6.7% of
+  stage-1 cycles, 7.5% of L1d misses), `ir_validate_canonical_module`
+  (2.2%/3.4%), `dwarf_build_model` (1.1%/3.8%), and the lowering side that
+  writes them (`c_ir_lower_*` ≥15% combined). Move operand/target/immediate
+  arrays to u32 offsets into per-function flat pools (counts to u8/u16);
+  move the inline-assembly-only fields (`label_names`, `operand_names`,
+  `clobbers`, `literal`) into a sparse per-function side table keyed by
+  instruction id — the exact pattern the `2026-08-08j` IrValue table just
+  validated at `-3.3%` stage 1 for a smaller row; shrink `IrSourceRange` to
+  u32 offset/length (`c_translate_source` already rejects sources over
+  UINT32_MAX); and consider splitting build-time-only fields (`entity`,
+  `instantiation`, `local`, analysis-side ids) from the consume-time set so
+  codegen/validate/dwarf walk a ~48–64 B row. Expected larger than the
+  IrValue win; also cuts the per-function `memset`/fault tax
+  (`__memset_avx512` family holds ~14% of stage-1 libc L1d misses).
+  `IrIncoming`/`IrBlockParameter`/`IrPredecessor` linked lists flatten to
+  index-linked arrays in the same pass.
+- **Proposal 2 — intern identifiers at lex time; make names u32 symbol ids.**
+  Every identifier on every logical line runs `c_macro_find` (byte-at-a-time
+  FNV then chain walk with `string_equal`; 1.4% cycles, 2.1% of branch
+  misses), `c_parse_lookup_entity` re-probes per scope with string keys
+  (2.3% cycles), `c_declaration_keyword` re-hashes spellings (1.1% cycles,
+  2.3% of misses), and `c_ir_prepare_calls_discover` runs a ~25-probe
+  `string_equal` builtin ladder per identifier token inside
+  `c_ir_lower_frame_fallback` (9.1% cycles, 8.3% of misses — the #2
+  mispredictor). Hash each identifier once in `c_lex` while its bytes are in
+  L1, intern into a flat open-addressing table, store the u32 id in the
+  token. Macro lookup becomes an id-indexed array load; keyword and builtin
+  tests become integer range compares (intern keywords and builtin names
+  first, in enum order); scope lookups key on u32. Until it lands, a one-byte
+  `spelling.pointer[0] == '_'` prefilter in front of the builtin ladder is
+  the cheap stopgap.
+- **Proposal 3 — shrink `CToken` 48 B to 16** (u32 source offset replacing
+  the `spelling` pointer, u32 length, u8 kind, u16 punctuator, plus the
+  proposal-2 symbol id): the lexer allocates `48 B x (source bytes + 1)` of
+  token rows per include file — the `c_lex include arrays ~26 ms` fault item
+  from `2026-08-08i` — and the preprocessor's staging arrays, expansion
+  copies, and range materialization move 48-B rows (`__memmove_avx512` ~1%
+  of stage-1 cycles, libc 13.9% of L1d misses overall). The eagerly
+  materialized 24-B `CSourceLocation` per token is recomputable on demand
+  from the existing checkpoint tables (same eager-metadata shape the IrValue
+  table removed). Pervasive `spelling` consumers make this the widest
+  refactor of the three; sequence it with proposal 2.
+- **Proposal 4 — block classification for `c_lex` (and the buster
+  `tokenize`), not more in-loop SWAR.** `c_lex` is 4.2% of stage-1 cycles
+  but **9.4% of branch misses — the #1 mispredictor**; on the bench side
+  `tokenize` holds 31% of cycles post-fix. `2026-08-08i` already measured
+  that SWAR probes *inside* the per-token loop go negative (comment scan
+  `+12 M`, whitespace run `+6 M`) — the structural version classifies the
+  whole translated buffer once: 64-byte AVX-512 blocks producing bitmasks
+  (whitespace, newline, identifier-continue via VPERMB nibble tables,
+  quote/backslash, punctuator starts), token boundaries then come from mask
+  arithmetic and `tzcnt` iteration with no per-byte dispatch. Zen 4/5 run
+  VPERMB/VPCMPEQB at full rate; guard behind `__AVX512BW__`-family checks
+  with the current scalar loop as the fallback (self-host and MSVC compile
+  it; performance is only quoted clang-built). The same pass can emit the
+  spelling/delimiter position streams `c_parse_position_index_build`
+  rebuilds today (1.0% cycles, 2.5% of misses). Fold `c_translate_source`'s
+  SWAR probe into the same block walk. `ide bench`'s keyword ladder
+  (`__memcmp_evex` 3.2% of bench cycles) wants the proposal-2 treatment —
+  perfect-hash or intern, one probe per identifier.
+- **Proposal 5 — fuse the three canonical-codegen instruction scans**
+  (`codegen_canonical_direct_call_uses`, `x64_function_saves_rbx`, and the
+  per-call `x64_call_layout` rediscovery — 14.4%/6.8%/13.5% of the module's
+  samples in the `2026-08-08i` capture, still open and unclaimed): one pass
+  over the instruction array filling a per-function scratch, ideally taken
+  together with proposal 1 since it rewrites the same walks over the same
+  rows. The per-function `memset(uses, 0, value_count)` becomes a shared
+  2-bit scratch bitmap in the same change.
+- Left alone deliberately: threaded/lane-parallel codegen (excluded from
+  this survey's mandate), and the four `2026-08-08j`-branch leads listed at
+  the top. Traps re-confirmed for the next reader: quote performance only
+  from clang-built binaries; run `test_self_host` unpiped after frontend
+  changes; SWAR-in-the-token-loop is a measured dead end — classification
+  must move out of the dispatch loop to win.
+- Reference points for the next audit, all clang-built on this host:
+  stage 1 `5.473 G` instructions / `~287 k` minor faults (unchanged —
+  tokenizer is not on the `cc` path), Release `ide test` `7.264 G`,
+  `ide bench` **`559.1 M`** instructions per run, `BENCH_PARSE` median
+  `~82.0 k ns`, `BENCH_IO` median `~261.6 k ns`. Stage 2 `80.0 G`,
+  validation only.
+
 `2026-08-08l` (Linux x86_64; the same branch as `2026-08-08j`, taking the
 remaining ranked leftovers — arena reuse routing, the generated-blob
 chunk-pointer table, and the codegen scan items — measured change-by-change
