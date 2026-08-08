@@ -39140,12 +39140,17 @@ BUSTER_GLOBAL_LOCAL bool c_ir_alignment_evaluate(CIntegerIrBuilder* builder, u32
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool c_ir_type_is_flexible_array(CParseResult* parse, CTypeId type)
+// Marks every array type that some struct uses as its flexible array member.
+// The answer is a property of the whole type table, so it is collected in one
+// pass and read back by index; asking it per array type rescans every
+// aggregate and every member, which is quadratic on a large translation unit.
+BUSTER_GLOBAL_LOCAL void c_ir_collect_flexible_array_types(CParseResult* parse, bool* flexible)
 {
-    if (!parse || type.value >= parse->type_count)
+    if (!parse || !flexible)
     {
-        return false;
+        return;
     }
+    memset(flexible, 0, sizeof(*flexible) * parse->type_count);
     for (u32 aggregate_index = 0; aggregate_index < parse->type_count; aggregate_index += 1)
     {
         CType* aggregate = parse->types + aggregate_index;
@@ -39165,18 +39170,16 @@ BUSTER_GLOBAL_LOCAL bool c_ir_type_is_flexible_array(CParseResult* parse, CTypeI
             continue;
         }
         CType* array = parse->types + member->type.value;
-        if (array->kind != C_TYPE_ARRAY || array->array_bound >= parse->array_bound_count || member->type.value != type.value ||
-            array->element_type.value >= parse->type_count)
+        if (array->kind != C_TYPE_ARRAY || array->array_bound >= parse->array_bound_count || array->element_type.value >= parse->type_count)
         {
             continue;
         }
         CArrayBound bound = parse->array_bounds[array->array_bound];
         if (!bound.token_count && !bound.is_star && !bound.has_inferred_count)
         {
-            return true;
+            flexible[member->type.value] = true;
         }
     }
-    return false;
 }
 
 CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target)
@@ -39509,8 +39512,13 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                      .field_count = c_type->member_count,
                                                                  });
     }
+    bool* flexible_array_types = arena_allocate(temporary_arena, bool, parse.type_count);
     for (u32 type_mapping_round = 0; type_mapping_round < 2; type_mapping_round += 1)
     {
+        // Rebuilt each round because c_ir_infer_incomplete_array_bounds below
+        // can give a bound an inferred count, which retires it as a flexible
+        // array member.  Nothing inside the pass loop edits types or bounds.
+        c_ir_collect_flexible_array_types(&parse, flexible_array_types);
         for (u32 pass = 0; pass < parse.type_count; pass += 1)
         {
             bool progress = false;
@@ -39821,10 +39829,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 CArrayBound bound = parse.array_bounds[c_type->array_bound];
                 u64 element_count = 0;
                 bool count_resolved = c_ir_array_bound_evaluate(&constant_builder, bound, &element_count);
-                if (!count_resolved && !bound.is_star && !bound.token_count &&
-                    c_ir_type_is_flexible_array(&parse, (CTypeId){
-                                                     .value = type_index,
-                                                 }))
+                if (!count_resolved && !bound.is_star && !bound.token_count && flexible_array_types[type_index])
                 {
                     element_count = 0;
                     count_resolved = true;
