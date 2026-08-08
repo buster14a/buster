@@ -198,10 +198,11 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_inline_assembly_types_compatible(IrType* o
 
 BUSTER_GLOBAL_LOCAL bool ir_analysis_inline_assembly_valid(AnalysisResult* analysis, IrFunction* function, IrInstruction* instruction)
 {
+    IrInstructionExtra extra = ir_instruction_extra(function, instruction->id);
     bool valid = instruction->operand_count == instruction->immediate_count && (instruction->target_count == 0 || instruction->target_count >= 2) &&
-                 instruction->label_name_count == (instruction->target_count ? instruction->target_count - 1 : 0) &&
-                 (!instruction->label_name_count || instruction->label_names) && instruction->operand_name_count == instruction->operand_count &&
-                 (!instruction->operand_name_count || instruction->operand_names) && (!instruction->clobber_count || instruction->clobbers) &&
+                 extra.label_name_count == (instruction->target_count ? instruction->target_count - 1 : 0) &&
+                 (!extra.label_name_count || extra.label_names) && extra.operand_name_count == instruction->operand_count &&
+                 (!extra.operand_name_count || extra.operand_names) && (!extra.clobber_count || extra.clobbers) &&
                  instruction->result.value == IR_ID_UNDERLYING_INVALID;
     for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
     {
@@ -248,11 +249,12 @@ BUSTER_GLOBAL_LOCAL bool ir_analysis_inline_assembly_valid(AnalysisResult* analy
 
 BUSTER_GLOBAL_LOCAL bool ir_canonical_inline_assembly_valid(IrProgram* program, IrFunction* function, IrInstruction* instruction)
 {
+    IrInstructionExtra extra = ir_instruction_extra(function, instruction->id);
     bool valid = instruction->canonical_type.value < program->types.count && ir_type_from_id(&program->types, instruction->canonical_type)->kind == IR_TYPE_VOID &&
                  instruction->operand_count == instruction->immediate_count && (instruction->target_count == 0 || instruction->target_count >= 2) &&
-                 instruction->label_name_count == (instruction->target_count ? instruction->target_count - 1 : 0) &&
-                 (!instruction->label_name_count || instruction->label_names) && instruction->operand_name_count == instruction->operand_count &&
-                 (!instruction->operand_name_count || instruction->operand_names) && (!instruction->clobber_count || instruction->clobbers) &&
+                 extra.label_name_count == (instruction->target_count ? instruction->target_count - 1 : 0) &&
+                 (!extra.label_name_count || extra.label_names) && extra.operand_name_count == instruction->operand_count &&
+                 (!extra.operand_name_count || extra.operand_names) && (!extra.clobber_count || extra.clobbers) &&
                  instruction->result.value == IR_ID_UNDERLYING_INVALID;
     for (u32 target_index = 0; valid && target_index < instruction->target_count; target_index += 1)
     {
@@ -333,6 +335,98 @@ IrValueLabelMetadata ir_value_label_metadata(IrFunction* function, IrValueId val
     IrValueLabelMetadata* entry = ir_value_label_metadata_find(function, value);
     IrValueLabelMetadata zero = {0};
     return entry ? *entry : zero;
+}
+
+IrInstructionExtra* ir_instruction_extra_find(IrFunction* function, IrInstructionId instruction)
+{
+    if (!function || !function->extra_count)
+    {
+        return 0;
+    }
+    u32 low = 0;
+    u32 high = function->extra_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (function->extra_instructions[middle].value < instruction.value)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    if (low < function->extra_count && function->extra_instructions[low].value == instruction.value)
+    {
+        return function->extras + low;
+    }
+    return 0;
+}
+
+IrInstructionExtra ir_instruction_extra(IrFunction* function, IrInstructionId instruction)
+{
+    IrInstructionExtra* entry = ir_instruction_extra_find(function, instruction);
+    IrInstructionExtra zero = {0};
+    return entry ? *entry : zero;
+}
+
+IrInstructionExtra* ir_instruction_extra_ensure(Arena* arena, IrFunction* function, IrInstructionId instruction)
+{
+    if (!arena || !function)
+    {
+        return 0;
+    }
+    u32 low = 0;
+    u32 high = function->extra_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (function->extra_instructions[middle].value < instruction.value)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    if (low < function->extra_count && function->extra_instructions[low].value == instruction.value)
+    {
+        return function->extras + low;
+    }
+    if (function->extra_count == function->extra_capacity)
+    {
+        u32 capacity = function->extra_capacity ? function->extra_capacity * 2 : 8;
+        IrInstructionId* instructions = arena_allocate(arena, IrInstructionId, capacity);
+        IrInstructionExtra* extras = arena_allocate(arena, IrInstructionExtra, capacity);
+        if (function->extra_count)
+        {
+            memcpy(instructions, function->extra_instructions, sizeof(*instructions) * function->extra_count);
+            memcpy(extras, function->extras, sizeof(*extras) * function->extra_count);
+        }
+        function->extra_instructions = instructions;
+        function->extras = extras;
+        function->extra_capacity = capacity;
+    }
+    for (u32 move = function->extra_count; move > low; move -= 1)
+    {
+        function->extra_instructions[move] = function->extra_instructions[move - 1];
+        function->extras[move] = function->extras[move - 1];
+    }
+    function->extra_instructions[low] = instruction;
+    function->extras[low] = (IrInstructionExtra){0};
+    function->extra_count += 1;
+    return function->extras + low;
+}
+
+ParserSourceRange ir_instruction_source(IrFunction* function, IrInstructionId instruction)
+{
+    if (!function || !function->instruction_sources || instruction.value >= function->instruction_count)
+    {
+        return (ParserSourceRange){0};
+    }
+    return function->instruction_sources[instruction.value];
 }
 
 IrValueLabelMetadata* ir_value_label_metadata_ensure(Arena* arena, IrFunction* function, IrValueId value)
@@ -1828,8 +1922,9 @@ u32 ir_inline_assembly_label_operand_base(IrInstruction* instruction)
     return result > UINT32_MAX ? UINT32_MAX : (u32)result;
 }
 
-bool ir_inline_assembly_jump_target(IrInstruction* instruction, String8 literal, String8 prefix, u32* target_index_out)
+bool ir_inline_assembly_jump_target(IrFunction* function, IrInstruction* instruction, String8 literal, String8 prefix, u32* target_index_out)
 {
+    IrInstructionExtra extra = ir_instruction_extra(function, instruction->id);
     if (!instruction || !target_index_out || !literal.pointer || !prefix.pointer || literal.length <= prefix.length || instruction->target_count < 2)
     {
         return false;
@@ -1846,7 +1941,7 @@ bool ir_inline_assembly_jump_target(IrInstruction* instruction, String8 literal,
     u32 label_count = instruction->target_count - 1;
     if (suffix_length >= 3 && literal.pointer[suffix_start] == '[' && literal.pointer[literal.length - 1] == ']')
     {
-        if (instruction->label_name_count != label_count || !instruction->label_names)
+        if (extra.label_name_count != label_count || !extra.label_names)
         {
             return false;
         }
@@ -1854,9 +1949,9 @@ bool ir_inline_assembly_jump_target(IrInstruction* instruction, String8 literal,
             .pointer = literal.pointer + suffix_start + 1,
             .length = suffix_length - 2,
         };
-        for (u32 label_index = 0; label_index < instruction->label_name_count; label_index += 1)
+        for (u32 label_index = 0; label_index < extra.label_name_count; label_index += 1)
         {
-            if (string_equal(name, instruction->label_names[label_index]))
+            if (string_equal(name, extra.label_names[label_index]))
             {
                 *target_index_out = label_index + 1;
                 return true;
@@ -2214,6 +2309,7 @@ BUSTER_GLOBAL_LOCAL IrInstruction* ir_emit(IrBuilder* builder, IrOpcode opcode, 
     BUSTER_CHECK(function->instruction_count < function->instruction_capacity);
     IrInstructionId id = {.value = function->instruction_count};
     IrInstruction* instruction = function->instructions + function->instruction_count;
+    function->instruction_sources[id.value] = source;
     *instruction = (IrInstruction){
         .type = type,
         .canonical_type = IR_TYPE_ID_INVALID,
@@ -2225,7 +2321,6 @@ BUSTER_GLOBAL_LOCAL IrInstruction* ir_emit(IrBuilder* builder, IrOpcode opcode, 
         .id = id,
         .next = IR_INSTRUCTION_ID_INVALID,
         .result = IR_VALUE_ID_INVALID,
-        .source = source,
         .opcode = opcode,
         .conversion_operation = IR_CONVERSION_COUNT,
         .unary_operation = IR_UNARY_COUNT,
@@ -2788,7 +2883,7 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
         case AST_NODE_CONSTANT_FLOAT:
         {
             instruction = ir_emit(builder, IR_OPCODE_CONSTANT_FLOAT, typed->type, IR_VALUE_VALUE, source, 0, 0, true);
-            instruction->literal = node->floating.spelling;
+            ir_instruction_extra_ensure(builder->result_arena, builder->function, instruction->id)->literal = node->floating.spelling;
             instruction->immediates = arena_allocate(builder->result_arena, u64, 1);
             AnalysisType* float_type = analysis_type_from_id(builder->analysis, typed->type);
             BUSTER_CHECK(typed->constant.kind == ANALYSIS_CONSTANT_FLOAT && float_type->kind == ANALYSIS_TYPE_FLOAT);
@@ -2811,7 +2906,7 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
         case AST_NODE_CONSTANT_STRING:
         {
             instruction = ir_emit(builder, IR_OPCODE_CONSTANT_STRING, typed->type, IR_VALUE_VALUE, source, 0, 0, true);
-            instruction->literal = node->string.value;
+            ir_instruction_extra_ensure(builder->result_arena, builder->function, instruction->id)->literal = node->string.value;
         }
         break;
         case AST_NODE_IDENTIFIER:
@@ -3617,6 +3712,8 @@ BUSTER_GLOBAL_LOCAL void ir_lower_function(Arena* result_arena, Arena* scratch_a
     ir_function_measure(scratch_arena, entity->ast.code, body, &function->instruction_capacity, &function->block_capacity, &function->value_capacity);
     function->blocks = arena_allocate(result_arena, IrBlock, function->block_capacity);
     function->instructions = arena_allocate(result_arena, IrInstruction, function->instruction_capacity);
+    function->instruction_sources = arena_allocate(result_arena, ParserSourceRange, function->instruction_capacity);
+    memset(function->instruction_sources, 0, sizeof(*function->instruction_sources) * function->instruction_capacity);
     function->values = arena_allocate(result_arena, IrValue, function->value_capacity);
     function->local_places = arena_allocate(result_arena, IrValueId, function->local_count);
     function->local_uses_memory = arena_allocate(result_arena, bool, function->local_count);
@@ -4633,6 +4730,13 @@ IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, 
         {
             memcpy(instructions, function->instructions, sizeof(IrInstruction) * function->instruction_count);
         }
+        if (function->instruction_sources)
+        {
+            ParserSourceRange* sources = arena_allocate(arena, ParserSourceRange, capacity);
+            memset(sources, 0, sizeof(*sources) * capacity);
+            memcpy(sources, function->instruction_sources, sizeof(*sources) * function->instruction_count);
+            function->instruction_sources = sources;
+        }
         function->instructions = instructions;
         function->instruction_capacity = capacity;
     }
@@ -4988,7 +5092,7 @@ BUSTER_GLOBAL_LOCAL void ir_program_canonicalize_module(IrProgram* program, Anal
         {
             IrInstruction* instruction = function->instructions + instruction_index;
             instruction->canonical_type = ir_program_type_map(program, module_analysis->module.id, instruction->type);
-            instruction->canonical_source = ir_source_range_from_parser(source, instruction->source);
+            instruction->canonical_source = ir_source_range_from_parser(source, ir_instruction_source(function, instruction->id));
             instruction->canonical_local = instruction->local.value == ANALYSIS_ID_UNDERLYING_INVALID ? IR_LOCAL_ID_INVALID
                                                                                                       : (IrLocalId){
                                                                                                             .value = instruction->local.value,

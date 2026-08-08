@@ -16569,7 +16569,6 @@ BUSTER_GLOBAL_LOCAL CIrGroupScan c_ir_scan_delimiter_group(CIntegerIrBuilder* bu
 BUSTER_GLOBAL_LOCAL IrInstruction c_ir_instruction_initialize(IrOpcode opcode, IrTypeId type, IrSourceRange source)
 {
     return (IrInstruction){
-        .source = {0},
         .canonical_source = source,
         .type = ANALYSIS_TYPE_ID_INVALID,
         .entity = ANALYSIS_ENTITY_ID_INVALID,
@@ -18934,11 +18933,11 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_float(CIntegerIrBuilder* builder, CToken
     immediate[0] = bits;
     IrInstruction instruction =
         c_ir_instruction_initialize(IR_OPCODE_CONSTANT_FLOAT, type, c_ir_source_range(token.location, token.spelling.length));
-    instruction.literal = token.spelling;
     instruction.immediates = immediate;
     instruction.immediate_count = 1;
     instruction.result = result;
     IrInstructionId id = c_ir_append_instruction(builder, instruction);
+    ir_instruction_extra_ensure(builder->arena, builder->function, id)->literal = token.spelling;
     builder->function->values[result.value].definition = id;
     return result;
 }
@@ -33628,7 +33627,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder,
     IrInstruction instruction = c_ir_instruction_initialize(
         IR_OPCODE_INLINE_ASSEMBLY, builder->void_type,
         c_ir_source_range(builder->preprocess.tokens[state->start].location, builder->preprocess.tokens[state->start].spelling.length));
-    instruction.literal = (String8){
+    String8 assembly_literal = {
         .pointer = (char8*)assembly.pointer,
         .length = assembly.length,
     };
@@ -33636,15 +33635,11 @@ BUSTER_GLOBAL_LOCAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder,
     instruction.operand_count = state->operand_count;
     instruction.immediates = state->constraints;
     instruction.immediate_count = state->operand_count;
-    instruction.operand_names = state->operand_names;
-    instruction.operand_name_count = state->operand_count;
-    instruction.clobbers = state->clobbers;
-    instruction.clobber_count = state->clobber_count;
-    if (!c_ir_inline_assembly_template_names_valid(builder, state, instruction.literal))
+    if (!c_ir_inline_assembly_template_names_valid(builder, state, assembly_literal))
     {
         return false;
     }
-    if (!c_ir_inline_assembly_substitute_named_operands(builder, state, instruction.literal, &instruction.literal))
+    if (!c_ir_inline_assembly_substitute_named_operands(builder, state, assembly_literal, &assembly_literal))
     {
         return false;
     }
@@ -33698,12 +33693,19 @@ BUSTER_GLOBAL_LOCAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder,
         instruction.targets[0] = fallthrough;
         memcpy(instruction.targets + 1, edge_targets, sizeof(IrBlockId) * state->label_count);
         instruction.target_count = state->label_count + 1;
-        instruction.label_names = state->label_names;
-        instruction.label_name_count = state->label_count;
-        if (c_ir_append_instruction(builder, instruction).value == IR_ID_UNDERLYING_INVALID)
+        IrInstructionId goto_assembly = c_ir_append_instruction(builder, instruction);
+        if (goto_assembly.value == IR_ID_UNDERLYING_INVALID)
         {
             return false;
         }
+        IrInstructionExtra* goto_extra = ir_instruction_extra_ensure(builder->arena, builder->function, goto_assembly);
+        goto_extra->literal = assembly_literal;
+        goto_extra->operand_names = state->operand_names;
+        goto_extra->operand_name_count = state->operand_count;
+        goto_extra->clobbers = state->clobbers;
+        goto_extra->clobber_count = state->clobber_count;
+        goto_extra->label_names = state->label_names;
+        goto_extra->label_name_count = state->label_count;
         builder->function->blocks[builder->current_block.value].terminated = true;
         if (!c_ir_switch_block(builder, fallthrough))
         {
@@ -33740,7 +33742,18 @@ BUSTER_GLOBAL_LOCAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder,
         }
         return c_ir_switch_block(builder, fallthrough);
     }
-    return c_ir_append_instruction(builder, instruction).value != IR_ID_UNDERLYING_INVALID;
+    IrInstructionId plain_assembly = c_ir_append_instruction(builder, instruction);
+    if (plain_assembly.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return false;
+    }
+    IrInstructionExtra* plain_extra = ir_instruction_extra_ensure(builder->arena, builder->function, plain_assembly);
+    plain_extra->literal = assembly_literal;
+    plain_extra->operand_names = state->operand_names;
+    plain_extra->operand_name_count = state->operand_count;
+    plain_extra->clobbers = state->clobbers;
+    plain_extra->clobber_count = state->clobber_count;
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* builder)

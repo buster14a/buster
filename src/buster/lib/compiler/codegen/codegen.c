@@ -9,9 +9,10 @@
 #define X64_VALUE_SLOT_COMPONENT_COUNT 4
 #define A64_VALUE_SLOT_SIZE 32
 
-BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_jump_target(IrInstruction* instruction, String8 literal, String8 prefix, u32* target_index_out)
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_jump_target(IrFunction* function, IrInstruction* instruction, String8 literal, String8 prefix,
+                                                             u32* target_index_out)
 {
-    return ir_inline_assembly_jump_target(instruction, literal, prefix, target_index_out);
+    return ir_inline_assembly_jump_target(function, instruction, literal, prefix, target_index_out);
 }
 
 BUSTER_GLOBAL_LOCAL void codegen_emit_u8(CodegenBuffer* buffer, u8 value);
@@ -193,7 +194,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_function_saves_rbx(IrFunction* fu
         {
             continue;
         }
-        if ((instruction->operand_count && !instruction->immediates) || (instruction->clobber_count && !instruction->clobbers))
+        IrInstructionExtra extra = ir_instruction_extra(function, instruction->id);
+        if ((instruction->operand_count && !instruction->immediates) || (extra.clobber_count && !extra.clobbers))
         {
             return false;
         }
@@ -204,9 +206,9 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_function_saves_rbx(IrFunction* fu
                 return true;
             }
         }
-        for (u32 clobber_index = 0; clobber_index < instruction->clobber_count; clobber_index += 1)
+        for (u32 clobber_index = 0; clobber_index < extra.clobber_count; clobber_index += 1)
         {
-            if (codegen_inline_assembly_clobber_is_rbx(instruction->clobbers[clobber_index]))
+            if (codegen_inline_assembly_clobber_is_rbx(extra.clobbers[clobber_index]))
             {
                 return true;
             }
@@ -2676,17 +2678,18 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(X64Builder* builder, IrBlockId blo
     case IR_OPCODE_CONSTANT_STRING:
     {
         AnalysisType* type = analysis_type_from_id(builder->analysis, instruction->type);
-        if (type->kind != ANALYSIS_TYPE_ARRAY || type->as.array.count != instruction->literal.length)
+        String8 literal = ir_instruction_extra(builder->function, instruction->id).literal;
+        if (type->kind != ANALYSIS_TYPE_ARRAY || type->as.array.count != literal.length)
         {
             return false;
         }
         u32 data_offset = (u32)builder->read_only_data.count;
-        if (instruction->literal.length > builder->read_only_data.capacity - builder->read_only_data.count)
+        if (literal.length > builder->read_only_data.capacity - builder->read_only_data.count)
         {
             return false;
         }
-        memcpy(builder->read_only_data.bytes + builder->read_only_data.count, instruction->literal.pointer, instruction->literal.length);
-        builder->read_only_data.count += instruction->literal.length;
+        memcpy(builder->read_only_data.bytes + builder->read_only_data.count, literal.pointer, literal.length);
+        builder->read_only_data.count += literal.length;
         codegen_emit_u8(&builder->buffer, 0x48);
         codegen_emit_u8(&builder->buffer, 0x8d);
         codegen_emit_u8(&builder->buffer, 0x05);
@@ -2709,7 +2712,7 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(X64Builder* builder, IrBlockId blo
         x64_emit_store(builder, X64_REGISTER_RAX, x64_value_displacement_component(instruction->result, 0));
         codegen_emit_u8(&builder->buffer, 0x48);
         codegen_emit_u8(&builder->buffer, 0xb8);
-        codegen_emit_u64(&builder->buffer, instruction->literal.length);
+        codegen_emit_u64(&builder->buffer, literal.length);
         x64_emit_store(builder, X64_REGISTER_RAX, x64_value_displacement_component(instruction->result, 1));
         codegen_emit_u8(&builder->buffer, 0x48);
         codegen_emit_u8(&builder->buffer, 0xb8);
@@ -4310,7 +4313,7 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(Arena* arena, Analys
         IrInstruction* instruction = function->instructions + instruction_index;
         if (instruction->opcode == IR_OPCODE_CONSTANT_STRING)
         {
-            read_only_data_capacity += instruction->literal.length;
+            read_only_data_capacity += ir_instruction_extra(function, instruction->id).literal.length;
         }
     }
     CodegenRegisterAllocation allocation = codegen_allocate_registers(arena, analysis, function, 1, false);
@@ -4414,9 +4417,10 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(Arena* arena, Analys
         for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
         {
             IrInstruction* emitted = function->instructions + id.value;
+            ParserSourceRange emitted_source = ir_instruction_source(function, id);
             // Parser lines are zero-based; recorded lines are one-based.
-            codegen_record_line(line_entries, &line_entry_count, line_entry_capacity, (u32)builder.buffer.count, 0, emitted->source.line + 1,
-                                emitted->source.column + 1);
+            codegen_record_line(line_entries, &line_entry_count, line_entry_capacity, (u32)builder.buffer.count, 0, emitted_source.line + 1,
+                                emitted_source.column + 1);
             if (!x64_emit_instruction(&builder, block->id, emitted))
             {
                 builder.buffer.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
@@ -5468,7 +5472,7 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(Arena* arena, Analy
         IrInstruction* instruction = function->instructions + instruction_index;
         if (instruction->opcode == IR_OPCODE_CONSTANT_STRING)
         {
-            read_only_data_capacity += instruction->literal.length;
+            read_only_data_capacity += ir_instruction_extra(function, instruction->id).literal.length;
         }
     }
     CodegenBuffer buffer = {
@@ -5555,9 +5559,10 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(Arena* arena, Analy
         for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
         {
             IrInstruction* instruction = function->instructions + id.value;
+            ParserSourceRange instruction_source = ir_instruction_source(function, id);
             // Parser lines are zero-based; recorded lines are one-based.
-            codegen_record_line(line_entries, &line_entry_count, line_entry_capacity, (u32)buffer.count, 0, instruction->source.line + 1,
-                                instruction->source.column + 1);
+            codegen_record_line(line_entries, &line_entry_count, line_entry_capacity, (u32)buffer.count, 0, instruction_source.line + 1,
+                                instruction_source.column + 1);
             switch (instruction->opcode)
             {
             case IR_OPCODE_LOCAL:
@@ -5740,15 +5745,16 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(Arena* arena, Analy
             case IR_OPCODE_CONSTANT_STRING:
             {
                 AnalysisType* type = analysis_type_from_id(analysis, instruction->type);
-                if (type->kind != ANALYSIS_TYPE_ARRAY || type->as.array.count != instruction->literal.length ||
-                    instruction->literal.length > read_only_data.capacity - read_only_data.count)
+                String8 literal = ir_instruction_extra(function, instruction->id).literal;
+                if (type->kind != ANALYSIS_TYPE_ARRAY || type->as.array.count != literal.length ||
+                    literal.length > read_only_data.capacity - read_only_data.count)
                 {
                     buffer.error = CODEGEN_ERROR_INVALID_IR;
                     break;
                 }
                 u32 data_offset = (u32)read_only_data.count;
-                memcpy(read_only_data.bytes + read_only_data.count, instruction->literal.pointer, instruction->literal.length);
-                read_only_data.count += instruction->literal.length;
+                memcpy(read_only_data.bytes + read_only_data.count, literal.pointer, literal.length);
+                read_only_data.count += literal.length;
                 if (buffer.count & 7)
                 {
                     a64_emit_instruction_word(&buffer, 0xd503201f);
@@ -5772,7 +5778,7 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(Arena* arena, Analy
                 last_data_relocation = relocation;
                 codegen_emit_u64(&buffer, 0);
                 a64_emit_store_value_component(&buffer, 0, instruction->result, 0);
-                a64_emit_constant(&buffer, 0, instruction->literal.length);
+                a64_emit_constant(&buffer, 0, literal.length);
                 a64_emit_store_value_component(&buffer, 0, instruction->result, 1);
                 a64_emit_constant(&buffer, 0, 1);
                 a64_emit_store_value_component(&buffer, 0, instruction->result, 2);
@@ -9182,8 +9188,9 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
             {
                 IrInstruction* instruction = function->instructions + instruction_index;
+                IrInstructionExtra extra = ir_instruction_extra(function, instruction->id);
                 if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY &&
-                    ((instruction->operand_count && !instruction->immediates) || (instruction->clobber_count && !instruction->clobbers)))
+                    ((instruction->operand_count && !instruction->immediates) || (extra.clobber_count && !extra.clobbers)))
                 {
                     result.error = CODEGEN_ERROR_INVALID_IR;
                     return result;
@@ -12343,15 +12350,16 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     }
                     else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY)
                     {
-                        bool cpuid = string_equal(instruction->literal, S8("cpuid"));
-                        bool xgetbv = string_equal(instruction->literal, S8("xgetbv"));
-                        bool undefined = string_equal(instruction->literal, S8("ud2"));
-                        bool no_instruction = !instruction->literal.length;
-                        bool nop = string_equal(instruction->literal, S8("nop"));
-                        bool pause = string_equal(instruction->literal, S8("pause"));
-                        bool interrupt = string_equal(instruction->literal, S8("int3"));
+                        IrInstructionExtra asm_extra = ir_instruction_extra(function, instruction->id);
+                        bool cpuid = string_equal(asm_extra.literal, S8("cpuid"));
+                        bool xgetbv = string_equal(asm_extra.literal, S8("xgetbv"));
+                        bool undefined = string_equal(asm_extra.literal, S8("ud2"));
+                        bool no_instruction = !asm_extra.literal.length;
+                        bool nop = string_equal(asm_extra.literal, S8("nop"));
+                        bool pause = string_equal(asm_extra.literal, S8("pause"));
+                        bool interrupt = string_equal(asm_extra.literal, S8("int3"));
                         u32 jump_target_index = 0;
-                        bool jump_label = codegen_inline_assembly_jump_target(instruction, instruction->literal, S8("jmp %l"), &jump_target_index);
+                        bool jump_label = codegen_inline_assembly_jump_target(function, instruction, asm_extra.literal, S8("jmp %l"), &jump_target_index);
                         bool operandless = undefined || nop || pause || interrupt;
                         if (!cpuid && !xgetbv && !operandless && !no_instruction && !jump_label)
                         {
@@ -12359,16 +12367,16 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             return result;
                         }
                         if ((operandless && instruction->operand_count) || (jump_label && instruction->target_count < 2) ||
-                            instruction->operand_count != instruction->immediate_count || instruction->operand_name_count != instruction->operand_count ||
-                            (instruction->operand_count && (!instruction->operands || !instruction->immediates || !instruction->operand_names)) ||
-                            (instruction->clobber_count && !instruction->clobbers))
+                            instruction->operand_count != instruction->immediate_count || asm_extra.operand_name_count != instruction->operand_count ||
+                            (instruction->operand_count && (!instruction->operands || !instruction->immediates || !asm_extra.operand_names)) ||
+                            (asm_extra.clobber_count && !asm_extra.clobbers))
                         {
                             result.error = CODEGEN_ERROR_INVALID_IR;
                             return result;
                         }
-                        for (u32 clobber_index = 0; clobber_index < instruction->clobber_count; clobber_index += 1)
+                        for (u32 clobber_index = 0; clobber_index < asm_extra.clobber_count; clobber_index += 1)
                         {
-                            String8 clobber = instruction->clobbers[clobber_index];
+                            String8 clobber = asm_extra.clobbers[clobber_index];
                             bool accepted = string_equal(clobber, S8("memory")) || string_equal(clobber, S8("cc")) ||
                                             string_equal(clobber, S8("rax")) || string_equal(clobber, S8("eax")) || string_equal(clobber, S8("ax")) ||
                                             string_equal(clobber, S8("al")) || string_equal(clobber, S8("rbx")) || string_equal(clobber, S8("ebx")) ||
@@ -12398,10 +12406,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         bool clobbered_registers[12] = {0};
                         bool* indirect = arena_allocate(arena, bool, instruction->operand_count ? instruction->operand_count : 1);
                         X64Register* asm_registers = arena_allocate(arena, X64Register, instruction->operand_count ? instruction->operand_count : 1);
-                        for (u32 clobber_index = 0; clobber_index < instruction->clobber_count; clobber_index += 1)
+                        for (u32 clobber_index = 0; clobber_index < asm_extra.clobber_count; clobber_index += 1)
                         {
                             X64Register clobber_register = X64_REGISTER_RAX;
-                            if (codegen_inline_assembly_clobber_register(instruction->clobbers[clobber_index], &clobber_register))
+                            if (codegen_inline_assembly_clobber_register(asm_extra.clobbers[clobber_index], &clobber_register))
                             {
                                 clobbered_registers[clobber_register] = true;
                                 used_registers[clobber_register] = true;
@@ -14677,22 +14685,23 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     }
                     else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY)
                     {
-                        bool empty = !instruction->literal.length;
-                        bool brk = string_equal(instruction->literal, S8("brk #0"));
-                        u32 nop_count = codegen_canonical_a64_nop_count(instruction->literal);
+                        IrInstructionExtra asm_extra = ir_instruction_extra(function, instruction->id);
+                        bool empty = !asm_extra.literal.length;
+                        bool brk = string_equal(asm_extra.literal, S8("brk #0"));
+                        u32 nop_count = codegen_canonical_a64_nop_count(asm_extra.literal);
                         bool nop = nop_count != 0;
-                        bool yield = string_equal(instruction->literal, S8("yield"));
-                        bool wait_event = string_equal(instruction->literal, S8("wfe"));
-                        bool wait_interrupt = string_equal(instruction->literal, S8("wfi"));
-                        bool send_event = string_equal(instruction->literal, S8("sev"));
-                        bool send_event_local = string_equal(instruction->literal, S8("sevl"));
+                        bool yield = string_equal(asm_extra.literal, S8("yield"));
+                        bool wait_event = string_equal(asm_extra.literal, S8("wfe"));
+                        bool wait_interrupt = string_equal(asm_extra.literal, S8("wfi"));
+                        bool send_event = string_equal(asm_extra.literal, S8("sev"));
+                        bool send_event_local = string_equal(asm_extra.literal, S8("sevl"));
                         u32 jump_target_index = 0;
-                        bool jump_label = codegen_inline_assembly_jump_target(instruction, instruction->literal, S8("b %l"), &jump_target_index);
+                        bool jump_label = codegen_inline_assembly_jump_target(function, instruction, asm_extra.literal, S8("b %l"), &jump_target_index);
                         if ((!empty && !brk && !nop && !yield && !wait_event && !wait_interrupt && !send_event && !send_event_local && !jump_label) ||
                             (jump_label && instruction->target_count < 2) || instruction->operand_count != instruction->immediate_count ||
-                            instruction->operand_name_count != instruction->operand_count ||
-                            (instruction->operand_count && (!instruction->operands || !instruction->immediates || !instruction->operand_names)) ||
-                            (instruction->clobber_count && !instruction->clobbers))
+                            asm_extra.operand_name_count != instruction->operand_count ||
+                            (instruction->operand_count && (!instruction->operands || !instruction->immediates || !asm_extra.operand_names)) ||
+                            (asm_extra.clobber_count && !asm_extra.clobbers))
                         {
                             result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                             return result;

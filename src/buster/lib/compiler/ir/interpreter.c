@@ -985,16 +985,17 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_field(IrExecutionFrame* frame, AnalysisT
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_interpreter_inline_assembly_jump_target(IrInstruction* instruction, String8 literal, String8 prefix, u32* target_index_out)
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_inline_assembly_jump_target(IrFunction* function, IrInstruction* instruction, String8 literal, String8 prefix,
+                                                                    u32* target_index_out)
 {
-    return ir_inline_assembly_jump_target(instruction, literal, prefix, target_index_out);
+    return ir_inline_assembly_jump_target(function, instruction, literal, prefix, target_index_out);
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_instruction_shape_valid(IrExecutionFrame* frame, IrInstruction* instruction)
 {
     if (!frame || !instruction || instruction->opcode >= IR_OPCODE_COUNT || !ir_interpreter_type_id_valid(frame->analysis, instruction->type) ||
         (instruction->operand_count && !instruction->operands) || (instruction->target_count && !instruction->targets) ||
-        (instruction->immediate_count && !instruction->immediates) || (instruction->literal.length && !instruction->literal.pointer))
+        (instruction->immediate_count && !instruction->immediates))
     {
         return false;
     }
@@ -1081,10 +1082,11 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_instruction_shape_valid(IrExecutionFrame
         return instruction->operand_count == 2 && instruction->target_count == 0 && instruction->immediate_count == 0;
     case IR_OPCODE_INLINE_ASSEMBLY:
     {
+        IrInstructionExtra extra = ir_instruction_extra(frame->function, instruction->id);
         bool valid = instruction->operand_count == instruction->immediate_count && (instruction->target_count == 0 || instruction->target_count >= 2) &&
-                     instruction->label_name_count == (instruction->target_count ? instruction->target_count - 1 : 0) &&
-                     (!instruction->label_name_count || instruction->label_names) && instruction->operand_name_count == instruction->operand_count &&
-                     (!instruction->operand_name_count || instruction->operand_names) && (!instruction->clobber_count || instruction->clobbers);
+                     extra.label_name_count == (instruction->target_count ? instruction->target_count - 1 : 0) &&
+                     (!extra.label_name_count || extra.label_names) && extra.operand_name_count == instruction->operand_count &&
+                     (!extra.operand_name_count || extra.operand_names) && (!extra.clobber_count || extra.clobbers);
         for (u32 target_index = 0; valid && target_index < instruction->target_count; target_index += 1)
         {
             valid = instruction->targets[target_index].value < frame->function->block_count;
@@ -2259,20 +2261,21 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                 operation_trap = IR_EXECUTION_TRAP_INVALID_PROGRAM;
                 break;
             }
-            IrRuntimeObject* object = ir_interpreter_object_create(scratch.arena, instruction->literal.length);
+            String8 literal = ir_instruction_extra(frame->function, instruction->id).literal;
+            IrRuntimeObject* object = ir_interpreter_object_create(scratch.arena, literal.length);
             if (!object)
             {
                 operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
                 break;
             }
-            for (u64 index = 0; index < instruction->literal.length; index += 1)
+            for (u64 index = 0; index < literal.length; index += 1)
             {
-                object->bytes[index] = instruction->literal.pointer[index];
+                object->bytes[index] = literal.pointer[index];
                 object->initialized[index] = 1;
             }
             produced = (IrRuntimeValue){
                 .object = object,
-                .length = instruction->literal.length,
+                .length = literal.length,
                 .element_size = 1,
                 .kind = string_type->kind == ANALYSIS_TYPE_SLICE ? IR_RUNTIME_VALUE_SLICE : IR_RUNTIME_VALUE_AGGREGATE,
                 .initialized = true,
@@ -3063,13 +3066,14 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
             }
             IrBlockId target = instruction->targets[0];
             u32 jump_target_index = 0;
-            bool jump_label = ir_interpreter_inline_assembly_jump_target(instruction, instruction->literal, S8("jmp %l"), &jump_target_index) ||
-                              ir_interpreter_inline_assembly_jump_target(instruction, instruction->literal, S8("b %l"), &jump_target_index);
+            String8 assembly_literal = ir_instruction_extra(frame->function, instruction->id).literal;
+            bool jump_label = ir_interpreter_inline_assembly_jump_target(frame->function, instruction, assembly_literal, S8("jmp %l"), &jump_target_index) ||
+                              ir_interpreter_inline_assembly_jump_target(frame->function, instruction, assembly_literal, S8("b %l"), &jump_target_index);
             if (jump_label)
             {
                 target = instruction->targets[jump_target_index];
             }
-            else if (instruction->literal.length)
+            else if (assembly_literal.length)
             {
                 operation_trap = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
                 break;

@@ -7856,7 +7856,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 if (asm_goto)
                 {
                     BUSTER_TEST(arguments, asm_goto->target_count == 2);
-                    BUSTER_TEST(arguments, asm_goto->literal.length == 0);
+                    BUSTER_TEST(arguments, ir_instruction_extra(labels_function, asm_goto->id).literal.length == 0);
                 }
                 BUSTER_TEST(arguments, ir_validate_canonical_module(labels_lowered.program, labels_module).error == IR_VALIDATION_NONE);
                 if (indirect_branch)
@@ -8032,6 +8032,11 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             IrInstruction* named_asm = 0;
             IrInstruction* named_operand_asm = 0;
             IrInstruction* outputs_only_asm = 0;
+            IrFunction* numeric_asm_function = 0;
+            IrFunction* named_asm_function = 0;
+            IrInstructionExtra numeric_asm_extra = {0};
+            IrInstructionExtra named_asm_extra = {0};
+            IrInstructionExtra named_operand_asm_extra = {0};
             IrInstruction* set_valued_indirect = 0;
             for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
             {
@@ -8072,18 +8077,24 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                     else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->target_count)
                     {
                         inline_goto_count += 1;
-                        if (instruction->literal.length && instruction->literal.pointer[instruction->literal.length - 1] == '2')
+                        IrInstructionExtra instruction_extra = ir_instruction_extra(function, instruction->id);
+                        if (instruction_extra.literal.length && instruction_extra.literal.pointer[instruction_extra.literal.length - 1] == '2')
                         {
                             numeric_asm = instruction;
+                            numeric_asm_function = function;
+                            numeric_asm_extra = instruction_extra;
                         }
                         else
                         {
                             named_asm = instruction;
+                            named_asm_function = function;
+                            named_asm_extra = instruction_extra;
                         }
                     }
                     else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && string_equal(function->name, S8("named_asm_operand")))
                     {
                         named_operand_asm = instruction;
+                        named_operand_asm_extra = ir_instruction_extra(function, instruction->id);
                     }
                     else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && string_equal(function->name, S8("outputs_only_asm")))
                     {
@@ -8099,29 +8110,29 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, overwritten_table_set_count == 0);
             BUSTER_TEST(arguments, typedef_indirect_count == 1);
             BUSTER_TEST(arguments, inline_goto_count == 2);
-            BUSTER_TEST(arguments, numeric_asm && numeric_asm->label_name_count == 1);
-            BUSTER_TEST(arguments, named_asm && named_asm->label_name_count == 1);
-            BUSTER_TEST(arguments, named_operand_asm && named_operand_asm->operand_name_count == 1);
+            BUSTER_TEST(arguments, numeric_asm && numeric_asm_extra.label_name_count == 1);
+            BUSTER_TEST(arguments, named_asm && named_asm_extra.label_name_count == 1);
+            BUSTER_TEST(arguments, named_operand_asm && named_operand_asm_extra.operand_name_count == 1);
             BUSTER_TEST(arguments, outputs_only_asm && outputs_only_asm->operand_count == 2 && outputs_only_asm->target_count == 0);
             if (named_operand_asm)
             {
-                BUSTER_STRING_TEST(arguments, named_operand_asm->operand_names[0], S8("named"));
-                BUSTER_STRING_TEST(arguments, named_operand_asm->literal, S8("%0"));
+                BUSTER_STRING_TEST(arguments, named_operand_asm_extra.operand_names[0], S8("named"));
+                BUSTER_STRING_TEST(arguments, named_operand_asm_extra.literal, S8("%0"));
             }
             if (numeric_asm)
             {
                 BUSTER_TEST(arguments, ir_inline_assembly_label_operand_base(numeric_asm) == 2);
                 u32 target_index = 0;
-                BUSTER_TEST(arguments, ir_inline_assembly_jump_target(numeric_asm, numeric_asm->literal, S8("jmp %l"), &target_index));
+                BUSTER_TEST(arguments, ir_inline_assembly_jump_target(numeric_asm_function, numeric_asm, numeric_asm_extra.literal, S8("jmp %l"), &target_index));
                 BUSTER_TEST(arguments, target_index == 1);
-                BUSTER_TEST(arguments, !ir_inline_assembly_jump_target(numeric_asm, S8("jmp %l1"), S8("jmp %l"), &target_index));
+                BUSTER_TEST(arguments, !ir_inline_assembly_jump_target(numeric_asm_function, numeric_asm, S8("jmp %l1"), S8("jmp %l"), &target_index));
             }
             if (named_asm)
             {
                 u32 target_index = 0;
-                BUSTER_TEST(arguments, ir_inline_assembly_jump_target(named_asm, named_asm->literal, S8("jmp %l"), &target_index));
+                BUSTER_TEST(arguments, ir_inline_assembly_jump_target(named_asm_function, named_asm, named_asm_extra.literal, S8("jmp %l"), &target_index));
                 BUSTER_TEST(arguments, target_index == 1);
-                BUSTER_STRING_TEST(arguments, named_asm->label_names[0], S8("target"));
+                BUSTER_STRING_TEST(arguments, named_asm_extra.label_names[0], S8("target"));
             }
             IrValidationResult label_flow_validation = ir_validate_canonical_module(label_flow_lowered.program, module);
             BUSTER_TEST(arguments, label_flow_validation.error == IR_VALIDATION_NONE);
@@ -8978,11 +8989,12 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                     break;
                 }
             }
-            BUSTER_TEST(arguments, assembly && assembly->operand_name_count == 2);
-            if (assembly && assembly->operand_name_count == 2)
+            IrInstructionExtra assembly_extra = assembly ? ir_instruction_extra(function, assembly->id) : (IrInstructionExtra){0};
+            BUSTER_TEST(arguments, assembly && assembly_extra.operand_name_count == 2);
+            if (assembly && assembly_extra.operand_name_count == 2)
             {
-                BUSTER_STRING_TEST(arguments, assembly->operand_names[0], S8("value"));
-                BUSTER_STRING_TEST(arguments, assembly->operand_names[1], S8("index_input"));
+                BUSTER_STRING_TEST(arguments, assembly_extra.operand_names[0], S8("value"));
+                BUSTER_STRING_TEST(arguments, assembly_extra.operand_names[1], S8("index_input"));
             }
         }
         scratch_end(symbolic_array_operand_temporary);
@@ -9010,6 +9022,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         IrInstruction* named_tied_assembly = 0;
         IrInstruction* many_tied_assembly = 0;
         IrInstruction* four_tied_assembly = 0;
+        IrInstructionExtra named_tied_extra = {0};
         if (tied_assembly_lowered.program)
         {
             IrModule* module = tied_assembly_lowered.program->modules;
@@ -9032,6 +9045,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 else if (string_equal(function->name, S8("named_tied")))
                 {
                     named_tied_assembly = first_assembly;
+                    named_tied_extra = first_assembly ? ir_instruction_extra(function, first_assembly->id) : (IrInstructionExtra){0};
                 }
                 else if (string_equal(function->name, S8("many_tied")))
                 {
@@ -9083,7 +9097,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         if (named_tied_assembly)
         {
-            BUSTER_STRING_TEST(arguments, named_tied_assembly->operand_names[0], S8("dst"));
+            BUSTER_STRING_TEST(arguments, named_tied_extra.operand_names[0], S8("dst"));
             BUSTER_TEST(arguments, (named_tied_assembly->immediates[1] & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0);
             BUSTER_TEST(arguments, IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(named_tied_assembly->immediates[1]) == 0);
         }

@@ -1397,8 +1397,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             if (code.failed_instruction.value < failed_function->instruction_count)
             {
                 IrInstruction* failed_instruction = &failed_function->instructions[code.failed_instruction.value];
-                source_line = failed_instruction->source.line;
-                source_column = failed_instruction->source.column;
+                ParserSourceRange failed_source = ir_instruction_source(failed_function, failed_instruction->id);
+                source_line = failed_source.line;
+                source_column = failed_source.column;
                 operation = failed_instruction->opcode == IR_OPCODE_BINARY  ? (u32)failed_instruction->binary_operation
                             : failed_instruction->opcode == IR_OPCODE_UNARY ? (u32)failed_instruction->unary_operation
                                                                             : (u32)IR_BINARY_COUNT;
