@@ -40566,6 +40566,9 @@ BUSTER_GLOBAL_LOCAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* bu
         {
             u32 close = c_ir_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             IrTypeId type = IR_TYPE_ID_INVALID;
+            u64 operand_size = 0;
+            u32 operand_alignment = 0;
+            bool operand_resolved = false;
             if (close != UINT32_MAX)
             {
                 c_ir_query_type_name(builder, index + 2, close, true, &type);
@@ -40573,24 +40576,37 @@ BUSTER_GLOBAL_LOCAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* bu
                 {
                     return false;
                 }
-                if (type.value == IR_ID_UNDERLYING_INVALID)
+                IrType* value = ir_type_from_id(&program->types, type);
+                if (value && value->layout.resolved)
                 {
-                    c_ir_query_prediction(builder, index + 2, close, &type);
+                    operand_size = value->layout.size;
+                    operand_alignment = value->layout.alignment;
+                    operand_resolved = true;
+                }
+                else if (type.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    // The operand is an expression, not a type name. Resolve it
+                    // through the sizeof query only: the type-prediction query
+                    // guesses int for anything it cannot resolve yet, and a
+                    // guessed size folded into an array bound lays the global
+                    // out too small (the stage-1 stray-global-write incident of
+                    // 2026-08-08). Failing here re-queues the bound for a later
+                    // type-mapping pass instead.
+                    operand_resolved = c_ir_query_sizeof(builder, index + 2, close, &operand_size, &operand_alignment);
                     if (builder->queries->has_request)
                     {
                         return false;
                     }
                 }
             }
-            IrType* value = ir_type_from_id(&program->types, type);
-            if (!value || !value->layout.resolved)
+            if (!operand_resolved)
             {
                 return false;
             }
             token.kind = C_TOKEN_PREPROCESSING_NUMBER;
             token.punctuator = C_PUNCTUATOR_NONE;
             token.spelling =
-                string_format(arena, S8("{u64}"), c_parse_alignof_word(preprocess.tokens[index].spelling) ? value->layout.alignment : value->layout.size);
+                string_format(arena, S8("{u64}"), c_parse_alignof_word(preprocess.tokens[index].spelling) ? operand_alignment : operand_size);
             tokens[token_count++] = token;
             index = close;
             continue;

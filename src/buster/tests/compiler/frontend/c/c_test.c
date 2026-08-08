@@ -4195,6 +4195,74 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
     return result;
 }
 
+// Regression coverage for the 2026-08-08 stage-1 stray-global-write incident:
+// a file-scope array bound of the form sizeof(table)/sizeof(table[0]) + 1,
+// where table's element is a struct, folded through the type-prediction
+// query's int guess to 2 before table's type mapped, so the next global was
+// laid out inside the array. The bound must either resolve to the real count
+// or defer to a later type-mapping pass, never fold a guessed size.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_global_array_sizeof_bound(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("typedef struct { const char *name; unsigned char builtin; } SizeofEntry;\n"
+                                               "static const SizeofEntry sizeof_table[] = {\n"
+                                               " { \"a\", 1 }, { \"b\", 2 }, { \"c\", 3 }, { \"d\", 4 },\n"
+                                               " { \"e\", 5 }, { \"f\", 6 }, { \"g\", 7 },\n"
+                                               "};\n"
+                                               "static unsigned char sizeof_kinds[sizeof(sizeof_table) / sizeof(sizeof_table[0]) + 1];\n"
+                                               "static unsigned char sizeof_whole[sizeof(sizeof_table)];\n"
+                                               "unsigned int sizeof_probe(void)\n"
+                                               "{ return (unsigned int)(sizeof(sizeof_kinds) + sizeof_kinds[2] + sizeof_whole[3]"
+                                               " + sizeof_table[0].builtin); }\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("global-array-sizeof-bound.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        IrModule* module = &ir.program->modules[0];
+        IrType* table_type = 0;
+        IrType* kinds_type = 0;
+        IrType* whole_type = 0;
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            IrGlobal* global = module->globals + global_index;
+            IrSymbol* symbol = ir_symbol_from_id(&ir.program->symbols, global->symbol);
+            if (!symbol)
+            {
+                continue;
+            }
+            if (string_equal(symbol->link_name, S8("sizeof_table")))
+            {
+                table_type = ir_type_from_id(&ir.program->types, global->type);
+            }
+            else if (string_equal(symbol->link_name, S8("sizeof_kinds")))
+            {
+                kinds_type = ir_type_from_id(&ir.program->types, global->type);
+            }
+            else if (string_equal(symbol->link_name, S8("sizeof_whole")))
+            {
+                whole_type = ir_type_from_id(&ir.program->types, global->type);
+            }
+        }
+        BUSTER_TEST(arguments, table_type && table_type->kind == IR_TYPE_ARRAY && table_type->element_count == 7);
+        BUSTER_TEST(arguments, table_type && table_type->layout.resolved && table_type->layout.size == 112);
+        BUSTER_TEST(arguments, kinds_type && kinds_type->kind == IR_TYPE_ARRAY && kinds_type->element_count == 8);
+        BUSTER_TEST(arguments, kinds_type && kinds_type->layout.resolved && kinds_type->layout.size == 8);
+        BUSTER_TEST(arguments, whole_type && whole_type->kind == IR_TYPE_ARRAY && whole_type->element_count == 112);
+        BUSTER_TEST(arguments, whole_type && whole_type->layout.resolved && whole_type->layout.size == 112);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6307,6 +6375,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
     c_test_result_add(&result, c_test_frontend_semantic_basics(arguments));
     c_test_result_add(&result, c_test_frontend_global_types(arguments));
+    c_test_result_add(&result, c_test_global_array_sizeof_bound(arguments));
     c_test_result_add(&result, c_test_frontend_control_flow(arguments));
     c_test_result_add(&result, c_test_frontend_vectors(arguments));
     c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));
