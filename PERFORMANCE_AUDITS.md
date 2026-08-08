@@ -142,25 +142,28 @@ recorded as ranked structural proposals below.
   ceiling doubles on Zen 5 hardware, and the compaction lexer is itself a
   memory-shrink change (2–16 B tokens, no eager locations), so it attacks
   both limits at once.
-- **Proposal 5 — fuse the three canonical-codegen instruction scans**
-  (`codegen_canonical_direct_call_uses`, `x64_function_saves_rbx`, and the
-  per-call `x64_call_layout` rediscovery — 14.4%/6.8%/13.5% of the module's
-  samples in the `2026-08-08i` capture, still open and unclaimed): one pass
-  over the instruction array filling a per-function scratch, ideally taken
-  together with proposal 1 since it rewrites the same walks over the same
-  rows. The per-function `memset(uses, 0, value_count)` becomes a shared
-  2-bit scratch bitmap in the same change.
+- **Proposal 5 — WITHDRAWN before landing: the `2026-08-08l` audit fused the
+  three canonical-codegen scans and measured it NEGATIVE** (+6 M
+  instructions, +3.5% minimum cycles — clang optimizes the three tight
+  single-purpose loops better than one fused branchy loop; the surviving
+  piece was the Win64 call-layout cache, taken there). Do not retry the
+  fusion as written; if proposal 1's flattening lands, the scans get cheap
+  by shrinking the rows they walk instead.
 - Left alone deliberately: threaded/lane-parallel codegen (excluded from
   this survey's mandate), and the four `2026-08-08j`-branch leads listed at
   the top. Traps re-confirmed for the next reader: quote performance only
   from clang-built binaries; run `test_self_host` unpiped after frontend
   changes; SWAR-in-the-token-loop is a measured dead end — classification
   must move out of the dispatch loop to win.
-- Reference points for the next audit, all clang-built on this host:
-  stage 1 `5.473 G` instructions / `~287 k` minor faults (unchanged —
-  tokenizer is not on the `cc` path), Release `ide test` `7.264 G`,
-  `ide bench` **`559.1 M`** instructions per run, `BENCH_PARSE` median
-  `~82.0 k ns`, `BENCH_IO` median `~261.6 k ns`. Stage 2 `80.0 G`,
+- Reference points for the next audit, all clang-built on this host and
+  re-measured on the merged tree (this branch rebased onto the landed
+  `2026-08-08l` chain; before the merge this entry's tokenizer change
+  measured against the `2026-08-08i` baseline as bench `713.0 M` to
+  `559.1 M` and `BENCH_PARSE` median `95.1 k` to `82.0 k ns`): stage 1
+  `5.138 G` instructions / `~271 k` minor faults, Release `ide test`
+  `6.809 G`, `ide bench` **`559.4 M`** instructions per run, `BENCH_PARSE`
+  median `~78.5 k ns`, `BENCH_IO` median `~264 k ns`, byte-identical fixed
+  point (`SELF_HOST deterministic bytes=28189896`). Stage 2 `76.0 G`,
   validation only.
 
 `2026-08-08l` (Linux x86_64; the same branch as `2026-08-08j`, taking the
