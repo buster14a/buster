@@ -12693,11 +12693,69 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_only_declaration(CPreprocessResult preproc
     return index + 1 == end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_SEMICOLON);
 }
 
+BUSTER_GLOBAL_LOCAL void c_parse_index_scope_children(CParseResult* result, Arena* arena)
+{
+    u32 scope_count = result->scope_count;
+    u32* offsets = arena_allocate(arena, u32, (u64)scope_count + 1);
+    memset(offsets, 0, sizeof(*offsets) * ((u64)scope_count + 1));
+    for (u32 scope_index = 0; scope_index < scope_count; scope_index += 1)
+    {
+        CScopeId parent = result->scopes[scope_index].parent;
+        if (parent.value < scope_count && parent.value != scope_index)
+        {
+            offsets[parent.value + 1] += 1;
+        }
+    }
+    for (u32 scope_index = 0; scope_index < scope_count; scope_index += 1)
+    {
+        offsets[scope_index + 1] += offsets[scope_index];
+    }
+    u32* children = arena_allocate(arena, u32, offsets[scope_count]);
+    u32* cursors = arena_allocate(arena, u32, scope_count);
+    memset(cursors, 0, sizeof(*cursors) * scope_count);
+    for (u32 scope_index = 0; scope_index < scope_count; scope_index += 1)
+    {
+        CScopeId parent = result->scopes[scope_index].parent;
+        if (parent.value < scope_count && parent.value != scope_index)
+        {
+            children[offsets[parent.value] + cursors[parent.value]] = scope_index;
+            cursors[parent.value] += 1;
+        }
+    }
+    result->scope_children_offsets = offsets;
+    result->scope_children = children;
+}
+
 BUSTER_GLOBAL_LOCAL CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index)
 {
     if (!result || root.value >= result->scope_count)
     {
         return root;
+    }
+    if (result->scope_children_offsets)
+    {
+        // Sibling scopes never overlap, so at most one child of the current
+        // scope contains the token (equal-range parent/child pairs resolve to
+        // the child, matching the full scan's index tie-break), and the
+        // deepest containing scope under the root is the scan's answer.
+        CScopeId best = root;
+        bool descended = true;
+        while (descended)
+        {
+            descended = false;
+            u32 child_end = result->scope_children_offsets[best.value + 1];
+            for (u32 child_index = result->scope_children_offsets[best.value]; child_index < child_end; child_index += 1)
+            {
+                u32 candidate = result->scope_children[child_index];
+                CScope* scope = &result->scopes[candidate];
+                if (scope->token_start <= token_index && token_index < scope->token_end)
+                {
+                    best.value = candidate;
+                    descended = true;
+                }
+            }
+        }
+        return best;
     }
     CScopeId best = root;
     u32 best_start = result->scopes[root.value].token_start;
@@ -39345,6 +39403,9 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     };
     TemporalArena temporary = scratch_begin(temporary_conflicts, BUSTER_ARRAY_LENGTH(temporary_conflicts));
     Arena* temporary_arena = temporary.arena;
+    // Scopes are final here, so every builder copy of this parse result can
+    // answer c_parse_scope_for_token by descent instead of a full scope scan.
+    c_parse_index_scope_children(&parse, temporary_arena);
     CIrQueryMachine queries = {
         .frames = arena_allocate(temporary_arena, CIrQueryFrame, (u32)query_frame_capacity),
         .completed = arena_allocate(temporary_arena, CIrQueryFrame, (u32)query_frame_capacity),

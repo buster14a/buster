@@ -593,6 +593,12 @@ struct CParseResult
     CEntityId* typedef_lookup_buckets;
     CIdentifierUse* identifier_uses;
     u32* identifier_use_by_token;
+    // Children of each scope in ascending scope order, built by
+    // c_parse_index_scope_children once scopes are final; zero when absent.
+    // c_parse_scope_for_token descends this index instead of scanning every
+    // scope when it is present.
+    u32* scope_children_offsets;
+    u32* scope_children;
     CDiagnostic* diagnostics;
     CDeferredStaticAssert* deferred_static_asserts;
     u32 declaration_count;
