@@ -5,6 +5,20 @@
 #include <buster/lib/file.h>
 #include <buster/lib/time.h>
 
+// Chunk-classified scan acceleration for the tokenizer's run loops (see the
+// AGENTS.md SIMD lexing/parsing method notes): each 64-byte chunk is
+// classified once into per-class bitmasks and every run scan in that chunk
+// becomes a shift plus count-trailing-ones, replacing the unpredictable
+// per-byte exit branches. Guarded per the tuning-target rules: the scalar
+// loops below stay as the fallback for MSVC, non-AVX-512 hosts, and the
+// self-hosted stages (which compile without vendor headers).
+#if BUSTER_CPU_ARCH_X86_64 && defined(__AVX512F__) && defined(__AVX512BW__) && !defined(__BUSTER__) && !BUSTER_COMPILER_MSVC
+#define BUSTER_TOKENIZER_AVX512 1
+#include <immintrin.h>
+#else
+#define BUSTER_TOKENIZER_AVX512 0
+#endif
+
 #define first_keyword TOKEN_KEYWORD_RETURN
 #define last_keyword (TOKEN_COUNT - 1)
 
@@ -60,7 +74,7 @@ BUSTER_GLOBAL_LOCAL void tokenizer_identifier_continue_table_build(void)
     tokenizer_identifier_continue_table_built = true;
 }
 
-BUSTER_GLOBAL_LOCAL const char8* tokenizer_identifier_run_end(const char8* it, const char8* top)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL const char8* tokenizer_identifier_run_end(const char8* it, const char8* top)
 {
     if (!tokenizer_identifier_continue_table_built)
     {
@@ -103,7 +117,81 @@ BUSTER_GLOBAL_LOCAL void tokenizer_string_plain_table_build(void)
     tokenizer_string_plain_table_built = true;
 }
 
-BUSTER_GLOBAL_LOCAL const char8* tokenizer_string_plain_run_end(const char8* it, const char8* top)
+#if BUSTER_TOKENIZER_AVX512
+
+enum
+{
+    TOKENIZER_CLASS_IDENTIFIER,
+    TOKENIZER_CLASS_SPACE,
+    TOKENIZER_CLASS_TAB,
+    TOKENIZER_CLASS_STRING_PLAIN,
+    TOKENIZER_CLASS_COMMENT_BODY,
+    TOKENIZER_CLASS_COUNT,
+};
+
+typedef struct TokenizerClassifier TokenizerClassifier;
+struct TokenizerClassifier
+{
+    const char8* base;
+    u64 length;
+    u64 chunk_index;
+    u64 masks[TOKENIZER_CLASS_COUNT];
+};
+
+BUSTER_GLOBAL_LOCAL void tokenizer_classifier_load(TokenizerClassifier* restrict classifier, u64 chunk_index)
+{
+    u64 offset = chunk_index << 6;
+    u64 remaining = classifier->length - offset;
+    // The masked load never touches lanes past the file, so no trailing
+    // sentinel bytes are required of callers. Invalid lanes read as zero:
+    // zero classifies as none of the positive classes, and the two negated
+    // classes are ANDed with the valid mask below so runs stop at the end
+    // of the file exactly like the bounds-checked scalar loops.
+    __mmask64 valid = remaining >= 64 ? ~(__mmask64)0 : (((__mmask64)1 << remaining) - 1);
+    __m512i chunk = _mm512_maskz_loadu_epi8(valid, classifier->base + offset);
+    __m512i lower = _mm512_or_si512(chunk, _mm512_set1_epi8(0x20));
+    __mmask64 alpha = _mm512_cmplt_epu8_mask(_mm512_sub_epi8(lower, _mm512_set1_epi8('a')), _mm512_set1_epi8(26));
+    __mmask64 digit = _mm512_cmplt_epu8_mask(_mm512_sub_epi8(chunk, _mm512_set1_epi8('0')), _mm512_set1_epi8(10));
+    __mmask64 underscore = _mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('_'));
+    __mmask64 quote = _mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('"'));
+    __mmask64 backslash = _mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\\'));
+    __mmask64 newline = _mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\n'));
+    __mmask64 carriage = _mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\r'));
+    __mmask64 semicolon = _mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8(';'));
+    __mmask64 high = _mm512_movepi8_mask(chunk);
+    classifier->chunk_index = chunk_index;
+    classifier->masks[TOKENIZER_CLASS_IDENTIFIER] = (u64)(alpha | digit | underscore);
+    classifier->masks[TOKENIZER_CLASS_SPACE] = (u64)_mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8(' '));
+    classifier->masks[TOKENIZER_CLASS_TAB] = (u64)_mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\t'));
+    classifier->masks[TOKENIZER_CLASS_STRING_PLAIN] = ~(u64)(quote | backslash | newline | carriage | semicolon | high) & (u64)valid;
+    classifier->masks[TOKENIZER_CLASS_COMMENT_BODY] = ~(u64)(newline | carriage) & (u64)valid;
+}
+
+BUSTER_GLOBAL_LOCAL const char8* tokenizer_class_run_end(TokenizerClassifier* restrict classifier, const char8* it, u32 class_index)
+{
+    u64 position = (u64)(it - classifier->base);
+    while (position < classifier->length)
+    {
+        u64 chunk_index = position >> 6;
+        if (chunk_index != classifier->chunk_index)
+        {
+            tokenizer_classifier_load(classifier, chunk_index);
+        }
+        u64 bit = position & 63;
+        u64 not_class = ~(classifier->masks[class_index] >> bit);
+        u64 run = not_class ? (u64)__builtin_ctzll(not_class) : 64;
+        if (run < 64 - bit)
+        {
+            return classifier->base + position + run;
+        }
+        position = (chunk_index + 1) << 6;
+    }
+    return classifier->base + classifier->length;
+}
+
+#endif
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL const char8* tokenizer_string_plain_run_end(const char8* it, const char8* top)
 {
     if (!tokenizer_string_plain_table_built)
     {
@@ -393,6 +481,13 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
 
     const char8* restrict it = file_pointer;
     const char8* top = file_pointer + file_length;
+#if BUSTER_TOKENIZER_AVX512
+    TokenizerClassifier classifier = {
+        .base = file_pointer,
+        .length = file_length,
+        .chunk_index = UINT64_MAX,
+    };
+#endif
 
     while (it < top)
     {
@@ -407,7 +502,11 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
         BUSTER_SWITCH_ALPHA_LOWER:
         case '_':
         {
+#if BUSTER_TOKENIZER_AVX512
+            it = tokenizer_class_run_end(&classifier, it, TOKENIZER_CLASS_IDENTIFIER);
+#else
             it = tokenizer_identifier_run_end(it, top);
+#endif
 
             String8 identifier = string_from_pointer_length(start, (u64)(it - start));
             if (it < top && *it == '?' && (string_equal(identifier, S8("and")) || string_equal(identifier, S8("or"))))
@@ -435,20 +534,28 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
         {
             id = TOKEN_SPACE;
 
+#if BUSTER_TOKENIZER_AVX512
+            it = tokenizer_class_run_end(&classifier, it, TOKENIZER_CLASS_SPACE);
+#else
             while (it < top && *it == ' ')
             {
                 it += 1;
             }
+#endif
         }
         break;
         case '\t':
         {
             id = TOKEN_TAB;
 
+#if BUSTER_TOKENIZER_AVX512
+            it = tokenizer_class_run_end(&classifier, it, TOKENIZER_CLASS_TAB);
+#else
             while (it < top && *it == '\t')
             {
                 it += 1;
             }
+#endif
         }
         break;
         BUSTER_SWITCH_DECIMAL_DIGIT:
@@ -645,7 +752,11 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
             it += 1;
             while (it < top && *it != '\n' && *it != '\r')
             {
+#if BUSTER_TOKENIZER_AVX512
+                it = tokenizer_class_run_end(&classifier, it, TOKENIZER_CLASS_STRING_PLAIN);
+#else
                 it = tokenizer_string_plain_run_end(it, top);
+#endif
                 if (it >= top || *it == '\n' || *it == '\r')
                 {
                     break;
@@ -883,10 +994,14 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
             {
                 id = TOKEN_COMMENT;
                 it += 2;
+#if BUSTER_TOKENIZER_AVX512
+                it = tokenizer_class_run_end(&classifier, it, TOKENIZER_CLASS_COMMENT_BODY);
+#else
                 while (it < top && *it != '\n' && *it != '\r')
                 {
                     it += 1;
                 }
+#endif
             }
             else if (it + 1 < top && it[1] == '=')
             {
