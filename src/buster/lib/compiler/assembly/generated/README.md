@@ -11,11 +11,14 @@ yet.
 
 - `x86_64-xed.jsonl`, `x86_64-assembly.generated.h`, and
   `x86_64-coverage.generated.inc` are the existing checked-in XED artifacts.
-- `x86_64-assembly.generated.h` is a 6,092,260-byte compact ABI artifact:
+- `x86_64-assembly.generated.h` is a 6,052,140-byte compact ABI artifact:
   11,013 forms, 32,813 operands, a 1,726,254-byte logical string pool, and
   immutable little-endian packed blobs accessed through bounded generated
   accessors. Flat C string chunks are at most 4,092 payload bytes, avoiding a
-  nested initializer or runtime table construction in self-hosted builds.
+  nested initializer or runtime table construction in self-hosted builds;
+  each chunked blob also carries constant chunk pointer/length tables so the
+  bounded accessors index one flat table instead of dispatching a
+  several-hundred-way switch per byte.
   Generated sorted indexes contain 1,942 mnemonic ranges/11,019 candidates,
   1,995 iclass ranges/11,013 candidates, 5,855 iform ranges/7,525 candidates,
   and form/coverage hash indexes with 11,013 ranges and candidates each.
@@ -23,7 +26,7 @@ yet.
   Intel, AT&T, and generic disassembly fields; iclass and iform remain separate
   exact diagnostic indexes. Numeric form IDs are snapshot row IDs; `stable_hash`
   is the durable form identity.
-- `x86_64-coverage.generated.inc` is a 392,002-byte packed coverage include.
+- `x86_64-coverage.generated.inc` is a 389,599-byte packed coverage include.
   It has one checked row per form and reports DIRECT=0, NORMALIZED=10,636,
   NOT64=268, PRIVILEGED=109, RESERVED=0, UNSUPPORTED_TOKEN=0, and
   UNCLASSIFIED=0. NORMALIZED rows are metadata coverage, not a claim that the
@@ -36,9 +39,10 @@ yet.
   indexes. Numeric tables use deterministic packed base64 byte blobs with
   fixed little-endian wire layouts and generated typed accessors. Each blob is
   emitted as independent flat C string chunks no larger than 4,092 payload
-  bytes, with a bounded non-inline switch accessor; there are no nested
-  aggregates, pointer tables, or runtime initialization paths, so the
-  pointer-free source remains consumable by Buster.
+  bytes, with constant chunk pointer/length tables and bounded non-inline
+  accessors; there are no runtime initialization paths, and the constant
+  symbol-address tables lower through the same static-initializer relocation
+  path Buster already supports, so the source remains consumable by Buster.
 - `aarch64-coverage.generated.inc` contains one stable row for every input
   record, including explicit source and name hashes, normalized form ID,
   classification, encoder family, test class, and reason ID.

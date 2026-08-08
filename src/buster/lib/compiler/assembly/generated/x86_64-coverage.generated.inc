@@ -181,104 +181,195 @@ static const char8 buster_x86_generated_coverage_blob_chunk_89[] = "AQAAAAAAAAAA
 ;
 #define buster_x86_generated_coverage_blob_BYTE_COUNT 275325
 #define buster_x86_generated_coverage_blob_CHUNK_COUNT 90
+static const char8* const buster_x86_generated_coverage_blob_chunks[] = {
+    buster_x86_generated_coverage_blob_chunk_0,
+    buster_x86_generated_coverage_blob_chunk_1,
+    buster_x86_generated_coverage_blob_chunk_2,
+    buster_x86_generated_coverage_blob_chunk_3,
+    buster_x86_generated_coverage_blob_chunk_4,
+    buster_x86_generated_coverage_blob_chunk_5,
+    buster_x86_generated_coverage_blob_chunk_6,
+    buster_x86_generated_coverage_blob_chunk_7,
+    buster_x86_generated_coverage_blob_chunk_8,
+    buster_x86_generated_coverage_blob_chunk_9,
+    buster_x86_generated_coverage_blob_chunk_10,
+    buster_x86_generated_coverage_blob_chunk_11,
+    buster_x86_generated_coverage_blob_chunk_12,
+    buster_x86_generated_coverage_blob_chunk_13,
+    buster_x86_generated_coverage_blob_chunk_14,
+    buster_x86_generated_coverage_blob_chunk_15,
+    buster_x86_generated_coverage_blob_chunk_16,
+    buster_x86_generated_coverage_blob_chunk_17,
+    buster_x86_generated_coverage_blob_chunk_18,
+    buster_x86_generated_coverage_blob_chunk_19,
+    buster_x86_generated_coverage_blob_chunk_20,
+    buster_x86_generated_coverage_blob_chunk_21,
+    buster_x86_generated_coverage_blob_chunk_22,
+    buster_x86_generated_coverage_blob_chunk_23,
+    buster_x86_generated_coverage_blob_chunk_24,
+    buster_x86_generated_coverage_blob_chunk_25,
+    buster_x86_generated_coverage_blob_chunk_26,
+    buster_x86_generated_coverage_blob_chunk_27,
+    buster_x86_generated_coverage_blob_chunk_28,
+    buster_x86_generated_coverage_blob_chunk_29,
+    buster_x86_generated_coverage_blob_chunk_30,
+    buster_x86_generated_coverage_blob_chunk_31,
+    buster_x86_generated_coverage_blob_chunk_32,
+    buster_x86_generated_coverage_blob_chunk_33,
+    buster_x86_generated_coverage_blob_chunk_34,
+    buster_x86_generated_coverage_blob_chunk_35,
+    buster_x86_generated_coverage_blob_chunk_36,
+    buster_x86_generated_coverage_blob_chunk_37,
+    buster_x86_generated_coverage_blob_chunk_38,
+    buster_x86_generated_coverage_blob_chunk_39,
+    buster_x86_generated_coverage_blob_chunk_40,
+    buster_x86_generated_coverage_blob_chunk_41,
+    buster_x86_generated_coverage_blob_chunk_42,
+    buster_x86_generated_coverage_blob_chunk_43,
+    buster_x86_generated_coverage_blob_chunk_44,
+    buster_x86_generated_coverage_blob_chunk_45,
+    buster_x86_generated_coverage_blob_chunk_46,
+    buster_x86_generated_coverage_blob_chunk_47,
+    buster_x86_generated_coverage_blob_chunk_48,
+    buster_x86_generated_coverage_blob_chunk_49,
+    buster_x86_generated_coverage_blob_chunk_50,
+    buster_x86_generated_coverage_blob_chunk_51,
+    buster_x86_generated_coverage_blob_chunk_52,
+    buster_x86_generated_coverage_blob_chunk_53,
+    buster_x86_generated_coverage_blob_chunk_54,
+    buster_x86_generated_coverage_blob_chunk_55,
+    buster_x86_generated_coverage_blob_chunk_56,
+    buster_x86_generated_coverage_blob_chunk_57,
+    buster_x86_generated_coverage_blob_chunk_58,
+    buster_x86_generated_coverage_blob_chunk_59,
+    buster_x86_generated_coverage_blob_chunk_60,
+    buster_x86_generated_coverage_blob_chunk_61,
+    buster_x86_generated_coverage_blob_chunk_62,
+    buster_x86_generated_coverage_blob_chunk_63,
+    buster_x86_generated_coverage_blob_chunk_64,
+    buster_x86_generated_coverage_blob_chunk_65,
+    buster_x86_generated_coverage_blob_chunk_66,
+    buster_x86_generated_coverage_blob_chunk_67,
+    buster_x86_generated_coverage_blob_chunk_68,
+    buster_x86_generated_coverage_blob_chunk_69,
+    buster_x86_generated_coverage_blob_chunk_70,
+    buster_x86_generated_coverage_blob_chunk_71,
+    buster_x86_generated_coverage_blob_chunk_72,
+    buster_x86_generated_coverage_blob_chunk_73,
+    buster_x86_generated_coverage_blob_chunk_74,
+    buster_x86_generated_coverage_blob_chunk_75,
+    buster_x86_generated_coverage_blob_chunk_76,
+    buster_x86_generated_coverage_blob_chunk_77,
+    buster_x86_generated_coverage_blob_chunk_78,
+    buster_x86_generated_coverage_blob_chunk_79,
+    buster_x86_generated_coverage_blob_chunk_80,
+    buster_x86_generated_coverage_blob_chunk_81,
+    buster_x86_generated_coverage_blob_chunk_82,
+    buster_x86_generated_coverage_blob_chunk_83,
+    buster_x86_generated_coverage_blob_chunk_84,
+    buster_x86_generated_coverage_blob_chunk_85,
+    buster_x86_generated_coverage_blob_chunk_86,
+    buster_x86_generated_coverage_blob_chunk_87,
+    buster_x86_generated_coverage_blob_chunk_88,
+    buster_x86_generated_coverage_blob_chunk_89,
+};
+static const u16 buster_x86_generated_coverage_blob_chunk_lengths[] = {
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_0) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_1) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_2) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_3) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_4) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_5) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_6) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_7) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_8) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_9) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_10) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_11) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_12) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_13) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_14) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_15) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_16) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_17) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_18) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_19) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_20) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_21) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_22) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_23) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_24) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_25) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_26) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_27) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_28) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_29) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_30) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_31) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_32) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_33) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_34) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_35) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_36) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_37) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_38) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_39) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_40) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_41) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_42) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_43) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_44) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_45) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_46) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_47) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_48) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_49) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_50) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_51) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_52) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_53) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_54) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_55) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_56) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_57) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_58) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_59) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_60) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_61) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_62) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_63) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_64) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_65) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_66) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_67) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_68) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_69) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_70) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_71) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_72) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_73) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_74) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_75) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_76) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_77) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_78) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_79) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_80) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_81) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_82) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_83) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_84) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_85) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_86) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_87) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_88) - 1u),
+    (u16)(sizeof(buster_x86_generated_coverage_blob_chunk_89) - 1u),
+};
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL char8 buster_x86_generated_coverage_blob_char(u64 logical)
 {
     u64 chunk = logical / BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;
     u64 offset = logical % BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;
-    switch (chunk)
-    {
-        case 0: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_0) - 1u) ? buster_x86_generated_coverage_blob_chunk_0[offset] : 0;
-        case 1: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_1) - 1u) ? buster_x86_generated_coverage_blob_chunk_1[offset] : 0;
-        case 2: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_2) - 1u) ? buster_x86_generated_coverage_blob_chunk_2[offset] : 0;
-        case 3: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_3) - 1u) ? buster_x86_generated_coverage_blob_chunk_3[offset] : 0;
-        case 4: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_4) - 1u) ? buster_x86_generated_coverage_blob_chunk_4[offset] : 0;
-        case 5: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_5) - 1u) ? buster_x86_generated_coverage_blob_chunk_5[offset] : 0;
-        case 6: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_6) - 1u) ? buster_x86_generated_coverage_blob_chunk_6[offset] : 0;
-        case 7: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_7) - 1u) ? buster_x86_generated_coverage_blob_chunk_7[offset] : 0;
-        case 8: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_8) - 1u) ? buster_x86_generated_coverage_blob_chunk_8[offset] : 0;
-        case 9: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_9) - 1u) ? buster_x86_generated_coverage_blob_chunk_9[offset] : 0;
-        case 10: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_10) - 1u) ? buster_x86_generated_coverage_blob_chunk_10[offset] : 0;
-        case 11: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_11) - 1u) ? buster_x86_generated_coverage_blob_chunk_11[offset] : 0;
-        case 12: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_12) - 1u) ? buster_x86_generated_coverage_blob_chunk_12[offset] : 0;
-        case 13: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_13) - 1u) ? buster_x86_generated_coverage_blob_chunk_13[offset] : 0;
-        case 14: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_14) - 1u) ? buster_x86_generated_coverage_blob_chunk_14[offset] : 0;
-        case 15: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_15) - 1u) ? buster_x86_generated_coverage_blob_chunk_15[offset] : 0;
-        case 16: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_16) - 1u) ? buster_x86_generated_coverage_blob_chunk_16[offset] : 0;
-        case 17: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_17) - 1u) ? buster_x86_generated_coverage_blob_chunk_17[offset] : 0;
-        case 18: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_18) - 1u) ? buster_x86_generated_coverage_blob_chunk_18[offset] : 0;
-        case 19: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_19) - 1u) ? buster_x86_generated_coverage_blob_chunk_19[offset] : 0;
-        case 20: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_20) - 1u) ? buster_x86_generated_coverage_blob_chunk_20[offset] : 0;
-        case 21: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_21) - 1u) ? buster_x86_generated_coverage_blob_chunk_21[offset] : 0;
-        case 22: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_22) - 1u) ? buster_x86_generated_coverage_blob_chunk_22[offset] : 0;
-        case 23: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_23) - 1u) ? buster_x86_generated_coverage_blob_chunk_23[offset] : 0;
-        case 24: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_24) - 1u) ? buster_x86_generated_coverage_blob_chunk_24[offset] : 0;
-        case 25: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_25) - 1u) ? buster_x86_generated_coverage_blob_chunk_25[offset] : 0;
-        case 26: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_26) - 1u) ? buster_x86_generated_coverage_blob_chunk_26[offset] : 0;
-        case 27: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_27) - 1u) ? buster_x86_generated_coverage_blob_chunk_27[offset] : 0;
-        case 28: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_28) - 1u) ? buster_x86_generated_coverage_blob_chunk_28[offset] : 0;
-        case 29: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_29) - 1u) ? buster_x86_generated_coverage_blob_chunk_29[offset] : 0;
-        case 30: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_30) - 1u) ? buster_x86_generated_coverage_blob_chunk_30[offset] : 0;
-        case 31: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_31) - 1u) ? buster_x86_generated_coverage_blob_chunk_31[offset] : 0;
-        case 32: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_32) - 1u) ? buster_x86_generated_coverage_blob_chunk_32[offset] : 0;
-        case 33: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_33) - 1u) ? buster_x86_generated_coverage_blob_chunk_33[offset] : 0;
-        case 34: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_34) - 1u) ? buster_x86_generated_coverage_blob_chunk_34[offset] : 0;
-        case 35: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_35) - 1u) ? buster_x86_generated_coverage_blob_chunk_35[offset] : 0;
-        case 36: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_36) - 1u) ? buster_x86_generated_coverage_blob_chunk_36[offset] : 0;
-        case 37: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_37) - 1u) ? buster_x86_generated_coverage_blob_chunk_37[offset] : 0;
-        case 38: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_38) - 1u) ? buster_x86_generated_coverage_blob_chunk_38[offset] : 0;
-        case 39: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_39) - 1u) ? buster_x86_generated_coverage_blob_chunk_39[offset] : 0;
-        case 40: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_40) - 1u) ? buster_x86_generated_coverage_blob_chunk_40[offset] : 0;
-        case 41: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_41) - 1u) ? buster_x86_generated_coverage_blob_chunk_41[offset] : 0;
-        case 42: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_42) - 1u) ? buster_x86_generated_coverage_blob_chunk_42[offset] : 0;
-        case 43: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_43) - 1u) ? buster_x86_generated_coverage_blob_chunk_43[offset] : 0;
-        case 44: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_44) - 1u) ? buster_x86_generated_coverage_blob_chunk_44[offset] : 0;
-        case 45: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_45) - 1u) ? buster_x86_generated_coverage_blob_chunk_45[offset] : 0;
-        case 46: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_46) - 1u) ? buster_x86_generated_coverage_blob_chunk_46[offset] : 0;
-        case 47: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_47) - 1u) ? buster_x86_generated_coverage_blob_chunk_47[offset] : 0;
-        case 48: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_48) - 1u) ? buster_x86_generated_coverage_blob_chunk_48[offset] : 0;
-        case 49: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_49) - 1u) ? buster_x86_generated_coverage_blob_chunk_49[offset] : 0;
-        case 50: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_50) - 1u) ? buster_x86_generated_coverage_blob_chunk_50[offset] : 0;
-        case 51: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_51) - 1u) ? buster_x86_generated_coverage_blob_chunk_51[offset] : 0;
-        case 52: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_52) - 1u) ? buster_x86_generated_coverage_blob_chunk_52[offset] : 0;
-        case 53: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_53) - 1u) ? buster_x86_generated_coverage_blob_chunk_53[offset] : 0;
-        case 54: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_54) - 1u) ? buster_x86_generated_coverage_blob_chunk_54[offset] : 0;
-        case 55: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_55) - 1u) ? buster_x86_generated_coverage_blob_chunk_55[offset] : 0;
-        case 56: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_56) - 1u) ? buster_x86_generated_coverage_blob_chunk_56[offset] : 0;
-        case 57: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_57) - 1u) ? buster_x86_generated_coverage_blob_chunk_57[offset] : 0;
-        case 58: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_58) - 1u) ? buster_x86_generated_coverage_blob_chunk_58[offset] : 0;
-        case 59: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_59) - 1u) ? buster_x86_generated_coverage_blob_chunk_59[offset] : 0;
-        case 60: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_60) - 1u) ? buster_x86_generated_coverage_blob_chunk_60[offset] : 0;
-        case 61: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_61) - 1u) ? buster_x86_generated_coverage_blob_chunk_61[offset] : 0;
-        case 62: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_62) - 1u) ? buster_x86_generated_coverage_blob_chunk_62[offset] : 0;
-        case 63: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_63) - 1u) ? buster_x86_generated_coverage_blob_chunk_63[offset] : 0;
-        case 64: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_64) - 1u) ? buster_x86_generated_coverage_blob_chunk_64[offset] : 0;
-        case 65: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_65) - 1u) ? buster_x86_generated_coverage_blob_chunk_65[offset] : 0;
-        case 66: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_66) - 1u) ? buster_x86_generated_coverage_blob_chunk_66[offset] : 0;
-        case 67: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_67) - 1u) ? buster_x86_generated_coverage_blob_chunk_67[offset] : 0;
-        case 68: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_68) - 1u) ? buster_x86_generated_coverage_blob_chunk_68[offset] : 0;
-        case 69: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_69) - 1u) ? buster_x86_generated_coverage_blob_chunk_69[offset] : 0;
-        case 70: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_70) - 1u) ? buster_x86_generated_coverage_blob_chunk_70[offset] : 0;
-        case 71: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_71) - 1u) ? buster_x86_generated_coverage_blob_chunk_71[offset] : 0;
-        case 72: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_72) - 1u) ? buster_x86_generated_coverage_blob_chunk_72[offset] : 0;
-        case 73: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_73) - 1u) ? buster_x86_generated_coverage_blob_chunk_73[offset] : 0;
-        case 74: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_74) - 1u) ? buster_x86_generated_coverage_blob_chunk_74[offset] : 0;
-        case 75: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_75) - 1u) ? buster_x86_generated_coverage_blob_chunk_75[offset] : 0;
-        case 76: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_76) - 1u) ? buster_x86_generated_coverage_blob_chunk_76[offset] : 0;
-        case 77: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_77) - 1u) ? buster_x86_generated_coverage_blob_chunk_77[offset] : 0;
-        case 78: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_78) - 1u) ? buster_x86_generated_coverage_blob_chunk_78[offset] : 0;
-        case 79: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_79) - 1u) ? buster_x86_generated_coverage_blob_chunk_79[offset] : 0;
-        case 80: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_80) - 1u) ? buster_x86_generated_coverage_blob_chunk_80[offset] : 0;
-        case 81: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_81) - 1u) ? buster_x86_generated_coverage_blob_chunk_81[offset] : 0;
-        case 82: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_82) - 1u) ? buster_x86_generated_coverage_blob_chunk_82[offset] : 0;
-        case 83: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_83) - 1u) ? buster_x86_generated_coverage_blob_chunk_83[offset] : 0;
-        case 84: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_84) - 1u) ? buster_x86_generated_coverage_blob_chunk_84[offset] : 0;
-        case 85: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_85) - 1u) ? buster_x86_generated_coverage_blob_chunk_85[offset] : 0;
-        case 86: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_86) - 1u) ? buster_x86_generated_coverage_blob_chunk_86[offset] : 0;
-        case 87: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_87) - 1u) ? buster_x86_generated_coverage_blob_chunk_87[offset] : 0;
-        case 88: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_88) - 1u) ? buster_x86_generated_coverage_blob_chunk_88[offset] : 0;
-        case 89: return offset < (u64)(sizeof(buster_x86_generated_coverage_blob_chunk_89) - 1u) ? buster_x86_generated_coverage_blob_chunk_89[offset] : 0;
-        default: return 0;
-    }
+    return chunk < sizeof(buster_x86_generated_coverage_blob_chunks) / sizeof(buster_x86_generated_coverage_blob_chunks[0]) && offset < (u64)buster_x86_generated_coverage_blob_chunk_lengths[chunk] ? buster_x86_generated_coverage_blob_chunks[chunk][offset] : 0;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_x86_generated_coverage_blob_u8_counted(u64 byte_count, u64 offset)
@@ -287,7 +378,20 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_x86_generated_coverage_blob_u8_
     if (offset >= byte_count || !buster_x86_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;
     u64 encoded_offset = (offset / 3u) * 4u;
     if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;
-    u32 value = ((u32)buster_x86_generated_base64_value(buster_x86_generated_coverage_blob_char(encoded_offset + 0u)) << 18) | ((u32)buster_x86_generated_base64_value(buster_x86_generated_coverage_blob_char(encoded_offset + 1u)) << 12) | ((u32)buster_x86_generated_base64_value(buster_x86_generated_coverage_blob_char(encoded_offset + 2u)) << 6) | (u32)buster_x86_generated_base64_value(buster_x86_generated_coverage_blob_char(encoded_offset + 3u));
+    u64 chunk = encoded_offset / BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u64 chunk_offset = encoded_offset % BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u32 value = 0;
+    if (chunk < sizeof(buster_x86_generated_coverage_blob_chunks) / sizeof(buster_x86_generated_coverage_blob_chunks[0]))
+    {
+        const char8* encoded = buster_x86_generated_coverage_blob_chunks[chunk];
+        u64 length = (u64)buster_x86_generated_coverage_blob_chunk_lengths[chunk];
+        char8 character_0 = chunk_offset + 1u <= length ? encoded[chunk_offset + 0u] : 0;
+        char8 character_1 = chunk_offset + 2u <= length ? encoded[chunk_offset + 1u] : 0;
+        char8 character_2 = chunk_offset + 3u <= length ? encoded[chunk_offset + 2u] : 0;
+        char8 character_3 = chunk_offset + 4u <= length ? encoded[chunk_offset + 3u] : 0;
+        value = ((u32)buster_x86_generated_base64_value(character_0) << 18) | ((u32)buster_x86_generated_base64_value(character_1) << 12) |
+                ((u32)buster_x86_generated_base64_value(character_2) << 6) | (u32)buster_x86_generated_base64_value(character_3);
+    }
     return (u8)(value >> ((2u - (offset % 3u)) * 8u));
 }
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_x86_generated_coverage_blob_u8(u64 offset)

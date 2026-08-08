@@ -36021,22 +36021,12 @@ BUSTER_GLOBAL_LOCAL void c_ir_store_pointer_bits(CIntegerIrBuilder* builder, IrT
 
 BUSTER_GLOBAL_LOCAL bool c_ir_symbol_is_thread_local(CIntegerIrBuilder* builder, IrSymbolId symbol)
 {
-    for (u32 entity_index = 0; entity_index < builder->parse.entity_count; entity_index += 1)
-    {
-        if (builder->entity_symbols[entity_index].value == symbol.value && builder->parse.entities[entity_index].is_thread_local)
-        {
-            return true;
-        }
-    }
-    for (u32 global_index = 0; global_index < builder->module->global_count; global_index += 1)
-    {
-        IrGlobal* global = builder->module->globals + global_index;
-        if (global->symbol.value == symbol.value && global->is_thread_local)
-        {
-            return true;
-        }
-    }
-    return false;
+    // Every data-symbol creation site records the owning declaration's
+    // thread-local storage class on the IrSymbol itself, so the previous
+    // whole-entity-table and whole-global-table scans (quadratic across a
+    // large constant initializer's address elements) reduce to one lookup.
+    IrSymbol* symbol_value = ir_symbol_from_id(&builder->program->symbols, symbol);
+    return symbol_value && symbol_value->is_thread_local;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_string_range(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_type, u8* bytes,

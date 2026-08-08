@@ -310,97 +310,181 @@ static const char8 buster_aarch64_generated_string_pool_chunk_81[] = "ushl{\011$
 static const char8 buster_aarch64_generated_string_pool_chunk_82[] = "rrow\000vecshiftR64Narrow:$imm\000vecshiftR8\000vecshiftR8:$imm\000vl\000wback\000wfet\000wfet\011$Rt\000wfit\000wfit\011$Rt\000whilege\000whilege\011$PNd, $Rn, $Rm, $vl\000whilege\011$Pd, $Rn, $Rm\000whilegt\000whilegt\011$PNd, $Rn, $Rm, $vl\000whilegt\011$Pd, $Rn, $Rm\000whilehi\000whilehi\011$PNd, $Rn, $Rm, $vl\000whilehi\011$Pd, $Rn, $Rm\000whilehs\000whilehs\011$PNd, $Rn, $Rm, $vl\000whilehs\011$Pd, $Rn, $Rm\000whilele\000whilele\011$PNd, $Rn, $Rm, $vl\000whilele\011$Pd, $Rn, $Rm\000whilelo\000whilelo\011$PNd, $Rn, $Rm, $vl\000whilelo\011$Pd, $Rn, $Rm\000whilels\000whilels\011$PNd, $Rn, $Rm, $vl\000whilels\011$Pd, $Rn, $Rm\000whilelt\000whilelt\011$PNd, $Rn, $Rm, $vl\000whilelt\011$Pd, $Rn, $Rm\000whilerw\000whilerw\011$Pd, $Rn, $Rm\000whilewr\000whilewr\011$Pd, $Rn, $Rm\000wrffr\000wrffr\011$Pn\000xaflag\000xar\000xar\011$Zdn, $_Zdn, $Zm, $imm\000xar{\011$Vd.2d, $Vn.2d, $Vm.2d, $imm|.2d\011$Vd, $Vn, $Vm, $imm}\000xpacd\000xpacd\011$Rd\000xpaci\000xpaci\011$Rd\000xtn\000xtn2\000xtn2{\011$Rd.16b, $Rn.8h|.16b\011$Rd, $Rn}\000xtn2{\011$Rd.4s, $Rn.2d|.4s\011$Rd, $Rn}\000xtn2{\011$Rd.8h, $Rn.4s|.8h\011$Rd, $Rn}\000xtn{\011$Rd.2s, $Rn.2d|.2s\011$Rd, $Rn}\000xtn{\011$Rd.4h, $Rn.4s|.4h\011$Rd, $Rn}\000xtn{\011$Rd.8b, $Rn.8h|.8b\011$Rd, $Rn}\000xzr_pair\000zero\000zero\011$ZAd[$Rv, $imm, vgx2]\000zero\011$ZAd[$Rv, $imm, vgx4]\000zero\011$ZAd[$Rv, $imm]\000zero\011$imm\000zero\011\\{ $ZT \\}\000zip\000zip\011$Zd, $Zn\000zip\011$Zd, $Zn, $Zm\000zip1\000zip1\011$Pd, $Pn, $Pm\000zip1\011$Zd, $Zn, $Zm\000zip1{\011$Rd.16b, $Rn.16b, $Rm.16b|.16b\011$Rd, $Rn, $Rm}\000zip1{\011$Rd.2d, $Rn.2d, $Rm.2d|.2d\011$Rd, $Rn, $Rm}\000zip1{\011$Rd.2s, $Rn.2s, $Rm.2s|.2s\011$Rd, $Rn, $Rm}\000zip1{\011$Rd.4h, $Rn.4h, $Rm.4h|.4h\011$Rd, $Rn, $Rm}\000zip1{\011$Rd.4s, $Rn.4s, $Rm.4s|.4s\011$Rd, $Rn, $Rm}\000zip1{\011$Rd.8b, $Rn.8b, $Rm.8b|.8b\011$Rd, $Rn, $Rm}\000zip1{\011$Rd.8h, $Rn.8h, $Rm.8h|.8h\011$Rd, $Rn, $Rm}\000zip2\000zip2\011$Pd, $Pn, $Pm\000zip2\011$Zd, $Zn, $Zm\000zip2{\011$Rd.16b, $Rn.16b, $Rm.16b|.16b\011$Rd, $Rn, $Rm}\000zip2{\011$Rd.2d, $Rn.2d, $Rm.2d|.2d\011$Rd, $Rn, $Rm}\000zip2{\011$Rd.2s, $Rn.2s, $Rm.2s|.2s\011$Rd, $Rn, $Rm}\000zip2{\011$Rd.4h, $Rn.4h, $Rm.4h|.4h\011$Rd, $Rn, $Rm}\000zip2{\011$Rd.4s, $Rn.4s, $Rm.4s|.4s\011$Rd, $Rn, $Rm}\000zip2{\011$Rd.8b, $Rn.8b, $Rm.8b|.8b\011$Rd, $Rn, $Rm}\000zip2{\011$Rd.8h, $Rn.8h, $Rm.8h|.8h\011$Rd, $Rn, $Rm}\000zipq1\000zipq1\011$Zd, $Zn, $Zm\000zipq2\000zipq2\011$Zd, $Zn, $Zm\000";
 #define buster_aarch64_generated_string_pool_BYTE_COUNT 337490
 #define buster_aarch64_generated_string_pool_CHUNK_COUNT 83
+static const char8* const buster_aarch64_generated_string_pool_chunks[] = {
+    buster_aarch64_generated_string_pool_chunk_0,
+    buster_aarch64_generated_string_pool_chunk_1,
+    buster_aarch64_generated_string_pool_chunk_2,
+    buster_aarch64_generated_string_pool_chunk_3,
+    buster_aarch64_generated_string_pool_chunk_4,
+    buster_aarch64_generated_string_pool_chunk_5,
+    buster_aarch64_generated_string_pool_chunk_6,
+    buster_aarch64_generated_string_pool_chunk_7,
+    buster_aarch64_generated_string_pool_chunk_8,
+    buster_aarch64_generated_string_pool_chunk_9,
+    buster_aarch64_generated_string_pool_chunk_10,
+    buster_aarch64_generated_string_pool_chunk_11,
+    buster_aarch64_generated_string_pool_chunk_12,
+    buster_aarch64_generated_string_pool_chunk_13,
+    buster_aarch64_generated_string_pool_chunk_14,
+    buster_aarch64_generated_string_pool_chunk_15,
+    buster_aarch64_generated_string_pool_chunk_16,
+    buster_aarch64_generated_string_pool_chunk_17,
+    buster_aarch64_generated_string_pool_chunk_18,
+    buster_aarch64_generated_string_pool_chunk_19,
+    buster_aarch64_generated_string_pool_chunk_20,
+    buster_aarch64_generated_string_pool_chunk_21,
+    buster_aarch64_generated_string_pool_chunk_22,
+    buster_aarch64_generated_string_pool_chunk_23,
+    buster_aarch64_generated_string_pool_chunk_24,
+    buster_aarch64_generated_string_pool_chunk_25,
+    buster_aarch64_generated_string_pool_chunk_26,
+    buster_aarch64_generated_string_pool_chunk_27,
+    buster_aarch64_generated_string_pool_chunk_28,
+    buster_aarch64_generated_string_pool_chunk_29,
+    buster_aarch64_generated_string_pool_chunk_30,
+    buster_aarch64_generated_string_pool_chunk_31,
+    buster_aarch64_generated_string_pool_chunk_32,
+    buster_aarch64_generated_string_pool_chunk_33,
+    buster_aarch64_generated_string_pool_chunk_34,
+    buster_aarch64_generated_string_pool_chunk_35,
+    buster_aarch64_generated_string_pool_chunk_36,
+    buster_aarch64_generated_string_pool_chunk_37,
+    buster_aarch64_generated_string_pool_chunk_38,
+    buster_aarch64_generated_string_pool_chunk_39,
+    buster_aarch64_generated_string_pool_chunk_40,
+    buster_aarch64_generated_string_pool_chunk_41,
+    buster_aarch64_generated_string_pool_chunk_42,
+    buster_aarch64_generated_string_pool_chunk_43,
+    buster_aarch64_generated_string_pool_chunk_44,
+    buster_aarch64_generated_string_pool_chunk_45,
+    buster_aarch64_generated_string_pool_chunk_46,
+    buster_aarch64_generated_string_pool_chunk_47,
+    buster_aarch64_generated_string_pool_chunk_48,
+    buster_aarch64_generated_string_pool_chunk_49,
+    buster_aarch64_generated_string_pool_chunk_50,
+    buster_aarch64_generated_string_pool_chunk_51,
+    buster_aarch64_generated_string_pool_chunk_52,
+    buster_aarch64_generated_string_pool_chunk_53,
+    buster_aarch64_generated_string_pool_chunk_54,
+    buster_aarch64_generated_string_pool_chunk_55,
+    buster_aarch64_generated_string_pool_chunk_56,
+    buster_aarch64_generated_string_pool_chunk_57,
+    buster_aarch64_generated_string_pool_chunk_58,
+    buster_aarch64_generated_string_pool_chunk_59,
+    buster_aarch64_generated_string_pool_chunk_60,
+    buster_aarch64_generated_string_pool_chunk_61,
+    buster_aarch64_generated_string_pool_chunk_62,
+    buster_aarch64_generated_string_pool_chunk_63,
+    buster_aarch64_generated_string_pool_chunk_64,
+    buster_aarch64_generated_string_pool_chunk_65,
+    buster_aarch64_generated_string_pool_chunk_66,
+    buster_aarch64_generated_string_pool_chunk_67,
+    buster_aarch64_generated_string_pool_chunk_68,
+    buster_aarch64_generated_string_pool_chunk_69,
+    buster_aarch64_generated_string_pool_chunk_70,
+    buster_aarch64_generated_string_pool_chunk_71,
+    buster_aarch64_generated_string_pool_chunk_72,
+    buster_aarch64_generated_string_pool_chunk_73,
+    buster_aarch64_generated_string_pool_chunk_74,
+    buster_aarch64_generated_string_pool_chunk_75,
+    buster_aarch64_generated_string_pool_chunk_76,
+    buster_aarch64_generated_string_pool_chunk_77,
+    buster_aarch64_generated_string_pool_chunk_78,
+    buster_aarch64_generated_string_pool_chunk_79,
+    buster_aarch64_generated_string_pool_chunk_80,
+    buster_aarch64_generated_string_pool_chunk_81,
+    buster_aarch64_generated_string_pool_chunk_82,
+};
+static const u16 buster_aarch64_generated_string_pool_chunk_lengths[] = {
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_0) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_1) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_2) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_3) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_4) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_5) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_6) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_7) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_8) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_9) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_10) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_11) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_12) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_13) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_14) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_15) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_16) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_17) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_18) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_19) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_20) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_21) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_22) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_23) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_24) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_25) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_26) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_27) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_28) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_29) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_30) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_31) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_32) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_33) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_34) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_35) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_36) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_37) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_38) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_39) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_40) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_41) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_42) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_43) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_44) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_45) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_46) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_47) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_48) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_49) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_50) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_51) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_52) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_53) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_54) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_55) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_56) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_57) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_58) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_59) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_60) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_61) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_62) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_63) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_64) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_65) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_66) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_67) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_68) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_69) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_70) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_71) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_72) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_73) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_74) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_75) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_76) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_77) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_78) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_79) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_80) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_81) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_string_pool_chunk_82) - 1u),
+};
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL char8 buster_aarch64_generated_string_pool_char(u64 logical)
 {
     u64 chunk = logical / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
     u64 offset = logical % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
-    switch (chunk)
-    {
-        case 0: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_0) - 1u) ? buster_aarch64_generated_string_pool_chunk_0[offset] : 0;
-        case 1: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_1) - 1u) ? buster_aarch64_generated_string_pool_chunk_1[offset] : 0;
-        case 2: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_2) - 1u) ? buster_aarch64_generated_string_pool_chunk_2[offset] : 0;
-        case 3: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_3) - 1u) ? buster_aarch64_generated_string_pool_chunk_3[offset] : 0;
-        case 4: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_4) - 1u) ? buster_aarch64_generated_string_pool_chunk_4[offset] : 0;
-        case 5: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_5) - 1u) ? buster_aarch64_generated_string_pool_chunk_5[offset] : 0;
-        case 6: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_6) - 1u) ? buster_aarch64_generated_string_pool_chunk_6[offset] : 0;
-        case 7: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_7) - 1u) ? buster_aarch64_generated_string_pool_chunk_7[offset] : 0;
-        case 8: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_8) - 1u) ? buster_aarch64_generated_string_pool_chunk_8[offset] : 0;
-        case 9: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_9) - 1u) ? buster_aarch64_generated_string_pool_chunk_9[offset] : 0;
-        case 10: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_10) - 1u) ? buster_aarch64_generated_string_pool_chunk_10[offset] : 0;
-        case 11: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_11) - 1u) ? buster_aarch64_generated_string_pool_chunk_11[offset] : 0;
-        case 12: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_12) - 1u) ? buster_aarch64_generated_string_pool_chunk_12[offset] : 0;
-        case 13: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_13) - 1u) ? buster_aarch64_generated_string_pool_chunk_13[offset] : 0;
-        case 14: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_14) - 1u) ? buster_aarch64_generated_string_pool_chunk_14[offset] : 0;
-        case 15: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_15) - 1u) ? buster_aarch64_generated_string_pool_chunk_15[offset] : 0;
-        case 16: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_16) - 1u) ? buster_aarch64_generated_string_pool_chunk_16[offset] : 0;
-        case 17: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_17) - 1u) ? buster_aarch64_generated_string_pool_chunk_17[offset] : 0;
-        case 18: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_18) - 1u) ? buster_aarch64_generated_string_pool_chunk_18[offset] : 0;
-        case 19: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_19) - 1u) ? buster_aarch64_generated_string_pool_chunk_19[offset] : 0;
-        case 20: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_20) - 1u) ? buster_aarch64_generated_string_pool_chunk_20[offset] : 0;
-        case 21: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_21) - 1u) ? buster_aarch64_generated_string_pool_chunk_21[offset] : 0;
-        case 22: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_22) - 1u) ? buster_aarch64_generated_string_pool_chunk_22[offset] : 0;
-        case 23: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_23) - 1u) ? buster_aarch64_generated_string_pool_chunk_23[offset] : 0;
-        case 24: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_24) - 1u) ? buster_aarch64_generated_string_pool_chunk_24[offset] : 0;
-        case 25: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_25) - 1u) ? buster_aarch64_generated_string_pool_chunk_25[offset] : 0;
-        case 26: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_26) - 1u) ? buster_aarch64_generated_string_pool_chunk_26[offset] : 0;
-        case 27: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_27) - 1u) ? buster_aarch64_generated_string_pool_chunk_27[offset] : 0;
-        case 28: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_28) - 1u) ? buster_aarch64_generated_string_pool_chunk_28[offset] : 0;
-        case 29: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_29) - 1u) ? buster_aarch64_generated_string_pool_chunk_29[offset] : 0;
-        case 30: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_30) - 1u) ? buster_aarch64_generated_string_pool_chunk_30[offset] : 0;
-        case 31: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_31) - 1u) ? buster_aarch64_generated_string_pool_chunk_31[offset] : 0;
-        case 32: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_32) - 1u) ? buster_aarch64_generated_string_pool_chunk_32[offset] : 0;
-        case 33: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_33) - 1u) ? buster_aarch64_generated_string_pool_chunk_33[offset] : 0;
-        case 34: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_34) - 1u) ? buster_aarch64_generated_string_pool_chunk_34[offset] : 0;
-        case 35: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_35) - 1u) ? buster_aarch64_generated_string_pool_chunk_35[offset] : 0;
-        case 36: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_36) - 1u) ? buster_aarch64_generated_string_pool_chunk_36[offset] : 0;
-        case 37: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_37) - 1u) ? buster_aarch64_generated_string_pool_chunk_37[offset] : 0;
-        case 38: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_38) - 1u) ? buster_aarch64_generated_string_pool_chunk_38[offset] : 0;
-        case 39: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_39) - 1u) ? buster_aarch64_generated_string_pool_chunk_39[offset] : 0;
-        case 40: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_40) - 1u) ? buster_aarch64_generated_string_pool_chunk_40[offset] : 0;
-        case 41: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_41) - 1u) ? buster_aarch64_generated_string_pool_chunk_41[offset] : 0;
-        case 42: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_42) - 1u) ? buster_aarch64_generated_string_pool_chunk_42[offset] : 0;
-        case 43: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_43) - 1u) ? buster_aarch64_generated_string_pool_chunk_43[offset] : 0;
-        case 44: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_44) - 1u) ? buster_aarch64_generated_string_pool_chunk_44[offset] : 0;
-        case 45: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_45) - 1u) ? buster_aarch64_generated_string_pool_chunk_45[offset] : 0;
-        case 46: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_46) - 1u) ? buster_aarch64_generated_string_pool_chunk_46[offset] : 0;
-        case 47: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_47) - 1u) ? buster_aarch64_generated_string_pool_chunk_47[offset] : 0;
-        case 48: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_48) - 1u) ? buster_aarch64_generated_string_pool_chunk_48[offset] : 0;
-        case 49: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_49) - 1u) ? buster_aarch64_generated_string_pool_chunk_49[offset] : 0;
-        case 50: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_50) - 1u) ? buster_aarch64_generated_string_pool_chunk_50[offset] : 0;
-        case 51: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_51) - 1u) ? buster_aarch64_generated_string_pool_chunk_51[offset] : 0;
-        case 52: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_52) - 1u) ? buster_aarch64_generated_string_pool_chunk_52[offset] : 0;
-        case 53: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_53) - 1u) ? buster_aarch64_generated_string_pool_chunk_53[offset] : 0;
-        case 54: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_54) - 1u) ? buster_aarch64_generated_string_pool_chunk_54[offset] : 0;
-        case 55: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_55) - 1u) ? buster_aarch64_generated_string_pool_chunk_55[offset] : 0;
-        case 56: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_56) - 1u) ? buster_aarch64_generated_string_pool_chunk_56[offset] : 0;
-        case 57: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_57) - 1u) ? buster_aarch64_generated_string_pool_chunk_57[offset] : 0;
-        case 58: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_58) - 1u) ? buster_aarch64_generated_string_pool_chunk_58[offset] : 0;
-        case 59: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_59) - 1u) ? buster_aarch64_generated_string_pool_chunk_59[offset] : 0;
-        case 60: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_60) - 1u) ? buster_aarch64_generated_string_pool_chunk_60[offset] : 0;
-        case 61: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_61) - 1u) ? buster_aarch64_generated_string_pool_chunk_61[offset] : 0;
-        case 62: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_62) - 1u) ? buster_aarch64_generated_string_pool_chunk_62[offset] : 0;
-        case 63: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_63) - 1u) ? buster_aarch64_generated_string_pool_chunk_63[offset] : 0;
-        case 64: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_64) - 1u) ? buster_aarch64_generated_string_pool_chunk_64[offset] : 0;
-        case 65: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_65) - 1u) ? buster_aarch64_generated_string_pool_chunk_65[offset] : 0;
-        case 66: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_66) - 1u) ? buster_aarch64_generated_string_pool_chunk_66[offset] : 0;
-        case 67: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_67) - 1u) ? buster_aarch64_generated_string_pool_chunk_67[offset] : 0;
-        case 68: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_68) - 1u) ? buster_aarch64_generated_string_pool_chunk_68[offset] : 0;
-        case 69: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_69) - 1u) ? buster_aarch64_generated_string_pool_chunk_69[offset] : 0;
-        case 70: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_70) - 1u) ? buster_aarch64_generated_string_pool_chunk_70[offset] : 0;
-        case 71: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_71) - 1u) ? buster_aarch64_generated_string_pool_chunk_71[offset] : 0;
-        case 72: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_72) - 1u) ? buster_aarch64_generated_string_pool_chunk_72[offset] : 0;
-        case 73: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_73) - 1u) ? buster_aarch64_generated_string_pool_chunk_73[offset] : 0;
-        case 74: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_74) - 1u) ? buster_aarch64_generated_string_pool_chunk_74[offset] : 0;
-        case 75: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_75) - 1u) ? buster_aarch64_generated_string_pool_chunk_75[offset] : 0;
-        case 76: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_76) - 1u) ? buster_aarch64_generated_string_pool_chunk_76[offset] : 0;
-        case 77: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_77) - 1u) ? buster_aarch64_generated_string_pool_chunk_77[offset] : 0;
-        case 78: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_78) - 1u) ? buster_aarch64_generated_string_pool_chunk_78[offset] : 0;
-        case 79: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_79) - 1u) ? buster_aarch64_generated_string_pool_chunk_79[offset] : 0;
-        case 80: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_80) - 1u) ? buster_aarch64_generated_string_pool_chunk_80[offset] : 0;
-        case 81: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_81) - 1u) ? buster_aarch64_generated_string_pool_chunk_81[offset] : 0;
-        case 82: return offset < (u64)(sizeof(buster_aarch64_generated_string_pool_chunk_82) - 1u) ? buster_aarch64_generated_string_pool_chunk_82[offset] : 0;
-        default: return 0;
-    }
+    return chunk < sizeof(buster_aarch64_generated_string_pool_chunks) / sizeof(buster_aarch64_generated_string_pool_chunks[0]) && offset < (u64)buster_aarch64_generated_string_pool_chunk_lengths[chunk] ? buster_aarch64_generated_string_pool_chunks[chunk][offset] : 0;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_string_pool_u8_counted(u64 byte_count, u64 offset)
@@ -409,7 +493,20 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_string_pool_u
     if (offset >= byte_count || !buster_aarch64_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;
     u64 encoded_offset = (offset / 3u) * 4u;
     if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;
-    u32 value = ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_string_pool_char(encoded_offset + 0u)) << 18) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_string_pool_char(encoded_offset + 1u)) << 12) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_string_pool_char(encoded_offset + 2u)) << 6) | (u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_string_pool_char(encoded_offset + 3u));
+    u64 chunk = encoded_offset / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u64 chunk_offset = encoded_offset % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u32 value = 0;
+    if (chunk < sizeof(buster_aarch64_generated_string_pool_chunks) / sizeof(buster_aarch64_generated_string_pool_chunks[0]))
+    {
+        const char8* encoded = buster_aarch64_generated_string_pool_chunks[chunk];
+        u64 length = (u64)buster_aarch64_generated_string_pool_chunk_lengths[chunk];
+        char8 character_0 = chunk_offset + 1u <= length ? encoded[chunk_offset + 0u] : 0;
+        char8 character_1 = chunk_offset + 2u <= length ? encoded[chunk_offset + 1u] : 0;
+        char8 character_2 = chunk_offset + 3u <= length ? encoded[chunk_offset + 2u] : 0;
+        char8 character_3 = chunk_offset + 4u <= length ? encoded[chunk_offset + 3u] : 0;
+        value = ((u32)buster_aarch64_generated_base64_value(character_0) << 18) | ((u32)buster_aarch64_generated_base64_value(character_1) << 12) |
+                ((u32)buster_aarch64_generated_base64_value(character_2) << 6) | (u32)buster_aarch64_generated_base64_value(character_3);
+    }
     return (u8)(value >> ((2u - (offset % 3u)) * 8u));
 }
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_string_pool_u8(u64 offset)
@@ -483,45 +580,77 @@ static const char8 buster_aarch64_generated_segments_blob_chunk_29[] = "BQAABQUA
 static const char8 buster_aarch64_generated_segments_blob_chunk_30[] = "AAABBAAABQUAABAFAAABBAAABQUAABAFAAABBAAABQUAABAFAAACAwAABwMAAAIDAAAHAwAAAgMAAAcDAAACAwAABwMAAAIDAAAHAwAA";
 #define buster_aarch64_generated_segments_blob_BYTE_COUNT 92148
 #define buster_aarch64_generated_segments_blob_CHUNK_COUNT 31
+static const char8* const buster_aarch64_generated_segments_blob_chunks[] = {
+    buster_aarch64_generated_segments_blob_chunk_0,
+    buster_aarch64_generated_segments_blob_chunk_1,
+    buster_aarch64_generated_segments_blob_chunk_2,
+    buster_aarch64_generated_segments_blob_chunk_3,
+    buster_aarch64_generated_segments_blob_chunk_4,
+    buster_aarch64_generated_segments_blob_chunk_5,
+    buster_aarch64_generated_segments_blob_chunk_6,
+    buster_aarch64_generated_segments_blob_chunk_7,
+    buster_aarch64_generated_segments_blob_chunk_8,
+    buster_aarch64_generated_segments_blob_chunk_9,
+    buster_aarch64_generated_segments_blob_chunk_10,
+    buster_aarch64_generated_segments_blob_chunk_11,
+    buster_aarch64_generated_segments_blob_chunk_12,
+    buster_aarch64_generated_segments_blob_chunk_13,
+    buster_aarch64_generated_segments_blob_chunk_14,
+    buster_aarch64_generated_segments_blob_chunk_15,
+    buster_aarch64_generated_segments_blob_chunk_16,
+    buster_aarch64_generated_segments_blob_chunk_17,
+    buster_aarch64_generated_segments_blob_chunk_18,
+    buster_aarch64_generated_segments_blob_chunk_19,
+    buster_aarch64_generated_segments_blob_chunk_20,
+    buster_aarch64_generated_segments_blob_chunk_21,
+    buster_aarch64_generated_segments_blob_chunk_22,
+    buster_aarch64_generated_segments_blob_chunk_23,
+    buster_aarch64_generated_segments_blob_chunk_24,
+    buster_aarch64_generated_segments_blob_chunk_25,
+    buster_aarch64_generated_segments_blob_chunk_26,
+    buster_aarch64_generated_segments_blob_chunk_27,
+    buster_aarch64_generated_segments_blob_chunk_28,
+    buster_aarch64_generated_segments_blob_chunk_29,
+    buster_aarch64_generated_segments_blob_chunk_30,
+};
+static const u16 buster_aarch64_generated_segments_blob_chunk_lengths[] = {
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_0) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_1) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_2) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_3) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_4) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_5) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_6) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_7) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_8) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_9) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_10) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_11) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_12) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_13) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_14) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_15) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_16) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_17) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_18) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_19) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_20) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_21) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_22) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_23) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_24) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_25) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_26) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_27) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_28) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_29) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_segments_blob_chunk_30) - 1u),
+};
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL char8 buster_aarch64_generated_segments_blob_char(u64 logical)
 {
     u64 chunk = logical / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
     u64 offset = logical % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
-    switch (chunk)
-    {
-        case 0: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_0) - 1u) ? buster_aarch64_generated_segments_blob_chunk_0[offset] : 0;
-        case 1: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_1) - 1u) ? buster_aarch64_generated_segments_blob_chunk_1[offset] : 0;
-        case 2: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_2) - 1u) ? buster_aarch64_generated_segments_blob_chunk_2[offset] : 0;
-        case 3: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_3) - 1u) ? buster_aarch64_generated_segments_blob_chunk_3[offset] : 0;
-        case 4: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_4) - 1u) ? buster_aarch64_generated_segments_blob_chunk_4[offset] : 0;
-        case 5: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_5) - 1u) ? buster_aarch64_generated_segments_blob_chunk_5[offset] : 0;
-        case 6: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_6) - 1u) ? buster_aarch64_generated_segments_blob_chunk_6[offset] : 0;
-        case 7: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_7) - 1u) ? buster_aarch64_generated_segments_blob_chunk_7[offset] : 0;
-        case 8: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_8) - 1u) ? buster_aarch64_generated_segments_blob_chunk_8[offset] : 0;
-        case 9: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_9) - 1u) ? buster_aarch64_generated_segments_blob_chunk_9[offset] : 0;
-        case 10: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_10) - 1u) ? buster_aarch64_generated_segments_blob_chunk_10[offset] : 0;
-        case 11: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_11) - 1u) ? buster_aarch64_generated_segments_blob_chunk_11[offset] : 0;
-        case 12: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_12) - 1u) ? buster_aarch64_generated_segments_blob_chunk_12[offset] : 0;
-        case 13: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_13) - 1u) ? buster_aarch64_generated_segments_blob_chunk_13[offset] : 0;
-        case 14: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_14) - 1u) ? buster_aarch64_generated_segments_blob_chunk_14[offset] : 0;
-        case 15: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_15) - 1u) ? buster_aarch64_generated_segments_blob_chunk_15[offset] : 0;
-        case 16: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_16) - 1u) ? buster_aarch64_generated_segments_blob_chunk_16[offset] : 0;
-        case 17: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_17) - 1u) ? buster_aarch64_generated_segments_blob_chunk_17[offset] : 0;
-        case 18: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_18) - 1u) ? buster_aarch64_generated_segments_blob_chunk_18[offset] : 0;
-        case 19: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_19) - 1u) ? buster_aarch64_generated_segments_blob_chunk_19[offset] : 0;
-        case 20: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_20) - 1u) ? buster_aarch64_generated_segments_blob_chunk_20[offset] : 0;
-        case 21: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_21) - 1u) ? buster_aarch64_generated_segments_blob_chunk_21[offset] : 0;
-        case 22: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_22) - 1u) ? buster_aarch64_generated_segments_blob_chunk_22[offset] : 0;
-        case 23: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_23) - 1u) ? buster_aarch64_generated_segments_blob_chunk_23[offset] : 0;
-        case 24: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_24) - 1u) ? buster_aarch64_generated_segments_blob_chunk_24[offset] : 0;
-        case 25: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_25) - 1u) ? buster_aarch64_generated_segments_blob_chunk_25[offset] : 0;
-        case 26: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_26) - 1u) ? buster_aarch64_generated_segments_blob_chunk_26[offset] : 0;
-        case 27: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_27) - 1u) ? buster_aarch64_generated_segments_blob_chunk_27[offset] : 0;
-        case 28: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_28) - 1u) ? buster_aarch64_generated_segments_blob_chunk_28[offset] : 0;
-        case 29: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_29) - 1u) ? buster_aarch64_generated_segments_blob_chunk_29[offset] : 0;
-        case 30: return offset < (u64)(sizeof(buster_aarch64_generated_segments_blob_chunk_30) - 1u) ? buster_aarch64_generated_segments_blob_chunk_30[offset] : 0;
-        default: return 0;
-    }
+    return chunk < sizeof(buster_aarch64_generated_segments_blob_chunks) / sizeof(buster_aarch64_generated_segments_blob_chunks[0]) && offset < (u64)buster_aarch64_generated_segments_blob_chunk_lengths[chunk] ? buster_aarch64_generated_segments_blob_chunks[chunk][offset] : 0;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_segments_blob_u8_counted(u64 byte_count, u64 offset)
@@ -530,7 +659,20 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_segments_blob
     if (offset >= byte_count || !buster_aarch64_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;
     u64 encoded_offset = (offset / 3u) * 4u;
     if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;
-    u32 value = ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_segments_blob_char(encoded_offset + 0u)) << 18) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_segments_blob_char(encoded_offset + 1u)) << 12) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_segments_blob_char(encoded_offset + 2u)) << 6) | (u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_segments_blob_char(encoded_offset + 3u));
+    u64 chunk = encoded_offset / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u64 chunk_offset = encoded_offset % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u32 value = 0;
+    if (chunk < sizeof(buster_aarch64_generated_segments_blob_chunks) / sizeof(buster_aarch64_generated_segments_blob_chunks[0]))
+    {
+        const char8* encoded = buster_aarch64_generated_segments_blob_chunks[chunk];
+        u64 length = (u64)buster_aarch64_generated_segments_blob_chunk_lengths[chunk];
+        char8 character_0 = chunk_offset + 1u <= length ? encoded[chunk_offset + 0u] : 0;
+        char8 character_1 = chunk_offset + 2u <= length ? encoded[chunk_offset + 1u] : 0;
+        char8 character_2 = chunk_offset + 3u <= length ? encoded[chunk_offset + 2u] : 0;
+        char8 character_3 = chunk_offset + 4u <= length ? encoded[chunk_offset + 3u] : 0;
+        value = ((u32)buster_aarch64_generated_base64_value(character_0) << 18) | ((u32)buster_aarch64_generated_base64_value(character_1) << 12) |
+                ((u32)buster_aarch64_generated_base64_value(character_2) << 6) | (u32)buster_aarch64_generated_base64_value(character_3);
+    }
     return (u8)(value >> ((2u - (offset % 3u)) * 8u));
 }
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_segments_blob_u8(u64 offset)
@@ -715,162 +857,311 @@ static const char8 buster_aarch64_generated_fields_blob_chunk_146[] = "AQAAAAIAT
 static const char8 buster_aarch64_generated_fields_blob_chunk_147[] = "ALNZAAAfAAAABQEBAAAAAgBz5wIAtFkAAB8AAAAFAQEAAAABAITnAgC1WQAAHwAAAAUBAQAAAAIAgecCALZZAAAfAAAABQEBAAAAAgBBGwIAt1kAAB8AAAAFAQEAAAABAGwbAgC4WQAAHwAAAAUBAQAAAAIAThsCALlZAAAfAAAABQEBAAAAAgBBGwIAulkAAB8AAAAFAQEAAAABAGwbAgC7WQAAHwAAAAUBAQAAAAIAThsCALxZAAAfAAAABQEBAAAAAgBBGwIAvVkAAB8AAAAFAQEAAAABAGwbAgC+WQAAHwAAAAUBAQAAAAIAThsCAL9ZAAAfAAAABQEBAAAAAgBBGwIAwFkAAB8AAAAFAQEAAAABAGwbAgDBWQAAHwAAAAUBAQAAAAIAThsCAMJZAAAfAAAABQEBAAAAAgBBGwIAw1kAAB8AAAAFAQEAAAABAGwbAgDEWQAAHwAAAAUBAQAAAAIAThsCAMVZAAAfAAAABQEBAAAAAgBBGwIAxlkAAB8AAAAFAQEAAAABAGwbAgDHWQAAHwAAAAUBAQAAAAIAThsCAMhZAAAfAAAABQEBAAAAAgBBGwIAyVkAAB8AAAAFAQEAAAABAGwbAgDKWQAAHwAAAAUBAQAAAAIAThsCAMtZAAAfAAAABQEBAAAAAgBz5wIAzFkAAB8AAAAFAQEAAAABAITnAgDNWQAAHwAAAAUBAQAAAAIAgecCAM5ZAAAfAAAABQEBAAAAAgBz5wIAz1kAAB8AAAAFAQEAAAABAITnAgDQWQAAHwAAAAUBAQAAAAIAgecCANFZAAAfAAAABQEBAAAAAgBz5wIA0lkAAB8AAAAFAQEAAAABAITnAgDTWQAAHwAAAAUBAQAAAAIAgecCANRZAAAfAAAABQEBAAAAAgBz5wIA1VkAAB8AAAAFAQEAAAABAITnAgDWWQAAHwAAAAUBAQAAAAIAgecCANdZAAAfAAAABQEBAAAAAgBz5wIA2FkAAB8AAAAFAQEAAAABAITnAgDZWQAAHwAAAAUBAQAAAAIAgecCANpZAAAfAAAABQEBAAAAAgBz5wIA21kAAB8AAAAFAQEAAAABAITnAgDcWQAAHwAAAAUBAQAAAAIAgecCAN1ZAAAfAAAABQEBAAAAAgBz5wIA3lkAAB8AAAAFAQEAAAABAITnAgDfWQAAHwAAAAUBAQAAAAIAgecCAOBZAAAfAAAABQEBAAAAAgBz5wIA4VkAAB8AAAAFAQEAAAABAITnAgDiWQAAHwAAAAUBAQAAAAIAgecCAONZAAAfAAAABQEBAAAAAgBz5wIA5FkAAA8AAAAEAQAAAAABAITnAgDlWQAAHwAAAAUBAQAAAAIAgecCAOZZAAAfAAAABQEBAAAAAgBz5wIA51kAAA8AAAAEAQAAAAABAITnAgDoWQAAHwAAAAUBAQAAAAIAgecCAOlZAAAfAAAABQEBAAAAAgBz5wIA6lkAAA8AAAAEAQAAAAABAITnAgDrWQAAHwAAAAUBAQAAAAIAgecCAOxZAAAfAAAABQEBAAAAAgBz5wIA7VkAAA8AAAAEAQAAAAABAITnAgDuWQAAHwAAAAUBAQAAAAIAgecCAO9ZAAAfAAAABQEBAAAAAgBz5wIA8FkAAA8AAAAEAQAAAAABAITnAgDxWQAAHwAAAAUBAQAAAAIAgecCAPJZAAAfAAAABQEBAAAAAgBz5wIA81kAAAcAAAADAQAAAAABAITnAgD0WQAABwAAAAMBAAAAAAIAc+cCAPVZAAAHAAAAAwEAAAAAAQCE5wIA9lkAAAcAAAADAQAAAAACAHPnAgD3WQAABwAAAAMBAAAAAAEAhOcCAPhZAAAHAAAAAwEAAAAAAgBz5wIA+VkAAAcAAAADAQAAAAABAITnAgD6WQAABwAAAAMBAAAAAAIAc+cCAPtZAAAHAAAAAwEAAAAAAQCE5wIA/FkAAAcAAAADAQAAAAACAA==";
 #define buster_aarch64_generated_fields_blob_BYTE_COUNT 452620
 #define buster_aarch64_generated_fields_blob_CHUNK_COUNT 148
+static const char8* const buster_aarch64_generated_fields_blob_chunks[] = {
+    buster_aarch64_generated_fields_blob_chunk_0,
+    buster_aarch64_generated_fields_blob_chunk_1,
+    buster_aarch64_generated_fields_blob_chunk_2,
+    buster_aarch64_generated_fields_blob_chunk_3,
+    buster_aarch64_generated_fields_blob_chunk_4,
+    buster_aarch64_generated_fields_blob_chunk_5,
+    buster_aarch64_generated_fields_blob_chunk_6,
+    buster_aarch64_generated_fields_blob_chunk_7,
+    buster_aarch64_generated_fields_blob_chunk_8,
+    buster_aarch64_generated_fields_blob_chunk_9,
+    buster_aarch64_generated_fields_blob_chunk_10,
+    buster_aarch64_generated_fields_blob_chunk_11,
+    buster_aarch64_generated_fields_blob_chunk_12,
+    buster_aarch64_generated_fields_blob_chunk_13,
+    buster_aarch64_generated_fields_blob_chunk_14,
+    buster_aarch64_generated_fields_blob_chunk_15,
+    buster_aarch64_generated_fields_blob_chunk_16,
+    buster_aarch64_generated_fields_blob_chunk_17,
+    buster_aarch64_generated_fields_blob_chunk_18,
+    buster_aarch64_generated_fields_blob_chunk_19,
+    buster_aarch64_generated_fields_blob_chunk_20,
+    buster_aarch64_generated_fields_blob_chunk_21,
+    buster_aarch64_generated_fields_blob_chunk_22,
+    buster_aarch64_generated_fields_blob_chunk_23,
+    buster_aarch64_generated_fields_blob_chunk_24,
+    buster_aarch64_generated_fields_blob_chunk_25,
+    buster_aarch64_generated_fields_blob_chunk_26,
+    buster_aarch64_generated_fields_blob_chunk_27,
+    buster_aarch64_generated_fields_blob_chunk_28,
+    buster_aarch64_generated_fields_blob_chunk_29,
+    buster_aarch64_generated_fields_blob_chunk_30,
+    buster_aarch64_generated_fields_blob_chunk_31,
+    buster_aarch64_generated_fields_blob_chunk_32,
+    buster_aarch64_generated_fields_blob_chunk_33,
+    buster_aarch64_generated_fields_blob_chunk_34,
+    buster_aarch64_generated_fields_blob_chunk_35,
+    buster_aarch64_generated_fields_blob_chunk_36,
+    buster_aarch64_generated_fields_blob_chunk_37,
+    buster_aarch64_generated_fields_blob_chunk_38,
+    buster_aarch64_generated_fields_blob_chunk_39,
+    buster_aarch64_generated_fields_blob_chunk_40,
+    buster_aarch64_generated_fields_blob_chunk_41,
+    buster_aarch64_generated_fields_blob_chunk_42,
+    buster_aarch64_generated_fields_blob_chunk_43,
+    buster_aarch64_generated_fields_blob_chunk_44,
+    buster_aarch64_generated_fields_blob_chunk_45,
+    buster_aarch64_generated_fields_blob_chunk_46,
+    buster_aarch64_generated_fields_blob_chunk_47,
+    buster_aarch64_generated_fields_blob_chunk_48,
+    buster_aarch64_generated_fields_blob_chunk_49,
+    buster_aarch64_generated_fields_blob_chunk_50,
+    buster_aarch64_generated_fields_blob_chunk_51,
+    buster_aarch64_generated_fields_blob_chunk_52,
+    buster_aarch64_generated_fields_blob_chunk_53,
+    buster_aarch64_generated_fields_blob_chunk_54,
+    buster_aarch64_generated_fields_blob_chunk_55,
+    buster_aarch64_generated_fields_blob_chunk_56,
+    buster_aarch64_generated_fields_blob_chunk_57,
+    buster_aarch64_generated_fields_blob_chunk_58,
+    buster_aarch64_generated_fields_blob_chunk_59,
+    buster_aarch64_generated_fields_blob_chunk_60,
+    buster_aarch64_generated_fields_blob_chunk_61,
+    buster_aarch64_generated_fields_blob_chunk_62,
+    buster_aarch64_generated_fields_blob_chunk_63,
+    buster_aarch64_generated_fields_blob_chunk_64,
+    buster_aarch64_generated_fields_blob_chunk_65,
+    buster_aarch64_generated_fields_blob_chunk_66,
+    buster_aarch64_generated_fields_blob_chunk_67,
+    buster_aarch64_generated_fields_blob_chunk_68,
+    buster_aarch64_generated_fields_blob_chunk_69,
+    buster_aarch64_generated_fields_blob_chunk_70,
+    buster_aarch64_generated_fields_blob_chunk_71,
+    buster_aarch64_generated_fields_blob_chunk_72,
+    buster_aarch64_generated_fields_blob_chunk_73,
+    buster_aarch64_generated_fields_blob_chunk_74,
+    buster_aarch64_generated_fields_blob_chunk_75,
+    buster_aarch64_generated_fields_blob_chunk_76,
+    buster_aarch64_generated_fields_blob_chunk_77,
+    buster_aarch64_generated_fields_blob_chunk_78,
+    buster_aarch64_generated_fields_blob_chunk_79,
+    buster_aarch64_generated_fields_blob_chunk_80,
+    buster_aarch64_generated_fields_blob_chunk_81,
+    buster_aarch64_generated_fields_blob_chunk_82,
+    buster_aarch64_generated_fields_blob_chunk_83,
+    buster_aarch64_generated_fields_blob_chunk_84,
+    buster_aarch64_generated_fields_blob_chunk_85,
+    buster_aarch64_generated_fields_blob_chunk_86,
+    buster_aarch64_generated_fields_blob_chunk_87,
+    buster_aarch64_generated_fields_blob_chunk_88,
+    buster_aarch64_generated_fields_blob_chunk_89,
+    buster_aarch64_generated_fields_blob_chunk_90,
+    buster_aarch64_generated_fields_blob_chunk_91,
+    buster_aarch64_generated_fields_blob_chunk_92,
+    buster_aarch64_generated_fields_blob_chunk_93,
+    buster_aarch64_generated_fields_blob_chunk_94,
+    buster_aarch64_generated_fields_blob_chunk_95,
+    buster_aarch64_generated_fields_blob_chunk_96,
+    buster_aarch64_generated_fields_blob_chunk_97,
+    buster_aarch64_generated_fields_blob_chunk_98,
+    buster_aarch64_generated_fields_blob_chunk_99,
+    buster_aarch64_generated_fields_blob_chunk_100,
+    buster_aarch64_generated_fields_blob_chunk_101,
+    buster_aarch64_generated_fields_blob_chunk_102,
+    buster_aarch64_generated_fields_blob_chunk_103,
+    buster_aarch64_generated_fields_blob_chunk_104,
+    buster_aarch64_generated_fields_blob_chunk_105,
+    buster_aarch64_generated_fields_blob_chunk_106,
+    buster_aarch64_generated_fields_blob_chunk_107,
+    buster_aarch64_generated_fields_blob_chunk_108,
+    buster_aarch64_generated_fields_blob_chunk_109,
+    buster_aarch64_generated_fields_blob_chunk_110,
+    buster_aarch64_generated_fields_blob_chunk_111,
+    buster_aarch64_generated_fields_blob_chunk_112,
+    buster_aarch64_generated_fields_blob_chunk_113,
+    buster_aarch64_generated_fields_blob_chunk_114,
+    buster_aarch64_generated_fields_blob_chunk_115,
+    buster_aarch64_generated_fields_blob_chunk_116,
+    buster_aarch64_generated_fields_blob_chunk_117,
+    buster_aarch64_generated_fields_blob_chunk_118,
+    buster_aarch64_generated_fields_blob_chunk_119,
+    buster_aarch64_generated_fields_blob_chunk_120,
+    buster_aarch64_generated_fields_blob_chunk_121,
+    buster_aarch64_generated_fields_blob_chunk_122,
+    buster_aarch64_generated_fields_blob_chunk_123,
+    buster_aarch64_generated_fields_blob_chunk_124,
+    buster_aarch64_generated_fields_blob_chunk_125,
+    buster_aarch64_generated_fields_blob_chunk_126,
+    buster_aarch64_generated_fields_blob_chunk_127,
+    buster_aarch64_generated_fields_blob_chunk_128,
+    buster_aarch64_generated_fields_blob_chunk_129,
+    buster_aarch64_generated_fields_blob_chunk_130,
+    buster_aarch64_generated_fields_blob_chunk_131,
+    buster_aarch64_generated_fields_blob_chunk_132,
+    buster_aarch64_generated_fields_blob_chunk_133,
+    buster_aarch64_generated_fields_blob_chunk_134,
+    buster_aarch64_generated_fields_blob_chunk_135,
+    buster_aarch64_generated_fields_blob_chunk_136,
+    buster_aarch64_generated_fields_blob_chunk_137,
+    buster_aarch64_generated_fields_blob_chunk_138,
+    buster_aarch64_generated_fields_blob_chunk_139,
+    buster_aarch64_generated_fields_blob_chunk_140,
+    buster_aarch64_generated_fields_blob_chunk_141,
+    buster_aarch64_generated_fields_blob_chunk_142,
+    buster_aarch64_generated_fields_blob_chunk_143,
+    buster_aarch64_generated_fields_blob_chunk_144,
+    buster_aarch64_generated_fields_blob_chunk_145,
+    buster_aarch64_generated_fields_blob_chunk_146,
+    buster_aarch64_generated_fields_blob_chunk_147,
+};
+static const u16 buster_aarch64_generated_fields_blob_chunk_lengths[] = {
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_0) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_1) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_2) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_3) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_4) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_5) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_6) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_7) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_8) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_9) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_10) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_11) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_12) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_13) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_14) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_15) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_16) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_17) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_18) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_19) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_20) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_21) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_22) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_23) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_24) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_25) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_26) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_27) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_28) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_29) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_30) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_31) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_32) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_33) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_34) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_35) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_36) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_37) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_38) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_39) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_40) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_41) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_42) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_43) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_44) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_45) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_46) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_47) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_48) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_49) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_50) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_51) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_52) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_53) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_54) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_55) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_56) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_57) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_58) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_59) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_60) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_61) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_62) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_63) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_64) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_65) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_66) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_67) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_68) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_69) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_70) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_71) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_72) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_73) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_74) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_75) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_76) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_77) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_78) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_79) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_80) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_81) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_82) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_83) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_84) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_85) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_86) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_87) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_88) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_89) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_90) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_91) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_92) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_93) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_94) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_95) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_96) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_97) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_98) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_99) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_100) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_101) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_102) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_103) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_104) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_105) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_106) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_107) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_108) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_109) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_110) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_111) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_112) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_113) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_114) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_115) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_116) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_117) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_118) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_119) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_120) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_121) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_122) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_123) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_124) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_125) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_126) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_127) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_128) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_129) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_130) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_131) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_132) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_133) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_134) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_135) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_136) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_137) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_138) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_139) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_140) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_141) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_142) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_143) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_144) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_145) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_146) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_fields_blob_chunk_147) - 1u),
+};
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL char8 buster_aarch64_generated_fields_blob_char(u64 logical)
 {
     u64 chunk = logical / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
     u64 offset = logical % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
-    switch (chunk)
-    {
-        case 0: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_0) - 1u) ? buster_aarch64_generated_fields_blob_chunk_0[offset] : 0;
-        case 1: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_1) - 1u) ? buster_aarch64_generated_fields_blob_chunk_1[offset] : 0;
-        case 2: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_2) - 1u) ? buster_aarch64_generated_fields_blob_chunk_2[offset] : 0;
-        case 3: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_3) - 1u) ? buster_aarch64_generated_fields_blob_chunk_3[offset] : 0;
-        case 4: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_4) - 1u) ? buster_aarch64_generated_fields_blob_chunk_4[offset] : 0;
-        case 5: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_5) - 1u) ? buster_aarch64_generated_fields_blob_chunk_5[offset] : 0;
-        case 6: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_6) - 1u) ? buster_aarch64_generated_fields_blob_chunk_6[offset] : 0;
-        case 7: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_7) - 1u) ? buster_aarch64_generated_fields_blob_chunk_7[offset] : 0;
-        case 8: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_8) - 1u) ? buster_aarch64_generated_fields_blob_chunk_8[offset] : 0;
-        case 9: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_9) - 1u) ? buster_aarch64_generated_fields_blob_chunk_9[offset] : 0;
-        case 10: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_10) - 1u) ? buster_aarch64_generated_fields_blob_chunk_10[offset] : 0;
-        case 11: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_11) - 1u) ? buster_aarch64_generated_fields_blob_chunk_11[offset] : 0;
-        case 12: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_12) - 1u) ? buster_aarch64_generated_fields_blob_chunk_12[offset] : 0;
-        case 13: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_13) - 1u) ? buster_aarch64_generated_fields_blob_chunk_13[offset] : 0;
-        case 14: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_14) - 1u) ? buster_aarch64_generated_fields_blob_chunk_14[offset] : 0;
-        case 15: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_15) - 1u) ? buster_aarch64_generated_fields_blob_chunk_15[offset] : 0;
-        case 16: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_16) - 1u) ? buster_aarch64_generated_fields_blob_chunk_16[offset] : 0;
-        case 17: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_17) - 1u) ? buster_aarch64_generated_fields_blob_chunk_17[offset] : 0;
-        case 18: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_18) - 1u) ? buster_aarch64_generated_fields_blob_chunk_18[offset] : 0;
-        case 19: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_19) - 1u) ? buster_aarch64_generated_fields_blob_chunk_19[offset] : 0;
-        case 20: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_20) - 1u) ? buster_aarch64_generated_fields_blob_chunk_20[offset] : 0;
-        case 21: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_21) - 1u) ? buster_aarch64_generated_fields_blob_chunk_21[offset] : 0;
-        case 22: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_22) - 1u) ? buster_aarch64_generated_fields_blob_chunk_22[offset] : 0;
-        case 23: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_23) - 1u) ? buster_aarch64_generated_fields_blob_chunk_23[offset] : 0;
-        case 24: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_24) - 1u) ? buster_aarch64_generated_fields_blob_chunk_24[offset] : 0;
-        case 25: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_25) - 1u) ? buster_aarch64_generated_fields_blob_chunk_25[offset] : 0;
-        case 26: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_26) - 1u) ? buster_aarch64_generated_fields_blob_chunk_26[offset] : 0;
-        case 27: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_27) - 1u) ? buster_aarch64_generated_fields_blob_chunk_27[offset] : 0;
-        case 28: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_28) - 1u) ? buster_aarch64_generated_fields_blob_chunk_28[offset] : 0;
-        case 29: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_29) - 1u) ? buster_aarch64_generated_fields_blob_chunk_29[offset] : 0;
-        case 30: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_30) - 1u) ? buster_aarch64_generated_fields_blob_chunk_30[offset] : 0;
-        case 31: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_31) - 1u) ? buster_aarch64_generated_fields_blob_chunk_31[offset] : 0;
-        case 32: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_32) - 1u) ? buster_aarch64_generated_fields_blob_chunk_32[offset] : 0;
-        case 33: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_33) - 1u) ? buster_aarch64_generated_fields_blob_chunk_33[offset] : 0;
-        case 34: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_34) - 1u) ? buster_aarch64_generated_fields_blob_chunk_34[offset] : 0;
-        case 35: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_35) - 1u) ? buster_aarch64_generated_fields_blob_chunk_35[offset] : 0;
-        case 36: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_36) - 1u) ? buster_aarch64_generated_fields_blob_chunk_36[offset] : 0;
-        case 37: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_37) - 1u) ? buster_aarch64_generated_fields_blob_chunk_37[offset] : 0;
-        case 38: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_38) - 1u) ? buster_aarch64_generated_fields_blob_chunk_38[offset] : 0;
-        case 39: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_39) - 1u) ? buster_aarch64_generated_fields_blob_chunk_39[offset] : 0;
-        case 40: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_40) - 1u) ? buster_aarch64_generated_fields_blob_chunk_40[offset] : 0;
-        case 41: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_41) - 1u) ? buster_aarch64_generated_fields_blob_chunk_41[offset] : 0;
-        case 42: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_42) - 1u) ? buster_aarch64_generated_fields_blob_chunk_42[offset] : 0;
-        case 43: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_43) - 1u) ? buster_aarch64_generated_fields_blob_chunk_43[offset] : 0;
-        case 44: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_44) - 1u) ? buster_aarch64_generated_fields_blob_chunk_44[offset] : 0;
-        case 45: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_45) - 1u) ? buster_aarch64_generated_fields_blob_chunk_45[offset] : 0;
-        case 46: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_46) - 1u) ? buster_aarch64_generated_fields_blob_chunk_46[offset] : 0;
-        case 47: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_47) - 1u) ? buster_aarch64_generated_fields_blob_chunk_47[offset] : 0;
-        case 48: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_48) - 1u) ? buster_aarch64_generated_fields_blob_chunk_48[offset] : 0;
-        case 49: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_49) - 1u) ? buster_aarch64_generated_fields_blob_chunk_49[offset] : 0;
-        case 50: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_50) - 1u) ? buster_aarch64_generated_fields_blob_chunk_50[offset] : 0;
-        case 51: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_51) - 1u) ? buster_aarch64_generated_fields_blob_chunk_51[offset] : 0;
-        case 52: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_52) - 1u) ? buster_aarch64_generated_fields_blob_chunk_52[offset] : 0;
-        case 53: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_53) - 1u) ? buster_aarch64_generated_fields_blob_chunk_53[offset] : 0;
-        case 54: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_54) - 1u) ? buster_aarch64_generated_fields_blob_chunk_54[offset] : 0;
-        case 55: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_55) - 1u) ? buster_aarch64_generated_fields_blob_chunk_55[offset] : 0;
-        case 56: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_56) - 1u) ? buster_aarch64_generated_fields_blob_chunk_56[offset] : 0;
-        case 57: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_57) - 1u) ? buster_aarch64_generated_fields_blob_chunk_57[offset] : 0;
-        case 58: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_58) - 1u) ? buster_aarch64_generated_fields_blob_chunk_58[offset] : 0;
-        case 59: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_59) - 1u) ? buster_aarch64_generated_fields_blob_chunk_59[offset] : 0;
-        case 60: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_60) - 1u) ? buster_aarch64_generated_fields_blob_chunk_60[offset] : 0;
-        case 61: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_61) - 1u) ? buster_aarch64_generated_fields_blob_chunk_61[offset] : 0;
-        case 62: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_62) - 1u) ? buster_aarch64_generated_fields_blob_chunk_62[offset] : 0;
-        case 63: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_63) - 1u) ? buster_aarch64_generated_fields_blob_chunk_63[offset] : 0;
-        case 64: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_64) - 1u) ? buster_aarch64_generated_fields_blob_chunk_64[offset] : 0;
-        case 65: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_65) - 1u) ? buster_aarch64_generated_fields_blob_chunk_65[offset] : 0;
-        case 66: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_66) - 1u) ? buster_aarch64_generated_fields_blob_chunk_66[offset] : 0;
-        case 67: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_67) - 1u) ? buster_aarch64_generated_fields_blob_chunk_67[offset] : 0;
-        case 68: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_68) - 1u) ? buster_aarch64_generated_fields_blob_chunk_68[offset] : 0;
-        case 69: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_69) - 1u) ? buster_aarch64_generated_fields_blob_chunk_69[offset] : 0;
-        case 70: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_70) - 1u) ? buster_aarch64_generated_fields_blob_chunk_70[offset] : 0;
-        case 71: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_71) - 1u) ? buster_aarch64_generated_fields_blob_chunk_71[offset] : 0;
-        case 72: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_72) - 1u) ? buster_aarch64_generated_fields_blob_chunk_72[offset] : 0;
-        case 73: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_73) - 1u) ? buster_aarch64_generated_fields_blob_chunk_73[offset] : 0;
-        case 74: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_74) - 1u) ? buster_aarch64_generated_fields_blob_chunk_74[offset] : 0;
-        case 75: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_75) - 1u) ? buster_aarch64_generated_fields_blob_chunk_75[offset] : 0;
-        case 76: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_76) - 1u) ? buster_aarch64_generated_fields_blob_chunk_76[offset] : 0;
-        case 77: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_77) - 1u) ? buster_aarch64_generated_fields_blob_chunk_77[offset] : 0;
-        case 78: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_78) - 1u) ? buster_aarch64_generated_fields_blob_chunk_78[offset] : 0;
-        case 79: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_79) - 1u) ? buster_aarch64_generated_fields_blob_chunk_79[offset] : 0;
-        case 80: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_80) - 1u) ? buster_aarch64_generated_fields_blob_chunk_80[offset] : 0;
-        case 81: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_81) - 1u) ? buster_aarch64_generated_fields_blob_chunk_81[offset] : 0;
-        case 82: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_82) - 1u) ? buster_aarch64_generated_fields_blob_chunk_82[offset] : 0;
-        case 83: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_83) - 1u) ? buster_aarch64_generated_fields_blob_chunk_83[offset] : 0;
-        case 84: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_84) - 1u) ? buster_aarch64_generated_fields_blob_chunk_84[offset] : 0;
-        case 85: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_85) - 1u) ? buster_aarch64_generated_fields_blob_chunk_85[offset] : 0;
-        case 86: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_86) - 1u) ? buster_aarch64_generated_fields_blob_chunk_86[offset] : 0;
-        case 87: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_87) - 1u) ? buster_aarch64_generated_fields_blob_chunk_87[offset] : 0;
-        case 88: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_88) - 1u) ? buster_aarch64_generated_fields_blob_chunk_88[offset] : 0;
-        case 89: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_89) - 1u) ? buster_aarch64_generated_fields_blob_chunk_89[offset] : 0;
-        case 90: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_90) - 1u) ? buster_aarch64_generated_fields_blob_chunk_90[offset] : 0;
-        case 91: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_91) - 1u) ? buster_aarch64_generated_fields_blob_chunk_91[offset] : 0;
-        case 92: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_92) - 1u) ? buster_aarch64_generated_fields_blob_chunk_92[offset] : 0;
-        case 93: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_93) - 1u) ? buster_aarch64_generated_fields_blob_chunk_93[offset] : 0;
-        case 94: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_94) - 1u) ? buster_aarch64_generated_fields_blob_chunk_94[offset] : 0;
-        case 95: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_95) - 1u) ? buster_aarch64_generated_fields_blob_chunk_95[offset] : 0;
-        case 96: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_96) - 1u) ? buster_aarch64_generated_fields_blob_chunk_96[offset] : 0;
-        case 97: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_97) - 1u) ? buster_aarch64_generated_fields_blob_chunk_97[offset] : 0;
-        case 98: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_98) - 1u) ? buster_aarch64_generated_fields_blob_chunk_98[offset] : 0;
-        case 99: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_99) - 1u) ? buster_aarch64_generated_fields_blob_chunk_99[offset] : 0;
-        case 100: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_100) - 1u) ? buster_aarch64_generated_fields_blob_chunk_100[offset] : 0;
-        case 101: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_101) - 1u) ? buster_aarch64_generated_fields_blob_chunk_101[offset] : 0;
-        case 102: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_102) - 1u) ? buster_aarch64_generated_fields_blob_chunk_102[offset] : 0;
-        case 103: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_103) - 1u) ? buster_aarch64_generated_fields_blob_chunk_103[offset] : 0;
-        case 104: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_104) - 1u) ? buster_aarch64_generated_fields_blob_chunk_104[offset] : 0;
-        case 105: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_105) - 1u) ? buster_aarch64_generated_fields_blob_chunk_105[offset] : 0;
-        case 106: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_106) - 1u) ? buster_aarch64_generated_fields_blob_chunk_106[offset] : 0;
-        case 107: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_107) - 1u) ? buster_aarch64_generated_fields_blob_chunk_107[offset] : 0;
-        case 108: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_108) - 1u) ? buster_aarch64_generated_fields_blob_chunk_108[offset] : 0;
-        case 109: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_109) - 1u) ? buster_aarch64_generated_fields_blob_chunk_109[offset] : 0;
-        case 110: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_110) - 1u) ? buster_aarch64_generated_fields_blob_chunk_110[offset] : 0;
-        case 111: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_111) - 1u) ? buster_aarch64_generated_fields_blob_chunk_111[offset] : 0;
-        case 112: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_112) - 1u) ? buster_aarch64_generated_fields_blob_chunk_112[offset] : 0;
-        case 113: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_113) - 1u) ? buster_aarch64_generated_fields_blob_chunk_113[offset] : 0;
-        case 114: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_114) - 1u) ? buster_aarch64_generated_fields_blob_chunk_114[offset] : 0;
-        case 115: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_115) - 1u) ? buster_aarch64_generated_fields_blob_chunk_115[offset] : 0;
-        case 116: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_116) - 1u) ? buster_aarch64_generated_fields_blob_chunk_116[offset] : 0;
-        case 117: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_117) - 1u) ? buster_aarch64_generated_fields_blob_chunk_117[offset] : 0;
-        case 118: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_118) - 1u) ? buster_aarch64_generated_fields_blob_chunk_118[offset] : 0;
-        case 119: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_119) - 1u) ? buster_aarch64_generated_fields_blob_chunk_119[offset] : 0;
-        case 120: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_120) - 1u) ? buster_aarch64_generated_fields_blob_chunk_120[offset] : 0;
-        case 121: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_121) - 1u) ? buster_aarch64_generated_fields_blob_chunk_121[offset] : 0;
-        case 122: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_122) - 1u) ? buster_aarch64_generated_fields_blob_chunk_122[offset] : 0;
-        case 123: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_123) - 1u) ? buster_aarch64_generated_fields_blob_chunk_123[offset] : 0;
-        case 124: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_124) - 1u) ? buster_aarch64_generated_fields_blob_chunk_124[offset] : 0;
-        case 125: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_125) - 1u) ? buster_aarch64_generated_fields_blob_chunk_125[offset] : 0;
-        case 126: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_126) - 1u) ? buster_aarch64_generated_fields_blob_chunk_126[offset] : 0;
-        case 127: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_127) - 1u) ? buster_aarch64_generated_fields_blob_chunk_127[offset] : 0;
-        case 128: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_128) - 1u) ? buster_aarch64_generated_fields_blob_chunk_128[offset] : 0;
-        case 129: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_129) - 1u) ? buster_aarch64_generated_fields_blob_chunk_129[offset] : 0;
-        case 130: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_130) - 1u) ? buster_aarch64_generated_fields_blob_chunk_130[offset] : 0;
-        case 131: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_131) - 1u) ? buster_aarch64_generated_fields_blob_chunk_131[offset] : 0;
-        case 132: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_132) - 1u) ? buster_aarch64_generated_fields_blob_chunk_132[offset] : 0;
-        case 133: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_133) - 1u) ? buster_aarch64_generated_fields_blob_chunk_133[offset] : 0;
-        case 134: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_134) - 1u) ? buster_aarch64_generated_fields_blob_chunk_134[offset] : 0;
-        case 135: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_135) - 1u) ? buster_aarch64_generated_fields_blob_chunk_135[offset] : 0;
-        case 136: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_136) - 1u) ? buster_aarch64_generated_fields_blob_chunk_136[offset] : 0;
-        case 137: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_137) - 1u) ? buster_aarch64_generated_fields_blob_chunk_137[offset] : 0;
-        case 138: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_138) - 1u) ? buster_aarch64_generated_fields_blob_chunk_138[offset] : 0;
-        case 139: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_139) - 1u) ? buster_aarch64_generated_fields_blob_chunk_139[offset] : 0;
-        case 140: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_140) - 1u) ? buster_aarch64_generated_fields_blob_chunk_140[offset] : 0;
-        case 141: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_141) - 1u) ? buster_aarch64_generated_fields_blob_chunk_141[offset] : 0;
-        case 142: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_142) - 1u) ? buster_aarch64_generated_fields_blob_chunk_142[offset] : 0;
-        case 143: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_143) - 1u) ? buster_aarch64_generated_fields_blob_chunk_143[offset] : 0;
-        case 144: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_144) - 1u) ? buster_aarch64_generated_fields_blob_chunk_144[offset] : 0;
-        case 145: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_145) - 1u) ? buster_aarch64_generated_fields_blob_chunk_145[offset] : 0;
-        case 146: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_146) - 1u) ? buster_aarch64_generated_fields_blob_chunk_146[offset] : 0;
-        case 147: return offset < (u64)(sizeof(buster_aarch64_generated_fields_blob_chunk_147) - 1u) ? buster_aarch64_generated_fields_blob_chunk_147[offset] : 0;
-        default: return 0;
-    }
+    return chunk < sizeof(buster_aarch64_generated_fields_blob_chunks) / sizeof(buster_aarch64_generated_fields_blob_chunks[0]) && offset < (u64)buster_aarch64_generated_fields_blob_chunk_lengths[chunk] ? buster_aarch64_generated_fields_blob_chunks[chunk][offset] : 0;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_fields_blob_u8_counted(u64 byte_count, u64 offset)
@@ -879,7 +1170,20 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_fields_blob_u
     if (offset >= byte_count || !buster_aarch64_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;
     u64 encoded_offset = (offset / 3u) * 4u;
     if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;
-    u32 value = ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_fields_blob_char(encoded_offset + 0u)) << 18) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_fields_blob_char(encoded_offset + 1u)) << 12) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_fields_blob_char(encoded_offset + 2u)) << 6) | (u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_fields_blob_char(encoded_offset + 3u));
+    u64 chunk = encoded_offset / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u64 chunk_offset = encoded_offset % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u32 value = 0;
+    if (chunk < sizeof(buster_aarch64_generated_fields_blob_chunks) / sizeof(buster_aarch64_generated_fields_blob_chunks[0]))
+    {
+        const char8* encoded = buster_aarch64_generated_fields_blob_chunks[chunk];
+        u64 length = (u64)buster_aarch64_generated_fields_blob_chunk_lengths[chunk];
+        char8 character_0 = chunk_offset + 1u <= length ? encoded[chunk_offset + 0u] : 0;
+        char8 character_1 = chunk_offset + 2u <= length ? encoded[chunk_offset + 1u] : 0;
+        char8 character_2 = chunk_offset + 3u <= length ? encoded[chunk_offset + 2u] : 0;
+        char8 character_3 = chunk_offset + 4u <= length ? encoded[chunk_offset + 3u] : 0;
+        value = ((u32)buster_aarch64_generated_base64_value(character_0) << 18) | ((u32)buster_aarch64_generated_base64_value(character_1) << 12) |
+                ((u32)buster_aarch64_generated_base64_value(character_2) << 6) | (u32)buster_aarch64_generated_base64_value(character_3);
+    }
     return (u8)(value >> ((2u - (offset % 3u)) * 8u));
 }
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_fields_blob_u8(u64 offset)
@@ -1276,374 +1580,735 @@ static const char8 buster_aarch64_generated_operands_blob_chunk_358[] = "gAAvZgA
 static const char8 buster_aarch64_generated_operands_blob_chunk_359[] = "ZgAAAAAAAAEABAAQAAAA99cCAMfXAgCB5wIASlgAAAAAAAAAAAAAEAB5ZgAAAAAAAAEABAAQAAAAetgCAGrYAgBz5wIAS1gAAAAAAAAAAAAAIAB6ZgAAAAAAAAIABAAQAAAApNgCAGrYAgCE5wIATFgAAAAAAAAAAAAAIAB7ZgAAAAAAAAEABAAQAAAAmtgCAGrYAgCB5wIATVgAAAAAAAAAAAAAIAB8ZgAAAAAAAAEABAAQAAAAAeMCAPbiAgBz5wIATlgAAAAAAAAAAAAAAAB9ZgAAAAAAAAIGRAAAAAAAKt4CAPbdAgCE5wIAT1gAAAAAAAAAAAAACAB+ZgAAAAAAAAEABAAQAAAAId4CAPbdAgCB5wIAUFgAAAAAAAAAAAAACAB/ZgAAAAAAAAEABAAQAAAA/+MCAPTjAgBz5wIAUVgAAAAAAAAAAAAAAACAZgAAAAAAAAIGRAAAAAAAs9sCAG/bAgCE5wIAUlgAAAAAAAAAAAAAQACBZgAAAAAAAAEABAAQAAAAqdsCAG/bAgCB5wIAU1gAAAAAAAAAAAAAQACCZgAAAAAAAAEABAAQAAAA7OQCAOHkAgBz5wIAVFgAAAAAAAAAAAAAAACDZgAAAAAAAAIGRAAAAAAAAdgCAMfXAgCE5wIAVVgAAAAAAAAAAAAAEACEZgAAAAAAAAEABAAQAAAA99cCAMfXAgCB5wIAVlgAAAAAAAAAAAAAEACFZgAAAAAAAAEABAAQAAAA9+UCAOzlAgBz5wIAV1gAAAAAAAAAAAAAAACGZgAAAAAAAAIGRAAAAAAAsNcCAJPXAgCE5wIAWFgAAAAAAAAAAAAAgACHZgAAAAAAAAEABAAQAAAApdcCAJPXAgCB5wIAWVgAAAAAAAAAAAAAgACIZgAAAAAAAAEABAAQAAAASeYCAD7mAgBz5wIAWlgAAAAAAAAAAAAAAACJZgAAAAAAAAIGRAAAAAAApNgCAGrYAgCE5wIAW1gAAAAAAAAAAAAAIACKZgAAAAAAAAEABAAQAAAAmtgCAGrYAgCB5wIAXFgAAAAAAAAAAAAAIACLZgAAAAAAAAEABAAQAAAAEN8CAAPfAgBz5wIAXVgAAAAAAAAAAAAAAACMZgAAAAAAAAIGRAAAAAAARN8CAAPfAgCE5wIAXlgAAAAAAAAAAAAAAACNZgAAAAAAAAEGRAAAAAAA6t8CAN3fAgBz5wIAX1gAAAAAAAAAAAAAAACOZgAAAAAAAAIGRAAAAAAAHuACAN3fAgCE5wIAYFgAAAAAAAAAAAAAAACPZgAAAAAAAAEGRAAAAAAAseACAKTgAgBz5wIAYVgAAAAAAAAAAAAAAACQZgAAAAAAAAIGRAAAAAAA5eACAKTgAgCE5wIAYlgAAAAAAAAAAAAAAACRZgAAAAAAAAEGRAAAAAAAgOECAHPhAgBz5wIAY1gAAAAAAAAAAAAAAACSZgAAAAAAAAIGRAAAAAAAkeECAHPhAgCE5wIAZFgAAAAAAAAAAAAAAACTZgAAAAAAAAEGRAAAAAAAzOECAL/hAgBz5wIAZVgAAAAAAAAAAAAAAACUZgAAAAAAAAIGRAAAAAAAAOICAL/hAgCE5wIAZlgAAAAAAAAAAAAAAACVZgAAAAAAAAEGRAAAAAAA";
 #define buster_aarch64_generated_operands_blob_BYTE_COUNT 1103004
 #define buster_aarch64_generated_operands_blob_CHUNK_COUNT 360
+static const char8* const buster_aarch64_generated_operands_blob_chunks[] = {
+    buster_aarch64_generated_operands_blob_chunk_0,
+    buster_aarch64_generated_operands_blob_chunk_1,
+    buster_aarch64_generated_operands_blob_chunk_2,
+    buster_aarch64_generated_operands_blob_chunk_3,
+    buster_aarch64_generated_operands_blob_chunk_4,
+    buster_aarch64_generated_operands_blob_chunk_5,
+    buster_aarch64_generated_operands_blob_chunk_6,
+    buster_aarch64_generated_operands_blob_chunk_7,
+    buster_aarch64_generated_operands_blob_chunk_8,
+    buster_aarch64_generated_operands_blob_chunk_9,
+    buster_aarch64_generated_operands_blob_chunk_10,
+    buster_aarch64_generated_operands_blob_chunk_11,
+    buster_aarch64_generated_operands_blob_chunk_12,
+    buster_aarch64_generated_operands_blob_chunk_13,
+    buster_aarch64_generated_operands_blob_chunk_14,
+    buster_aarch64_generated_operands_blob_chunk_15,
+    buster_aarch64_generated_operands_blob_chunk_16,
+    buster_aarch64_generated_operands_blob_chunk_17,
+    buster_aarch64_generated_operands_blob_chunk_18,
+    buster_aarch64_generated_operands_blob_chunk_19,
+    buster_aarch64_generated_operands_blob_chunk_20,
+    buster_aarch64_generated_operands_blob_chunk_21,
+    buster_aarch64_generated_operands_blob_chunk_22,
+    buster_aarch64_generated_operands_blob_chunk_23,
+    buster_aarch64_generated_operands_blob_chunk_24,
+    buster_aarch64_generated_operands_blob_chunk_25,
+    buster_aarch64_generated_operands_blob_chunk_26,
+    buster_aarch64_generated_operands_blob_chunk_27,
+    buster_aarch64_generated_operands_blob_chunk_28,
+    buster_aarch64_generated_operands_blob_chunk_29,
+    buster_aarch64_generated_operands_blob_chunk_30,
+    buster_aarch64_generated_operands_blob_chunk_31,
+    buster_aarch64_generated_operands_blob_chunk_32,
+    buster_aarch64_generated_operands_blob_chunk_33,
+    buster_aarch64_generated_operands_blob_chunk_34,
+    buster_aarch64_generated_operands_blob_chunk_35,
+    buster_aarch64_generated_operands_blob_chunk_36,
+    buster_aarch64_generated_operands_blob_chunk_37,
+    buster_aarch64_generated_operands_blob_chunk_38,
+    buster_aarch64_generated_operands_blob_chunk_39,
+    buster_aarch64_generated_operands_blob_chunk_40,
+    buster_aarch64_generated_operands_blob_chunk_41,
+    buster_aarch64_generated_operands_blob_chunk_42,
+    buster_aarch64_generated_operands_blob_chunk_43,
+    buster_aarch64_generated_operands_blob_chunk_44,
+    buster_aarch64_generated_operands_blob_chunk_45,
+    buster_aarch64_generated_operands_blob_chunk_46,
+    buster_aarch64_generated_operands_blob_chunk_47,
+    buster_aarch64_generated_operands_blob_chunk_48,
+    buster_aarch64_generated_operands_blob_chunk_49,
+    buster_aarch64_generated_operands_blob_chunk_50,
+    buster_aarch64_generated_operands_blob_chunk_51,
+    buster_aarch64_generated_operands_blob_chunk_52,
+    buster_aarch64_generated_operands_blob_chunk_53,
+    buster_aarch64_generated_operands_blob_chunk_54,
+    buster_aarch64_generated_operands_blob_chunk_55,
+    buster_aarch64_generated_operands_blob_chunk_56,
+    buster_aarch64_generated_operands_blob_chunk_57,
+    buster_aarch64_generated_operands_blob_chunk_58,
+    buster_aarch64_generated_operands_blob_chunk_59,
+    buster_aarch64_generated_operands_blob_chunk_60,
+    buster_aarch64_generated_operands_blob_chunk_61,
+    buster_aarch64_generated_operands_blob_chunk_62,
+    buster_aarch64_generated_operands_blob_chunk_63,
+    buster_aarch64_generated_operands_blob_chunk_64,
+    buster_aarch64_generated_operands_blob_chunk_65,
+    buster_aarch64_generated_operands_blob_chunk_66,
+    buster_aarch64_generated_operands_blob_chunk_67,
+    buster_aarch64_generated_operands_blob_chunk_68,
+    buster_aarch64_generated_operands_blob_chunk_69,
+    buster_aarch64_generated_operands_blob_chunk_70,
+    buster_aarch64_generated_operands_blob_chunk_71,
+    buster_aarch64_generated_operands_blob_chunk_72,
+    buster_aarch64_generated_operands_blob_chunk_73,
+    buster_aarch64_generated_operands_blob_chunk_74,
+    buster_aarch64_generated_operands_blob_chunk_75,
+    buster_aarch64_generated_operands_blob_chunk_76,
+    buster_aarch64_generated_operands_blob_chunk_77,
+    buster_aarch64_generated_operands_blob_chunk_78,
+    buster_aarch64_generated_operands_blob_chunk_79,
+    buster_aarch64_generated_operands_blob_chunk_80,
+    buster_aarch64_generated_operands_blob_chunk_81,
+    buster_aarch64_generated_operands_blob_chunk_82,
+    buster_aarch64_generated_operands_blob_chunk_83,
+    buster_aarch64_generated_operands_blob_chunk_84,
+    buster_aarch64_generated_operands_blob_chunk_85,
+    buster_aarch64_generated_operands_blob_chunk_86,
+    buster_aarch64_generated_operands_blob_chunk_87,
+    buster_aarch64_generated_operands_blob_chunk_88,
+    buster_aarch64_generated_operands_blob_chunk_89,
+    buster_aarch64_generated_operands_blob_chunk_90,
+    buster_aarch64_generated_operands_blob_chunk_91,
+    buster_aarch64_generated_operands_blob_chunk_92,
+    buster_aarch64_generated_operands_blob_chunk_93,
+    buster_aarch64_generated_operands_blob_chunk_94,
+    buster_aarch64_generated_operands_blob_chunk_95,
+    buster_aarch64_generated_operands_blob_chunk_96,
+    buster_aarch64_generated_operands_blob_chunk_97,
+    buster_aarch64_generated_operands_blob_chunk_98,
+    buster_aarch64_generated_operands_blob_chunk_99,
+    buster_aarch64_generated_operands_blob_chunk_100,
+    buster_aarch64_generated_operands_blob_chunk_101,
+    buster_aarch64_generated_operands_blob_chunk_102,
+    buster_aarch64_generated_operands_blob_chunk_103,
+    buster_aarch64_generated_operands_blob_chunk_104,
+    buster_aarch64_generated_operands_blob_chunk_105,
+    buster_aarch64_generated_operands_blob_chunk_106,
+    buster_aarch64_generated_operands_blob_chunk_107,
+    buster_aarch64_generated_operands_blob_chunk_108,
+    buster_aarch64_generated_operands_blob_chunk_109,
+    buster_aarch64_generated_operands_blob_chunk_110,
+    buster_aarch64_generated_operands_blob_chunk_111,
+    buster_aarch64_generated_operands_blob_chunk_112,
+    buster_aarch64_generated_operands_blob_chunk_113,
+    buster_aarch64_generated_operands_blob_chunk_114,
+    buster_aarch64_generated_operands_blob_chunk_115,
+    buster_aarch64_generated_operands_blob_chunk_116,
+    buster_aarch64_generated_operands_blob_chunk_117,
+    buster_aarch64_generated_operands_blob_chunk_118,
+    buster_aarch64_generated_operands_blob_chunk_119,
+    buster_aarch64_generated_operands_blob_chunk_120,
+    buster_aarch64_generated_operands_blob_chunk_121,
+    buster_aarch64_generated_operands_blob_chunk_122,
+    buster_aarch64_generated_operands_blob_chunk_123,
+    buster_aarch64_generated_operands_blob_chunk_124,
+    buster_aarch64_generated_operands_blob_chunk_125,
+    buster_aarch64_generated_operands_blob_chunk_126,
+    buster_aarch64_generated_operands_blob_chunk_127,
+    buster_aarch64_generated_operands_blob_chunk_128,
+    buster_aarch64_generated_operands_blob_chunk_129,
+    buster_aarch64_generated_operands_blob_chunk_130,
+    buster_aarch64_generated_operands_blob_chunk_131,
+    buster_aarch64_generated_operands_blob_chunk_132,
+    buster_aarch64_generated_operands_blob_chunk_133,
+    buster_aarch64_generated_operands_blob_chunk_134,
+    buster_aarch64_generated_operands_blob_chunk_135,
+    buster_aarch64_generated_operands_blob_chunk_136,
+    buster_aarch64_generated_operands_blob_chunk_137,
+    buster_aarch64_generated_operands_blob_chunk_138,
+    buster_aarch64_generated_operands_blob_chunk_139,
+    buster_aarch64_generated_operands_blob_chunk_140,
+    buster_aarch64_generated_operands_blob_chunk_141,
+    buster_aarch64_generated_operands_blob_chunk_142,
+    buster_aarch64_generated_operands_blob_chunk_143,
+    buster_aarch64_generated_operands_blob_chunk_144,
+    buster_aarch64_generated_operands_blob_chunk_145,
+    buster_aarch64_generated_operands_blob_chunk_146,
+    buster_aarch64_generated_operands_blob_chunk_147,
+    buster_aarch64_generated_operands_blob_chunk_148,
+    buster_aarch64_generated_operands_blob_chunk_149,
+    buster_aarch64_generated_operands_blob_chunk_150,
+    buster_aarch64_generated_operands_blob_chunk_151,
+    buster_aarch64_generated_operands_blob_chunk_152,
+    buster_aarch64_generated_operands_blob_chunk_153,
+    buster_aarch64_generated_operands_blob_chunk_154,
+    buster_aarch64_generated_operands_blob_chunk_155,
+    buster_aarch64_generated_operands_blob_chunk_156,
+    buster_aarch64_generated_operands_blob_chunk_157,
+    buster_aarch64_generated_operands_blob_chunk_158,
+    buster_aarch64_generated_operands_blob_chunk_159,
+    buster_aarch64_generated_operands_blob_chunk_160,
+    buster_aarch64_generated_operands_blob_chunk_161,
+    buster_aarch64_generated_operands_blob_chunk_162,
+    buster_aarch64_generated_operands_blob_chunk_163,
+    buster_aarch64_generated_operands_blob_chunk_164,
+    buster_aarch64_generated_operands_blob_chunk_165,
+    buster_aarch64_generated_operands_blob_chunk_166,
+    buster_aarch64_generated_operands_blob_chunk_167,
+    buster_aarch64_generated_operands_blob_chunk_168,
+    buster_aarch64_generated_operands_blob_chunk_169,
+    buster_aarch64_generated_operands_blob_chunk_170,
+    buster_aarch64_generated_operands_blob_chunk_171,
+    buster_aarch64_generated_operands_blob_chunk_172,
+    buster_aarch64_generated_operands_blob_chunk_173,
+    buster_aarch64_generated_operands_blob_chunk_174,
+    buster_aarch64_generated_operands_blob_chunk_175,
+    buster_aarch64_generated_operands_blob_chunk_176,
+    buster_aarch64_generated_operands_blob_chunk_177,
+    buster_aarch64_generated_operands_blob_chunk_178,
+    buster_aarch64_generated_operands_blob_chunk_179,
+    buster_aarch64_generated_operands_blob_chunk_180,
+    buster_aarch64_generated_operands_blob_chunk_181,
+    buster_aarch64_generated_operands_blob_chunk_182,
+    buster_aarch64_generated_operands_blob_chunk_183,
+    buster_aarch64_generated_operands_blob_chunk_184,
+    buster_aarch64_generated_operands_blob_chunk_185,
+    buster_aarch64_generated_operands_blob_chunk_186,
+    buster_aarch64_generated_operands_blob_chunk_187,
+    buster_aarch64_generated_operands_blob_chunk_188,
+    buster_aarch64_generated_operands_blob_chunk_189,
+    buster_aarch64_generated_operands_blob_chunk_190,
+    buster_aarch64_generated_operands_blob_chunk_191,
+    buster_aarch64_generated_operands_blob_chunk_192,
+    buster_aarch64_generated_operands_blob_chunk_193,
+    buster_aarch64_generated_operands_blob_chunk_194,
+    buster_aarch64_generated_operands_blob_chunk_195,
+    buster_aarch64_generated_operands_blob_chunk_196,
+    buster_aarch64_generated_operands_blob_chunk_197,
+    buster_aarch64_generated_operands_blob_chunk_198,
+    buster_aarch64_generated_operands_blob_chunk_199,
+    buster_aarch64_generated_operands_blob_chunk_200,
+    buster_aarch64_generated_operands_blob_chunk_201,
+    buster_aarch64_generated_operands_blob_chunk_202,
+    buster_aarch64_generated_operands_blob_chunk_203,
+    buster_aarch64_generated_operands_blob_chunk_204,
+    buster_aarch64_generated_operands_blob_chunk_205,
+    buster_aarch64_generated_operands_blob_chunk_206,
+    buster_aarch64_generated_operands_blob_chunk_207,
+    buster_aarch64_generated_operands_blob_chunk_208,
+    buster_aarch64_generated_operands_blob_chunk_209,
+    buster_aarch64_generated_operands_blob_chunk_210,
+    buster_aarch64_generated_operands_blob_chunk_211,
+    buster_aarch64_generated_operands_blob_chunk_212,
+    buster_aarch64_generated_operands_blob_chunk_213,
+    buster_aarch64_generated_operands_blob_chunk_214,
+    buster_aarch64_generated_operands_blob_chunk_215,
+    buster_aarch64_generated_operands_blob_chunk_216,
+    buster_aarch64_generated_operands_blob_chunk_217,
+    buster_aarch64_generated_operands_blob_chunk_218,
+    buster_aarch64_generated_operands_blob_chunk_219,
+    buster_aarch64_generated_operands_blob_chunk_220,
+    buster_aarch64_generated_operands_blob_chunk_221,
+    buster_aarch64_generated_operands_blob_chunk_222,
+    buster_aarch64_generated_operands_blob_chunk_223,
+    buster_aarch64_generated_operands_blob_chunk_224,
+    buster_aarch64_generated_operands_blob_chunk_225,
+    buster_aarch64_generated_operands_blob_chunk_226,
+    buster_aarch64_generated_operands_blob_chunk_227,
+    buster_aarch64_generated_operands_blob_chunk_228,
+    buster_aarch64_generated_operands_blob_chunk_229,
+    buster_aarch64_generated_operands_blob_chunk_230,
+    buster_aarch64_generated_operands_blob_chunk_231,
+    buster_aarch64_generated_operands_blob_chunk_232,
+    buster_aarch64_generated_operands_blob_chunk_233,
+    buster_aarch64_generated_operands_blob_chunk_234,
+    buster_aarch64_generated_operands_blob_chunk_235,
+    buster_aarch64_generated_operands_blob_chunk_236,
+    buster_aarch64_generated_operands_blob_chunk_237,
+    buster_aarch64_generated_operands_blob_chunk_238,
+    buster_aarch64_generated_operands_blob_chunk_239,
+    buster_aarch64_generated_operands_blob_chunk_240,
+    buster_aarch64_generated_operands_blob_chunk_241,
+    buster_aarch64_generated_operands_blob_chunk_242,
+    buster_aarch64_generated_operands_blob_chunk_243,
+    buster_aarch64_generated_operands_blob_chunk_244,
+    buster_aarch64_generated_operands_blob_chunk_245,
+    buster_aarch64_generated_operands_blob_chunk_246,
+    buster_aarch64_generated_operands_blob_chunk_247,
+    buster_aarch64_generated_operands_blob_chunk_248,
+    buster_aarch64_generated_operands_blob_chunk_249,
+    buster_aarch64_generated_operands_blob_chunk_250,
+    buster_aarch64_generated_operands_blob_chunk_251,
+    buster_aarch64_generated_operands_blob_chunk_252,
+    buster_aarch64_generated_operands_blob_chunk_253,
+    buster_aarch64_generated_operands_blob_chunk_254,
+    buster_aarch64_generated_operands_blob_chunk_255,
+    buster_aarch64_generated_operands_blob_chunk_256,
+    buster_aarch64_generated_operands_blob_chunk_257,
+    buster_aarch64_generated_operands_blob_chunk_258,
+    buster_aarch64_generated_operands_blob_chunk_259,
+    buster_aarch64_generated_operands_blob_chunk_260,
+    buster_aarch64_generated_operands_blob_chunk_261,
+    buster_aarch64_generated_operands_blob_chunk_262,
+    buster_aarch64_generated_operands_blob_chunk_263,
+    buster_aarch64_generated_operands_blob_chunk_264,
+    buster_aarch64_generated_operands_blob_chunk_265,
+    buster_aarch64_generated_operands_blob_chunk_266,
+    buster_aarch64_generated_operands_blob_chunk_267,
+    buster_aarch64_generated_operands_blob_chunk_268,
+    buster_aarch64_generated_operands_blob_chunk_269,
+    buster_aarch64_generated_operands_blob_chunk_270,
+    buster_aarch64_generated_operands_blob_chunk_271,
+    buster_aarch64_generated_operands_blob_chunk_272,
+    buster_aarch64_generated_operands_blob_chunk_273,
+    buster_aarch64_generated_operands_blob_chunk_274,
+    buster_aarch64_generated_operands_blob_chunk_275,
+    buster_aarch64_generated_operands_blob_chunk_276,
+    buster_aarch64_generated_operands_blob_chunk_277,
+    buster_aarch64_generated_operands_blob_chunk_278,
+    buster_aarch64_generated_operands_blob_chunk_279,
+    buster_aarch64_generated_operands_blob_chunk_280,
+    buster_aarch64_generated_operands_blob_chunk_281,
+    buster_aarch64_generated_operands_blob_chunk_282,
+    buster_aarch64_generated_operands_blob_chunk_283,
+    buster_aarch64_generated_operands_blob_chunk_284,
+    buster_aarch64_generated_operands_blob_chunk_285,
+    buster_aarch64_generated_operands_blob_chunk_286,
+    buster_aarch64_generated_operands_blob_chunk_287,
+    buster_aarch64_generated_operands_blob_chunk_288,
+    buster_aarch64_generated_operands_blob_chunk_289,
+    buster_aarch64_generated_operands_blob_chunk_290,
+    buster_aarch64_generated_operands_blob_chunk_291,
+    buster_aarch64_generated_operands_blob_chunk_292,
+    buster_aarch64_generated_operands_blob_chunk_293,
+    buster_aarch64_generated_operands_blob_chunk_294,
+    buster_aarch64_generated_operands_blob_chunk_295,
+    buster_aarch64_generated_operands_blob_chunk_296,
+    buster_aarch64_generated_operands_blob_chunk_297,
+    buster_aarch64_generated_operands_blob_chunk_298,
+    buster_aarch64_generated_operands_blob_chunk_299,
+    buster_aarch64_generated_operands_blob_chunk_300,
+    buster_aarch64_generated_operands_blob_chunk_301,
+    buster_aarch64_generated_operands_blob_chunk_302,
+    buster_aarch64_generated_operands_blob_chunk_303,
+    buster_aarch64_generated_operands_blob_chunk_304,
+    buster_aarch64_generated_operands_blob_chunk_305,
+    buster_aarch64_generated_operands_blob_chunk_306,
+    buster_aarch64_generated_operands_blob_chunk_307,
+    buster_aarch64_generated_operands_blob_chunk_308,
+    buster_aarch64_generated_operands_blob_chunk_309,
+    buster_aarch64_generated_operands_blob_chunk_310,
+    buster_aarch64_generated_operands_blob_chunk_311,
+    buster_aarch64_generated_operands_blob_chunk_312,
+    buster_aarch64_generated_operands_blob_chunk_313,
+    buster_aarch64_generated_operands_blob_chunk_314,
+    buster_aarch64_generated_operands_blob_chunk_315,
+    buster_aarch64_generated_operands_blob_chunk_316,
+    buster_aarch64_generated_operands_blob_chunk_317,
+    buster_aarch64_generated_operands_blob_chunk_318,
+    buster_aarch64_generated_operands_blob_chunk_319,
+    buster_aarch64_generated_operands_blob_chunk_320,
+    buster_aarch64_generated_operands_blob_chunk_321,
+    buster_aarch64_generated_operands_blob_chunk_322,
+    buster_aarch64_generated_operands_blob_chunk_323,
+    buster_aarch64_generated_operands_blob_chunk_324,
+    buster_aarch64_generated_operands_blob_chunk_325,
+    buster_aarch64_generated_operands_blob_chunk_326,
+    buster_aarch64_generated_operands_blob_chunk_327,
+    buster_aarch64_generated_operands_blob_chunk_328,
+    buster_aarch64_generated_operands_blob_chunk_329,
+    buster_aarch64_generated_operands_blob_chunk_330,
+    buster_aarch64_generated_operands_blob_chunk_331,
+    buster_aarch64_generated_operands_blob_chunk_332,
+    buster_aarch64_generated_operands_blob_chunk_333,
+    buster_aarch64_generated_operands_blob_chunk_334,
+    buster_aarch64_generated_operands_blob_chunk_335,
+    buster_aarch64_generated_operands_blob_chunk_336,
+    buster_aarch64_generated_operands_blob_chunk_337,
+    buster_aarch64_generated_operands_blob_chunk_338,
+    buster_aarch64_generated_operands_blob_chunk_339,
+    buster_aarch64_generated_operands_blob_chunk_340,
+    buster_aarch64_generated_operands_blob_chunk_341,
+    buster_aarch64_generated_operands_blob_chunk_342,
+    buster_aarch64_generated_operands_blob_chunk_343,
+    buster_aarch64_generated_operands_blob_chunk_344,
+    buster_aarch64_generated_operands_blob_chunk_345,
+    buster_aarch64_generated_operands_blob_chunk_346,
+    buster_aarch64_generated_operands_blob_chunk_347,
+    buster_aarch64_generated_operands_blob_chunk_348,
+    buster_aarch64_generated_operands_blob_chunk_349,
+    buster_aarch64_generated_operands_blob_chunk_350,
+    buster_aarch64_generated_operands_blob_chunk_351,
+    buster_aarch64_generated_operands_blob_chunk_352,
+    buster_aarch64_generated_operands_blob_chunk_353,
+    buster_aarch64_generated_operands_blob_chunk_354,
+    buster_aarch64_generated_operands_blob_chunk_355,
+    buster_aarch64_generated_operands_blob_chunk_356,
+    buster_aarch64_generated_operands_blob_chunk_357,
+    buster_aarch64_generated_operands_blob_chunk_358,
+    buster_aarch64_generated_operands_blob_chunk_359,
+};
+static const u16 buster_aarch64_generated_operands_blob_chunk_lengths[] = {
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_0) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_1) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_2) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_3) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_4) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_5) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_6) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_7) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_8) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_9) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_10) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_11) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_12) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_13) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_14) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_15) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_16) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_17) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_18) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_19) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_20) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_21) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_22) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_23) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_24) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_25) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_26) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_27) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_28) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_29) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_30) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_31) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_32) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_33) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_34) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_35) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_36) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_37) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_38) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_39) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_40) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_41) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_42) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_43) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_44) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_45) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_46) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_47) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_48) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_49) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_50) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_51) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_52) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_53) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_54) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_55) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_56) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_57) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_58) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_59) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_60) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_61) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_62) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_63) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_64) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_65) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_66) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_67) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_68) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_69) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_70) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_71) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_72) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_73) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_74) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_75) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_76) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_77) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_78) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_79) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_80) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_81) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_82) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_83) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_84) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_85) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_86) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_87) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_88) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_89) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_90) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_91) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_92) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_93) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_94) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_95) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_96) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_97) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_98) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_99) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_100) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_101) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_102) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_103) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_104) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_105) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_106) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_107) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_108) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_109) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_110) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_111) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_112) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_113) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_114) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_115) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_116) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_117) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_118) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_119) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_120) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_121) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_122) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_123) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_124) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_125) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_126) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_127) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_128) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_129) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_130) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_131) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_132) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_133) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_134) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_135) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_136) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_137) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_138) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_139) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_140) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_141) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_142) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_143) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_144) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_145) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_146) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_147) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_148) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_149) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_150) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_151) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_152) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_153) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_154) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_155) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_156) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_157) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_158) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_159) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_160) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_161) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_162) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_163) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_164) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_165) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_166) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_167) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_168) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_169) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_170) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_171) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_172) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_173) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_174) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_175) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_176) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_177) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_178) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_179) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_180) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_181) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_182) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_183) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_184) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_185) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_186) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_187) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_188) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_189) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_190) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_191) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_192) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_193) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_194) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_195) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_196) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_197) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_198) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_199) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_200) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_201) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_202) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_203) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_204) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_205) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_206) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_207) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_208) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_209) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_210) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_211) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_212) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_213) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_214) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_215) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_216) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_217) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_218) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_219) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_220) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_221) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_222) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_223) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_224) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_225) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_226) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_227) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_228) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_229) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_230) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_231) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_232) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_233) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_234) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_235) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_236) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_237) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_238) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_239) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_240) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_241) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_242) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_243) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_244) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_245) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_246) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_247) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_248) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_249) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_250) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_251) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_252) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_253) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_254) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_255) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_256) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_257) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_258) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_259) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_260) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_261) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_262) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_263) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_264) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_265) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_266) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_267) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_268) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_269) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_270) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_271) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_272) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_273) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_274) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_275) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_276) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_277) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_278) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_279) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_280) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_281) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_282) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_283) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_284) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_285) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_286) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_287) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_288) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_289) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_290) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_291) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_292) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_293) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_294) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_295) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_296) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_297) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_298) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_299) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_300) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_301) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_302) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_303) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_304) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_305) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_306) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_307) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_308) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_309) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_310) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_311) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_312) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_313) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_314) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_315) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_316) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_317) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_318) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_319) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_320) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_321) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_322) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_323) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_324) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_325) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_326) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_327) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_328) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_329) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_330) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_331) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_332) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_333) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_334) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_335) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_336) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_337) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_338) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_339) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_340) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_341) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_342) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_343) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_344) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_345) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_346) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_347) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_348) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_349) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_350) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_351) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_352) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_353) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_354) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_355) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_356) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_357) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_358) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_operands_blob_chunk_359) - 1u),
+};
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL char8 buster_aarch64_generated_operands_blob_char(u64 logical)
 {
     u64 chunk = logical / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
     u64 offset = logical % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
-    switch (chunk)
-    {
-        case 0: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_0) - 1u) ? buster_aarch64_generated_operands_blob_chunk_0[offset] : 0;
-        case 1: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_1) - 1u) ? buster_aarch64_generated_operands_blob_chunk_1[offset] : 0;
-        case 2: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_2) - 1u) ? buster_aarch64_generated_operands_blob_chunk_2[offset] : 0;
-        case 3: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_3) - 1u) ? buster_aarch64_generated_operands_blob_chunk_3[offset] : 0;
-        case 4: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_4) - 1u) ? buster_aarch64_generated_operands_blob_chunk_4[offset] : 0;
-        case 5: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_5) - 1u) ? buster_aarch64_generated_operands_blob_chunk_5[offset] : 0;
-        case 6: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_6) - 1u) ? buster_aarch64_generated_operands_blob_chunk_6[offset] : 0;
-        case 7: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_7) - 1u) ? buster_aarch64_generated_operands_blob_chunk_7[offset] : 0;
-        case 8: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_8) - 1u) ? buster_aarch64_generated_operands_blob_chunk_8[offset] : 0;
-        case 9: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_9) - 1u) ? buster_aarch64_generated_operands_blob_chunk_9[offset] : 0;
-        case 10: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_10) - 1u) ? buster_aarch64_generated_operands_blob_chunk_10[offset] : 0;
-        case 11: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_11) - 1u) ? buster_aarch64_generated_operands_blob_chunk_11[offset] : 0;
-        case 12: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_12) - 1u) ? buster_aarch64_generated_operands_blob_chunk_12[offset] : 0;
-        case 13: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_13) - 1u) ? buster_aarch64_generated_operands_blob_chunk_13[offset] : 0;
-        case 14: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_14) - 1u) ? buster_aarch64_generated_operands_blob_chunk_14[offset] : 0;
-        case 15: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_15) - 1u) ? buster_aarch64_generated_operands_blob_chunk_15[offset] : 0;
-        case 16: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_16) - 1u) ? buster_aarch64_generated_operands_blob_chunk_16[offset] : 0;
-        case 17: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_17) - 1u) ? buster_aarch64_generated_operands_blob_chunk_17[offset] : 0;
-        case 18: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_18) - 1u) ? buster_aarch64_generated_operands_blob_chunk_18[offset] : 0;
-        case 19: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_19) - 1u) ? buster_aarch64_generated_operands_blob_chunk_19[offset] : 0;
-        case 20: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_20) - 1u) ? buster_aarch64_generated_operands_blob_chunk_20[offset] : 0;
-        case 21: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_21) - 1u) ? buster_aarch64_generated_operands_blob_chunk_21[offset] : 0;
-        case 22: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_22) - 1u) ? buster_aarch64_generated_operands_blob_chunk_22[offset] : 0;
-        case 23: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_23) - 1u) ? buster_aarch64_generated_operands_blob_chunk_23[offset] : 0;
-        case 24: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_24) - 1u) ? buster_aarch64_generated_operands_blob_chunk_24[offset] : 0;
-        case 25: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_25) - 1u) ? buster_aarch64_generated_operands_blob_chunk_25[offset] : 0;
-        case 26: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_26) - 1u) ? buster_aarch64_generated_operands_blob_chunk_26[offset] : 0;
-        case 27: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_27) - 1u) ? buster_aarch64_generated_operands_blob_chunk_27[offset] : 0;
-        case 28: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_28) - 1u) ? buster_aarch64_generated_operands_blob_chunk_28[offset] : 0;
-        case 29: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_29) - 1u) ? buster_aarch64_generated_operands_blob_chunk_29[offset] : 0;
-        case 30: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_30) - 1u) ? buster_aarch64_generated_operands_blob_chunk_30[offset] : 0;
-        case 31: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_31) - 1u) ? buster_aarch64_generated_operands_blob_chunk_31[offset] : 0;
-        case 32: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_32) - 1u) ? buster_aarch64_generated_operands_blob_chunk_32[offset] : 0;
-        case 33: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_33) - 1u) ? buster_aarch64_generated_operands_blob_chunk_33[offset] : 0;
-        case 34: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_34) - 1u) ? buster_aarch64_generated_operands_blob_chunk_34[offset] : 0;
-        case 35: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_35) - 1u) ? buster_aarch64_generated_operands_blob_chunk_35[offset] : 0;
-        case 36: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_36) - 1u) ? buster_aarch64_generated_operands_blob_chunk_36[offset] : 0;
-        case 37: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_37) - 1u) ? buster_aarch64_generated_operands_blob_chunk_37[offset] : 0;
-        case 38: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_38) - 1u) ? buster_aarch64_generated_operands_blob_chunk_38[offset] : 0;
-        case 39: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_39) - 1u) ? buster_aarch64_generated_operands_blob_chunk_39[offset] : 0;
-        case 40: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_40) - 1u) ? buster_aarch64_generated_operands_blob_chunk_40[offset] : 0;
-        case 41: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_41) - 1u) ? buster_aarch64_generated_operands_blob_chunk_41[offset] : 0;
-        case 42: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_42) - 1u) ? buster_aarch64_generated_operands_blob_chunk_42[offset] : 0;
-        case 43: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_43) - 1u) ? buster_aarch64_generated_operands_blob_chunk_43[offset] : 0;
-        case 44: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_44) - 1u) ? buster_aarch64_generated_operands_blob_chunk_44[offset] : 0;
-        case 45: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_45) - 1u) ? buster_aarch64_generated_operands_blob_chunk_45[offset] : 0;
-        case 46: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_46) - 1u) ? buster_aarch64_generated_operands_blob_chunk_46[offset] : 0;
-        case 47: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_47) - 1u) ? buster_aarch64_generated_operands_blob_chunk_47[offset] : 0;
-        case 48: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_48) - 1u) ? buster_aarch64_generated_operands_blob_chunk_48[offset] : 0;
-        case 49: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_49) - 1u) ? buster_aarch64_generated_operands_blob_chunk_49[offset] : 0;
-        case 50: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_50) - 1u) ? buster_aarch64_generated_operands_blob_chunk_50[offset] : 0;
-        case 51: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_51) - 1u) ? buster_aarch64_generated_operands_blob_chunk_51[offset] : 0;
-        case 52: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_52) - 1u) ? buster_aarch64_generated_operands_blob_chunk_52[offset] : 0;
-        case 53: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_53) - 1u) ? buster_aarch64_generated_operands_blob_chunk_53[offset] : 0;
-        case 54: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_54) - 1u) ? buster_aarch64_generated_operands_blob_chunk_54[offset] : 0;
-        case 55: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_55) - 1u) ? buster_aarch64_generated_operands_blob_chunk_55[offset] : 0;
-        case 56: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_56) - 1u) ? buster_aarch64_generated_operands_blob_chunk_56[offset] : 0;
-        case 57: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_57) - 1u) ? buster_aarch64_generated_operands_blob_chunk_57[offset] : 0;
-        case 58: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_58) - 1u) ? buster_aarch64_generated_operands_blob_chunk_58[offset] : 0;
-        case 59: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_59) - 1u) ? buster_aarch64_generated_operands_blob_chunk_59[offset] : 0;
-        case 60: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_60) - 1u) ? buster_aarch64_generated_operands_blob_chunk_60[offset] : 0;
-        case 61: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_61) - 1u) ? buster_aarch64_generated_operands_blob_chunk_61[offset] : 0;
-        case 62: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_62) - 1u) ? buster_aarch64_generated_operands_blob_chunk_62[offset] : 0;
-        case 63: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_63) - 1u) ? buster_aarch64_generated_operands_blob_chunk_63[offset] : 0;
-        case 64: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_64) - 1u) ? buster_aarch64_generated_operands_blob_chunk_64[offset] : 0;
-        case 65: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_65) - 1u) ? buster_aarch64_generated_operands_blob_chunk_65[offset] : 0;
-        case 66: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_66) - 1u) ? buster_aarch64_generated_operands_blob_chunk_66[offset] : 0;
-        case 67: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_67) - 1u) ? buster_aarch64_generated_operands_blob_chunk_67[offset] : 0;
-        case 68: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_68) - 1u) ? buster_aarch64_generated_operands_blob_chunk_68[offset] : 0;
-        case 69: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_69) - 1u) ? buster_aarch64_generated_operands_blob_chunk_69[offset] : 0;
-        case 70: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_70) - 1u) ? buster_aarch64_generated_operands_blob_chunk_70[offset] : 0;
-        case 71: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_71) - 1u) ? buster_aarch64_generated_operands_blob_chunk_71[offset] : 0;
-        case 72: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_72) - 1u) ? buster_aarch64_generated_operands_blob_chunk_72[offset] : 0;
-        case 73: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_73) - 1u) ? buster_aarch64_generated_operands_blob_chunk_73[offset] : 0;
-        case 74: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_74) - 1u) ? buster_aarch64_generated_operands_blob_chunk_74[offset] : 0;
-        case 75: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_75) - 1u) ? buster_aarch64_generated_operands_blob_chunk_75[offset] : 0;
-        case 76: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_76) - 1u) ? buster_aarch64_generated_operands_blob_chunk_76[offset] : 0;
-        case 77: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_77) - 1u) ? buster_aarch64_generated_operands_blob_chunk_77[offset] : 0;
-        case 78: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_78) - 1u) ? buster_aarch64_generated_operands_blob_chunk_78[offset] : 0;
-        case 79: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_79) - 1u) ? buster_aarch64_generated_operands_blob_chunk_79[offset] : 0;
-        case 80: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_80) - 1u) ? buster_aarch64_generated_operands_blob_chunk_80[offset] : 0;
-        case 81: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_81) - 1u) ? buster_aarch64_generated_operands_blob_chunk_81[offset] : 0;
-        case 82: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_82) - 1u) ? buster_aarch64_generated_operands_blob_chunk_82[offset] : 0;
-        case 83: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_83) - 1u) ? buster_aarch64_generated_operands_blob_chunk_83[offset] : 0;
-        case 84: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_84) - 1u) ? buster_aarch64_generated_operands_blob_chunk_84[offset] : 0;
-        case 85: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_85) - 1u) ? buster_aarch64_generated_operands_blob_chunk_85[offset] : 0;
-        case 86: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_86) - 1u) ? buster_aarch64_generated_operands_blob_chunk_86[offset] : 0;
-        case 87: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_87) - 1u) ? buster_aarch64_generated_operands_blob_chunk_87[offset] : 0;
-        case 88: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_88) - 1u) ? buster_aarch64_generated_operands_blob_chunk_88[offset] : 0;
-        case 89: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_89) - 1u) ? buster_aarch64_generated_operands_blob_chunk_89[offset] : 0;
-        case 90: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_90) - 1u) ? buster_aarch64_generated_operands_blob_chunk_90[offset] : 0;
-        case 91: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_91) - 1u) ? buster_aarch64_generated_operands_blob_chunk_91[offset] : 0;
-        case 92: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_92) - 1u) ? buster_aarch64_generated_operands_blob_chunk_92[offset] : 0;
-        case 93: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_93) - 1u) ? buster_aarch64_generated_operands_blob_chunk_93[offset] : 0;
-        case 94: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_94) - 1u) ? buster_aarch64_generated_operands_blob_chunk_94[offset] : 0;
-        case 95: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_95) - 1u) ? buster_aarch64_generated_operands_blob_chunk_95[offset] : 0;
-        case 96: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_96) - 1u) ? buster_aarch64_generated_operands_blob_chunk_96[offset] : 0;
-        case 97: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_97) - 1u) ? buster_aarch64_generated_operands_blob_chunk_97[offset] : 0;
-        case 98: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_98) - 1u) ? buster_aarch64_generated_operands_blob_chunk_98[offset] : 0;
-        case 99: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_99) - 1u) ? buster_aarch64_generated_operands_blob_chunk_99[offset] : 0;
-        case 100: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_100) - 1u) ? buster_aarch64_generated_operands_blob_chunk_100[offset] : 0;
-        case 101: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_101) - 1u) ? buster_aarch64_generated_operands_blob_chunk_101[offset] : 0;
-        case 102: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_102) - 1u) ? buster_aarch64_generated_operands_blob_chunk_102[offset] : 0;
-        case 103: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_103) - 1u) ? buster_aarch64_generated_operands_blob_chunk_103[offset] : 0;
-        case 104: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_104) - 1u) ? buster_aarch64_generated_operands_blob_chunk_104[offset] : 0;
-        case 105: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_105) - 1u) ? buster_aarch64_generated_operands_blob_chunk_105[offset] : 0;
-        case 106: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_106) - 1u) ? buster_aarch64_generated_operands_blob_chunk_106[offset] : 0;
-        case 107: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_107) - 1u) ? buster_aarch64_generated_operands_blob_chunk_107[offset] : 0;
-        case 108: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_108) - 1u) ? buster_aarch64_generated_operands_blob_chunk_108[offset] : 0;
-        case 109: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_109) - 1u) ? buster_aarch64_generated_operands_blob_chunk_109[offset] : 0;
-        case 110: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_110) - 1u) ? buster_aarch64_generated_operands_blob_chunk_110[offset] : 0;
-        case 111: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_111) - 1u) ? buster_aarch64_generated_operands_blob_chunk_111[offset] : 0;
-        case 112: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_112) - 1u) ? buster_aarch64_generated_operands_blob_chunk_112[offset] : 0;
-        case 113: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_113) - 1u) ? buster_aarch64_generated_operands_blob_chunk_113[offset] : 0;
-        case 114: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_114) - 1u) ? buster_aarch64_generated_operands_blob_chunk_114[offset] : 0;
-        case 115: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_115) - 1u) ? buster_aarch64_generated_operands_blob_chunk_115[offset] : 0;
-        case 116: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_116) - 1u) ? buster_aarch64_generated_operands_blob_chunk_116[offset] : 0;
-        case 117: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_117) - 1u) ? buster_aarch64_generated_operands_blob_chunk_117[offset] : 0;
-        case 118: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_118) - 1u) ? buster_aarch64_generated_operands_blob_chunk_118[offset] : 0;
-        case 119: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_119) - 1u) ? buster_aarch64_generated_operands_blob_chunk_119[offset] : 0;
-        case 120: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_120) - 1u) ? buster_aarch64_generated_operands_blob_chunk_120[offset] : 0;
-        case 121: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_121) - 1u) ? buster_aarch64_generated_operands_blob_chunk_121[offset] : 0;
-        case 122: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_122) - 1u) ? buster_aarch64_generated_operands_blob_chunk_122[offset] : 0;
-        case 123: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_123) - 1u) ? buster_aarch64_generated_operands_blob_chunk_123[offset] : 0;
-        case 124: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_124) - 1u) ? buster_aarch64_generated_operands_blob_chunk_124[offset] : 0;
-        case 125: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_125) - 1u) ? buster_aarch64_generated_operands_blob_chunk_125[offset] : 0;
-        case 126: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_126) - 1u) ? buster_aarch64_generated_operands_blob_chunk_126[offset] : 0;
-        case 127: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_127) - 1u) ? buster_aarch64_generated_operands_blob_chunk_127[offset] : 0;
-        case 128: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_128) - 1u) ? buster_aarch64_generated_operands_blob_chunk_128[offset] : 0;
-        case 129: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_129) - 1u) ? buster_aarch64_generated_operands_blob_chunk_129[offset] : 0;
-        case 130: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_130) - 1u) ? buster_aarch64_generated_operands_blob_chunk_130[offset] : 0;
-        case 131: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_131) - 1u) ? buster_aarch64_generated_operands_blob_chunk_131[offset] : 0;
-        case 132: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_132) - 1u) ? buster_aarch64_generated_operands_blob_chunk_132[offset] : 0;
-        case 133: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_133) - 1u) ? buster_aarch64_generated_operands_blob_chunk_133[offset] : 0;
-        case 134: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_134) - 1u) ? buster_aarch64_generated_operands_blob_chunk_134[offset] : 0;
-        case 135: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_135) - 1u) ? buster_aarch64_generated_operands_blob_chunk_135[offset] : 0;
-        case 136: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_136) - 1u) ? buster_aarch64_generated_operands_blob_chunk_136[offset] : 0;
-        case 137: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_137) - 1u) ? buster_aarch64_generated_operands_blob_chunk_137[offset] : 0;
-        case 138: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_138) - 1u) ? buster_aarch64_generated_operands_blob_chunk_138[offset] : 0;
-        case 139: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_139) - 1u) ? buster_aarch64_generated_operands_blob_chunk_139[offset] : 0;
-        case 140: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_140) - 1u) ? buster_aarch64_generated_operands_blob_chunk_140[offset] : 0;
-        case 141: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_141) - 1u) ? buster_aarch64_generated_operands_blob_chunk_141[offset] : 0;
-        case 142: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_142) - 1u) ? buster_aarch64_generated_operands_blob_chunk_142[offset] : 0;
-        case 143: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_143) - 1u) ? buster_aarch64_generated_operands_blob_chunk_143[offset] : 0;
-        case 144: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_144) - 1u) ? buster_aarch64_generated_operands_blob_chunk_144[offset] : 0;
-        case 145: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_145) - 1u) ? buster_aarch64_generated_operands_blob_chunk_145[offset] : 0;
-        case 146: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_146) - 1u) ? buster_aarch64_generated_operands_blob_chunk_146[offset] : 0;
-        case 147: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_147) - 1u) ? buster_aarch64_generated_operands_blob_chunk_147[offset] : 0;
-        case 148: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_148) - 1u) ? buster_aarch64_generated_operands_blob_chunk_148[offset] : 0;
-        case 149: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_149) - 1u) ? buster_aarch64_generated_operands_blob_chunk_149[offset] : 0;
-        case 150: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_150) - 1u) ? buster_aarch64_generated_operands_blob_chunk_150[offset] : 0;
-        case 151: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_151) - 1u) ? buster_aarch64_generated_operands_blob_chunk_151[offset] : 0;
-        case 152: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_152) - 1u) ? buster_aarch64_generated_operands_blob_chunk_152[offset] : 0;
-        case 153: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_153) - 1u) ? buster_aarch64_generated_operands_blob_chunk_153[offset] : 0;
-        case 154: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_154) - 1u) ? buster_aarch64_generated_operands_blob_chunk_154[offset] : 0;
-        case 155: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_155) - 1u) ? buster_aarch64_generated_operands_blob_chunk_155[offset] : 0;
-        case 156: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_156) - 1u) ? buster_aarch64_generated_operands_blob_chunk_156[offset] : 0;
-        case 157: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_157) - 1u) ? buster_aarch64_generated_operands_blob_chunk_157[offset] : 0;
-        case 158: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_158) - 1u) ? buster_aarch64_generated_operands_blob_chunk_158[offset] : 0;
-        case 159: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_159) - 1u) ? buster_aarch64_generated_operands_blob_chunk_159[offset] : 0;
-        case 160: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_160) - 1u) ? buster_aarch64_generated_operands_blob_chunk_160[offset] : 0;
-        case 161: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_161) - 1u) ? buster_aarch64_generated_operands_blob_chunk_161[offset] : 0;
-        case 162: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_162) - 1u) ? buster_aarch64_generated_operands_blob_chunk_162[offset] : 0;
-        case 163: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_163) - 1u) ? buster_aarch64_generated_operands_blob_chunk_163[offset] : 0;
-        case 164: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_164) - 1u) ? buster_aarch64_generated_operands_blob_chunk_164[offset] : 0;
-        case 165: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_165) - 1u) ? buster_aarch64_generated_operands_blob_chunk_165[offset] : 0;
-        case 166: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_166) - 1u) ? buster_aarch64_generated_operands_blob_chunk_166[offset] : 0;
-        case 167: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_167) - 1u) ? buster_aarch64_generated_operands_blob_chunk_167[offset] : 0;
-        case 168: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_168) - 1u) ? buster_aarch64_generated_operands_blob_chunk_168[offset] : 0;
-        case 169: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_169) - 1u) ? buster_aarch64_generated_operands_blob_chunk_169[offset] : 0;
-        case 170: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_170) - 1u) ? buster_aarch64_generated_operands_blob_chunk_170[offset] : 0;
-        case 171: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_171) - 1u) ? buster_aarch64_generated_operands_blob_chunk_171[offset] : 0;
-        case 172: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_172) - 1u) ? buster_aarch64_generated_operands_blob_chunk_172[offset] : 0;
-        case 173: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_173) - 1u) ? buster_aarch64_generated_operands_blob_chunk_173[offset] : 0;
-        case 174: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_174) - 1u) ? buster_aarch64_generated_operands_blob_chunk_174[offset] : 0;
-        case 175: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_175) - 1u) ? buster_aarch64_generated_operands_blob_chunk_175[offset] : 0;
-        case 176: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_176) - 1u) ? buster_aarch64_generated_operands_blob_chunk_176[offset] : 0;
-        case 177: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_177) - 1u) ? buster_aarch64_generated_operands_blob_chunk_177[offset] : 0;
-        case 178: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_178) - 1u) ? buster_aarch64_generated_operands_blob_chunk_178[offset] : 0;
-        case 179: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_179) - 1u) ? buster_aarch64_generated_operands_blob_chunk_179[offset] : 0;
-        case 180: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_180) - 1u) ? buster_aarch64_generated_operands_blob_chunk_180[offset] : 0;
-        case 181: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_181) - 1u) ? buster_aarch64_generated_operands_blob_chunk_181[offset] : 0;
-        case 182: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_182) - 1u) ? buster_aarch64_generated_operands_blob_chunk_182[offset] : 0;
-        case 183: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_183) - 1u) ? buster_aarch64_generated_operands_blob_chunk_183[offset] : 0;
-        case 184: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_184) - 1u) ? buster_aarch64_generated_operands_blob_chunk_184[offset] : 0;
-        case 185: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_185) - 1u) ? buster_aarch64_generated_operands_blob_chunk_185[offset] : 0;
-        case 186: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_186) - 1u) ? buster_aarch64_generated_operands_blob_chunk_186[offset] : 0;
-        case 187: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_187) - 1u) ? buster_aarch64_generated_operands_blob_chunk_187[offset] : 0;
-        case 188: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_188) - 1u) ? buster_aarch64_generated_operands_blob_chunk_188[offset] : 0;
-        case 189: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_189) - 1u) ? buster_aarch64_generated_operands_blob_chunk_189[offset] : 0;
-        case 190: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_190) - 1u) ? buster_aarch64_generated_operands_blob_chunk_190[offset] : 0;
-        case 191: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_191) - 1u) ? buster_aarch64_generated_operands_blob_chunk_191[offset] : 0;
-        case 192: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_192) - 1u) ? buster_aarch64_generated_operands_blob_chunk_192[offset] : 0;
-        case 193: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_193) - 1u) ? buster_aarch64_generated_operands_blob_chunk_193[offset] : 0;
-        case 194: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_194) - 1u) ? buster_aarch64_generated_operands_blob_chunk_194[offset] : 0;
-        case 195: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_195) - 1u) ? buster_aarch64_generated_operands_blob_chunk_195[offset] : 0;
-        case 196: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_196) - 1u) ? buster_aarch64_generated_operands_blob_chunk_196[offset] : 0;
-        case 197: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_197) - 1u) ? buster_aarch64_generated_operands_blob_chunk_197[offset] : 0;
-        case 198: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_198) - 1u) ? buster_aarch64_generated_operands_blob_chunk_198[offset] : 0;
-        case 199: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_199) - 1u) ? buster_aarch64_generated_operands_blob_chunk_199[offset] : 0;
-        case 200: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_200) - 1u) ? buster_aarch64_generated_operands_blob_chunk_200[offset] : 0;
-        case 201: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_201) - 1u) ? buster_aarch64_generated_operands_blob_chunk_201[offset] : 0;
-        case 202: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_202) - 1u) ? buster_aarch64_generated_operands_blob_chunk_202[offset] : 0;
-        case 203: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_203) - 1u) ? buster_aarch64_generated_operands_blob_chunk_203[offset] : 0;
-        case 204: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_204) - 1u) ? buster_aarch64_generated_operands_blob_chunk_204[offset] : 0;
-        case 205: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_205) - 1u) ? buster_aarch64_generated_operands_blob_chunk_205[offset] : 0;
-        case 206: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_206) - 1u) ? buster_aarch64_generated_operands_blob_chunk_206[offset] : 0;
-        case 207: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_207) - 1u) ? buster_aarch64_generated_operands_blob_chunk_207[offset] : 0;
-        case 208: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_208) - 1u) ? buster_aarch64_generated_operands_blob_chunk_208[offset] : 0;
-        case 209: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_209) - 1u) ? buster_aarch64_generated_operands_blob_chunk_209[offset] : 0;
-        case 210: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_210) - 1u) ? buster_aarch64_generated_operands_blob_chunk_210[offset] : 0;
-        case 211: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_211) - 1u) ? buster_aarch64_generated_operands_blob_chunk_211[offset] : 0;
-        case 212: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_212) - 1u) ? buster_aarch64_generated_operands_blob_chunk_212[offset] : 0;
-        case 213: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_213) - 1u) ? buster_aarch64_generated_operands_blob_chunk_213[offset] : 0;
-        case 214: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_214) - 1u) ? buster_aarch64_generated_operands_blob_chunk_214[offset] : 0;
-        case 215: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_215) - 1u) ? buster_aarch64_generated_operands_blob_chunk_215[offset] : 0;
-        case 216: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_216) - 1u) ? buster_aarch64_generated_operands_blob_chunk_216[offset] : 0;
-        case 217: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_217) - 1u) ? buster_aarch64_generated_operands_blob_chunk_217[offset] : 0;
-        case 218: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_218) - 1u) ? buster_aarch64_generated_operands_blob_chunk_218[offset] : 0;
-        case 219: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_219) - 1u) ? buster_aarch64_generated_operands_blob_chunk_219[offset] : 0;
-        case 220: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_220) - 1u) ? buster_aarch64_generated_operands_blob_chunk_220[offset] : 0;
-        case 221: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_221) - 1u) ? buster_aarch64_generated_operands_blob_chunk_221[offset] : 0;
-        case 222: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_222) - 1u) ? buster_aarch64_generated_operands_blob_chunk_222[offset] : 0;
-        case 223: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_223) - 1u) ? buster_aarch64_generated_operands_blob_chunk_223[offset] : 0;
-        case 224: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_224) - 1u) ? buster_aarch64_generated_operands_blob_chunk_224[offset] : 0;
-        case 225: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_225) - 1u) ? buster_aarch64_generated_operands_blob_chunk_225[offset] : 0;
-        case 226: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_226) - 1u) ? buster_aarch64_generated_operands_blob_chunk_226[offset] : 0;
-        case 227: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_227) - 1u) ? buster_aarch64_generated_operands_blob_chunk_227[offset] : 0;
-        case 228: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_228) - 1u) ? buster_aarch64_generated_operands_blob_chunk_228[offset] : 0;
-        case 229: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_229) - 1u) ? buster_aarch64_generated_operands_blob_chunk_229[offset] : 0;
-        case 230: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_230) - 1u) ? buster_aarch64_generated_operands_blob_chunk_230[offset] : 0;
-        case 231: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_231) - 1u) ? buster_aarch64_generated_operands_blob_chunk_231[offset] : 0;
-        case 232: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_232) - 1u) ? buster_aarch64_generated_operands_blob_chunk_232[offset] : 0;
-        case 233: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_233) - 1u) ? buster_aarch64_generated_operands_blob_chunk_233[offset] : 0;
-        case 234: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_234) - 1u) ? buster_aarch64_generated_operands_blob_chunk_234[offset] : 0;
-        case 235: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_235) - 1u) ? buster_aarch64_generated_operands_blob_chunk_235[offset] : 0;
-        case 236: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_236) - 1u) ? buster_aarch64_generated_operands_blob_chunk_236[offset] : 0;
-        case 237: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_237) - 1u) ? buster_aarch64_generated_operands_blob_chunk_237[offset] : 0;
-        case 238: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_238) - 1u) ? buster_aarch64_generated_operands_blob_chunk_238[offset] : 0;
-        case 239: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_239) - 1u) ? buster_aarch64_generated_operands_blob_chunk_239[offset] : 0;
-        case 240: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_240) - 1u) ? buster_aarch64_generated_operands_blob_chunk_240[offset] : 0;
-        case 241: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_241) - 1u) ? buster_aarch64_generated_operands_blob_chunk_241[offset] : 0;
-        case 242: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_242) - 1u) ? buster_aarch64_generated_operands_blob_chunk_242[offset] : 0;
-        case 243: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_243) - 1u) ? buster_aarch64_generated_operands_blob_chunk_243[offset] : 0;
-        case 244: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_244) - 1u) ? buster_aarch64_generated_operands_blob_chunk_244[offset] : 0;
-        case 245: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_245) - 1u) ? buster_aarch64_generated_operands_blob_chunk_245[offset] : 0;
-        case 246: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_246) - 1u) ? buster_aarch64_generated_operands_blob_chunk_246[offset] : 0;
-        case 247: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_247) - 1u) ? buster_aarch64_generated_operands_blob_chunk_247[offset] : 0;
-        case 248: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_248) - 1u) ? buster_aarch64_generated_operands_blob_chunk_248[offset] : 0;
-        case 249: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_249) - 1u) ? buster_aarch64_generated_operands_blob_chunk_249[offset] : 0;
-        case 250: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_250) - 1u) ? buster_aarch64_generated_operands_blob_chunk_250[offset] : 0;
-        case 251: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_251) - 1u) ? buster_aarch64_generated_operands_blob_chunk_251[offset] : 0;
-        case 252: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_252) - 1u) ? buster_aarch64_generated_operands_blob_chunk_252[offset] : 0;
-        case 253: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_253) - 1u) ? buster_aarch64_generated_operands_blob_chunk_253[offset] : 0;
-        case 254: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_254) - 1u) ? buster_aarch64_generated_operands_blob_chunk_254[offset] : 0;
-        case 255: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_255) - 1u) ? buster_aarch64_generated_operands_blob_chunk_255[offset] : 0;
-        case 256: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_256) - 1u) ? buster_aarch64_generated_operands_blob_chunk_256[offset] : 0;
-        case 257: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_257) - 1u) ? buster_aarch64_generated_operands_blob_chunk_257[offset] : 0;
-        case 258: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_258) - 1u) ? buster_aarch64_generated_operands_blob_chunk_258[offset] : 0;
-        case 259: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_259) - 1u) ? buster_aarch64_generated_operands_blob_chunk_259[offset] : 0;
-        case 260: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_260) - 1u) ? buster_aarch64_generated_operands_blob_chunk_260[offset] : 0;
-        case 261: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_261) - 1u) ? buster_aarch64_generated_operands_blob_chunk_261[offset] : 0;
-        case 262: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_262) - 1u) ? buster_aarch64_generated_operands_blob_chunk_262[offset] : 0;
-        case 263: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_263) - 1u) ? buster_aarch64_generated_operands_blob_chunk_263[offset] : 0;
-        case 264: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_264) - 1u) ? buster_aarch64_generated_operands_blob_chunk_264[offset] : 0;
-        case 265: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_265) - 1u) ? buster_aarch64_generated_operands_blob_chunk_265[offset] : 0;
-        case 266: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_266) - 1u) ? buster_aarch64_generated_operands_blob_chunk_266[offset] : 0;
-        case 267: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_267) - 1u) ? buster_aarch64_generated_operands_blob_chunk_267[offset] : 0;
-        case 268: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_268) - 1u) ? buster_aarch64_generated_operands_blob_chunk_268[offset] : 0;
-        case 269: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_269) - 1u) ? buster_aarch64_generated_operands_blob_chunk_269[offset] : 0;
-        case 270: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_270) - 1u) ? buster_aarch64_generated_operands_blob_chunk_270[offset] : 0;
-        case 271: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_271) - 1u) ? buster_aarch64_generated_operands_blob_chunk_271[offset] : 0;
-        case 272: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_272) - 1u) ? buster_aarch64_generated_operands_blob_chunk_272[offset] : 0;
-        case 273: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_273) - 1u) ? buster_aarch64_generated_operands_blob_chunk_273[offset] : 0;
-        case 274: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_274) - 1u) ? buster_aarch64_generated_operands_blob_chunk_274[offset] : 0;
-        case 275: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_275) - 1u) ? buster_aarch64_generated_operands_blob_chunk_275[offset] : 0;
-        case 276: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_276) - 1u) ? buster_aarch64_generated_operands_blob_chunk_276[offset] : 0;
-        case 277: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_277) - 1u) ? buster_aarch64_generated_operands_blob_chunk_277[offset] : 0;
-        case 278: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_278) - 1u) ? buster_aarch64_generated_operands_blob_chunk_278[offset] : 0;
-        case 279: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_279) - 1u) ? buster_aarch64_generated_operands_blob_chunk_279[offset] : 0;
-        case 280: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_280) - 1u) ? buster_aarch64_generated_operands_blob_chunk_280[offset] : 0;
-        case 281: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_281) - 1u) ? buster_aarch64_generated_operands_blob_chunk_281[offset] : 0;
-        case 282: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_282) - 1u) ? buster_aarch64_generated_operands_blob_chunk_282[offset] : 0;
-        case 283: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_283) - 1u) ? buster_aarch64_generated_operands_blob_chunk_283[offset] : 0;
-        case 284: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_284) - 1u) ? buster_aarch64_generated_operands_blob_chunk_284[offset] : 0;
-        case 285: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_285) - 1u) ? buster_aarch64_generated_operands_blob_chunk_285[offset] : 0;
-        case 286: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_286) - 1u) ? buster_aarch64_generated_operands_blob_chunk_286[offset] : 0;
-        case 287: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_287) - 1u) ? buster_aarch64_generated_operands_blob_chunk_287[offset] : 0;
-        case 288: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_288) - 1u) ? buster_aarch64_generated_operands_blob_chunk_288[offset] : 0;
-        case 289: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_289) - 1u) ? buster_aarch64_generated_operands_blob_chunk_289[offset] : 0;
-        case 290: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_290) - 1u) ? buster_aarch64_generated_operands_blob_chunk_290[offset] : 0;
-        case 291: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_291) - 1u) ? buster_aarch64_generated_operands_blob_chunk_291[offset] : 0;
-        case 292: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_292) - 1u) ? buster_aarch64_generated_operands_blob_chunk_292[offset] : 0;
-        case 293: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_293) - 1u) ? buster_aarch64_generated_operands_blob_chunk_293[offset] : 0;
-        case 294: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_294) - 1u) ? buster_aarch64_generated_operands_blob_chunk_294[offset] : 0;
-        case 295: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_295) - 1u) ? buster_aarch64_generated_operands_blob_chunk_295[offset] : 0;
-        case 296: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_296) - 1u) ? buster_aarch64_generated_operands_blob_chunk_296[offset] : 0;
-        case 297: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_297) - 1u) ? buster_aarch64_generated_operands_blob_chunk_297[offset] : 0;
-        case 298: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_298) - 1u) ? buster_aarch64_generated_operands_blob_chunk_298[offset] : 0;
-        case 299: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_299) - 1u) ? buster_aarch64_generated_operands_blob_chunk_299[offset] : 0;
-        case 300: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_300) - 1u) ? buster_aarch64_generated_operands_blob_chunk_300[offset] : 0;
-        case 301: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_301) - 1u) ? buster_aarch64_generated_operands_blob_chunk_301[offset] : 0;
-        case 302: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_302) - 1u) ? buster_aarch64_generated_operands_blob_chunk_302[offset] : 0;
-        case 303: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_303) - 1u) ? buster_aarch64_generated_operands_blob_chunk_303[offset] : 0;
-        case 304: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_304) - 1u) ? buster_aarch64_generated_operands_blob_chunk_304[offset] : 0;
-        case 305: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_305) - 1u) ? buster_aarch64_generated_operands_blob_chunk_305[offset] : 0;
-        case 306: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_306) - 1u) ? buster_aarch64_generated_operands_blob_chunk_306[offset] : 0;
-        case 307: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_307) - 1u) ? buster_aarch64_generated_operands_blob_chunk_307[offset] : 0;
-        case 308: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_308) - 1u) ? buster_aarch64_generated_operands_blob_chunk_308[offset] : 0;
-        case 309: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_309) - 1u) ? buster_aarch64_generated_operands_blob_chunk_309[offset] : 0;
-        case 310: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_310) - 1u) ? buster_aarch64_generated_operands_blob_chunk_310[offset] : 0;
-        case 311: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_311) - 1u) ? buster_aarch64_generated_operands_blob_chunk_311[offset] : 0;
-        case 312: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_312) - 1u) ? buster_aarch64_generated_operands_blob_chunk_312[offset] : 0;
-        case 313: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_313) - 1u) ? buster_aarch64_generated_operands_blob_chunk_313[offset] : 0;
-        case 314: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_314) - 1u) ? buster_aarch64_generated_operands_blob_chunk_314[offset] : 0;
-        case 315: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_315) - 1u) ? buster_aarch64_generated_operands_blob_chunk_315[offset] : 0;
-        case 316: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_316) - 1u) ? buster_aarch64_generated_operands_blob_chunk_316[offset] : 0;
-        case 317: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_317) - 1u) ? buster_aarch64_generated_operands_blob_chunk_317[offset] : 0;
-        case 318: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_318) - 1u) ? buster_aarch64_generated_operands_blob_chunk_318[offset] : 0;
-        case 319: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_319) - 1u) ? buster_aarch64_generated_operands_blob_chunk_319[offset] : 0;
-        case 320: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_320) - 1u) ? buster_aarch64_generated_operands_blob_chunk_320[offset] : 0;
-        case 321: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_321) - 1u) ? buster_aarch64_generated_operands_blob_chunk_321[offset] : 0;
-        case 322: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_322) - 1u) ? buster_aarch64_generated_operands_blob_chunk_322[offset] : 0;
-        case 323: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_323) - 1u) ? buster_aarch64_generated_operands_blob_chunk_323[offset] : 0;
-        case 324: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_324) - 1u) ? buster_aarch64_generated_operands_blob_chunk_324[offset] : 0;
-        case 325: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_325) - 1u) ? buster_aarch64_generated_operands_blob_chunk_325[offset] : 0;
-        case 326: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_326) - 1u) ? buster_aarch64_generated_operands_blob_chunk_326[offset] : 0;
-        case 327: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_327) - 1u) ? buster_aarch64_generated_operands_blob_chunk_327[offset] : 0;
-        case 328: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_328) - 1u) ? buster_aarch64_generated_operands_blob_chunk_328[offset] : 0;
-        case 329: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_329) - 1u) ? buster_aarch64_generated_operands_blob_chunk_329[offset] : 0;
-        case 330: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_330) - 1u) ? buster_aarch64_generated_operands_blob_chunk_330[offset] : 0;
-        case 331: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_331) - 1u) ? buster_aarch64_generated_operands_blob_chunk_331[offset] : 0;
-        case 332: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_332) - 1u) ? buster_aarch64_generated_operands_blob_chunk_332[offset] : 0;
-        case 333: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_333) - 1u) ? buster_aarch64_generated_operands_blob_chunk_333[offset] : 0;
-        case 334: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_334) - 1u) ? buster_aarch64_generated_operands_blob_chunk_334[offset] : 0;
-        case 335: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_335) - 1u) ? buster_aarch64_generated_operands_blob_chunk_335[offset] : 0;
-        case 336: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_336) - 1u) ? buster_aarch64_generated_operands_blob_chunk_336[offset] : 0;
-        case 337: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_337) - 1u) ? buster_aarch64_generated_operands_blob_chunk_337[offset] : 0;
-        case 338: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_338) - 1u) ? buster_aarch64_generated_operands_blob_chunk_338[offset] : 0;
-        case 339: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_339) - 1u) ? buster_aarch64_generated_operands_blob_chunk_339[offset] : 0;
-        case 340: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_340) - 1u) ? buster_aarch64_generated_operands_blob_chunk_340[offset] : 0;
-        case 341: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_341) - 1u) ? buster_aarch64_generated_operands_blob_chunk_341[offset] : 0;
-        case 342: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_342) - 1u) ? buster_aarch64_generated_operands_blob_chunk_342[offset] : 0;
-        case 343: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_343) - 1u) ? buster_aarch64_generated_operands_blob_chunk_343[offset] : 0;
-        case 344: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_344) - 1u) ? buster_aarch64_generated_operands_blob_chunk_344[offset] : 0;
-        case 345: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_345) - 1u) ? buster_aarch64_generated_operands_blob_chunk_345[offset] : 0;
-        case 346: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_346) - 1u) ? buster_aarch64_generated_operands_blob_chunk_346[offset] : 0;
-        case 347: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_347) - 1u) ? buster_aarch64_generated_operands_blob_chunk_347[offset] : 0;
-        case 348: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_348) - 1u) ? buster_aarch64_generated_operands_blob_chunk_348[offset] : 0;
-        case 349: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_349) - 1u) ? buster_aarch64_generated_operands_blob_chunk_349[offset] : 0;
-        case 350: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_350) - 1u) ? buster_aarch64_generated_operands_blob_chunk_350[offset] : 0;
-        case 351: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_351) - 1u) ? buster_aarch64_generated_operands_blob_chunk_351[offset] : 0;
-        case 352: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_352) - 1u) ? buster_aarch64_generated_operands_blob_chunk_352[offset] : 0;
-        case 353: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_353) - 1u) ? buster_aarch64_generated_operands_blob_chunk_353[offset] : 0;
-        case 354: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_354) - 1u) ? buster_aarch64_generated_operands_blob_chunk_354[offset] : 0;
-        case 355: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_355) - 1u) ? buster_aarch64_generated_operands_blob_chunk_355[offset] : 0;
-        case 356: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_356) - 1u) ? buster_aarch64_generated_operands_blob_chunk_356[offset] : 0;
-        case 357: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_357) - 1u) ? buster_aarch64_generated_operands_blob_chunk_357[offset] : 0;
-        case 358: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_358) - 1u) ? buster_aarch64_generated_operands_blob_chunk_358[offset] : 0;
-        case 359: return offset < (u64)(sizeof(buster_aarch64_generated_operands_blob_chunk_359) - 1u) ? buster_aarch64_generated_operands_blob_chunk_359[offset] : 0;
-        default: return 0;
-    }
+    return chunk < sizeof(buster_aarch64_generated_operands_blob_chunks) / sizeof(buster_aarch64_generated_operands_blob_chunks[0]) && offset < (u64)buster_aarch64_generated_operands_blob_chunk_lengths[chunk] ? buster_aarch64_generated_operands_blob_chunks[chunk][offset] : 0;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_operands_blob_u8_counted(u64 byte_count, u64 offset)
@@ -1652,7 +2317,20 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_operands_blob
     if (offset >= byte_count || !buster_aarch64_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;
     u64 encoded_offset = (offset / 3u) * 4u;
     if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;
-    u32 value = ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_operands_blob_char(encoded_offset + 0u)) << 18) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_operands_blob_char(encoded_offset + 1u)) << 12) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_operands_blob_char(encoded_offset + 2u)) << 6) | (u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_operands_blob_char(encoded_offset + 3u));
+    u64 chunk = encoded_offset / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u64 chunk_offset = encoded_offset % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u32 value = 0;
+    if (chunk < sizeof(buster_aarch64_generated_operands_blob_chunks) / sizeof(buster_aarch64_generated_operands_blob_chunks[0]))
+    {
+        const char8* encoded = buster_aarch64_generated_operands_blob_chunks[chunk];
+        u64 length = (u64)buster_aarch64_generated_operands_blob_chunk_lengths[chunk];
+        char8 character_0 = chunk_offset + 1u <= length ? encoded[chunk_offset + 0u] : 0;
+        char8 character_1 = chunk_offset + 2u <= length ? encoded[chunk_offset + 1u] : 0;
+        char8 character_2 = chunk_offset + 3u <= length ? encoded[chunk_offset + 2u] : 0;
+        char8 character_3 = chunk_offset + 4u <= length ? encoded[chunk_offset + 3u] : 0;
+        value = ((u32)buster_aarch64_generated_base64_value(character_0) << 18) | ((u32)buster_aarch64_generated_base64_value(character_1) << 12) |
+                ((u32)buster_aarch64_generated_base64_value(character_2) << 6) | (u32)buster_aarch64_generated_base64_value(character_3);
+    }
     return (u8)(value >> ((2u - (offset % 3u)) * 8u));
 }
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_operands_blob_u8(u64 offset)
@@ -1700,25 +2378,37 @@ static const char8 buster_aarch64_generated_predicates_blob_chunk_9[] = "0gEAANI
 static const char8 buster_aarch64_generated_predicates_blob_chunk_10[] = "AQAq0gEAKtIBACrSAQAq0gEAUNIBAFDSAQBQ0gEAUNIBAADSAQAA0gEAANIBAADSAQAA0gEAANIBAADSAQAA0gEAKtIBACrSAQAq0gEAKtIBAFDSAQBQ0gEAUNIBAFDSAQAA0gEAANIBAADSAQAA0gEAANIBAADSAQAA0gEAANIBACrSAQAq0gEAKtIBACrSAQBQ0gEAUNIBAFDSAQBQ0gEAF9MBABfTAQAX0wEAF9MBABfTAQAX0wEAF9MBABfTAQAq0gEAKtIBACrSAQAq0gEAUNIBAFDSAQBQ0gEAUNIBABfTAQAX0wEAF9MBABfTAQAX0wEAF9MBABfTAQAX0wEAKtIBACrSAQAq0gEAKtIBAFDSAQBQ0gEAUNIBAFDSAQAX0wEAF9MBABfTAQAX0wEAF9MBABfTAQAX0wEAF9MBACrSAQAq0gEAKtIBACrSAQBQ0gEAUNIBAFDSAQBQ0gEAF9MBABfTAQAX0wEAF9MBABfTAQAX0wEAF9MBABfTAQAA0gEAANIBAADSAQAA0gEAANIBAADSAQAA0gEAANIBAPHRAQCdzQEAw9ABAADSAQAA0gEAANIBAADSAQBm0AEAZtABAFDPAQBQzwEAUM8BAFDPAQBQzwEAUM8BAKbRAQD+0AEA/tABAP7QAQD+0AEA/tABAP7QAQD+0AEA/tABAOHQAQAX0wEAF9MBABfTAQAX0wEAF9MBABfTAQAX0wEAF9MBADTPAQAX0wEAUM8BAFDPAQBQzwEAUM8BAFDPAQBQzwEAUM8BABfTAQAX0wEAF9MBABfTAQAX0wEAF9MBABfTAQAX0wEANM8BABfTAQBQzwEAUM8BAFDPAQBQzwEAUM8BAFDPAQBQzwEAPNIBADzSAQA80gEAPNIBADzSAQA80gEAPNIBADzSAQDZ0AEA2dABANnQAQDZ0AEA2dABANnQAQDZ0AEA2dABANnQAQDZ0AEA";
 #define buster_aarch64_generated_predicates_blob_BYTE_COUNT 31416
 #define buster_aarch64_generated_predicates_blob_CHUNK_COUNT 11
+static const char8* const buster_aarch64_generated_predicates_blob_chunks[] = {
+    buster_aarch64_generated_predicates_blob_chunk_0,
+    buster_aarch64_generated_predicates_blob_chunk_1,
+    buster_aarch64_generated_predicates_blob_chunk_2,
+    buster_aarch64_generated_predicates_blob_chunk_3,
+    buster_aarch64_generated_predicates_blob_chunk_4,
+    buster_aarch64_generated_predicates_blob_chunk_5,
+    buster_aarch64_generated_predicates_blob_chunk_6,
+    buster_aarch64_generated_predicates_blob_chunk_7,
+    buster_aarch64_generated_predicates_blob_chunk_8,
+    buster_aarch64_generated_predicates_blob_chunk_9,
+    buster_aarch64_generated_predicates_blob_chunk_10,
+};
+static const u16 buster_aarch64_generated_predicates_blob_chunk_lengths[] = {
+    (u16)(sizeof(buster_aarch64_generated_predicates_blob_chunk_0) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_predicates_blob_chunk_1) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_predicates_blob_chunk_2) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_predicates_blob_chunk_3) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_predicates_blob_chunk_4) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_predicates_blob_chunk_5) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_predicates_blob_chunk_6) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_predicates_blob_chunk_7) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_predicates_blob_chunk_8) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_predicates_blob_chunk_9) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_predicates_blob_chunk_10) - 1u),
+};
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL char8 buster_aarch64_generated_predicates_blob_char(u64 logical)
 {
     u64 chunk = logical / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
     u64 offset = logical % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
-    switch (chunk)
-    {
-        case 0: return offset < (u64)(sizeof(buster_aarch64_generated_predicates_blob_chunk_0) - 1u) ? buster_aarch64_generated_predicates_blob_chunk_0[offset] : 0;
-        case 1: return offset < (u64)(sizeof(buster_aarch64_generated_predicates_blob_chunk_1) - 1u) ? buster_aarch64_generated_predicates_blob_chunk_1[offset] : 0;
-        case 2: return offset < (u64)(sizeof(buster_aarch64_generated_predicates_blob_chunk_2) - 1u) ? buster_aarch64_generated_predicates_blob_chunk_2[offset] : 0;
-        case 3: return offset < (u64)(sizeof(buster_aarch64_generated_predicates_blob_chunk_3) - 1u) ? buster_aarch64_generated_predicates_blob_chunk_3[offset] : 0;
-        case 4: return offset < (u64)(sizeof(buster_aarch64_generated_predicates_blob_chunk_4) - 1u) ? buster_aarch64_generated_predicates_blob_chunk_4[offset] : 0;
-        case 5: return offset < (u64)(sizeof(buster_aarch64_generated_predicates_blob_chunk_5) - 1u) ? buster_aarch64_generated_predicates_blob_chunk_5[offset] : 0;
-        case 6: return offset < (u64)(sizeof(buster_aarch64_generated_predicates_blob_chunk_6) - 1u) ? buster_aarch64_generated_predicates_blob_chunk_6[offset] : 0;
-        case 7: return offset < (u64)(sizeof(buster_aarch64_generated_predicates_blob_chunk_7) - 1u) ? buster_aarch64_generated_predicates_blob_chunk_7[offset] : 0;
-        case 8: return offset < (u64)(sizeof(buster_aarch64_generated_predicates_blob_chunk_8) - 1u) ? buster_aarch64_generated_predicates_blob_chunk_8[offset] : 0;
-        case 9: return offset < (u64)(sizeof(buster_aarch64_generated_predicates_blob_chunk_9) - 1u) ? buster_aarch64_generated_predicates_blob_chunk_9[offset] : 0;
-        case 10: return offset < (u64)(sizeof(buster_aarch64_generated_predicates_blob_chunk_10) - 1u) ? buster_aarch64_generated_predicates_blob_chunk_10[offset] : 0;
-        default: return 0;
-    }
+    return chunk < sizeof(buster_aarch64_generated_predicates_blob_chunks) / sizeof(buster_aarch64_generated_predicates_blob_chunks[0]) && offset < (u64)buster_aarch64_generated_predicates_blob_chunk_lengths[chunk] ? buster_aarch64_generated_predicates_blob_chunks[chunk][offset] : 0;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_predicates_blob_u8_counted(u64 byte_count, u64 offset)
@@ -1727,7 +2417,20 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_predicates_bl
     if (offset >= byte_count || !buster_aarch64_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;
     u64 encoded_offset = (offset / 3u) * 4u;
     if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;
-    u32 value = ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_predicates_blob_char(encoded_offset + 0u)) << 18) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_predicates_blob_char(encoded_offset + 1u)) << 12) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_predicates_blob_char(encoded_offset + 2u)) << 6) | (u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_predicates_blob_char(encoded_offset + 3u));
+    u64 chunk = encoded_offset / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u64 chunk_offset = encoded_offset % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u32 value = 0;
+    if (chunk < sizeof(buster_aarch64_generated_predicates_blob_chunks) / sizeof(buster_aarch64_generated_predicates_blob_chunks[0]))
+    {
+        const char8* encoded = buster_aarch64_generated_predicates_blob_chunks[chunk];
+        u64 length = (u64)buster_aarch64_generated_predicates_blob_chunk_lengths[chunk];
+        char8 character_0 = chunk_offset + 1u <= length ? encoded[chunk_offset + 0u] : 0;
+        char8 character_1 = chunk_offset + 2u <= length ? encoded[chunk_offset + 1u] : 0;
+        char8 character_2 = chunk_offset + 3u <= length ? encoded[chunk_offset + 2u] : 0;
+        char8 character_3 = chunk_offset + 4u <= length ? encoded[chunk_offset + 3u] : 0;
+        value = ((u32)buster_aarch64_generated_base64_value(character_0) << 18) | ((u32)buster_aarch64_generated_base64_value(character_1) << 12) |
+                ((u32)buster_aarch64_generated_base64_value(character_2) << 6) | (u32)buster_aarch64_generated_base64_value(character_3);
+    }
     return (u8)(value >> ((2u - (offset % 3u)) * 8u));
 }
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_predicates_blob_u8(u64 offset)
@@ -1979,229 +2682,445 @@ static const char8 buster_aarch64_generated_forms_blob_chunk_213[] = "IQUAIDIBAJ
 static const char8 buster_aarch64_generated_forms_blob_chunk_214[] = "T1Mt1gIAnyQFALckBQCtNwEA+L4AABhYAABHZgAAkR4AACcdAAADAAMAAQAAAAD84P8AZGAFAQQAAAAAAAD/////meIJWg+soNgThF/fP9JW6hoM1pYcozQvONYCAJ8kBQC3JAUASTcBAHS9AAAbWAAASmYAAJIeAAAoHQAAAwADAAIAAAAA/OD/AASgBQEEAAAAAAAA/////+Zj751bVMw08gjsTLFC8tYNB7Xpqfv5fUPWAgCfJAUAtyQFADA4AQA9xwAAHlgAAE1mAACUHgAAKR0AAAMAAwABAAAAAPzg/wBkoAUBBAAAAAAAAP////+Vt3hvVsxSZz5Bp65vabuJptiHbjkCSRlO1gIAnyQFAMokBQDuMQEAu5wAACFYAABQZgAAlR4AACodAAADAAMAAQAAAAD84P8AeABOAQMAAAEAAAD/////0w7yYKvOUpkAKWnpdWJAqNSU/wipnkwLWNYCAJ8kBQAuJQUAMTIBAI+lAAAkWAAAU2YAAJYeAAArHQAAAwADAAEAAAAA/OD/AHiADgEDAAABAAAA/////8U7ar52sItKyr9udyLYr1K15S8p2FtAumLWAgCfJAUA/iQFAO4xAQC7nAAAJ1gAAFZmAACXHgAALB0AAAMAAwABAAAAAPzg/wB4wE4BAwAAAQAAAP////8ug5tLpibcJd79/nnDQ7vepU1OK14ojUFs1gIAnyQFAF4lBQAxMgEAj6UAACpYAABZZgAAmB4AAC0dAAADAAMAAQAAAAD84P8AeEAOAQMAAAEAAAD/////qJEYWcMdJVb8v2DQr9m64wZcopvXer+6dtYCAJ8kBQCOJQUA7jEBALucAAAtWAAAXGYAAJkeAAAuHQAAAwADAAEAAAAA/OD/AHiATgEDAAABAAAA/////5h4lmfkE+GhygmPmL//hD6ZZdArcGShOoDWAgCfJAUA7iUFAO4xAQC7nAAAMFgAAF9mAACaHgAALx0AAAMAAwABAAAAAPzg/wB4QE4BAwAAAQAAAP/////iOPgp8Q7jKbL9BYUjWWVleW0JY38jUXiK1gIAnyQFAL4lBQAxMgEAj6UAADNYAABiZgAAmx4AADAdAAADAAMAAQAAAAD84P8AeAAOAQMAAAEAAAD//////CGrQYOJs7zmEYKAVHL15Xd5741hegy/k9YCAB4mBQAkJgUANjkBALnbAAA2WAAAZWYAAJweAAAxHQAAAwADAAEAAAAA/OD/AOAARAEEAAAAAAAA/////5ycElplU5JyE4T5uiHXkNHFleOYlIlemZ/WAgAeJgUAJCYFALM4AQBW0gAAOVgAAGhmAACdHgAAMh0AAAMAAwABAAAAAPzg/wDgwEQBBAAAAAAAAP////9QCO7KdYAzxqtzmQv9on541i+2GE3+xYCr1gIAHiYFACQmBQCtNwEA+L4AADxYAABrZgAAnh4AADMdAAADAAMAAQAAAAD84P8A4EBEAQQAAAAAAAD/////jAluErJ0sdU7vakmfBRfUmpww221A8Zmt9YCAB4mBQAkJgUAMDgBAD3HAAA/WAAAbmYAAJ8eAAA0HQAAAwADAAEAAAAA/OD/AOCARAEEAAAAAAAA/////wVWiD/pi0mYVExnaOJ02V8KzSn6x2gwqMPWAgA4JgUAPiYFADY5AQC52wAAQlgAAHFmAACgHgAANR0AAAMAAwABAAAAAPzg/wDkAEQBBAAAAAAAAP/////DKbcxSutjAfThVpgo1LdHsOTdpXOzCsTP1gIAOCYFAD4mBQCzOAEAVtIAAEVYAAB0ZgAAoR4AADYdAAADAAMAAQAAAAD84P8A5MBEAQQAAAAAAAD/////YdbmkR+jN1U2ML1UMIavF6vf7MrNmyEo29YCADgmBQA+JgUArTcBAPi+AABIWAAAd2YAAKIeAAA3HQAAAwADAAEAAAAA/OD/AORARAEEAAAAAAAA/////1yOkgq+58p/ADHSnMzWIsz3XJC4LsY5gufWAgA4JgUAPiYFADA4AQA9xwAAS1gAAHpmAACjHgAAOB0AAAMAAwABAAAAAPzg/wDkgEQBBAAAAAAAAP////9S2p2RL1d4e30yBEqM6DLzAAAAAAAAAADz1gIA/SIFAA4jBQAsPgEAudsAAE5YAAB9ZgAApB4AADkdAAADAAMAAQAAAAH84P8A0CDBBQQHDAAAAAD/////YrpoVBkW6NexkGL6IxZB1AAAAAAAAAAAAtcCAP0iBQAOIwUABz8BAFbSAABRWAAAgGYAAKUeAAA6HQAAAwADAAEAAAAB/OD/ANDgwQUEBwwAAAAA/////0Qumhm0xCQDeImD8fsaNw0AAAAAAAAAABHXAgD9IgUADiMFAPQ/AQD4vgAAVFgAAINmAACmHgAAOx0AAAMAAwABAAAAAfzg/wDQYMEFBAcMAAAAAP////8NXREHj0d0Lr5mQ5VUOE+CAAAAAAAAAAAg1wIA/SIFAA4jBQDRQAEAdL0AAFdYAACGZgAApx4AADwdAAADAAMAAQAAAAH84P8A1CDBBQQHDAAAAAD/////2KUy8VmMG1dUhC54A9TbWgAAAAAAAAAAL9cCAP0iBQAOIwUADkEBAD3HAABaWAAAiWYAAKgeAAA9HQAAAwADAAEAAAAB/OD/ANCgwQUEBwwAAAAA/////63YpbZ9bR6Qkr/1dBcl+9wAAAAAAAAAAD7XAgD9IgUAASMFAAc6AQCF5AAAXVgAAIxmAACpHgAAPh0AAAIAAgABAAAAY/z//wDgNsEFAAcMAAAAAP////8kLHYK+USHrbrYXUf4wxvvAAAAAAAAAABN1wIA/SIFAAEjBQDyOgEAAecAAF9YAACOZgAAqh4AAD8dAAACAAIAAQAAAGP8//8A4PbBBQAHDAAAAAD/////aLKGQdTBYL3rnKEFohxYtgAAAAAAAAAAXNcCAP0iBQABIwUA7zsBALfpAABhWAAAkGYAAKseAABAHQAAAgACAAEAAABj/P//AOB2wQUABwwAAAAA/////32S0yAfrMBYktKsddMQbuAAAAAAAAAAAGvXAgD9IgUAASMFANw8AQBF7AAAY1gAAJJmAACsHgAAQR0AAAIAAgABAAAAY/z//wDgN8EFAAcMAAAAAP////+kyWowUAkdzTqch3y1iW6GAAAAAAAAAAB61wIA/SIFAAEjBQAGPQEA3OwAAGVYAACUZgAArR4AAEIdAAACAAIAAQAAAGP8//8A4LbBBQAHDAAAAAD/////";
 #define buster_aarch64_generated_forms_blob_BYTE_COUNT 659208
 #define buster_aarch64_generated_forms_blob_CHUNK_COUNT 215
+static const char8* const buster_aarch64_generated_forms_blob_chunks[] = {
+    buster_aarch64_generated_forms_blob_chunk_0,
+    buster_aarch64_generated_forms_blob_chunk_1,
+    buster_aarch64_generated_forms_blob_chunk_2,
+    buster_aarch64_generated_forms_blob_chunk_3,
+    buster_aarch64_generated_forms_blob_chunk_4,
+    buster_aarch64_generated_forms_blob_chunk_5,
+    buster_aarch64_generated_forms_blob_chunk_6,
+    buster_aarch64_generated_forms_blob_chunk_7,
+    buster_aarch64_generated_forms_blob_chunk_8,
+    buster_aarch64_generated_forms_blob_chunk_9,
+    buster_aarch64_generated_forms_blob_chunk_10,
+    buster_aarch64_generated_forms_blob_chunk_11,
+    buster_aarch64_generated_forms_blob_chunk_12,
+    buster_aarch64_generated_forms_blob_chunk_13,
+    buster_aarch64_generated_forms_blob_chunk_14,
+    buster_aarch64_generated_forms_blob_chunk_15,
+    buster_aarch64_generated_forms_blob_chunk_16,
+    buster_aarch64_generated_forms_blob_chunk_17,
+    buster_aarch64_generated_forms_blob_chunk_18,
+    buster_aarch64_generated_forms_blob_chunk_19,
+    buster_aarch64_generated_forms_blob_chunk_20,
+    buster_aarch64_generated_forms_blob_chunk_21,
+    buster_aarch64_generated_forms_blob_chunk_22,
+    buster_aarch64_generated_forms_blob_chunk_23,
+    buster_aarch64_generated_forms_blob_chunk_24,
+    buster_aarch64_generated_forms_blob_chunk_25,
+    buster_aarch64_generated_forms_blob_chunk_26,
+    buster_aarch64_generated_forms_blob_chunk_27,
+    buster_aarch64_generated_forms_blob_chunk_28,
+    buster_aarch64_generated_forms_blob_chunk_29,
+    buster_aarch64_generated_forms_blob_chunk_30,
+    buster_aarch64_generated_forms_blob_chunk_31,
+    buster_aarch64_generated_forms_blob_chunk_32,
+    buster_aarch64_generated_forms_blob_chunk_33,
+    buster_aarch64_generated_forms_blob_chunk_34,
+    buster_aarch64_generated_forms_blob_chunk_35,
+    buster_aarch64_generated_forms_blob_chunk_36,
+    buster_aarch64_generated_forms_blob_chunk_37,
+    buster_aarch64_generated_forms_blob_chunk_38,
+    buster_aarch64_generated_forms_blob_chunk_39,
+    buster_aarch64_generated_forms_blob_chunk_40,
+    buster_aarch64_generated_forms_blob_chunk_41,
+    buster_aarch64_generated_forms_blob_chunk_42,
+    buster_aarch64_generated_forms_blob_chunk_43,
+    buster_aarch64_generated_forms_blob_chunk_44,
+    buster_aarch64_generated_forms_blob_chunk_45,
+    buster_aarch64_generated_forms_blob_chunk_46,
+    buster_aarch64_generated_forms_blob_chunk_47,
+    buster_aarch64_generated_forms_blob_chunk_48,
+    buster_aarch64_generated_forms_blob_chunk_49,
+    buster_aarch64_generated_forms_blob_chunk_50,
+    buster_aarch64_generated_forms_blob_chunk_51,
+    buster_aarch64_generated_forms_blob_chunk_52,
+    buster_aarch64_generated_forms_blob_chunk_53,
+    buster_aarch64_generated_forms_blob_chunk_54,
+    buster_aarch64_generated_forms_blob_chunk_55,
+    buster_aarch64_generated_forms_blob_chunk_56,
+    buster_aarch64_generated_forms_blob_chunk_57,
+    buster_aarch64_generated_forms_blob_chunk_58,
+    buster_aarch64_generated_forms_blob_chunk_59,
+    buster_aarch64_generated_forms_blob_chunk_60,
+    buster_aarch64_generated_forms_blob_chunk_61,
+    buster_aarch64_generated_forms_blob_chunk_62,
+    buster_aarch64_generated_forms_blob_chunk_63,
+    buster_aarch64_generated_forms_blob_chunk_64,
+    buster_aarch64_generated_forms_blob_chunk_65,
+    buster_aarch64_generated_forms_blob_chunk_66,
+    buster_aarch64_generated_forms_blob_chunk_67,
+    buster_aarch64_generated_forms_blob_chunk_68,
+    buster_aarch64_generated_forms_blob_chunk_69,
+    buster_aarch64_generated_forms_blob_chunk_70,
+    buster_aarch64_generated_forms_blob_chunk_71,
+    buster_aarch64_generated_forms_blob_chunk_72,
+    buster_aarch64_generated_forms_blob_chunk_73,
+    buster_aarch64_generated_forms_blob_chunk_74,
+    buster_aarch64_generated_forms_blob_chunk_75,
+    buster_aarch64_generated_forms_blob_chunk_76,
+    buster_aarch64_generated_forms_blob_chunk_77,
+    buster_aarch64_generated_forms_blob_chunk_78,
+    buster_aarch64_generated_forms_blob_chunk_79,
+    buster_aarch64_generated_forms_blob_chunk_80,
+    buster_aarch64_generated_forms_blob_chunk_81,
+    buster_aarch64_generated_forms_blob_chunk_82,
+    buster_aarch64_generated_forms_blob_chunk_83,
+    buster_aarch64_generated_forms_blob_chunk_84,
+    buster_aarch64_generated_forms_blob_chunk_85,
+    buster_aarch64_generated_forms_blob_chunk_86,
+    buster_aarch64_generated_forms_blob_chunk_87,
+    buster_aarch64_generated_forms_blob_chunk_88,
+    buster_aarch64_generated_forms_blob_chunk_89,
+    buster_aarch64_generated_forms_blob_chunk_90,
+    buster_aarch64_generated_forms_blob_chunk_91,
+    buster_aarch64_generated_forms_blob_chunk_92,
+    buster_aarch64_generated_forms_blob_chunk_93,
+    buster_aarch64_generated_forms_blob_chunk_94,
+    buster_aarch64_generated_forms_blob_chunk_95,
+    buster_aarch64_generated_forms_blob_chunk_96,
+    buster_aarch64_generated_forms_blob_chunk_97,
+    buster_aarch64_generated_forms_blob_chunk_98,
+    buster_aarch64_generated_forms_blob_chunk_99,
+    buster_aarch64_generated_forms_blob_chunk_100,
+    buster_aarch64_generated_forms_blob_chunk_101,
+    buster_aarch64_generated_forms_blob_chunk_102,
+    buster_aarch64_generated_forms_blob_chunk_103,
+    buster_aarch64_generated_forms_blob_chunk_104,
+    buster_aarch64_generated_forms_blob_chunk_105,
+    buster_aarch64_generated_forms_blob_chunk_106,
+    buster_aarch64_generated_forms_blob_chunk_107,
+    buster_aarch64_generated_forms_blob_chunk_108,
+    buster_aarch64_generated_forms_blob_chunk_109,
+    buster_aarch64_generated_forms_blob_chunk_110,
+    buster_aarch64_generated_forms_blob_chunk_111,
+    buster_aarch64_generated_forms_blob_chunk_112,
+    buster_aarch64_generated_forms_blob_chunk_113,
+    buster_aarch64_generated_forms_blob_chunk_114,
+    buster_aarch64_generated_forms_blob_chunk_115,
+    buster_aarch64_generated_forms_blob_chunk_116,
+    buster_aarch64_generated_forms_blob_chunk_117,
+    buster_aarch64_generated_forms_blob_chunk_118,
+    buster_aarch64_generated_forms_blob_chunk_119,
+    buster_aarch64_generated_forms_blob_chunk_120,
+    buster_aarch64_generated_forms_blob_chunk_121,
+    buster_aarch64_generated_forms_blob_chunk_122,
+    buster_aarch64_generated_forms_blob_chunk_123,
+    buster_aarch64_generated_forms_blob_chunk_124,
+    buster_aarch64_generated_forms_blob_chunk_125,
+    buster_aarch64_generated_forms_blob_chunk_126,
+    buster_aarch64_generated_forms_blob_chunk_127,
+    buster_aarch64_generated_forms_blob_chunk_128,
+    buster_aarch64_generated_forms_blob_chunk_129,
+    buster_aarch64_generated_forms_blob_chunk_130,
+    buster_aarch64_generated_forms_blob_chunk_131,
+    buster_aarch64_generated_forms_blob_chunk_132,
+    buster_aarch64_generated_forms_blob_chunk_133,
+    buster_aarch64_generated_forms_blob_chunk_134,
+    buster_aarch64_generated_forms_blob_chunk_135,
+    buster_aarch64_generated_forms_blob_chunk_136,
+    buster_aarch64_generated_forms_blob_chunk_137,
+    buster_aarch64_generated_forms_blob_chunk_138,
+    buster_aarch64_generated_forms_blob_chunk_139,
+    buster_aarch64_generated_forms_blob_chunk_140,
+    buster_aarch64_generated_forms_blob_chunk_141,
+    buster_aarch64_generated_forms_blob_chunk_142,
+    buster_aarch64_generated_forms_blob_chunk_143,
+    buster_aarch64_generated_forms_blob_chunk_144,
+    buster_aarch64_generated_forms_blob_chunk_145,
+    buster_aarch64_generated_forms_blob_chunk_146,
+    buster_aarch64_generated_forms_blob_chunk_147,
+    buster_aarch64_generated_forms_blob_chunk_148,
+    buster_aarch64_generated_forms_blob_chunk_149,
+    buster_aarch64_generated_forms_blob_chunk_150,
+    buster_aarch64_generated_forms_blob_chunk_151,
+    buster_aarch64_generated_forms_blob_chunk_152,
+    buster_aarch64_generated_forms_blob_chunk_153,
+    buster_aarch64_generated_forms_blob_chunk_154,
+    buster_aarch64_generated_forms_blob_chunk_155,
+    buster_aarch64_generated_forms_blob_chunk_156,
+    buster_aarch64_generated_forms_blob_chunk_157,
+    buster_aarch64_generated_forms_blob_chunk_158,
+    buster_aarch64_generated_forms_blob_chunk_159,
+    buster_aarch64_generated_forms_blob_chunk_160,
+    buster_aarch64_generated_forms_blob_chunk_161,
+    buster_aarch64_generated_forms_blob_chunk_162,
+    buster_aarch64_generated_forms_blob_chunk_163,
+    buster_aarch64_generated_forms_blob_chunk_164,
+    buster_aarch64_generated_forms_blob_chunk_165,
+    buster_aarch64_generated_forms_blob_chunk_166,
+    buster_aarch64_generated_forms_blob_chunk_167,
+    buster_aarch64_generated_forms_blob_chunk_168,
+    buster_aarch64_generated_forms_blob_chunk_169,
+    buster_aarch64_generated_forms_blob_chunk_170,
+    buster_aarch64_generated_forms_blob_chunk_171,
+    buster_aarch64_generated_forms_blob_chunk_172,
+    buster_aarch64_generated_forms_blob_chunk_173,
+    buster_aarch64_generated_forms_blob_chunk_174,
+    buster_aarch64_generated_forms_blob_chunk_175,
+    buster_aarch64_generated_forms_blob_chunk_176,
+    buster_aarch64_generated_forms_blob_chunk_177,
+    buster_aarch64_generated_forms_blob_chunk_178,
+    buster_aarch64_generated_forms_blob_chunk_179,
+    buster_aarch64_generated_forms_blob_chunk_180,
+    buster_aarch64_generated_forms_blob_chunk_181,
+    buster_aarch64_generated_forms_blob_chunk_182,
+    buster_aarch64_generated_forms_blob_chunk_183,
+    buster_aarch64_generated_forms_blob_chunk_184,
+    buster_aarch64_generated_forms_blob_chunk_185,
+    buster_aarch64_generated_forms_blob_chunk_186,
+    buster_aarch64_generated_forms_blob_chunk_187,
+    buster_aarch64_generated_forms_blob_chunk_188,
+    buster_aarch64_generated_forms_blob_chunk_189,
+    buster_aarch64_generated_forms_blob_chunk_190,
+    buster_aarch64_generated_forms_blob_chunk_191,
+    buster_aarch64_generated_forms_blob_chunk_192,
+    buster_aarch64_generated_forms_blob_chunk_193,
+    buster_aarch64_generated_forms_blob_chunk_194,
+    buster_aarch64_generated_forms_blob_chunk_195,
+    buster_aarch64_generated_forms_blob_chunk_196,
+    buster_aarch64_generated_forms_blob_chunk_197,
+    buster_aarch64_generated_forms_blob_chunk_198,
+    buster_aarch64_generated_forms_blob_chunk_199,
+    buster_aarch64_generated_forms_blob_chunk_200,
+    buster_aarch64_generated_forms_blob_chunk_201,
+    buster_aarch64_generated_forms_blob_chunk_202,
+    buster_aarch64_generated_forms_blob_chunk_203,
+    buster_aarch64_generated_forms_blob_chunk_204,
+    buster_aarch64_generated_forms_blob_chunk_205,
+    buster_aarch64_generated_forms_blob_chunk_206,
+    buster_aarch64_generated_forms_blob_chunk_207,
+    buster_aarch64_generated_forms_blob_chunk_208,
+    buster_aarch64_generated_forms_blob_chunk_209,
+    buster_aarch64_generated_forms_blob_chunk_210,
+    buster_aarch64_generated_forms_blob_chunk_211,
+    buster_aarch64_generated_forms_blob_chunk_212,
+    buster_aarch64_generated_forms_blob_chunk_213,
+    buster_aarch64_generated_forms_blob_chunk_214,
+};
+static const u16 buster_aarch64_generated_forms_blob_chunk_lengths[] = {
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_0) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_1) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_2) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_3) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_4) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_5) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_6) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_7) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_8) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_9) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_10) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_11) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_12) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_13) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_14) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_15) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_16) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_17) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_18) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_19) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_20) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_21) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_22) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_23) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_24) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_25) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_26) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_27) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_28) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_29) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_30) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_31) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_32) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_33) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_34) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_35) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_36) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_37) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_38) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_39) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_40) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_41) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_42) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_43) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_44) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_45) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_46) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_47) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_48) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_49) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_50) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_51) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_52) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_53) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_54) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_55) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_56) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_57) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_58) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_59) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_60) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_61) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_62) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_63) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_64) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_65) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_66) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_67) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_68) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_69) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_70) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_71) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_72) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_73) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_74) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_75) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_76) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_77) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_78) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_79) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_80) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_81) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_82) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_83) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_84) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_85) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_86) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_87) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_88) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_89) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_90) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_91) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_92) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_93) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_94) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_95) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_96) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_97) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_98) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_99) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_100) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_101) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_102) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_103) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_104) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_105) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_106) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_107) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_108) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_109) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_110) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_111) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_112) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_113) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_114) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_115) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_116) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_117) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_118) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_119) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_120) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_121) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_122) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_123) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_124) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_125) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_126) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_127) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_128) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_129) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_130) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_131) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_132) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_133) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_134) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_135) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_136) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_137) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_138) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_139) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_140) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_141) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_142) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_143) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_144) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_145) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_146) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_147) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_148) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_149) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_150) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_151) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_152) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_153) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_154) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_155) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_156) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_157) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_158) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_159) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_160) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_161) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_162) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_163) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_164) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_165) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_166) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_167) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_168) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_169) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_170) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_171) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_172) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_173) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_174) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_175) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_176) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_177) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_178) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_179) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_180) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_181) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_182) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_183) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_184) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_185) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_186) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_187) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_188) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_189) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_190) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_191) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_192) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_193) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_194) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_195) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_196) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_197) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_198) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_199) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_200) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_201) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_202) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_203) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_204) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_205) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_206) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_207) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_208) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_209) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_210) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_211) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_212) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_213) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_forms_blob_chunk_214) - 1u),
+};
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL char8 buster_aarch64_generated_forms_blob_char(u64 logical)
 {
     u64 chunk = logical / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
     u64 offset = logical % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
-    switch (chunk)
-    {
-        case 0: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_0) - 1u) ? buster_aarch64_generated_forms_blob_chunk_0[offset] : 0;
-        case 1: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_1) - 1u) ? buster_aarch64_generated_forms_blob_chunk_1[offset] : 0;
-        case 2: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_2) - 1u) ? buster_aarch64_generated_forms_blob_chunk_2[offset] : 0;
-        case 3: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_3) - 1u) ? buster_aarch64_generated_forms_blob_chunk_3[offset] : 0;
-        case 4: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_4) - 1u) ? buster_aarch64_generated_forms_blob_chunk_4[offset] : 0;
-        case 5: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_5) - 1u) ? buster_aarch64_generated_forms_blob_chunk_5[offset] : 0;
-        case 6: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_6) - 1u) ? buster_aarch64_generated_forms_blob_chunk_6[offset] : 0;
-        case 7: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_7) - 1u) ? buster_aarch64_generated_forms_blob_chunk_7[offset] : 0;
-        case 8: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_8) - 1u) ? buster_aarch64_generated_forms_blob_chunk_8[offset] : 0;
-        case 9: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_9) - 1u) ? buster_aarch64_generated_forms_blob_chunk_9[offset] : 0;
-        case 10: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_10) - 1u) ? buster_aarch64_generated_forms_blob_chunk_10[offset] : 0;
-        case 11: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_11) - 1u) ? buster_aarch64_generated_forms_blob_chunk_11[offset] : 0;
-        case 12: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_12) - 1u) ? buster_aarch64_generated_forms_blob_chunk_12[offset] : 0;
-        case 13: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_13) - 1u) ? buster_aarch64_generated_forms_blob_chunk_13[offset] : 0;
-        case 14: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_14) - 1u) ? buster_aarch64_generated_forms_blob_chunk_14[offset] : 0;
-        case 15: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_15) - 1u) ? buster_aarch64_generated_forms_blob_chunk_15[offset] : 0;
-        case 16: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_16) - 1u) ? buster_aarch64_generated_forms_blob_chunk_16[offset] : 0;
-        case 17: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_17) - 1u) ? buster_aarch64_generated_forms_blob_chunk_17[offset] : 0;
-        case 18: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_18) - 1u) ? buster_aarch64_generated_forms_blob_chunk_18[offset] : 0;
-        case 19: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_19) - 1u) ? buster_aarch64_generated_forms_blob_chunk_19[offset] : 0;
-        case 20: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_20) - 1u) ? buster_aarch64_generated_forms_blob_chunk_20[offset] : 0;
-        case 21: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_21) - 1u) ? buster_aarch64_generated_forms_blob_chunk_21[offset] : 0;
-        case 22: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_22) - 1u) ? buster_aarch64_generated_forms_blob_chunk_22[offset] : 0;
-        case 23: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_23) - 1u) ? buster_aarch64_generated_forms_blob_chunk_23[offset] : 0;
-        case 24: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_24) - 1u) ? buster_aarch64_generated_forms_blob_chunk_24[offset] : 0;
-        case 25: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_25) - 1u) ? buster_aarch64_generated_forms_blob_chunk_25[offset] : 0;
-        case 26: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_26) - 1u) ? buster_aarch64_generated_forms_blob_chunk_26[offset] : 0;
-        case 27: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_27) - 1u) ? buster_aarch64_generated_forms_blob_chunk_27[offset] : 0;
-        case 28: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_28) - 1u) ? buster_aarch64_generated_forms_blob_chunk_28[offset] : 0;
-        case 29: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_29) - 1u) ? buster_aarch64_generated_forms_blob_chunk_29[offset] : 0;
-        case 30: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_30) - 1u) ? buster_aarch64_generated_forms_blob_chunk_30[offset] : 0;
-        case 31: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_31) - 1u) ? buster_aarch64_generated_forms_blob_chunk_31[offset] : 0;
-        case 32: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_32) - 1u) ? buster_aarch64_generated_forms_blob_chunk_32[offset] : 0;
-        case 33: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_33) - 1u) ? buster_aarch64_generated_forms_blob_chunk_33[offset] : 0;
-        case 34: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_34) - 1u) ? buster_aarch64_generated_forms_blob_chunk_34[offset] : 0;
-        case 35: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_35) - 1u) ? buster_aarch64_generated_forms_blob_chunk_35[offset] : 0;
-        case 36: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_36) - 1u) ? buster_aarch64_generated_forms_blob_chunk_36[offset] : 0;
-        case 37: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_37) - 1u) ? buster_aarch64_generated_forms_blob_chunk_37[offset] : 0;
-        case 38: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_38) - 1u) ? buster_aarch64_generated_forms_blob_chunk_38[offset] : 0;
-        case 39: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_39) - 1u) ? buster_aarch64_generated_forms_blob_chunk_39[offset] : 0;
-        case 40: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_40) - 1u) ? buster_aarch64_generated_forms_blob_chunk_40[offset] : 0;
-        case 41: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_41) - 1u) ? buster_aarch64_generated_forms_blob_chunk_41[offset] : 0;
-        case 42: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_42) - 1u) ? buster_aarch64_generated_forms_blob_chunk_42[offset] : 0;
-        case 43: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_43) - 1u) ? buster_aarch64_generated_forms_blob_chunk_43[offset] : 0;
-        case 44: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_44) - 1u) ? buster_aarch64_generated_forms_blob_chunk_44[offset] : 0;
-        case 45: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_45) - 1u) ? buster_aarch64_generated_forms_blob_chunk_45[offset] : 0;
-        case 46: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_46) - 1u) ? buster_aarch64_generated_forms_blob_chunk_46[offset] : 0;
-        case 47: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_47) - 1u) ? buster_aarch64_generated_forms_blob_chunk_47[offset] : 0;
-        case 48: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_48) - 1u) ? buster_aarch64_generated_forms_blob_chunk_48[offset] : 0;
-        case 49: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_49) - 1u) ? buster_aarch64_generated_forms_blob_chunk_49[offset] : 0;
-        case 50: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_50) - 1u) ? buster_aarch64_generated_forms_blob_chunk_50[offset] : 0;
-        case 51: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_51) - 1u) ? buster_aarch64_generated_forms_blob_chunk_51[offset] : 0;
-        case 52: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_52) - 1u) ? buster_aarch64_generated_forms_blob_chunk_52[offset] : 0;
-        case 53: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_53) - 1u) ? buster_aarch64_generated_forms_blob_chunk_53[offset] : 0;
-        case 54: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_54) - 1u) ? buster_aarch64_generated_forms_blob_chunk_54[offset] : 0;
-        case 55: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_55) - 1u) ? buster_aarch64_generated_forms_blob_chunk_55[offset] : 0;
-        case 56: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_56) - 1u) ? buster_aarch64_generated_forms_blob_chunk_56[offset] : 0;
-        case 57: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_57) - 1u) ? buster_aarch64_generated_forms_blob_chunk_57[offset] : 0;
-        case 58: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_58) - 1u) ? buster_aarch64_generated_forms_blob_chunk_58[offset] : 0;
-        case 59: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_59) - 1u) ? buster_aarch64_generated_forms_blob_chunk_59[offset] : 0;
-        case 60: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_60) - 1u) ? buster_aarch64_generated_forms_blob_chunk_60[offset] : 0;
-        case 61: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_61) - 1u) ? buster_aarch64_generated_forms_blob_chunk_61[offset] : 0;
-        case 62: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_62) - 1u) ? buster_aarch64_generated_forms_blob_chunk_62[offset] : 0;
-        case 63: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_63) - 1u) ? buster_aarch64_generated_forms_blob_chunk_63[offset] : 0;
-        case 64: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_64) - 1u) ? buster_aarch64_generated_forms_blob_chunk_64[offset] : 0;
-        case 65: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_65) - 1u) ? buster_aarch64_generated_forms_blob_chunk_65[offset] : 0;
-        case 66: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_66) - 1u) ? buster_aarch64_generated_forms_blob_chunk_66[offset] : 0;
-        case 67: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_67) - 1u) ? buster_aarch64_generated_forms_blob_chunk_67[offset] : 0;
-        case 68: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_68) - 1u) ? buster_aarch64_generated_forms_blob_chunk_68[offset] : 0;
-        case 69: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_69) - 1u) ? buster_aarch64_generated_forms_blob_chunk_69[offset] : 0;
-        case 70: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_70) - 1u) ? buster_aarch64_generated_forms_blob_chunk_70[offset] : 0;
-        case 71: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_71) - 1u) ? buster_aarch64_generated_forms_blob_chunk_71[offset] : 0;
-        case 72: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_72) - 1u) ? buster_aarch64_generated_forms_blob_chunk_72[offset] : 0;
-        case 73: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_73) - 1u) ? buster_aarch64_generated_forms_blob_chunk_73[offset] : 0;
-        case 74: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_74) - 1u) ? buster_aarch64_generated_forms_blob_chunk_74[offset] : 0;
-        case 75: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_75) - 1u) ? buster_aarch64_generated_forms_blob_chunk_75[offset] : 0;
-        case 76: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_76) - 1u) ? buster_aarch64_generated_forms_blob_chunk_76[offset] : 0;
-        case 77: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_77) - 1u) ? buster_aarch64_generated_forms_blob_chunk_77[offset] : 0;
-        case 78: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_78) - 1u) ? buster_aarch64_generated_forms_blob_chunk_78[offset] : 0;
-        case 79: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_79) - 1u) ? buster_aarch64_generated_forms_blob_chunk_79[offset] : 0;
-        case 80: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_80) - 1u) ? buster_aarch64_generated_forms_blob_chunk_80[offset] : 0;
-        case 81: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_81) - 1u) ? buster_aarch64_generated_forms_blob_chunk_81[offset] : 0;
-        case 82: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_82) - 1u) ? buster_aarch64_generated_forms_blob_chunk_82[offset] : 0;
-        case 83: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_83) - 1u) ? buster_aarch64_generated_forms_blob_chunk_83[offset] : 0;
-        case 84: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_84) - 1u) ? buster_aarch64_generated_forms_blob_chunk_84[offset] : 0;
-        case 85: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_85) - 1u) ? buster_aarch64_generated_forms_blob_chunk_85[offset] : 0;
-        case 86: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_86) - 1u) ? buster_aarch64_generated_forms_blob_chunk_86[offset] : 0;
-        case 87: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_87) - 1u) ? buster_aarch64_generated_forms_blob_chunk_87[offset] : 0;
-        case 88: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_88) - 1u) ? buster_aarch64_generated_forms_blob_chunk_88[offset] : 0;
-        case 89: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_89) - 1u) ? buster_aarch64_generated_forms_blob_chunk_89[offset] : 0;
-        case 90: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_90) - 1u) ? buster_aarch64_generated_forms_blob_chunk_90[offset] : 0;
-        case 91: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_91) - 1u) ? buster_aarch64_generated_forms_blob_chunk_91[offset] : 0;
-        case 92: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_92) - 1u) ? buster_aarch64_generated_forms_blob_chunk_92[offset] : 0;
-        case 93: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_93) - 1u) ? buster_aarch64_generated_forms_blob_chunk_93[offset] : 0;
-        case 94: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_94) - 1u) ? buster_aarch64_generated_forms_blob_chunk_94[offset] : 0;
-        case 95: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_95) - 1u) ? buster_aarch64_generated_forms_blob_chunk_95[offset] : 0;
-        case 96: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_96) - 1u) ? buster_aarch64_generated_forms_blob_chunk_96[offset] : 0;
-        case 97: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_97) - 1u) ? buster_aarch64_generated_forms_blob_chunk_97[offset] : 0;
-        case 98: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_98) - 1u) ? buster_aarch64_generated_forms_blob_chunk_98[offset] : 0;
-        case 99: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_99) - 1u) ? buster_aarch64_generated_forms_blob_chunk_99[offset] : 0;
-        case 100: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_100) - 1u) ? buster_aarch64_generated_forms_blob_chunk_100[offset] : 0;
-        case 101: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_101) - 1u) ? buster_aarch64_generated_forms_blob_chunk_101[offset] : 0;
-        case 102: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_102) - 1u) ? buster_aarch64_generated_forms_blob_chunk_102[offset] : 0;
-        case 103: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_103) - 1u) ? buster_aarch64_generated_forms_blob_chunk_103[offset] : 0;
-        case 104: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_104) - 1u) ? buster_aarch64_generated_forms_blob_chunk_104[offset] : 0;
-        case 105: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_105) - 1u) ? buster_aarch64_generated_forms_blob_chunk_105[offset] : 0;
-        case 106: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_106) - 1u) ? buster_aarch64_generated_forms_blob_chunk_106[offset] : 0;
-        case 107: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_107) - 1u) ? buster_aarch64_generated_forms_blob_chunk_107[offset] : 0;
-        case 108: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_108) - 1u) ? buster_aarch64_generated_forms_blob_chunk_108[offset] : 0;
-        case 109: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_109) - 1u) ? buster_aarch64_generated_forms_blob_chunk_109[offset] : 0;
-        case 110: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_110) - 1u) ? buster_aarch64_generated_forms_blob_chunk_110[offset] : 0;
-        case 111: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_111) - 1u) ? buster_aarch64_generated_forms_blob_chunk_111[offset] : 0;
-        case 112: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_112) - 1u) ? buster_aarch64_generated_forms_blob_chunk_112[offset] : 0;
-        case 113: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_113) - 1u) ? buster_aarch64_generated_forms_blob_chunk_113[offset] : 0;
-        case 114: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_114) - 1u) ? buster_aarch64_generated_forms_blob_chunk_114[offset] : 0;
-        case 115: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_115) - 1u) ? buster_aarch64_generated_forms_blob_chunk_115[offset] : 0;
-        case 116: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_116) - 1u) ? buster_aarch64_generated_forms_blob_chunk_116[offset] : 0;
-        case 117: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_117) - 1u) ? buster_aarch64_generated_forms_blob_chunk_117[offset] : 0;
-        case 118: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_118) - 1u) ? buster_aarch64_generated_forms_blob_chunk_118[offset] : 0;
-        case 119: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_119) - 1u) ? buster_aarch64_generated_forms_blob_chunk_119[offset] : 0;
-        case 120: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_120) - 1u) ? buster_aarch64_generated_forms_blob_chunk_120[offset] : 0;
-        case 121: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_121) - 1u) ? buster_aarch64_generated_forms_blob_chunk_121[offset] : 0;
-        case 122: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_122) - 1u) ? buster_aarch64_generated_forms_blob_chunk_122[offset] : 0;
-        case 123: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_123) - 1u) ? buster_aarch64_generated_forms_blob_chunk_123[offset] : 0;
-        case 124: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_124) - 1u) ? buster_aarch64_generated_forms_blob_chunk_124[offset] : 0;
-        case 125: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_125) - 1u) ? buster_aarch64_generated_forms_blob_chunk_125[offset] : 0;
-        case 126: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_126) - 1u) ? buster_aarch64_generated_forms_blob_chunk_126[offset] : 0;
-        case 127: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_127) - 1u) ? buster_aarch64_generated_forms_blob_chunk_127[offset] : 0;
-        case 128: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_128) - 1u) ? buster_aarch64_generated_forms_blob_chunk_128[offset] : 0;
-        case 129: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_129) - 1u) ? buster_aarch64_generated_forms_blob_chunk_129[offset] : 0;
-        case 130: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_130) - 1u) ? buster_aarch64_generated_forms_blob_chunk_130[offset] : 0;
-        case 131: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_131) - 1u) ? buster_aarch64_generated_forms_blob_chunk_131[offset] : 0;
-        case 132: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_132) - 1u) ? buster_aarch64_generated_forms_blob_chunk_132[offset] : 0;
-        case 133: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_133) - 1u) ? buster_aarch64_generated_forms_blob_chunk_133[offset] : 0;
-        case 134: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_134) - 1u) ? buster_aarch64_generated_forms_blob_chunk_134[offset] : 0;
-        case 135: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_135) - 1u) ? buster_aarch64_generated_forms_blob_chunk_135[offset] : 0;
-        case 136: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_136) - 1u) ? buster_aarch64_generated_forms_blob_chunk_136[offset] : 0;
-        case 137: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_137) - 1u) ? buster_aarch64_generated_forms_blob_chunk_137[offset] : 0;
-        case 138: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_138) - 1u) ? buster_aarch64_generated_forms_blob_chunk_138[offset] : 0;
-        case 139: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_139) - 1u) ? buster_aarch64_generated_forms_blob_chunk_139[offset] : 0;
-        case 140: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_140) - 1u) ? buster_aarch64_generated_forms_blob_chunk_140[offset] : 0;
-        case 141: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_141) - 1u) ? buster_aarch64_generated_forms_blob_chunk_141[offset] : 0;
-        case 142: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_142) - 1u) ? buster_aarch64_generated_forms_blob_chunk_142[offset] : 0;
-        case 143: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_143) - 1u) ? buster_aarch64_generated_forms_blob_chunk_143[offset] : 0;
-        case 144: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_144) - 1u) ? buster_aarch64_generated_forms_blob_chunk_144[offset] : 0;
-        case 145: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_145) - 1u) ? buster_aarch64_generated_forms_blob_chunk_145[offset] : 0;
-        case 146: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_146) - 1u) ? buster_aarch64_generated_forms_blob_chunk_146[offset] : 0;
-        case 147: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_147) - 1u) ? buster_aarch64_generated_forms_blob_chunk_147[offset] : 0;
-        case 148: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_148) - 1u) ? buster_aarch64_generated_forms_blob_chunk_148[offset] : 0;
-        case 149: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_149) - 1u) ? buster_aarch64_generated_forms_blob_chunk_149[offset] : 0;
-        case 150: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_150) - 1u) ? buster_aarch64_generated_forms_blob_chunk_150[offset] : 0;
-        case 151: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_151) - 1u) ? buster_aarch64_generated_forms_blob_chunk_151[offset] : 0;
-        case 152: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_152) - 1u) ? buster_aarch64_generated_forms_blob_chunk_152[offset] : 0;
-        case 153: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_153) - 1u) ? buster_aarch64_generated_forms_blob_chunk_153[offset] : 0;
-        case 154: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_154) - 1u) ? buster_aarch64_generated_forms_blob_chunk_154[offset] : 0;
-        case 155: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_155) - 1u) ? buster_aarch64_generated_forms_blob_chunk_155[offset] : 0;
-        case 156: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_156) - 1u) ? buster_aarch64_generated_forms_blob_chunk_156[offset] : 0;
-        case 157: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_157) - 1u) ? buster_aarch64_generated_forms_blob_chunk_157[offset] : 0;
-        case 158: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_158) - 1u) ? buster_aarch64_generated_forms_blob_chunk_158[offset] : 0;
-        case 159: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_159) - 1u) ? buster_aarch64_generated_forms_blob_chunk_159[offset] : 0;
-        case 160: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_160) - 1u) ? buster_aarch64_generated_forms_blob_chunk_160[offset] : 0;
-        case 161: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_161) - 1u) ? buster_aarch64_generated_forms_blob_chunk_161[offset] : 0;
-        case 162: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_162) - 1u) ? buster_aarch64_generated_forms_blob_chunk_162[offset] : 0;
-        case 163: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_163) - 1u) ? buster_aarch64_generated_forms_blob_chunk_163[offset] : 0;
-        case 164: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_164) - 1u) ? buster_aarch64_generated_forms_blob_chunk_164[offset] : 0;
-        case 165: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_165) - 1u) ? buster_aarch64_generated_forms_blob_chunk_165[offset] : 0;
-        case 166: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_166) - 1u) ? buster_aarch64_generated_forms_blob_chunk_166[offset] : 0;
-        case 167: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_167) - 1u) ? buster_aarch64_generated_forms_blob_chunk_167[offset] : 0;
-        case 168: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_168) - 1u) ? buster_aarch64_generated_forms_blob_chunk_168[offset] : 0;
-        case 169: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_169) - 1u) ? buster_aarch64_generated_forms_blob_chunk_169[offset] : 0;
-        case 170: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_170) - 1u) ? buster_aarch64_generated_forms_blob_chunk_170[offset] : 0;
-        case 171: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_171) - 1u) ? buster_aarch64_generated_forms_blob_chunk_171[offset] : 0;
-        case 172: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_172) - 1u) ? buster_aarch64_generated_forms_blob_chunk_172[offset] : 0;
-        case 173: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_173) - 1u) ? buster_aarch64_generated_forms_blob_chunk_173[offset] : 0;
-        case 174: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_174) - 1u) ? buster_aarch64_generated_forms_blob_chunk_174[offset] : 0;
-        case 175: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_175) - 1u) ? buster_aarch64_generated_forms_blob_chunk_175[offset] : 0;
-        case 176: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_176) - 1u) ? buster_aarch64_generated_forms_blob_chunk_176[offset] : 0;
-        case 177: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_177) - 1u) ? buster_aarch64_generated_forms_blob_chunk_177[offset] : 0;
-        case 178: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_178) - 1u) ? buster_aarch64_generated_forms_blob_chunk_178[offset] : 0;
-        case 179: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_179) - 1u) ? buster_aarch64_generated_forms_blob_chunk_179[offset] : 0;
-        case 180: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_180) - 1u) ? buster_aarch64_generated_forms_blob_chunk_180[offset] : 0;
-        case 181: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_181) - 1u) ? buster_aarch64_generated_forms_blob_chunk_181[offset] : 0;
-        case 182: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_182) - 1u) ? buster_aarch64_generated_forms_blob_chunk_182[offset] : 0;
-        case 183: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_183) - 1u) ? buster_aarch64_generated_forms_blob_chunk_183[offset] : 0;
-        case 184: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_184) - 1u) ? buster_aarch64_generated_forms_blob_chunk_184[offset] : 0;
-        case 185: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_185) - 1u) ? buster_aarch64_generated_forms_blob_chunk_185[offset] : 0;
-        case 186: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_186) - 1u) ? buster_aarch64_generated_forms_blob_chunk_186[offset] : 0;
-        case 187: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_187) - 1u) ? buster_aarch64_generated_forms_blob_chunk_187[offset] : 0;
-        case 188: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_188) - 1u) ? buster_aarch64_generated_forms_blob_chunk_188[offset] : 0;
-        case 189: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_189) - 1u) ? buster_aarch64_generated_forms_blob_chunk_189[offset] : 0;
-        case 190: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_190) - 1u) ? buster_aarch64_generated_forms_blob_chunk_190[offset] : 0;
-        case 191: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_191) - 1u) ? buster_aarch64_generated_forms_blob_chunk_191[offset] : 0;
-        case 192: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_192) - 1u) ? buster_aarch64_generated_forms_blob_chunk_192[offset] : 0;
-        case 193: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_193) - 1u) ? buster_aarch64_generated_forms_blob_chunk_193[offset] : 0;
-        case 194: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_194) - 1u) ? buster_aarch64_generated_forms_blob_chunk_194[offset] : 0;
-        case 195: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_195) - 1u) ? buster_aarch64_generated_forms_blob_chunk_195[offset] : 0;
-        case 196: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_196) - 1u) ? buster_aarch64_generated_forms_blob_chunk_196[offset] : 0;
-        case 197: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_197) - 1u) ? buster_aarch64_generated_forms_blob_chunk_197[offset] : 0;
-        case 198: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_198) - 1u) ? buster_aarch64_generated_forms_blob_chunk_198[offset] : 0;
-        case 199: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_199) - 1u) ? buster_aarch64_generated_forms_blob_chunk_199[offset] : 0;
-        case 200: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_200) - 1u) ? buster_aarch64_generated_forms_blob_chunk_200[offset] : 0;
-        case 201: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_201) - 1u) ? buster_aarch64_generated_forms_blob_chunk_201[offset] : 0;
-        case 202: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_202) - 1u) ? buster_aarch64_generated_forms_blob_chunk_202[offset] : 0;
-        case 203: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_203) - 1u) ? buster_aarch64_generated_forms_blob_chunk_203[offset] : 0;
-        case 204: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_204) - 1u) ? buster_aarch64_generated_forms_blob_chunk_204[offset] : 0;
-        case 205: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_205) - 1u) ? buster_aarch64_generated_forms_blob_chunk_205[offset] : 0;
-        case 206: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_206) - 1u) ? buster_aarch64_generated_forms_blob_chunk_206[offset] : 0;
-        case 207: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_207) - 1u) ? buster_aarch64_generated_forms_blob_chunk_207[offset] : 0;
-        case 208: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_208) - 1u) ? buster_aarch64_generated_forms_blob_chunk_208[offset] : 0;
-        case 209: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_209) - 1u) ? buster_aarch64_generated_forms_blob_chunk_209[offset] : 0;
-        case 210: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_210) - 1u) ? buster_aarch64_generated_forms_blob_chunk_210[offset] : 0;
-        case 211: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_211) - 1u) ? buster_aarch64_generated_forms_blob_chunk_211[offset] : 0;
-        case 212: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_212) - 1u) ? buster_aarch64_generated_forms_blob_chunk_212[offset] : 0;
-        case 213: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_213) - 1u) ? buster_aarch64_generated_forms_blob_chunk_213[offset] : 0;
-        case 214: return offset < (u64)(sizeof(buster_aarch64_generated_forms_blob_chunk_214) - 1u) ? buster_aarch64_generated_forms_blob_chunk_214[offset] : 0;
-        default: return 0;
-    }
+    return chunk < sizeof(buster_aarch64_generated_forms_blob_chunks) / sizeof(buster_aarch64_generated_forms_blob_chunks[0]) && offset < (u64)buster_aarch64_generated_forms_blob_chunk_lengths[chunk] ? buster_aarch64_generated_forms_blob_chunks[chunk][offset] : 0;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_forms_blob_u8_counted(u64 byte_count, u64 offset)
@@ -2210,7 +3129,20 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_forms_blob_u8
     if (offset >= byte_count || !buster_aarch64_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;
     u64 encoded_offset = (offset / 3u) * 4u;
     if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;
-    u32 value = ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_forms_blob_char(encoded_offset + 0u)) << 18) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_forms_blob_char(encoded_offset + 1u)) << 12) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_forms_blob_char(encoded_offset + 2u)) << 6) | (u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_forms_blob_char(encoded_offset + 3u));
+    u64 chunk = encoded_offset / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u64 chunk_offset = encoded_offset % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u32 value = 0;
+    if (chunk < sizeof(buster_aarch64_generated_forms_blob_chunks) / sizeof(buster_aarch64_generated_forms_blob_chunks[0]))
+    {
+        const char8* encoded = buster_aarch64_generated_forms_blob_chunks[chunk];
+        u64 length = (u64)buster_aarch64_generated_forms_blob_chunk_lengths[chunk];
+        char8 character_0 = chunk_offset + 1u <= length ? encoded[chunk_offset + 0u] : 0;
+        char8 character_1 = chunk_offset + 2u <= length ? encoded[chunk_offset + 1u] : 0;
+        char8 character_2 = chunk_offset + 3u <= length ? encoded[chunk_offset + 2u] : 0;
+        char8 character_3 = chunk_offset + 4u <= length ? encoded[chunk_offset + 3u] : 0;
+        value = ((u32)buster_aarch64_generated_base64_value(character_0) << 18) | ((u32)buster_aarch64_generated_base64_value(character_1) << 12) |
+                ((u32)buster_aarch64_generated_base64_value(character_2) << 6) | (u32)buster_aarch64_generated_base64_value(character_3);
+    }
     return (u8)(value >> ((2u - (offset % 3u)) * 8u));
 }
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_forms_blob_u8(u64 offset)
@@ -2260,21 +3192,29 @@ static const char8 buster_aarch64_generated_mnemonic_ranges_blob_chunk_5[] = "AA
 static const char8 buster_aarch64_generated_mnemonic_ranges_blob_chunk_6[] = "AAAQAAAATh8FAIAcAAAQAAAAiB8FAJAcAAAQAAAAwh8FAKAcAAAQAAAA/B8FALAcAAAQAAAANiAFAMAcAAAQAAAAcCAFANAcAAAQAAAAqiAFAOAcAAAQAAAA5CAFAPAcAAAEAAAAAiEFAPQcAAAEAAAAICEFAPgcAAABAAAAMCEFAPkcAAABAAAANyEFAPocAAAFAAAAkSEFAP8cAAABAAAAoSEFAAAdAAABAAAAsSEFAAEdAAADAAAAtSEFAAQdAAADAAAAlCIFAAcdAAAKAAAA/SIFABEdAAAKAAAAICMFABsdAAAQAAAAnyQFACsdAAAQAAAAHiYFADsdAAAEAAAAOCYFAD8dAAAEAAAA";
 #define buster_aarch64_generated_mnemonic_ranges_blob_BYTE_COUNT 18684
 #define buster_aarch64_generated_mnemonic_ranges_blob_CHUNK_COUNT 7
+static const char8* const buster_aarch64_generated_mnemonic_ranges_blob_chunks[] = {
+    buster_aarch64_generated_mnemonic_ranges_blob_chunk_0,
+    buster_aarch64_generated_mnemonic_ranges_blob_chunk_1,
+    buster_aarch64_generated_mnemonic_ranges_blob_chunk_2,
+    buster_aarch64_generated_mnemonic_ranges_blob_chunk_3,
+    buster_aarch64_generated_mnemonic_ranges_blob_chunk_4,
+    buster_aarch64_generated_mnemonic_ranges_blob_chunk_5,
+    buster_aarch64_generated_mnemonic_ranges_blob_chunk_6,
+};
+static const u16 buster_aarch64_generated_mnemonic_ranges_blob_chunk_lengths[] = {
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunk_0) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunk_1) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunk_2) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunk_3) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunk_4) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunk_5) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunk_6) - 1u),
+};
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL char8 buster_aarch64_generated_mnemonic_ranges_blob_char(u64 logical)
 {
     u64 chunk = logical / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
     u64 offset = logical % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
-    switch (chunk)
-    {
-        case 0: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunk_0) - 1u) ? buster_aarch64_generated_mnemonic_ranges_blob_chunk_0[offset] : 0;
-        case 1: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunk_1) - 1u) ? buster_aarch64_generated_mnemonic_ranges_blob_chunk_1[offset] : 0;
-        case 2: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunk_2) - 1u) ? buster_aarch64_generated_mnemonic_ranges_blob_chunk_2[offset] : 0;
-        case 3: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunk_3) - 1u) ? buster_aarch64_generated_mnemonic_ranges_blob_chunk_3[offset] : 0;
-        case 4: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunk_4) - 1u) ? buster_aarch64_generated_mnemonic_ranges_blob_chunk_4[offset] : 0;
-        case 5: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunk_5) - 1u) ? buster_aarch64_generated_mnemonic_ranges_blob_chunk_5[offset] : 0;
-        case 6: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunk_6) - 1u) ? buster_aarch64_generated_mnemonic_ranges_blob_chunk_6[offset] : 0;
-        default: return 0;
-    }
+    return chunk < sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunks) / sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunks[0]) && offset < (u64)buster_aarch64_generated_mnemonic_ranges_blob_chunk_lengths[chunk] ? buster_aarch64_generated_mnemonic_ranges_blob_chunks[chunk][offset] : 0;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_mnemonic_ranges_blob_u8_counted(u64 byte_count, u64 offset)
@@ -2283,7 +3223,20 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_mnemonic_rang
     if (offset >= byte_count || !buster_aarch64_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;
     u64 encoded_offset = (offset / 3u) * 4u;
     if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;
-    u32 value = ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_mnemonic_ranges_blob_char(encoded_offset + 0u)) << 18) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_mnemonic_ranges_blob_char(encoded_offset + 1u)) << 12) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_mnemonic_ranges_blob_char(encoded_offset + 2u)) << 6) | (u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_mnemonic_ranges_blob_char(encoded_offset + 3u));
+    u64 chunk = encoded_offset / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u64 chunk_offset = encoded_offset % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u32 value = 0;
+    if (chunk < sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunks) / sizeof(buster_aarch64_generated_mnemonic_ranges_blob_chunks[0]))
+    {
+        const char8* encoded = buster_aarch64_generated_mnemonic_ranges_blob_chunks[chunk];
+        u64 length = (u64)buster_aarch64_generated_mnemonic_ranges_blob_chunk_lengths[chunk];
+        char8 character_0 = chunk_offset + 1u <= length ? encoded[chunk_offset + 0u] : 0;
+        char8 character_1 = chunk_offset + 2u <= length ? encoded[chunk_offset + 1u] : 0;
+        char8 character_2 = chunk_offset + 3u <= length ? encoded[chunk_offset + 2u] : 0;
+        char8 character_3 = chunk_offset + 4u <= length ? encoded[chunk_offset + 3u] : 0;
+        value = ((u32)buster_aarch64_generated_base64_value(character_0) << 18) | ((u32)buster_aarch64_generated_base64_value(character_1) << 12) |
+                ((u32)buster_aarch64_generated_base64_value(character_2) << 6) | (u32)buster_aarch64_generated_base64_value(character_3);
+    }
     return (u8)(value >> ((2u - (offset % 3u)) * 8u));
 }
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_mnemonic_ranges_blob_u8(u64 offset)
@@ -2330,24 +3283,35 @@ static const char8 buster_aarch64_generated_mnemonic_candidates_blob_chunk_8[] =
 static const char8 buster_aarch64_generated_mnemonic_candidates_blob_chunk_9[] = "GgAA6RoAAOoaAADrGgAAABsAAAEbAAACGwAAAxsAAAQbAAAFGwAABhsAAAcbAAAIGwAACRsAAAobAAALGwAADBsAAA0bAAAOGwAADxsAABAbAAARGwAAEhsAABMbAAAUGwAAFRsAABYbAAAXGwAAGBsAABkbAAAaGwAAGxsAABwbAAAdGwAA/BoAAP0aAAD+GgAA/xoAACQbAAAlGwAAJhsAACcbAAAoGwAAKhsAACsbAAAuGwAAKRsAACwbAAAtGwAAHhsAAB8bAAAgGwAAIRsAACIbAAAjGwAAMxsAADQbAAA1GwAANhsAADcbAAA4GwAAORsAADobAAA7GwAAPBsAAD0bAAA+GwAAPxsAAEAbAABBGwAAQhsAAEMbAABEGwAARRsAAEYbAABHGwAASBsAAEkbAAAvGwAAMBsAADEbAAAyGwAAURsAAFIbAABTGwAAVBsAAFUbAABYGwAAUBsAAFYbAABXGwAAShsAAEsbAABMGwAATRsAAE4bAABPGwAAWRsAAFobAABbGwAAXBsAAF0bAABeGwAAXxsAAGAbAABhGwAAYhsAAGMbAABkGwAAZRsAAGYbAABrGwAAbBsAAG0bAABuGwAAbxsAAHAbAABxGwAAchsAAHMbAAB0GwAAdRsAAHYbAAB3GwAAeBsAAHkbAAB6GwAAexsAAHwbAAB9GwAAfhsAAH8bAACAGwAAgRsAAIIbAACDGwAAhBsAAIUbAACGGwAAZxsAAGgbAABpGwAAahsAAIcbAACIGwAAiRsAAIobAACLGwAAjBsAAI0bAACOGwAAjxsAAJAbAACRGwAAkhsAAJMbAACUGwAAlRsAAJYbAACXGwAAmBsAAJkbAACaGwAAmxsAAJwbAACdGwAAnhsAAJ8bAACgGwAAoRsAAKIbAACjGwAApBsAAKUbAACmGwAApxsAAKgbAACpGwAAqhsAAKsbAACsGwAArRsAAK4bAAC7GwAAvBsAAL0bAAC+GwAAvxsAAMAbAADBGwAAwhsAALYbAAC3GwAAuhsAALUbAAC4GwAAuRsAAK8bAACwGwAAsRsAALIbAACzGwAAtBsAAMMbAADEGwAAxRsAAMYbAADHGwAAyBsAAMkbAADKGwAAyxsAAMwbAADNGwAAzhsAAM8bAADQGwAA0RsAANIbAADTGwAA1BsAANUbAADWGwAA1xsAANgbAADZGwAA2hsAANsbAADcGwAA3RsAAN4bAADfGwAA4BsAAOEbAADiGwAA4xsAAOQbAADlGwAA5hsAAOcbAADoGwAA6RsAAOobAADrGwAA7BsAAO0bAADuGwAA7xsAAPAbAADxGwAA8hsAAPMbAAD0GwAA9RsAAPYbAAD3GwAA+BsAAPkbAAD6GwAA+xsAAPwbAAD9GwAA/hsAAP8bAAAAHAAAARwAAAIcAAADHAAABBwAAAwcAAANHAAAEBwAAAscAAAOHAAADxwAAAUcAAAGHAAABxwAAAgcAAAJHAAAChwAABgcAAAZHAAAHBwAABccAAAaHAAAGxwAABEcAAASHAAAExwAABQcAAAVHAAAFhwAAB0cAAAeHAAAHxwAACYcAAAnHAAAKBwAACkcAAAqHAAAKxwAACAcAAAhHAAAIhwAACMcAAAkHAAAJRwAACwcAAAtHAAALhwAAC8cAAAwHAAAMRwAADIcAAAzHAAANBwAADUcAAA2HAAANxwAADgcAAA5HAAAOhwAAGMcAABkHAAAZRwAAGYcAABnHAAAaBwAAGkcAABqHAAAaxwAAGwcAAA7HAAAPBwAAD0cAAA+HAAAPxwAAEAcAABBHAAAQhwAAEMcAABEHAAARRwAAEYcAABHHAAASBwAAEkcAABKHAAASxwAAEwcAABNHAAAThwAAE8cAABQHAAAURwAAFIcAABTHAAAVBwAAFUcAABWHAAAVxwAAFgcAABZHAAAWhwAAFscAABcHAAAXRwAAF4cAABfHAAAYBwAAGEcAABiHAAAbRwAAG4cAABvHAAAcBwAAHEcAAByHAAAcxwAAHQcAAB1HAAAdhwAAHccAAB4HAAAeRwAAHocAAB7HAAAfBwAAH0cAAB+HAAAfxwAAIAcAACBHAAAghwAAIMcAACEHAAAhRwAAIYcAACHHAAAiBwAAIkcAACKHAAAixwAAIwcAACNHAAAjhwAAI8cAACQHAAAkRwAAJIcAACTHAAAlBwAAJUcAACWHAAAlxwAAJgcAACZHAAAmhwAAJscAACcHAAAnRwAAJ4cAACfHAAAoBwAAKEcAACiHAAAoxwAAKQcAAClHAAAphwAAKccAACoHAAAqRwAAKocAACrHAAArBwAAK0cAACuHAAArxwAALAcAACxHAAAshwAALMcAAC0HAAAtRwAALYcAAC3HAAAuBwAALkcAAC6HAAAuxwAALwcAAC9HAAAvhwAAL8cAADAHAAAwRwAAMIcAADDHAAAxBwAAMUcAADGHAAAxxwAAMgcAADJHAAAyhwAAMscAADMHAAAzRwAAM4cAADPHAAA0BwAANEcAADSHAAA0xwAANQcAADVHAAA1hwAANccAADYHAAA2RwAANocAADbHAAA3BwAAN0cAADeHAAA3xwAAOAcAADhHAAA4hwAAOMcAADkHAAA5RwAAOYcAADnHAAA6BwAAOkcAADqHAAA6xwAAOwcAADtHAAA7hwAAO8cAADwHAAA8RwAAPIcAADzHAAA9BwAAPUcAAD2HAAA9xwAAPgcAAD5HAAA+hwAAPscAAD8HAAA/RwAAP4cAAD/HAAAAh0AAAMdAAAGHQAAAR0AAAQdAAAFHQAABx0AAAgdAAAJHQAACh0AAAsdAAAMHQAADR0AAA4dAAAPHQAAEB0AADkdAAA6HQAAOx0AADwdAAA9HQAAPh0AAD8dAABAHQAAQR0AAEIdAAARHQAAEh0AABMdAAAUHQAAFR0AABYdAAAXHQAAGB0AABkdAAAaHQAAGx0AABwdAAAdHQAAHh0AAB8dAAAgHQAAIR0AACIdAAAjHQAAJB0AACUdAAAmHQAAJx0AACgdAAApHQAAKh0AACsdAAAsHQAALR0AAC4dAAAvHQAAMB0AADEdAAAyHQAAMx0AADQdAAA1HQAANh0AADcdAAA4HQAA";
 #define buster_aarch64_generated_mnemonic_candidates_blob_BYTE_COUNT 29964
 #define buster_aarch64_generated_mnemonic_candidates_blob_CHUNK_COUNT 10
+static const char8* const buster_aarch64_generated_mnemonic_candidates_blob_chunks[] = {
+    buster_aarch64_generated_mnemonic_candidates_blob_chunk_0,
+    buster_aarch64_generated_mnemonic_candidates_blob_chunk_1,
+    buster_aarch64_generated_mnemonic_candidates_blob_chunk_2,
+    buster_aarch64_generated_mnemonic_candidates_blob_chunk_3,
+    buster_aarch64_generated_mnemonic_candidates_blob_chunk_4,
+    buster_aarch64_generated_mnemonic_candidates_blob_chunk_5,
+    buster_aarch64_generated_mnemonic_candidates_blob_chunk_6,
+    buster_aarch64_generated_mnemonic_candidates_blob_chunk_7,
+    buster_aarch64_generated_mnemonic_candidates_blob_chunk_8,
+    buster_aarch64_generated_mnemonic_candidates_blob_chunk_9,
+};
+static const u16 buster_aarch64_generated_mnemonic_candidates_blob_chunk_lengths[] = {
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_0) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_1) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_2) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_3) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_4) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_5) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_6) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_7) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_8) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_9) - 1u),
+};
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL char8 buster_aarch64_generated_mnemonic_candidates_blob_char(u64 logical)
 {
     u64 chunk = logical / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
     u64 offset = logical % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
-    switch (chunk)
-    {
-        case 0: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_0) - 1u) ? buster_aarch64_generated_mnemonic_candidates_blob_chunk_0[offset] : 0;
-        case 1: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_1) - 1u) ? buster_aarch64_generated_mnemonic_candidates_blob_chunk_1[offset] : 0;
-        case 2: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_2) - 1u) ? buster_aarch64_generated_mnemonic_candidates_blob_chunk_2[offset] : 0;
-        case 3: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_3) - 1u) ? buster_aarch64_generated_mnemonic_candidates_blob_chunk_3[offset] : 0;
-        case 4: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_4) - 1u) ? buster_aarch64_generated_mnemonic_candidates_blob_chunk_4[offset] : 0;
-        case 5: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_5) - 1u) ? buster_aarch64_generated_mnemonic_candidates_blob_chunk_5[offset] : 0;
-        case 6: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_6) - 1u) ? buster_aarch64_generated_mnemonic_candidates_blob_chunk_6[offset] : 0;
-        case 7: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_7) - 1u) ? buster_aarch64_generated_mnemonic_candidates_blob_chunk_7[offset] : 0;
-        case 8: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_8) - 1u) ? buster_aarch64_generated_mnemonic_candidates_blob_chunk_8[offset] : 0;
-        case 9: return offset < (u64)(sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunk_9) - 1u) ? buster_aarch64_generated_mnemonic_candidates_blob_chunk_9[offset] : 0;
-        default: return 0;
-    }
+    return chunk < sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunks) / sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunks[0]) && offset < (u64)buster_aarch64_generated_mnemonic_candidates_blob_chunk_lengths[chunk] ? buster_aarch64_generated_mnemonic_candidates_blob_chunks[chunk][offset] : 0;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_mnemonic_candidates_blob_u8_counted(u64 byte_count, u64 offset)
@@ -2356,7 +3320,20 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_mnemonic_cand
     if (offset >= byte_count || !buster_aarch64_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;
     u64 encoded_offset = (offset / 3u) * 4u;
     if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;
-    u32 value = ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_mnemonic_candidates_blob_char(encoded_offset + 0u)) << 18) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_mnemonic_candidates_blob_char(encoded_offset + 1u)) << 12) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_mnemonic_candidates_blob_char(encoded_offset + 2u)) << 6) | (u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_mnemonic_candidates_blob_char(encoded_offset + 3u));
+    u64 chunk = encoded_offset / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u64 chunk_offset = encoded_offset % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u32 value = 0;
+    if (chunk < sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunks) / sizeof(buster_aarch64_generated_mnemonic_candidates_blob_chunks[0]))
+    {
+        const char8* encoded = buster_aarch64_generated_mnemonic_candidates_blob_chunks[chunk];
+        u64 length = (u64)buster_aarch64_generated_mnemonic_candidates_blob_chunk_lengths[chunk];
+        char8 character_0 = chunk_offset + 1u <= length ? encoded[chunk_offset + 0u] : 0;
+        char8 character_1 = chunk_offset + 2u <= length ? encoded[chunk_offset + 1u] : 0;
+        char8 character_2 = chunk_offset + 3u <= length ? encoded[chunk_offset + 2u] : 0;
+        char8 character_3 = chunk_offset + 4u <= length ? encoded[chunk_offset + 3u] : 0;
+        value = ((u32)buster_aarch64_generated_base64_value(character_0) << 18) | ((u32)buster_aarch64_generated_base64_value(character_1) << 12) |
+                ((u32)buster_aarch64_generated_base64_value(character_2) << 6) | (u32)buster_aarch64_generated_base64_value(character_3);
+    }
     return (u8)(value >> ((2u - (offset % 3u)) * 8u));
 }
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_mnemonic_candidates_blob_u8(u64 offset)
@@ -2416,37 +3393,61 @@ static const char8 buster_aarch64_generated_signature_ranges_blob_chunk_21[] = "
 static const char8 buster_aarch64_generated_signature_ranges_blob_chunk_22[] = "AAA1am3WagUw+HwQAAABAAAAkgJRBB9pMPh9EAAAAQAAAKHVtXHOnnP4fhAAAAEAAAC/5POwI460+H8QAAABAAAAOMHKhityuPiAEAAAAQAAABIAGs39bLr4gRAAAAEAAABGw5tT0qbS+IIQAAABAAAACalu+xd41/iDEAAAAQAAAL57YP6VSt/4hBAAAAEAAAA0+eXFmhPx+IUQAAABAAAAXH0f6rIQ9viGEAAAAQAAAFgfQ4WDcEH5hxAAAAEAAABjXDS/KT9K+YgQAAABAAAAbPkn9rOSdvmJEAAAAQAAALo9Kfk7hHf5ihAAAAEAAACqGlA5P0qC+YsQAAABAAAAJU/1Bl+HsvmMEAAAAQAAADXVKgmjGLX5jRAAAAEAAADbznn7ICq5+Y4QAAABAAAALc6+y/nR1PmPEAAAAQAAAK/7ZrfNBdX5kBAAAAEAAAA+04UFgYdM+pEQAAABAAAAuuY/0Q37rPqSEAAAAQAAAEhS9g3Nna76kxAAAAEAAAC7DBChMzPI+pQQAAABAAAAS26rTZL9JPuVEAAAAQAAANgZq4mJdCn7lhAAAAEAAABzsso42Hw0+5cQAAABAAAAlfpG2+R8QvuYEAAAAQAAADIKUgRfJEP7mRAAAAEAAADb+KZN+kBa+5oQAAABAAAAPE66pQp0XfubEAAAAQAAAI9wFMHC1GH7nBAAAAEAAADp4nKUx8iJ+50QAAABAAAA0/CVKCXHkPueEAAAAQAAAFmel5n9opj7nxAAAAEAAAANzZ8TCZGi+6AQAAABAAAA14LR5B5ktPuhEAAAAQAAAH4ktml1/8X7ohAAAAEAAABzZ6s9ZGH2+6MQAAABAAAA5Lk4t6bhHvykEAAAAQAAACuUwbg1NS38pRAAAAEAAADM7ebm1h0x/KYQAAABAAAAwvKOW0dPSPynEAAAAQAAALWb4yvBHEv8qBAAAAEAAAAVy0XuluFl/KkQAAABAAAA3OjIqr1wavyqEAAAAQAAAOmJUmX17mr8qxAAAAEAAACka+oWs/5t/KwQAAABAAAAaQnrTO/bifytEAAAAQAAAD3vjJUgQpT8rhAAAAEAAADeAjjizoSU/K8QAAABAAAA7S6ZF5KMxPywEAAAAQAAAOx4fRpR7c/8sRAAAAEAAACDuauYVyns/LIQAAABAAAAXvuQNOyAMP2zEAAAAQAAAECzeAYNSIz9tBAAAAEAAAAqINRtwz+Y/bUQAAABAAAAfy8MXtWIm/22EAAAAQAAAJlwNX2PYrD9txAAAAEAAADPlWtyePrS/bgQAAABAAAAaN1RB7jP5/25EAAAAQAAAPsEYLOrZPT9uhAAAAEAAADeFYxmTRIH/rsQAAABAAAAcYhT59SHDf68EAAAAQAAAHAY+My9QBj+vRAAAAEAAAAzpgFbz5gq/r4QAAABAAAAAUqUlGDMWv6/EAAAAQAAAOaDYMS3VHr+wBAAAAEAAAB56OAUbb1+/sEQAAABAAAAQ1FIXn6Wgv7CEAAAAQAAAMW537GN6rj+wxAAAAEAAADnJK5ZDNDA/sQQAAABAAAABWOlCNGEyv7FEAAAAQAAAKWmTM+lKsz+xhAAAAEAAACOhu3E44nS/scQAAABAAAAq8u5uEv26P7IEAAAAQAAANBg2+9SbvD+yRAAAAEAAABivBPf7oED/8oQAAABAAAAjJ8IQf3JEf/LEAAAAQAAAF4/rqZU0Rv/zBAAAAEAAACS9AxNi78j/80QAAABAAAAbB6XeKrnL//OEAAAAQAAAC6MTi2nIGX/zxAAAAEAAABI745tKGd+/9AQAAABAAAATLU65JCgvP/REAAAAQAAAFexgY7LO8D/0hAAAAEAAADoA9LCuOfm/9MQAAABAAAA/oa7VAXz9v/UEAAAAQAAAJjlRVsLU/z/1RAAAAEAAAA=";
 #define buster_aarch64_generated_signature_ranges_blob_BYTE_COUNT 68960
 #define buster_aarch64_generated_signature_ranges_blob_CHUNK_COUNT 23
+static const char8* const buster_aarch64_generated_signature_ranges_blob_chunks[] = {
+    buster_aarch64_generated_signature_ranges_blob_chunk_0,
+    buster_aarch64_generated_signature_ranges_blob_chunk_1,
+    buster_aarch64_generated_signature_ranges_blob_chunk_2,
+    buster_aarch64_generated_signature_ranges_blob_chunk_3,
+    buster_aarch64_generated_signature_ranges_blob_chunk_4,
+    buster_aarch64_generated_signature_ranges_blob_chunk_5,
+    buster_aarch64_generated_signature_ranges_blob_chunk_6,
+    buster_aarch64_generated_signature_ranges_blob_chunk_7,
+    buster_aarch64_generated_signature_ranges_blob_chunk_8,
+    buster_aarch64_generated_signature_ranges_blob_chunk_9,
+    buster_aarch64_generated_signature_ranges_blob_chunk_10,
+    buster_aarch64_generated_signature_ranges_blob_chunk_11,
+    buster_aarch64_generated_signature_ranges_blob_chunk_12,
+    buster_aarch64_generated_signature_ranges_blob_chunk_13,
+    buster_aarch64_generated_signature_ranges_blob_chunk_14,
+    buster_aarch64_generated_signature_ranges_blob_chunk_15,
+    buster_aarch64_generated_signature_ranges_blob_chunk_16,
+    buster_aarch64_generated_signature_ranges_blob_chunk_17,
+    buster_aarch64_generated_signature_ranges_blob_chunk_18,
+    buster_aarch64_generated_signature_ranges_blob_chunk_19,
+    buster_aarch64_generated_signature_ranges_blob_chunk_20,
+    buster_aarch64_generated_signature_ranges_blob_chunk_21,
+    buster_aarch64_generated_signature_ranges_blob_chunk_22,
+};
+static const u16 buster_aarch64_generated_signature_ranges_blob_chunk_lengths[] = {
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_0) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_1) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_2) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_3) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_4) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_5) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_6) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_7) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_8) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_9) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_10) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_11) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_12) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_13) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_14) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_15) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_16) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_17) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_18) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_19) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_20) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_21) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_22) - 1u),
+};
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL char8 buster_aarch64_generated_signature_ranges_blob_char(u64 logical)
 {
     u64 chunk = logical / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
     u64 offset = logical % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
-    switch (chunk)
-    {
-        case 0: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_0) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_0[offset] : 0;
-        case 1: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_1) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_1[offset] : 0;
-        case 2: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_2) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_2[offset] : 0;
-        case 3: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_3) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_3[offset] : 0;
-        case 4: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_4) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_4[offset] : 0;
-        case 5: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_5) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_5[offset] : 0;
-        case 6: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_6) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_6[offset] : 0;
-        case 7: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_7) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_7[offset] : 0;
-        case 8: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_8) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_8[offset] : 0;
-        case 9: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_9) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_9[offset] : 0;
-        case 10: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_10) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_10[offset] : 0;
-        case 11: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_11) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_11[offset] : 0;
-        case 12: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_12) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_12[offset] : 0;
-        case 13: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_13) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_13[offset] : 0;
-        case 14: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_14) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_14[offset] : 0;
-        case 15: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_15) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_15[offset] : 0;
-        case 16: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_16) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_16[offset] : 0;
-        case 17: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_17) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_17[offset] : 0;
-        case 18: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_18) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_18[offset] : 0;
-        case 19: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_19) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_19[offset] : 0;
-        case 20: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_20) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_20[offset] : 0;
-        case 21: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_21) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_21[offset] : 0;
-        case 22: return offset < (u64)(sizeof(buster_aarch64_generated_signature_ranges_blob_chunk_22) - 1u) ? buster_aarch64_generated_signature_ranges_blob_chunk_22[offset] : 0;
-        default: return 0;
-    }
+    return chunk < sizeof(buster_aarch64_generated_signature_ranges_blob_chunks) / sizeof(buster_aarch64_generated_signature_ranges_blob_chunks[0]) && offset < (u64)buster_aarch64_generated_signature_ranges_blob_chunk_lengths[chunk] ? buster_aarch64_generated_signature_ranges_blob_chunks[chunk][offset] : 0;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_signature_ranges_blob_u8_counted(u64 byte_count, u64 offset)
@@ -2455,7 +3456,20 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_signature_ran
     if (offset >= byte_count || !buster_aarch64_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;
     u64 encoded_offset = (offset / 3u) * 4u;
     if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;
-    u32 value = ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_signature_ranges_blob_char(encoded_offset + 0u)) << 18) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_signature_ranges_blob_char(encoded_offset + 1u)) << 12) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_signature_ranges_blob_char(encoded_offset + 2u)) << 6) | (u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_signature_ranges_blob_char(encoded_offset + 3u));
+    u64 chunk = encoded_offset / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u64 chunk_offset = encoded_offset % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u32 value = 0;
+    if (chunk < sizeof(buster_aarch64_generated_signature_ranges_blob_chunks) / sizeof(buster_aarch64_generated_signature_ranges_blob_chunks[0]))
+    {
+        const char8* encoded = buster_aarch64_generated_signature_ranges_blob_chunks[chunk];
+        u64 length = (u64)buster_aarch64_generated_signature_ranges_blob_chunk_lengths[chunk];
+        char8 character_0 = chunk_offset + 1u <= length ? encoded[chunk_offset + 0u] : 0;
+        char8 character_1 = chunk_offset + 2u <= length ? encoded[chunk_offset + 1u] : 0;
+        char8 character_2 = chunk_offset + 3u <= length ? encoded[chunk_offset + 2u] : 0;
+        char8 character_3 = chunk_offset + 4u <= length ? encoded[chunk_offset + 3u] : 0;
+        value = ((u32)buster_aarch64_generated_base64_value(character_0) << 18) | ((u32)buster_aarch64_generated_base64_value(character_1) << 12) |
+                ((u32)buster_aarch64_generated_base64_value(character_2) << 6) | (u32)buster_aarch64_generated_base64_value(character_3);
+    }
     return (u8)(value >> ((2u - (offset % 3u)) * 8u));
 }
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_signature_ranges_blob_u8(u64 offset)
@@ -2498,20 +3512,27 @@ static const char8 buster_aarch64_generated_signature_candidates_blob_chunk_4[] 
 static const char8 buster_aarch64_generated_signature_candidates_blob_chunk_5[] = "AQAA1wYAACoYAAA9BAAAfhcAALYYAACpDQAABQQAAJMRAADuEwAA/xIAAIYKAABXAgAALQkAANEJAAB1DwAARhgAAJUOAADcAgAA4RYAAHoOAADFBQAAGwYAACQMAADqAgAALxkAAEUJAACEBAAAhQoAABUDAACuEAAAChwAAPcbAAC8CgAARhEAAPoRAACEBgAAihcAADsIAADTCQAA/QUAAIgZAAAmHQAAOxQAAA4aAABaEAAARAQAAMoaAAArAgAA1RMAAD0BAAD3BAAAcA8AAGEFAADTEwAAABgAAF0SAADtDwAASBwAANoQAADFFgAA4AAAAOsPAADGAgAA+hcAAJsFAAC4GgAAWxoAAM4CAACqDQAAqgcAAEICAADWGAAA0wwAAAECAABwBAAAGwAAAEUGAACEDgAAuQgAABgDAADSAwAADAQAACIRAAC8AgAAyggAAHYRAADnBQAASQQAANUGAAAMDgAAoA0AAFwPAADkFgAAZhkAAKEOAAALCAAADAcAAAgEAADMCAAA9wgAABMFAAB1CAAA7RMAACgQAAAGCQAAWw0AAFIQAAAJBwAAiQYAANwWAABuBAAAzBAAAJEBAADbAQAA/hQAANMCAAA2DwAApRkAAFAcAADFGgAAyRAAAA0OAAAbEQAAaBMAAFUQAAA8EgAAFQIAABQQAADTBQAAJBUAALkSAADjBAAAhBcAAIsMAACDGQAAmhEAACoTAAB/FwAACw8AAKYOAAB0GQAAyRkAAF4CAACaBAAA6AgAAPAAAABSAgAAUxMAAMsAAAB5DAAAKQIAAIAHAAByFwAArhkAAD4AAABIGwAAhw4AADkJAAD2GAAAXRwAAH0XAABDGwAAMgUAAMcIAACHDQAA6gQAADMGAAAjCAAAQBoAAIsJAADQEAAAqgwAAJ0VAAC3EAAAagEAAOsNAACdEQAAihwAADwMAABCGQAAxggAAOQBAAAyGAAApAAAAB4AAABhEwAAbAIAAH4MAAA/GwAAEAUAADcQAABiEwAA7BwAAC0NAAAJAwAAPBoAAF0MAAAnBwAAjhQAAIAGAAC6CgAAsBgAAHoZAAB6CQAALRIAABobAADYGAAAVxwAAL0IAADuDwAAcgkAAJQQAAA7BwAAiREAAFEcAABiGAAADhMAAFoJAAB0EwAARxsAAI4MAACWAAAAQAwAACgYAAA4GwAAMRQAAEIWAABRBwAAsRkAAAoJAACJEgAAkwkAAPsSAAAtFQAA5BMAAGYYAAB7CQAA2xQAABcBAAB8GQAAqBkAAGYEAAAAEAAAAB0AAM8aAABhEAAAixcAADgQAABxDQAAmBUAAOURAAC+FgAAJQcAAJ4NAACKDwAAixwAAMUYAACFEgAAOg4AAC4XAACVGwAAsQYAAFYCAAAABwAANAYAADgXAACHAQAALwcAACEUAADSBgAA1QIAAHgIAADoCQAA6hIAAIgAAACNDQAAVw0AAKARAABbBAAADwAAAP4QAAA/FwAARgIAAKEEAAB8FwAA+wgAACMcAAAyGwAAxwwAAOEBAACiDwAA0QwAAGUTAACBDQAAlAcAAHMAAAAOAgAAdwAAAMEDAAAmEwAAqREAAJwXAADKBAAAMwIAAAQaAADzFAAALxsAACMCAACoHAAA5ggAAA4OAAB7AgAA7Q0AABQPAACzAwAAcBkAADocAAAkGAAA/BoAAGcNAAABAwAAKQ0AAHACAABZHAAA5wEAAIoAAAA+BAAAJQAAAOsTAABBDgAANA0AAGANAADABgAAMwUAAAoTAAB1DAAAMBIAAO4BAADqDwAA2Q0AAFQXAADPEQAA3xMAAE8MAABmEQAAPQcAAKQQAABoBAAAqgkAAIUAAABhDQAADQIAAB0dAADaCAAAvRkAAO4SAABiBQAAghoAAH0ZAAB1CQAAZwEAANEDAADhAAAAiQ8AAH0CAAALFAAAMQUAAGERAADmAAAAVRwAALIIAADNCAAA/AgAABIPAADIGgAALAkAAIwMAAA7BQAAxwIAAA0FAABTBwAAFBgAAO0QAAAEBwAAqxkAAP4aAADhCQAAggcAAC8OAACnDAAAwRYAALANAAD2BAAAghEAAG4IAAB7EAAA9w0AAD8OAAArBQAAqAAAAI8FAAAMFAAAFgIAADYAAAAABgAAdRoAAP0PAADVGAAA0A0AAKcFAADnCAAAYQYAACUVAAAEEgAAjRAAAFgJAABRBgAAIxAAAKoDAAAzCQAAfBEAALcCAACCCQAA8RsAACsSAADLFAAAPhkAABYTAADeGgAAfBIAAKwRAABpAgAAuhIAAFkMAAAMHAAAhBoAAMIGAAA6GwAApRgAAMgIAABWAQAA1BoAAK8IAAAgDgAA4w8AAHMCAAC9GAAA9gIAAO8YAABeCQAAGhoAAFgHAABsCQAAYgwAALkKAAC8EAAAqQAAAE0QAACIGAAATgwAABkCAAAcEgAAZxkAAFwGAADQBQAAJg4AAJwYAADAFgAAvBsAAOMbAADwGAAATgAAAIYaAAA=";
 #define buster_aarch64_generated_signature_candidates_blob_BYTE_COUNT 17240
 #define buster_aarch64_generated_signature_candidates_blob_CHUNK_COUNT 6
+static const char8* const buster_aarch64_generated_signature_candidates_blob_chunks[] = {
+    buster_aarch64_generated_signature_candidates_blob_chunk_0,
+    buster_aarch64_generated_signature_candidates_blob_chunk_1,
+    buster_aarch64_generated_signature_candidates_blob_chunk_2,
+    buster_aarch64_generated_signature_candidates_blob_chunk_3,
+    buster_aarch64_generated_signature_candidates_blob_chunk_4,
+    buster_aarch64_generated_signature_candidates_blob_chunk_5,
+};
+static const u16 buster_aarch64_generated_signature_candidates_blob_chunk_lengths[] = {
+    (u16)(sizeof(buster_aarch64_generated_signature_candidates_blob_chunk_0) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_candidates_blob_chunk_1) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_candidates_blob_chunk_2) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_candidates_blob_chunk_3) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_candidates_blob_chunk_4) - 1u),
+    (u16)(sizeof(buster_aarch64_generated_signature_candidates_blob_chunk_5) - 1u),
+};
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL char8 buster_aarch64_generated_signature_candidates_blob_char(u64 logical)
 {
     u64 chunk = logical / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
     u64 offset = logical % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
-    switch (chunk)
-    {
-        case 0: return offset < (u64)(sizeof(buster_aarch64_generated_signature_candidates_blob_chunk_0) - 1u) ? buster_aarch64_generated_signature_candidates_blob_chunk_0[offset] : 0;
-        case 1: return offset < (u64)(sizeof(buster_aarch64_generated_signature_candidates_blob_chunk_1) - 1u) ? buster_aarch64_generated_signature_candidates_blob_chunk_1[offset] : 0;
-        case 2: return offset < (u64)(sizeof(buster_aarch64_generated_signature_candidates_blob_chunk_2) - 1u) ? buster_aarch64_generated_signature_candidates_blob_chunk_2[offset] : 0;
-        case 3: return offset < (u64)(sizeof(buster_aarch64_generated_signature_candidates_blob_chunk_3) - 1u) ? buster_aarch64_generated_signature_candidates_blob_chunk_3[offset] : 0;
-        case 4: return offset < (u64)(sizeof(buster_aarch64_generated_signature_candidates_blob_chunk_4) - 1u) ? buster_aarch64_generated_signature_candidates_blob_chunk_4[offset] : 0;
-        case 5: return offset < (u64)(sizeof(buster_aarch64_generated_signature_candidates_blob_chunk_5) - 1u) ? buster_aarch64_generated_signature_candidates_blob_chunk_5[offset] : 0;
-        default: return 0;
-    }
+    return chunk < sizeof(buster_aarch64_generated_signature_candidates_blob_chunks) / sizeof(buster_aarch64_generated_signature_candidates_blob_chunks[0]) && offset < (u64)buster_aarch64_generated_signature_candidates_blob_chunk_lengths[chunk] ? buster_aarch64_generated_signature_candidates_blob_chunks[chunk][offset] : 0;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_signature_candidates_blob_u8_counted(u64 byte_count, u64 offset)
@@ -2520,7 +3541,20 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_signature_can
     if (offset >= byte_count || !buster_aarch64_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;
     u64 encoded_offset = (offset / 3u) * 4u;
     if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;
-    u32 value = ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_signature_candidates_blob_char(encoded_offset + 0u)) << 18) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_signature_candidates_blob_char(encoded_offset + 1u)) << 12) | ((u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_signature_candidates_blob_char(encoded_offset + 2u)) << 6) | (u32)buster_aarch64_generated_base64_value(buster_aarch64_generated_signature_candidates_blob_char(encoded_offset + 3u));
+    u64 chunk = encoded_offset / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u64 chunk_offset = encoded_offset % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;
+    u32 value = 0;
+    if (chunk < sizeof(buster_aarch64_generated_signature_candidates_blob_chunks) / sizeof(buster_aarch64_generated_signature_candidates_blob_chunks[0]))
+    {
+        const char8* encoded = buster_aarch64_generated_signature_candidates_blob_chunks[chunk];
+        u64 length = (u64)buster_aarch64_generated_signature_candidates_blob_chunk_lengths[chunk];
+        char8 character_0 = chunk_offset + 1u <= length ? encoded[chunk_offset + 0u] : 0;
+        char8 character_1 = chunk_offset + 2u <= length ? encoded[chunk_offset + 1u] : 0;
+        char8 character_2 = chunk_offset + 3u <= length ? encoded[chunk_offset + 2u] : 0;
+        char8 character_3 = chunk_offset + 4u <= length ? encoded[chunk_offset + 3u] : 0;
+        value = ((u32)buster_aarch64_generated_base64_value(character_0) << 18) | ((u32)buster_aarch64_generated_base64_value(character_1) << 12) |
+                ((u32)buster_aarch64_generated_base64_value(character_2) << 6) | (u32)buster_aarch64_generated_base64_value(character_3);
+    }
     return (u8)(value >> ((2u - (offset % 3u)) * 8u));
 }
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 buster_aarch64_generated_signature_candidates_blob_u8(u64 offset)

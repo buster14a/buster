@@ -12803,8 +12803,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_validate_artifact(Arena* arena, String8
 BUSTER_GLOBAL_LOCAL bool assembly_import_validate_checked_in_x86(Arena* arena, String8* artifacts)
 {
     bool artifact_checks = assembly_import_validate_artifact(arena, artifacts[0], 4660881, S8("ba80aa3be0eb2e6f")) &&
-                           assembly_import_validate_artifact(arena, artifacts[1], 6092260, S8("e6ef83ed59b0ddf3")) &&
-                           assembly_import_validate_artifact(arena, artifacts[2], 392002, S8("78ecc6cfb575213a"));
+                           assembly_import_validate_artifact(arena, artifacts[1], 6052140, S8("6296b870e5a81815")) &&
+                           assembly_import_validate_artifact(arena, artifacts[2], 389599, S8("bae2415469c41d76"));
     bool invariant_checks = assembly_import_line_count(artifacts[0]) == 11013 &&
                             string_contains(artifacts[1], S8("#define BUSTER_X86_GENERATED_FORM_COUNT 11013")) &&
                             string_contains(artifacts[1], S8("#define BUSTER_X86_GENERATED_COVERAGE_COUNT 11013"));
@@ -15189,37 +15189,65 @@ BUSTER_GLOBAL_LOCAL void aarch64_generated_append_c_bytes(Arena* output, const u
     arena_append_char8(output, '"');
 }
 
-BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_chunk_accessor(Arena* output, String8 name, u32 chunk_count)
+// Chunk pointer/length tables replace the per-chunk switch: the accessors
+// index one flat table instead of dispatching a several-hundred-way switch
+// per byte, and the base64 reader pulls its whole 4-character group from one
+// chunk directly (groups never straddle chunks because the chunk size is a
+// multiple of 4). Out-of-payload reads still clamp to 0 per character, so
+// the results match the switch form exactly for every input.
+BUSTER_GLOBAL_LOCAL void assembly_generated_emit_chunk_tables(Arena* output, String8 name, u32 chunk_count)
 {
-    arena_append_string8(output, S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL char8 "));
+    arena_append_string8(output, S8("static const char8* const "));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_char(u64 logical)\n{\n    u64 chunk = logical / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;\n    u64 offset = logical % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;\n    switch (chunk)\n    {\n"));
+    arena_append_string8(output, S8("_chunks[] = {\n"));
     for (u32 chunk = 0; chunk < chunk_count; chunk += 1)
     {
-        arena_append_string8(output, S8("        case "));
-        xed_generated_append_decimal(output, chunk);
-        arena_append_string8(output, S8(": return offset < (u64)(sizeof("));
+        arena_append_string8(output, S8("    "));
         arena_append_string8(output, name);
         arena_append_string8(output, S8("_chunk_"));
         xed_generated_append_decimal(output, chunk);
-        arena_append_string8(output, S8(") - 1u) ? "));
-        arena_append_string8(output, name);
-        arena_append_string8(output, S8("_chunk_"));
-        xed_generated_append_decimal(output, chunk);
-        arena_append_string8(output, S8("[offset] : 0;\n"));
+        arena_append_string8(output, S8(",\n"));
     }
-    arena_append_string8(output, S8("        default: return 0;\n    }\n}\n\n"));
+    arena_append_string8(output, S8("};\n"));
+    arena_append_string8(output, S8("static const u16 "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_chunk_lengths[] = {\n"));
+    for (u32 chunk = 0; chunk < chunk_count; chunk += 1)
+    {
+        arena_append_string8(output, S8("    (u16)(sizeof("));
+        arena_append_string8(output, name);
+        arena_append_string8(output, S8("_chunk_"));
+        xed_generated_append_decimal(output, chunk);
+        arena_append_string8(output, S8(") - 1u),\n"));
+    }
+    arena_append_string8(output, S8("};\n"));
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_chunk_accessor(Arena* output, String8 name, u32 chunk_count)
+{
+    assembly_generated_emit_chunk_tables(output, name, chunk_count);
+    arena_append_string8(output, S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL char8 "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_char(u64 logical)\n{\n    u64 chunk = logical / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;\n    u64 offset = logical % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;\n    return chunk < sizeof("));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_chunks) / sizeof("));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_chunks[0]) && offset < (u64)"));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_chunk_lengths[chunk] ? "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_chunks[chunk][offset] : 0;\n}\n\n"));
     arena_append_string8(output, S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 "));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_u8_counted(u64 byte_count, u64 offset)\n{\n    u64 encoded_count = 0;\n    if (offset >= byte_count || !buster_aarch64_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;\n    u64 encoded_offset = (offset / 3u) * 4u;\n    if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;\n    u32 value = ((u32)buster_aarch64_generated_base64_value("));
+    arena_append_string8(output, S8("_u8_counted(u64 byte_count, u64 offset)\n{\n    u64 encoded_count = 0;\n    if (offset >= byte_count || !buster_aarch64_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;\n    u64 encoded_offset = (offset / 3u) * 4u;\n    if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;\n    u64 chunk = encoded_offset / BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;\n    u64 chunk_offset = encoded_offset % BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE;\n    u32 value = 0;\n    if (chunk < sizeof("));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_char(encoded_offset + 0u)) << 18) | ((u32)buster_aarch64_generated_base64_value("));
+    arena_append_string8(output, S8("_chunks) / sizeof("));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_char(encoded_offset + 1u)) << 12) | ((u32)buster_aarch64_generated_base64_value("));
+    arena_append_string8(output, S8("_chunks[0]))\n    {\n        const char8* encoded = "));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_char(encoded_offset + 2u)) << 6) | (u32)buster_aarch64_generated_base64_value("));
+    arena_append_string8(output, S8("_chunks[chunk];\n        u64 length = (u64)"));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_char(encoded_offset + 3u));\n    return (u8)(value >> ((2u - (offset % 3u)) * 8u));\n}\n"));
+    arena_append_string8(output, S8("_chunk_lengths[chunk];\n        char8 character_0 = chunk_offset + 1u <= length ? encoded[chunk_offset + 0u] : 0;\n        char8 character_1 = chunk_offset + 2u <= length ? encoded[chunk_offset + 1u] : 0;\n        char8 character_2 = chunk_offset + 3u <= length ? encoded[chunk_offset + 2u] : 0;\n        char8 character_3 = chunk_offset + 4u <= length ? encoded[chunk_offset + 3u] : 0;\n        value = ((u32)buster_aarch64_generated_base64_value(character_0) << 18) | ((u32)buster_aarch64_generated_base64_value(character_1) << 12) |\n                ((u32)buster_aarch64_generated_base64_value(character_2) << 6) | (u32)buster_aarch64_generated_base64_value(character_3);\n    }\n    return (u8)(value >> ((2u - (offset % 3u)) * 8u));\n}\n"));
     arena_append_string8(output, S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 "));
     arena_append_string8(output, name);
     arena_append_string8(output, S8("_u8(u64 offset)\n{\n    return "));
@@ -16332,35 +16360,29 @@ BUSTER_GLOBAL_LOCAL void xed_generated_append_x86_base64_value_preamble(Arena* o
 
 BUSTER_GLOBAL_LOCAL void xed_generated_emit_x86_chunk_accessor(Arena* output, String8 name, u32 chunk_count)
 {
+    assembly_generated_emit_chunk_tables(output, name, chunk_count);
     arena_append_string8(output, S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL char8 "));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_char(u64 logical)\n{\n    u64 chunk = logical / BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;\n    u64 offset = logical % BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;\n    switch (chunk)\n    {\n"));
-    for (u32 chunk = 0; chunk < chunk_count; chunk += 1)
-    {
-        arena_append_string8(output, S8("        case "));
-        xed_generated_append_decimal(output, chunk);
-        arena_append_string8(output, S8(": return offset < (u64)(sizeof("));
-        arena_append_string8(output, name);
-        arena_append_string8(output, S8("_chunk_"));
-        xed_generated_append_decimal(output, chunk);
-        arena_append_string8(output, S8(") - 1u) ? "));
-        arena_append_string8(output, name);
-        arena_append_string8(output, S8("_chunk_"));
-        xed_generated_append_decimal(output, chunk);
-        arena_append_string8(output, S8("[offset] : 0;\n"));
-    }
-    arena_append_string8(output, S8("        default: return 0;\n    }\n}\n\n"));
+    arena_append_string8(output, S8("_char(u64 logical)\n{\n    u64 chunk = logical / BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;\n    u64 offset = logical % BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;\n    return chunk < sizeof("));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_chunks) / sizeof("));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_chunks[0]) && offset < (u64)"));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_chunk_lengths[chunk] ? "));
+    arena_append_string8(output, name);
+    arena_append_string8(output, S8("_chunks[chunk][offset] : 0;\n}\n\n"));
     arena_append_string8(output, S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 "));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_u8_counted(u64 byte_count, u64 offset)\n{\n    u64 encoded_count = 0;\n    if (offset >= byte_count || !buster_x86_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;\n    u64 encoded_offset = (offset / 3u) * 4u;\n    if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;\n    u32 value = ((u32)buster_x86_generated_base64_value("));
+    arena_append_string8(output, S8("_u8_counted(u64 byte_count, u64 offset)\n{\n    u64 encoded_count = 0;\n    if (offset >= byte_count || !buster_x86_generated_base64_encoded_count(byte_count, &encoded_count)) return 0;\n    u64 encoded_offset = (offset / 3u) * 4u;\n    if (encoded_offset > encoded_count || encoded_count - encoded_offset < 4u) return 0;\n    u64 chunk = encoded_offset / BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;\n    u64 chunk_offset = encoded_offset % BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;\n    u32 value = 0;\n    if (chunk < sizeof("));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_char(encoded_offset + 0u)) << 18) | ((u32)buster_x86_generated_base64_value("));
+    arena_append_string8(output, S8("_chunks) / sizeof("));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_char(encoded_offset + 1u)) << 12) | ((u32)buster_x86_generated_base64_value("));
+    arena_append_string8(output, S8("_chunks[0]))\n    {\n        const char8* encoded = "));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_char(encoded_offset + 2u)) << 6) | (u32)buster_x86_generated_base64_value("));
+    arena_append_string8(output, S8("_chunks[chunk];\n        u64 length = (u64)"));
     arena_append_string8(output, name);
-    arena_append_string8(output, S8("_char(encoded_offset + 3u));\n    return (u8)(value >> ((2u - (offset % 3u)) * 8u));\n}\n"));
+    arena_append_string8(output, S8("_chunk_lengths[chunk];\n        char8 character_0 = chunk_offset + 1u <= length ? encoded[chunk_offset + 0u] : 0;\n        char8 character_1 = chunk_offset + 2u <= length ? encoded[chunk_offset + 1u] : 0;\n        char8 character_2 = chunk_offset + 3u <= length ? encoded[chunk_offset + 2u] : 0;\n        char8 character_3 = chunk_offset + 4u <= length ? encoded[chunk_offset + 3u] : 0;\n        value = ((u32)buster_x86_generated_base64_value(character_0) << 18) | ((u32)buster_x86_generated_base64_value(character_1) << 12) |\n                ((u32)buster_x86_generated_base64_value(character_2) << 6) | (u32)buster_x86_generated_base64_value(character_3);\n    }\n    return (u8)(value >> ((2u - (offset % 3u)) * 8u));\n}\n"));
     arena_append_string8(output, S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u8 "));
     arena_append_string8(output, name);
     arena_append_string8(output, S8("_u8(u64 offset)\n{\n    return "));
@@ -16499,18 +16521,11 @@ BUSTER_GLOBAL_LOCAL void xed_generated_emit_x86_chunked_string_pool(Arena* outpu
     xed_generated_append_decimal(output, pool->byte_count);
     arena_append_string8(output, S8("\n#define BUSTER_X86_GENERATED_STRING_POOL_CHUNK_COUNT "));
     xed_generated_append_decimal(output, chunk_count);
-    arena_append_string8(output, S8("\nBUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE char8 buster_x86_generated_string_byte(u64 logical)\n{\n    if (logical >= (u64)BUSTER_X86_GENERATED_STRING_POOL_SIZE) return 0;\n    u64 chunk = logical / BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;\n    u64 offset = logical % BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;\n    switch (chunk)\n    {\n"));
-    for (u32 chunk = 0; chunk < chunk_count; chunk += 1)
-    {
-        arena_append_string8(output, S8("        case "));
-        xed_generated_append_decimal(output, chunk);
-        arena_append_string8(output, S8(": return offset < (u64)(sizeof(buster_x86_generated_string_pool_chunk_"));
-        xed_generated_append_decimal(output, chunk);
-        arena_append_string8(output, S8(") - 1u) ? buster_x86_generated_string_pool_chunk_"));
-        xed_generated_append_decimal(output, chunk);
-        arena_append_string8(output, S8("[offset] : 0;\n"));
-    }
-    arena_append_string8(output, S8("        default: return 0;\n    }\n}\n\n"));
+    arena_append_string8(output, S8("\n"));
+    assembly_generated_emit_chunk_tables(output, S8("buster_x86_generated_string_pool"), chunk_count);
+    arena_append_string8(
+        output,
+        S8("BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE char8 buster_x86_generated_string_byte(u64 logical)\n{\n    if (logical >= (u64)BUSTER_X86_GENERATED_STRING_POOL_SIZE) return 0;\n    u64 chunk = logical / BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;\n    u64 offset = logical % BUSTER_X86_GENERATED_C_ARRAY_CHUNK_SIZE;\n    return chunk < sizeof(buster_x86_generated_string_pool_chunks) / sizeof(buster_x86_generated_string_pool_chunks[0]) &&\n                   offset < (u64)buster_x86_generated_string_pool_chunk_lengths[chunk]\n               ? buster_x86_generated_string_pool_chunks[chunk][offset]\n               : 0;\n}\n\n"));
 }
 
 BUSTER_GLOBAL_LOCAL void xed_generated_emit_x86_text_index_accessors(Arena* output, String8 macro_prefix, String8 blob_prefix)
@@ -18081,6 +18096,183 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
     return result;
 }
 
+// The reduced XED JSONL is the pinned input the x86 artifacts are generated
+// from; parsing it back into import records makes the checked-in x86 header
+// regenerable without a raw XED checkout. The decoder handles exactly the
+// escape set arena_append_json_string emits, and the caller proves the round
+// trip by re-emitting the parsed records and requiring byte identity with
+// the checked-in JSONL before any generated output is written.
+BUSTER_GLOBAL_LOCAL bool assembly_import_json_string_decode(Arena* arena, String8 raw, String8* result)
+{
+    if (raw.length < 2 || raw.pointer[0] != '"' || raw.pointer[raw.length - 1] != '"')
+    {
+        return false;
+    }
+    String8 body = {.pointer = raw.pointer + 1, .length = raw.length - 2};
+    bool escaped = false;
+    for (u64 index = 0; index < body.length; index += 1)
+    {
+        escaped |= body.pointer[index] == '\\';
+    }
+    if (!escaped)
+    {
+        *result = body;
+        return true;
+    }
+    char8* bytes = arena_allocate(arena, char8, body.length);
+    u64 count = 0;
+    for (u64 index = 0; index < body.length; index += 1)
+    {
+        char8 character = body.pointer[index];
+        if (character != '\\')
+        {
+            bytes[count++] = character;
+            continue;
+        }
+        index += 1;
+        if (index >= body.length)
+        {
+            return false;
+        }
+        char8 escape = body.pointer[index];
+        if (escape == '"' || escape == '\\')
+        {
+            bytes[count++] = escape;
+        }
+        else if (escape == 'n')
+        {
+            bytes[count++] = '\n';
+        }
+        else if (escape == 'r')
+        {
+            bytes[count++] = '\r';
+        }
+        else if (escape == 't')
+        {
+            bytes[count++] = '\t';
+        }
+        else if (escape == 'u')
+        {
+            if (index + 4 >= body.length)
+            {
+                return false;
+            }
+            u32 value = 0;
+            for (u32 digit = 1; digit <= 4; digit += 1)
+            {
+                char8 hex = body.pointer[index + digit];
+                u32 nibble = hex >= '0' && hex <= '9'   ? (u32)(hex - '0')
+                             : hex >= 'a' && hex <= 'f' ? (u32)(hex - 'a' + 10)
+                             : hex >= 'A' && hex <= 'F' ? (u32)(hex - 'A' + 10)
+                                                        : UINT32_MAX;
+                if (nibble == UINT32_MAX)
+                {
+                    return false;
+                }
+                value = value * 16 + nibble;
+            }
+            if (value > 0xff)
+            {
+                return false;
+            }
+            bytes[count++] = (char8)value;
+            index += 4;
+        }
+        else
+        {
+            return false;
+        }
+    }
+    result->pointer = bytes;
+    result->length = count;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_import_parse_x86_reduced_jsonl(Arena* arena, String8 content, XedImportRecordList* records)
+{
+    u64 offset = 0;
+    while (offset < content.length)
+    {
+        u64 line_end = offset;
+        while (line_end < content.length && content.pointer[line_end] != '\n')
+        {
+            line_end += 1;
+        }
+        String8 line = {.pointer = content.pointer + offset, .length = line_end - offset};
+        offset = line_end + 1;
+        if (!line.length)
+        {
+            continue;
+        }
+        JsonParser parser = {.text = line};
+        if (!json_consume(&parser, '{'))
+        {
+            return false;
+        }
+        XedImportRecord* record = arena_allocate(arena, XedImportRecord, 1);
+        *record = (XedImportRecord){0};
+        bool valid = true;
+        while (true)
+        {
+            String8 raw_key = {0};
+            String8 value = {0};
+            if (!json_raw_object_next(&parser, &raw_key, &value, &valid))
+            {
+                break;
+            }
+            String8 key = json_raw_key_text(raw_key);
+            String8* field = 0;
+            if (string_equal(key, S8("source"))) field = &record->source;
+            else if (string_equal(key, S8("iclass"))) field = &record->iclass;
+            else if (string_equal(key, S8("iform"))) field = &record->iform;
+            else if (string_equal(key, S8("isa_set"))) field = &record->isa_set;
+            else if (string_equal(key, S8("category"))) field = &record->category;
+            else if (string_equal(key, S8("extension"))) field = &record->extension;
+            else if (string_equal(key, S8("attributes"))) field = &record->attributes;
+            else if (string_equal(key, S8("cpl"))) field = &record->cpl;
+            else if (string_equal(key, S8("exceptions"))) field = &record->exceptions;
+            else if (string_equal(key, S8("flags"))) field = &record->flags;
+            else if (string_equal(key, S8("disasm"))) field = &record->disasm;
+            else if (string_equal(key, S8("disasm_intel"))) field = &record->disasm_intel;
+            else if (string_equal(key, S8("disasm_attsv"))) field = &record->disasm_attsv;
+            else if (string_equal(key, S8("real_opcode"))) field = &record->real_opcode;
+            else if (string_equal(key, S8("uname"))) field = &record->uname;
+            else if (string_equal(key, S8("comment"))) field = &record->comment;
+            else if (string_equal(key, S8("version"))) field = &record->version;
+            else if (string_equal(key, S8("pattern"))) field = &record->pattern;
+            else if (string_equal(key, S8("operands")))
+            {
+                field = &record->operands;
+                record->operands_present = true;
+            }
+            else if (string_equal(key, S8("operand_annotation"))) field = &record->operand_annotation;
+            else
+            {
+                return false;
+            }
+            if (!assembly_import_json_string_decode(arena, value, field))
+            {
+                return false;
+            }
+        }
+        if (!valid)
+        {
+            return false;
+        }
+        if (records->last)
+        {
+            records->last->next = record;
+        }
+        else
+        {
+            records->first = record;
+        }
+        records->last = record;
+        records->count += 1;
+    }
+    return records->count != 0;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* arena, AssemblyImportOptions options)
 {
     FileMapRead aarch64_map = file_map_read(arena, options.aarch64_json, (FileReadOptions){0});
@@ -18216,6 +18408,68 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
                 string_print(S8("audit: checked-in XED provenance accepted; one-byte copied mutation rejected\n"));
             }
         }
+        // Regenerate the x86 artifacts from the pinned reduced JSONL instead
+        // of copying the checked-in files through, so template changes to the
+        // generated accessors take effect without a raw XED checkout. The
+        // parse is proven exact by re-emitting the records and requiring the
+        // byte-identical checked-in JSONL back.
+        XedGeneratedTableStats xed_regenerated_stats = {0};
+        if (result == PROCESS_RESULT_SUCCESS)
+        {
+            XedImportRecordList xed_records = {0};
+            Arena* xed_reemit_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
+            Arena* xed_generated_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
+            Arena* xed_coverage_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
+            if (!xed_reemit_output || !xed_generated_output || !xed_coverage_output)
+            {
+                string_print(S8("error: failed to reserve XED regeneration arenas\n"));
+                result = PROCESS_RESULT_FAILED;
+            }
+            else if (!assembly_import_parse_x86_reduced_jsonl(arena, xed_content[0], &xed_records))
+            {
+                string_print(S8("error: malformed checked-in reduced XED JSONL\n"));
+                result = PROCESS_RESULT_FAILED;
+            }
+            else
+            {
+                xed_import_emit(xed_reemit_output, xed_records);
+                String8 reemitted = assembly_import_arena_contents(xed_reemit_output);
+                if (!string_equal(reemitted, xed_content[0]))
+                {
+                    string_print(S8("error: reduced XED JSONL round-trip is not byte-identical; refusing to regenerate\n"));
+                    result = PROCESS_RESULT_FAILED;
+                }
+                else
+                {
+                    bool records_valid = true;
+                    u64 failed_index = 0;
+                    String8 bad_token = {0};
+                    bool bad_operand = false;
+                    XedGeneratedFormList regenerated_forms =
+                        xed_import_normalize_records(arena, xed_records, &records_valid, &failed_index, &bad_token, &bad_operand);
+                    if (!records_valid)
+                    {
+                        string_print(S8("error: unsupported XED {S8} token in checked-in reduced JSONL: {S8}\n"),
+                                     bad_operand ? S8("operand") : S8("pattern"), bad_token);
+                        result = PROCESS_RESULT_FAILED;
+                    }
+                    else if (!xed_import_emit_generated_tables_packed(xed_generated_output, xed_coverage_output, arena, regenerated_forms,
+                                                                      &xed_regenerated_stats))
+                    {
+                        string_print(S8("error: regenerated XED coverage contains UNCLASSIFIED rows\n"));
+                        result = PROCESS_RESULT_FAILED;
+                    }
+                    else
+                    {
+                        xed_content[1] = assembly_import_arena_contents(xed_generated_output);
+                        xed_content[2] = assembly_import_arena_contents(xed_coverage_output);
+                        string_print(S8("XED regenerated: header={u64} bytes checksum={S8} coverage={u64} bytes checksum={S8}\n"),
+                                     xed_content[1].length, assembly_import_checksum(arena, xed_content[1]), xed_content[2].length,
+                                     assembly_import_checksum(arena, xed_content[2]));
+                    }
+                }
+            }
+        }
         if (result == PROCESS_RESULT_SUCCESS)
         {
             make_directory_recursive(arena, options.output_directory);
@@ -18247,7 +18501,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
                 result = PROCESS_RESULT_FAILED;
             }
             String8 inventory_checksum = assembly_import_checksum(arena, inventory_content);
-            XedGeneratedTableStats xed_stats = {0};
+            XedGeneratedTableStats xed_stats = xed_regenerated_stats;
             xed_stats.header_bytes = xed_content[1].length;
             xed_stats.coverage_bytes = xed_content[2].length;
             AssemblyImportFullManifestData manifest_data = {
