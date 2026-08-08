@@ -247,8 +247,10 @@ typedef struct BusterX86MetadataString BusterX86MetadataString;
 struct BusterX86MetadataString
 {
     // Logical offset into the generated string pool. The pool is chunked in
-    // the generated ABI, so callers use buster_x86_metadata_string_byte()
-    // rather than assuming one contiguous host pointer.
+    // the generated ABI, but the one-time decode flattens it into a
+    // contiguous host array, so prefer buster_x86_metadata_string_span() and
+    // scan the bytes directly; buster_x86_metadata_string_byte() remains for
+    // one-off reads and costs a call per byte.
     u32 offset;
     u32 length;
 };
@@ -851,6 +853,11 @@ BUSTER_F_DECL BusterX86MetadataCounts buster_x86_metadata_counts(void);
 BUSTER_F_DECL bool buster_x86_metadata_validate(BusterX86MetadataValidationResult* result);
 BUSTER_F_DECL bool buster_x86_metadata_string(u32 offset, BusterX86MetadataString* result);
 BUSTER_F_DECL u8 buster_x86_metadata_string_byte(BusterX86MetadataString string, u32 index);
+// Contiguous view of a pool string, valid for the life of the process. Empty
+// when the record is out of range. Prefer this to a per-byte loop over
+// buster_x86_metadata_string_byte(), which costs a call and a decode-guard
+// test for every byte examined.
+BUSTER_F_DECL String8 buster_x86_metadata_string_span(BusterX86MetadataString string);
 BUSTER_F_DECL bool buster_x86_metadata_form(u32 form_id, BusterX86MetadataForm* result);
 // The normalized XED iform carries DFV as a source role while generated
 // visible operands intentionally omit it.  The source assembler uses this

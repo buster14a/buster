@@ -14,11 +14,13 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_string_equal(BusterX86MetadataStri
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_string_contains(BusterX86MetadataString value, String8 needle)
 {
     if (!needle.length || value.length < needle.length) return false;
-    for (u32 offset = 0; offset + needle.length <= value.length; offset += 1)
+    String8 span = buster_x86_metadata_string_span(value);
+    if (span.length < needle.length) return false;
+    for (u32 offset = 0; offset + needle.length <= span.length; offset += 1)
     {
         bool equal = true;
         for (u32 index = 0; index < needle.length; index += 1)
-            equal &= buster_x86_metadata_string_byte(value, offset + index) == (u8)needle.pointer[index];
+            equal &= (u8)span.pointer[offset + index] == (u8)needle.pointer[index];
         if (equal) return true;
     }
     return false;
@@ -27,15 +29,15 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_string_contains(BusterX86MetadataS
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_pattern_has_token(BusterX86MetadataString value, String8 token)
 {
     if (!token.length || value.length < token.length) return false;
-    for (u32 offset = 0; offset + token.length <= value.length; offset += 1)
+    String8 span = buster_x86_metadata_string_span(value);
+    if (span.length < token.length) return false;
+    for (u32 offset = 0; offset + token.length <= span.length; offset += 1)
     {
-        if (offset && buster_x86_metadata_string_byte(value, offset - 1) != ' ') continue;
-        if (offset + token.length < value.length &&
-            buster_x86_metadata_string_byte(value, (u32)(offset + token.length)) != ' ')
-            continue;
+        if (offset && (u8)span.pointer[offset - 1] != ' ') continue;
+        if (offset + token.length < span.length && (u8)span.pointer[offset + token.length] != ' ') continue;
         bool equal = true;
         for (u32 index = 0; index < token.length; index += 1)
-            equal &= buster_x86_metadata_string_byte(value, offset + index) == (u8)token.pointer[index];
+            equal &= (u8)span.pointer[offset + index] == (u8)token.pointer[index];
         if (equal) return true;
     }
     return false;

@@ -162,6 +162,27 @@ BUSTER_GLOBAL_LOCAL char8 buster_x86_metadata_pool_byte(u64 logical)
     return logical < BUSTER_X86_GENERATED_STRING_POOL_SIZE ? buster_x86_metadata_pool_bytes[logical] : (char8)0;
 }
 
+// The decode flattens the chunked generated pool into one contiguous array, so
+// a range of it can be handed out as a plain span.  Comparing or searching a
+// pool string through buster_x86_metadata_pool_byte() costs a call per byte
+// over a 1.7 MB pool; taking the span once and reading it directly does not.
+// An out-of-range request yields an empty span, which every caller below
+// treats as "no match" exactly as a zero byte did.
+BUSTER_GLOBAL_LOCAL String8 buster_x86_metadata_pool_span(u32 offset, u32 length)
+{
+    buster_x86_metadata_decode_tables();
+    if (offset >= BUSTER_X86_GENERATED_STRING_POOL_SIZE || length > BUSTER_X86_GENERATED_STRING_POOL_SIZE - offset)
+    {
+        return (String8){0};
+    }
+    return (String8){.pointer = buster_x86_metadata_pool_bytes + offset, .length = length};
+}
+
+String8 buster_x86_metadata_string_span(BusterX86MetadataString string)
+{
+    return buster_x86_metadata_pool_span(string.offset, string.length);
+}
+
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedForm buster_x86_metadata_form_record(u32 index)
 {
     buster_x86_metadata_decode_tables();
@@ -474,21 +495,16 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_string_offset_terminated(u32 offset
     {
         return false;
     }
-    u32 result = 0;
-    while (offset <= BUSTER_X86_GENERATED_STRING_POOL_SIZE - result)
+    String8 tail = buster_x86_metadata_pool_span(offset, BUSTER_X86_GENERATED_STRING_POOL_SIZE - offset);
+    for (u32 result = 0; result < tail.length; result += 1)
     {
-        if (buster_x86_metadata_pool_byte((u64)offset + result) == 0)
+        if (tail.pointer[result] == 0)
         {
             if (length)
             {
                 *length = result;
             }
             return true;
-        }
-        result += 1;
-        if (result == BUSTER_X86_GENERATED_STRING_POOL_SIZE - offset)
-        {
-            break;
         }
     }
     return false;
@@ -503,10 +519,15 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_string_equal_offsets(u32 first_offs
     {
         return false;
     }
+    String8 first = buster_x86_metadata_pool_span(first_offset, first_length);
+    String8 second = buster_x86_metadata_pool_span(second_offset, second_length);
+    if (first.length != first_length || second.length != second_length)
+    {
+        return false;
+    }
     for (u32 index = 0; index < first_length; index += 1)
     {
-        if (buster_x86_metadata_pool_byte((u64)first_offset + index) !=
-            buster_x86_metadata_pool_byte((u64)second_offset + index))
+        if (first.pointer[index] != second.pointer[index])
         {
             return false;
         }
@@ -523,9 +544,10 @@ BUSTER_GLOBAL_LOCAL u64 buster_x86_metadata_hash_string(u32 offset, bool* valid)
         return 0;
     }
     u8 bytes[BUSTER_X86_METADATA_HASH_STRING_CAPACITY] = {0};
-    for (u32 index = 0; index < length; index += 1)
+    String8 span = buster_x86_metadata_pool_span(offset, length);
+    for (u32 index = 0; index < span.length; index += 1)
     {
-        bytes[index] = (u8)buster_x86_metadata_pool_byte((u64)offset + index);
+        bytes[index] = (u8)span.pointer[index];
     }
     static const u8 empty[] = {0};
     u8 const* pointer = length ? bytes : empty;
@@ -814,13 +836,14 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
     char8 token_buffer[128];
     u32 offset = 0;
     bool after_modrm = false;
-    while (offset < form.pattern.length)
+    String8 pattern_span = buster_x86_metadata_string_span(form.pattern);
+    while (offset < pattern_span.length)
     {
-        while (offset < form.pattern.length && buster_x86_metadata_is_space(buster_x86_metadata_string_byte(form.pattern, offset)))
+        while (offset < pattern_span.length && buster_x86_metadata_is_space(pattern_span.pointer[offset]))
             offset += 1;
-        if (offset == form.pattern.length) break;
+        if (offset == pattern_span.length) break;
         u32 start = offset;
-        while (offset < form.pattern.length && !buster_x86_metadata_is_space(buster_x86_metadata_string_byte(form.pattern, offset)))
+        while (offset < pattern_span.length && !buster_x86_metadata_is_space(pattern_span.pointer[offset]))
             offset += 1;
         u32 length = offset - start;
         if (length >= BUSTER_ARRAY_LENGTH(token_buffer))
@@ -830,7 +853,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
         }
         u32 token_index = 0;
         for (; token_index < length; token_index += 1)
-            token_buffer[token_index] = buster_x86_metadata_string_byte(form.pattern, start + token_index);
+            token_buffer[token_index] = pattern_span.pointer[start + token_index];
         u32 value = 0;
         if (length >= 3 && token_buffer[0] == '0' && (token_buffer[1] == 'x' || token_buffer[1] == 'X'))
         {
@@ -2076,12 +2099,14 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_count(BusterX86Me
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_contains(BusterX86MetadataString atom, String8 needle)
 {
     if (!needle.length || atom.length < needle.length) return false;
-    for (u32 offset = 0; offset + needle.length <= atom.length; offset += 1)
+    String8 span = buster_x86_metadata_string_span(atom);
+    if (span.length < needle.length) return false;
+    for (u32 offset = 0; offset + needle.length <= span.length; offset += 1)
     {
         bool equal = true;
         for (u32 index = 0; index < needle.length; index += 1)
         {
-            if (buster_x86_metadata_string_byte(atom, offset + index) != needle.pointer[index])
+            if (span.pointer[offset + index] != needle.pointer[index])
             {
                 equal = false;
                 break;
@@ -2108,9 +2133,11 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_effective_field_source(BusterX86
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_equal(BusterX86MetadataString atom, String8 literal)
 {
     if (atom.length != literal.length || (!literal.pointer && literal.length)) return false;
-    for (u32 index = 0; index < atom.length; index += 1)
+    String8 span = buster_x86_metadata_string_span(atom);
+    if (span.length != atom.length) return false;
+    for (u32 index = 0; index < span.length; index += 1)
     {
-        if (buster_x86_metadata_string_byte(atom, index) != (u8)literal.pointer[index]) return false;
+        if ((u8)span.pointer[index] != (u8)literal.pointer[index]) return false;
     }
     return true;
 }
@@ -2118,9 +2145,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_equal(BusterX86MetadataSt
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_prefix(BusterX86MetadataString atom, String8 prefix)
 {
     if (atom.length <= prefix.length) return false;
+    String8 span = buster_x86_metadata_string_span(atom);
+    if (span.length < prefix.length) return false;
     for (u32 index = 0; index < prefix.length; index += 1)
     {
-        if (buster_x86_metadata_string_byte(atom, index) != (u8)prefix.pointer[index]) return false;
+        if ((u8)span.pointer[index] != (u8)prefix.pointer[index]) return false;
     }
     return true;
 }
@@ -2446,10 +2475,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_fixed_register_matches(BusterX
         // R31/... .  Keep the identity check exact without a mnemonic table
         // exception for each architectural register.
         String8 gpr_prefix = S8("XED_REG_R");
-        bool prefix_match = metadata.atom.length > gpr_prefix.length;
+        String8 atom_span = buster_x86_metadata_string_span(metadata.atom);
+        bool prefix_match = metadata.atom.length > gpr_prefix.length && atom_span.length == metadata.atom.length;
         u32 prefix_index = 0;
         for (; prefix_match && prefix_index < gpr_prefix.length; prefix_index += 1)
-            prefix_match &= buster_x86_metadata_string_byte(metadata.atom, prefix_index) == (u8)gpr_prefix.pointer[prefix_index];
+            prefix_match &= (u8)atom_span.pointer[prefix_index] == (u8)gpr_prefix.pointer[prefix_index];
         if (prefix_match)
         {
             u32 parsed = 0;
@@ -2457,7 +2487,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_fixed_register_matches(BusterX
             u32 index = (u32)gpr_prefix.length;
             for (; index < metadata.atom.length; index += 1)
             {
-                u8 character = buster_x86_metadata_string_byte(metadata.atom, index);
+                u8 character = (u8)atom_span.pointer[index];
                 if (character < '0' || character > '9') break;
                 u32 digit = (u32)character - (u32)'0';
                 if (parsed > (UINT16_MAX - digit) / 10u) break;
@@ -2469,7 +2499,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_fixed_register_matches(BusterX
                 u16 width = 64;
                 if (index + 1 == metadata.atom.length)
                 {
-                    u8 suffix = buster_x86_metadata_string_byte(metadata.atom, index);
+                    u8 suffix = (u8)atom_span.pointer[index];
                     width = suffix == 'D' ? 32 : suffix == 'W' ? 16 : suffix == 'B' ? 8 : 0;
                 }
                 else if (index != metadata.atom.length)
@@ -2545,9 +2575,10 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_fixed_register_matches(BusterX
         if (prefix.length)
         {
             u32 parsed = 0;
+            String8 digits_span = buster_x86_metadata_string_span(metadata.atom);
             for (u32 index = (u32)prefix.length; index < metadata.atom.length; index += 1)
             {
-                u8 character = buster_x86_metadata_string_byte(metadata.atom, index);
+                u8 character = index < digits_span.length ? (u8)digits_span.pointer[index] : 0;
                 if (character < '0' || character > '9')
                 {
                     parsed = UINT32_MAX;
@@ -2898,12 +2929,14 @@ struct BusterX86MetadataAddressEncoding
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_string_has(BusterX86MetadataString string, String8 needle)
 {
     if (!needle.length || string.length < needle.length) return false;
-    for (u32 offset = 0; offset + needle.length <= string.length; offset += 1)
+    String8 span = buster_x86_metadata_string_span(string);
+    if (span.length < needle.length) return false;
+    for (u32 offset = 0; offset + needle.length <= span.length; offset += 1)
     {
         bool equal = true;
         for (u32 index = 0; index < needle.length; index += 1)
         {
-            if (buster_x86_metadata_string_byte(string, offset + index) != needle.pointer[index])
+            if (span.pointer[offset + index] != needle.pointer[index])
             {
                 equal = false;
                 break;
@@ -5658,9 +5691,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_string_input_equal(u32 offset, Stri
 {
     u32 length = 0;
     if (!buster_x86_metadata_string_offset_terminated(offset, &length) || length != input.length) return false;
+    String8 pooled = buster_x86_metadata_pool_span(offset, length);
+    if (pooled.length != length) return false;
     for (u32 index = 0; index < length; index += 1)
     {
-        char8 left = buster_x86_metadata_pool_byte((u64)offset + index);
+        char8 left = pooled.pointer[index];
         char8 right = input.pointer[index];
         if (buster_x86_metadata_lowercase_character(left) != buster_x86_metadata_lowercase_character(right)) return false;
     }
