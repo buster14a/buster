@@ -501,7 +501,9 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                 }
                 if (it < top && *it != '\n' && *it != '\r')
                 {
-                    it += tokenizer_utf8_sequence_length(it, top);
+                    // ASCII bytes are always one-byte sequences; the call is
+                    // reserved for lead bytes that need validation.
+                    it += (u8)*it < 0x80u ? 1 : tokenizer_utf8_sequence_length(it, top);
                 }
 
                 while (it < top && *it != '\n' && *it != '\r')
@@ -515,7 +517,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                     {
                         break;
                     }
-                    it += tokenizer_utf8_sequence_length(it, top);
+                    it += (u8)*it < 0x80u ? 1 : tokenizer_utf8_sequence_length(it, top);
                 }
             }
         }
@@ -546,7 +548,7 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
                 {
                     recovery = it;
                 }
-                it += tokenizer_utf8_sequence_length(it, top);
+                it += (u8)*it < 0x80u ? 1 : tokenizer_utf8_sequence_length(it, top);
             }
             if (!terminated && recovery)
             {

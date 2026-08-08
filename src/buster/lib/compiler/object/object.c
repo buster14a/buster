@@ -6380,6 +6380,95 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind object_section_kind_for_dwarf(DwarfSection
     return OBJECT_SECTION_COUNT;
 }
 
+// Symbol references resolve by the first defined then the first undefined
+// name match in symbol index order. The probe table records the lowest-index
+// match of each class per name, so a lookup returns exactly what the linear
+// scan over the symbol table would, without rescanning it per relocation.
+typedef struct ObjectSymbolNameSlot ObjectSymbolNameSlot;
+struct ObjectSymbolNameSlot
+{
+    String8 name;
+    u32 defined;
+    u32 undefined;
+    bool used;
+};
+
+typedef struct ObjectSymbolNameIndex ObjectSymbolNameIndex;
+struct ObjectSymbolNameIndex
+{
+    ObjectSymbolNameSlot* slots;
+    u32 mask;
+};
+
+BUSTER_GLOBAL_LOCAL u64 object_symbol_name_hash(String8 name)
+{
+    u64 hash = 1469598103934665603ull;
+    for (u64 index = 0; index < name.length; index += 1)
+    {
+        hash ^= name.pointer[index];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+BUSTER_GLOBAL_LOCAL ObjectSymbolNameSlot* object_symbol_name_slot(ObjectSymbolNameIndex table, String8 name)
+{
+    u32 mask = table.mask;
+    u32 slot_index = (u32)(object_symbol_name_hash(name) & mask);
+    ObjectSymbolNameSlot* slot = table.slots + slot_index;
+    while (slot->used && !string_equal(slot->name, name))
+    {
+        slot_index = (slot_index + 1) & mask;
+        slot = table.slots + slot_index;
+    }
+    return slot;
+}
+
+BUSTER_GLOBAL_LOCAL void object_symbol_name_index_add(ObjectSymbolNameIndex table, ObjectSymbol* symbol, u32 symbol_index)
+{
+    ObjectSymbolNameSlot* slot = object_symbol_name_slot(table, symbol->name);
+    if (!slot->used)
+    {
+        slot->used = true;
+        slot->name = symbol->name;
+        slot->defined = UINT32_MAX;
+        slot->undefined = UINT32_MAX;
+    }
+    if (symbol->section != OBJECT_SECTION_UNDEFINED)
+    {
+        if (slot->defined == UINT32_MAX)
+        {
+            slot->defined = symbol_index;
+        }
+    }
+    else if (slot->undefined == UINT32_MAX)
+    {
+        slot->undefined = symbol_index;
+    }
+}
+
+// symbol_capacity bounds every add the caller will make, including symbols it
+// appends after building; the table stays under half full so probing stays
+// short.
+BUSTER_GLOBAL_LOCAL ObjectSymbolNameIndex object_symbol_name_index_build(Arena* arena, ObjectSymbol* symbols, u32 symbol_count, u64 symbol_capacity)
+{
+    u64 capacity = 16;
+    while (capacity < symbol_capacity * 2 + 1)
+    {
+        capacity <<= 1;
+    }
+    ObjectSymbolNameIndex table = {
+        .slots = arena_allocate(arena, ObjectSymbolNameSlot, capacity),
+        .mask = (u32)(capacity - 1),
+    };
+    memset(table.slots, 0, sizeof(*table.slots) * capacity);
+    for (u32 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
+    {
+        object_symbol_name_index_add(table, symbols + symbol_index, symbol_index);
+    }
+    return table;
+}
+
 // Appends the built DWARF sections plus local base symbols carrying the
 // relocations: 64-bit address slots resolve against the text base and 32-bit
 // slots hold offsets into a sibling debug section that shift when objects are
@@ -6418,20 +6507,18 @@ BUSTER_GLOBAL_LOCAL void object_append_dwarf(ObjectFile* object, DwarfResult bui
             .kind = OBJECT_SYMBOL_DATA,
         };
     }
+    TemporalArena name_temporary = scratch_begin(0, 0);
+    ObjectSymbolNameIndex name_index = object_symbol_name_index_build(name_temporary.arena, object->symbols, object->symbol_count, object->symbol_count);
     for (u32 relocation_index = 0; relocation_index < built.relocation_count; relocation_index += 1)
     {
         DwarfRelocation relocation = built.relocations[relocation_index];
         u32 relocation_symbol = relocation.address ? text_symbol : debug_symbols[relocation.target];
         if (relocation.symbol_address && relocation.symbol_name.length)
         {
-            for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
+            ObjectSymbolNameSlot* slot = object_symbol_name_slot(name_index, relocation.symbol_name);
+            if (slot->used && slot->defined != UINT32_MAX)
             {
-                ObjectSymbol* candidate = object->symbols + symbol_index;
-                if (candidate->section != OBJECT_SECTION_UNDEFINED && string_equal(candidate->name, relocation.symbol_name))
-                {
-                    relocation_symbol = symbol_index;
-                    break;
-                }
+                relocation_symbol = slot->defined;
             }
         }
         object->relocations[object->relocation_count++] = (ObjectRelocation){
@@ -6442,6 +6529,7 @@ BUSTER_GLOBAL_LOCAL void object_append_dwarf(ObjectFile* object, DwarfResult bui
             .kind = relocation.address ? OBJECT_RELOCATION_ABSOLUTE64 : OBJECT_RELOCATION_ABSOLUTE32,
         };
     }
+    scratch_end(name_temporary);
 }
 
 BUSTER_GLOBAL_LOCAL bool object_append_dwarf_cfi(ObjectFile* object, DwarfCfiResult built)
@@ -7717,6 +7805,23 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         };
     }
     result.relocations = arena_allocate(arena, ObjectRelocation, module->relocation_count + metadata_relocation_count);
+    Arena* name_conflicts[] = {
+        arena,
+    };
+    TemporalArena name_temporary = scratch_begin(name_conflicts, BUSTER_ARRAY_LENGTH(name_conflicts));
+    u32 entry_symbol_capacity = program->symbols.count ? program->symbols.count : 1;
+    u32* entry_by_symbol = arena_allocate(name_temporary.arena, u32, entry_symbol_capacity);
+    memset(entry_by_symbol, 0xFF, sizeof(*entry_by_symbol) * entry_symbol_capacity);
+    for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
+    {
+        u32 symbol_value = module->entries[entry_index].symbol.value;
+        if (symbol_value < entry_symbol_capacity && entry_by_symbol[symbol_value] == UINT32_MAX)
+        {
+            entry_by_symbol[symbol_value] = entry_index;
+        }
+    }
+    ObjectSymbolNameIndex name_index = object_symbol_name_index_build(name_temporary.arena, result.symbols, result.symbol_count,
+                                                                      (u64)result.symbol_count + module->relocation_count);
     for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
     {
         CodegenModuleRelocation source = module->relocations[relocation_index];
@@ -7729,38 +7834,16 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         if (!target_symbol || source.source >= CODEGEN_MODULE_RELOCATION_SOURCE_COUNT || source.offset >= source_data.length)
         {
             result.error = OBJECT_ERROR_INVALID_INPUT;
-            return result;
+            break;
         }
-        u32 symbol_index = UINT32_MAX;
-        for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
-        {
-            if (module->entries[entry_index].symbol.value == source.symbol.value)
-            {
-                symbol_index = entry_index;
-                break;
-            }
-        }
+        u32 symbol_index = source.symbol.value < entry_symbol_capacity ? entry_by_symbol[source.symbol.value] : UINT32_MAX;
         String8 name = target_symbol->link_name.length ? target_symbol->link_name : target_symbol->name;
         if (symbol_index == UINT32_MAX)
         {
-            for (u32 existing = 0; existing < result.symbol_count; existing += 1)
+            ObjectSymbolNameSlot* slot = object_symbol_name_slot(name_index, name);
+            if (slot->used)
             {
-                if (result.symbols[existing].section != OBJECT_SECTION_UNDEFINED && string_equal(result.symbols[existing].name, name))
-                {
-                    symbol_index = existing;
-                    break;
-                }
-            }
-        }
-        if (symbol_index == UINT32_MAX)
-        {
-            for (u32 existing = 0; existing < result.symbol_count; existing += 1)
-            {
-                if (result.symbols[existing].section == OBJECT_SECTION_UNDEFINED && string_equal(result.symbols[existing].name, name))
-                {
-                    symbol_index = existing;
-                    break;
-                }
+                symbol_index = slot->defined != UINT32_MAX ? slot->defined : slot->undefined;
             }
         }
         if (symbol_index == UINT32_MAX)
@@ -7772,6 +7855,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                 .kind = target_symbol->kind == IR_SYMBOL_DATA ? OBJECT_SYMBOL_DATA : OBJECT_SYMBOL_FUNCTION,
                 .global = true,
             };
+            object_symbol_name_index_add(name_index, &result.symbols[symbol_index], symbol_index);
         }
         ObjectRelocationKind kind =
             source.thread_local_index && source.aarch64 && source.thread_local_low              ? OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12
@@ -7803,6 +7887,11 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .symbol = symbol_index,
             .kind = kind,
         };
+    }
+    scratch_end(name_temporary);
+    if (result.error != OBJECT_ERROR_NONE)
+    {
+        return result;
     }
     object_append_dwarf(&result, dwarf);
     object_append_codeview(&result, codeview);

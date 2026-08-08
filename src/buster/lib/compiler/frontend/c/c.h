@@ -574,6 +574,31 @@ struct CParserResult
     u32 diagnostic_capacity;
 };
 
+// (kind, tag) -> oldest matching aggregate type id. Slots can go stale when a
+// speculative type parse rolls the result back, so lookups validate the
+// recorded id against the live type table and fall back to the linear scan;
+// staleness costs time, never a wrong answer. The header lives outside
+// CParseResult because rollback restores that struct wholesale from a
+// checkpoint copy while the slot storage keeps its contents; fill only ever
+// grows, which is what guarantees probe termination under the half-full cap.
+typedef struct CAggregateLookupSlot CAggregateLookupSlot;
+struct CAggregateLookupSlot
+{
+    String8 tag;
+    u32 kind;
+    u32 type_index;
+    bool used;
+};
+
+typedef struct CAggregateLookup CAggregateLookup;
+struct CAggregateLookup
+{
+    CAggregateLookupSlot* slots;
+    u32 slot_count;
+    u32 fill;
+    bool saturated;
+};
+
 typedef struct CParseResult CParseResult;
 struct CParseResult
 {
@@ -591,6 +616,7 @@ struct CParseResult
     CScope* scopes;
     CEntityId* entity_lookup_buckets;
     CEntityId* typedef_lookup_buckets;
+    CAggregateLookup* aggregate_lookup;
     CIdentifierUse* identifier_uses;
     u32* identifier_use_by_token;
     // Children of each scope in ascending scope order, built by

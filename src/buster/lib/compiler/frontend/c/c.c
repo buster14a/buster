@@ -223,15 +223,75 @@ BUSTER_GLOBAL_LOCAL String8 const c_punctuator_spellings[C_PUNCTUATOR_COUNT] = {
     [C_PUNCTUATOR_BACKSLASH] = S8_INITIALIZER("\\"),
 };
 
+// First-byte dispatch over c_punctuator_spellings, derived from the table at
+// first use so the spellings stay the single source of truth. Enum order is
+// longest-first, so each per-byte group inherits maximal munch. Without it,
+// every lexed punctuator paid a linear scan of the whole table — a `;` sat
+// behind ~52 failed memcmp probes.
+typedef struct CPunctuatorDispatch CPunctuatorDispatch;
+struct CPunctuatorDispatch
+{
+    u8 start;
+    u8 count;
+};
+
+BUSTER_GLOBAL_LOCAL u8 c_punctuator_dispatch_order[C_PUNCTUATOR_COUNT];
+BUSTER_GLOBAL_LOCAL CPunctuatorDispatch c_punctuator_dispatch[256];
+BUSTER_GLOBAL_LOCAL bool c_punctuator_dispatch_built;
+
+BUSTER_GLOBAL_LOCAL void c_punctuator_dispatch_build(void)
+{
+    u32 cursor = 0;
+    for (u32 first = 0; first < 256; first += 1)
+    {
+        u32 start = cursor;
+        for (u32 punctuator_index = C_PUNCTUATOR_NONE + 1; punctuator_index < C_PUNCTUATOR_COUNT; punctuator_index += 1)
+        {
+            String8 spelling = c_punctuator_spellings[punctuator_index];
+            if (spelling.length && (u8)spelling.pointer[0] == first)
+            {
+                c_punctuator_dispatch_order[cursor++] = (u8)punctuator_index;
+            }
+        }
+        c_punctuator_dispatch[first] = (CPunctuatorDispatch){
+            .start = (u8)start,
+            .count = (u8)(cursor - start),
+        };
+    }
+    c_punctuator_dispatch_built = true;
+}
+
 BUSTER_GLOBAL_LOCAL u64 c_punctuator_length(String8 source, u64 offset, CPunctuator* punctuator_out)
 {
-    for (u64 punctuator_index = C_PUNCTUATOR_NONE + 1; punctuator_index < C_PUNCTUATOR_COUNT; punctuator_index += 1)
+    if (!c_punctuator_dispatch_built)
     {
-        String8 punctuator = c_punctuator_spellings[punctuator_index];
-        if (punctuator.length <= source.length - offset && memcmp(source.pointer + offset, punctuator.pointer, punctuator.length) == 0)
+        c_punctuator_dispatch_build();
+    }
+    if (offset < source.length)
+    {
+        CPunctuatorDispatch dispatch = c_punctuator_dispatch[(u8)source.pointer[offset]];
+        for (u32 order_index = 0; order_index < dispatch.count; order_index += 1)
         {
-            *punctuator_out = (CPunctuator)punctuator_index;
-            return punctuator.length;
+            u32 punctuator_index = c_punctuator_dispatch_order[dispatch.start + order_index];
+            String8 punctuator = c_punctuator_spellings[punctuator_index];
+            if (punctuator.length > source.length - offset)
+            {
+                continue;
+            }
+            bool match = true;
+            for (u64 byte_index = 1; byte_index < punctuator.length; byte_index += 1)
+            {
+                if (source.pointer[offset + byte_index] != punctuator.pointer[byte_index])
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (match)
+            {
+                *punctuator_out = (CPunctuator)punctuator_index;
+                return punctuator.length;
+            }
         }
     }
     *punctuator_out = C_PUNCTUATOR_NONE;
@@ -3777,25 +3837,67 @@ BUSTER_GLOBAL_LOCAL bool c_parse_auto_type_word(String8 spelling)
     return string_equal(spelling, S8("__auto_type"));
 }
 
+// The keyword set is probed once per identifier from several parser scan
+// loops, so it is a hashed set built once from the spellings table rather
+// than a linear walk that re-derived every keyword's length per query.
+BUSTER_GLOBAL_LOCAL String8 const c_declaration_keyword_spellings[] = {
+    S8_INITIALIZER("auto"),          S8_INITIALIZER("break"),     S8_INITIALIZER("case"),           S8_INITIALIZER("char"),
+    S8_INITIALIZER("const"),         S8_INITIALIZER("continue"),  S8_INITIALIZER("default"),        S8_INITIALIZER("do"),
+    S8_INITIALIZER("double"),        S8_INITIALIZER("else"),      S8_INITIALIZER("enum"),           S8_INITIALIZER("extern"),
+    S8_INITIALIZER("float"),         S8_INITIALIZER("for"),       S8_INITIALIZER("goto"),           S8_INITIALIZER("if"),
+    S8_INITIALIZER("inline"),        S8_INITIALIZER("int"),       S8_INITIALIZER("long"),           S8_INITIALIZER("register"),
+    S8_INITIALIZER("restrict"),      S8_INITIALIZER("return"),    S8_INITIALIZER("short"),          S8_INITIALIZER("signed"),
+    S8_INITIALIZER("sizeof"),        S8_INITIALIZER("static"),    S8_INITIALIZER("struct"),         S8_INITIALIZER("switch"),
+    S8_INITIALIZER("typedef"),       S8_INITIALIZER("union"),     S8_INITIALIZER("unsigned"),       S8_INITIALIZER("void"),
+    S8_INITIALIZER("volatile"),      S8_INITIALIZER("while"),     S8_INITIALIZER("_Alignas"),       S8_INITIALIZER("_Alignof"),
+    S8_INITIALIZER("_Atomic"),       S8_INITIALIZER("_Bool"),     S8_INITIALIZER("_Complex"),       S8_INITIALIZER("_Generic"),
+    S8_INITIALIZER("_Imaginary"),    S8_INITIALIZER("_Noreturn"), S8_INITIALIZER("_Static_assert"), S8_INITIALIZER("_Thread_local"),
+    S8_INITIALIZER("__attribute__"), S8_INITIALIZER("__declspec"), S8_INITIALIZER("__auto_type"),   S8_INITIALIZER("__thread"),
+    S8_INITIALIZER("__typeof__"),    S8_INITIALIZER("__extension__"), S8_INITIALIZER("__inline"),   S8_INITIALIZER("__inline__"),
+    S8_INITIALIZER("__const"),       S8_INITIALIZER("__const__"), S8_INITIALIZER("__volatile"),     S8_INITIALIZER("__volatile__"),
+    S8_INITIALIZER("__restrict"),    S8_INITIALIZER("__restrict__"), S8_INITIALIZER("__signed"),    S8_INITIALIZER("__signed__"),
+    S8_INITIALIZER("__asm"),         S8_INITIALIZER("__asm__"),   S8_INITIALIZER("__alignof"),      S8_INITIALIZER("__alignof__"),
+    S8_INITIALIZER("_Nonnull"),      S8_INITIALIZER("_Nullable"), S8_INITIALIZER("_Null_unspecified"),
+};
+
+enum
+{
+    C_DECLARATION_KEYWORD_SLOT_COUNT = 256,
+};
+
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_declaration_keyword_spellings) < C_DECLARATION_KEYWORD_SLOT_COUNT / 2);
+
+BUSTER_GLOBAL_LOCAL u8 c_declaration_keyword_slots[C_DECLARATION_KEYWORD_SLOT_COUNT];
+BUSTER_GLOBAL_LOCAL bool c_declaration_keyword_slots_built;
+
+BUSTER_GLOBAL_LOCAL void c_declaration_keyword_slots_build(void)
+{
+    for (u32 keyword_index = 0; keyword_index < BUSTER_ARRAY_LENGTH(c_declaration_keyword_spellings); keyword_index += 1)
+    {
+        u32 slot = (u32)(c_macro_name_hash(c_declaration_keyword_spellings[keyword_index]) & (C_DECLARATION_KEYWORD_SLOT_COUNT - 1));
+        while (c_declaration_keyword_slots[slot])
+        {
+            slot = (slot + 1) & (C_DECLARATION_KEYWORD_SLOT_COUNT - 1);
+        }
+        c_declaration_keyword_slots[slot] = (u8)(keyword_index + 1);
+    }
+    c_declaration_keyword_slots_built = true;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_declaration_keyword(String8 spelling)
 {
-    static char const* keywords[] = {
-        "auto",          "break",     "case",           "char",          "const",         "continue",   "default",      "do",
-        "double",        "else",      "enum",           "extern",        "float",         "for",        "goto",         "if",
-        "inline",        "int",       "long",           "register",      "restrict",      "return",     "short",        "signed",
-        "sizeof",        "static",    "struct",         "switch",        "typedef",       "union",      "unsigned",     "void",
-        "volatile",      "while",     "_Alignas",       "_Alignof",      "_Atomic",       "_Bool",      "_Complex",     "_Generic",
-        "_Imaginary",    "_Noreturn", "_Static_assert", "_Thread_local", "__attribute__", "__declspec", "__auto_type", "__thread",     "__typeof__",
-        "__extension__", "__inline",  "__inline__",     "__const",       "__const__",     "__volatile", "__volatile__", "__restrict",
-        "__restrict__",  "__signed",  "__signed__",     "__asm",         "__asm__",       "__alignof",   "__alignof__",   "_Nonnull",
-        "_Nullable",     "_Null_unspecified",
-    };
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(keywords); index += 1)
+    if (!c_declaration_keyword_slots_built)
     {
-        if (string_equal(spelling, string_from_pointer((char8*)keywords[index])))
+        c_declaration_keyword_slots_build();
+    }
+    u32 slot = (u32)(c_macro_name_hash(spelling) & (C_DECLARATION_KEYWORD_SLOT_COUNT - 1));
+    while (c_declaration_keyword_slots[slot])
+    {
+        if (string_equal(spelling, c_declaration_keyword_spellings[c_declaration_keyword_slots[slot] - 1]))
         {
             return true;
         }
+        slot = (slot + 1) & (C_DECLARATION_KEYWORD_SLOT_COUNT - 1);
     }
     return false;
 }
@@ -3936,8 +4038,11 @@ struct CTypeParseMachine
     u32 incomplete_array_chain_capacity;
     Arena* scratch_arena;
     CParsePromotedMemberWork* promoted_member_work;
-    bool* promoted_member_visited;
+    // Visited marks are generation stamps, not bools: a query is a generation
+    // bump instead of a memset over one slot per type in the unit.
+    u32* promoted_member_visited;
     u32 promoted_member_capacity;
+    u32 promoted_member_generation;
     CTypeId result_type;
     u32 result_index;
     u32 frame_count;
@@ -6395,8 +6500,14 @@ BUSTER_GLOBAL_LOCAL bool c_parse_promoted_member_type(CTypeParseMachine* machine
         return false;
     }
     CParsePromotedMemberWork* work = machine->promoted_member_work;
-    bool* visited = machine->promoted_member_visited;
-    memset(visited, 0, sizeof(*visited) * capacity);
+    u32* visited = machine->promoted_member_visited;
+    machine->promoted_member_generation += 1;
+    if (!machine->promoted_member_generation)
+    {
+        memset(visited, 0, sizeof(*visited) * capacity);
+        machine->promoted_member_generation = 1;
+    }
+    u32 generation = machine->promoted_member_generation;
     u32 work_count = 1;
     u32 work_index = 0;
     bool found = false;
@@ -6411,11 +6522,11 @@ BUSTER_GLOBAL_LOCAL bool c_parse_promoted_member_type(CTypeParseMachine* machine
         {
             type_id = result->types[type_id.value].unqualified_type;
         }
-        if (type_id.value >= result->type_count || visited[type_id.value])
+        if (type_id.value >= result->type_count || visited[type_id.value] == generation)
         {
             continue;
         }
-        visited[type_id.value] = true;
+        visited[type_id.value] = generation;
         if (found && current.depth > found_depth)
         {
             break;
@@ -6457,7 +6568,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_promoted_member_type(CTypeParseMachine* machine
                 continue;
             }
             CTypeKind child_kind = result->types[child_id.value].kind;
-            if ((child_kind != C_TYPE_STRUCT && child_kind != C_TYPE_UNION) || visited[child_id.value] || work_count >= capacity)
+            if ((child_kind != C_TYPE_STRUCT && child_kind != C_TYPE_UNION) || visited[child_id.value] == generation || work_count >= capacity)
             {
                 continue;
             }
@@ -7107,6 +7218,46 @@ BUSTER_GLOBAL_LOCAL void c_parse_infer_file_array_bounds(CTypeParseMachine* mach
     }
 }
 
+BUSTER_GLOBAL_LOCAL void c_parse_aggregate_lookup_insert(CParseResult* result, CTypeId id)
+{
+    CAggregateLookup* lookup = result->aggregate_lookup;
+    CType* type = &result->types[id.value];
+    if (!lookup || lookup->saturated || !type->tag.length)
+    {
+        return;
+    }
+    u32 mask = lookup->slot_count - 1;
+    u32 slot_index = (u32)(c_macro_name_hash(type->tag) & mask) ^ ((u32)type->kind & mask);
+    CAggregateLookupSlot* slot = lookup->slots + slot_index;
+    while (slot->used && (slot->kind != (u32)type->kind || !string_equal(slot->tag, type->tag)))
+    {
+        slot_index = (slot_index + 1) & mask;
+        slot = lookup->slots + slot_index;
+    }
+    if (slot->used)
+    {
+        // Keep the recorded id only while it still names an older live type
+        // with this key; a rolled-back id is replaced by the new one.
+        u32 existing = slot->type_index;
+        if (existing < id.value && result->types[existing].kind == type->kind && string_equal(result->types[existing].tag, type->tag))
+        {
+            return;
+        }
+        slot->type_index = id.value;
+        return;
+    }
+    if (lookup->fill >= lookup->slot_count / 2)
+    {
+        lookup->saturated = true;
+        return;
+    }
+    lookup->fill += 1;
+    slot->used = true;
+    slot->tag = type->tag;
+    slot->kind = (u32)type->kind;
+    slot->type_index = id.value;
+}
+
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_add_type(CParseResult* result, CType type)
 {
     if (!c_parse_result_reserve_types(result, 1))
@@ -7117,6 +7268,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_add_type(CParseResult* result, CType type)
         .value = result->type_count,
     };
     result->types[result->type_count++] = type;
+    c_parse_aggregate_lookup_insert(result, id);
     return id;
 }
 
@@ -7511,6 +7663,35 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_aggregate_lookup(CParseResult* result, CType
     if (!tag.length)
     {
         return C_TYPE_ID_INVALID;
+    }
+    CAggregateLookup* lookup = result->aggregate_lookup;
+    if (lookup)
+    {
+        u32 mask = lookup->slot_count - 1;
+        u32 slot_index = (u32)(c_macro_name_hash(tag) & mask) ^ ((u32)kind & mask);
+        CAggregateLookupSlot* slot = lookup->slots + slot_index;
+        bool stale = false;
+        while (slot->used)
+        {
+            if (slot->kind == (u32)kind && string_equal(slot->tag, tag))
+            {
+                u32 type_index = slot->type_index;
+                if (type_index < result->type_count && result->types[type_index].kind == kind && string_equal(result->types[type_index].tag, tag))
+                {
+                    return (CTypeId){
+                        .value = type_index,
+                    };
+                }
+                stale = true;
+                break;
+            }
+            slot_index = (slot_index + 1) & mask;
+            slot = lookup->slots + slot_index;
+        }
+        if (!stale && !lookup->saturated)
+        {
+            return C_TYPE_ID_INVALID;
+        }
     }
     for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
     {
@@ -8881,7 +9062,8 @@ BUSTER_GLOBAL_LOCAL void c_type_parse_parameter_step(CTypeParseMachine* machine,
     {
         for (u32 index = frame->start; index < frame->end; index += 1)
         {
-            if (preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER && string_equal(preprocess.tokens[index].spelling, S8("_Alignas")))
+            if (preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER && preprocess.tokens[index].spelling.length == S8("_Alignas").length &&
+                string_equal(preprocess.tokens[index].spelling, S8("_Alignas")))
             {
                 c_parse_diagnostic(result, preprocess.tokens[index].location, C_DIAGNOSTIC_INVALID_ALIGNMENT,
                                    S8("alignment specifier cannot be applied to a parameter"));
@@ -9010,16 +9192,16 @@ BUSTER_GLOBAL_LOCAL void c_type_parse_parenthesized_step(CTypeParseMachine* mach
         u32 bracket_depth = 0;
         while (frame->has_name && frame->close_index < frame->end)
         {
-            CToken token = preprocess.tokens[frame->close_index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+            const CToken* token = &preprocess.tokens[frame->close_index];
+            if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_BRACKET))
             {
                 bracket_depth += 1;
             }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && bracket_depth)
+            else if (c_token_is_punctuator(token, C_PUNCTUATOR_RIGHT_BRACKET) && bracket_depth)
             {
                 bracket_depth -= 1;
             }
-            else if (!bracket_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            else if (!bracket_depth && c_token_is_punctuator(token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
                 break;
             }
@@ -9080,21 +9262,21 @@ BUSTER_GLOBAL_LOCAL void c_type_parse_parenthesized_step(CTypeParseMachine* mach
     {
         while (frame->scan_index < frame->end)
         {
-            CToken token = preprocess.tokens[frame->scan_index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            const CToken* token = &preprocess.tokens[frame->scan_index];
+            if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
                 frame->depth += 1;
                 frame->scan_index += 1;
                 continue;
             }
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && frame->depth > 1)
+            if (c_token_is_punctuator(token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && frame->depth > 1)
             {
                 frame->depth -= 1;
                 frame->scan_index += 1;
                 continue;
             }
-            bool segment_end = frame->depth == 1 && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA);
-            bool list_end = frame->depth == 1 && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            bool segment_end = frame->depth == 1 && c_token_is_punctuator(token, C_PUNCTUATOR_COMMA);
+            bool list_end = frame->depth == 1 && c_token_is_punctuator(token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             if (!segment_end && !list_end)
             {
                 frame->scan_index += 1;
@@ -13383,7 +13565,7 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
                                       BUSTER_ALIGN_OF(CParseExpressionTypeTask)) ||
         !c_type_parse_buffer_size_add(&machine_buffer_size, promoted_member_capacity, sizeof(CParsePromotedMemberWork),
                                       BUSTER_ALIGN_OF(CParsePromotedMemberWork)) ||
-        !c_type_parse_buffer_size_add(&machine_buffer_size, promoted_member_capacity, sizeof(bool), BUSTER_ALIGN_OF(bool)) ||
+        !c_type_parse_buffer_size_add(&machine_buffer_size, promoted_member_capacity, sizeof(u32), BUSTER_ALIGN_OF(u32)) ||
         !c_type_parse_buffer_size_add(&machine_buffer_size, incomplete_array_chain_capacity, sizeof(CTypeId), BUSTER_ALIGN_OF(CTypeId)) ||
         machine_buffer_size > UINT64_MAX - (BUSTER_KB(64) - 1))
     {
@@ -13411,7 +13593,7 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
         .incomplete_array_chain_capacity = incomplete_array_chain_capacity,
         .scratch_arena = machine_temporary.arena,
         .promoted_member_work = arena_allocate(machine_buffer_arena, CParsePromotedMemberWork, promoted_member_capacity),
-        .promoted_member_visited = arena_allocate(machine_buffer_arena, bool, promoted_member_capacity),
+        .promoted_member_visited = arena_allocate(machine_buffer_arena, u32, promoted_member_capacity),
         .promoted_member_capacity = promoted_member_capacity,
         .frame_capacity = type_frame_capacity,
         .mutation_capacity = type_mutation_capacity,
@@ -13450,6 +13632,15 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
     memset(result.entity_lookup_buckets, 0xff, sizeof(*result.entity_lookup_buckets) * result.entity_lookup_bucket_count);
     result.typedef_lookup_buckets = arena_allocate(arena, CEntityId, result.entity_lookup_bucket_count);
     memset(result.typedef_lookup_buckets, 0xff, sizeof(*result.typedef_lookup_buckets) * result.entity_lookup_bucket_count);
+    {
+        u32 aggregate_slot_count = 16384;
+        result.aggregate_lookup = arena_allocate(arena, CAggregateLookup, 1);
+        *result.aggregate_lookup = (CAggregateLookup){
+            .slots = arena_allocate(arena, CAggregateLookupSlot, aggregate_slot_count),
+            .slot_count = aggregate_slot_count,
+        };
+        memset(result.aggregate_lookup->slots, 0, sizeof(*result.aggregate_lookup->slots) * aggregate_slot_count);
+    }
     result.identifier_uses = arena_allocate(arena, CIdentifierUse, result.identifier_use_capacity);
     result.identifier_use_by_token = arena_allocate(arena, u32, result.identifier_use_by_token_capacity);
     memset(result.identifier_use_by_token, 0xff, sizeof(*result.identifier_use_by_token) * result.identifier_use_by_token_capacity);
@@ -14215,6 +14406,10 @@ struct CIrPointerTypeCache
     u32 capacity;
     u32 contains_pointer_count;
     u32 zero_reference_limit;
+    // Program types below this index have already been swept into by_element,
+    // so a cache miss sweeps only the types added since the previous miss
+    // instead of rescanning the whole table per query.
+    u32 sweep_watermark;
 };
 
 BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_pointer_type(IrProgram* program, CIrPointerTypeCache* cache, IrTypeId element)
@@ -14228,14 +14423,20 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_pointer_type(IrProgram* program, CIrPointe
     {
         return cached;
     }
-    for (u32 type_index = 0; type_index < program->types.count; type_index += 1)
+    for (u32 type_index = cache->sweep_watermark; type_index < program->types.count; type_index += 1)
     {
         IrType* type = &program->types.types[type_index];
-        if (!type->is_atomic && !type->is_nullptr && type->kind == IR_TYPE_POINTER && type->element_type.value == element.value)
+        if (!type->is_atomic && !type->is_nullptr && type->kind == IR_TYPE_POINTER && type->element_type.value < cache->capacity &&
+            cache->by_element[type->element_type.value].value == IR_ID_UNDERLYING_INVALID)
         {
-            cache->by_element[element.value] = type->id;
-            return type->id;
+            cache->by_element[type->element_type.value] = type->id;
         }
+    }
+    cache->sweep_watermark = program->types.count;
+    cached = cache->by_element[element.value];
+    if (cached.value != IR_ID_UNDERLYING_INVALID)
+    {
+        return cached;
     }
     IrTypeId result = ir_program_add_type(program, (IrType){
                                                            .name = S8("pointer"),
@@ -14848,6 +15049,12 @@ struct CIntegerIrBuilder
     Target target;
     IrSourceId source;
     IrInstructionId last_instruction;
+    // Predecessor of last_instruction within the current block, maintained by
+    // c_ir_append_instruction so popping the just-emitted load in the
+    // assignment rewrite does not walk the whole block chain. Block switches
+    // and tail edits leave it unknown; the pop falls back to the walk then.
+    IrInstructionId previous_instruction;
+    bool previous_instruction_known;
     String8 failure_message;
     u32 failure_token_index;
     u32 declaration_index;
@@ -16110,6 +16317,8 @@ BUSTER_GLOBAL_LOCAL IrInstructionId c_ir_append_instruction(CIntegerIrBuilder* b
     {
         block->first_instruction = id;
     }
+    builder->previous_instruction = builder->last_instruction;
+    builder->previous_instruction_known = true;
     builder->last_instruction = id;
     block->last_instruction = id;
     return id;
@@ -27203,6 +27412,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_switch_block(CIntegerIrBuilder* builder, IrBlockId
     }
     builder->current_block = block;
     builder->last_instruction = builder->function->blocks[block.value].last_instruction;
+    builder->previous_instruction_known = false;
     return true;
 }
 
@@ -27983,16 +28193,23 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder*
                         return;
                     }
                     IrInstructionId previous = IR_INSTRUCTION_ID_INVALID;
-                    IrInstructionId cursor = current_block->first_instruction;
-                    while (cursor.value != IR_ID_UNDERLYING_INVALID && cursor.value != definition_id.value)
+                    if (builder->previous_instruction_known)
                     {
-                        previous = cursor;
-                        cursor = builder->function->instructions[cursor.value].next;
+                        previous = builder->previous_instruction;
                     }
-                    if (cursor.value != definition_id.value)
+                    else
                     {
-                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                        return;
+                        IrInstructionId cursor = current_block->first_instruction;
+                        while (cursor.value != IR_ID_UNDERLYING_INVALID && cursor.value != definition_id.value)
+                        {
+                            previous = cursor;
+                            cursor = builder->function->instructions[cursor.value].next;
+                        }
+                        if (cursor.value != definition_id.value)
+                        {
+                            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                            return;
+                        }
                     }
                     if (previous.value == IR_ID_UNDERLYING_INVALID)
                     {
@@ -28004,6 +28221,7 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder*
                     }
                     current_block->last_instruction = previous;
                     builder->last_instruction = previous;
+                    builder->previous_instruction_known = false;
                     builder->function->instruction_count -= 1;
                     builder->function->value_count -= 1;
                     state->place = definition->operands[0];
@@ -28035,6 +28253,7 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder*
                     builder->function->instructions[definition_id.value].next = IR_INSTRUCTION_ID_INVALID;
                     current_block->last_instruction = definition_id;
                     builder->last_instruction = definition_id;
+                    builder->previous_instruction_known = false;
                     builder->function->instruction_count = definition_id.value + 1;
                     builder->function->value_count = candidate.value + 1;
                     state->place = candidate;
