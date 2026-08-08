@@ -531,6 +531,14 @@ BUSTER_GLOBAL_LOCAL bool ir_label_block_sets_equal(IrValueLabelMetadata* left, I
 BUSTER_F_DECL bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrValueId value_id)
 {
     IrValue* value_slot = function && value_id.value < function->value_count ? function->values + value_id.value : 0;
+    if (function && !function->label_metadata_count)
+    {
+        // With no metadata anywhere in the function every label-specific
+        // clause below is vacuous; only the value/type-layout requirements
+        // remain.
+        IrType* empty_value_type = program && value_slot ? ir_type_from_id(&program->types, value_slot->canonical_type) : 0;
+        return value_slot && (!program || (empty_value_type && empty_value_type->layout.resolved));
+    }
     IrValueLabelMetadata metadata = ir_value_label_metadata(function, value_id);
     IrValueLabelMetadata* value = value_slot ? &metadata : 0;
     IrType* value_type = program && value_slot ? ir_type_from_id(&program->types, value_slot->canonical_type) : 0;
@@ -1094,12 +1102,48 @@ BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFuncti
     {
         return true;
     }
-    IrValueLabelMetadata result_metadata = ir_value_label_metadata(function, value_id);
-    IrValueLabelMetadata* result = &result_metadata;
     IrInstruction* definition = function->instructions + result_slot->definition.value;
     IrValue* first_slot = definition->operand_count && definition->operands && definition->operands[0].value < function->value_count
                               ? function->values + definition->operands[0].value
                               : 0;
+    if (!function->label_metadata_count)
+    {
+        // With no metadata anywhere in the function, the full checks below
+        // reduce to the operand-existence requirements of each transfer rule
+        // (and LABEL_ADDRESS can never validate a metadata-free result).
+        switch (definition->opcode)
+        {
+        case IR_OPCODE_LOAD:
+        case IR_OPCODE_ATOMIC_LOAD:
+        case IR_OPCODE_CAST:
+        case IR_OPCODE_FIELD:
+        case IR_OPCODE_INDEX:
+        case IR_OPCODE_DEREFERENCE:
+            return first_slot != 0;
+        case IR_OPCODE_ARRAY:
+        case IR_OPCODE_AGGREGATE:
+        {
+            if (!program)
+            {
+                return true;
+            }
+            for (u32 operand_index = 0; operand_index < definition->operand_count; operand_index += 1)
+            {
+                if (!definition->operands || definition->operands[operand_index].value >= function->value_count)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        case IR_OPCODE_LABEL_ADDRESS:
+            return false;
+        default:
+            return true;
+        }
+    }
+    IrValueLabelMetadata result_metadata = ir_value_label_metadata(function, value_id);
+    IrValueLabelMetadata* result = &result_metadata;
     IrValueLabelMetadata first_metadata = first_slot ? ir_value_label_metadata(function, definition->operands[0]) : (IrValueLabelMetadata){0};
     IrValueLabelMetadata* first = first_slot ? &first_metadata : 0;
     switch (definition->opcode)
