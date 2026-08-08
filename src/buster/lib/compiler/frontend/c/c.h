@@ -19,6 +19,73 @@ typedef enum CTokenKind
     C_TOKEN_KIND_COUNT,
 } CTokenKind;
 
+// Every punctuator the lexer can produce, so that recognizing one is a scalar
+// compare instead of a string compare.  The declaration order is the lexer's
+// maximal-munch scan order: a spelling must precede every spelling it starts
+// with.  Digraphs stay distinct from the punctuators they spell, because
+// callers ask about a spelling and never about a meaning.
+typedef enum CPunctuator
+{
+    C_PUNCTUATOR_NONE,
+    C_PUNCTUATOR_HASH_HASH_DIGRAPH,
+    C_PUNCTUATOR_SHIFT_LEFT_ASSIGN,
+    C_PUNCTUATOR_SHIFT_RIGHT_ASSIGN,
+    C_PUNCTUATOR_ELLIPSIS,
+    C_PUNCTUATOR_ARROW,
+    C_PUNCTUATOR_PLUS_PLUS,
+    C_PUNCTUATOR_MINUS_MINUS,
+    C_PUNCTUATOR_SHIFT_LEFT,
+    C_PUNCTUATOR_SHIFT_RIGHT,
+    C_PUNCTUATOR_LESS_EQUAL,
+    C_PUNCTUATOR_GREATER_EQUAL,
+    C_PUNCTUATOR_EQUAL,
+    C_PUNCTUATOR_NOT_EQUAL,
+    C_PUNCTUATOR_AMPERSAND_AMPERSAND,
+    C_PUNCTUATOR_PIPE_PIPE,
+    C_PUNCTUATOR_STAR_ASSIGN,
+    C_PUNCTUATOR_SLASH_ASSIGN,
+    C_PUNCTUATOR_PERCENT_ASSIGN,
+    C_PUNCTUATOR_PLUS_ASSIGN,
+    C_PUNCTUATOR_MINUS_ASSIGN,
+    C_PUNCTUATOR_AMPERSAND_ASSIGN,
+    C_PUNCTUATOR_CARET_ASSIGN,
+    C_PUNCTUATOR_PIPE_ASSIGN,
+    C_PUNCTUATOR_HASH_HASH,
+    C_PUNCTUATOR_LEFT_BRACKET_DIGRAPH,
+    C_PUNCTUATOR_RIGHT_BRACKET_DIGRAPH,
+    C_PUNCTUATOR_LEFT_BRACE_DIGRAPH,
+    C_PUNCTUATOR_RIGHT_BRACE_DIGRAPH,
+    C_PUNCTUATOR_HASH_DIGRAPH,
+    C_PUNCTUATOR_LEFT_BRACKET,
+    C_PUNCTUATOR_RIGHT_BRACKET,
+    C_PUNCTUATOR_LEFT_PARENTHESIS,
+    C_PUNCTUATOR_RIGHT_PARENTHESIS,
+    C_PUNCTUATOR_LEFT_BRACE,
+    C_PUNCTUATOR_RIGHT_BRACE,
+    C_PUNCTUATOR_DOT,
+    C_PUNCTUATOR_AMPERSAND,
+    C_PUNCTUATOR_STAR,
+    C_PUNCTUATOR_PLUS,
+    C_PUNCTUATOR_MINUS,
+    C_PUNCTUATOR_TILDE,
+    C_PUNCTUATOR_EXCLAMATION,
+    C_PUNCTUATOR_SLASH,
+    C_PUNCTUATOR_PERCENT,
+    C_PUNCTUATOR_LESS,
+    C_PUNCTUATOR_GREATER,
+    C_PUNCTUATOR_CARET,
+    C_PUNCTUATOR_PIPE,
+    C_PUNCTUATOR_QUESTION,
+    C_PUNCTUATOR_COLON,
+    C_PUNCTUATOR_SEMICOLON,
+    C_PUNCTUATOR_ASSIGN,
+    C_PUNCTUATOR_COMMA,
+    C_PUNCTUATOR_HASH,
+    C_PUNCTUATOR_AT,
+    C_PUNCTUATOR_BACKSLASH,
+    C_PUNCTUATOR_COUNT,
+} CPunctuator;
+
 typedef struct CSourceLocation CSourceLocation;
 struct CSourceLocation
 {
@@ -35,8 +102,16 @@ struct CToken
     String8 spelling;
     CSourceLocation location;
     CTokenKind kind;
-    u32 pack_alignment;
+    // A CPunctuator, narrowed so that the id shares the word pack_alignment used
+    // to own and CToken keeps the size it had.  It is C_PUNCTUATOR_NONE on every
+    // token whose kind is not C_TOKEN_PUNCTUATOR, which is what lets
+    // c_token_is_punctuator be one compare and skip the kind test.
+    u16 punctuator;
+    u16 pack_alignment;
 };
+
+BUSTER_CT_CHECK(sizeof(CToken) == sizeof(String8) + sizeof(CSourceLocation) + sizeof(u32) * 2);
+BUSTER_CT_CHECK(C_PUNCTUATOR_COUNT <= UINT16_MAX);
 
 typedef enum CDiagnosticKind
 {

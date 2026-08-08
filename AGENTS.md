@@ -391,16 +391,42 @@ rather than half of `c_frontend_tests`.
   the comparison through a scalar-argument helper `577.96 G` against the
   `537.66 G` state it was applied to. All three were reverted. Do not retry a
   local rewrite of these predicates; only removing the comparison entirely wins.
-- The remaining `c_frontend_tests` cost is concentrated in one predicate:
-  `c_token_is_punctuator` reaching `string_equal` is `14.1%` of the whole run,
-  `~19%` counting its own frame and `string_equal`'s ASan fake stack. It is
-  queried from `999` call sites over a closed set of 31 punctuators. The fix
-  that works is a `CPunctuator` id on the token, reducing the test to one
-  scalar compare: the id fits without growing `CToken` past 48 bytes by
-  narrowing `pack_alignment` to `u16`, and `c_punctuator_length` already
-  matches the punctuator the id would name. Token pasting also constructs
-  punctuator tokens, so any such change needs the self-host fixed point to
-  verify it.
+- **Giving the token a `CPunctuator` id removed another 20% of the suite.**
+  `c_token_is_punctuator` reaching `string_equal` had been `14.1%` of the whole
+  run, `~19%` counting its own frame and `string_equal`'s ASan fake stack, from
+  `1155` call sites over a closed set of 56 spellings. `c_punctuator_length`
+  now returns the id it already matched, `CToken` carries it in a `u16` that
+  shares the word `pack_alignment` used to own — so `CToken` stays 48 bytes,
+  locked by a `BUSTER_CT_CHECK` — and the predicate is `token->punctuator ==
+  punctuator`. The run went from `537.91 G` to `430.69 G` instructions
+  (`-19.9%`), `24.98 s` to `20.9-21.8 s`; `c_frontend_tests` `15.27 s` to
+  `10.7-11.4 s` (`-26%`, and quote the instruction count instead — the wall-time
+  spread across two runs of the identical binary is that wide). Compile
+  throughput moved with it: self-host stage 1 `29.50 G` to `27.25 G` (`-7.6%`)
+  and stage 2 `442.85 G` to `394.65 G` (`-10.9%`), at the byte-identical fixed
+  point.
+- Two properties make the single compare sound, and a change that breaks either
+  one is silently wrong rather than loud. **Only a `C_TOKEN_PUNCTUATOR` token
+  may carry a nonzero id**, so the predicate needs no kind test; every site that
+  retypes an existing token assigns `punctuator` alongside `kind`.
+  **Digraphs keep ids distinct from the punctuators they spell** (`<:` is not
+  `[`), because every caller was asking about a spelling. The one place that
+  edits a spelling in flight, `c_ir_compound_assignment_operator`, drops the
+  `'='` and hands the result to the spelling-driven `c_conditional_operator`, so
+  it clears the id that no longer describes it.
+- Converting the punctuator tests that went through `c_token_spelling_equal`
+  was worth `0.04%` (`430.84 G` to `430.68 G`): they sit on the directive path,
+  not the hot loop. It was kept for the invariant, not the number. The
+  `C_CONDITIONAL_MATCH` chain in `c_conditional_operator` is still a linear walk
+  of string compares and was deliberately left alone — it does not appear in the
+  profile, and converting it means reworking the spelling truncation above.
+- After the change `string_equal` is `5.6%` and no longer punctuator work: it is
+  `c_parse_apply_vector_attribute` and `c_ir_type_name_prefix` matching keywords
+  and type names. The largest single buster frame is now
+  `c_ir_label_metadata_store_for_place` at `7.4%`, and module shares are
+  `c_frontend_tests` `51.5%` (`10.72 s`) against `x86_64_metadata_tests` `39.9%`
+  (`8.31 s`) — the two modules are close to tied again, so the next audit should
+  not assume the C frontend is where the time is.
 - Self-host stage ratio, for the canonical codegen path that runs no register
   allocation: stage 1 `3.45 s` / `29.50 G` instructions, stage 2 `37.96 s` /
   `442.85 G`. That is `11.0x` by wall time but `15.0x` by instructions retired;
