@@ -40090,6 +40090,37 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             object_referenced[entity.value] = true;
         }
     }
+    // The symbol and global passes below join declarations to their entity by
+    // rescanning every declaration per entity, quadratic in the translation
+    // unit; bucket the declaration indices by entity once instead.  Buckets
+    // keep ascending declaration order, so 'first' and 'definition' resolve
+    // exactly as the full scans did.
+    u32* declarations_by_entity_offsets = arena_allocate(temporary_arena, u32, (u64)parse.entity_count + 1);
+    memset(declarations_by_entity_offsets, 0, sizeof(*declarations_by_entity_offsets) * ((u64)parse.entity_count + 1));
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        u32 entity_value = parse.declarations[declaration_index].entity.value;
+        if (entity_value < parse.entity_count)
+        {
+            declarations_by_entity_offsets[entity_value + 1] += 1;
+        }
+    }
+    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    {
+        declarations_by_entity_offsets[entity_index + 1] += declarations_by_entity_offsets[entity_index];
+    }
+    u32* declarations_by_entity = arena_allocate(temporary_arena, u32, declarations_by_entity_offsets[parse.entity_count]);
+    u32* declarations_by_entity_cursors = arena_allocate(temporary_arena, u32, parse.entity_count);
+    memset(declarations_by_entity_cursors, 0, sizeof(*declarations_by_entity_cursors) * parse.entity_count);
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        u32 entity_value = parse.declarations[declaration_index].entity.value;
+        if (entity_value < parse.entity_count)
+        {
+            declarations_by_entity[declarations_by_entity_offsets[entity_value] + declarations_by_entity_cursors[entity_value]] = declaration_index;
+            declarations_by_entity_cursors[entity_value] += 1;
+        }
+    }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
     {
         CEntity* entity = parse.entities + entity_index;
@@ -40107,10 +40138,11 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         CDeclaration* first = 0;
         bool internal = false;
         bool is_thread_local = false;
-        for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+        u32 entity_bucket_end = declarations_by_entity_offsets[entity_index + 1];
+        for (u32 bucket_index = declarations_by_entity_offsets[entity_index]; bucket_index < entity_bucket_end; bucket_index += 1)
         {
-            CDeclaration* declaration = parse.declarations + declaration_index;
-            if (declaration->kind != C_DECLARATION_OBJECT || declaration->entity.value != entity_index)
+            CDeclaration* declaration = parse.declarations + declarations_by_entity[bucket_index];
+            if (declaration->kind != C_DECLARATION_OBJECT)
             {
                 continue;
             }
@@ -40222,10 +40254,11 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         CDeclaration* first = 0;
         CDeclaration* definition = 0;
         bool internal = false;
-        for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+        u32 entity_bucket_end = declarations_by_entity_offsets[entity_index + 1];
+        for (u32 bucket_index = declarations_by_entity_offsets[entity_index]; bucket_index < entity_bucket_end; bucket_index += 1)
         {
-            CDeclaration* declaration = parse.declarations + declaration_index;
-            if (declaration->kind != C_DECLARATION_FUNCTION || declaration->entity.value != entity_index)
+            CDeclaration* declaration = parse.declarations + declarations_by_entity[bucket_index];
+            if (declaration->kind != C_DECLARATION_FUNCTION)
             {
                 continue;
             }
@@ -40267,10 +40300,11 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         CDeclaration* first = 0;
         CDeclaration* definition = 0;
         bool internal = false;
-        for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+        u32 entity_bucket_end = declarations_by_entity_offsets[entity_index + 1];
+        for (u32 bucket_index = declarations_by_entity_offsets[entity_index]; bucket_index < entity_bucket_end; bucket_index += 1)
         {
-            CDeclaration* declaration = parse.declarations + declaration_index;
-            if (declaration->kind != C_DECLARATION_FUNCTION || declaration->entity.value != entity_index)
+            CDeclaration* declaration = parse.declarations + declarations_by_entity[bucket_index];
+            if (declaration->kind != C_DECLARATION_FUNCTION)
             {
                 continue;
             }
@@ -40313,10 +40347,11 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         CDeclaration* definition = 0;
         CDeclaration* first = 0;
         bool internal = false;
-        for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+        u32 entity_bucket_end = declarations_by_entity_offsets[entity_index + 1];
+        for (u32 bucket_index = declarations_by_entity_offsets[entity_index]; bucket_index < entity_bucket_end; bucket_index += 1)
         {
-            CDeclaration* declaration = parse.declarations + declaration_index;
-            if (declaration->kind != C_DECLARATION_OBJECT || declaration->entity.value != entity_index)
+            CDeclaration* declaration = parse.declarations + declarations_by_entity[bucket_index];
+            if (declaration->kind != C_DECLARATION_OBJECT)
             {
                 continue;
             }
@@ -40360,10 +40395,10 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         u32 object_alignment = type_value->layout.alignment;
         bool has_alignment = false;
         bool alignment_valid = true;
-        for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+        for (u32 bucket_index = declarations_by_entity_offsets[entity_index]; bucket_index < entity_bucket_end; bucket_index += 1)
         {
-            CDeclaration* declaration = parse.declarations + declaration_index;
-            if (declaration->kind != C_DECLARATION_OBJECT || declaration->entity.value != entity_index || !declaration->alignment_count)
+            CDeclaration* declaration = parse.declarations + declarations_by_entity[bucket_index];
+            if (declaration->kind != C_DECLARATION_OBJECT || !declaration->alignment_count)
             {
                 continue;
             }
