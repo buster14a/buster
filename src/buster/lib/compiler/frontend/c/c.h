@@ -614,6 +614,11 @@ struct CTokenPositionIndex
 {
     u32* vector_size_positions;
     u32* alignas_positions;
+    // Per token: the position of the matching closer for every opening
+    // (/[/{ whose whole group is properly nested across all three delimiter
+    // kinds, else UINT32_MAX. A mismatched closer unmatches everything still
+    // open, so scans over malformed regions keep their exact scalar walks.
+    u32* matching_delimiters;
     u32 vector_size_count;
     u32 alignas_count;
     bool built;

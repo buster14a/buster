@@ -12,6 +12,62 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-08h` (Linux x86_64; the structural follow-up that took three of the
+`2026-08-08g` leftovers the same day — every number from a clang-built
+binary, measured change-by-change). Release `ide test` `8.818 G` to
+`7.628 G` instructions (`-13.5%`, wall `~0.86 s` to `~0.79 s`, minor faults
+`101.6 k` to `87.7 k`), stage 1 `6.554 G` to `6.450 G` (`-1.6%`, minor
+faults `326 k` to `309 k`, wall `~1.22 s` to `~1.15 s`), sanitized
+`ide test` `141.964 G` to `121.695 G` (`-14.3%` across both rounds), `ide bench` instruction-neutral
+(`713.0 M`), byte-identical fixed point after each change.
+
+- **Preprocessed output is now a list of contiguous token ranges, and
+  expansion-free lines never touch the expansion machinery.** A logical line
+  whose identifiers name no defined macro expands to itself, so `c_preprocess`
+  appends its staging array directly as a `CPreprocessTokenRange` (adjacent
+  ranges merge); only lines that actually expand still run
+  `c_preprocess_expand` and materialize one exact-size array from their node
+  list. Final assembly is a few `memcpy`s instead of the per-token node-list
+  walk that held `3.2%` of stage-1 leaf samples, and unexpanded tokens stop
+  paying a task node plus an output node each. Stage 1 `-1.9%` instructions,
+  `-18 k` faults, and most of this round's stage-1 wall drop.
+- **The parse side got the IR side's matching-delimiter index.**
+  `CTokenPositionIndex` now carries a whole-stream `matching_delimiters`
+  table (closer position per properly nested `(`/`[`/`{`, built in the same
+  lazy sweep as the spelling positions; a mismatched closer unmatches
+  everything still open so malformed regions keep their exact scalar walks).
+  The type-parse machine's PARAMETERS walk and BEGIN-stage bracket scan hop
+  whole nested groups through it — a properly nested group is paren-balanced
+  inside, so the hop leaves the depth walk identical. Release `ide test`
+  fell `12.9%` — the machine's re-scans over nested declarator groups were
+  far bigger than its `9.5%` self time suggested — for `+0.26%` stage 1
+  (the 4 B/token table on the unity TU), the same trade the `2026-08-08f`
+  position index made at ~50x return.
+- **Destroyed default-shaped arenas park in a per-thread pool for reuse**
+  (`ARENA_POOL_LIMIT` 16). The reservation and its faulted pages survive, so
+  the next `arena_create` skips the `munmap`/`mmap` pair and the kernel's
+  first-touch zeroing; a reused arena hands out dirty bytes — the same
+  contract `arena_reset_to_start` already imposes everywhere. Thread-local
+  (`BUSTER_THREAD_LOCAL_DECL`) so it degrades to a plain global in
+  single-threaded builds and stays race-free in threaded ones; execute,
+  locked, multi-arena, and custom-size reservations bypass it unchanged.
+  Worth `-4 k` faults and `~15 ms` of `ide test` wall; instruction-neutral.
+- **Measured negative, reverted: staging the per-function IR arrays in the
+  lowering scratch with exact-size copy-out.** The theory (THP zeroes the
+  worst-case capacity slack folio-by-folio) did not hold up: `-4.6 k`
+  stage-1 faults for `+14 M` instructions, and `ide test` faults *rose*
+  `13 k` because the enlarged scratch reservation fell out of the arena pool
+  and churned per fixture. It also tripped the 64 MB scratch reservation on
+  the hardening tests' giant functions. The real IrValue shape work — the
+  sparse label-metadata side table (432 field references across four files)
+  — remains open and should be done as its own change, not as a staging
+  trick.
+- Reference points for the next audit, all clang-built: stage 1 `6.450 G`
+  instructions / `~1.15 s` wall / `~309 k` minor faults, Release `ide test`
+  `7.628 G` / `~87.7 k` faults, sanitized `ide test` `121.695 G`,
+  `ide bench` `713.0 M` instructions per run.
+  Stage 2 `91.4 G`, validation only.
+
 `2026-08-08g` (Linux x86_64; started from the two 15:58 Superluminal captures
 of `ide test` and the stage-1 `ide cc`, then re-profiled after each round with
 `perf record --call-graph fp` plus batch `llvm-symbolizer --inlines` over the

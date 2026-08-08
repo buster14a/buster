@@ -727,6 +727,41 @@ struct CPreprocessTokenNode
     CToken token;
 };
 
+// The preprocessed output is a list of contiguous token ranges — one per
+// expansion-free logical line (referencing the line's staging array
+// directly) or per expanded line (materialized once from its node list) —
+// so final assembly is a few bulk copies instead of a per-token node walk.
+typedef struct CPreprocessTokenRange CPreprocessTokenRange;
+struct CPreprocessTokenRange
+{
+    CPreprocessTokenRange* next;
+    CToken* tokens;
+    u64 count;
+};
+
+BUSTER_GLOBAL_LOCAL void c_preprocess_output_append_range(Arena* arena, CPreprocessTokenRange** first, CPreprocessTokenRange** last, CToken* tokens, u64 count)
+{
+    if (*last && (*last)->tokens + (*last)->count == tokens)
+    {
+        (*last)->count += count;
+        return;
+    }
+    CPreprocessTokenRange* range = arena_allocate(arena, CPreprocessTokenRange, 1);
+    *range = (CPreprocessTokenRange){
+        .tokens = tokens,
+        .count = count,
+    };
+    if (*last)
+    {
+        (*last)->next = range;
+    }
+    else
+    {
+        *first = range;
+    }
+    *last = range;
+}
+
 typedef enum CMacroExpansionTaskKind
 {
     C_MACRO_EXPANSION_TOKEN,
@@ -2482,32 +2517,29 @@ BUSTER_GLOBAL_LOCAL void c_preprocess_pragma_marker(CPreprocessPragmaContext con
     c_preprocess_handle_pragma(context, lex.tokens, token_count);
 }
 
-BUSTER_GLOBAL_LOCAL void c_preprocess_process_expanded_line(CPreprocessPragmaContext context, CPreprocessTokenNode* first_line,
-                                                            CPreprocessTokenNode** first_output, CPreprocessTokenNode** last_output, u64* output_count)
+BUSTER_GLOBAL_LOCAL void c_preprocess_process_expanded_line(Arena* arena, CPreprocessPragmaContext context, CPreprocessTokenNode* first_line,
+                                                            u64 line_output_count, CPreprocessTokenRange** first_output_range,
+                                                            CPreprocessTokenRange** last_output_range, u64* output_count)
 {
-    for (CPreprocessTokenNode* node = first_line; node;)
+    CToken* tokens = arena_allocate(arena, CToken, line_output_count);
+    u64 count = 0;
+    for (CPreprocessTokenNode* node = first_line; node; node = node->next)
     {
-        CPreprocessTokenNode* next = node->next;
         if (node->token.kind == C_TOKEN_PRAGMA)
         {
             c_preprocess_pragma_marker(context, node->token);
         }
         else
         {
-            node->token.pack_alignment = *context.pack_alignment;
-            node->next = 0;
-            if (*last_output)
-            {
-                (*last_output)->next = node;
-            }
-            else
-            {
-                *first_output = node;
-            }
-            *last_output = node;
-            *output_count += 1;
+            tokens[count] = node->token;
+            tokens[count].pack_alignment = *context.pack_alignment;
+            count += 1;
         }
-        node = next;
+    }
+    if (count)
+    {
+        c_preprocess_output_append_range(arena, first_output_range, last_output_range, tokens, count);
+        *output_count += count;
     }
 }
 
@@ -3509,8 +3541,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     }
     c_macro_define(arena, &first_macro, &last_macro, S8("__STDC_HOSTED__"), standard_replacement, 1, 0, 0, false, false);
     c_macro_define(arena, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
-    CPreprocessTokenNode* first_output = 0;
-    CPreprocessTokenNode* last_output = 0;
+    CPreprocessTokenRange* first_output_range = 0;
+    CPreprocessTokenRange* last_output_range = 0;
     u64 output_count = 0;
     CPragmaPackStack* pack_stack = 0;
     CMacroPushMacro* macro_push_stack = 0;
@@ -3941,13 +3973,37 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 logical_tokens[logical_token_count - 1].pack_alignment = pack_alignment;
             }
         }
-        CPreprocessTokenNode* first_line = 0;
-        CPreprocessTokenNode* last_line = 0;
-        u64 line_output_count = 0;
-        expansion_ok = c_preprocess_expand(arena, first_macro, logical_tokens, logical_token_count, &first_line, &last_line, &line_output_count, expansion_limit, &result);
-        if (expansion_ok)
+        // A line whose identifiers name no defined macro expands to itself,
+        // so its staging array is the output range and the expansion
+        // machinery (a task node and an output node per token) is skipped.
+        bool needs_expansion = false;
+        for (u32 scan = 0; scan < logical_token_count && !needs_expansion; scan += 1)
         {
-            c_preprocess_process_expanded_line(pragma_context, first_line, &first_output, &last_output, &output_count);
+            CToken logical_token = logical_tokens[scan];
+            if (logical_token.kind == C_TOKEN_IDENTIFIER)
+            {
+                CMacro* line_macro = c_macro_find(first_macro, logical_token.spelling);
+                needs_expansion = line_macro && line_macro->definition.defined;
+            }
+        }
+        if (!needs_expansion)
+        {
+            if (logical_token_count)
+            {
+                c_preprocess_output_append_range(arena, &first_output_range, &last_output_range, logical_tokens, logical_token_count);
+                output_count += logical_token_count;
+            }
+        }
+        else
+        {
+            CPreprocessTokenNode* first_line = 0;
+            CPreprocessTokenNode* last_line = 0;
+            u64 line_output_count = 0;
+            expansion_ok = c_preprocess_expand(arena, first_macro, logical_tokens, logical_token_count, &first_line, &last_line, &line_output_count, expansion_limit, &result);
+            if (expansion_ok)
+            {
+                c_preprocess_process_expanded_line(arena, pragma_context, first_line, line_output_count, &first_output_range, &last_output_range, &output_count);
+            }
         }
         source_frame->token_index = logical_end;
         if (!expansion_ok)
@@ -3957,9 +4013,10 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     }
     result.tokens = arena_allocate(arena, CToken, output_count + 1);
     u64 output_index = 0;
-    for (CPreprocessTokenNode* node = first_output; node; node = node->next)
+    for (CPreprocessTokenRange* range = first_output_range; range; range = range->next)
     {
-        result.tokens[output_index++] = node->token;
+        memcpy(result.tokens + output_index, range->tokens, sizeof(*result.tokens) * range->count);
+        output_index += range->count;
     }
     result.tokens[output_index++] = (CToken){
         .location = root_lex.tokens[root_lex.token_count - 1].location,
@@ -4140,7 +4197,61 @@ BUSTER_GLOBAL_LOCAL void c_parse_position_index_build(CParseResult* result, CPre
             index->alignas_positions[index->alignas_count++] = (u32)token_index;
         }
     }
+    index->matching_delimiters = arena_allocate(result->arena, u32, preprocess.token_count ? preprocess.token_count : 1);
+    memset(index->matching_delimiters, 0xff, sizeof(*index->matching_delimiters) * preprocess.token_count);
+    TemporalArena temporary = scratch_begin(&result->arena, 1);
+    typedef struct CDelimiterStackEntry CDelimiterStackEntry;
+    struct CDelimiterStackEntry
+    {
+        u32 position;
+        CPunctuator opening;
+    };
+    CDelimiterStackEntry* stack = arena_allocate(temporary.arena, CDelimiterStackEntry, preprocess.token_count ? preprocess.token_count : 1);
+    u32 stack_count = 0;
+    for (u64 token_index = 0; token_index < preprocess.token_count; token_index += 1)
+    {
+        CToken token = preprocess.tokens[token_index];
+        if (token.kind != C_TOKEN_PUNCTUATOR)
+        {
+            continue;
+        }
+        if (token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || token.punctuator == C_PUNCTUATOR_LEFT_BRACKET ||
+            token.punctuator == C_PUNCTUATOR_LEFT_BRACE)
+        {
+            stack[stack_count++] = (CDelimiterStackEntry){
+                .position = (u32)token_index,
+                .opening = token.punctuator,
+            };
+            continue;
+        }
+        CPunctuator expected = token.punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS ? C_PUNCTUATOR_LEFT_PARENTHESIS
+                               : token.punctuator == C_PUNCTUATOR_RIGHT_BRACKET   ? C_PUNCTUATOR_LEFT_BRACKET
+                               : token.punctuator == C_PUNCTUATOR_RIGHT_BRACE     ? C_PUNCTUATOR_LEFT_BRACE
+                                                                                  : C_PUNCTUATOR_NONE;
+        if (expected == C_PUNCTUATOR_NONE)
+        {
+            continue;
+        }
+        if (!stack_count || stack[stack_count - 1].opening != expected)
+        {
+            stack_count = 0;
+            continue;
+        }
+        index->matching_delimiters[stack[--stack_count].position] = (u32)token_index;
+    }
+    scratch_end(temporary);
     index->built = true;
+}
+
+// Matching closer for the opening delimiter at open, or UINT32_MAX; see
+// CTokenPositionIndex.matching_delimiters.
+BUSTER_GLOBAL_LOCAL u32 c_parse_matching_delimiter_indexed(CParseResult* result, CPreprocessResult preprocess, u32 open)
+{
+    if (!result->position_index->built)
+    {
+        c_parse_position_index_build(result, preprocess);
+    }
+    return open < preprocess.token_count ? result->position_index->matching_delimiters[open] : UINT32_MAX;
 }
 
 // First recorded position in [start, end), or UINT32_MAX. Positions are
@@ -9498,6 +9609,12 @@ BUSTER_GLOBAL_LOCAL void c_type_parse_parenthesized_step(CTypeParseMachine* mach
             const CToken* token = &preprocess.tokens[frame->close_index];
             if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_BRACKET))
             {
+                u32 bracket_close = c_parse_matching_delimiter_indexed(result, preprocess, frame->close_index);
+                if (bracket_close < frame->end)
+                {
+                    frame->close_index = bracket_close + 1;
+                    continue;
+                }
                 bracket_depth += 1;
             }
             else if (c_token_is_punctuator(token, C_PUNCTUATOR_RIGHT_BRACKET) && bracket_depth)
@@ -9568,6 +9685,14 @@ BUSTER_GLOBAL_LOCAL void c_type_parse_parenthesized_step(CTypeParseMachine* mach
             const CToken* token = &preprocess.tokens[frame->scan_index];
             if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
+                // A properly nested group is paren-balanced inside, so
+                // hopping to its closer leaves the depth walk identical.
+                u32 nested_close = c_parse_matching_delimiter_indexed(result, preprocess, frame->scan_index);
+                if (nested_close < frame->end)
+                {
+                    frame->scan_index = nested_close + 1;
+                    continue;
+                }
                 frame->depth += 1;
                 frame->scan_index += 1;
                 continue;
