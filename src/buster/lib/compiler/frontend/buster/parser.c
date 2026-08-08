@@ -282,7 +282,7 @@ BUSTER_GLOBAL_LOCAL u64 tokenizer_utf8_sequence_length(const char8* restrict it,
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void tokenizer_emit_token(Arena* arena, TokenizerResult* restrict result, Token** restrict token_start, u64* restrict token_count,
+BUSTER_GLOBAL_LOCAL void tokenizer_emit_token(TokenizerResult* restrict result, Token* restrict tokens, u64* restrict token_count,
                                               TokenId id, u64 length, bool overflow)
 {
     bool first_chunk = true;
@@ -291,11 +291,7 @@ BUSTER_GLOBAL_LOCAL void tokenizer_emit_token(Arena* arena, TokenizerResult* res
         TokenId emitted_id = overflow && !first_chunk ? TOKEN_ERROR : id;
 
         u32 chunk_length = (u32)BUSTER_MIN(length, (u64)TOKEN_MAX_LENGTH);
-        Token* token = arena_allocate(arena, Token, 1);
-        if (!*token_start)
-        {
-            *token_start = token;
-        }
+        Token* token = tokens + *token_count;
         *token = (Token){.id = emitted_id};
         token_length_set(token, chunk_length);
         *token_count += 1;
@@ -312,17 +308,25 @@ BUSTER_GLOBAL_LOCAL void tokenizer_emit_token(Arena* arena, TokenizerResult* res
 TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length)
 {
     TokenizerResult result = {0};
-    Token* token_start = 0;
     u64 token_count = 0;
 
     if (file_length > UINT32_MAX)
     {
-        tokenizer_emit_token(arena, &result, &token_start, &token_count, TOKEN_EOF, 0, false);
+        Token* token_start = arena_allocate(arena, Token, 1);
+        tokenizer_emit_token(&result, token_start, &token_count, TOKEN_EOF, 0, false);
         result.tokens = token_start;
         result.token_count = 1;
         result.error_count = 1;
         return result;
     }
+
+    // Every scan step consumes at least one source byte and an overflow chunk
+    // covers at least one byte, so file_length + 1 bounds the token count
+    // including the EOF token. Reserving the whole array once keeps the
+    // per-token cost to a store and an increment instead of an
+    // arena_allocate call per 4-byte token; the unused tail is handed back
+    // to the arena after the scan.
+    Token* token_start = arena_allocate(arena, Token, file_length + 1);
 
     const char8* restrict it = file_pointer;
     const char8* top = file_pointer + file_length;
@@ -891,10 +895,12 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
 
         const char8* restrict end = it;
         u64 length = (u64)(end - start);
-        tokenizer_emit_token(arena, &result, &token_start, &token_count, id, length, length > TOKEN_MAX_LENGTH);
+        tokenizer_emit_token(&result, token_start, &token_count, id, length, length > TOKEN_MAX_LENGTH);
     }
 
-    tokenizer_emit_token(arena, &result, &token_start, &token_count, TOKEN_EOF, 0, false);
+    tokenizer_emit_token(&result, token_start, &token_count, TOKEN_EOF, 0, false);
+
+    arena_set_position(arena, (u64)((u8*)(token_start + token_count) - (u8*)arena));
 
     result.tokens = token_start;
 
