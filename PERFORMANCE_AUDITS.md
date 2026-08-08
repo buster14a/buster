@@ -62,6 +62,43 @@ recorded as ranked structural proposals below.
   41.4%, `tokenize` 23.2%, `arena_allocate_bytes` 11.7% — the next bench
   levers are parser-side node-allocation batching and the proposal-4
   compaction tokenizer.
+- **The parser's per-push/per-node allocations got an inline bump fast
+  path** (`parser_bump_allocate`): `state_pop` rewinds the arena position,
+  so pushes re-bumped over committed bytes yet paid the outlined
+  `arena_allocate_bytes` call each time. **`ide bench` 438.1 M to 417.0 M
+  (`-4.8%`)**.
+- **The buster tokenizer's run scans became chunk-classified** (proposal 4's
+  tokenizer-1 stage): each 64-byte chunk classifies once into five per-class
+  bitmasks (`vpcmpb`-family into `k`-masks, masked tail loads so no caller
+  padding), and every run scan is shift + count-trailing-ones. **417.0 M to
+  409.8 M (`-1.7%`), branch misses `-17%`**; the `vpcompressb` compaction
+  emitter remains the recorded endgame.
+- **Proposal 2 landed: identifiers intern once during preprocessing** and
+  macro lookup, the builtin ladder, entity scope lookup, and keyword
+  classification all compare u32 symbol ids. **Stage 1 `5.1406 G` to
+  `5.1070 G` (`-0.65%`), branches `-19 M`.** The intermediate states were
+  measured and matter for the next reader: the intern pass *alone* was
+  `+85 M` (it duplicates the macro-lookup hash until consumers convert), an
+  8-byte-SWAR intern hash measured *worse* than byte FNV on short
+  identifiers, and only converting the entity buckets and keyword-class
+  bytes flipped the total negative. Two correctness rules are now encoded
+  in c.c: **the symbol must travel with the spelling** (location
+  transplants preserve it, constructions with foreign locations zero it via
+  `c_location_without_symbol`, the C23 respell pass re-interns), and the
+  classification arrays live **arena-resident on the table** — as file
+  globals they were clobbered by a stray stage-1 write (create-time
+  `kinds[8]==7` read as `1` later, buster-built stage only; follow-up task
+  filed for the underlying codegen bug).
+- **Proposal 1 landed in its rare-payload slice: `IrInstruction` 216 to
+  144 bytes (`-33%`).** The inline-assembly name arrays and the
+  string/float `literal` moved to a sorted per-function
+  `IrInstructionExtra` side table and the buster `ParserSourceRange` to a
+  dense parallel array (`ir_instruction_source`). **Stage-1 minor faults
+  `272.0 k` to `254.9 k` (`-6.3%`), L1d load misses `150.9 M`**, at
+  `+7.7 M` instructions of accessor cost; stage 2 `76.0 G` to `72.2 G`
+  (`-5%`, validation only). Still open from proposal 1:
+  operand/target/immediate pools as u32 offsets, `IrSourceRange` 32 to 16
+  bytes, and the build/consume SoA split.
 - **Counter shape of stage 1, for targeting (clang Release, this host):**
   5.472 G instructions / 3.108 G cycles (IPC 1.76), 1.035 G branches with
   18.5 M misses (1.79% — ≈8% of cycles at Zen 4's ~13-cycle redirect), and
@@ -177,17 +214,15 @@ recorded as ranked structural proposals below.
   from clang-built binaries; run `test_self_host` unpiped after frontend
   changes; SWAR-in-the-token-loop is a measured dead end — classification
   must move out of the dispatch loop to win.
-- Reference points for the next audit, all clang-built on this host and
-  re-measured on the merged tree (this branch rebased onto the landed
-  `2026-08-08l` chain; before the merge this entry's tokenizer change
-  measured against the `2026-08-08i` baseline as bench `713.0 M` to
-  `559.1 M` and `BENCH_PARSE` median `95.1 k` to `82.0 k ns`): stage 1
-  `5.141 G` instructions / `~271 k` minor faults, Release `ide test`
-  `6.801 G`, `ide bench` **`438.1 M`** instructions per run (`713.0 M` at
-  the start of this audit — `-38.6%` across its two changes),
-  `BENCH_PARSE` median `~59-61 k ns`, `BENCH_IO` median `~240 k ns`,
-  byte-identical fixed point (`SELF_HOST deterministic bytes=28194952`).
-  Stage 2 `76.0 G`, validation only.
+- Reference points for the next audit, all clang-built on this host on the
+  merged tree (rebased onto the landed `2026-08-08l` chain): stage 1
+  `5.114 G` instructions / `~255 k` minor faults / `~150.9 M` L1d load
+  misses, Release `ide test` `6.730 G`, `ide bench` **`409.8 M`**
+  instructions per run (`713.0 M` at the start of this audit — `-42.5%`
+  across its changes), `BENCH_PARSE` median `~56-58 k ns`, `BENCH_IO`
+  median `~226 k ns`, `IrInstruction` 144 bytes, byte-identical fixed
+  point (`SELF_HOST deterministic bytes=28235824`). Stage 2 `72.2 G`,
+  validation only.
 
 `2026-08-08l` (Linux x86_64; the same branch as `2026-08-08j`, taking the
 remaining ranked leftovers — arena reuse routing, the generated-blob
