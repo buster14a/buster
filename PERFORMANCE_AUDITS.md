@@ -28,7 +28,7 @@ Zen 4 must break even at its double-pumped AVX2-equivalent throughput,
 `-march=native` already on GNU-family builds, intrinsics keep guarded
 scalar fallbacks because the self-hosted stages compile without vendor
 headers — plus the Validark-lineage SIMD lexing/parsing method vocabulary
-this entry's proposal 4 builds on.) One change taken and measured, the rest
+this entry's proposal 4 builds on.) Two changes taken and measured, the rest
 recorded as ranked structural proposals below.
 
 - **The buster tokenizer paid one `arena_allocate` call per 4-byte token.**
@@ -45,6 +45,23 @@ recorded as ranked structural proposals below.
   the `cc` path), byte-identical fixed point (`SELF_HOST deterministic
   bytes=28704320`), all 16356 Release tests and all 29 sanitized Debug
   modules pass.
+- **Buster keyword recognition became a perfect hash** (taken after the
+  rebase onto `2026-08-08l`, measured against the merged tree): the
+  tokenizer ran a 23-entry `string_equal` ladder per identifier; now
+  `((len << 9) ^ first_two_bytes) * last_two_bytes >> 8` masked to 128
+  slots — a variant brute-force-verified collision-free for this keyword
+  set — selects a single candidate verified by one compare, per proposal
+  2/4's PHF item. Every keyword is ≥2 bytes so the pair loads stay inside
+  the identifier (no sentinels needed); the table builds on first use with
+  the lookup's own loads and hard-checks perfection, so keyword edits fail
+  loudly. **`ide bench` 559.4 M to 438.1 M instructions (`-21.7%`),
+  `BENCH_PARSE` median 78.5 to ~60 k ns (`-23%`), branches 107.7 M to
+  76.6 M (`-29%`)**; all 16360 Release tests and 29 sanitized modules pass,
+  fixed point deterministic, stage 1 `+2.8 M` (the added table source
+  compiling in the unity TU). Post-change bench shape: `parser_parse`
+  41.4%, `tokenize` 23.2%, `arena_allocate_bytes` 11.7% — the next bench
+  levers are parser-side node-allocation batching and the proposal-4
+  compaction tokenizer.
 - **Counter shape of stage 1, for targeting (clang Release, this host):**
   5.472 G instructions / 3.108 G cycles (IPC 1.76), 1.035 G branches with
   18.5 M misses (1.79% — ≈8% of cycles at Zen 4's ~13-cycle redirect), and
@@ -165,11 +182,12 @@ recorded as ranked structural proposals below.
   `2026-08-08l` chain; before the merge this entry's tokenizer change
   measured against the `2026-08-08i` baseline as bench `713.0 M` to
   `559.1 M` and `BENCH_PARSE` median `95.1 k` to `82.0 k ns`): stage 1
-  `5.138 G` instructions / `~271 k` minor faults, Release `ide test`
-  `6.809 G`, `ide bench` **`559.4 M`** instructions per run, `BENCH_PARSE`
-  median `~78.5 k ns`, `BENCH_IO` median `~264 k ns`, byte-identical fixed
-  point (`SELF_HOST deterministic bytes=28189896`). Stage 2 `76.0 G`,
-  validation only.
+  `5.141 G` instructions / `~271 k` minor faults, Release `ide test`
+  `6.801 G`, `ide bench` **`438.1 M`** instructions per run (`713.0 M` at
+  the start of this audit — `-38.6%` across its two changes),
+  `BENCH_PARSE` median `~59-61 k ns`, `BENCH_IO` median `~240 k ns`,
+  byte-identical fixed point (`SELF_HOST deterministic bytes=28194952`).
+  Stage 2 `76.0 G`, validation only.
 
 `2026-08-08l` (Linux x86_64; the same branch as `2026-08-08j`, taking the
 remaining ranked leftovers — arena reuse routing, the generated-blob
