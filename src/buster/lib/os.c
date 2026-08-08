@@ -1960,9 +1960,16 @@ u64 os_get_physical_memory_size(void)
         result = memory_size;
     }
 #else
+    // The build driver compiles this file with tcc on Windows, and tcc's
+    // bundled kernel32 import stubs lack GlobalMemoryStatusEx (the header
+    // declares it; the link fails). Resolve it at runtime for every Windows
+    // compiler instead of keeping a second import-based path.
+    typedef BOOL(WINAPI* GlobalMemoryStatusExProc)(MEMORYSTATUSEX*);
+    GlobalMemoryStatusExProc global_memory_status_ex =
+        (GlobalMemoryStatusExProc)(void (*)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GlobalMemoryStatusEx");
     MEMORYSTATUSEX status = {0};
     status.dwLength = sizeof(status);
-    if (GlobalMemoryStatusEx(&status))
+    if (global_memory_status_ex && global_memory_status_ex(&status))
     {
         result = status.ullTotalPhys;
     }
