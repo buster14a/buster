@@ -93,7 +93,12 @@ struct CSourceLocation
     u32 line;
     u32 column;
     u32 file;
-    u32 reserved;
+    // For C_TOKEN_IDENTIFIER tokens, the symbol id the preprocessor's intern
+    // pass assigned (0 = uninterned; consumers must keep a spelling-based
+    // fallback for synthesized and test-built tokens). Carried inside the
+    // location word so CToken keeps its 48-byte row; meaningless on
+    // diagnostic locations.
+    u32 symbol;
 };
 
 typedef struct CToken CToken;
@@ -219,10 +224,16 @@ struct CPreprocessOptions
     u8 reserved[3];
 };
 
+typedef struct CSymbolTable CSymbolTable;
+
 typedef struct CPreprocessResult CPreprocessResult;
 struct CPreprocessResult
 {
     CToken* tokens;
+    // The identifier intern table the tokens' symbol ids point into; arena
+    // resident so parse and lowering can intern on demand. Null for
+    // hand-built results.
+    CSymbolTable* symbols;
     CDiagnostic* diagnostics;
     String8* files;
     Target target;
@@ -407,6 +418,9 @@ typedef struct CEntity CEntity;
 struct CEntity
 {
     String8 name;
+    // Interned id of `name` (0 when the parse ran without a symbol table);
+    // the scope-lookup buckets and chains key on it.
+    u32 symbol;
     CSourceLocation location;
     CTypeId type;
     CScopeId scope;
@@ -630,6 +644,9 @@ struct CParseResult
     // Borrowed owner of the result arrays.  It must outlive this result and is
     // never destroyed or rewound by the parser.
     Arena* arena;
+    // Borrowed from the preprocess result (null for hand-built inputs); lets
+    // the parse intern names on demand so entity lookups key on symbol ids.
+    CSymbolTable* symbols;
     CDeclaration* declarations;
     CType* types;
     CParameter* parameters;
