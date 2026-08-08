@@ -86,6 +86,48 @@ BUSTER_GLOBAL_LOCAL u64 c_identifier_run_end(String8 source, u64 offset)
     return offset;
 }
 
+// One byte per character value: 1 when the byte cannot end or escape a
+// character/string literal (either quote kind, backslash, newline), so the
+// literal scan ANDs eight entries per step like the identifier run.
+BUSTER_GLOBAL_LOCAL u8 c_literal_plain_table[256];
+BUSTER_GLOBAL_LOCAL bool c_literal_plain_table_built;
+
+BUSTER_GLOBAL_LOCAL void c_literal_plain_table_build(void)
+{
+    for (u32 character = 0; character < 256; character += 1)
+    {
+        bool special = character == '"' || character == '\'' || character == '\\' || character == '\n';
+        c_literal_plain_table[character] = special ? 0 : 1;
+    }
+    c_literal_plain_table_built = true;
+}
+
+BUSTER_GLOBAL_LOCAL u64 c_literal_plain_run_end(String8 source, u64 offset)
+{
+    if (!c_literal_plain_table_built)
+    {
+        c_literal_plain_table_build();
+    }
+    const u8* bytes = (const u8*)source.pointer;
+    while (offset + 8 <= source.length)
+    {
+        u8 all = c_literal_plain_table[bytes[offset]] & c_literal_plain_table[bytes[offset + 1]] &
+                 c_literal_plain_table[bytes[offset + 2]] & c_literal_plain_table[bytes[offset + 3]] &
+                 c_literal_plain_table[bytes[offset + 4]] & c_literal_plain_table[bytes[offset + 5]] &
+                 c_literal_plain_table[bytes[offset + 6]] & c_literal_plain_table[bytes[offset + 7]];
+        if (!all)
+        {
+            break;
+        }
+        offset += 8;
+    }
+    while (offset < source.length && c_literal_plain_table[bytes[offset]])
+    {
+        offset += 1;
+    }
+    return offset;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_horizontal_whitespace(char8 character)
 {
     switch (character)
@@ -523,6 +565,11 @@ CLexResult c_lex(Arena* arena, String8 source)
             bool terminated = false;
             while (offset < translated.source.length)
             {
+                offset = c_literal_plain_run_end(translated.source, offset);
+                if (offset >= translated.source.length)
+                {
+                    break;
+                }
                 character = translated.source.pointer[offset];
                 if (character == literal_delimiter)
                 {
@@ -4172,6 +4219,9 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type_in_scope(CTypeParseMachine* mach
                                                          u32 start, u32 end,
                                                          u32* declarator_start);
 
+BUSTER_GLOBAL_LOCAL CEntityId c_parse_lookup_typedef_name(CParseResult* result, String8 name, bool oldest);
+BUSTER_GLOBAL_LOCAL CEntity* c_parse_first_constant_entity(CParseResult* result, String8 name);
+
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end);
 
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end);
@@ -4830,16 +4880,8 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
                         {
                             CToken type_token = preprocess.tokens[cast_type_index];
                             bool type_word = type_token.kind == C_TOKEN_IDENTIFIER && c_parse_type_word_for_dialect(type_token.spelling, preprocess.dialect);
-                            bool typedef_name = false;
-                            for (u32 entity_index = 0; !type_word && entity_index < result->entity_count; entity_index += 1)
-                            {
-                                CEntity* entity = &result->entities[entity_index];
-                                typedef_name = entity->kind == C_ENTITY_TYPEDEF && string_equal(entity->name, type_token.spelling);
-                                if (typedef_name)
-                                {
-                                    break;
-                                }
-                            }
+                            bool typedef_name =
+                                !type_word && c_parse_lookup_typedef_name(result, type_token.spelling, false).value != C_ID_UNDERLYING_INVALID;
                             cast_type = type_word || typedef_name;
                         }
                         if (cast_type)
@@ -4850,17 +4892,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
                     }
                     if (token.kind == C_TOKEN_IDENTIFIER)
                     {
-                        CEntity* constant = 0;
-                        for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
-                        {
-                            CEntity* entity = &result->entities[entity_index];
-                            if ((entity->kind == C_ENTITY_ENUMERATOR || (entity->is_constexpr && entity->has_constant_value)) &&
-                                string_equal(entity->name, token.spelling))
-                            {
-                                constant = entity;
-                                break;
-                            }
-                        }
+                        CEntity* constant = c_parse_first_constant_entity(result, token.spelling);
                         if (!constant)
                         {
                             unresolved_identifier = true;
@@ -11164,16 +11196,19 @@ BUSTER_GLOBAL_LOCAL void c_parse_scope_add_entity(CParseResult* result, CScopeId
 
     BUSTER_CHECK(result->entity_lookup_bucket_count != 0);
     CEntity* added = &result->entities[entity.value];
-    u64 hash = c_macro_name_hash(added->name);
+    u64 name_hash = c_macro_name_hash(added->name);
+    u64 hash = name_hash;
     hash ^= (u64)scope.value + UINT64_C(0x9e3779b97f4a7c15) + (hash << 6) + (hash >> 2);
     u32 bucket = (u32)hash & (result->entity_lookup_bucket_count - 1);
     added->next_in_lookup = result->entity_lookup_buckets[bucket];
     result->entity_lookup_buckets[bucket] = entity;
+    u32 name_bucket = (u32)name_hash & (result->entity_lookup_bucket_count - 1);
+    added->next_by_name = result->name_lookup_buckets[name_bucket];
+    result->name_lookup_buckets[name_bucket] = entity;
     if (added->kind == C_ENTITY_TYPEDEF)
     {
-        u32 typedef_bucket = (u32)c_macro_name_hash(added->name) & (result->entity_lookup_bucket_count - 1);
-        added->next_typedef_in_lookup = result->typedef_lookup_buckets[typedef_bucket];
-        result->typedef_lookup_buckets[typedef_bucket] = entity;
+        added->next_typedef_in_lookup = result->typedef_lookup_buckets[name_bucket];
+        result->typedef_lookup_buckets[name_bucket] = entity;
     }
 }
 
@@ -11254,6 +11289,28 @@ BUSTER_GLOBAL_LOCAL CEntityId c_parse_lookup_typedef_name(CParseResult* result, 
         }
     }
     return found;
+}
+
+BUSTER_GLOBAL_LOCAL CEntity* c_parse_first_constant_entity(CParseResult* result, String8 name)
+{
+    if (!result->name_lookup_buckets || !result->entity_lookup_bucket_count)
+    {
+        return 0;
+    }
+    u32 bucket = (u32)c_macro_name_hash(name) & (result->entity_lookup_bucket_count - 1);
+    // The chain is newest-first; the last predicate match is the lowest entity
+    // index, matching an ascending scan over the entity table.
+    CEntity* first = 0;
+    for (CEntityId entity = result->name_lookup_buckets[bucket]; entity.value != C_ID_UNDERLYING_INVALID;
+         entity = result->entities[entity.value].next_by_name)
+    {
+        CEntity* candidate = &result->entities[entity.value];
+        if ((candidate->kind == C_ENTITY_ENUMERATOR || (candidate->is_constexpr && candidate->has_constant_value)) && string_equal(candidate->name, name))
+        {
+            first = candidate;
+        }
+    }
+    return first;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_parse_type_start(CParseResult* result, CScopeId scope, String8 spelling, CPreprocessDialect dialect)
@@ -13061,24 +13118,27 @@ BUSTER_GLOBAL_LOCAL void c_parse_bind_function_body(CTypeParseMachine* machine, 
                 continue;
             }
         }
-        bool member = index > declaration->body_start && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
-                                                          c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
-        bool tag_name = index > declaration->body_start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
-                        (string_equal(preprocess.tokens[index - 1].spelling, S8("struct")) ||
-                         string_equal(preprocess.tokens[index - 1].spelling, S8("union")) || string_equal(preprocess.tokens[index - 1].spelling, S8("enum")));
-        bool label = c_ir_named_label_at(preprocess, declaration->body_start, index, body_end);
-        bool goto_target = index > declaration->body_start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
-                           string_equal(preprocess.tokens[index - 1].spelling, S8("goto"));
-        bool label_address = index > declaration->body_start &&
-                             c_parse_label_address_prefix_with_typedef(result, preprocess, scope_stack[scope_count - 1], declaration->body_start,
-                                                                        index - 1);
-        bool asm_goto_label = asm_goto_label_start != UINT32_MAX && index >= asm_goto_label_start && index < asm_goto_label_end;
-        bool asm_operand_name = asm_operand_range_start != UINT32_MAX &&
-                                c_parse_asm_operand_name_token(preprocess, asm_operand_range_start, asm_operand_range_end, index);
-        if (token.kind == C_TOKEN_IDENTIFIER && !c_parse_declaration_keyword_at(result, preprocess, index) && !member && !tag_name && !label &&
-            !goto_target && !label_address && !asm_goto_label && !asm_operand_name)
+        bool label = false;
+        if (token.kind == C_TOKEN_IDENTIFIER)
         {
-            c_parse_bind_identifier(result_arena, result, preprocess, scope_stack[scope_count - 1], index);
+            label = c_ir_named_label_at(preprocess, declaration->body_start, index, body_end);
+            bool member = index > declaration->body_start && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
+                                                              c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
+            bool tag_name = index > declaration->body_start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+                            (string_equal(preprocess.tokens[index - 1].spelling, S8("struct")) ||
+                             string_equal(preprocess.tokens[index - 1].spelling, S8("union")) ||
+                             string_equal(preprocess.tokens[index - 1].spelling, S8("enum")));
+            bool goto_target = index > declaration->body_start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+                               string_equal(preprocess.tokens[index - 1].spelling, S8("goto"));
+            bool asm_goto_label = asm_goto_label_start != UINT32_MAX && index >= asm_goto_label_start && index < asm_goto_label_end;
+            if (!member && !tag_name && !label && !goto_target && !asm_goto_label && !c_parse_declaration_keyword_at(result, preprocess, index) &&
+                !(index > declaration->body_start &&
+                  c_parse_label_address_prefix_with_typedef(result, preprocess, scope_stack[scope_count - 1], declaration->body_start, index - 1)) &&
+                !(asm_operand_range_start != UINT32_MAX &&
+                  c_parse_asm_operand_name_token(preprocess, asm_operand_range_start, asm_operand_range_end, index)))
+            {
+                c_parse_bind_identifier(result_arena, result, preprocess, scope_stack[scope_count - 1], index);
+            }
         }
         if (label)
         {
@@ -13903,6 +13963,8 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
     memset(result.entity_lookup_buckets, 0xff, sizeof(*result.entity_lookup_buckets) * result.entity_lookup_bucket_count);
     result.typedef_lookup_buckets = arena_allocate(arena, CEntityId, result.entity_lookup_bucket_count);
     memset(result.typedef_lookup_buckets, 0xff, sizeof(*result.typedef_lookup_buckets) * result.entity_lookup_bucket_count);
+    result.name_lookup_buckets = arena_allocate(arena, CEntityId, result.entity_lookup_bucket_count);
+    memset(result.name_lookup_buckets, 0xff, sizeof(*result.name_lookup_buckets) * result.entity_lookup_bucket_count);
     {
         u32 aggregate_slot_count = 16384;
         result.aggregate_lookup = arena_allocate(arena, CAggregateLookup, 1);
@@ -14043,22 +14105,65 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
                 preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && string_equal(preprocess.tokens[token_index].spelling, S8("__overloadable__"));
         }
         CEntityKind entity_kind = kind == C_DECLARATION_FUNCTION ? C_ENTITY_FUNCTION : kind == C_DECLARATION_TYPEDEF ? C_ENTITY_TYPEDEF : C_ENTITY_OBJECT;
-        for (u32 entity_index = 0; entity_index < result.entity_count; entity_index += 1)
+        // The name chain lists same-named entities newest first; the
+        // redeclaration logic below needs ascending entity order, so gather
+        // the file-scope candidates and walk them in reverse.
+        u32 candidate_ids[64];
+        u32 candidate_count = 0;
+        bool candidates_overflowed = false;
+        u32 name_bucket = (u32)c_macro_name_hash(declaration->name) & (result.entity_lookup_bucket_count - 1);
+        for (CEntityId chain = result.name_lookup_buckets[name_bucket]; chain.value != C_ID_UNDERLYING_INVALID;
+             chain = result.entities[chain.value].next_by_name)
         {
-            CEntity* candidate = &result.entities[entity_index];
+            CEntity* candidate = &result.entities[chain.value];
             if (candidate->scope.value != 0 || !string_equal(candidate->name, declaration->name))
             {
                 continue;
             }
-            if (candidate->kind == entity_kind && c_parse_types_compatible(arena, &result, preprocess, candidate->type, declaration->type))
+            if (candidate_count == 64)
             {
-                existing = candidate;
-                existing_index = entity_index;
+                candidates_overflowed = true;
                 break;
             }
-            if (!conflicting)
+            candidate_ids[candidate_count++] = chain.value;
+        }
+        if (candidates_overflowed)
+        {
+            for (u32 entity_index = 0; entity_index < result.entity_count; entity_index += 1)
             {
-                conflicting = candidate;
+                CEntity* candidate = &result.entities[entity_index];
+                if (candidate->scope.value != 0 || !string_equal(candidate->name, declaration->name))
+                {
+                    continue;
+                }
+                if (candidate->kind == entity_kind && c_parse_types_compatible(arena, &result, preprocess, candidate->type, declaration->type))
+                {
+                    existing = candidate;
+                    existing_index = entity_index;
+                    break;
+                }
+                if (!conflicting)
+                {
+                    conflicting = candidate;
+                }
+            }
+        }
+        else
+        {
+            for (u32 position = candidate_count; position-- > 0;)
+            {
+                u32 entity_index = candidate_ids[position];
+                CEntity* candidate = &result.entities[entity_index];
+                if (candidate->kind == entity_kind && c_parse_types_compatible(arena, &result, preprocess, candidate->type, declaration->type))
+                {
+                    existing = candidate;
+                    existing_index = entity_index;
+                    break;
+                }
+                if (!conflicting)
+                {
+                    conflicting = candidate;
+                }
             }
         }
         if (existing)
@@ -39777,16 +39882,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* bu
         }
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
-            CEntity* constant = 0;
-            for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
-            {
-                CEntity* entity = &parse.entities[entity_index];
-                if ((entity->kind == C_ENTITY_ENUMERATOR || (entity->is_constexpr && entity->has_constant_value)) && string_equal(entity->name, token.spelling))
-                {
-                    constant = entity;
-                    break;
-                }
-            }
+            CEntity* constant = c_parse_first_constant_entity(&parse, token.spelling);
             if (!constant)
             {
                 return false;
@@ -39911,6 +40007,24 @@ BUSTER_GLOBAL_LOCAL void c_ir_collect_flexible_array_types(CParseResult* parse, 
             flexible[member->type.value] = true;
         }
     }
+}
+
+// A type can still act in a mapping pass while it is unmapped, tracks a
+// qualified alias of another mapping, or is a mapped aggregate whose layout
+// has not been completed; every pass branch is gated by one of these.
+BUSTER_GLOBAL_LOCAL bool c_ir_type_mapping_pending(CParseResult* parse, IrProgram* program, IrTypeId* c_type_ir_map, u32 type_index)
+{
+    CType* c_type = &parse->types[type_index];
+    if (c_type_ir_map[type_index].value == IR_ID_UNDERLYING_INVALID || c_type->has_unqualified_type)
+    {
+        return true;
+    }
+    if (c_type->kind == C_TYPE_STRUCT || c_type->kind == C_TYPE_UNION)
+    {
+        IrType* mapped = ir_type_from_id(&program->types, c_type_ir_map[type_index]);
+        return !mapped || !mapped->layout.resolved;
+    }
+    return false;
 }
 
 CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target)
@@ -40288,17 +40402,35 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             object_declarations_by_type_cursors[type_value] += 1;
         }
     }
+    u32* type_mapping_worklist = arena_allocate(temporary_arena, u32, parse.type_count);
     for (u32 type_mapping_round = 0; type_mapping_round < 2; type_mapping_round += 1)
     {
         // Rebuilt each round because c_ir_infer_incomplete_array_bounds below
         // can give a bound an inferred count, which retires it as a flexible
         // array member.  Nothing inside the pass loop edits types or bounds.
         c_ir_collect_flexible_array_types(&parse, flexible_array_types);
+        u32 type_mapping_worklist_count = 0;
+        for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
+        {
+            if (c_ir_type_mapping_pending(&parse, program, c_type_ir_map, type_index))
+            {
+                type_mapping_worklist[type_mapping_worklist_count++] = type_index;
+            }
+        }
         for (u32 pass = 0; pass < parse.type_count; pass += 1)
         {
             bool progress = false;
-            for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
+            u32 kept_count = 0;
+            for (u32 position = 0; position < type_mapping_worklist_count; position += 1)
             {
+                u32 kept_index = type_mapping_worklist[position];
+                type_mapping_worklist[kept_count] = kept_index;
+                kept_count += c_ir_type_mapping_pending(&parse, program, c_type_ir_map, kept_index);
+            }
+            type_mapping_worklist_count = kept_count;
+            for (u32 position = 0; position < type_mapping_worklist_count; position += 1)
+            {
+                u32 type_index = type_mapping_worklist[position];
                 CType* c_type = &parse.types[type_index];
                 if (c_type->has_unqualified_type)
                 {

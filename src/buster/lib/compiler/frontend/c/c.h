@@ -413,6 +413,7 @@ struct CEntity
     CEntityId next_in_scope;
     CEntityId next_in_lookup;
     CEntityId next_typedef_in_lookup;
+    CEntityId next_by_name;
     u32 declaration_index;
     u32 declaration_token_plus_one;
     u32 declaration_token_start;
@@ -635,6 +636,7 @@ struct CParseResult
     CScope* scopes;
     CEntityId* entity_lookup_buckets;
     CEntityId* typedef_lookup_buckets;
+    CEntityId* name_lookup_buckets;
     CAggregateLookup* aggregate_lookup;
     CTokenPositionIndex* position_index;
     CIdentifierUse* identifier_uses;

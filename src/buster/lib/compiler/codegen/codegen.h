@@ -292,7 +292,8 @@ typedef struct CodegenModuleOptions CodegenModuleOptions;
 struct CodegenModuleOptions
 {
     bool debug_info;
-    u8 reserved[7];
+    bool assume_validated;
+    u8 reserved[6];
 };
 
 BUSTER_F_DECL CodegenAbi codegen_abi_for_target(Target target);

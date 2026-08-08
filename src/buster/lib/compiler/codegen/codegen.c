@@ -4106,6 +4106,19 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
     {
         return;
     }
+    TemporalArena temporary = scratch_begin(0, 0);
+    IrValueId* local_places = arena_allocate(temporary.arena, IrValueId, function->local_count);
+    memset(local_places, 0xff, sizeof(*local_places) * function->local_count);
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        IrInstruction* instruction = function->instructions + instruction_index;
+        if (instruction->result.value < function->value_count && instruction->canonical_local.value < function->local_count &&
+            (instruction->opcode == IR_OPCODE_LOCAL || instruction->opcode == IR_OPCODE_ARGUMENT) &&
+            local_places[instruction->canonical_local.value].value == IR_ID_UNDERLYING_INVALID)
+        {
+            local_places[instruction->canonical_local.value] = instruction->result;
+        }
+    }
     for (u32 local_index = 0; local_index < function->debug_local_count; local_index += 1)
     {
         IrDebugLocal* local = function->debug_locals + local_index;
@@ -4114,15 +4127,18 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
             continue;
         }
         bool emitted = false;
-        IrValueId place = IR_VALUE_ID_INVALID;
-        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        IrValueId place = local->id.value < function->local_count ? local_places[local->id.value] : IR_VALUE_ID_INVALID;
+        if (place.value == IR_ID_UNDERLYING_INVALID && local->id.value >= function->local_count)
         {
-            IrInstruction* instruction = function->instructions + instruction_index;
-            if (instruction->result.value < function->value_count && instruction->canonical_local.value == local->id.value &&
-                (instruction->opcode == IR_OPCODE_LOCAL || instruction->opcode == IR_OPCODE_ARGUMENT))
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
             {
-                place = instruction->result;
-                break;
+                IrInstruction* instruction = function->instructions + instruction_index;
+                if (instruction->result.value < function->value_count && instruction->canonical_local.value == local->id.value &&
+                    (instruction->opcode == IR_OPCODE_LOCAL || instruction->opcode == IR_OPCODE_ARGUMENT))
+                {
+                    place = instruction->result;
+                    break;
+                }
             }
         }
         if (place.value != IR_ID_UNDERLYING_INVALID)
@@ -4172,6 +4188,7 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
                                               });
         }
     }
+    scratch_end(temporary);
 }
 
 BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(Arena* arena, AnalysisResult* analysis, IrFunction* function, Target target, bool record_lines)
@@ -8833,11 +8850,14 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         return result;
     }
     ir_prepare_program_abi(program, codegen_canonical_ir_abi_convention(result.abi));
-    IrValidationResult validation = ir_validate_canonical_module(program, module);
-    if (validation.error != IR_VALIDATION_NONE)
+    if (!options.assume_validated)
     {
-        result.error = CODEGEN_ERROR_INVALID_IR;
-        return result;
+        IrValidationResult validation = ir_validate_canonical_module(program, module);
+        if (validation.error != IR_VALIDATION_NONE)
+        {
+            result.error = CODEGEN_ERROR_INVALID_IR;
+            return result;
+        }
     }
     result.globals = arena_allocate(arena, CodegenModuleGlobal, module->global_count);
     u64 read_only_capacity = 0;
@@ -9060,6 +9080,19 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 .absolute = true,
                 .label_address = relocation.is_label_address,
             };
+        }
+    }
+    // Label-address relocations only come from the global initializers just
+    // emitted, and each is resolved exactly once by its owning function, so
+    // the per-function resolution below walks this side list instead of
+    // rescanning every module relocation.
+    u32* label_address_relocation_indices = arena_allocate(arena, u32, result.relocation_count);
+    u32 label_address_relocation_count = 0;
+    for (u32 relocation_index = 0; relocation_index < result.relocation_count; relocation_index += 1)
+    {
+        if (result.relocations[relocation_index].label_address)
+        {
+            label_address_relocation_indices[label_address_relocation_count++] = relocation_index;
         }
     }
     u64 instruction_capacity = target.cpu_arch == CPU_ARCH_AARCH64 ? 128 : 48;
@@ -15011,11 +15044,14 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 memcpy(buffer.bytes + patch.offset, &instruction, sizeof(instruction));
             }
         }
-        for (u32 relocation_index = 0; relocation_index < result.relocation_count; relocation_index += 1)
+        u32 kept_label_address_count = 0;
+        for (u32 side_index = 0; side_index < label_address_relocation_count; side_index += 1)
         {
+            u32 relocation_index = label_address_relocation_indices[side_index];
             CodegenModuleRelocation* relocation = result.relocations + relocation_index;
-            if (!relocation->label_address || relocation->symbol.value != function->symbol.value)
+            if (relocation->symbol.value != function->symbol.value)
             {
+                label_address_relocation_indices[kept_label_address_count++] = relocation_index;
                 continue;
             }
             if (relocation->label_block.value >= function->block_count)
@@ -15033,6 +15069,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             relocation->addend += block_addend;
             relocation->label_address = false;
         }
+        label_address_relocation_count = kept_label_address_count;
         descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
         if (options.debug_info)
         {

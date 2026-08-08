@@ -85,6 +85,49 @@ BUSTER_GLOBAL_LOCAL const char8* tokenizer_identifier_run_end(const char8* it, c
     return it;
 }
 
+// One byte per character value: 1 when the byte cannot affect the string
+// scan (no delimiter, escape, newline, recovery semicolon, or non-ASCII
+// byte), so the literal scan ANDs eight entries per step like the
+// identifier run. Non-ASCII stays special so malformed UTF-8 keeps its
+// sequence-length stepping.
+BUSTER_GLOBAL_LOCAL u8 tokenizer_string_plain_table[256];
+BUSTER_GLOBAL_LOCAL bool tokenizer_string_plain_table_built;
+
+BUSTER_GLOBAL_LOCAL void tokenizer_string_plain_table_build(void)
+{
+    for (u32 ch = 0; ch < 256; ch += 1)
+    {
+        bool special = ch >= 0x80u || ch == '"' || ch == '\\' || ch == '\n' || ch == '\r' || ch == ';';
+        tokenizer_string_plain_table[ch] = special ? 0 : 1;
+    }
+    tokenizer_string_plain_table_built = true;
+}
+
+BUSTER_GLOBAL_LOCAL const char8* tokenizer_string_plain_run_end(const char8* it, const char8* top)
+{
+    if (!tokenizer_string_plain_table_built)
+    {
+        tokenizer_string_plain_table_build();
+    }
+    while (top - it >= 8)
+    {
+        u8 all = tokenizer_string_plain_table[(u8)it[0]] & tokenizer_string_plain_table[(u8)it[1]] &
+                 tokenizer_string_plain_table[(u8)it[2]] & tokenizer_string_plain_table[(u8)it[3]] &
+                 tokenizer_string_plain_table[(u8)it[4]] & tokenizer_string_plain_table[(u8)it[5]] &
+                 tokenizer_string_plain_table[(u8)it[6]] & tokenizer_string_plain_table[(u8)it[7]];
+        if (!all)
+        {
+            break;
+        }
+        it += 8;
+    }
+    while (it < top && tokenizer_string_plain_table[(u8)*it])
+    {
+        it += 1;
+    }
+    return it;
+}
+
 BUSTER_GLOBAL_LOCAL bool tokenizer_is_integer_digit(IntegerFormat format, u8 ch)
 {
     bool result = false;
@@ -567,6 +610,11 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
             it += 1;
             while (it < top && *it != '\n' && *it != '\r')
             {
+                it = tokenizer_string_plain_run_end(it, top);
+                if (it >= top || *it == '\n' || *it == '\r')
+                {
+                    break;
+                }
                 if (*it == '"')
                 {
                     it += 1;

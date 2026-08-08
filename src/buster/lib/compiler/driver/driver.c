@@ -1374,6 +1374,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     CodegenModule code = codegen_generate_canonical_module(arena, lowered.program, module, invocation.target,
                                                            (CodegenModuleOptions){
                                                                .debug_info = invocation.debug_info,
+                                                               .assume_validated = true,
                                                            });
     result.codegen_statistics = code.statistics;
     result.codegen_error = code.error;
