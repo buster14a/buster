@@ -429,6 +429,20 @@ history.
   stages must stay deterministic — write results into slots indexed by work
   item, never by completion order — so the self-hosting fixed point stays
   byte-identical at any lane count.
+- **Microarchitecture tuning target: AMD Zen 4 and Zen 5, for now.** The main
+  development machine is a Ryzen 9 7940HS (Zen 4) and the CI x86-64 runners
+  cover both generations (the Windows runner is a Zen 5 box), so single-thread
+  throughput decisions — SIMD width, table sizes, branch-vs-cmov trades — are
+  made for and measured on these cores. GNU-family builds compile with
+  `-march=native`, so clang-built binaries on these hosts already have
+  AVX-512 (VL/BW/DQ/VBMI/VBMI2) available; Zen 4 executes 512-bit ops
+  double-pumped over 256-bit datapaths while Zen 5 has native 512-bit units,
+  so prefer kernels whose win survives at 256-bit effective width. Explicit
+  intrinsics must stay behind feature/compiler guards with a scalar or SWAR
+  fallback: MSVC builds carry no `-march`, aarch64 (macOS/Android/iOS) must
+  keep building, and the self-hosted `ide cc` stages compile the same tree
+  without vendor headers — performance is only ever quoted from clang-built
+  binaries, so fallback paths need correctness, not speed.
 - **Warnings are errors** under a very large warning set (see
   `GNU_FAMILY_WARNINGS` in `CMakeLists.txt`), and code must stay clean under
   Clang, GCC, Zig cc, and MSVC. TCC is required only to compile/bootstrap the
