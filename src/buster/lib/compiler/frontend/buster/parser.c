@@ -1466,9 +1466,26 @@ BUSTER_GLOBAL_LOCAL ParserState state_pop(ParserStateState* stack)
     return old_top;
 }
 
+// Fast-path bump for the parser's per-push and per-node allocations: the
+// state stack pops by rewinding the arena position and the expression arena
+// resets every parse, so these allocations almost always re-bump over
+// already-committed bytes; only a push past the committed watermark needs
+// arena_allocate's commit machinery.
+BUSTER_GLOBAL_LOCAL void* parser_bump_allocate(Arena* restrict arena, u64 size, u64 alignment)
+{
+    u64 aligned_offset = (arena->position + (alignment - 1)) & ~(alignment - 1);
+    u64 position_after = aligned_offset + size;
+    if (BUSTER_LIKELY(position_after <= arena->os_position))
+    {
+        arena->position = position_after;
+        return (u8*)arena + aligned_offset;
+    }
+    return arena_allocate_bytes(arena, size, alignment);
+}
+
 BUSTER_GLOBAL_LOCAL ParserState* state_push(ParserStateState* stack)
 {
-    ParserState* state = arena_allocate(stack->arena, ParserState, 1);
+    ParserState* state = (ParserState*)parser_bump_allocate(stack->arena, sizeof(ParserState), BUSTER_ALIGN_OF(ParserState));
     *state = (ParserState){0};
     return state;
 }
@@ -3187,7 +3204,7 @@ BUSTER_GLOBAL_LOCAL BindingPower binary_binding_power(AstNodeId id)
 // Append a node to the current expression's postorder output stream.
 BUSTER_GLOBAL_LOCAL AstNode* expression_emit(Parser* restrict parser, ParserState* restrict st, AstNodeId id)
 {
-    AstNode* node = arena_allocate(parser->expression_arena, AstNode, 1);
+    AstNode* node = (AstNode*)parser_bump_allocate(parser->expression_arena, sizeof(AstNode), BUSTER_ALIGN_OF(AstNode));
     node->id = id;
     node->integer = (AstIntegerLiteral){0};
     if (st->expression.output_count == 0)
