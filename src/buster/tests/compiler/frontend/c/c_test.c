@@ -4263,6 +4263,119 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_global_array_sizeof_bound(UnitTestArgu
     return result;
 }
 
+/* Function-body sizeof over an expression operand must fold through the resolved
+   operand types with the usual arithmetic conversions, never through the
+   type-prediction guess: narrow operands promote to int, shifts keep the promoted
+   left operand, assignments keep the left operand unpromoted, and a nested sizeof
+   contributes size_t. Each probe function's IR must contain the correctly folded
+   constant and must not contain the value the prediction guess used to fold. */
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_body_sizeof_expression(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    // Lower for the native target and an LLP64 one: the size_type/ptrdiff selection
+    // reads the program data layout, so a Windows-target lowering must fold the
+    // nested-sizeof probe through a 64-bit size_t even though its unsigned long is 32-bit.
+    Target targets[2] = {target_native, target_native};
+    targets[1].os = OPERATING_SYSTEM_WINDOWS;
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        Target probe_target = targets[target_index];
+        CPreprocessResult tokens =
+            c_preprocess(temporary.arena,
+                         S8("char sizeof_take_char(void) { return 1; }\n"
+                            "static short sizeof_global_short;\n"
+                            "struct SizeofPromote { char first; short second; };\n"
+                            "unsigned int sizeof_fold_short_add(void) { short value; return (unsigned int)sizeof(value + value); }\n"
+                            "unsigned int sizeof_fold_char_negate(void) { char value; return (unsigned int)sizeof(-value); }\n"
+                            "unsigned int sizeof_fold_bool_not(void) { _Bool value; return (unsigned int)sizeof(~value); }\n"
+                            "unsigned int sizeof_fold_shift_left_operand(void) { int left; long long right;"
+                            " return (unsigned int)sizeof(left << right); }\n"
+                            "unsigned int sizeof_fold_assign_left(void) { short target; long long source;"
+                            " return (unsigned int)sizeof(target = source); }\n"
+                            "unsigned int sizeof_fold_compound_assign_left(void) { char target; long long source;"
+                            " return (unsigned int)sizeof(target += source); }\n"
+                            "unsigned int sizeof_fold_conditional_promotes(void) { _Bool which; char value;"
+                            " return (unsigned int)sizeof(which ? value : value); }\n"
+                            "unsigned int sizeof_fold_call_add(void)"
+                            " { return (unsigned int)sizeof(sizeof_take_char() + sizeof_take_char()); }\n"
+                            "unsigned int sizeof_fold_nested_sizeof(void) { int value; return (unsigned int)sizeof(sizeof(value) + value); }\n"
+                            "unsigned int sizeof_fold_member_add(void) { struct SizeofPromote pair;"
+                            " return (unsigned int)sizeof(pair.first + pair.second); }\n"
+                            "unsigned int sizeof_fold_element_add(void) { short table[4];"
+                            " return (unsigned int)sizeof(table[0] + table[1]); }\n"
+                            "unsigned int sizeof_fold_cast_add(void) { long long wide; return (unsigned int)sizeof((char)wide + 1); }\n"
+                            "unsigned int sizeof_fold_global_add(void)"
+                            " { return (unsigned int)sizeof(sizeof_global_short + sizeof_global_short); }\n"),
+                         (CPreprocessOptions){
+                             .target = probe_target,
+                             .data_layout = target_data_layout(probe_target),
+                         });
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("function-body-sizeof-expression.c"), tokens, parse, probe_target);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+        BUSTER_TEST(arguments, ir.program != 0);
+        if (ir.program)
+        {
+            struct
+            {
+                String8 name;
+                u64 folded;
+                u64 guessed;
+            } probes[] = {
+                {S8_INITIALIZER("sizeof_fold_short_add"), 4, 2},
+                {S8_INITIALIZER("sizeof_fold_char_negate"), 4, 1},
+                {S8_INITIALIZER("sizeof_fold_bool_not"), 4, 1},
+                {S8_INITIALIZER("sizeof_fold_shift_left_operand"), 4, 8},
+                {S8_INITIALIZER("sizeof_fold_assign_left"), 2, 8},
+                {S8_INITIALIZER("sizeof_fold_compound_assign_left"), 1, 8},
+                {S8_INITIALIZER("sizeof_fold_conditional_promotes"), 4, 1},
+                {S8_INITIALIZER("sizeof_fold_call_add"), 4, 1},
+                {S8_INITIALIZER("sizeof_fold_nested_sizeof"), 8, 4},
+                {S8_INITIALIZER("sizeof_fold_member_add"), 4, 2},
+                {S8_INITIALIZER("sizeof_fold_element_add"), 4, 2},
+                {S8_INITIALIZER("sizeof_fold_cast_add"), 4, 1},
+                {S8_INITIALIZER("sizeof_fold_global_add"), 4, 2},
+            };
+            IrModule* module = &ir.program->modules[0];
+            for (u32 probe_index = 0; probe_index < BUSTER_ARRAY_LENGTH(probes); probe_index += 1)
+            {
+                bool found_folded = false;
+                bool found_guessed = false;
+                bool found_function = false;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    IrFunction* function = &module->functions[function_index];
+                    if (!string_equal(function->name, probes[probe_index].name))
+                    {
+                        continue;
+                    }
+                    found_function = true;
+                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                    {
+                        IrInstruction instruction = function->instructions[instruction_index];
+                        if (instruction.opcode != IR_OPCODE_CONSTANT_INTEGER)
+                        {
+                            continue;
+                        }
+                        found_folded |= instruction.immediates[0] == probes[probe_index].folded;
+                        found_guessed |= instruction.immediates[0] == probes[probe_index].guessed;
+                    }
+                }
+                BUSTER_TEST(arguments, found_function);
+                BUSTER_TEST(arguments, found_folded);
+                BUSTER_TEST(arguments, !found_guessed);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6455,6 +6568,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_frontend_semantic_basics(arguments));
     c_test_result_add(&result, c_test_frontend_global_types(arguments));
     c_test_result_add(&result, c_test_global_array_sizeof_bound(arguments));
+    c_test_result_add(&result, c_test_function_body_sizeof_expression(arguments));
     c_test_result_add(&result, c_test_frontend_control_flow(arguments));
     c_test_result_add(&result, c_test_then_nested_conditionals(arguments));
     c_test_result_add(&result, c_test_frontend_vectors(arguments));

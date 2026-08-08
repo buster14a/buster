@@ -545,6 +545,37 @@ static int indirect_variadic_struct_argument(void)
     return holder.callback(4, slice, 5ULL, 6ULL) == 18;
 }
 
+static char sizeof_fold_char_source(void)
+{
+    return 1;
+}
+
+static int sizeof_expression_folds(void)
+{
+    char narrow = 1;
+    short compact = 2;
+    int whole = 3;
+    long long wide = 4;
+    _Bool flag = 1;
+    unsigned short packed[4] = {1, 2, 3, 4};
+    struct WidePair pair = {5, 6};
+    int result = 0;
+    ACCUMULATE_BOOLEAN(result, sizeof(narrow + narrow) == sizeof(int));
+    ACCUMULATE_BOOLEAN(result, sizeof(compact * compact) == sizeof(int));
+    ACCUMULATE_BOOLEAN(result, sizeof(-narrow) == sizeof(int));
+    ACCUMULATE_BOOLEAN(result, sizeof(~flag) == sizeof(int));
+    ACCUMULATE_BOOLEAN(result, sizeof(whole << wide) == sizeof(int));
+    ACCUMULATE_BOOLEAN(result, sizeof(compact = wide) == sizeof(short));
+    ACCUMULATE_BOOLEAN(result, sizeof(narrow += wide) == 1);
+    ACCUMULATE_BOOLEAN(result, sizeof(flag ? narrow : narrow) == sizeof(int));
+    ACCUMULATE_BOOLEAN(result, sizeof(packed[0] + packed[1]) == sizeof(int));
+    ACCUMULATE_BOOLEAN(result, sizeof((char)wide + 1) == sizeof(int));
+    ACCUMULATE_BOOLEAN(result, sizeof(sizeof(whole) + whole) == sizeof(sizeof(int)));
+    ACCUMULATE_BOOLEAN(result, sizeof(pair.left + narrow) == sizeof(unsigned long long));
+    ACCUMULATE_BOOLEAN(result, sizeof(sizeof_fold_char_source() + sizeof_fold_char_source()) == sizeof(int));
+    return result == 13;
+}
+
 static int zero_storage_round_trip(void)
 {
     if (large_zero_storage[0] || large_zero_storage[sizeof(large_zero_storage) - 1] || constant_zero_storage[0] ||
@@ -596,5 +627,5 @@ int main(void)
            8 * (0ULL - (unsigned long long)(-9223372036854775807LL - 1) == 9223372036854775808ULL) + 16 * ((-10LL - 1) == -11LL) +
            32 * (9223372036854775807LL == 0x7fffffffffffffffLL) + 64 * (-9223372036854775807LL == (long long)0x8000000000000001ULL) +
            2 * initialized_integer_arrays() + unicode_exception_paths() + unicode_index_conditions() + narrow_unsigned_conversions() +
-           (integer_width_mask(32) == 0xffffffffULL) + indirect_variadic_struct_argument() + zero_storage_round_trip() - 472;
+           (integer_width_mask(32) == 0xffffffffULL) + indirect_variadic_struct_argument() + sizeof_expression_folds() + zero_storage_round_trip() - 473;
 }

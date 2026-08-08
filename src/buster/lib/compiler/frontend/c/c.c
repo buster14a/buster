@@ -27026,8 +27026,674 @@ BUSTER_GLOBAL_LOCAL bool c_ir_static_postfix_type(CIntegerIrBuilder* builder, Ir
     return index == end && type->value != IR_ID_UNDERLYING_INVALID;
 }
 
+BUSTER_GLOBAL_LOCAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type);
+BUSTER_GLOBAL_LOCAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 start, u32 end);
+BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
+
+BUSTER_GLOBAL_LOCAL IrTypeId c_ir_sizeof_operand_decay(CIntegerIrBuilder* builder, IrTypeId type)
+{
+    IrType* value = ir_type_from_id(&builder->program->types, type);
+    if (value && value->kind == IR_TYPE_ARRAY)
+    {
+        return c_ir_add_pointer_type(builder->program, builder->pointer_types, value->element_type);
+    }
+    return type;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operand_postfix_chain_attempt(CIntegerIrBuilder* builder, IrTypeId* type, u32 index, u32 end)
+{
+    while (index < end)
+    {
+        IrType* value = ir_type_from_id(&builder->program->types, *type);
+        if (!value)
+        {
+            return false;
+        }
+        CToken token = builder->preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+            if (close >= end || (value->kind != IR_TYPE_ARRAY && value->kind != IR_TYPE_POINTER))
+            {
+                return false;
+            }
+            *type = value->element_type;
+            index = close + 1;
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            if (close >= end)
+            {
+                return false;
+            }
+            if (value->kind == IR_TYPE_POINTER)
+            {
+                *type = value->element_type;
+                value = ir_type_from_id(&builder->program->types, *type);
+            }
+            if (!value || value->kind != IR_TYPE_FUNCTION)
+            {
+                return false;
+            }
+            *type = value->return_type;
+            index = close + 1;
+            continue;
+        }
+        if ((c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS)) && index + 1 == end)
+        {
+            // Postfix increment keeps the operand type.
+            return true;
+        }
+        bool arrow = c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW);
+        if (!arrow && !c_token_is_punctuator(&token, C_PUNCTUATOR_DOT))
+        {
+            return false;
+        }
+        if (arrow)
+        {
+            if (value->kind != IR_TYPE_POINTER)
+            {
+                return false;
+            }
+            *type = value->element_type;
+            value = ir_type_from_id(&builder->program->types, *type);
+        }
+        if (!value || (value->kind != IR_TYPE_STRUCT && value->kind != IR_TYPE_UNION) || index + 1 >= end ||
+            builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER)
+        {
+            return false;
+        }
+        IrTypeId member_type = IR_TYPE_ID_INVALID;
+        if (!c_ir_promoted_member_type(builder, *type, builder->preprocess.tokens[index + 1].spelling, &member_type))
+        {
+            return false;
+        }
+        *type = member_type;
+        index += 2;
+    }
+    return type->value != IR_ID_UNDERLYING_INVALID;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out)
+{
+    CToken token = builder->preprocess.tokens[start];
+    CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
+    CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+    IrTypeId type = IR_TYPE_ID_INVALID;
+    u32 chain_start = start + 1;
+    if (local)
+    {
+        if (local->is_variable_length_array)
+        {
+            return false;
+        }
+        type = local->type;
+    }
+    else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
+    {
+        type = builder->s32_type;
+    }
+    else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT)
+    {
+        CTypeId c_type = builder->parse.entities[entity.value].type;
+        if (c_type.value < builder->parse.type_count)
+        {
+            type = builder->c_type_ir_map[c_type.value];
+        }
+    }
+    if (type.value == IR_ID_UNDERLYING_INVALID && chain_start < end &&
+        c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        // A direct call through a function name resolves to the declared return type.
+        CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, start);
+        u32 close = UINT32_MAX;
+        if (prepared_call && builder->function && prepared_call->emitted && prepared_call->result.value < builder->function->value_count)
+        {
+            type = builder->function->values[prepared_call->result.value].canonical_type;
+            close = prepared_call->close_index;
+        }
+        else
+        {
+            u32 declaration_index = c_ir_find_function(builder, token.spelling);
+            if (declaration_index != UINT32_MAX && builder->signatures)
+            {
+                type = builder->signatures[declaration_index].return_type;
+                close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            }
+        }
+        if (close >= end)
+        {
+            return false;
+        }
+        chain_start = close + 1;
+    }
+    else if (type.value == IR_ID_UNDERLYING_INVALID)
+    {
+        // A bare function name resolves to its function type so a call applied
+        // through parentheses, e.g. `(name)(...)`, still reaches the return type.
+        u32 declaration_index = c_ir_find_function(builder, token.spelling);
+        if (declaration_index != UINT32_MAX && builder->declaration_functions && builder->declaration_functions[declaration_index])
+        {
+            type = builder->declaration_functions[declaration_index]->canonical_type;
+        }
+    }
+    if (type.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return false;
+    }
+    *type_out = type;
+    return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, chain_start, end);
+}
+
+/* Resolves the C result type of a sizeof/alignof expression operand strictly: every
+   sub-operand must resolve through a mapped entity, literal, cast, or call before any
+   type is combined, and binary operators apply the usual arithmetic conversions (so
+   narrow operands promote to int and mixed widths take the wider side). Returning
+   false defers to the older per-shape paths and ultimately the caller's fallback; a
+   guessed type must never come out of this function, because the guessed size folds
+   silently into the program (the 2026-08-08 array-bound incident, and the same
+   defect shape in function bodies). */
+BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out)
+{
+    while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
+    {
+        start += 1;
+        end -= 1;
+    }
+    if (start >= end)
+    {
+        return false;
+    }
+    // One top-level scan records the loosest-binding operator of every precedence tier.
+    // Left-associative tiers split at their last top-level operator, the right-associative
+    // assignment at its first; a `?` only counts at ternary depth zero so operators inside
+    // conditional arms never split the outer expression.
+    u32 last_comma = UINT32_MAX;
+    u32 first_assign = UINT32_MAX;
+    u32 first_question = UINT32_MAX;
+    u32 first_colon = UINT32_MAX;
+    u32 logical_index = UINT32_MAX;
+    u32 bit_or_index = UINT32_MAX;
+    u32 bit_xor_index = UINT32_MAX;
+    u32 bit_and_index = UINT32_MAX;
+    u32 comparison_index = UINT32_MAX;
+    u32 shift_index = UINT32_MAX;
+    u32 additive_index = UINT32_MAX;
+    u32 multiplicative_index = UINT32_MAX;
+    u32 ternary_depth = 0;
+    bool previous_is_operand = false;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+        if (scan == C_IR_GROUP_SCAN_SKIPPED)
+        {
+            previous_is_operand = true;
+            continue;
+        }
+        if (scan == C_IR_GROUP_SCAN_UNCLOSED)
+        {
+            return false;
+        }
+        u32 punctuator = token.punctuator;
+        if (punctuator == C_PUNCTUATOR_NONE)
+        {
+            // The sizeof/alignof words are prefix operators, so a `*` after one
+            // dereferences rather than multiplies.
+            previous_is_operand =
+                token.kind != C_TOKEN_IDENTIFIER || (!string_equal(token.spelling, S8("sizeof")) && !c_parse_alignof_word(token.spelling));
+            continue;
+        }
+        if (punctuator == C_PUNCTUATOR_QUESTION)
+        {
+            if (!ternary_depth && first_question == UINT32_MAX)
+            {
+                first_question = index;
+            }
+            ternary_depth += 1;
+            previous_is_operand = false;
+            continue;
+        }
+        if (punctuator == C_PUNCTUATOR_COLON)
+        {
+            if (!ternary_depth)
+            {
+                return false;
+            }
+            ternary_depth -= 1;
+            if (!ternary_depth && first_colon == UINT32_MAX)
+            {
+                first_colon = index;
+            }
+            previous_is_operand = false;
+            continue;
+        }
+        if (punctuator == C_PUNCTUATOR_PLUS_PLUS || punctuator == C_PUNCTUATOR_MINUS_MINUS)
+        {
+            // Postfix after an operand, prefix before one: either way the operand state carries over.
+            continue;
+        }
+        bool binary_allowed = previous_is_operand;
+        previous_is_operand = false;
+        if (ternary_depth)
+        {
+            continue;
+        }
+        switch (punctuator)
+        {
+        case C_PUNCTUATOR_COMMA: last_comma = index; break;
+        case C_PUNCTUATOR_ASSIGN:
+        case C_PUNCTUATOR_PLUS_ASSIGN:
+        case C_PUNCTUATOR_MINUS_ASSIGN:
+        case C_PUNCTUATOR_STAR_ASSIGN:
+        case C_PUNCTUATOR_SLASH_ASSIGN:
+        case C_PUNCTUATOR_PERCENT_ASSIGN:
+        case C_PUNCTUATOR_SHIFT_LEFT_ASSIGN:
+        case C_PUNCTUATOR_SHIFT_RIGHT_ASSIGN:
+        case C_PUNCTUATOR_AMPERSAND_ASSIGN:
+        case C_PUNCTUATOR_CARET_ASSIGN:
+        case C_PUNCTUATOR_PIPE_ASSIGN:
+            if (first_assign == UINT32_MAX)
+            {
+                first_assign = index;
+            }
+            break;
+        case C_PUNCTUATOR_PIPE_PIPE: logical_index = index; break;
+        case C_PUNCTUATOR_AMPERSAND_AMPERSAND:
+            if (!binary_allowed)
+            {
+                // A leading `&&` is a label-address operand; leave it to the prediction paths.
+                return false;
+            }
+            logical_index = index;
+            break;
+        case C_PUNCTUATOR_PIPE: bit_or_index = index; break;
+        case C_PUNCTUATOR_CARET: bit_xor_index = index; break;
+        case C_PUNCTUATOR_AMPERSAND:
+            if (binary_allowed)
+            {
+                bit_and_index = index;
+            }
+            break;
+        case C_PUNCTUATOR_EQUAL:
+        case C_PUNCTUATOR_NOT_EQUAL:
+        case C_PUNCTUATOR_LESS:
+        case C_PUNCTUATOR_GREATER:
+        case C_PUNCTUATOR_LESS_EQUAL:
+        case C_PUNCTUATOR_GREATER_EQUAL: comparison_index = index; break;
+        case C_PUNCTUATOR_SHIFT_LEFT:
+        case C_PUNCTUATOR_SHIFT_RIGHT: shift_index = index; break;
+        case C_PUNCTUATOR_PLUS:
+        case C_PUNCTUATOR_MINUS:
+            if (binary_allowed)
+            {
+                additive_index = index;
+            }
+            break;
+        case C_PUNCTUATOR_STAR:
+            if (binary_allowed)
+            {
+                multiplicative_index = index;
+            }
+            break;
+        case C_PUNCTUATOR_SLASH:
+        case C_PUNCTUATOR_PERCENT: multiplicative_index = index; break;
+        case C_PUNCTUATOR_TILDE:
+        case C_PUNCTUATOR_EXCLAMATION:
+        case C_PUNCTUATOR_DOT:
+        case C_PUNCTUATOR_ARROW: break;
+        default: return false;
+        }
+    }
+    if (ternary_depth)
+    {
+        return false;
+    }
+    if (last_comma != UINT32_MAX)
+    {
+        IrTypeId right = IR_TYPE_ID_INVALID;
+        if (!c_ir_sizeof_operand_type_attempt(builder, last_comma + 1, end, &right))
+        {
+            return false;
+        }
+        *type_out = c_ir_sizeof_operand_decay(builder, right);
+        return true;
+    }
+    if (first_assign != UINT32_MAX)
+    {
+        // Assignment yields the unpromoted type of its left operand.
+        return c_ir_sizeof_operand_type_attempt(builder, start, first_assign, type_out);
+    }
+    if (first_question != UINT32_MAX)
+    {
+        if (first_colon == UINT32_MAX)
+        {
+            return false;
+        }
+        u32 true_start = first_question + 1;
+        u32 true_end = first_colon;
+        if (true_start == true_end)
+        {
+            // GNU `a ?: b` reuses the condition as the true arm.
+            true_start = start;
+            true_end = first_question;
+        }
+        IrTypeId true_type = IR_TYPE_ID_INVALID;
+        IrTypeId false_type = IR_TYPE_ID_INVALID;
+        if (!c_ir_sizeof_operand_type_attempt(builder, true_start, true_end, &true_type) ||
+            !c_ir_sizeof_operand_type_attempt(builder, first_colon + 1, end, &false_type))
+        {
+            return false;
+        }
+        true_type = c_ir_sizeof_operand_decay(builder, true_type);
+        false_type = c_ir_sizeof_operand_decay(builder, false_type);
+        IrTypeId arithmetic = c_ir_usual_arithmetic_type(builder, true_type, false_type);
+        if (arithmetic.value != IR_ID_UNDERLYING_INVALID)
+        {
+            *type_out = arithmetic;
+            return true;
+        }
+        IrTypeId merged = c_ir_conditional_result_type_attempt(builder, true_type, false_type, true_start, true_end, first_colon + 1, end);
+        if (builder->queries->has_request || merged.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+        *type_out = merged;
+        return true;
+    }
+    if (logical_index != UINT32_MAX)
+    {
+        *type_out = builder->s32_type;
+        return true;
+    }
+    u32 bitwise_index = bit_or_index != UINT32_MAX ? bit_or_index : bit_xor_index != UINT32_MAX ? bit_xor_index : bit_and_index;
+    if (bitwise_index != UINT32_MAX)
+    {
+        IrTypeId left = IR_TYPE_ID_INVALID;
+        IrTypeId right = IR_TYPE_ID_INVALID;
+        if (!c_ir_sizeof_operand_type_attempt(builder, start, bitwise_index, &left) ||
+            !c_ir_sizeof_operand_type_attempt(builder, bitwise_index + 1, end, &right))
+        {
+            return false;
+        }
+        IrTypeId result = c_ir_usual_arithmetic_type(builder, left, right);
+        if (result.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+        *type_out = result;
+        return true;
+    }
+    if (comparison_index != UINT32_MAX)
+    {
+        *type_out = builder->s32_type;
+        return true;
+    }
+    if (shift_index != UINT32_MAX)
+    {
+        // A shift yields the promoted left operand; the right operand never widens it.
+        IrTypeId left = IR_TYPE_ID_INVALID;
+        if (!c_ir_sizeof_operand_type_attempt(builder, start, shift_index, &left))
+        {
+            return false;
+        }
+        IrTypeId promoted = c_ir_usual_arithmetic_type(builder, left, left);
+        IrType* promoted_value = ir_type_from_id(&builder->program->types, promoted);
+        if (!promoted_value || promoted_value->kind != IR_TYPE_INTEGER)
+        {
+            return false;
+        }
+        *type_out = promoted;
+        return true;
+    }
+    if (additive_index != UINT32_MAX)
+    {
+        IrTypeId left = IR_TYPE_ID_INVALID;
+        IrTypeId right = IR_TYPE_ID_INVALID;
+        if (!c_ir_sizeof_operand_type_attempt(builder, start, additive_index, &left) ||
+            !c_ir_sizeof_operand_type_attempt(builder, additive_index + 1, end, &right))
+        {
+            return false;
+        }
+        left = c_ir_sizeof_operand_decay(builder, left);
+        right = c_ir_sizeof_operand_decay(builder, right);
+        IrTypeId arithmetic = c_ir_usual_arithmetic_type(builder, left, right);
+        if (arithmetic.value != IR_ID_UNDERLYING_INVALID)
+        {
+            *type_out = arithmetic;
+            return true;
+        }
+        IrType* left_value = ir_type_from_id(&builder->program->types, left);
+        IrType* right_value = ir_type_from_id(&builder->program->types, right);
+        if (!left_value || !right_value)
+        {
+            return false;
+        }
+        bool minus = c_token_is_punctuator(&builder->preprocess.tokens[additive_index], C_PUNCTUATOR_MINUS);
+        bool left_integer = left_value->kind == IR_TYPE_BOOLEAN || left_value->kind == IR_TYPE_INTEGER || left_value->kind == IR_TYPE_ENUM;
+        bool right_integer = right_value->kind == IR_TYPE_BOOLEAN || right_value->kind == IR_TYPE_INTEGER || right_value->kind == IR_TYPE_ENUM;
+        if (left_value->kind == IR_TYPE_POINTER && right_value->kind == IR_TYPE_POINTER && minus)
+        {
+            *type_out = builder->ptrdiff_type;
+            return true;
+        }
+        if (left_value->kind == IR_TYPE_POINTER && right_integer)
+        {
+            *type_out = left;
+            return true;
+        }
+        if (!minus && left_integer && right_value->kind == IR_TYPE_POINTER)
+        {
+            *type_out = right;
+            return true;
+        }
+        return false;
+    }
+    if (multiplicative_index != UINT32_MAX)
+    {
+        IrTypeId left = IR_TYPE_ID_INVALID;
+        IrTypeId right = IR_TYPE_ID_INVALID;
+        if (!c_ir_sizeof_operand_type_attempt(builder, start, multiplicative_index, &left) ||
+            !c_ir_sizeof_operand_type_attempt(builder, multiplicative_index + 1, end, &right))
+        {
+            return false;
+        }
+        IrTypeId result = c_ir_usual_arithmetic_type(builder, left, right);
+        if (result.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+        *type_out = result;
+        return true;
+    }
+    CToken first = builder->preprocess.tokens[start];
+    if (first.kind == C_TOKEN_IDENTIFIER && (string_equal(first.spelling, S8("sizeof")) || c_parse_alignof_word(first.spelling)))
+    {
+        if (start + 1 >= end)
+        {
+            return false;
+        }
+        bool parenthesized = c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                             c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1;
+        if (!parenthesized && c_ir_unary_expression_end(builder, start + 1, end) != end)
+        {
+            return false;
+        }
+        *type_out = builder->size_type;
+        return true;
+    }
+    if (c_token_is_punctuator(&first, C_PUNCTUATOR_EXCLAMATION))
+    {
+        *type_out = builder->s32_type;
+        return true;
+    }
+    if (c_token_is_punctuator(&first, C_PUNCTUATOR_STAR))
+    {
+        IrTypeId operand = IR_TYPE_ID_INVALID;
+        if (!c_ir_sizeof_operand_type_attempt(builder, start + 1, end, &operand))
+        {
+            return false;
+        }
+        IrType* value = ir_type_from_id(&builder->program->types, operand);
+        if (!value || (value->kind != IR_TYPE_POINTER && value->kind != IR_TYPE_ARRAY))
+        {
+            return false;
+        }
+        *type_out = value->element_type;
+        return true;
+    }
+    if (c_token_is_punctuator(&first, C_PUNCTUATOR_AMPERSAND))
+    {
+        IrTypeId operand = IR_TYPE_ID_INVALID;
+        if (!c_ir_sizeof_operand_type_attempt(builder, start + 1, end, &operand))
+        {
+            return false;
+        }
+        *type_out = c_ir_add_pointer_type(builder->program, builder->pointer_types, operand);
+        return true;
+    }
+    if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS) ||
+        c_token_is_punctuator(&first, C_PUNCTUATOR_TILDE))
+    {
+        IrTypeId operand = IR_TYPE_ID_INVALID;
+        if (!c_ir_sizeof_operand_type_attempt(builder, start + 1, end, &operand))
+        {
+            return false;
+        }
+        IrTypeId promoted = c_ir_usual_arithmetic_type(builder, operand, operand);
+        IrType* promoted_value = ir_type_from_id(&builder->program->types, promoted);
+        if (!promoted_value || (c_token_is_punctuator(&first, C_PUNCTUATOR_TILDE) && promoted_value->kind != IR_TYPE_INTEGER))
+        {
+            return false;
+        }
+        *type_out = promoted;
+        return true;
+    }
+    if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS_MINUS))
+    {
+        return c_ir_sizeof_operand_type_attempt(builder, start + 1, end, type_out);
+    }
+    if (c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close >= end)
+        {
+            return false;
+        }
+        IrTypeId cast_type = IR_TYPE_ID_INVALID;
+        bool named = c_ir_query_type_name(builder, start + 1, close, true, &cast_type);
+        if (builder->queries->has_request)
+        {
+            return false;
+        }
+        if (named && cast_type.value != IR_ID_UNDERLYING_INVALID)
+        {
+            if (close + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE))
+            {
+                u32 initializer_close = c_ir_matching_delimiter_cached(builder, close + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+                if (initializer_close >= end)
+                {
+                    return false;
+                }
+                IrTypeId literal_type = IR_TYPE_ID_INVALID;
+                if (!c_ir_query_compound_type(builder, start + 1, close, close + 1, initializer_close, &literal_type) ||
+                    literal_type.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+                *type_out = literal_type;
+                return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, initializer_close + 1, end);
+            }
+            if (close + 1 >= end)
+            {
+                // A bare parenthesized type name is not an expression operand.
+                return false;
+            }
+            *type_out = cast_type;
+            return true;
+        }
+        IrTypeId inner = IR_TYPE_ID_INVALID;
+        if (!c_ir_sizeof_operand_type_attempt(builder, start + 1, close, &inner))
+        {
+            return false;
+        }
+        *type_out = inner;
+        return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end);
+    }
+    if (first.kind == C_TOKEN_PREPROCESSING_NUMBER && start + 1 == end)
+    {
+        if (c_ir_number_is_float(first.spelling))
+        {
+            char8 suffix = first.spelling.length ? first.spelling.pointer[first.spelling.length - 1] : 0;
+            *type_out = suffix == 'f' || suffix == 'F' ? builder->f32_type : suffix == 'l' || suffix == 'L' ? builder->long_double_type : builder->f64_type;
+            return true;
+        }
+        u64 integer_value = 0;
+        if (!c_conditional_number(first.spelling, &integer_value))
+        {
+            return false;
+        }
+        IrTypeId literal_type = c_ir_integer_literal_type(builder, first.spelling, integer_value);
+        if (literal_type.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+        *type_out = literal_type;
+        return true;
+    }
+    if (first.kind == C_TOKEN_CHARACTER_LITERAL && start + 1 == end)
+    {
+        u64 opening = 0;
+        while (opening < first.spelling.length && first.spelling.pointer[opening] != '\'')
+        {
+            opening += 1;
+        }
+        CTypeKind kind = C_TYPE_INT;
+        if (opening == 2)
+        {
+            kind = C_TYPE_UNSIGNED_CHAR;
+        }
+        else if (opening == 1)
+        {
+            kind = first.spelling.pointer[0] == 'u'                 ? C_TYPE_UNSIGNED_SHORT
+                   : first.spelling.pointer[0] == 'U'               ? C_TYPE_UNSIGNED_INT
+                   : builder->target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_UNSIGNED_SHORT
+                                                                    : C_TYPE_INT;
+        }
+        *type_out = builder->scalar_types[kind];
+        return true;
+    }
+    if (first.kind == C_TOKEN_STRING_LITERAL)
+    {
+        u32 literal_end = start + 1;
+        while (literal_end < end && builder->preprocess.tokens[literal_end].kind == C_TOKEN_STRING_LITERAL)
+        {
+            literal_end += 1;
+        }
+        CIrDecodedString decoded = {0};
+        if (!c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, start, literal_end, &decoded))
+        {
+            return false;
+        }
+        // Sub-operand string literals only appear in decaying contexts here; the
+        // whole-operand array case is handled before this resolver runs.
+        *type_out = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->scalar_types[decoded.element_kind]);
+        return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, literal_end, end);
+    }
+    if (first.kind == C_TOKEN_IDENTIFIER)
+    {
+        return c_ir_sizeof_operand_identifier_type_attempt(builder, start, end, type_out);
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* size_out, u32* alignment_out)
 {
+    u32 expression_start = start;
+    u32 expression_end = end;
     u32 dereference_count = 0;
     bool normalized = true;
     while (normalized && start < end)
@@ -27056,7 +27722,12 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* build
             }
         }
     }
-    if (start < end && builder->preprocess.tokens[start].kind == C_TOKEN_STRING_LITERAL)
+    bool whole_range_string = !dereference_count && start < end;
+    for (u32 literal_index = start; whole_range_string && literal_index < end; literal_index += 1)
+    {
+        whole_range_string = builder->preprocess.tokens[literal_index].kind == C_TOKEN_STRING_LITERAL;
+    }
+    if (whole_range_string)
     {
         CIrDecodedString decoded = {0};
         if (!c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, start, end, &decoded) ||
@@ -27176,6 +27847,35 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* build
                     return true;
                 }
             }
+        }
+    }
+    if (builder->queries->has_request)
+    {
+        // A shape path above already missed a sub-query; re-run after it completes
+        // instead of issuing another request in the same pass.
+        return false;
+    }
+    {
+        // Expression operands the shape paths above did not match resolve through the
+        // strict operand-type resolver on the original range (the paths above consumed
+        // leading `*`/`&` and enclosing parentheses from start/end).
+        IrTypeId expression_type = IR_TYPE_ID_INVALID;
+        if (c_ir_sizeof_operand_type_attempt(builder, expression_start, expression_end, &expression_type))
+        {
+            IrType* expression = ir_type_from_id(&builder->program->types, expression_type);
+            if (expression && expression->layout.resolved)
+            {
+                *size_out = expression->layout.size;
+                if (alignment_out)
+                {
+                    *alignment_out = expression->layout.alignment;
+                }
+                return true;
+            }
+        }
+        if (builder->queries->has_request)
+        {
+            return false;
         }
     }
     u32 base_index = start;
