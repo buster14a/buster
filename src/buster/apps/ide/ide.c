@@ -30,6 +30,18 @@
 
 #if BUSTER_UNITY_BUILD
 #if BUSTER_INCLUDE_TESTS
+// `apply_to=function` stamps the attribute on every function *declared* while
+// it is pushed, headers included. <buster/lib/simd.h> pulls in the compiler's
+// <immintrin.h>, whose intrinsics are `static inline __always_inline__`
+// wrappers around one instruction each, so a test that reached it first inside
+// the region below marked the whole AVX-512 vocabulary `optnone` -- and an
+// `optnone` function cannot be inlined however it is attributed. Every SIMD
+// kernel in the tree then paid a real call per operation: measured on the
+// clang-built unity Release binary, `ide bench` ran 446.7 M instructions
+// against 343.2 M, and the C lexer's compaction emitter lost 221 M on a
+// self-host stage 1. Declaring the vocabulary out here keeps the intrinsics
+// optimized whatever the tests include.
+#include <buster/lib/simd.h>
 // Test bodies are half the optimizer's work in this translation unit and none
 // of its runtime cost: what the test modules spend their time in is production
 // code, which stays optimized. Optimizing them anyway costs ~11 seconds of
