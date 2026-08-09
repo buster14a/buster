@@ -2298,22 +2298,26 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_frame_store(MachineX64Encoder* encoder
     machine_x64_emit_frame_modrm(encoder, reg, offset);
 }
 
-// [base + disp] addressing for the copy loops; the bases are operand
-// scratches, never RSP/RBP/R12/R13, so the plain ModRM forms suffice.
+// [base + disp] addressing for allocated bases. The RSP/R12 encodings
+// demand a SIB byte and the RBP/R13 encodings have no displacement-free
+// form, so those low codes take the SIB and disp8 detours.
 BUSTER_GLOBAL_LOCAL void machine_x64_emit_memory_modrm(MachineX64Encoder* encoder, u32 reg, u32 base, u32 displacement)
 {
-    if (!displacement)
+    u32 base_low = base & 7;
+    u32 mod = displacement                                    ? displacement <= INT8_MAX ? 0x40u : 0x80u
+              : base_low == 5                                 ? 0x40u
+                                                              : 0x00u;
+    machine_x64_emit8(encoder, (u8)(mod | ((reg & 7) << 3) | base_low));
+    if (base_low == 4)
     {
-        machine_x64_emit8(encoder, (u8)(((reg & 7) << 3) | (base & 7)));
+        machine_x64_emit8(encoder, 0x24);
     }
-    else if (displacement <= INT8_MAX)
+    if (mod == 0x40)
     {
-        machine_x64_emit8(encoder, (u8)(0x40 | ((reg & 7) << 3) | (base & 7)));
         machine_x64_emit8(encoder, (u8)displacement);
     }
-    else
+    else if (mod == 0x80)
     {
-        machine_x64_emit8(encoder, (u8)(0x80 | ((reg & 7) << 3) | (base & 7)));
         machine_x64_emit32(encoder, displacement);
     }
 }
@@ -2451,6 +2455,16 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     if (placement->callee_saved_mask & (1u << MACHINE_X64_RBX))
     {
         machine_x64_emit8(&encoder, 0x53);
+    }
+    if (placement->callee_saved_mask & (1u << MACHINE_X64_R12))
+    {
+        machine_x64_emit8(&encoder, 0x41);
+        machine_x64_emit8(&encoder, 0x54);
+    }
+    if (placement->callee_saved_mask & (1u << MACHINE_X64_R13))
+    {
+        machine_x64_emit8(&encoder, 0x41);
+        machine_x64_emit8(&encoder, 0x55);
     }
     if (placement->callee_saved_mask & (1u << MACHINE_X64_R14))
     {
@@ -2718,7 +2732,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     }
                     machine_x64_emit8(&encoder, 0x8b);
                 }
-                machine_x64_emit8(&encoder, (u8)(((destination & 7) << 3) | (address & 7)));
+                machine_x64_emit_memory_modrm(&encoder, destination, address, 0);
             }
             break;
             case MACHINE_X64_STORE_PTR8:
@@ -2744,7 +2758,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     machine_x64_emit8(&encoder, rex);
                 }
                 machine_x64_emit8(&encoder, instruction->opcode == MACHINE_X64_STORE_PTR8 ? 0x88 : 0x89);
-                machine_x64_emit8(&encoder, (u8)(((value_register & 7) << 3) | (address & 7)));
+                machine_x64_emit_memory_modrm(&encoder, value_register, address, 0);
             }
             break;
             case MACHINE_X64_JMP:
@@ -2801,6 +2815,16 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     {
                         machine_x64_emit8(&encoder, 0x41);
                         machine_x64_emit8(&encoder, 0x5e);
+                    }
+                    if (placement->callee_saved_mask & (1u << MACHINE_X64_R13))
+                    {
+                        machine_x64_emit8(&encoder, 0x41);
+                        machine_x64_emit8(&encoder, 0x5d);
+                    }
+                    if (placement->callee_saved_mask & (1u << MACHINE_X64_R12))
+                    {
+                        machine_x64_emit8(&encoder, 0x41);
+                        machine_x64_emit8(&encoder, 0x5c);
                     }
                     if (placement->callee_saved_mask & (1u << MACHINE_X64_RBX))
                     {

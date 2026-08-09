@@ -11,12 +11,12 @@
 // untouched: per-slot operand registers plus a point-sorted reload/spill
 // edit stream.
 
-// Registers the local allocator may own between instructions. RSP and RBP
-// are reserved, and R12/R13 wait for the encoder to learn their ModRM
-// base quirks. The callee-saved members survive calls, cost one push/pop
-// pair per function that binds them, and their pushes carry unwind
-// actions.
-#define MACHINE_FAST_CALLEE_SAVED_MASK ((1u << MACHINE_X64_RBX) | (1u << MACHINE_X64_R14) | (1u << MACHINE_X64_R15))
+// Registers the local allocator may own between instructions; RSP and
+// RBP are reserved. The callee-saved members survive calls, cost one
+// push/pop pair per function that binds them, and their pushes carry
+// unwind actions.
+#define MACHINE_FAST_CALLEE_SAVED_MASK                                                                                                                         \
+    ((1u << MACHINE_X64_RBX) | (1u << MACHINE_X64_R12) | (1u << MACHINE_X64_R13) | (1u << MACHINE_X64_R14) | (1u << MACHINE_X64_R15))
 #define MACHINE_FAST_ALLOCATABLE_MASK                                                                                                                          \
     ((1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX) | (1u << MACHINE_X64_RDX) | (1u << MACHINE_X64_RSI) | (1u << MACHINE_X64_RDI) |                         \
      (1u << MACHINE_X64_R8) | (1u << MACHINE_X64_R9) | (1u << MACHINE_X64_R10) | (1u << MACHINE_X64_R11) | MACHINE_FAST_CALLEE_SAVED_MASK)

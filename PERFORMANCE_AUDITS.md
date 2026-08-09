@@ -12,6 +12,29 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09u` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6 —
+R12/R13 complete the callee-saved file; ModRM base quirks fixed.)
+
+- **What was built.** `machine_x64_emit_memory_modrm` now handles the
+  RSP/R12 SIB and RBP/R13 no-disp0 encodings for any base at any
+  displacement, the pointer loads/stores route through it instead of
+  raw ModRM bytes, and R12/R13 join the allocatable and callee-saved
+  masks with prologue pushes, epilogue pops, and unwind actions
+  (machine-path unwind capacity 8). The helper's old comment claimed
+  quirk bases could never appear — with allocated copy-loop bases that
+  was one allocator change away from being false, so the fix removes a
+  loaded trap even where the measure is flat.
+- **Honest measure:** flat — 63.60G instructions, +3.6KB text against
+  `2026-08-09t`, run-to-run noise territory. Few blocks keep more than
+  three call-crossing values live at once, so the fourth and fifth
+  callee-saved members rarely bind, and [r12]/[r13] addressing costs an
+  extra byte per touch.
+- **Gates:** test_all green, FAST soak byte-identical on fresh
+  references, self-host fixed point holds.
+- **Next lever by mass:** the 1321 fallback functions. The selector
+  gives no rejection breakdown; instrument locally before choosing the
+  next stage-3 construct to lift.
+
 `2026-08-09t` (Linux x86_64, Zen 4 7940HS; register-allocator stage 5 —
 straight-line edge contracts land structurally, and measure flat.)
 

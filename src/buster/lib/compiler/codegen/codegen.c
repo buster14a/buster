@@ -10383,9 +10383,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                      ? result.abi == CODEGEN_ABI_X86_64_WINDOWS ? (frame_size != 0) : frame_size / 4096 + (frame_size % 4096 != 0)
                                      : frame_size / 4080 + (frame_size % 4080 != 0);
         u32 stack_action_capacity = windows_aarch64 ? (frame_size > 4080 ? 14u : stack_action_count * 2) : stack_action_count;
-        // x86_64 holds the frame-pointer pair, up to three machine-path
+        // x86_64 holds the frame-pointer pair, up to five machine-path
         // callee-saved pushes, and the stack allocation.
-        u32 unwind_action_capacity = (target.cpu_arch == CPU_ARCH_X86_64 ? 6u : windows_aarch64 ? 6u : 5u) + stack_action_capacity;
+        u32 unwind_action_capacity = (target.cpu_arch == CPU_ARCH_X86_64 ? 8u : windows_aarch64 ? 6u : 5u) + stack_action_capacity;
         CodegenFunctionDescriptor* descriptor = result.functions + result.function_count;
         result.function_count += 1;
         *descriptor = (CodegenFunctionDescriptor){
@@ -10444,6 +10444,20 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             machine_prologue_cursor += 1;
                             machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
                                                                                 CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_RBX, 0) &&
+                                                   machine_unwind_valid;
+                        }
+                        if (placement.callee_saved_mask & (1u << X64_REGISTER_R12))
+                        {
+                            machine_prologue_cursor += 2;
+                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_R12, 0) &&
+                                                   machine_unwind_valid;
+                        }
+                        if (placement.callee_saved_mask & (1u << X64_REGISTER_R13))
+                        {
+                            machine_prologue_cursor += 2;
+                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_R13, 0) &&
                                                    machine_unwind_valid;
                         }
                         if (placement.callee_saved_mask & (1u << X64_REGISTER_R14))
