@@ -64,9 +64,11 @@ struct CodeviewBuffer
     u8 reserved[7];
 };
 
+// See pdb_emit_bytes: remaining-space form so a wrapping `count + size` cannot
+// satisfy the bound.
 BUSTER_GLOBAL_LOCAL void codeview_emit_bytes(CodeviewBuffer* buffer, void const* source, u64 size)
 {
-    if (buffer->count + size > buffer->capacity)
+    if (size > buffer->capacity - buffer->count)
     {
         buffer->overflow = true;
         return;
@@ -95,7 +97,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_u32(CodeviewBuffer* buffer, u32 value)
 
 BUSTER_GLOBAL_LOCAL void codeview_write_u16_at(CodeviewBuffer* buffer, u64 offset, u16 value)
 {
-    if (offset + sizeof(value) > buffer->count)
+    if (offset > buffer->count || sizeof(value) > buffer->count - offset)
     {
         buffer->overflow = true;
         return;
@@ -105,7 +107,7 @@ BUSTER_GLOBAL_LOCAL void codeview_write_u16_at(CodeviewBuffer* buffer, u64 offse
 
 BUSTER_GLOBAL_LOCAL void codeview_write_u32_at(CodeviewBuffer* buffer, u64 offset, u32 value)
 {
-    if (offset + sizeof(value) > buffer->count)
+    if (offset > buffer->count || sizeof(value) > buffer->count - offset)
     {
         buffer->overflow = true;
         return;

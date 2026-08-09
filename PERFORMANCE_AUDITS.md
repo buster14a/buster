@@ -12,6 +12,108 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09h` (Linux x86_64, Zen 4 7940HS; not a throughput audit — a
+robustness change costed against the gate. An external audit reported that the
+arena and emitter bounds checks are bypassable by integer wraparound
+(`if (count + size > capacity)` passes when the sum wraps) and proposed
+centralized `u64_add_checked`/`u64_mul_checked`/`u64_align_forward_checked`/
+`arena_allocate_array_checked` helpers. The holes are real; the prescription
+was measured at `+19.5 M` and shipped at `+3.5 M` instead. **Gate: stage 1
+`5.1203 G` to `5.1373 G` (`+0.33%`); a fixed-workload cross-check attributes
+`+3.5 M` to compiler efficiency (`+0.068%`) and the rest to the tree's own
+growth (`+1.997 k` preprocessed tokens). `ide bench` neutral on an interleaved
+A/B. Fixed point byte-identical, 19560 Release and all sanitized tests pass.**
+Baselines here are the current main (`41814ea`), not `2026-08-09g`'s tree,
+which is why stage 1 starts at `5.1203 G` rather than `5.0824 G`.)
+
+- **The exchange rate this entry exists to record.** `arena_allocate_bytes`
+  runs **`~7.3 M` times per stage-1 compile**, so one instruction retired on
+  its fast path costs `~7 M` instructions, or `0.14%`. That number was read
+  off the disassembly and then confirmed against the counter three times: the
+  two-compare form measured `+19.5 M` for `+2` instructions plus a branch,
+  the single-compare form `+7.3 M` for `+1`, and the shipped form `+3.5 M`
+  for a `+1` that is a 10-byte `movabs`. Price any future check on this path
+  against that rate before writing it.
+- **What was built.** `arena_array_size` in `arena.h` guards every
+  `sizeof(T) * count` (1187 sites) with `count > ARENA_MAX_RESERVATION /
+  element_size`; `arena_allocate_bytes` bounds `size` against
+  `ARENA_MAX_RESERVATION` so the sum-form capacity test is exact rather than
+  bypassable, and the granularity round-up moved into the commit branch,
+  which pays for the bound; `parser_bump_allocate` takes the same bound;
+  `pdb.c`, `codeview.c` and `object.c`'s patch-back helpers move to the
+  remaining-space form `dwarf.c` and `object_buffer_write` already used; and
+  `ir.c`'s `ast.count * 3 + 1` is widened, because `count` is a `u32` and the
+  product wrapped in 32 bits before any allocator could object to it.
+- **Bound the operands, not the results.** A result check (`did a + b
+  wrap?`) needs both operands live and never folds. An operand bound (`is
+  size sane?`) folds to nothing wherever the operand is a constant —
+  `parser_bump_allocate` gained one and `state_push` came out at the same 17
+  instructions as baseline. This works because `os_fail_raw` is
+  `BUSTER_NORETURN BUSTER_COLD`, so a bound established early lets the
+  optimizer delete every later check it implies; verified in isolation, a
+  redundant multiply guard behind an earlier range check disappears
+  entirely.
+- **`__builtin_mul_overflow` is unavailable and unnecessary.** The C
+  frontend implements no `__builtin_*_overflow`
+  (`c_conditional_builtin_supported`), so a builtin-based helper breaks the
+  fixed point. It buys nothing anyway: the portable `count > UINT64_MAX /
+  sizeof(T)` emits byte-identical code for power-of-two element sizes
+  (`shr $60`/`jne`) and strictly better code for others (`cmp` against an
+  immediate plus `lea`, against the builtin's `mulq`/`jo`). The guard folds
+  away entirely when the count is a `u32` or a literal, which is why 1187
+  guarded multiplies cost `+1.08 M` and not `+15 M`.
+- **The gate charges for source size, not only for speed.** The first
+  spelling, `arena_array_size(sizeof(T), (u64)(count))`, cost `+24.7 M` on
+  the gate while costing only `+1.08 M` of real work — the other `+23.6 M`
+  was the compiler compiling `+6.477 k` extra preprocessed tokens from a
+  macro that expands at 1187 sites. Dropping the `(u64)` cast recovered
+  `~4.7 k` tokens. Hardening spelled into a widely-expanded macro must be
+  token-lean; nothing outside a self-hosting compiler would show this.
+- **Measured negative or rejected, do not retry as written:** (1) the
+  audit's remaining-space form as literally proposed, `aligned_offset <=
+  reserved_size && size <= reserved_size - aligned_offset`, `+19.5 M`; (2)
+  the same with the precondition hoisted to a hot `alignment <=
+  ARENA_MAX_ALIGNMENT` check, `+7.3 M` — the constant alignment cannot fold
+  in an out-of-line callee, which is the whole cost; (3) a saturating
+  product instead of a trapping one, rejected on codegen inspection at 4
+  instructions against the trapping form's 2, with no branch to win back
+  since the trapping branch is never taken; (4) `u64_align_forward_checked`
+  as a per-allocation check — alignment is a `BUSTER_ALIGN_OF` or a literal
+  at every site but `disk_builder`'s, so it is not input-reachable and
+  checking it is exactly find (2).
+- **Traps paid for.** (1) The fastest variant measured, `-2.60 M`,
+  establishes `aligned_offset <= reserved_size` by rounding reservations up
+  to 4 KB at creation — and silently enlarges the 256-byte arenas
+  `rendering_test.c` reserves on purpose to test exact boundary behaviour,
+  which surfaced as an `os_commit` failure at the pre-existing `position <=
+  os_position` assertion rather than anywhere near the change. Reservation
+  granularity is not a property of this codebase's arenas; do not make it
+  one to buy `0.05%`. (2) A `static inline` helper in a widely-included
+  header needs `BUSTER_UNUSED_DECL`: the Release unity build passes
+  `-Wno-unused-function` and the split Debug build does not, so it compiles
+  everywhere except the configuration CI runs sanitized. (3) `ide bench`
+  varies `~4%` between separately linked binaries from code layout alone,
+  and a single-binary reading of it produced a phantom `+5%` regression
+  early in this session; interleave the two binaries' runs and compare
+  minima. Stage-1 instructions reproduce to `0.005%` and are the instrument
+  to trust.
+- **Recorded next step, verified rather than proposed.** No checked-allocator
+  API can catch a count that wrapped before the call — `ast.count * 3 + 1` is
+  the proof. Adding `unsigned-integer-overflow` to the sanitizer set in
+  `CMakeLists.txt` was trialled end to end: **46 reports across the whole
+  sanitized suite, every one deliberate** (`hash.c` mixing, the SWAR
+  byte-scan at `c.c:325`, `u128` negation in `string.c`, djb2 in
+  `ui_core.c`, `s64`-to-`u64` time diffs), and zero test failures. Annotating
+  those `~10` functions with `no_sanitize("unsigned-integer-overflow")` makes
+  the row run clean and catches this class permanently, in a configuration
+  that pays no Release cost. The CMake change was reverted rather than
+  shipped, because it reds the sanitized row until the annotations land.
+- Reference points for the next audit, all clang-built on this host:
+  stage 1 `5.1373 G` instructions, stage 2 `69.26 G` (validation only),
+  `BENCH_PARSE` `~48.8 us` minimum, byte-identical fixed point
+  (`SELF_HOST deterministic bytes=26743800`), 19560 Release unit tests and
+  29 module tests.
+
 `2026-08-09g` (Linux x86_64, Zen 4 7940HS; proposal 3 of `2026-08-08k` taken
 as its own session — `CToken` 48 to 16 bytes with offset-based spellings and
 on-demand location recovery. Developed against the pre-`2026-08-09c` main and

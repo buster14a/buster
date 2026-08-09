@@ -2231,6 +2231,11 @@ BUSTER_GLOBAL_LOCAL ParserState state_pop(ParserStateState* stack)
 // arena_allocate's commit machinery.
 BUSTER_GLOBAL_LOCAL void* parser_bump_allocate(Arena* restrict arena, u64 size, u64 alignment)
 {
+    // Bounding the operand rather than the sum keeps this free: `size` is a
+    // sizeof at every call site, so the compare folds away, and with both
+    // `size` and `position` under ARENA_MAX_RESERVATION the sum below cannot
+    // wrap past the committed-watermark test.
+    BUSTER_CHECK(size <= ARENA_MAX_RESERVATION);
     u64 aligned_offset = (arena->position + (alignment - 1)) & ~(alignment - 1);
     u64 position_after = aligned_offset + size;
     if (BUSTER_LIKELY(position_after <= arena->os_position))

@@ -7,22 +7,41 @@ BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(64);
 BUSTER_GLOBAL_LOCAL u64 initial_size_granularity_factor = 4;
 
+void arena_allocation_overflow(void)
+{
+    os_fail_message(S8("arena allocation size overflowed"));
+}
+
 void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
 {
-    u64 aligned_offset = align_forward(arena->position, alignment);
-    u64 aligned_size_after = aligned_offset + size;
-    u64 target_committed_size = align_forward(aligned_size_after, arena->granularity);
     // Arenas created with count > 1 share one reservation, so committing past
     // reserved_size would land on the next arena's pages and corrupt it
     // silently; fail loudly instead. Callers never check for null, so this
     // must not return one.
-    BUSTER_CHECK(target_committed_size <= arena->reserved_size);
+    //
+    // Bounding the operand is what makes that bound hold for every `size`
+    // rather than only for the ones that happen not to wrap: with `size` and
+    // `position` both under ARENA_MAX_RESERVATION (the second enforced in
+    // arena_create), the sum cannot carry past 2^64, so the comparison against
+    // `reserved_size` is exact instead of bypassable by a large enough `size`.
+    // The remaining-space form `size <= reserved_size - aligned_offset` needs
+    // one compare fewer, but only if reservations are alignment-granular, and
+    // they are not — the rendering boundary tests reserve 256 bytes on
+    // purpose. Rounding up to the commit granularity moved into the branch
+    // that needs it, which pays for the operand bound: the fast path no longer
+    // loads `granularity` at all.
+    BUSTER_CHECK(size <= ARENA_MAX_RESERVATION);
+    u64 aligned_offset = align_forward(arena->position, alignment);
+    u64 aligned_size_after = aligned_offset + size;
+    BUSTER_CHECK(aligned_size_after <= arena->reserved_size);
 
     u8* arena_byte_pointer = (u8*)arena;
     u64 os_position = arena->os_position;
 
     if (BUSTER_UNLIKELY(aligned_size_after > os_position))
     {
+        u64 target_committed_size = align_forward(aligned_size_after, arena->granularity);
+        BUSTER_CHECK(target_committed_size <= arena->reserved_size);
         u64 size_to_commit = target_committed_size - os_position;
         u8* commit_pointer = arena_byte_pointer + os_position;
 
@@ -141,6 +160,10 @@ Arena* arena_create(ArenaCreation original_creation)
     ArenaCreation creation = arena_creation_parameters(original_creation);
     u64 count = creation.count;
     u64 individual_reserved_size = creation.reserved_size;
+    // The ceiling is what lets every later allocation reason about `position`
+    // and `reserved_size` as small numbers: with both under 2^48 no sum or
+    // alignment round-up in arena_allocate_bytes can reach 2^64.
+    BUSTER_CHECK(individual_reserved_size <= ARENA_MAX_RESERVATION);
     BUSTER_CHECK(count <= UINT64_MAX / individual_reserved_size);
     u64 total_reserved_size = individual_reserved_size * count;
 

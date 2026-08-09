@@ -2760,7 +2760,10 @@ BUSTER_GLOBAL_LOCAL IrLowered ir_lower_expression(IrBuilder* builder, AstExpress
     AnalysisTypedExpression* expression = ir_typed_expression_find(builder->body, ast);
     BUSTER_CHECK(expression);
     IrLowered* results = arena_allocate(builder->scratch_arena, IrLowered, ast.count);
-    IrExpressionTask* tasks = arena_allocate(builder->scratch_arena, IrExpressionTask, ast.count * 3 + 1);
+    // Widened before the multiply: `count` is a u32, so the product would wrap
+    // in 32 bits and reach the allocator as a small number the arena bound
+    // cannot object to.
+    IrExpressionTask* tasks = arena_allocate(builder->scratch_arena, IrExpressionTask, (u64)ast.count * 3 + 1);
     u32 task_count = 1;
     tasks[0] = (IrExpressionTask){
         .node_index = ast.count - 1,

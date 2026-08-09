@@ -44,6 +44,9 @@ struct TemporalArena
 };
 
 #define arena_minimum_position ((u64)sizeof(Arena))
+// Every reservation is capped here so that positions, sizes and their sums
+// stay far below 2^64 and the arithmetic in arena_allocate_bytes cannot wrap.
+#define ARENA_MAX_RESERVATION ((u64)1 << 48)
 
 BUSTER_F_DECL Arena* arena_create(ArenaCreation initialization);
 BUSTER_F_DECL bool arena_destroy(Arena* arena, u64 count);
@@ -59,7 +62,27 @@ BUSTER_F_DECL TemporalArena arena_begin_temporal(Arena* arena);
 BUSTER_F_DECL TemporalArena scratch_begin(Arena** conflicts, u64 count);
 BUSTER_F_DECL void scratch_end(TemporalArena scratch);
 
-#define arena_allocate(arena, T, count) (T*)arena_allocate_bytes(arena, sizeof(T) * (count), BUSTER_ALIGN_OF(T))
+// sizeof(T) * count is the one multiplication every array allocation performs
+// on caller-influenced data, so it is the one place a wrapped product could
+// hand back a buffer smaller than the caller is about to write. The divisor is
+// always a sizeof, so it folds to a constant and the guard costs one compare
+// against an immediate; when the count is provably narrower than 64 bits
+// (a u32 index, a literal) the compiler drops the compare entirely. Bounding
+// the product by ARENA_MAX_RESERVATION rather than by UINT64_MAX is the same
+// compare against a different immediate, and reports the caller's own
+// arithmetic rather than leaving it to surface as a capacity failure.
+BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void arena_allocation_overflow(void);
+
+BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE u64 arena_array_size(u64 element_size, u64 count)
+{
+    if (BUSTER_UNLIKELY(count > ARENA_MAX_RESERVATION / element_size))
+    {
+        arena_allocation_overflow();
+    }
+    return element_size * count;
+}
+
+#define arena_allocate(arena, T, count) (T*)arena_allocate_bytes(arena, arena_array_size(sizeof(T), count), BUSTER_ALIGN_OF(T))
 #define arena_buffer_is_empty(arena) ((arena)->position == arena_minimum_position)
 #define arena_buffer_size(arena) ((arena)->position - arena_minimum_position)
 #define arena_buffer_start(arena) ((u8*)arena + arena_minimum_position)

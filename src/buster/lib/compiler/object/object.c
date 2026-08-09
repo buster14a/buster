@@ -65,7 +65,7 @@ BUSTER_GLOBAL_LOCAL void object_buffer_align(ObjectBuffer* buffer, u64 alignment
 
 BUSTER_GLOBAL_LOCAL void object_write_u16_at(ObjectBuffer* buffer, u64 offset, u16 value)
 {
-    if (offset + sizeof(value) > buffer->capacity)
+    if (offset > buffer->capacity || sizeof(value) > buffer->capacity - offset)
     {
         buffer->error = OBJECT_ERROR_CAPACITY;
         return;
@@ -75,7 +75,7 @@ BUSTER_GLOBAL_LOCAL void object_write_u16_at(ObjectBuffer* buffer, u64 offset, u
 
 BUSTER_GLOBAL_LOCAL void object_write_u32_at(ObjectBuffer* buffer, u64 offset, u32 value)
 {
-    if (offset + sizeof(value) > buffer->capacity)
+    if (offset > buffer->capacity || sizeof(value) > buffer->capacity - offset)
     {
         buffer->error = OBJECT_ERROR_CAPACITY;
         return;
@@ -85,7 +85,7 @@ BUSTER_GLOBAL_LOCAL void object_write_u32_at(ObjectBuffer* buffer, u64 offset, u
 
 BUSTER_GLOBAL_LOCAL void object_write_u64_at(ObjectBuffer* buffer, u64 offset, u64 value)
 {
-    if (offset + sizeof(value) > buffer->capacity)
+    if (offset > buffer->capacity || sizeof(value) > buffer->capacity - offset)
     {
         buffer->error = OBJECT_ERROR_CAPACITY;
         return;

@@ -91,9 +91,12 @@ struct PdbBuffer
     u8 reserved[7];
 };
 
+// The remaining-space form of `count + size > capacity`: `count` never passes
+// `capacity`, so the subtraction cannot underflow, and unlike the sum it
+// cannot wrap past a `size` large enough to make the test pass.
 BUSTER_GLOBAL_LOCAL void pdb_emit_bytes(PdbBuffer* buffer, void const* source, u64 size)
 {
-    if (buffer->count + size > buffer->capacity)
+    if (size > buffer->capacity - buffer->count)
     {
         buffer->overflow = true;
         return;
@@ -107,7 +110,7 @@ BUSTER_GLOBAL_LOCAL void pdb_emit_bytes(PdbBuffer* buffer, void const* source, u
 
 BUSTER_GLOBAL_LOCAL void pdb_emit_zero(PdbBuffer* buffer, u64 size)
 {
-    if (buffer->count + size > buffer->capacity)
+    if (size > buffer->capacity - buffer->count)
     {
         buffer->overflow = true;
         return;
@@ -136,7 +139,7 @@ BUSTER_GLOBAL_LOCAL void pdb_emit_align4(PdbBuffer* buffer)
 
 BUSTER_GLOBAL_LOCAL void pdb_write_u32_at(PdbBuffer* buffer, u64 offset, u32 value)
 {
-    if (offset + sizeof(value) > buffer->count)
+    if (offset > buffer->count || sizeof(value) > buffer->count - offset)
     {
         buffer->overflow = true;
         return;
