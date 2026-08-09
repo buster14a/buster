@@ -9,7 +9,7 @@ BUSTER_GLOBAL_LOCAL void c_test_token(UnitTestArguments* arguments, UnitTestResu
     if (index < lex.token_count)
     {
         BUSTER_TEST(arguments, lex.tokens[index].kind == kind);
-        BUSTER_STRING_TEST(arguments, lex.tokens[index].spelling, spelling);
+        BUSTER_STRING_TEST(arguments, c_token_spelling(lex.spelling_base, lex.tokens[index]), spelling);
     }
     outer_result->test_count += result.test_count;
     outer_result->succeeded_test_count += result.succeeded_test_count;
@@ -24,7 +24,7 @@ BUSTER_GLOBAL_LOCAL void c_test_preprocessed_token(UnitTestArguments* arguments,
     if (index < preprocess.token_count)
     {
         BUSTER_TEST(arguments, preprocess.tokens[index].kind == kind);
-        BUSTER_STRING_TEST(arguments, preprocess.tokens[index].spelling, spelling);
+        BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), spelling);
     }
     outer_result->test_count += result.test_count;
     outer_result->succeeded_test_count += result.succeeded_test_count;
@@ -525,7 +525,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parse_storage_growth(UnitTestArguments
     for (u32 token_index = 0; token_index < growth_tokens.token_count; token_index += 1)
     {
         CToken token = growth_tokens.tokens[token_index];
-        open_bracket_count += token.kind == C_TOKEN_PUNCTUATOR && string_equal(token.spelling, S8("["));
+        open_bracket_count += token.kind == C_TOKEN_PUNCTUATOR && string_equal(c_token_spelling(growth_tokens.spelling_base, token), S8("["));
     }
     u64 old_type_capacity = (u64)growth_tokens.token_count * 2 + 1;
     u64 old_array_bound_capacity = (u64)open_bracket_count + 1;
@@ -1610,8 +1610,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     c_test_token(arguments, &result, basic, 4, C_TOKEN_PUNCTUATOR, S8(")"));
     if (basic.token_count >= 5)
     {
-        BUSTER_TEST(arguments, basic.tokens[1].location.line == 1);
-        BUSTER_TEST(arguments, basic.tokens[4].location.line == 2);
+        BUSTER_TEST(arguments, c_lex_token_location(&basic, basic.tokens[1]).line == 1);
+        BUSTER_TEST(arguments, c_lex_token_location(&basic, basic.tokens[4]).line == 2);
     }
 
     CLexResult tokens = c_lex(arguments->arena, S8("u8\"x\" L'a' .5e+2 0x1p-3 "
@@ -1817,9 +1817,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     bool natural_alignment_seen = false;
     for (u32 token_index = 0; token_index < pragma_pack.token_count; token_index += 1)
     {
+        char8 const* token_spelling_base = pragma_pack.spelling_base;
         CToken token = pragma_pack.tokens[token_index];
-        packed_alignment_seen |= string_equal(token.spelling, S8("Packed")) && token.pack_alignment == 4;
-        natural_alignment_seen |= string_equal(token.spelling, S8("Natural")) && token.pack_alignment == 0;
+        packed_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("Packed")) && token.pack_alignment == 4;
+        natural_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("Natural")) && token.pack_alignment == 0;
     }
     BUSTER_TEST(arguments, packed_alignment_seen);
     BUSTER_TEST(arguments, natural_alignment_seen);
@@ -1896,12 +1897,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     bool restored_function_seen = false;
     for (u32 token_index = 0; token_index < expanded_pragmas.token_count; token_index += 1)
     {
+        char8 const* token_spelling_base = expanded_pragmas.spelling_base;
         CToken token = expanded_pragmas.tokens[token_index];
-        expanded_packed_alignment_seen |= string_equal(token.spelling, S8("ExpandedPacked")) && token.pack_alignment == 4;
-        expanded_inline_packed_alignment_seen |= string_equal(token.spelling, S8("ExpandedInlinePacked")) && token.pack_alignment == 8;
-        expanded_natural_alignment_seen |= string_equal(token.spelling, S8("ExpandedNatural")) && token.pack_alignment == 0;
-        restored_value_seen |= string_equal(token.spelling, S8("1"));
-        restored_function_seen |= string_equal(token.spelling, S8("+"));
+        expanded_packed_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("ExpandedPacked")) && token.pack_alignment == 4;
+        expanded_inline_packed_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("ExpandedInlinePacked")) && token.pack_alignment == 8;
+        expanded_natural_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("ExpandedNatural")) && token.pack_alignment == 0;
+        restored_value_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("1"));
+        restored_function_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("+"));
         BUSTER_TEST(arguments, token.kind != C_TOKEN_PRAGMA);
     }
     BUSTER_TEST(arguments, expanded_packed_alignment_seen);
@@ -1934,9 +1936,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     bool windows_natural_alignment_seen = false;
     for (u32 token_index = 0; token_index < windows_pragmas.token_count; token_index += 1)
     {
+        char8 const* token_spelling_base = windows_pragmas.spelling_base;
         CToken token = windows_pragmas.tokens[token_index];
-        windows_packed_alignment_seen |= string_equal(token.spelling, S8("WindowsPacked")) && token.pack_alignment == 2;
-        windows_natural_alignment_seen |= string_equal(token.spelling, S8("WindowsNatural")) && token.pack_alignment == 0;
+        windows_packed_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("WindowsPacked")) && token.pack_alignment == 2;
+        windows_natural_alignment_seen |= string_equal(c_token_spelling(token_spelling_base, token), S8("WindowsNatural")) && token.pack_alignment == 0;
     }
     BUSTER_TEST(arguments, windows_packed_alignment_seen);
     BUSTER_TEST(arguments, windows_natural_alignment_seen);
@@ -2260,10 +2263,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     }
     if (line_remapping.token_count >= 6)
     {
-        BUSTER_TEST(arguments, line_remapping.tokens[0].location.line == 200);
-        BUSTER_TEST(arguments, line_remapping.tokens[2].location.line == 200);
-        BUSTER_TEST(arguments, line_remapping.tokens[3].location.line == 7);
-        BUSTER_TEST(arguments, line_remapping.tokens[5].location.line == 7);
+        BUSTER_TEST(arguments, c_preprocess_token_location(&line_remapping, line_remapping.tokens[0]).line == 200);
+        BUSTER_TEST(arguments, c_preprocess_token_location(&line_remapping, line_remapping.tokens[2]).line == 200);
+        BUSTER_TEST(arguments, c_preprocess_token_location(&line_remapping, line_remapping.tokens[3]).line == 7);
+        BUSTER_TEST(arguments, c_preprocess_token_location(&line_remapping, line_remapping.tokens[5]).line == 7);
     }
     CPreprocessResult gnu_line_markers = c_preprocess(arguments->arena,
                                                       S8("# 42 \"generated.i\" 1 3 4\n"
@@ -2288,8 +2291,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     }
     if (gnu_line_markers.token_count >= 6)
     {
-        BUSTER_TEST(arguments, gnu_line_markers.tokens[0].location.line == 42);
-        BUSTER_TEST(arguments, gnu_line_markers.tokens[3].location.line == 9);
+        BUSTER_TEST(arguments, c_preprocess_token_location(&gnu_line_markers, gnu_line_markers.tokens[0]).line == 42);
+        BUSTER_TEST(arguments, c_preprocess_token_location(&gnu_line_markers, gnu_line_markers.tokens[3]).line == 9);
     }
     CPreprocessResult invalid_line = c_preprocess(arguments->arena,
                                                   S8("#line 0\n"
@@ -2853,8 +2856,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
             CArrayBound inner_bound = array_declarations.array_bounds[matrix_inner->array_bound];
             BUSTER_TEST(arguments, outer_bound.token_count == 1);
             BUSTER_TEST(arguments, inner_bound.token_count == 1);
-            BUSTER_STRING_TEST(arguments, array_declaration_tokens.tokens[outer_bound.token_start].spelling, S8("2"));
-            BUSTER_STRING_TEST(arguments, array_declaration_tokens.tokens[inner_bound.token_start].spelling, S8("3"));
+            BUSTER_STRING_TEST(arguments, c_token_spelling(array_declaration_tokens.spelling_base, array_declaration_tokens.tokens[outer_bound.token_start]), S8("2"));
+            BUSTER_STRING_TEST(arguments, c_token_spelling(array_declaration_tokens.spelling_base, array_declaration_tokens.tokens[inner_bound.token_start]), S8("3"));
         }
         CType* sum_type = c_type_from_id(&array_declarations, array_declarations.declarations[1].type);
         BUSTER_TEST(arguments, sum_type && sum_type->kind == C_TYPE_FUNCTION);
@@ -2920,7 +2923,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
         BUSTER_TEST(arguments, alias_callback_syntax && alias_callback_syntax->name_token < typedef_name_callback_tokens.token_count);
         if (alias_callback_syntax && alias_callback_syntax->name_token < typedef_name_callback_tokens.token_count)
         {
-            BUSTER_STRING_TEST(arguments, typedef_name_callback_tokens.tokens[alias_callback_syntax->name_token].spelling, S8("AliasCallback"));
+            BUSTER_STRING_TEST(arguments, c_token_spelling(typedef_name_callback_tokens.spelling_base, typedef_name_callback_tokens.tokens[alias_callback_syntax->name_token]), S8("AliasCallback"));
         }
     }
     CParseResult typedef_name_callback_declarations = c_parse(arguments->arena, typedef_name_callback_tokens);
@@ -4082,11 +4085,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
     u32 auto_initializer_token = UINT32_MAX;
     for (u32 token_index = 0; token_index + 3 < auto_type_tokens.token_count; token_index += 1)
     {
-        if (string_equal(auto_type_tokens.tokens[token_index].spelling, S8("__auto_type")) &&
-            string_equal(auto_type_tokens.tokens[token_index + 1].spelling, S8("value")) &&
+        if (string_equal(c_token_spelling(auto_type_tokens.spelling_base, auto_type_tokens.tokens[token_index]), S8("__auto_type")) &&
+            string_equal(c_token_spelling(auto_type_tokens.spelling_base, auto_type_tokens.tokens[token_index + 1]), S8("value")) &&
             auto_type_tokens.tokens[token_index + 2].kind == C_TOKEN_PUNCTUATOR &&
-            string_equal(auto_type_tokens.tokens[token_index + 2].spelling, S8("=")) &&
-            string_equal(auto_type_tokens.tokens[token_index + 3].spelling, S8("value")))
+            string_equal(c_token_spelling(auto_type_tokens.spelling_base, auto_type_tokens.tokens[token_index + 2]), S8("=")) &&
+            string_equal(c_token_spelling(auto_type_tokens.spelling_base, auto_type_tokens.tokens[token_index + 3]), S8("value")))
         {
             auto_initializer_token = token_index + 3;
             break;

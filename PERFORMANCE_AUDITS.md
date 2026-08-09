@@ -12,6 +12,111 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09g` (Linux x86_64, Zen 4 7940HS; proposal 3 of `2026-08-08k` taken
+as its own session — `CToken` 48 to 16 bytes with offset-based spellings and
+on-demand location recovery. Developed against the pre-`2026-08-09c` main and
+rebased onto the post-`2026-08-09f` main; every number below is clang-built
+on the rebased tree against the `2026-08-09f` reference points, counter
+medians on a quiet machine. **Mixed on the gate: stage 1 `4.9751 G` to
+`5.0824 G` instructions (`+2.2%`; the fixed-workload cross-check attributes
+`+80 M` to compiler efficiency and `+27 M` to the tree's own growth) against
+minor faults `242.9 k` to `203.4 k` (`-16.3%`), L1d load misses `146.7 M` to
+`~123.9 M` (`-15.5%`), cycles `2529 M` to `2513 M` medians (`-0.6%`, inside
+the noise band, directionally down, the sys share of wall drops with the
+faults). Opened as a PR with the tradeoff stated rather than parked: the
+16-byte token is the recorded prerequisite for extending the Deus-Lex
+compaction emitter to `c_lex`, and the fault/L1d wins are real today.**)
+
+- **What was built.** `CToken` is now `{u32 offset; u32 length; u32 symbol;
+  u16 pack_alignment; u8 kind; u8 punctuator}` — 16 bytes exactly. The
+  spelling pointer is gone: every spelling is `spelling_base + offset`, one
+  add on the hot paths, where the base is a single contiguous spelling
+  space per preprocess run (its own 1 GB commit-on-demand `pool_reuse`
+  arena carried behind `CPreprocessResult.recovery`) holding a fixed
+  prelude of well-known spellings, every include's translated source, and
+  every synthesized spelling. The eagerly materialized 24-byte
+  `CSourceLocation` is gone from the token and from `c_lex` entirely (the
+  lexer no longer computes locations at all — the checkpoint tables are
+  retained instead of consumed); line/column/file recover on demand
+  through a sorted source map: FILE regions reuse the retained checkpoints
+  with the region's `#line` delta, and macro-expansion output copies its
+  spellings contiguously so one EXPANSION entry per invocation carries the
+  stamped invocation location — diagnostics are bit-for-bit what the eager
+  design produced. `token.location.symbol` readers moved to `token.symbol`;
+  the symbol still travels with the spelling (C23 respell now runs at the
+  end of preprocessing and re-interns through prelude copies). Lookup is a
+  1 KB page-bracket index plus a two-slot cursor (file/expansion) with a
+  last-offset memo; parse/lowering-synthesized tokens (static-assert
+  wrappers, folded sizeof bounds, cleanup-call names) rebase through local
+  prelude-seeded spaces or point at space-resident names directly. The
+  expansion machinery carries a transient `{CToken, location, foreign}`
+  triple internally (48 bytes, the size the stored token used to be), so
+  stamping semantics are unchanged while lexed arrays, staging copies, and
+  macro definition rows all move 16-byte rows.
+- **Measured, change by change where it mattered (numbers from the
+  pre-rebase tree whose baseline was `4.998 G`):** the first working build
+  sat at `+333 M` on the gate; a fixed-workload cross-check split that
+  into `+302 M` compiler efficiency and `+31 M` tree growth. Cursor
+  two-slotting (file tokens sit low in the space, their macro-expanded
+  neighbors at the tail — one slot thrashed on every interleave) bought
+  `-46 M`; lazy `__LINE__` breadcrumbs (two stores per line instead of a
+  per-line recovery) plus bulk per-line expansion copies `-40 M`;
+  converting `c_ir_named_label_at` from by-value `CPreprocessResult` to a
+  pointer `-35 M` on its own; the page-bracket index removed the
+  parse-side binary searches from the profile. The rebase onto the
+  `2026-08-09c..f` main then halved the residual: the type-layout cache
+  and resumable constant-evaluation frames deleted re-runs that were
+  paying recovery repeatedly, leaving `+80 M` efficiency on the final
+  tree.
+- **Final numbers on the rebased tree:** stage 1 `5.0824 G` instructions /
+  `203.4 k` minor faults / `~123.9 M` L1d load misses / `2513 M` median
+  cycles; `ide bench` `343.2 M` (byte-for-byte neutral against the
+  Deus-Lex baseline — the buster tokenizer is untouched); Release
+  `ide test` `6.854 G` (19488 tests; not comparable to earlier references,
+  the suite grew); stage 2 `72.1 G` (validation only); fixed point
+  deterministic (`SELF_HOST deterministic bytes=26108920`); all 19488
+  Release and 18620 sanitized tests pass.
+- **Measured negative or neutral inside this session, do not retry as
+  written:** an `IrSourceRange` memo keyed on (offset, length) in
+  `c_ir_token_source_range` (`+8 M` — the 40-byte copy per query costs
+  more than the recovery it skips); consolidating the five new result
+  fields behind one pointer (instruction-neutral on its own — the win was
+  already taken by the pointer conversion above, but it keeps the
+  by-value tax off every future copy); once-per-line instead of per-token
+  recovery in directive-line wrapping (neutral — the frame cursor had
+  already amortized it).
+- **Traps paid for.** (1) Registering file ids at include time instead of
+  first-staged-token time broke the fixed point by 40 bytes of
+  `.debug_line`: the CMake-built stage resolves `<stdint.h>` into the
+  clang resource directory and the self-hosted stages (no resource dir)
+  do not, so a fully-guarded header that stages no tokens must never
+  reach the file table — file ids stay lazily assigned exactly as the
+  eager design had them, and the include-resolution asymmetry between
+  hosts is the reason why. `llvm-dwarfdump --debug-line` on the two
+  stages localizes this class of break instantly. (2) `CPreprocessResult`
+  travels by value through the whole parse/lowering surface, so every
+  field added to it taxes thousands of call sites — recovery state lives
+  behind one pointer, and the hottest by-value taker was worth converting
+  outright. (3) The spelling space cannot be carved from the caller's
+  arena: repeated preprocesses on one test arena each took a proportional
+  slice and exhausted it — hence the dedicated arena on the result.
+- **Where the remaining `+80 M` lives:** per-instruction line/column
+  recovery in lowering (`c_preprocess_token_location_cursor` — every
+  `c_ir_append_instruction` wants a full location the old design read for
+  free from the token), spelling-accessor adds smeared across every
+  consumer, and the expansion-copy pass. The structural buy-back is the
+  recorded next step: stop materializing line/column per IR instruction
+  (carry file+offset in `IrSourceRange`, resolve lines at the
+  DWARF/diagnostic boundary) and extend the `2026-08-09c` compaction
+  emitter to `c_lex`, which still holds `~300 M` and now has a 16-byte
+  row to store into.
+- Reference points for the next audit, all clang-built on this host:
+  stage 1 `5.0824 G` instructions / `203.4 k` minor faults / `~123.9 M`
+  L1d load misses, `ide bench` `343.2 M`, Release `ide test` `6.854 G`
+  (19488 tests), `CToken` **16 bytes**, byte-identical fixed point
+  (`SELF_HOST deterministic bytes=26108920`). Stage 2 `72.1 G`,
+  validation only.
+
 `2026-08-09f` (Linux x86_64, Zen 4 7940HS; the `c_parse_scope_add_entity`
 byte-FNV lead the `2026-08-09d` entry left on the table — every number
 clang-built, counter medians of 5 runs on a quiet machine, exact call

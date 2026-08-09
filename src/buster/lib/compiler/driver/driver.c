@@ -1127,7 +1127,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
     {
         if (preprocess.tokens[index].kind != C_TOKEN_END_OF_FILE)
         {
-            capacity += preprocess.tokens[index].spelling.length + 1;
+            capacity += preprocess.tokens[index].length + 1;
         }
     }
     char8* text = arena_allocate(arena, char8, capacity);
@@ -1143,8 +1143,9 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
         {
             text[length++] = ' ';
         }
-        memcpy(text + length, token.spelling.pointer, token.spelling.length);
-        length += token.spelling.length;
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        memcpy(text + length, spelling.pointer, spelling.length);
+        length += spelling.length;
     }
     text[length++] = '\n';
     text[length] = 0;

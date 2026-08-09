@@ -93,30 +93,36 @@ struct CSourceLocation
     u32 line;
     u32 column;
     u32 file;
-    // For C_TOKEN_IDENTIFIER tokens, the symbol id the preprocessor's intern
-    // pass assigned (0 = uninterned; consumers must keep a spelling-based
-    // fallback for synthesized and test-built tokens). Carried inside the
-    // location word so CToken keeps its 48-byte row; meaningless on
-    // diagnostic locations.
-    u32 symbol;
 };
 
+// A token no longer stores its spelling pointer or an eager source location.
+// The spelling is `spelling_base + offset` for `length` bytes, where the base
+// is the owning CLexResult's or CPreprocessResult's spelling space; the
+// line/column/file location is recovered on demand from the same offset (see
+// c_lex_token_location and c_preprocess_token_location).
 typedef struct CToken CToken;
 struct CToken
 {
-    String8 spelling;
-    CSourceLocation location;
-    CTokenKind kind;
-    // A CPunctuator, narrowed so that the id shares the word pack_alignment used
-    // to own and CToken keeps the size it had.  It is C_PUNCTUATOR_NONE on every
+    u32 offset;
+    u32 length;
+    // For C_TOKEN_IDENTIFIER tokens, the symbol id the preprocessor's intern
+    // pass assigned (0 = uninterned; consumers must keep a spelling-based
+    // fallback for synthesized and test-built tokens). The symbol travels
+    // with the spelling: every site that respells a token must re-intern.
+    u32 symbol;
+    // The #pragma pack alignment in effect where the token was emitted.
+    u16 pack_alignment;
+    // A CTokenKind.
+    u8 kind;
+    // A CPunctuator, narrowed to a byte.  It is C_PUNCTUATOR_NONE on every
     // token whose kind is not C_TOKEN_PUNCTUATOR, which is what lets
     // c_token_is_punctuator be one compare and skip the kind test.
-    u16 punctuator;
-    u16 pack_alignment;
+    u8 punctuator;
 };
 
-BUSTER_CT_CHECK(sizeof(CToken) == sizeof(String8) + sizeof(CSourceLocation) + sizeof(u32) * 2);
-BUSTER_CT_CHECK(C_PUNCTUATOR_COUNT <= UINT16_MAX);
+BUSTER_CT_CHECK(sizeof(CToken) == 16);
+BUSTER_CT_CHECK(C_PUNCTUATOR_COUNT <= UINT8_MAX);
+BUSTER_CT_CHECK(C_TOKEN_KIND_COUNT <= UINT8_MAX);
 
 typedef enum CDiagnosticKind
 {
@@ -175,13 +181,25 @@ typedef struct CLexResult CLexResult;
 struct CLexResult
 {
     String8 translated_source;
+    // Base pointer token offsets are relative to: translated_source.pointer
+    // for a standalone c_lex, the preprocessor's shared spelling space when
+    // the lex ran inside c_preprocess.
+    char8 const* spelling_base;
     CToken* tokens;
     CDiagnostic* diagnostics;
+    // Location checkpoints of the translated source, retained so a token's
+    // line/column recover on demand from its offset: the original-source
+    // location at each linearity break beside the translated offset of that
+    // break (see c_translate_source in c.c).
+    CSourceLocation* checkpoints;
+    u32* checkpoint_offsets;
+    u32 checkpoint_count;
+    // Spelling-space offset of translated_source.pointer (0 standalone).
+    u32 translated_offset;
     u64 token_count;
     u64 diagnostic_count;
-    // Cursor into the translated source's location checkpoints; token and
-    // diagnostic pushes ask for locations at non-decreasing offsets, so the
-    // lookup amortizes to one advance instead of a search.
+    // Cursor into the checkpoints; location queries at non-decreasing
+    // offsets amortize to one advance instead of a search.
     u32 location_cursor;
 };
 
@@ -226,10 +244,92 @@ struct CPreprocessOptions
 
 typedef struct CSymbolTable CSymbolTable;
 
+// One region of the spelling space, keyed by its first offset; a region
+// covers up to the next entry's start (entries are sorted by start, gaps
+// belong to the preceding entry). FILE entries recover line/column through
+// the owning lex result's checkpoints with the #line delta of the region;
+// EXPANSION entries carry one location shared by every offset in the region
+// (macro expansion output copies its spellings contiguously, so one entry
+// covers one invocation's tokens).
+typedef enum CSourceMapEntryKind
+{
+    C_SOURCE_MAP_FILE,
+    C_SOURCE_MAP_EXPANSION,
+} CSourceMapEntryKind;
+
+typedef struct CSourceMapEntry CSourceMapEntry;
+struct CSourceMapEntry
+{
+    u32 start;
+    u32 file;
+    CSourceLocation* checkpoints;
+    u32* checkpoint_offsets;
+    u32 checkpoint_count;
+    u32 translated_offset;
+    s64 line_delta;
+    CSourceLocation location;
+    CSourceMapEntryKind kind;
+    u32 reserved;
+};
+
+// The spelling space of every preprocess result begins with this fixed
+// prelude, so tokens synthesized after preprocessing (static-assert
+// wrappers, lowering-internal constants, C23 respells) can reference
+// well-known spellings at compile-time-known offsets.
+#define C_SPELLING_PRELUDE_TEXT "_Static_assert();._Bool_Alignas_Alignof_Thread_local010.0f"
+enum
+{
+    C_SPELLING_STATIC_ASSERT = 0,
+    C_SPELLING_STATIC_ASSERT_LENGTH = 14,
+    C_SPELLING_LEFT_PARENTHESIS = 14,
+    C_SPELLING_RIGHT_PARENTHESIS = 15,
+    C_SPELLING_SEMICOLON = 16,
+    C_SPELLING_DOT = 17,
+    C_SPELLING_BOOL = 18,
+    C_SPELLING_BOOL_LENGTH = 5,
+    C_SPELLING_ALIGNAS = 23,
+    C_SPELLING_ALIGNAS_LENGTH = 8,
+    C_SPELLING_ALIGNOF = 31,
+    C_SPELLING_ALIGNOF_LENGTH = 8,
+    C_SPELLING_THREAD_LOCAL = 39,
+    C_SPELLING_THREAD_LOCAL_LENGTH = 13,
+    C_SPELLING_ZERO = 52,
+    C_SPELLING_ONE = 53,
+    // "0.0f"; length 3 spells "0.0".
+    C_SPELLING_FLOAT_ZERO = 54,
+    C_SPELLING_PRELUDE_LENGTH = 58,
+};
+
+BUSTER_CT_CHECK(sizeof(C_SPELLING_PRELUDE_TEXT) - 1 == C_SPELLING_PRELUDE_LENGTH);
+
+// Location-recovery state of one preprocess run: the sorted spelling-space
+// regions, the page-bracket index (entry covering each 1 KB page's first
+// byte) that turns lookups into one load and a short bounded search, and
+// the commit-on-demand arena owning the spelling space. Behind one pointer
+// because CPreprocessResult travels by value through the whole parse and
+// lowering surface — growing that struct taxes every call.
+typedef struct CSourceMapRecovery CSourceMapRecovery;
+struct CSourceMapRecovery
+{
+    // Must outlive every consumer of the tokens; a caller compiling many
+    // units may destroy it once the unit's compilation is complete.
+    Arena* spelling_arena;
+    CSourceMapEntry* entries;
+    u32* pages;
+    u32 count;
+    u32 page_count;
+    u32 reserved;
+    u32 padding;
+};
+
 typedef struct CPreprocessResult CPreprocessResult;
 struct CPreprocessResult
 {
     CToken* tokens;
+    // Base of the spelling space every token offset points into.
+    char8 const* spelling_base;
+    // Null for hand-built results; token locations then recover as zero.
+    CSourceMapRecovery* recovery;
     // The identifier intern table the tokens' symbol ids point into; arena
     // resident so parse and lowering can intern on demand. Null for
     // hand-built results.
@@ -718,6 +818,14 @@ struct CIRLowerResult
 
 BUSTER_F_DECL CLexResult c_lex(Arena* arena, String8 source);
 BUSTER_F_DECL CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options);
+// The spelling of a token relative to its owning result's spelling base.
+BUSTER_F_DECL String8 c_token_spelling(char8 const* spelling_base, CToken token);
+// On-demand line/column/file recovery. The lex variant serves standalone lex
+// results (file always 0) and advances the result's amortization cursor; the
+// preprocess variant binary-searches the source map and is safe on any token
+// of the final stream.
+BUSTER_F_DECL CSourceLocation c_lex_token_location(CLexResult* lex, CToken token);
+BUSTER_F_DECL CSourceLocation c_preprocess_token_location(CPreprocessResult const* preprocess, CToken token);
 BUSTER_F_DECL CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess);
 BUSTER_F_DECL CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target);
 BUSTER_F_DECL CParseResult c_parse(Arena* arena, CPreprocessResult preprocess);
