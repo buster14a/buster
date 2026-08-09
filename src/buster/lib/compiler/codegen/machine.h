@@ -284,6 +284,16 @@ typedef enum MachineOpcode
     // the float ABI; payload is the XMM register index.
     MACHINE_X64_MOVQ_TO_XMM,   // use general source; xmm[payload] = bits
     MACHINE_X64_MOVQ_FROM_XMM, // def general destination = xmm[payload] bits
+    // Stack-argument machinery. LOAD_INCOMING reads the caller-pushed
+    // argument area above the frame base (payload = byte offset past the
+    // saved RBP and return address). The push rows build outgoing stack
+    // arguments right to left, and SUB/ADD_RSP keep the call-site stack
+    // aligned and cleaned (payload = bytes).
+    MACHINE_X64_LOAD_INCOMING, // def; payload byte offset into incoming args
+    MACHINE_X64_PUSH_FRAME,    // slot ref; payload byte offset into the slot
+    MACHINE_X64_PUSH_REGISTER, // use
+    MACHINE_X64_SUB_RSP,       // payload bytes
+    MACHINE_X64_ADD_RSP,       // payload bytes
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

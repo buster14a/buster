@@ -9,6 +9,9 @@
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
+// Supported argument-list length: six register slots plus stack parts.
+#define MACHINE_X64_MAX_ARGUMENTS 16
+
 // The register shape of one argument or result under the subset: scalar
 // values occupy one integer register; small integer-class aggregates occupy
 // one or two, with the part offsets taken from the IR-owned System V
@@ -20,7 +23,22 @@ struct MachineX64ValueShape
     u32 part_offsets[2];
     u8 part_is_float[2];
     u32 part_count;
+    u32 byte_size;
     bool aggregate;
+    u8 reserved[3];
+};
+
+// One argument's placement after running register assignment: either its
+// shape's parts in consecutive per-class registers, or the whole value in
+// consecutive eightbytes of the outgoing stack area.
+typedef struct MachineX64ArgumentPlacement MachineX64ArgumentPlacement;
+struct MachineX64ArgumentPlacement
+{
+    u16 first_integer;
+    u16 first_float;
+    u16 first_stack_part;
+    u16 stack_part_count;
+    bool on_stack;
     u8 reserved[3];
 };
 
@@ -44,13 +62,11 @@ struct MachineX64Selector
     // Result value per argument index, captured at entry before any scratch
     // register can clobber the incoming fixed registers; IR_ID_UNDERLYING_INVALID
     // when the function has no such argument.
-    u32 argument_values[6];
-    // Register shape and first System V integer/XMM register per
-    // parameter, plus the return shape, computed once from the IR-owned
-    // ABI classification.
-    MachineX64ValueShape parameter_shapes[6];
-    u8 parameter_first_integers[6];
-    u8 parameter_first_floats[6];
+    u32 argument_values[MACHINE_X64_MAX_ARGUMENTS];
+    // Register shape and placement per parameter, plus the return shape,
+    // computed once from the IR-owned ABI classification.
+    MachineX64ValueShape parameter_shapes[MACHINE_X64_MAX_ARGUMENTS];
+    MachineX64ArgumentPlacement parameter_placements[MACHINE_X64_MAX_ARGUMENTS];
     MachineX64ValueShape return_shape;
     // Definition point per virtual register, patched into the flattened
     // rows because builder chunks are write-once.
@@ -85,6 +101,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
     {
         *shape = (MachineX64ValueShape){
             .part_count = 1,
+            .byte_size = 8,
         };
         return true;
     }
@@ -93,6 +110,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
         *shape = (MachineX64ValueShape){
             .part_is_float = {1},
             .part_count = 1,
+            .byte_size = 8,
         };
         return true;
     }
@@ -105,8 +123,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
     {
         return false;
     }
+    if (type->layout.size > UINT32_MAX - 7)
+    {
+        return false;
+    }
     MachineX64ValueShape built = {
         .part_count = abi.part_count,
+        .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
         .aggregate = true,
     };
     for (u32 part_index = 0; part_index < abi.part_count; part_index += 1)
@@ -134,6 +157,32 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_shape_class_parts(MachineX64ValueShape* shap
         count += (shape->part_is_float[part_index] != 0) == floats;
     }
     return count;
+}
+
+// Assigns one argument to registers when its whole shape fits the remaining
+// per-class sequences, otherwise to consecutive outgoing stack eightbytes —
+// the canonical all-or-nothing rule.
+BUSTER_GLOBAL_LOCAL void machine_x64_place_argument(MachineX64ValueShape* shape, u32* integer_count, u32* float_count, u32* stack_part_count,
+                                                    MachineX64ArgumentPlacement* placement)
+{
+    u32 integer_parts = machine_x64_shape_class_parts(shape, false);
+    u32 float_parts = machine_x64_shape_class_parts(shape, true);
+    if (*integer_count + integer_parts > BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments) || *float_count + float_parts > 8)
+    {
+        *placement = (MachineX64ArgumentPlacement){
+            .first_stack_part = (u16)*stack_part_count,
+            .stack_part_count = (u16)(shape->byte_size / 8),
+            .on_stack = true,
+        };
+        *stack_part_count += shape->byte_size / 8;
+        return;
+    }
+    *placement = (MachineX64ArgumentPlacement){
+        .first_integer = (u16)*integer_count,
+        .first_float = (u16)*float_count,
+    };
+    *integer_count += integer_parts;
+    *float_count += float_parts;
 }
 
 // Mirrors codegen_canonical_register_is_64_bit for the integer subset.
@@ -328,7 +377,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             return false;
         }
         u32 argument_index = (u32)instruction->immediates[0];
-        return argument_index < BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments) &&
+        return argument_index < MACHINE_X64_MAX_ARGUMENTS &&
                (result_register != UINT32_MAX || selector->value_stack_slots[instruction->result.value] != UINT32_MAX) &&
                selector->argument_values[argument_index] == instruction->result.value;
     }
@@ -1089,7 +1138,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         bool variadic_call = callee_type && callee_type->kind == IR_TYPE_FUNCTION && callee_type->is_variadic;
         if (!callee_type || callee_type->kind != IR_TYPE_FUNCTION ||
             (variadic_call ? call_argument_count < callee_type->parameter_count : callee_type->parameter_count != call_argument_count) ||
-            call_argument_count > BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments))
+            call_argument_count > MACHINE_X64_MAX_ARGUMENTS)
         {
             return false;
         }
@@ -1104,11 +1153,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         // the subset's shapes; a variadic call then always passes zero
         // vector registers in AL, matching the canonical convention.
         // Aggregate variadic tails stay outside the subset.
-        MachineX64ValueShape argument_shapes[BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments)];
-        u32 argument_first_integers[BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments)];
-        u32 argument_first_floats[BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments)];
+        MachineX64ValueShape argument_shapes[MACHINE_X64_MAX_ARGUMENTS];
+        MachineX64ArgumentPlacement argument_placements[MACHINE_X64_MAX_ARGUMENTS];
         u32 call_integer_count = 0;
         u32 call_float_count = 0;
+        u32 call_stack_part_count = 0;
         for (u32 argument_index = 0; argument_index < call_argument_count; argument_index += 1)
         {
             IrTypeId argument_type_id = argument_index < callee_type->parameter_count
@@ -1119,19 +1168,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             {
                 return false;
             }
-            u32 integer_parts = machine_x64_shape_class_parts(argument_shapes + argument_index, false);
-            u32 float_parts = machine_x64_shape_class_parts(argument_shapes + argument_index, true);
-            if (call_integer_count + integer_parts > BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments) || call_float_count + float_parts > 8)
-            {
-                return false;
-            }
-            argument_first_integers[argument_index] = call_integer_count;
-            argument_first_floats[argument_index] = call_float_count;
-            call_integer_count += integer_parts;
-            call_float_count += float_parts;
+            machine_x64_place_argument(argument_shapes + argument_index, &call_integer_count, &call_float_count, &call_stack_part_count,
+                                       argument_placements + argument_index);
         }
-        u32 argument_registers[BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments)];
-        u32 argument_slots[BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments)];
+        bool call_stack_padding = (call_stack_part_count & 1) != 0;
+        u32 argument_registers[MACHINE_X64_MAX_ARGUMENTS];
+        u32 argument_slots[MACHINE_X64_MAX_ARGUMENTS];
         for (u32 argument_index = 0; argument_index < call_argument_count; argument_index += 1)
         {
             argument_registers[argument_index] = UINT32_MAX;
@@ -1149,6 +1191,41 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                 return false;
             }
         }
+        // Outgoing stack parts push right to left before any register is
+        // placed (the pushes scratch only RAX), with alignment padding for
+        // an odd part count.
+        if (call_stack_padding)
+        {
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .payload = 8,
+                                                 .opcode = MACHINE_X64_SUB_RSP,
+                                             });
+        }
+        for (u32 argument_reverse = call_argument_count; argument_reverse > 0; argument_reverse -= 1)
+        {
+            u32 argument_index = argument_reverse - 1;
+            MachineX64ArgumentPlacement* argument_placement = argument_placements + argument_index;
+            if (!argument_placement->on_stack)
+            {
+                continue;
+            }
+            if (argument_shapes[argument_index].aggregate)
+            {
+                for (u32 part_reverse = argument_placement->stack_part_count; part_reverse > 0; part_reverse -= 1)
+                {
+                    machine_x64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, argument_slots[argument_index])},
+                                                         .payload = (part_reverse - 1) * 8,
+                                                         .opcode = MACHINE_X64_PUSH_FRAME,
+                                                     });
+                }
+                continue;
+            }
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_registers[argument_index])},
+                                                 .opcode = MACHINE_X64_PUSH_REGISTER,
+                                             });
+        }
         // Explicit fixed-register argument copies; integer targets load
         // directly (never through a scratch that could disturb an already
         // placed argument), and float parts bounce through RAX into their
@@ -1156,8 +1233,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         for (u32 argument_index = 0; argument_index < call_argument_count; argument_index += 1)
         {
             MachineX64ValueShape* shape = argument_shapes + argument_index;
-            u32 next_integer = argument_first_integers[argument_index];
-            u32 next_float = argument_first_floats[argument_index];
+            if (argument_placements[argument_index].on_stack)
+            {
+                continue;
+            }
+            u32 next_integer = argument_placements[argument_index].first_integer;
+            u32 next_float = argument_placements[argument_index].first_float;
             if (shape->aggregate)
             {
                 for (u32 part_index = 0; part_index < shape->part_count; part_index += 1)
@@ -1218,6 +1299,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                              .opcode = MACHINE_X64_CALL_DIRECT,
                                              .flags = (u16)(variadic_call ? (1u | (call_float_count << 1)) : 0),
                                          });
+        if (call_stack_part_count || call_stack_padding)
+        {
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .payload = call_stack_part_count * 8 + (call_stack_padding ? 8u : 0),
+                                                 .opcode = MACHINE_X64_ADD_RSP,
+                                             });
+        }
         if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
         {
             if (callee_return_shape.aggregate)
@@ -1445,7 +1533,7 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
     }
     IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
     if (!function_type || function_type->kind != IR_TYPE_FUNCTION || function_type->is_variadic ||
-        function_type->parameter_count > BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments))
+        function_type->parameter_count > MACHINE_X64_MAX_ARGUMENTS)
     {
         return result;
     }
@@ -1456,11 +1544,11 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
     {
         return result;
     }
-    MachineX64ValueShape signature_parameter_shapes[6] = {0};
-    u8 signature_first_integers[6] = {0};
-    u8 signature_first_floats[6] = {0};
+    MachineX64ValueShape signature_parameter_shapes[MACHINE_X64_MAX_ARGUMENTS] = {0};
+    MachineX64ArgumentPlacement signature_parameter_placements[MACHINE_X64_MAX_ARGUMENTS] = {0};
     u32 signature_integer_count = 0;
     u32 signature_float_count = 0;
+    u32 signature_stack_count = 0;
     for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
     {
         if (!machine_x64_value_shape(program, function_type->parameter_types[parameter_index], IR_ABI_USE_ARGUMENT,
@@ -1468,16 +1556,8 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
         {
             return result;
         }
-        u32 integer_parts = machine_x64_shape_class_parts(signature_parameter_shapes + parameter_index, false);
-        u32 float_parts = machine_x64_shape_class_parts(signature_parameter_shapes + parameter_index, true);
-        if (signature_integer_count + integer_parts > BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments) || signature_float_count + float_parts > 8)
-        {
-            return result;
-        }
-        signature_first_integers[parameter_index] = (u8)signature_integer_count;
-        signature_first_floats[parameter_index] = (u8)signature_float_count;
-        signature_integer_count += integer_parts;
-        signature_float_count += float_parts;
+        machine_x64_place_argument(signature_parameter_shapes + parameter_index, &signature_integer_count, &signature_float_count,
+                                   &signature_stack_count, signature_parameter_placements + parameter_index);
     }
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
@@ -1505,8 +1585,7 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
     for (u32 parameter_index = 0; parameter_index < BUSTER_ARRAY_LENGTH(selector.parameter_shapes); parameter_index += 1)
     {
         selector.parameter_shapes[parameter_index] = signature_parameter_shapes[parameter_index];
-        selector.parameter_first_integers[parameter_index] = signature_first_integers[parameter_index];
-        selector.parameter_first_floats[parameter_index] = signature_first_floats[parameter_index];
+        selector.parameter_placements[parameter_index] = signature_parameter_placements[parameter_index];
     }
     for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
     {
@@ -1612,8 +1691,58 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
                         continue;
                     }
                     MachineX64ValueShape* shape = selector.parameter_shapes + argument_index;
-                    u32 next_integer = selector.parameter_first_integers[argument_index];
-                    u32 next_float = selector.parameter_first_floats[argument_index];
+                    MachineX64ArgumentPlacement* parameter_placement = selector.parameter_placements + argument_index;
+                    u32 next_integer = parameter_placement->first_integer;
+                    u32 next_float = parameter_placement->first_float;
+                    if (parameter_placement->on_stack)
+                    {
+                        // Stack parameters copy from the caller-pushed area
+                        // in the float pass, where the general-register
+                        // scratches are already free.
+                        if (!float_pass)
+                        {
+                            continue;
+                        }
+                        if (shape->aggregate)
+                        {
+                            u32 slot = selector.value_stack_slots[argument_value];
+                            if (slot == UINT32_MAX)
+                            {
+                                machine_x64_reject(&selector, IR_OPCODE_ARGUMENT);
+                                break;
+                            }
+                            for (u32 part_index = 0; part_index < parameter_placement->stack_part_count; part_index += 1)
+                            {
+                                u32 bounce_register = machine_x64_synthesize_register(&selector);
+                                machine_x64_select_row(&selector, (MachineInstruction){
+                                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                                      .payload = ((u32)parameter_placement->first_stack_part + part_index) * 8,
+                                                                      .opcode = MACHINE_X64_LOAD_INCOMING,
+                                                                  });
+                                machine_x64_select_row(&selector, (MachineInstruction){
+                                                                      .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                                      .payload = part_index * 8,
+                                                                      .opcode = MACHINE_X64_STORE_FRAME64,
+                                                                  });
+                            }
+                            continue;
+                        }
+                        u32 stack_argument_register = selector.value_virtual_registers[argument_value];
+                        if (stack_argument_register == UINT32_MAX)
+                        {
+                            machine_x64_reject(&selector, IR_OPCODE_ARGUMENT);
+                            break;
+                        }
+                        u32 incoming_row = machine_x64_select_row(&selector, (MachineInstruction){
+                                                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER,
+                                                                                                               stack_argument_register)},
+                                                                                 .payload = (u32)parameter_placement->first_stack_part * 8,
+                                                                                 .opcode = MACHINE_X64_LOAD_INCOMING,
+                                                                             });
+                        machine_x64_define(&selector, stack_argument_register, incoming_row);
+                        continue;
+                    }
                     if (shape->aggregate)
                     {
                         u32 slot = selector.value_stack_slots[argument_value];
@@ -2526,6 +2655,50 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             case MACHINE_X64_MOVQ_FROM_XMM:
                 machine_x64_emit_movq_from_xmm(&encoder, instruction->payload, operand_registers[0]);
                 break;
+            case MACHINE_X64_LOAD_INCOMING:
+            {
+                // The incoming argument area sits past the saved frame base
+                // and return address.
+                u32 destination = operand_registers[0];
+                machine_x64_emit8(&encoder, (u8)(0x48 | (destination >= 8 ? 0x04 : 0)));
+                machine_x64_emit8(&encoder, 0x8b);
+                machine_x64_emit8(&encoder, (u8)(0x85 | ((destination & 7) << 3)));
+                machine_x64_emit32(&encoder, 16 + instruction->payload);
+            }
+            break;
+            case MACHINE_X64_PUSH_FRAME:
+            {
+                machine_x64_emit8(&encoder, 0xff);
+                machine_x64_emit_frame_modrm(&encoder, 6, placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])] -
+                                                             instruction->payload);
+            }
+            break;
+            case MACHINE_X64_PUSH_REGISTER:
+            {
+                u32 source = operand_registers[0];
+                if (source >= 8)
+                {
+                    machine_x64_emit8(&encoder, 0x41);
+                }
+                machine_x64_emit8(&encoder, (u8)(0x50 | (source & 7)));
+            }
+            break;
+            case MACHINE_X64_SUB_RSP:
+            {
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x81);
+                machine_x64_emit8(&encoder, 0xec);
+                machine_x64_emit32(&encoder, instruction->payload);
+            }
+            break;
+            case MACHINE_X64_ADD_RSP:
+            {
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x81);
+                machine_x64_emit8(&encoder, 0xc4);
+                machine_x64_emit32(&encoder, instruction->payload);
+            }
+            break;
             case MACHINE_X64_SWITCH:
             {
                 // The canonical compare chain: the condition sits in the

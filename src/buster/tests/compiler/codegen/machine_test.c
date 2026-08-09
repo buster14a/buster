@@ -294,6 +294,11 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "int with_call(int a, int b) { return divide(a, 2) + srem(b, 3); }\n"
                                   "int fadd(float a, float b) { return a + b > 1.0f; }\n"
                                   "int seven(int a, int b, int c, int d, int e, int f, int g) { return a + g; }\n"
+                                  "long stack_mix(int a, int b, int c, int d, int e, int f, int g, long h) { return a + g * h; }\n"
+                                  "long call_stack(long h) { return stack_mix(1, 2, 3, 4, 5, 6, 7, h); }\n"
+                                  "double nine(double a, double b, double c, double d, double e, double f, double g, double h, double i) {\n"
+                                  "    return a + i * b; }\n"
+                                  "int indirect(int (*callee)(int, int), int a) { return callee(a, 2); }\n"
                                   "int counter;\n"
                                   "int bump(int by) { counter = counter + by; return counter; }\n"
                                   "int table[8];\n"
@@ -407,14 +412,21 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             MachineSelectResult float_selected = machine_select_canonical_function(arguments->arena, machine_program, float_function, machine_target);
             BUSTER_TEST(arguments, float_selected.supported);
         }
-        // Seven integer arguments overflow the register sequence into stack
-        // parts and stay the explicit unsupported representative.
+        // Stack arguments now select; dynamic stack allocation stays the
+        // explicit unsupported representative.
         IrFunction* seven_function = machine_test_ir_function_find(machine_module, S8("seven"));
         BUSTER_TEST(arguments, seven_function != 0);
         if (seven_function)
         {
             MachineSelectResult seven_selected = machine_select_canonical_function(arguments->arena, machine_program, seven_function, machine_target);
-            BUSTER_TEST(arguments, !seven_selected.supported);
+            BUSTER_TEST(arguments, seven_selected.supported);
+        }
+        IrFunction* indirect_function = machine_test_ir_function_find(machine_module, S8("indirect"));
+        BUSTER_TEST(arguments, indirect_function != 0);
+        if (indirect_function)
+        {
+            MachineSelectResult indirect_selected = machine_select_canonical_function(arguments->arena, machine_program, indirect_function, machine_target);
+            BUSTER_TEST(arguments, !indirect_selected.supported);
         }
         // Variadic direct calls select (AL zero, register-only integer
         // arguments); execution is proven by the linked soak because the
@@ -617,7 +629,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("uless"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("divide"), S8_INITIALIZER("with_call"),
             S8_INITIALIZER("locals_array"), S8_INITIALIZER("local_pair"), S8_INITIALIZER("pick"),
             S8_INITIALIZER("span_round_trip"), S8_INITIALIZER("single_round_trip"), S8_INITIALIZER("fmath"),
-            S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnan"),
+            S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnan"), S8_INITIALIZER("call_stack"),
         };
         typedef s64 MachineTestModuleCall2(s64, s64);
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(module_names) && none_module_executable.address && mir_module_executable.address;
@@ -697,9 +709,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 double v;
             } MachineTestTagged;
             typedef double MachineTestCallTagged(MachineTestTagged);
+            typedef int MachineTestCallI7(int, int, int, int, int, int, int);
+            typedef s64 MachineTestCallStackMix(int, int, int, int, int, int, int, s64);
+            typedef double MachineTestCallD9(double, double, double, double, double, double, double, double, double);
             String8 float_names[] = {
                 S8_INITIALIZER("dadd"), S8_INITIALIZER("dmix"), S8_INITIALIZER("fhalf"), S8_INITIALIZER("dpair_sum"),
                 S8_INITIALIZER("dpair_make"), S8_INITIALIZER("tagged_get"), S8_INITIALIZER("dcall"),
+                S8_INITIALIZER("seven"), S8_INITIALIZER("stack_mix"), S8_INITIALIZER("nine"),
             };
             void* none_addresses[BUSTER_ARRAY_LENGTH(float_names)];
             void* mir_addresses[BUSTER_ARRAY_LENGTH(float_names)];
@@ -757,6 +773,22 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, none_tagged(tagged_probe) == mir_tagged(tagged_probe));
                 BUSTER_TEST(arguments, none_tagged(tagged_zero) == mir_tagged(tagged_zero));
                 BUSTER_TEST(arguments, none_dcall(2.5, 4.0) == mir_dcall(2.5, 4.0));
+                MachineTestCallI7* none_seven;
+                MachineTestCallI7* mir_seven;
+                MachineTestCallStackMix* none_stack_mix;
+                MachineTestCallStackMix* mir_stack_mix;
+                MachineTestCallD9* none_nine;
+                MachineTestCallD9* mir_nine;
+                memcpy(&none_seven, none_addresses + 7, sizeof(none_seven));
+                memcpy(&mir_seven, mir_addresses + 7, sizeof(mir_seven));
+                memcpy(&none_stack_mix, none_addresses + 8, sizeof(none_stack_mix));
+                memcpy(&mir_stack_mix, mir_addresses + 8, sizeof(mir_stack_mix));
+                memcpy(&none_nine, none_addresses + 9, sizeof(none_nine));
+                memcpy(&mir_nine, mir_addresses + 9, sizeof(mir_nine));
+                BUSTER_TEST(arguments, none_seven(1, 2, 3, 4, 5, 6, 70) == mir_seven(1, 2, 3, 4, 5, 6, 70));
+                BUSTER_TEST(arguments, none_stack_mix(1, 2, 3, 4, 5, 6, 7, -11) == mir_stack_mix(1, 2, 3, 4, 5, 6, 7, -11));
+                BUSTER_TEST(arguments,
+                            none_nine(1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, -0.25) == mir_nine(1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, -0.25));
             }
         }
         codegen_release_executable(none_module_executable);

@@ -235,6 +235,26 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
     },
+    [MACHINE_X64_LOAD_INCOMING] = {
+        .name = S8_INITIALIZER("x64_load_incoming"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+    },
+    [MACHINE_X64_PUSH_FRAME] = {
+        .name = S8_INITIALIZER("x64_push_frame"),
+        .operand_count = 1,
+    },
+    [MACHINE_X64_PUSH_REGISTER] = {
+        .name = S8_INITIALIZER("x64_push_register"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL},
+    },
+    [MACHINE_X64_SUB_RSP] = {
+        .name = S8_INITIALIZER("x64_sub_rsp"),
+    },
+    [MACHINE_X64_ADD_RSP] = {
+        .name = S8_INITIALIZER("x64_add_rsp"),
+    },
     [MACHINE_X64_CALL_DIRECT] = {
         .name = S8_INITIALIZER("x64_call_direct"),
         .implicit_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX) | (1u << MACHINE_X64_RDX) | (1u << MACHINE_X64_RSI) | (1u << MACHINE_X64_RDI) |
