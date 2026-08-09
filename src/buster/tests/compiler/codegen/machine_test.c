@@ -284,6 +284,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "int six(int a, int b, int c, int d, int e, int f) { return a + b + c + d + e + f; }\n"
                                   "long arr_lit(long a, long b) { long t[4] = {a, b, a + b, 5}; return t[0] * 1000 + t[1] * 100 + t[2] * 10 + t[3]; }\n"
                                   "struct KPair { long low; long high; };\n"
+                                  "struct BF3 { unsigned r : 1; unsigned w : 1; unsigned x : 3; unsigned rest : 27; };\n"
+                                  "long bits(long a, long b) { struct BF3 f = {.r = (unsigned)a & 1u, .w = (unsigned)b & 1u, .x = (unsigned)(a + b) & 7u, .rest = 0u}; return (long)(f.r * 100u + f.w * 10u + f.x); }\n"
                                                                     "static long kagg_take(struct KPair pair, long salt) { return pair.low * 3 + pair.high + salt; }\n"
                                   "long kagg(long a, long b) { struct KPair pair = {.low = a + 1, .high = b}; return kagg_take(pair, a) + pair.high; }\n"
                                   "int sum_to(int n) { int s = 0; int i = 1; while (i <= n) { s = s + i; i = i + 1; } return s; }\n"
@@ -371,7 +373,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         String8 supported_names[] = {
             S8_INITIALIZER("add"), S8_INITIALIZER("mul"), S8_INITIALIZER("widen"), S8_INITIALIZER("narrow"),
             S8_INITIALIZER("negate"), S8_INITIALIZER("bitnot"), S8_INITIALIZER("lnot"), S8_INITIALIZER("less"),
-            S8_INITIALIZER("uless"), S8_INITIALIZER("six"), S8_INITIALIZER("kagg"), S8_INITIALIZER("arr_lit"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("readp"),
+            S8_INITIALIZER("uless"), S8_INITIALIZER("six"), S8_INITIALIZER("kagg"), S8_INITIALIZER("arr_lit"), S8_INITIALIZER("bits"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("readp"),
             S8_INITIALIZER("writep"), S8_INITIALIZER("divide"), S8_INITIALIZER("srem"), S8_INITIALIZER("udiv"),
             S8_INITIALIZER("shl"), S8_INITIALIZER("sar"), S8_INITIALIZER("shr"), S8_INITIALIZER("bump"),
             S8_INITIALIZER("table_get"), S8_INITIALIZER("table_set"), S8_INITIALIZER("pair_sum"),

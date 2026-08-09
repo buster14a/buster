@@ -12,6 +12,30 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09z` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+bit-field aggregate literals: coverage reaches ninety-eight percent.)
+
+- **What was built.** Bit-field members of an aggregate literal
+  accumulate per storage unit, mirroring the canonical shape: a zeroed
+  register takes each member masked to its width and shifted to its bit
+  position (a power-of-two multiply — the machine set's shifts are
+  CL-constrained and a scaled multiply is equivalent), the unit stores
+  once at its byte offset, and initializers materialize every member so
+  the accumulated word is the whole unit. Mixed structs interleave unit
+  accumulation with the plain member writes.
+- **Numbers** (buster-built stage comparison, compiling ide.c under
+  NONE): fallbacks 83 -> 52, coverage **2890 of 2942 (98.2%)**.
+  Fast-built compiler 53.42G instructions (canonical 70.05G,
+  **-23.7%**), text 20,937,787 (canonical 25,699,964, -18.5%).
+- **Gates:** test_all green (a bit-field literal differential joined
+  the corpus), MIR and FAST soaks byte-identical on fresh references,
+  self-host fixed point holds.
+- **Remaining census:** LOAD 14, no-opcode 11, CAST 10, GLOBAL 4,
+  UNARY 4, va 3, CALL 1, icache 1, misc — diminishing per-item mass;
+  the next session should weigh finishing the tail against returning
+  to stage 5/6 quality work (spill-slot reuse, debug locations, edge
+  contracts) and the QRA stages.
+
 `2026-08-09y` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 variadic aggregate arguments: coverage reaches ninety-seven percent.)
 
