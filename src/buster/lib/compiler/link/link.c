@@ -172,6 +172,11 @@ struct LinkPeExportIndex
     u64 capacity;
 };
 
+enum
+{
+    LINK_PE_EXPORT_INDEX_MIN_QUERY_COUNT = 8,
+};
+
 BUSTER_GLOBAL_LOCAL LinkPeExportSlot* link_pe_export_slot(LinkPeExportIndex* table, String8 name)
 {
     if (!table->capacity)
@@ -275,6 +280,29 @@ BUSTER_GLOBAL_LOCAL u32 link_pe_export_group(LinkPeExportIndex* table, String8 n
 {
     LinkPeExportSlot* slot = link_pe_export_slot(table, name);
     return slot && slot->used ? slot->group : UINT32_MAX;
+}
+
+BUSTER_GLOBAL_LOCAL u32 link_pe_export_group_scalar(NativeExecutableLinkOptions options, String8 name)
+{
+    for (u32 library_index = 0; library_index < options.dynamic_library_count; library_index += 1)
+    {
+        NativeDynamicLibrary* library = options.dynamic_libraries + library_index;
+        for (u32 export_index = 0; export_index < library->exported_symbol_count; export_index += 1)
+        {
+            if (string_equal(name, library->exported_symbols[export_index]))
+            {
+                return library_index + 1;
+            }
+        }
+    }
+    for (u32 export_index = 0; export_index < options.runtime_exported_symbol_count; export_index += 1)
+    {
+        if (string_equal(name, options.runtime_exported_symbols[export_index]))
+        {
+            return 0;
+        }
+    }
+    return UINT32_MAX;
 }
 
 BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, ObjectSymbol* source, ObjectFile* object, u64* section_offsets, Arena* arena)
@@ -2514,14 +2542,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     Arena* export_conflicts[] = {
         arena,
     };
-    TemporalArena export_temporary = scratch_begin(export_conflicts, BUSTER_ARRAY_LENGTH(export_conflicts));
+    TemporalArena export_temporary = {0};
     LinkPeExportIndex export_index = {0};
-    if (options.dynamic_library_count && !link_pe_export_index_initialize(export_temporary.arena, options, &export_index))
-    {
-        scratch_end(export_temporary);
-        result.error = LINK_ERROR_INVALID_INPUT;
-        return result;
-    }
+    u32 export_query_count = 0;
+    bool export_index_initialized = false;
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
         import_indices[symbol_index] = UINT32_MAX;
@@ -2538,18 +2562,36 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         {
             result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
             result.symbol = symbol->name;
-            scratch_end(export_temporary);
+            if (export_index_initialized)
+            {
+                scratch_end(export_temporary);
+            }
             return result;
         }
         u32 group = 0;
         if (options.dynamic_library_count)
         {
-            group = link_pe_export_group(&export_index, symbol->name);
+            export_query_count += 1;
+            if (!export_index_initialized && export_query_count == LINK_PE_EXPORT_INDEX_MIN_QUERY_COUNT)
+            {
+                export_temporary = scratch_begin(export_conflicts, BUSTER_ARRAY_LENGTH(export_conflicts));
+                if (!link_pe_export_index_initialize(export_temporary.arena, options, &export_index))
+                {
+                    scratch_end(export_temporary);
+                    result.error = LINK_ERROR_INVALID_INPUT;
+                    return result;
+                }
+                export_index_initialized = true;
+            }
+            group = export_index_initialized ? link_pe_export_group(&export_index, symbol->name) : link_pe_export_group_scalar(options, symbol->name);
             if (group == UINT32_MAX || (group == 0 && !options.runtime_exports_known))
             {
                 result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
                 result.symbol = symbol->name;
-                scratch_end(export_temporary);
+                if (export_index_initialized)
+                {
+                    scratch_end(export_temporary);
+                }
                 return result;
             }
         }
@@ -2559,7 +2601,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         imported_name_size += align_forward(symbol->name.length + 3, 2);
         import_count += 1;
     }
-    scratch_end(export_temporary);
+    if (export_index_initialized)
+    {
+        scratch_end(export_temporary);
+    }
     if (!aarch64)
     {
         group_import_counts[0] += (u32)BUSTER_ARRAY_LENGTH(startup_names);

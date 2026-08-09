@@ -6319,6 +6319,11 @@ struct ObjectSymbolNameIndex
     u32 mask;
 };
 
+enum
+{
+    OBJECT_LOOKUP_INDEX_MIN_QUERY_COUNT = 8,
+};
+
 BUSTER_GLOBAL_LOCAL u64 object_symbol_name_hash(String8 name)
 {
     u64 hash = 1469598103934665603ull;
@@ -6464,22 +6469,40 @@ BUSTER_GLOBAL_LOCAL void object_append_codeview(ObjectFile* object, CodeviewResu
     object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data = built.types;
     object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].alignment = 4;
     object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].alignment = 4;
-    TemporalArena name_temporary = scratch_begin(0, 0);
-    ObjectSymbolNameIndex name_index = object_symbol_name_index_build(name_temporary.arena, object->symbols, object->symbol_count, object->symbol_count);
+    TemporalArena name_temporary = {0};
+    ObjectSymbolNameIndex name_index = {0};
+    u32 named_relocation_count = 0;
+    bool name_index_initialized = false;
     for (u32 relocation_index = 0; relocation_index < built.relocation_count; relocation_index += 1)
     {
         CodeviewRelocation relocation = built.relocations[relocation_index];
         u32 symbol_index = relocation.function;
         if (relocation.symbol_name.length)
         {
-            ObjectSymbolNameSlot* slot = object_symbol_name_slot(name_index, relocation.symbol_name);
-            if (slot->used && slot->defined != UINT32_MAX)
+            named_relocation_count += 1;
+            if (!name_index_initialized && named_relocation_count == OBJECT_LOOKUP_INDEX_MIN_QUERY_COUNT)
             {
-                symbol_index = slot->defined;
+                name_temporary = scratch_begin(0, 0);
+                name_index = object_symbol_name_index_build(name_temporary.arena, object->symbols, object->symbol_count, object->symbol_count);
+                name_index_initialized = true;
+            }
+            if (name_index_initialized)
+            {
+                ObjectSymbolNameSlot* slot = object_symbol_name_slot(name_index, relocation.symbol_name);
+                symbol_index = slot->used ? slot->defined : UINT32_MAX;
             }
             else
             {
                 symbol_index = UINT32_MAX;
+                for (u32 candidate_index = 0; candidate_index < object->symbol_count; candidate_index += 1)
+                {
+                    ObjectSymbol* candidate = object->symbols + candidate_index;
+                    if (candidate->section != OBJECT_SECTION_UNDEFINED && string_equal(candidate->name, relocation.symbol_name))
+                    {
+                        symbol_index = candidate_index;
+                        break;
+                    }
+                }
             }
         }
         if (symbol_index == UINT32_MAX || symbol_index >= object->symbol_count)
@@ -6493,7 +6516,10 @@ BUSTER_GLOBAL_LOCAL void object_append_codeview(ObjectFile* object, CodeviewResu
             .kind = relocation.kind == CODEVIEW_RELOCATION_SECREL32 ? OBJECT_RELOCATION_COFF_SECREL32 : OBJECT_RELOCATION_COFF_SECTION16,
         };
     }
-    scratch_end(name_temporary);
+    if (name_index_initialized)
+    {
+        scratch_end(name_temporary);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void object_debug_module_set(Arena* arena, ObjectFile* object, String8 name, u64 code_size)
@@ -7440,22 +7466,68 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
     Arena* lookup_conflicts[] = {
         arena,
     };
-    TemporalArena lookup_temporary = scratch_begin(lookup_conflicts, BUSTER_ARRAY_LENGTH(lookup_conflicts));
-    ObjectCodegenEntryIndex entry_index = object_codegen_entry_index_build(lookup_temporary.arena, module->entries, module->entry_count);
-    ObjectSymbolNameIndex name_index = object_symbol_name_index_build(lookup_temporary.arena, result.symbols, result.symbol_count,
-                                                                      (u64)result.symbol_count + module->relocation_count);
+    bool entry_index_initialized = module->relocation_count >= OBJECT_LOOKUP_INDEX_MIN_QUERY_COUNT;
+    bool name_index_initialized = false;
+    u32 missing_tuple_query_count = 0;
+    TemporalArena lookup_temporary = {0};
+    ObjectCodegenEntryIndex entry_index = {0};
+    ObjectSymbolNameIndex name_index = {0};
+    if (entry_index_initialized)
+    {
+        lookup_temporary = scratch_begin(lookup_conflicts, BUSTER_ARRAY_LENGTH(lookup_conflicts));
+        entry_index = object_codegen_entry_index_build(lookup_temporary.arena, module->entries, module->entry_count);
+    }
     for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
     {
         CodegenModuleRelocation* source = module->relocations + relocation_index;
-        u32* entry_slot = object_codegen_entry_slot(entry_index, source->entity, source->instantiation);
-        u32 symbol_index = entry_slot ? *entry_slot : UINT32_MAX;
+        u32 symbol_index = UINT32_MAX;
+        if (entry_index_initialized)
+        {
+            u32* entry_slot = object_codegen_entry_slot(entry_index, source->entity, source->instantiation);
+            symbol_index = entry_slot ? *entry_slot : UINT32_MAX;
+        }
+        else
+        {
+            for (u32 candidate_index = 0; candidate_index < module->entry_count; candidate_index += 1)
+            {
+                CodegenModuleEntry* candidate = module->entries + candidate_index;
+                if (candidate->entity.module.value == source->entity.module.value && candidate->entity.index.value == source->entity.index.value &&
+                    candidate->instantiation.value == source->instantiation.value)
+                {
+                    symbol_index = candidate_index;
+                    break;
+                }
+            }
+        }
         if (symbol_index == UINT32_MAX)
         {
-            String8 name = object_entity_name(arena, analysis, source->entity, source->instantiation);
-            ObjectSymbolNameSlot* name_slot = object_symbol_name_slot(name_index, name);
-            if (name_slot->used)
+            missing_tuple_query_count += 1;
+            if (!name_index_initialized && missing_tuple_query_count == OBJECT_LOOKUP_INDEX_MIN_QUERY_COUNT)
             {
-                symbol_index = name_slot->undefined;
+                name_index = object_symbol_name_index_build(lookup_temporary.arena, result.symbols, result.symbol_count,
+                                                            (u64)result.symbol_count + module->relocation_count - relocation_index);
+                name_index_initialized = true;
+            }
+            String8 name = object_entity_name(arena, analysis, source->entity, source->instantiation);
+            if (name_index_initialized)
+            {
+                ObjectSymbolNameSlot* name_slot = object_symbol_name_slot(name_index, name);
+                if (name_slot->used)
+                {
+                    symbol_index = name_slot->undefined;
+                }
+            }
+            else
+            {
+                for (u32 candidate_index = 0; candidate_index < result.symbol_count; candidate_index += 1)
+                {
+                    ObjectSymbol* candidate = result.symbols + candidate_index;
+                    if (candidate->section == OBJECT_SECTION_UNDEFINED && string_equal(candidate->name, name))
+                    {
+                        symbol_index = candidate_index;
+                        break;
+                    }
+                }
             }
             if (symbol_index == UINT32_MAX)
             {
@@ -7466,7 +7538,10 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
                     .kind = OBJECT_SYMBOL_FUNCTION,
                     .global = true,
                 };
-                object_symbol_name_index_add(name_index, result.symbols + symbol_index, symbol_index);
+                if (name_index_initialized)
+                {
+                    object_symbol_name_index_add(name_index, result.symbols + symbol_index, symbol_index);
+                }
             }
         }
         ObjectRelocationKind kind = source->absolute  ? OBJECT_RELOCATION_ABSOLUTE64
@@ -7484,7 +7559,10 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
             if (source->offset + 8 > module->code.length)
             {
                 result.error = OBJECT_ERROR_INVALID_INPUT;
-                scratch_end(lookup_temporary);
+                if (entry_index_initialized)
+                {
+                    scratch_end(lookup_temporary);
+                }
                 return result;
             }
             memset(text + source->offset, 0, 8);
@@ -7494,7 +7572,10 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
             if (source->offset + 4 > module->code.length)
             {
                 result.error = OBJECT_ERROR_INVALID_INPUT;
-                scratch_end(lookup_temporary);
+                if (entry_index_initialized)
+                {
+                    scratch_end(lookup_temporary);
+                }
                 return result;
             }
             u32 instruction = 0x94000000;
@@ -7505,13 +7586,19 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
             if (source->offset + 4 > module->code.length)
             {
                 result.error = OBJECT_ERROR_INVALID_INPUT;
-                scratch_end(lookup_temporary);
+                if (entry_index_initialized)
+                {
+                    scratch_end(lookup_temporary);
+                }
                 return result;
             }
             memset(text + source->offset, 0, 4);
         }
     }
-    scratch_end(lookup_temporary);
+    if (entry_index_initialized)
+    {
+        scratch_end(lookup_temporary);
+    }
     if (module->data_relocation_count)
     {
         u32 data_symbol = result.symbol_count++;
