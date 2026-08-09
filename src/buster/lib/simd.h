@@ -275,7 +275,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_splat_fallback(u8 value)
 {
-    Simd512 result;
+    Simd512 result = {0};
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         result.bytes[lane] = value;
@@ -285,7 +285,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_splat_fallback(u8 value)
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_load_fallback(void const* address)
 {
-    Simd512 result;
+    Simd512 result = {0};
     u8 const* source = (u8 const*)address;
     for (u32 lane = 0; lane < 64; lane += 1)
     {
@@ -296,7 +296,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_load_fallback(void const*
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_load_masked_fallback(void const* address, Mask64 mask)
 {
-    Simd512 result;
+    Simd512 result = {0};
     u8 const* source = (u8 const*)address;
     for (u32 lane = 0; lane < 64; lane += 1)
     {
@@ -433,7 +433,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_shift_left_word_fallback(
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_and_fallback(Simd512 left, Simd512 right)
 {
-    Simd512 result;
+    Simd512 result = {0};
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         result.bytes[lane] = left.bytes[lane] & right.bytes[lane];
@@ -443,7 +443,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_and_fallback(Simd512 left
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_or_fallback(Simd512 left, Simd512 right)
 {
-    Simd512 result;
+    Simd512 result = {0};
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         result.bytes[lane] = left.bytes[lane] | right.bytes[lane];
@@ -453,7 +453,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_or_fallback(Simd512 left,
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_xor_fallback(Simd512 left, Simd512 right)
 {
-    Simd512 result;
+    Simd512 result = {0};
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         result.bytes[lane] = left.bytes[lane] ^ right.bytes[lane];
@@ -463,7 +463,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_xor_fallback(Simd512 left
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_add_byte_fallback(Simd512 left, Simd512 right)
 {
-    Simd512 result;
+    Simd512 result = {0};
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         result.bytes[lane] = (u8)(left.bytes[lane] + right.bytes[lane]);
@@ -473,7 +473,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_add_byte_fallback(Simd512
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_subtract_byte_fallback(Simd512 left, Simd512 right)
 {
-    Simd512 result;
+    Simd512 result = {0};
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         result.bytes[lane] = (u8)(left.bytes[lane] - right.bytes[lane]);
