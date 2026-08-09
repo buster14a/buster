@@ -581,4 +581,5 @@ BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* 
 BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* function);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target);
 BUSTER_F_DECL MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function);
+BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);

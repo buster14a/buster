@@ -10404,8 +10404,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // prologue byte-for-byte matches the canonical plain x64 prologue,
         // so the descriptor's unwind actions keep their exact meaning.
         bool machine_function_emitted = false;
-        if (options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_MIR_STACK && target.cpu_arch == CPU_ARCH_X86_64 &&
-            result.abi == CODEGEN_ABI_X86_64_SYSTEM_V)
+        if ((options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_MIR_STACK || options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST) &&
+            target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_SYSTEM_V)
         {
             bool label_address_target = false;
             for (u32 side_index = 0; side_index < label_address_relocation_count; side_index += 1)
@@ -10420,7 +10420,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             }
             if (selected.supported && machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE)
             {
-                MachineStackPlacement placement = machine_stack_placement_build(machine_scratch.arena, &selected.function);
+                MachineStackPlacement placement = options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST
+                                                      ? machine_fast_placement_build(machine_scratch.arena, &selected.function)
+                                                      : machine_stack_placement_build(machine_scratch.arena, &selected.function);
                 if (placement.valid)
                 {
                     MachineEncodeResult encoded = machine_encode_x86_64(machine_scratch.arena, &selected.function, &placement);

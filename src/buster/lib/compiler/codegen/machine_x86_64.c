@@ -2467,7 +2467,14 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             while (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == before)
             {
                 MachineEdit* edit = placement->edits + edit_cursor;
-                machine_x64_emit_frame_load(&encoder, edit->location, placement->virtual_register_offsets[edit->subject]);
+                if (edit->kind == MACHINE_EDIT_SPILL)
+                {
+                    machine_x64_emit_frame_store(&encoder, edit->location, placement->virtual_register_offsets[edit->subject]);
+                }
+                else
+                {
+                    machine_x64_emit_frame_load(&encoder, edit->location, placement->virtual_register_offsets[edit->subject]);
+                }
                 edit_cursor += 1;
             }
             switch (instruction->opcode)
@@ -2651,13 +2658,15 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             {
                 u32 slot_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])] - instruction->payload;
                 u32 value_register = operand_registers[1];
-                if (instruction->opcode == MACHINE_X64_STORE_FRAME64)
-                {
-                    machine_x64_emit8(&encoder, (u8)(0x48 | (value_register >= 8 ? 0x04 : 0)));
-                }
-                else if (instruction->opcode == MACHINE_X64_STORE_FRAME16)
+                if (instruction->opcode == MACHINE_X64_STORE_FRAME16)
                 {
                     machine_x64_emit8(&encoder, 0x66);
+                }
+                u8 rex = (u8)(0x40 | (value_register >= 8 ? 0x04 : 0) | (instruction->opcode == MACHINE_X64_STORE_FRAME64 ? 0x08 : 0));
+                if (rex != 0x40 || (instruction->opcode == MACHINE_X64_STORE_FRAME8 &&
+                                    (value_register == MACHINE_X64_RSI || value_register == MACHINE_X64_RDI)))
+                {
+                    machine_x64_emit8(&encoder, rex);
                 }
                 machine_x64_emit8(&encoder, instruction->opcode == MACHINE_X64_STORE_FRAME8 ? 0x88 : 0x89);
                 machine_x64_emit_frame_modrm(&encoder, value_register, slot_offset);
@@ -2670,9 +2679,10 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             {
                 u32 destination = operand_registers[0];
                 u32 address = operand_registers[1];
+                u8 rex = (u8)(0x40 | (destination >= 8 ? 0x04 : 0) | (address >= 8 ? 0x01 : 0));
                 if (instruction->opcode == MACHINE_X64_LOAD_PTR8 || instruction->opcode == MACHINE_X64_LOAD_PTR16)
                 {
-                    machine_x64_emit8(&encoder, 0x48);
+                    machine_x64_emit8(&encoder, (u8)(rex | 0x08));
                     machine_x64_emit8(&encoder, 0x0f);
                     machine_x64_emit8(&encoder, instruction->opcode == MACHINE_X64_LOAD_PTR8 ? 0xb6 : 0xb7);
                 }
@@ -2680,7 +2690,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 {
                     if (instruction->opcode == MACHINE_X64_LOAD_PTR64)
                     {
-                        machine_x64_emit8(&encoder, 0x48);
+                        rex |= 0x08;
+                    }
+                    if (rex != 0x40)
+                    {
+                        machine_x64_emit8(&encoder, rex);
                     }
                     machine_x64_emit8(&encoder, 0x8b);
                 }
@@ -2694,13 +2708,20 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             {
                 u32 address = operand_registers[0];
                 u32 value_register = operand_registers[1];
-                if (instruction->opcode == MACHINE_X64_STORE_PTR64)
-                {
-                    machine_x64_emit8(&encoder, 0x48);
-                }
-                else if (instruction->opcode == MACHINE_X64_STORE_PTR16)
+                if (instruction->opcode == MACHINE_X64_STORE_PTR16)
                 {
                     machine_x64_emit8(&encoder, 0x66);
+                }
+                u8 rex = (u8)(0x40 | (value_register >= 8 ? 0x04 : 0) | (address >= 8 ? 0x01 : 0));
+                if (instruction->opcode == MACHINE_X64_STORE_PTR64)
+                {
+                    rex |= 0x08;
+                }
+                // Byte stores to SIL/DIL and every extended register need the
+                // REX prefix even without W.
+                if (rex != 0x40 || (instruction->opcode == MACHINE_X64_STORE_PTR8 && (value_register == MACHINE_X64_RSI || value_register == MACHINE_X64_RDI)))
+                {
+                    machine_x64_emit8(&encoder, rex);
                 }
                 machine_x64_emit8(&encoder, instruction->opcode == MACHINE_X64_STORE_PTR8 ? 0x88 : 0x89);
                 machine_x64_emit8(&encoder, (u8)(((value_register & 7) << 3) | (address & 7)));
@@ -2770,14 +2791,17 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     machine_x64_emit8(&encoder, 0xb8);
                     machine_x64_emit32(&encoder, (u32)(instruction->flags >> 1));
                 }
-                machine_x64_emit8(&encoder, 0x41);
+                if (operand_registers[0] >= 8)
+                {
+                    machine_x64_emit8(&encoder, 0x41);
+                }
                 machine_x64_emit8(&encoder, 0xff);
                 machine_x64_emit8(&encoder, (u8)(0xd0 | (operand_registers[0] & 7)));
             }
             break;
             case MACHINE_X64_LEA_FRAME:
             {
-                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, (u8)(0x48 | (operand_registers[0] >= 8 ? 0x04 : 0)));
                 machine_x64_emit8(&encoder, 0x8d);
                 machine_x64_emit_frame_modrm(&encoder, operand_registers[0],
                                              placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])]);
@@ -2785,7 +2809,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             break;
             case MACHINE_X64_LEA_SYMBOL:
             {
-                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, (u8)(0x48 | (operand_registers[0] >= 8 ? 0x04 : 0)));
                 machine_x64_emit8(&encoder, 0x8d);
                 machine_x64_emit8(&encoder, (u8)(0x05 | ((operand_registers[0] & 7) << 3)));
                 MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
@@ -2820,7 +2844,19 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 while (copied < instruction->payload)
                 {
                     u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
-                    machine_x64_emit_chunk_load_prefix(&encoder, chunk);
+                    if (source_register >= 8)
+                    {
+                        machine_x64_emit8(&encoder, (u8)(chunk == 8 ? 0x49 : 0x41));
+                        machine_x64_emit8(&encoder, chunk <= 2 ? 0x0f : 0x8b);
+                        if (chunk <= 2)
+                        {
+                            machine_x64_emit8(&encoder, chunk == 1 ? 0xb6 : 0xb7);
+                        }
+                    }
+                    else
+                    {
+                        machine_x64_emit_chunk_load_prefix(&encoder, chunk);
+                    }
                     machine_x64_emit_memory_modrm(&encoder, MACHINE_X64_RAX, source_register, copied);
                     machine_x64_emit_chunk_store_prefix(&encoder, chunk);
                     machine_x64_emit_frame_modrm(&encoder, MACHINE_X64_RAX, destination_offset - copied);
@@ -2838,7 +2874,19 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     u32 chunk = machine_x64_copy_chunk(instruction->payload - copied);
                     machine_x64_emit_chunk_load_prefix(&encoder, chunk);
                     machine_x64_emit_frame_modrm(&encoder, MACHINE_X64_RDX, source_offset - copied);
-                    machine_x64_emit_chunk_store_prefix(&encoder, chunk);
+                    if (destination_register >= 8)
+                    {
+                        if (chunk == 2)
+                        {
+                            machine_x64_emit8(&encoder, 0x66);
+                        }
+                        machine_x64_emit8(&encoder, (u8)(chunk == 8 ? 0x49 : 0x41));
+                        machine_x64_emit8(&encoder, chunk == 1 ? 0x88 : 0x89);
+                    }
+                    else
+                    {
+                        machine_x64_emit_chunk_store_prefix(&encoder, chunk);
+                    }
                     machine_x64_emit_memory_modrm(&encoder, MACHINE_X64_RDX, destination_register, copied);
                     copied += chunk;
                 }
@@ -3104,7 +3152,14 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             while (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == after)
             {
                 MachineEdit* edit = placement->edits + edit_cursor;
-                machine_x64_emit_frame_store(&encoder, edit->location, placement->virtual_register_offsets[edit->subject]);
+                if (edit->kind == MACHINE_EDIT_RELOAD)
+                {
+                    machine_x64_emit_frame_load(&encoder, edit->location, placement->virtual_register_offsets[edit->subject]);
+                }
+                else
+                {
+                    machine_x64_emit_frame_store(&encoder, edit->location, placement->virtual_register_offsets[edit->subject]);
+                }
                 edit_cursor += 1;
             }
         }

@@ -859,6 +859,119 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 }
             }
         }
+        // The fast allocator is a drop-in placement replacement: the same
+        // module through FAST must behave identically to the oracle while
+        // producing strictly less slot traffic than MIR_STACK.
+        CodegenModule fast_module = codegen_generate_canonical_module(arguments->arena, machine_program, machine_module, machine_target,
+                                                                      (CodegenModuleOptions){
+                                                                          .register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST,
+                                                                      });
+        BUSTER_TEST(arguments, fast_module.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, fast_module.statistics.fallback_function_count == mir_module.statistics.fallback_function_count);
+        for (u32 relocation_index = 0; relocation_index < fast_module.relocation_count; relocation_index += 1)
+        {
+            CodegenModuleRelocation* relocation = fast_module.relocations + relocation_index;
+            if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute)
+            {
+                continue;
+            }
+            for (u32 entry_index = 0; entry_index < fast_module.entry_count; entry_index += 1)
+            {
+                if (fast_module.entries[entry_index].symbol.value == relocation->symbol.value)
+                {
+                    u32 displacement = fast_module.entries[entry_index].offset - (relocation->offset + 4);
+                    memcpy(fast_module.code.pointer + relocation->offset, &displacement, sizeof(displacement));
+                    break;
+                }
+            }
+        }
+        CodegenExecutable fast_module_executable = codegen_make_executable((CodegenFunction){
+            .code = fast_module.code,
+        });
+        BUSTER_TEST(arguments, fast_module_executable.error == CODEGEN_ERROR_NONE);
+        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(module_names) && none_module_executable.address && fast_module_executable.address;
+             name_index += 1)
+        {
+            u32 none_offset = machine_test_module_offset(&none_module, machine_module, module_names[name_index]);
+            u32 fast_offset = machine_test_module_offset(&fast_module, machine_module, module_names[name_index]);
+            BUSTER_TEST(arguments, none_offset != UINT32_MAX && fast_offset != UINT32_MAX);
+            if (none_offset == UINT32_MAX || fast_offset == UINT32_MAX)
+            {
+                continue;
+            }
+            bool fast_wide = string_equal(module_names[name_index], S8("widen")) || string_equal(module_names[name_index], S8("bitnot"));
+            bool fast_loop = string_equal(module_names[name_index], S8("sum_to"));
+            s64 fast_probes[][2] = {
+                {6, 2}, {-9, 13}, {0, 1},
+            };
+            bool fast_equal = true;
+            for (u32 probe_index = 0; probe_index < BUSTER_ARRAY_LENGTH(fast_probes); probe_index += 1)
+            {
+                s64 left = fast_probes[probe_index][0];
+                s64 right = fast_probes[probe_index][1];
+                if (fast_loop)
+                {
+                    left &= 63;
+                }
+                void* none_address = (u8*)none_module_executable.address + none_offset;
+                void* fast_address = (u8*)fast_module_executable.address + fast_offset;
+                MachineTestModuleCall2* none_call = 0;
+                MachineTestModuleCall2* fast_call = 0;
+                memcpy(&none_call, &none_address, sizeof(none_call));
+                memcpy(&fast_call, &fast_address, sizeof(fast_call));
+                if (fast_wide)
+                {
+                    fast_equal &= none_call(left, right) == fast_call(left, right);
+                }
+                else
+                {
+                    fast_equal &= (s32)none_call(left, right) == (s32)fast_call(left, right);
+                }
+            }
+            BUSTER_TEST_RAW(arguments, fast_equal, module_names[name_index]);
+        }
+        // Six register arguments exercise the entry captures: an eager pick
+        // must not clobber an incoming argument register before its own
+        // capture reads it.
+        if (none_module_executable.address && fast_module_executable.address)
+        {
+            u32 none_offset = machine_test_module_offset(&none_module, machine_module, S8("six"));
+            u32 fast_offset = machine_test_module_offset(&fast_module, machine_module, S8("six"));
+            BUSTER_TEST(arguments, none_offset != UINT32_MAX && fast_offset != UINT32_MAX);
+            if (none_offset != UINT32_MAX && fast_offset != UINT32_MAX)
+            {
+                void* none_address = (u8*)none_module_executable.address + none_offset;
+                void* fast_address = (u8*)fast_module_executable.address + fast_offset;
+                MachineTestCall6* none_call6 = 0;
+                MachineTestCall6* fast_call6 = 0;
+                memcpy(&none_call6, &none_address, sizeof(none_call6));
+                memcpy(&fast_call6, &fast_address, sizeof(fast_call6));
+                s32 none_result = (s32)none_call6(1, 20, 300, 4000, 50000, 600000);
+                s32 fast_result = (s32)fast_call6(1, 20, 300, 4000, 50000, 600000);
+                BUSTER_TEST_RAW(arguments, none_result == fast_result,
+                                string_format(arguments->arena, S8("fast six none={u64} fast={u64}"), (u64)(u32)none_result, (u64)(u32)fast_result));
+            }
+        }
+        codegen_release_executable(fast_module_executable);
+        // The loop-heavy body must see strictly fewer reloads and spills
+        // under the fast allocator than under the everything-in-slots mode.
+        IrFunction* traffic_function = machine_test_ir_function_find(machine_module, S8("sum_to"));
+        if (traffic_function)
+        {
+            MachineSelectResult traffic_selected = machine_select_canonical_function(arguments->arena, machine_program, traffic_function, machine_target);
+            BUSTER_TEST(arguments, traffic_selected.supported);
+            if (traffic_selected.supported)
+            {
+                MachineStackPlacement stack_placement = machine_stack_placement_build(arguments->arena, &traffic_selected.function);
+                MachineStackPlacement fast_placement = machine_fast_placement_build(arguments->arena, &traffic_selected.function);
+                BUSTER_TEST(arguments, stack_placement.valid && fast_placement.valid);
+                BUSTER_TEST_RAW(arguments,
+                                fast_placement.reload_count + fast_placement.spill_count <
+                                    stack_placement.reload_count + stack_placement.spill_count,
+                                string_format(arguments->arena, S8("fast traffic {u32}+{u32} vs stack {u32}+{u32}"), fast_placement.reload_count,
+                                              fast_placement.spill_count, stack_placement.reload_count, stack_placement.spill_count));
+            }
+        }
         codegen_release_executable(none_module_executable);
         codegen_release_executable(mir_module_executable);
 #endif
