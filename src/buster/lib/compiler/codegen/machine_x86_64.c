@@ -2118,6 +2118,8 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
     machine_stream_initialize(&selector.stack_slots, sizeof(u32));
     machine_stream_initialize(&selector.call_targets, sizeof(IrSymbolId));
     machine_stream_initialize(&selector.switch_cases, sizeof(MachineSwitchCase));
+    MachineBuilderStream line_marks;
+    machine_stream_initialize(&line_marks, sizeof(MachineLineMark));
     machine_stream_initialize(&selector.stack_slot_alignments, sizeof(u32));
     selector.return_shape = signature_return_shape;
     selector.hidden_return_slot = UINT32_MAX;
@@ -2372,6 +2374,17 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
         {
             IrInstruction* instruction = function->instructions + id.value;
             typed_instruction_count += 1;
+            IrSourceRange mark_source = ir_instruction_canonical_source(function, id);
+            if (mark_source.source.value != IR_ID_UNDERLYING_INVALID)
+            {
+                MachineLineMark* mark = (MachineLineMark*)machine_stream_append(arena, &line_marks);
+                *mark = (MachineLineMark){
+                    .row = selector.builder.instructions.total_count,
+                    .source = mark_source.source.value,
+                    .line = mark_source.line,
+                    .column = mark_source.column,
+                };
+            }
             if (!machine_x64_select_instruction(&selector, instruction))
             {
                 machine_x64_reject(&selector, instruction->opcode);
@@ -2397,6 +2410,9 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
     result.function.call_targets = arena_allocate(arena, IrSymbolId, selector.call_targets.total_count);
     result.function.call_target_count = selector.call_targets.total_count;
     machine_stream_flatten(&selector.call_targets, result.function.call_targets);
+    result.function.line_marks = arena_allocate(arena, MachineLineMark, line_marks.total_count);
+    result.function.line_mark_count = line_marks.total_count;
+    machine_stream_flatten(&line_marks, result.function.line_marks);
     result.function.switch_cases = arena_allocate(arena, MachineSwitchCase, selector.switch_cases.total_count);
     result.function.switch_case_count = selector.switch_cases.total_count;
     machine_stream_flatten(&selector.switch_cases, result.function.switch_cases);
@@ -2739,6 +2755,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     MachineBuilderStream call_sites;
     machine_stream_initialize(&call_sites, sizeof(MachineCallSite));
     result.block_offsets = arena_allocate(arena, u32, function->block_count);
+    result.row_offsets = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
     // Prologue: the frame base is RBP, matching the canonical path, and
     // the placement's callee-saved registers push right after it in fixed
     // RBX, R14, R15 order so the unwind actions can name exact offsets.
@@ -2804,6 +2821,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             u32 instruction_index = block->first_instruction + offset;
             MachineInstruction* instruction = function->instructions + instruction_index;
             u8 const* operand_registers = placement->operand_registers + (u64)instruction_index * 4;
+            result.row_offsets[instruction_index] = encoder.count;
             MachinePoint before = machine_point_make(instruction_index, MACHINE_POINT_BEFORE);
             while (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == before)
             {

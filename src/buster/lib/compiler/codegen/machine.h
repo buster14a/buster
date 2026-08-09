@@ -318,6 +318,19 @@ typedef enum MachineOpcode
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
+// One source mark per lowered IR instruction: the machine row where its
+// rows begin and the canonical source position, consumed by the encoder's
+// per-row offsets into per-function line entries.
+typedef struct MachineLineMark MachineLineMark;
+struct MachineLineMark
+{
+    u32 row;
+    u32 source;
+    u32 line;
+    u32 column;
+};
+BUSTER_CT_CHECK(sizeof(MachineLineMark) == 16);
+
 typedef struct MachineSwitchCase MachineSwitchCase;
 struct MachineSwitchCase
 {
@@ -402,6 +415,7 @@ struct MachineFunction
     // Direct-call callees, indexed by MACHINE_X64_CALL_DIRECT payloads.
     IrSymbolId* call_targets;
     MachineSwitchCase* switch_cases;
+    MachineLineMark* line_marks;
     u32 instruction_count;
     u32 virtual_register_count;
     u32 block_count;
@@ -409,6 +423,7 @@ struct MachineFunction
     u32 stack_slot_count;
     u32 call_target_count;
     u32 switch_case_count;
+    u32 line_mark_count;
     u32 reserved;
 };
 
@@ -501,6 +516,9 @@ struct MachineEncodeResult
     u8* bytes;
     u32 byte_count;
     u32* block_offsets;
+    // Function-relative offset of every instruction row's first byte,
+    // ahead of its reload edits, parallel to the instruction array.
+    u32* row_offsets;
     MachineCallSite* call_sites;
     u32 call_site_count;
     bool valid;

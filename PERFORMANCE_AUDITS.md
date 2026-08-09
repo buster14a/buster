@@ -12,6 +12,25 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09ab` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6 —
+machine-path debug line entries reach canonical parity.)
+
+- **What was built.** Selection records one MachineLineMark per lowered
+  IR instruction (its first machine row plus the canonical source
+  position), the encoder returns per-row code offsets ahead of each
+  row's reload edits, and the module emitter turns marks into ordinary
+  CodegenLineEntry rows through codegen_record_line — same dedupe, same
+  capacity budget (one mark per IR instruction at most).
+- **Parity note:** on C-frontend inputs both paths currently produce
+  the same function-level rows, because the frontend's on-demand
+  location recovery keeps most IR instructions without canonical
+  sources — the machine path now consumes exactly what canonical
+  consumes, so any future frontend location enrichment benefits both
+  sides equally. Verified with objdump --dwarf=decodedline on a
+  multi-statement probe: identical tables under NONE and FAST.
+- **Gates:** test_all green, MIR and FAST soaks byte-identical on
+  fresh references, self-host fixed point holds.
+
 `2026-08-09aa` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 array loads, bit scans, and unsigned-64 float conversions: ninety-nine
 percent.)

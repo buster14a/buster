@@ -10508,6 +10508,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         if (machine_unwind_valid)
                         {
                             memcpy(buffer.bytes + buffer.count, encoded.bytes, encoded.byte_count);
+                            for (u32 mark_index = 0; mark_index < selected.function.line_mark_count; mark_index += 1)
+                            {
+                                MachineLineMark* mark = selected.function.line_marks + mark_index;
+                                if (mark->row < selected.function.instruction_count)
+                                {
+                                    codegen_record_line(result.line_entries, &result.line_entry_count, line_entry_capacity,
+                                                        (u32)buffer.count + encoded.row_offsets[mark->row], mark->source, mark->line, mark->column);
+                                }
+                            }
                             for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)
                             {
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
