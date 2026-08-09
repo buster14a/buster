@@ -499,6 +499,10 @@ struct AnalysisModuleInterface
     AnalysisEntity* entities;
     AnalysisEntitySemantic* semantics;
     AnalysisBody* bodies;
+    // Immutable after indexing. Large modules use these open-addressed tables;
+    // small modules leave them null and retain the cheaper scalar scans.
+    u64* import_name_lookup_slots;
+    u64* entity_name_lookup_slots;
     AnalysisModuleId id;
     u32 source_count;
     u32 import_count;
@@ -506,6 +510,8 @@ struct AnalysisModuleInterface
     u32 type_count;
     u32 code_count;
     u32 data_count;
+    u32 import_name_lookup_mask;
+    u32 entity_name_lookup_mask;
 };
 
 typedef enum AnalysisDiagnosticKind

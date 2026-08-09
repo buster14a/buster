@@ -392,6 +392,129 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, duplicate_import_module.first_diagnostic->first_note != 0);
     }
 
+    {
+        TemporalArena stress = arena_begin_temporal(arguments->arena);
+        enum
+        {
+            ANALYSIS_TEST_STRESS_UNIQUE_ENTITY_COUNT = 2048,
+            ANALYSIS_TEST_STRESS_ENTITY_COUNT = ANALYSIS_TEST_STRESS_UNIQUE_ENTITY_COUNT + 2,
+            ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT = 1024,
+            ANALYSIS_TEST_STRESS_IMPORT_COUNT = ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT + 2,
+        };
+        AstCode* codes = arena_allocate(stress.arena, AstCode, ANALYSIS_TEST_STRESS_UNIQUE_ENTITY_COUNT + 1);
+        String8* entity_names = arena_allocate(stress.arena, String8, ANALYSIS_TEST_STRESS_UNIQUE_ENTITY_COUNT);
+        for (u32 index = 0; index < ANALYSIS_TEST_STRESS_UNIQUE_ENTITY_COUNT; index += 1)
+        {
+            entity_names[index] = string_format(stress.arena, S8("stress_entity_{u32}"), index);
+            codes[index] = (AstCode){
+                .next = codes + index + 1,
+                .name = entity_names[index],
+                .range = analysis_test_range(index),
+            };
+        }
+        codes[ANALYSIS_TEST_STRESS_UNIQUE_ENTITY_COUNT] = (AstCode){
+            .name = entity_names[17],
+            .range = analysis_test_range(ANALYSIS_TEST_STRESS_UNIQUE_ENTITY_COUNT),
+        };
+        AstTypeDeclaration stress_same_name_type = {
+            .name = {.text = entity_names[0]},
+            .range = analysis_test_range(ANALYSIS_TEST_STRESS_UNIQUE_ENTITY_COUNT + 1),
+            .kind = AST_TYPE_DECLARATION_STRUCT,
+        };
+        ParserResult stress_entity_parser = {
+            .first_code = codes,
+            .last_code = codes + ANALYSIS_TEST_STRESS_UNIQUE_ENTITY_COUNT,
+            .first_type_declaration = &stress_same_name_type,
+            .last_type_declaration = &stress_same_name_type,
+            .code_count = ANALYSIS_TEST_STRESS_UNIQUE_ENTITY_COUNT + 1,
+            .type_declaration_count = 1,
+        };
+        AnalysisSourceInput stress_entity_input = {.path = S8("stress-entities.bbb"), .parser = &stress_entity_parser};
+        AnalysisResult stress_entities = analysis_index_module(stress.arena, (AnalysisModuleId){.value = 200}, S8("stress-entities"),
+                                                               &stress_entity_input, 1);
+        BUSTER_TEST(arguments, stress_entities.module.entity_name_lookup_slots != 0);
+        BUSTER_TEST(arguments, stress_entities.module.entity_count == ANALYSIS_TEST_STRESS_ENTITY_COUNT);
+        BUSTER_TEST(arguments, stress_entities.diagnostic_count == 1);
+        BUSTER_TEST(arguments, stress_entities.first_diagnostic && stress_entities.first_diagnostic->kind == ANALYSIS_DIAGNOSTIC_DUPLICATE_DECLARATION);
+        BUSTER_TEST(arguments, stress_entities.first_diagnostic && stress_entities.first_diagnostic->previous_entity.index.value == 17);
+        for (u32 index = 0; index < ANALYSIS_TEST_STRESS_UNIQUE_ENTITY_COUNT; index += 1)
+        {
+            AnalysisEntity* found = analysis_value_entity_find(&stress_entities, entity_names[index]);
+            BUSTER_TEST(arguments, found && found->range.offset == index);
+        }
+        BUSTER_TEST(arguments, !analysis_value_entity_find(&stress_entities, S8("stress_entity_missing")));
+
+        AstImport* imports = arena_allocate(stress.arena, AstImport, ANALYSIS_TEST_STRESS_IMPORT_COUNT);
+        String8* import_names = arena_allocate(stress.arena, String8, ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT);
+        String8* import_paths = arena_allocate(stress.arena, String8, ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT);
+        for (u32 index = 0; index < ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT; index += 1)
+        {
+            import_names[index] = string_format(stress.arena, S8("stress_namespace_{u32}"), index);
+            import_paths[index] = string_format(stress.arena, S8("stress/module/{u32}"), index);
+            imports[index] = (AstImport){
+                .next = imports + index + 1,
+                .name_space = {.text = import_names[index], .range = analysis_test_range(index)},
+                .path = import_paths[index],
+                .range = analysis_test_range(index),
+            };
+        }
+        imports[ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT] = (AstImport){
+            .next = imports + ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT + 1,
+            .name_space = {.text = import_names[7], .range = analysis_test_range(ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT)},
+            .path = import_paths[7],
+            .range = analysis_test_range(ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT),
+        };
+        imports[ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT + 1] = (AstImport){
+            .name_space = {.text = import_names[8], .range = analysis_test_range(ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT + 1)},
+            .path = S8("stress/module/missing"),
+            .range = analysis_test_range(ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT + 1),
+        };
+        ParserResult stress_import_parser = {
+            .first_import = imports,
+            .last_import = imports + ANALYSIS_TEST_STRESS_IMPORT_COUNT - 1,
+            .import_count = ANALYSIS_TEST_STRESS_IMPORT_COUNT,
+        };
+        AnalysisSourceInput stress_import_input = {.path = S8("stress-imports.bbb"), .parser = &stress_import_parser};
+        AnalysisResult** modules = arena_allocate(stress.arena, AnalysisResult*, ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT + 2);
+        AnalysisResult* module_storage = arena_allocate(stress.arena, AnalysisResult, ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT + 2);
+        module_storage[0] = analysis_index_module(stress.arena, (AnalysisModuleId){.value = 300}, S8("stress-root"), &stress_import_input, 1);
+        modules[0] = module_storage;
+        BUSTER_TEST(arguments, module_storage[0].module.import_name_lookup_slots != 0);
+        BUSTER_TEST(arguments, module_storage[0].diagnostic_count == 2);
+        AstCode imported_code = {.name = S8("value"), .range = analysis_test_range(0)};
+        ParserResult imported_parser = {.first_code = &imported_code, .last_code = &imported_code, .code_count = 1};
+        AnalysisSourceInput imported_input = {.path = S8("imported.bbb"), .parser = &imported_parser};
+        for (u32 index = 0; index < ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT; index += 1)
+        {
+            module_storage[index + 1] =
+                analysis_index_module(stress.arena, (AnalysisModuleId){.value = 301 + index}, import_paths[index], &imported_input, 1);
+            modules[index + 1] = module_storage + index + 1;
+        }
+        module_storage[ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT + 1] =
+            analysis_index_module(stress.arena, (AnalysisModuleId){.value = 301 + ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT}, import_paths[9], &imported_input, 1);
+        modules[ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT + 1] = module_storage + ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT + 1;
+        analysis_resolve_imports(stress.arena, modules, ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT + 2);
+        BUSTER_TEST(arguments, module_storage[0].diagnostic_count == 4);
+        BUSTER_TEST(arguments, module_storage[0].module.imports[9].state == ANALYSIS_IMPORT_AMBIGUOUS);
+        BUSTER_TEST(arguments, module_storage[0].module.imports[ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT].state == ANALYSIS_IMPORT_RESOLVED);
+        BUSTER_TEST(arguments, module_storage[0].module.imports[ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT + 1].state == ANALYSIS_IMPORT_MISSING);
+        for (u32 index = 0; index < ANALYSIS_TEST_STRESS_UNIQUE_IMPORT_COUNT; index += 1)
+        {
+            AnalysisEntity* found = analysis_find_qualified_entity(modules[0], import_names[index], S8("value"), ANALYSIS_NAMESPACE_VALUE);
+            if (index == 7 || index == 9)
+            {
+                BUSTER_TEST(arguments, !found);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, found && found == modules[index + 1]->module.entities);
+            }
+        }
+        BUSTER_TEST(arguments,
+                    !analysis_find_qualified_entity(modules[0], S8("stress_namespace_missing"), S8("value"), ANALYSIS_NAMESPACE_VALUE));
+        arena_set_position(stress.arena, stress.position);
+    }
+
     AstType named_b = {
         .range = analysis_test_range(1),
         .id = AST_TYPE_NAMED,

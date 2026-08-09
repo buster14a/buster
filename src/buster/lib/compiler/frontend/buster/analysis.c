@@ -15,6 +15,138 @@ struct AnalysisProgramDiscovery
 };
 
 BUSTER_GLOBAL_LOCAL s32 analysis_string_compare(String8 left, String8 right);
+BUSTER_GLOBAL_LOCAL u64 analysis_bytes_hash(String8 bytes);
+
+enum
+{
+    // The checked-in corpus tops out below this boundary. Keep its compact
+    // modules on the scalar path; the table exists to cap genuinely large
+    // generated interfaces without taxing the common case.
+    ANALYSIS_NAME_LOOKUP_THRESHOLD = 128,
+};
+
+BUSTER_GLOBAL_LOCAL u64 analysis_name_lookup_pack(u32 first_index, u32 match_count)
+{
+    BUSTER_CHECK(first_index < UINT32_MAX);
+    BUSTER_CHECK(match_count);
+    return ((u64)match_count << 32) | (first_index + 1);
+}
+
+BUSTER_GLOBAL_LOCAL u32 analysis_name_lookup_first(u64 slot)
+{
+    BUSTER_CHECK((u32)slot);
+    return (u32)slot - 1;
+}
+
+BUSTER_GLOBAL_LOCAL u32 analysis_name_lookup_match_count(u64 slot)
+{
+    return (u32)(slot >> 32);
+}
+
+BUSTER_GLOBAL_LOCAL u64* analysis_name_lookup_allocate(Arena* arena, u32 count, u32* mask)
+{
+    if (count < ANALYSIS_NAME_LOOKUP_THRESHOLD)
+    {
+        *mask = 0;
+        return 0;
+    }
+
+    // A u32 mask cannot represent a 2^32-slot table. This bound is far above
+    // any addressable interface on the supported targets and keeps the
+    // half-full probing guarantee explicit.
+    BUSTER_CHECK(count <= (UINT32_C(1) << 30));
+    u32 capacity = 1;
+    u32 minimum_capacity = count * 2;
+    while (capacity < minimum_capacity)
+    {
+        capacity *= 2;
+    }
+    u64* slots = arena_allocate(arena, u64, capacity);
+    memset(slots, 0, sizeof(*slots) * capacity);
+    *mask = capacity - 1;
+    return slots;
+}
+
+BUSTER_GLOBAL_LOCAL u64 analysis_entity_name_hash(String8 name, AnalysisNamespace name_space)
+{
+    u64 hash = analysis_bytes_hash(name);
+    hash ^= (u64)name_space + 1;
+    hash *= UINT64_C(1099511628211);
+    return hash;
+}
+
+BUSTER_GLOBAL_LOCAL u64* analysis_entity_name_lookup_slot(AnalysisModuleInterface* module, String8 name, AnalysisNamespace name_space)
+{
+    BUSTER_CHECK(module->entity_name_lookup_slots);
+    u32 slot_index = (u32)analysis_entity_name_hash(name, name_space) & module->entity_name_lookup_mask;
+    u64* slot = module->entity_name_lookup_slots + slot_index;
+    while (*slot)
+    {
+        AnalysisEntity* existing = module->entities + analysis_name_lookup_first(*slot);
+        if (existing->name_space == name_space && string_equal(existing->name, name))
+        {
+            break;
+        }
+        slot_index = (slot_index + 1) & module->entity_name_lookup_mask;
+        slot = module->entity_name_lookup_slots + slot_index;
+    }
+    return slot;
+}
+
+BUSTER_GLOBAL_LOCAL u64* analysis_import_name_lookup_slot(AnalysisModuleInterface* module, String8 name_space)
+{
+    BUSTER_CHECK(module->import_name_lookup_slots);
+    u32 slot_index = (u32)analysis_bytes_hash(name_space) & module->import_name_lookup_mask;
+    u64* slot = module->import_name_lookup_slots + slot_index;
+    while (*slot)
+    {
+        AnalysisImport* existing = module->imports + analysis_name_lookup_first(*slot);
+        if (string_equal(existing->name_space, name_space))
+        {
+            break;
+        }
+        slot_index = (slot_index + 1) & module->import_name_lookup_mask;
+        slot = module->import_name_lookup_slots + slot_index;
+    }
+    return slot;
+}
+
+BUSTER_GLOBAL_LOCAL u64* analysis_program_module_lookup_slot(u64* slots, u32 mask, AnalysisResult** modules, String8 name)
+{
+    BUSTER_CHECK(slots);
+    u32 slot_index = (u32)analysis_bytes_hash(name) & mask;
+    u64* slot = slots + slot_index;
+    while (*slot)
+    {
+        AnalysisResult* existing = modules[analysis_name_lookup_first(*slot)];
+        BUSTER_CHECK(existing);
+        if (string_equal(existing->module.name, name))
+        {
+            break;
+        }
+        slot_index = (slot_index + 1) & mask;
+        slot = slots + slot_index;
+    }
+    return slot;
+}
+
+BUSTER_GLOBAL_LOCAL AnalysisEntity* analysis_module_entity_find(AnalysisModuleInterface* module, String8 name, AnalysisNamespace name_space)
+{
+    if (module->entity_name_lookup_slots)
+    {
+        u64 slot = *analysis_entity_name_lookup_slot(module, name, name_space);
+        return slot ? module->entities + analysis_name_lookup_first(slot) : 0;
+    }
+    for (u32 index = 0; index < module->entity_count; index += 1)
+    {
+        AnalysisEntity* entity = module->entities + index;
+        if (entity->name_space == name_space && string_equal(entity->name, name))
+        {
+            return entity;
+        }
+    }
+    return 0;
+}
 
 BUSTER_GLOBAL_LOCAL bool analysis_path_has_suffix(String8 path, String8 suffix)
 {
@@ -320,18 +452,43 @@ AnalysisResult analysis_index_module(Arena* result_arena, AnalysisModuleId modul
 
     BUSTER_CHECK(import_index == import_count);
     BUSTER_CHECK(entity_index == entity_count);
+    result.module.import_name_lookup_slots =
+        analysis_name_lookup_allocate(result_arena, import_count, &result.module.import_name_lookup_mask);
     for (u32 index = 0; index < import_count; index += 1)
     {
         AnalysisImport* import = result.module.imports + index;
-        for (u32 previous_index = 0; previous_index < index; previous_index += 1)
+        AnalysisImport* previous = 0;
+        if (result.module.import_name_lookup_slots)
         {
-            AnalysisImport* previous = result.module.imports + previous_index;
-            if (string_equal(import->name_space, previous->name_space))
+            u64* slot = analysis_import_name_lookup_slot(&result.module, import->name_space);
+            if (*slot)
             {
-                analysis_import_diagnostic_push(result_arena, &result, import, ANALYSIS_DIAGNOSTIC_DUPLICATE_IMPORT_NAMESPACE, S8("duplicate import namespace"),
-                                                previous);
-                break;
+                u32 match_count = analysis_name_lookup_match_count(*slot);
+                BUSTER_CHECK(match_count < UINT32_MAX);
+                previous = result.module.imports + analysis_name_lookup_first(*slot);
+                *slot = analysis_name_lookup_pack(analysis_name_lookup_first(*slot), match_count + 1);
             }
+            else
+            {
+                *slot = analysis_name_lookup_pack(index, 1);
+            }
+        }
+        else
+        {
+            for (u32 previous_index = 0; previous_index < index; previous_index += 1)
+            {
+                AnalysisImport* candidate = result.module.imports + previous_index;
+                if (string_equal(import->name_space, candidate->name_space))
+                {
+                    previous = candidate;
+                    break;
+                }
+            }
+        }
+        if (previous)
+        {
+            analysis_import_diagnostic_push(result_arena, &result, import, ANALYSIS_DIAGNOSTIC_DUPLICATE_IMPORT_NAMESPACE, S8("duplicate import namespace"),
+                                            previous);
         }
     }
     for (u32 index = 1; index < entity_count; index += 1)
@@ -346,6 +503,8 @@ AnalysisResult analysis_index_module(Arena* result_arena, AnalysisModuleId modul
         result.module.entities[insertion] = value;
     }
 
+    result.module.entity_name_lookup_slots =
+        analysis_name_lookup_allocate(result_arena, entity_count, &result.module.entity_name_lookup_mask);
     for (u32 index = 0; index < entity_count; index += 1)
     {
         AnalysisEntity* entity = result.module.entities + index;
@@ -358,14 +517,37 @@ AnalysisResult analysis_index_module(Arena* result_arena, AnalysisModuleId modul
             .module = module_id,
             .index = {.value = index},
         };
-        for (u32 previous_index = 0; previous_index < index; previous_index += 1)
+        AnalysisEntity* previous = 0;
+        if (result.module.entity_name_lookup_slots)
         {
-            AnalysisEntity* previous = result.module.entities + previous_index;
-            if (entity->name_space == previous->name_space && string_equal(entity->name, previous->name))
+            u64* slot = analysis_entity_name_lookup_slot(&result.module, entity->name, entity->name_space);
+            if (*slot)
             {
-                analysis_duplicate_diagnostic_push(result_arena, &result, entity, previous);
-                break;
+                u32 match_count = analysis_name_lookup_match_count(*slot);
+                BUSTER_CHECK(match_count < UINT32_MAX);
+                previous = result.module.entities + analysis_name_lookup_first(*slot);
+                *slot = analysis_name_lookup_pack(analysis_name_lookup_first(*slot), match_count + 1);
             }
+            else
+            {
+                *slot = analysis_name_lookup_pack(index, 1);
+            }
+        }
+        else
+        {
+            for (u32 previous_index = 0; previous_index < index; previous_index += 1)
+            {
+                AnalysisEntity* candidate = result.module.entities + previous_index;
+                if (entity->name_space == candidate->name_space && string_equal(entity->name, candidate->name))
+                {
+                    previous = candidate;
+                    break;
+                }
+            }
+        }
+        if (previous)
+        {
+            analysis_duplicate_diagnostic_push(result_arena, &result, entity, previous);
         }
     }
 
@@ -426,6 +608,33 @@ void analysis_resolve_imports(Arena* result_arena, AnalysisResult** modules, u32
     {
         program_modules[module_index] = modules[module_index];
     }
+
+    Arena* conflicts[] = {result_arena};
+    TemporalArena scratch = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+    u32 module_name_lookup_mask = 0;
+    u64* module_name_lookup_slots = analysis_name_lookup_allocate(scratch.arena, module_count, &module_name_lookup_mask);
+    if (module_name_lookup_slots)
+    {
+        for (u32 module_index = 0; module_index < module_count; module_index += 1)
+        {
+            AnalysisResult* module = modules[module_index];
+            if (!module)
+            {
+                continue;
+            }
+            u64* slot = analysis_program_module_lookup_slot(module_name_lookup_slots, module_name_lookup_mask, modules, module->module.name);
+            if (*slot)
+            {
+                u32 match_count = analysis_name_lookup_match_count(*slot);
+                BUSTER_CHECK(match_count < UINT32_MAX);
+                *slot = analysis_name_lookup_pack(analysis_name_lookup_first(*slot), match_count + 1);
+            }
+            else
+            {
+                *slot = analysis_name_lookup_pack(module_index, 1);
+            }
+        }
+    }
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
     {
         AnalysisResult* module = modules[module_index];
@@ -443,14 +652,30 @@ void analysis_resolve_imports(Arena* result_arena, AnalysisResult** modules, u32
             import->target_id = ANALYSIS_MODULE_ID_INVALID;
             import->state = ANALYSIS_IMPORT_UNRESOLVED;
             u32 match_count = 0;
-            for (u32 candidate_index = 0; candidate_index < module_count; candidate_index += 1)
+            if (module_name_lookup_slots)
             {
-                AnalysisResult* candidate = modules[candidate_index];
-                if (candidate && string_equal(candidate->module.name, import->path))
+                u64 slot = *analysis_program_module_lookup_slot(module_name_lookup_slots, module_name_lookup_mask, modules, import->path);
+                if (slot)
                 {
+                    u32 candidate_index = analysis_name_lookup_first(slot);
+                    AnalysisResult* candidate = modules[candidate_index];
+                    BUSTER_CHECK(candidate);
                     import->target = candidate;
                     import->target_id = candidate->module.id;
-                    match_count += 1;
+                    match_count = analysis_name_lookup_match_count(slot);
+                }
+            }
+            else
+            {
+                for (u32 candidate_index = 0; candidate_index < module_count; candidate_index += 1)
+                {
+                    AnalysisResult* candidate = modules[candidate_index];
+                    if (candidate && string_equal(candidate->module.name, import->path))
+                    {
+                        import->target = candidate;
+                        import->target_id = candidate->module.id;
+                        match_count += 1;
+                    }
                 }
             }
 
@@ -475,8 +700,6 @@ void analysis_resolve_imports(Arena* result_arena, AnalysisResult** modules, u32
         }
     }
 
-    Arena* conflicts[] = {result_arena};
-    TemporalArena scratch = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
     u8* colors = arena_allocate(scratch.arena, u8, module_count);
     AnalysisImportTraversalFrame* frames = arena_allocate(scratch.arena, AnalysisImportTraversalFrame, module_count);
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
@@ -513,12 +736,24 @@ void analysis_resolve_imports(Arena* result_arena, AnalysisResult** modules, u32
             }
 
             u32 target_index = module_count;
-            for (u32 candidate_index = 0; candidate_index < module_count; candidate_index += 1)
+            if (module_name_lookup_slots)
             {
-                if (modules[candidate_index] == import->target)
+                u64 slot = *analysis_program_module_lookup_slot(module_name_lookup_slots, module_name_lookup_mask, modules, import->target->module.name);
+                if (slot && analysis_name_lookup_match_count(slot) == 1)
                 {
-                    target_index = candidate_index;
-                    break;
+                    target_index = analysis_name_lookup_first(slot);
+                    BUSTER_CHECK(modules[target_index] == import->target);
+                }
+            }
+            else
+            {
+                for (u32 candidate_index = 0; candidate_index < module_count; candidate_index += 1)
+                {
+                    if (modules[candidate_index] == import->target)
+                    {
+                        target_index = candidate_index;
+                        break;
+                    }
                 }
             }
             BUSTER_CHECK(target_index < module_count);
@@ -612,16 +847,34 @@ void analysis_resolve_program_interfaces(Arena* result_arena, AnalysisResult** m
 AnalysisEntity* analysis_find_qualified_entity(AnalysisResult* module, String8 import_name_space, String8 entity_name, AnalysisNamespace name_space)
 {
     AnalysisResult* target = 0;
-    for (u32 import_index = 0; import_index < module->module.import_count; import_index += 1)
+    bool scan_imports = true;
+    if (module->module.import_name_lookup_slots)
     {
-        AnalysisImport* import = module->module.imports + import_index;
-        if (import->state == ANALYSIS_IMPORT_RESOLVED && string_equal(import->name_space, import_name_space))
+        u64 slot = *analysis_import_name_lookup_slot(&module->module, import_name_space);
+        if (!slot)
         {
-            if (target)
+            return 0;
+        }
+        if (analysis_name_lookup_match_count(slot) == 1)
+        {
+            AnalysisImport* import = module->module.imports + analysis_name_lookup_first(slot);
+            target = import->state == ANALYSIS_IMPORT_RESOLVED ? import->target : 0;
+            scan_imports = false;
+        }
+    }
+    if (scan_imports)
+    {
+        for (u32 import_index = 0; import_index < module->module.import_count; import_index += 1)
+        {
+            AnalysisImport* import = module->module.imports + import_index;
+            if (import->state == ANALYSIS_IMPORT_RESOLVED && string_equal(import->name_space, import_name_space))
             {
-                return 0;
+                if (target)
+                {
+                    return 0;
+                }
+                target = import->target;
             }
-            target = import->target;
         }
     }
     if (!target)
@@ -629,15 +882,7 @@ AnalysisEntity* analysis_find_qualified_entity(AnalysisResult* module, String8 i
         return 0;
     }
 
-    for (u32 entity_index = 0; entity_index < target->module.entity_count; entity_index += 1)
-    {
-        AnalysisEntity* entity = target->module.entities + entity_index;
-        if (entity->name_space == name_space && string_equal(entity->name, entity_name))
-        {
-            return entity;
-        }
-    }
-    return 0;
+    return analysis_module_entity_find(&target->module, entity_name, name_space);
 }
 
 typedef enum AnalysisCanonicalTaskKind
@@ -2395,19 +2640,16 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_builtin_type_find(AnalysisTypeTable*
 
 BUSTER_GLOBAL_LOCAL AnalysisEntity* analysis_named_type_find(AnalysisResult* result, String8 name)
 {
-    for (u32 index = 0; index < result->module.entity_count; index += 1)
-    {
-        AnalysisEntity* entity = result->module.entities + index;
-        if (entity->name_space == ANALYSIS_NAMESPACE_TYPE && string_equal(entity->name, name))
-        {
-            return entity;
-        }
-    }
-    return 0;
+    return analysis_module_entity_find(&result->module, name, ANALYSIS_NAMESPACE_TYPE);
 }
 
 BUSTER_GLOBAL_LOCAL AnalysisImport* analysis_import_find(AnalysisResult* result, String8 name_space)
 {
+    if (result->module.import_name_lookup_slots)
+    {
+        u64 slot = *analysis_import_name_lookup_slot(&result->module, name_space);
+        return slot && analysis_name_lookup_match_count(slot) == 1 ? result->module.imports + analysis_name_lookup_first(slot) : 0;
+    }
     AnalysisImport* found = 0;
     for (u32 index = 0; index < result->module.import_count; index += 1)
     {
@@ -3654,15 +3896,7 @@ BUSTER_GLOBAL_LOCAL bool analysis_generic_type_infer(Arena* scratch_arena, Analy
 
 AnalysisEntity* analysis_value_entity_find(AnalysisResult* result, String8 name)
 {
-    for (u32 index = 0; index < result->module.entity_count; index += 1)
-    {
-        AnalysisEntity* entity = result->module.entities + index;
-        if (entity->name_space == ANALYSIS_NAMESPACE_VALUE && string_equal(entity->name, name))
-        {
-            return entity;
-        }
-    }
-    return 0;
+    return analysis_module_entity_find(&result->module, name, ANALYSIS_NAMESPACE_VALUE);
 }
 
 BUSTER_GLOBAL_LOCAL AnalysisBinding* analysis_binding_find(AnalysisBinding* binding, String8 name)
