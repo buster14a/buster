@@ -636,6 +636,19 @@ s32 buster_fuzz_test_input(const u8* pointer, size_t size)
         }
     }
 
+    // c_preprocess owns the spelling space in an arena of its own, which it
+    // hands back through the result rather than freeing: the tokens point into
+    // it and it has to outlive every consumer. `ide cc` compiles one unit and
+    // exits, so nothing releases it there and nothing needs to -- but this
+    // target calls the whole frontend in a loop, and every input that reaches
+    // preprocessing leaked one. That is what walked the fuzz session's RSS
+    // from 1254 MB to 3370 MB in 1464 runs on a CI runner while a local
+    // session of 198.513 runs, which reaches preprocessing far less often per
+    // run, crept from 37 MB to 558 MB.
+    if (preprocess.recovery && preprocess.recovery->spelling_arena)
+    {
+        arena_destroy(preprocess.recovery->spelling_arena, 1);
+    }
     arena_destroy(expression_arena, 1);
     arena_destroy(result_arena, 1);
     return 0;
