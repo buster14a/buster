@@ -12,6 +12,27 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09ag` (Linux x86_64, Zen 4 7940HS; selection quality — folded
+address arithmetic.)
+
+- **What was built.** Two opcodes that take their constant inline:
+  `add r64, imm` and `imul r64, r64, imm` (imm8 form when it fits).
+  Field offsets and index element scales used to materialize the
+  constant into a scratch virtual register first, so every struct member
+  access cost `mov reg, imm` + `add`, and every array subscript cost
+  `mov reg, imm` + `imul`. Both are now single rows. That halves the
+  instruction count of the commonest address form in the language and,
+  just as valuable, removes two synthesized virtual registers per
+  access from the allocator's pressure.
+- **Numbers** (buster-built stage comparison, compiling ide.c under
+  NONE): instructions **47.07G -> 45.45G (-3.4%)**, against canonical's
+  70.05G now **-35.1%**. Text 19,487,253, from 20,038,638 (canonical
+  25,699,964, **-24.2%**). Allocator traffic is flat, as expected — the
+  win is fewer rows, not less spilling.
+- **Gates:** test_all green, MIR and FAST soaks byte-identical on fresh
+  references, self-host fixed point holds. Both allocators benefit,
+  since this is selection, not placement.
+
 `2026-08-09af` (Linux x86_64, Zen 4 7940HS; register-allocator stage 7
 lead — constant rematerialization, taken early because it is local.)
 

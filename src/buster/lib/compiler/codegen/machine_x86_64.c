@@ -1004,19 +1004,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         u64 field_offset = aggregate->fields[field_index].offset;
         if (field_offset)
         {
-            u32 offset_register = machine_x64_synthesize_register(selector);
+            // The offset folds into the add: no scratch register and no
+            // constant materialization for the commonest address form in
+            // the whole language.
             u32 immediate_index = selector->immediates.total_count;
             u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
             *immediate_row = field_offset;
             machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, offset_register),
-                                                              machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
-                                                 .opcode = MACHINE_X64_MOV_RI,
-                                             });
-            machine_x64_select_row(selector, (MachineInstruction){
                                                  .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, offset_register)},
-                                                 .opcode = MACHINE_X64_ADD64,
+                                                              machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
+                                                 .opcode = MACHINE_X64_ADD64_IMM,
                                              });
         }
         return true;
@@ -1234,19 +1231,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                          });
         if (element->layout.size != 1)
         {
-            u32 size_register = machine_x64_synthesize_register(selector);
+            // The element size folds into the multiply the same way.
             u32 immediate_index = selector->immediates.total_count;
             u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
             *immediate_row = element->layout.size;
             machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, size_register),
-                                                              machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
-                                                 .opcode = MACHINE_X64_MOV_RI,
-                                             });
-            machine_x64_select_row(selector, (MachineInstruction){
                                                  .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, size_register)},
-                                                 .opcode = MACHINE_X64_IMUL64,
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register),
+                                                              machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
+                                                 .opcode = MACHINE_X64_IMUL64_RRI,
                                              });
         }
         machine_x64_select_row(selector, (MachineInstruction){
@@ -2873,6 +2866,41 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             case MACHINE_X64_MOV32_RR:
                 machine_x64_emit_rr(&encoder, false, false, 0x89, operand_registers[1], operand_registers[0]);
                 break;
+            case MACHINE_X64_ADD64_IMM:
+            {
+                u32 reg = operand_registers[0];
+                u64 value = function->immediates[machine_ref_payload(instruction->operands[1])];
+                machine_x64_emit8(&encoder, (u8)(0x48 | (reg >= 8 ? 0x01 : 0)));
+                machine_x64_emit8(&encoder, value <= INT8_MAX ? 0x83 : 0x81);
+                machine_x64_emit8(&encoder, (u8)(0xc0 | (reg & 7)));
+                if (value <= INT8_MAX)
+                {
+                    machine_x64_emit8(&encoder, (u8)value);
+                }
+                else
+                {
+                    machine_x64_emit32(&encoder, (u32)value);
+                }
+            }
+            break;
+            case MACHINE_X64_IMUL64_RRI:
+            {
+                u32 destination = operand_registers[0];
+                u32 source = operand_registers[1];
+                u64 value = function->immediates[machine_ref_payload(instruction->operands[2])];
+                machine_x64_emit8(&encoder, (u8)(0x48 | (destination >= 8 ? 0x04 : 0) | (source >= 8 ? 0x01 : 0)));
+                machine_x64_emit8(&encoder, value <= INT8_MAX ? 0x6b : 0x69);
+                machine_x64_emit8(&encoder, machine_x64_modrm_register(destination, source));
+                if (value <= INT8_MAX)
+                {
+                    machine_x64_emit8(&encoder, (u8)value);
+                }
+                else
+                {
+                    machine_x64_emit32(&encoder, (u32)value);
+                }
+            }
+            break;
             case MACHINE_X64_BSF32:
             case MACHINE_X64_BSF64:
             case MACHINE_X64_BSR32:

@@ -106,6 +106,18 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_CVT_U64_TO_F64] = MACHINE_INFO_MOVE("x64_cvt_u64_to_f64"),
     [MACHINE_X64_CVT_F32_TO_U64] = MACHINE_INFO_MOVE("x64_cvt_f32_to_u64"),
     [MACHINE_X64_CVT_F64_TO_U64] = MACHINE_INFO_MOVE("x64_cvt_f64_to_u64"),
+    [MACHINE_X64_ADD64_IMM] = {
+        .name = S8_INITIALIZER("x64_add64_imm"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL, 0},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+    },
+    [MACHINE_X64_IMUL64_RRI] = {
+        .name = S8_INITIALIZER("x64_imul64_rri"),
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, 0},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+    },
     [MACHINE_X64_BSF32] = MACHINE_INFO_MOVE("x64_bsf32"),
     [MACHINE_X64_BSF64] = MACHINE_INFO_MOVE("x64_bsf64"),
     [MACHINE_X64_BSR32] = MACHINE_INFO_MOVE("x64_bsr32"),

@@ -215,6 +215,8 @@ typedef enum MachineOpcode
     MACHINE_X64_CVT_U64_TO_F64,
     MACHINE_X64_CVT_F32_TO_U64, // dest def, source use; canonical threshold-subtract form
     MACHINE_X64_CVT_F64_TO_U64,
+    MACHINE_X64_ADD64_IMM,   // dest use-define, immediate; folded address offset
+    MACHINE_X64_IMUL64_RRI,  // dest def, source use, immediate; folded index scale
     MACHINE_X64_BSF32, // dest def, source use; undefined on zero input
     MACHINE_X64_BSF64,
     MACHINE_X64_BSR32,
