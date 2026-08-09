@@ -2956,6 +2956,13 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
         AstExpression expression = parse_expression_snippet(arena, expression_arena, string_from_pointer_length(source_pointer, source_length));
         u32 expected_node_count = stress_prefix_count + stress_call_count * 2 + 1 + stress_postfix_count * 4;
         BUSTER_TEST(arguments, expression.count == expected_node_count);
+        u32 node_batch_capacity = parser_expression_node_batch_capacity();
+        u64 expected_staging_node_capacity = ((expected_node_count + node_batch_capacity - 1) / node_batch_capacity) * node_batch_capacity;
+        u64 staging_node_capacity = (expression_arena->position - arena_minimum_position) / sizeof(AstNode);
+        BUSTER_TEST(arguments, node_batch_capacity > 1);
+        BUSTER_TEST(arguments, expected_node_count > node_batch_capacity * 2);
+        BUSTER_TEST(arguments, expression_arena->position - arena_minimum_position == staging_node_capacity * sizeof(AstNode));
+        BUSTER_TEST(arguments, staging_node_capacity == expected_staging_node_capacity);
         if (expression.count == expected_node_count)
         {
             BUSTER_TEST(arguments, expression.nodes[0].id == AST_NODE_IDENTIFIER);
@@ -2964,6 +2971,61 @@ UnitTestResult parser_result_tests(UnitTestArguments* arguments)
         }
 
         arena->position = stress_position;
+    }
+
+    // Recovery may abandon a partial argument after the staging stream has
+    // crossed a batch boundary. The retained capacity must be rewound to the
+    // completed call prefix, and a later top-level expression must still start
+    // at the beginning of the same flat buffer.
+    {
+        u64 recovery_batch_position = arena->position;
+        u32 complete_argument_count = parser_expression_node_batch_capacity() + 3;
+        String8 prefix = S8("code main : fn () s32 { f(");
+        String8 argument = S8("1, ");
+        String8 suffix = S8("bad +, 2); return 9; }");
+        u64 source_length = prefix.length + (u64)complete_argument_count * argument.length + suffix.length;
+        char8* source_pointer = arena_allocate(arena, char8, source_length);
+        u64 offset = 0;
+        memcpy(source_pointer + offset, prefix.pointer, prefix.length);
+        offset += prefix.length;
+        for (u32 i = 0; i < complete_argument_count; i += 1)
+        {
+            memcpy(source_pointer + offset, argument.pointer, argument.length);
+            offset += argument.length;
+        }
+        memcpy(source_pointer + offset, suffix.pointer, suffix.length);
+        offset += suffix.length;
+        BUSTER_CHECK(offset == source_length);
+
+        String8 source = string_from_pointer_length(source_pointer, source_length);
+        TokenizerResult tokenizer = tokenize(arena, source.pointer, source.length);
+        ParserResult parsed = parser_parse(arena, expression_arena, source, tokenizer);
+        BUSTER_TEST(arguments, parsed.diagnostic_count == 1);
+        BUSTER_TEST(arguments, parsed.first_diagnostic && parsed.first_diagnostic->kind == PARSER_DIAGNOSTIC_EXPECTED_EXPRESSION);
+        BUSTER_TEST(arguments, parsed.first_code && parsed.first_code->body.statement_count == 2);
+        AstStatement* call_statement = parsed.first_code ? parsed.first_code->body.first_statement : 0;
+        AstStatement* return_statement = call_statement ? call_statement->next : 0;
+        BUSTER_TEST(arguments, call_statement && call_statement->id == AST_STATEMENT_EXPRESSION);
+        BUSTER_TEST(arguments, return_statement && return_statement->id == AST_STATEMENT_RETURN);
+        if (call_statement && call_statement->id == AST_STATEMENT_EXPRESSION)
+        {
+            AstExpression call_expression = call_statement->expression_statement.expression;
+            u32 expected_call_node_count = complete_argument_count + 3;
+            BUSTER_TEST(arguments, call_expression.count == expected_call_node_count);
+            if (call_expression.count == expected_call_node_count)
+            {
+                AstNode* call = &call_expression.nodes[call_expression.count - 1];
+                BUSTER_TEST(arguments, call->id == AST_NODE_CALL);
+                BUSTER_TEST(arguments, call->call.argument_count == complete_argument_count + 1);
+            }
+        }
+        if (return_statement && return_statement->id == AST_STATEMENT_RETURN)
+        {
+            AstExpression returned = return_statement->return_statement.expression;
+            BUSTER_TEST(arguments, returned.count == 1 && returned.nodes[0].id == AST_NODE_CONSTANT_INTEGER && returned.nodes[0].integer.value == 9);
+        }
+
+        arena->position = recovery_batch_position;
     }
 
     // The caller-owned expression arena is staging only: parser_parse()

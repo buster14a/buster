@@ -2293,10 +2293,41 @@ struct Parser
     ParserStateState state;
     Arena* restrict result_arena;
     Arena* restrict expression_arena;
-    u64 expression_arena_minimum_position;
+    AstNode* expression_node_base;
+    AstNode* expression_node_next;
+    AstNode* expression_node_end;
     ParserResult* result;
     ParserRecoveryKind recovery;
 };
+
+enum
+{
+    // Expression nodes form one contiguous postorder stream. Grow its staging
+    // storage a page-fragment at a time, then retain the largest capacity for
+    // the rest of this parse. Most expressions therefore emit with one pointer
+    // compare and bump rather than one arena-watermark check per node.
+    PARSER_EXPRESSION_NODE_BATCH_CAPACITY = 32,
+};
+
+#if BUSTER_INCLUDE_TESTS
+u32 parser_expression_node_batch_capacity(void)
+{
+    return PARSER_EXPRESSION_NODE_BATCH_CAPACITY;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST AstNode* parser_expression_node_batch_grow(Parser* restrict parser)
+{
+    AstNode* batch = (AstNode*)parser_bump_allocate(parser->expression_arena, sizeof(AstNode) * PARSER_EXPRESSION_NODE_BATCH_CAPACITY,
+                                                   BUSTER_ALIGN_OF(AstNode));
+    BUSTER_CHECK(!parser->expression_node_end || batch == parser->expression_node_end);
+    if (!parser->expression_node_base)
+    {
+        parser->expression_node_base = batch;
+    }
+    parser->expression_node_end = batch + PARSER_EXPRESSION_NODE_BATCH_CAPACITY;
+    return batch;
+}
 
 BUSTER_GLOBAL_LOCAL void consume(TokenIterator* restrict iterator);
 BUSTER_GLOBAL_LOCAL ExtendedToken peek(Parser* restrict parser);
@@ -2839,12 +2870,15 @@ BUSTER_GLOBAL_LOCAL void parser_recover(Parser* parser)
                 owner -= 1;
             }
             BUSTER_CHECK(owner->id == PARSER_STATE_EXPRESSION);
-            u64 expression_position = parser->expression_arena_minimum_position;
+            AstNode* expression_next = parser->expression_node_base;
             if (owner->expression.output_count)
             {
-                expression_position = (u64)((u8*)(owner->expression.output_base + owner->expression.output_count) - (u8*)parser->expression_arena);
+                expression_next = owner->expression.output_base + owner->expression.output_count;
             }
-            arena_set_position(parser->expression_arena, expression_position);
+            // Discard the incomplete suffix without releasing the retained
+            // batch capacity. The next emit overwrites it in place, preserving
+            // the completed owner's exact postorder prefix.
+            parser->expression_node_next = expression_next;
 
             if (container->id == PARSER_STATE_AGGREGATE_LITERAL && container->aggregate_literal.state != AGGREGATE_LITERAL_STATE_DELIMITER)
             {
@@ -3957,7 +3991,12 @@ BUSTER_GLOBAL_LOCAL BindingPower binary_binding_power(AstNodeId id)
 // Append a node to the current expression's postorder output stream.
 BUSTER_GLOBAL_LOCAL AstNode* expression_emit(Parser* restrict parser, ParserState* restrict st, AstNodeId id)
 {
-    AstNode* node = (AstNode*)parser_bump_allocate(parser->expression_arena, sizeof(AstNode), BUSTER_ALIGN_OF(AstNode));
+    AstNode* node = parser->expression_node_next;
+    if (BUSTER_UNLIKELY(node == parser->expression_node_end))
+    {
+        node = parser_expression_node_batch_grow(parser);
+    }
+    parser->expression_node_next = node + 1;
     node->id = id;
     node->integer = (AstIntegerLiteral){0};
     if (st->expression.output_count == 0)
@@ -4035,7 +4074,9 @@ BUSTER_GLOBAL_LOCAL AstAssignmentOperator assignment_operator_from_token(TokenId
 
 BUSTER_GLOBAL_LOCAL void parse_expression(Parser* restrict parser, TokenId end_of_statement_token)
 {
-    arena_set_position(parser->expression_arena, parser->expression_arena_minimum_position);
+    // Every prior top-level expression has already been copied to result_arena.
+    // Reuse the largest staging buffer reached earlier in this parse.
+    parser->expression_node_next = parser->expression_node_base;
     ParserState* state = state_push(&parser->state);
     state->id = PARSER_STATE_EXPRESSION;
     state->expression.state = EXPRESSION_STATE_PREFIX;
@@ -5176,7 +5217,6 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
     parser.state.minimum_position = scratch.arena->position;
     parser.result_arena = result_arena;
     parser.expression_arena = expression_arena;
-    parser.expression_arena_minimum_position = parser.expression_arena->position;
     parser.result = &result;
 
     // Push a dummy state so the stack is never empty
