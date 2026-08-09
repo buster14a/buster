@@ -191,6 +191,23 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, 0},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_TERMINATOR | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
     },
+    [MACHINE_X64_COPY_FRAME_FROM_FRAME] = {
+        .name = S8_INITIALIZER("x64_copy_frame_from_frame"),
+        .operand_count = 2,
+        .implicit_mask = 1u << MACHINE_X64_RAX,
+    },
+    [MACHINE_X64_COPY_FRAME_FROM_PTR] = {
+        .name = S8_INITIALIZER("x64_copy_frame_from_ptr"),
+        .operand_count = 2,
+        .operand_info = {0, MACHINE_OPERAND_USE_GENERAL},
+        .implicit_mask = 1u << MACHINE_X64_RAX,
+    },
+    [MACHINE_X64_COPY_PTR_FROM_FRAME] = {
+        .name = S8_INITIALIZER("x64_copy_ptr_from_frame"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, 0},
+        .implicit_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RDX),
+    },
     [MACHINE_X64_CALL_DIRECT] = {
         .name = S8_INITIALIZER("x64_call_direct"),
         .implicit_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX) | (1u << MACHINE_X64_RDX) | (1u << MACHINE_X64_RSI) | (1u << MACHINE_X64_RDI) |

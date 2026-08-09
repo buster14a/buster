@@ -215,8 +215,8 @@ typedef enum MachineOpcode
     MACHINE_X64_CMP64,
     MACHINE_X64_TEST_RR,      // use, use; defines flags (64-bit)
     MACHINE_X64_SETCC,        // def; payload = MachineX64Condition; uses flags
-    MACHINE_X64_LOAD_FRAME,   // def, stack-slot ref; 64-bit slot read
-    MACHINE_X64_STORE_FRAME8, // stack-slot ref, use; sized frame store
+    MACHINE_X64_LOAD_FRAME,   // def, stack-slot ref; 64-bit read at slot + payload byte offset
+    MACHINE_X64_STORE_FRAME8, // stack-slot ref, use; sized store at slot + payload byte offset
     MACHINE_X64_STORE_FRAME16,
     MACHINE_X64_STORE_FRAME32,
     MACHINE_X64_STORE_FRAME64,
@@ -259,6 +259,12 @@ typedef enum MachineOpcode
     // is the first row in the switch-case side table and flags holds the
     // case count.
     MACHINE_X64_SWITCH,
+    // Aggregate chunk copies, payload = byte count, chunked 8/4/2/1 like
+    // the canonical copy loops. RAX (and RDX for the pointer-destination
+    // form) are internal data scratches.
+    MACHINE_X64_COPY_FRAME_FROM_FRAME, // slot ref destination, slot ref source
+    MACHINE_X64_COPY_FRAME_FROM_PTR,   // slot ref destination, use address
+    MACHINE_X64_COPY_PTR_FROM_FRAME,   // use address destination, slot ref source
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

@@ -292,7 +292,16 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "int local_pair(int x) { Pair p; p.first = x; p.second = x * 2; return p.first + (int)p.second; }\n"
                                   "int pick(int k) { switch (k) { case 1: return 10; case 3: return 30; case 7: return 70; default: return -k; } }\n"
                                   "int printf(const char* format, ...);\n"
-                                  "int call_variadic(int a, long b) { return printf(\"%d %ld\", a, b); }\n");
+                                  "int call_variadic(int a, long b) { return printf(\"%d %ld\", a, b); }\n"
+                                  "typedef struct Span { char* data; unsigned long length; } Span;\n"
+                                  "unsigned long span_length(Span s) { return s.length; }\n"
+                                  "Span span_make(char* data, unsigned long length) { Span s; s.data = data; s.length = length; return s; }\n"
+                                  "long span_round_trip(char* data, unsigned long length) {\n"
+                                  "    Span s = span_make(data, length);\n"
+                                  "    return (long)span_length(s) + (s.data == data ? 1 : 0);\n"
+                                  "}\n"
+                                  "typedef struct Single { long only; } Single;\n"
+                                  "long single_round_trip(int a) { Single o; o.only = a * 3; Single copy = o; return copy.only; }\n");
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
     BUSTER_TEST(arguments, machine_program != 0);
     if (machine_program && machine_program->module_count)
@@ -311,6 +320,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("shl"), S8_INITIALIZER("sar"), S8_INITIALIZER("shr"), S8_INITIALIZER("bump"),
             S8_INITIALIZER("table_get"), S8_INITIALIZER("table_set"), S8_INITIALIZER("pair_sum"),
             S8_INITIALIZER("locals_array"), S8_INITIALIZER("local_pair"), S8_INITIALIZER("pick"),
+            S8_INITIALIZER("span_length"), S8_INITIALIZER("span_make"), S8_INITIALIZER("span_round_trip"),
+            S8_INITIALIZER("single_round_trip"),
         };
         MachineEncodeResult machine_encoded[BUSTER_ARRAY_LENGTH(supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(supported_names); name_index += 1)
@@ -395,7 +406,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                    string_equal(supported_names[name_index], S8("table_get")) ||
                                    string_equal(supported_names[name_index], S8("table_set")) ||
                                    string_equal(supported_names[name_index], S8("pair_sum"));
-            if (touches_globals)
+            // Call-containing functions execute only through the module
+            // differential, where their call relocations resolve.
+            bool contains_calls = string_equal(supported_names[name_index], S8("span_round_trip"));
+            if (touches_globals || contains_calls)
             {
                 continue;
             }
@@ -562,6 +576,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("negate"), S8_INITIALIZER("bitnot"), S8_INITIALIZER("lnot"), S8_INITIALIZER("less"),
             S8_INITIALIZER("uless"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("divide"), S8_INITIALIZER("with_call"),
             S8_INITIALIZER("locals_array"), S8_INITIALIZER("local_pair"), S8_INITIALIZER("pick"),
+            S8_INITIALIZER("span_round_trip"), S8_INITIALIZER("single_round_trip"),
         };
         typedef s64 MachineTestModuleCall2(s64, s64);
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(module_names) && none_module_executable.address && mir_module_executable.address;
