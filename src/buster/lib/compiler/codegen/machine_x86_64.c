@@ -772,8 +772,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             callee_type = ir_type_from_id(&program->types, callee_type->element_type);
         }
         u32 call_argument_count = instruction->operand_count - 1;
-        if (!callee_type || callee_type->kind != IR_TYPE_FUNCTION || callee_type->is_variadic ||
-            callee_type->parameter_count != call_argument_count || call_argument_count > BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments))
+        bool variadic_call = callee_type && callee_type->kind == IR_TYPE_FUNCTION && callee_type->is_variadic;
+        if (!callee_type || callee_type->kind != IR_TYPE_FUNCTION ||
+            (variadic_call ? call_argument_count < callee_type->parameter_count : callee_type->parameter_count != call_argument_count) ||
+            call_argument_count > BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments))
         {
             return false;
         }
@@ -783,9 +785,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         {
             return false;
         }
+        // Every argument — fixed and variadic — must be an integer-class
+        // scalar; a variadic call then always passes zero vector registers
+        // in AL, matching the canonical convention.
         for (u32 argument_index = 0; argument_index < call_argument_count; argument_index += 1)
         {
-            if (!machine_x64_type_is_scalar_register(ir_type_from_id(&program->types, callee_type->parameter_types[argument_index])))
+            IrType* argument_type = argument_index < callee_type->parameter_count
+                                        ? ir_type_from_id(&program->types, callee_type->parameter_types[argument_index])
+                                        : ir_type_from_id(&program->types, function->values[instruction->operands[argument_index + 1].value].canonical_type);
+            if (!machine_x64_type_is_scalar_register(argument_type))
             {
                 return false;
             }
@@ -816,6 +824,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         machine_x64_select_row(selector, (MachineInstruction){
                                              .payload = target_index,
                                              .opcode = MACHINE_X64_CALL_DIRECT,
+                                             .flags = (u16)(variadic_call ? 1 : 0),
                                          });
         if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
         {
@@ -1640,6 +1649,13 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             break;
             case MACHINE_X64_CALL_DIRECT:
             {
+                if (instruction->flags & 1)
+                {
+                    // Variadic System V call: AL carries the vector-register
+                    // count, always zero in the integer-only subset.
+                    machine_x64_emit8(&encoder, 0xb8);
+                    machine_x64_emit32(&encoder, 0);
+                }
                 machine_x64_emit8(&encoder, 0xe8);
                 MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                 *site = (MachineCallSite){

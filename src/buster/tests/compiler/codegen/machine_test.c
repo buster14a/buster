@@ -290,7 +290,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "long pair_sum(void) { return pair.first + pair.second; }\n"
                                   "int locals_array(int n) { int a[4]; a[0] = n; a[1] = n + 1; a[2] = a[0] * a[1]; a[3] = a[2] - n; return a[3]; }\n"
                                   "int local_pair(int x) { Pair p; p.first = x; p.second = x * 2; return p.first + (int)p.second; }\n"
-                                  "int pick(int k) { switch (k) { case 1: return 10; case 3: return 30; case 7: return 70; default: return -k; } }\n");
+                                  "int pick(int k) { switch (k) { case 1: return 10; case 3: return 30; case 7: return 70; default: return -k; } }\n"
+                                  "int printf(const char* format, ...);\n"
+                                  "int call_variadic(int a, long b) { return printf(\"%d %ld\", a, b); }\n");
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
     BUSTER_TEST(arguments, machine_program != 0);
     if (machine_program && machine_program->module_count)
@@ -362,6 +364,16 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         {
             MachineSelectResult float_selected = machine_select_canonical_function(arguments->arena, machine_program, float_function, machine_target);
             BUSTER_TEST(arguments, !float_selected.supported);
+        }
+        // Variadic direct calls select (AL zero, register-only integer
+        // arguments); execution is proven by the linked soak because the
+        // extern callee cannot resolve in a raw code copy.
+        IrFunction* variadic_function = machine_test_ir_function_find(machine_module, S8("call_variadic"));
+        BUSTER_TEST(arguments, variadic_function != 0);
+        if (variadic_function)
+        {
+            MachineSelectResult variadic_selected = machine_select_canonical_function(arguments->arena, machine_program, variadic_function, machine_target);
+            BUSTER_TEST(arguments, variadic_selected.supported);
         }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
         CodegenExecutable none_executable = codegen_make_executable((CodegenFunction){
