@@ -331,6 +331,27 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         case IR_BINARY_INTEGER_BITWISE_XOR:
             arithmetic = (u16)(wide ? MACHINE_X64_XOR64 : MACHINE_X64_XOR32);
             break;
+        case IR_BINARY_SHIFT_LEFT:
+            arithmetic = (u16)(wide ? MACHINE_X64_SHL64 : MACHINE_X64_SHL32);
+            break;
+        case IR_BINARY_SIGNED_SHIFT_RIGHT:
+            arithmetic = (u16)(wide ? MACHINE_X64_SAR64 : MACHINE_X64_SAR32);
+            break;
+        case IR_BINARY_UNSIGNED_SHIFT_RIGHT:
+            arithmetic = (u16)(wide ? MACHINE_X64_SHR64 : MACHINE_X64_SHR32);
+            break;
+        case IR_BINARY_SIGNED_DIVIDE:
+            arithmetic = (u16)(wide ? MACHINE_X64_SDIV64 : MACHINE_X64_SDIV32);
+            break;
+        case IR_BINARY_UNSIGNED_DIVIDE:
+            arithmetic = (u16)(wide ? MACHINE_X64_UDIV64 : MACHINE_X64_UDIV32);
+            break;
+        case IR_BINARY_SIGNED_REMAINDER:
+            arithmetic = (u16)(wide ? MACHINE_X64_SREM64 : MACHINE_X64_SREM32);
+            break;
+        case IR_BINARY_UNSIGNED_REMAINDER:
+            arithmetic = (u16)(wide ? MACHINE_X64_UREM64 : MACHINE_X64_UREM32);
+            break;
         default:
             arithmetic = 0;
         }
@@ -1080,6 +1101,74 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             case MACHINE_X64_TEST_RR:
                 machine_x64_emit_rr(&encoder, true, false, 0x85, operand_registers[1], operand_registers[0]);
                 break;
+            case MACHINE_X64_SHL32:
+            case MACHINE_X64_SHL64:
+            case MACHINE_X64_SAR32:
+            case MACHINE_X64_SAR64:
+            case MACHINE_X64_SHR32:
+            case MACHINE_X64_SHR64:
+            {
+                // The count operand must sit in CL; the stage-2 placement
+                // pins operand slot 1 to RCX by construction.
+                bool wide = instruction->opcode == MACHINE_X64_SHL64 || instruction->opcode == MACHINE_X64_SAR64 || instruction->opcode == MACHINE_X64_SHR64;
+                u8 form = instruction->opcode == MACHINE_X64_SHL32 || instruction->opcode == MACHINE_X64_SHL64   ? 4
+                          : instruction->opcode == MACHINE_X64_SAR32 || instruction->opcode == MACHINE_X64_SAR64 ? 7
+                                                                                                                 : 5;
+                machine_x64_emit_rr(&encoder, wide, false, 0xd3, form, operand_registers[0]);
+            }
+            break;
+            case MACHINE_X64_SDIV32:
+            case MACHINE_X64_SDIV64:
+            case MACHINE_X64_SREM32:
+            case MACHINE_X64_SREM64:
+            case MACHINE_X64_UDIV32:
+            case MACHINE_X64_UDIV64:
+            case MACHINE_X64_UREM32:
+            case MACHINE_X64_UREM64:
+            {
+                // Dividend and result live in RAX (operand slot 0); the
+                // divisor is in RCX (slot 1); RDX is clobbered, exactly like
+                // the canonical divide sequences.
+                bool wide = instruction->opcode == MACHINE_X64_SDIV64 || instruction->opcode == MACHINE_X64_SREM64 ||
+                            instruction->opcode == MACHINE_X64_UDIV64 || instruction->opcode == MACHINE_X64_UREM64;
+                bool is_signed = instruction->opcode == MACHINE_X64_SDIV32 || instruction->opcode == MACHINE_X64_SDIV64 ||
+                                 instruction->opcode == MACHINE_X64_SREM32 || instruction->opcode == MACHINE_X64_SREM64;
+                bool remainder = instruction->opcode == MACHINE_X64_SREM32 || instruction->opcode == MACHINE_X64_SREM64 ||
+                                 instruction->opcode == MACHINE_X64_UREM32 || instruction->opcode == MACHINE_X64_UREM64;
+                if (is_signed)
+                {
+                    if (wide)
+                    {
+                        machine_x64_emit8(&encoder, 0x48);
+                    }
+                    machine_x64_emit8(&encoder, 0x99);
+                }
+                else
+                {
+                    if (wide)
+                    {
+                        machine_x64_emit8(&encoder, 0x48);
+                    }
+                    machine_x64_emit8(&encoder, 0x31);
+                    machine_x64_emit8(&encoder, 0xd2);
+                }
+                if (wide)
+                {
+                    machine_x64_emit8(&encoder, 0x48);
+                }
+                machine_x64_emit8(&encoder, 0xf7);
+                machine_x64_emit8(&encoder, (u8)(is_signed ? 0xf9 : 0xf1));
+                if (remainder)
+                {
+                    if (wide)
+                    {
+                        machine_x64_emit8(&encoder, 0x48);
+                    }
+                    machine_x64_emit8(&encoder, 0x89);
+                    machine_x64_emit8(&encoder, 0xd0);
+                }
+            }
+            break;
             case MACHINE_X64_SETCC:
             {
                 // The stage-2 placement pins SETCC's destination to RAX so

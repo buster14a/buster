@@ -231,6 +231,24 @@ typedef enum MachineOpcode
     MACHINE_X64_JMP,          // block ref; terminator
     MACHINE_X64_JCC,          // block ref taken, block ref fallthrough; payload = condition; terminator
     MACHINE_X64_RET,          // terminator; implicit RAX use when returning a value
+    // Fixed-register forms. Shifts read their count from CL; the divide
+    // family keeps the dividend/result in RAX and clobbers RDX. The stage-2
+    // placement satisfies these by construction (slot 0 is RAX, slot 1 is
+    // RCX); real allocators must honor them as fixed constraints.
+    MACHINE_X64_SHL32,        // def tied use [RAX], use count [CL]
+    MACHINE_X64_SHL64,
+    MACHINE_X64_SAR32,
+    MACHINE_X64_SAR64,
+    MACHINE_X64_SHR32,
+    MACHINE_X64_SHR64,
+    MACHINE_X64_SDIV32,       // def tied use [RAX], use divisor; clobbers RDX
+    MACHINE_X64_SDIV64,
+    MACHINE_X64_UDIV32,
+    MACHINE_X64_UDIV64,
+    MACHINE_X64_SREM32,
+    MACHINE_X64_SREM64,
+    MACHINE_X64_UREM32,
+    MACHINE_X64_UREM64,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

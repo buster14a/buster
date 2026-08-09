@@ -272,7 +272,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "int sum_to(int n) { int s = 0; int i = 1; while (i <= n) { s = s + i; i = i + 1; } return s; }\n"
                                   "long readp(long* p) { return *p; }\n"
                                   "void writep(int* p, int v) { *p = v; }\n"
-                                  "int divide(int a, int b) { return a / b; }\n");
+                                  "int divide(int a, int b) { return a / b; }\n"
+                                  "int srem(int a, int b) { return a % b; }\n"
+                                  "unsigned long udiv(unsigned long a, unsigned long b) { return a / b; }\n"
+                                  "int shl(int a, int b) { return a << b; }\n"
+                                  "long sar(long a, int b) { return a >> b; }\n"
+                                  "unsigned shr(unsigned a, int b) { return a >> b; }\n"
+                                  "int with_call(int a) { return divide(a, 2); }\n");
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
     BUSTER_TEST(arguments, machine_program != 0);
     if (machine_program && machine_program->module_count)
@@ -287,7 +293,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("add"), S8_INITIALIZER("mul"), S8_INITIALIZER("widen"), S8_INITIALIZER("narrow"),
             S8_INITIALIZER("negate"), S8_INITIALIZER("bitnot"), S8_INITIALIZER("lnot"), S8_INITIALIZER("less"),
             S8_INITIALIZER("uless"), S8_INITIALIZER("six"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("readp"),
-            S8_INITIALIZER("writep"),
+            S8_INITIALIZER("writep"), S8_INITIALIZER("divide"), S8_INITIALIZER("srem"), S8_INITIALIZER("udiv"),
+            S8_INITIALIZER("shl"), S8_INITIALIZER("sar"), S8_INITIALIZER("shr"),
         };
         MachineEncodeResult machine_encoded[BUSTER_ARRAY_LENGTH(supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(supported_names); name_index += 1)
@@ -324,15 +331,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, add_placement.reload_count + add_placement.spill_count <= add_selected.function.instruction_count * 4);
             BUSTER_TEST(arguments, add_placement.frame_size % 16 == 0);
         }
-        // Explicit unsupported fallback: divide needs the RAX/RDX pair the
-        // stage-2 subset does not model yet.
-        IrFunction* divide_function = machine_test_ir_function_find(machine_module, S8("divide"));
-        BUSTER_TEST(arguments, divide_function != 0);
-        if (divide_function)
+        // Explicit unsupported fallback: calls are outside the subset until
+        // the ABI-lowering increment lands.
+        IrFunction* call_function = machine_test_ir_function_find(machine_module, S8("with_call"));
+        BUSTER_TEST(arguments, call_function != 0);
+        if (call_function)
         {
-            MachineSelectResult divide_selected = machine_select_canonical_function(arguments->arena, machine_program, divide_function, machine_target);
-            BUSTER_TEST(arguments, !divide_selected.supported);
-            BUSTER_TEST(arguments, divide_selected.failed_opcode == IR_OPCODE_BINARY);
+            MachineSelectResult call_selected = machine_select_canonical_function(arguments->arena, machine_program, call_function, machine_target);
+            BUSTER_TEST(arguments, !call_selected.supported);
+            BUSTER_TEST(arguments, call_selected.failed_opcode == IR_OPCODE_CALL || call_selected.failed_opcode == IR_OPCODE_FUNCTION);
         }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
         CodegenExecutable none_executable = codegen_make_executable((CodegenFunction){
@@ -375,7 +382,12 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             // because the canonical and machine paths may legitimately leave
             // different stale upper bits in RAX.
             bool wide_result = string_equal(supported_names[name_index], S8("widen")) ||
-                               string_equal(supported_names[name_index], S8("bitnot")) || is_readp;
+                               string_equal(supported_names[name_index], S8("bitnot")) ||
+                               string_equal(supported_names[name_index], S8("sar")) ||
+                               string_equal(supported_names[name_index], S8("udiv")) || is_readp;
+            bool is_division = string_equal(supported_names[name_index], S8("divide")) ||
+                               string_equal(supported_names[name_index], S8("srem")) ||
+                               string_equal(supported_names[name_index], S8("udiv"));
             s64 probe_arguments[][2] = {
                 {0, 0}, {1, 2}, {-1, 5}, {123456789, -987654321}, {-2147483647, 2147483647}, {40, 2}, {7, -7},
             };
@@ -388,6 +400,12 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 {
                     // Keep iteration counts test-sized.
                     left &= 63;
+                }
+                if (is_division)
+                {
+                    // Never probe a zero divisor; odd divisors also keep the
+                    // signed INT_MIN/-1 overflow case out of the grid.
+                    right |= 1;
                 }
                 void* none_address = (u8*)none_executable.address + none_offset;
                 void* machine_address = machine_executable.address;
