@@ -57,6 +57,7 @@ struct MachineX64Selector
     MachineBuilderStream stack_slots;
     MachineBuilderStream call_targets;
     MachineBuilderStream switch_cases;
+    MachineBuilderStream stack_slot_alignments;
     // Per IrValue: virtual register index, stack slot index, or UINT32_MAX.
     u32* value_virtual_registers;
     u32* value_stack_slots;
@@ -330,6 +331,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_place_address(MachineX64Selector* se
 
 // A selection-synthesized temporary vreg, defined at the next row to be
 // emitted so no post-pass definition patching is needed.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_append_slot(MachineX64Selector* selector, u32 size, u32 alignment)
+{
+    u32 slot_index = selector->stack_slots.total_count;
+    u32* slot_size = (u32*)machine_stream_append(selector->arena, &selector->stack_slots);
+    *slot_size = size;
+    u32* slot_alignment = (u32*)machine_stream_append(selector->arena, &selector->stack_slot_alignments);
+    *slot_alignment = alignment;
+    return slot_index;
+}
+
 BUSTER_GLOBAL_LOCAL u32 machine_x64_synthesize_register(MachineX64Selector* selector)
 {
     return machine_builder_virtual_register(&selector->builder, (MachineVirtualRegister){
@@ -1216,9 +1227,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             else
             {
                 // An unused indirect result still needs backing storage.
-                indirect_result_slot = selector->stack_slots.total_count;
-                u32* scratch_slot_size = (u32*)machine_stream_append(selector->arena, &selector->stack_slots);
-                *scratch_slot_size = callee_return_shape.byte_size;
+                indirect_result_slot = machine_x64_append_slot(selector, callee_return_shape.byte_size, 8);
             }
         }
         for (u32 argument_index = 0; argument_index < call_argument_count; argument_index += 1)
@@ -1703,13 +1712,12 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
     machine_stream_initialize(&selector.stack_slots, sizeof(u32));
     machine_stream_initialize(&selector.call_targets, sizeof(IrSymbolId));
     machine_stream_initialize(&selector.switch_cases, sizeof(MachineSwitchCase));
+    machine_stream_initialize(&selector.stack_slot_alignments, sizeof(u32));
     selector.return_shape = signature_return_shape;
     selector.hidden_return_slot = UINT32_MAX;
     if (signature_return_shape.indirect)
     {
-        selector.hidden_return_slot = selector.stack_slots.total_count;
-        u32* hidden_slot_size = (u32*)machine_stream_append(arena, &selector.stack_slots);
-        *hidden_slot_size = 8;
+        selector.hidden_return_slot = machine_x64_append_slot(&selector, 8, 8);
     }
     for (u32 parameter_index = 0; parameter_index < BUSTER_ARRAY_LENGTH(selector.parameter_shapes); parameter_index += 1)
     {
@@ -1746,15 +1754,14 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
             if (instruction->opcode == IR_OPCODE_LOCAL)
             {
                 IrType* local_type = ir_type_from_id(&program->types, value->canonical_type);
-                if (!local_type || !local_type->layout.resolved || value->alignment > 8 || local_type->layout.size > UINT32_MAX - 7)
+                u32 local_alignment = BUSTER_MAX(BUSTER_MAX(value->alignment, local_type ? local_type->layout.alignment : 0), 8u);
+                if (!local_type || !local_type->layout.resolved || local_alignment > 16 || local_type->layout.size > UINT32_MAX - 7)
                 {
                     machine_x64_reject(&selector, instruction->opcode);
                     break;
                 }
-                u32 slot_index = selector.stack_slots.total_count;
-                u32* slot_size = (u32*)machine_stream_append(arena, &selector.stack_slots);
-                *slot_size = (u32)((local_type->layout.size + 7) & ~(u64)7);
-                selector.value_stack_slots[instruction->result.value] = slot_index;
+                selector.value_stack_slots[instruction->result.value] =
+                    machine_x64_append_slot(&selector, (u32)((local_type->layout.size + 7) & ~(u64)7), local_alignment);
                 continue;
             }
             IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
@@ -1779,10 +1786,8 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
                 // Aggregate values own a frame slot like the canonical
                 // path's per-value storage; copies and ABI part transfers
                 // address it directly.
-                u32 slot_index = selector.stack_slots.total_count;
-                u32* slot_size = (u32*)machine_stream_append(arena, &selector.stack_slots);
-                *slot_size = (u32)((value_type->layout.size + 7) & ~(u64)7);
-                selector.value_stack_slots[instruction->result.value] = slot_index;
+                selector.value_stack_slots[instruction->result.value] =
+                    machine_x64_append_slot(&selector, (u32)((value_type->layout.size + 7) & ~(u64)7), 8);
             }
         }
     }
@@ -1979,6 +1984,8 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
     result.function.stack_slot_sizes = arena_allocate(arena, u32, selector.stack_slots.total_count);
     result.function.stack_slot_count = selector.stack_slots.total_count;
     machine_stream_flatten(&selector.stack_slots, result.function.stack_slot_sizes);
+    result.function.stack_slot_alignments = arena_allocate(arena, u32, selector.stack_slot_alignments.total_count);
+    machine_stream_flatten(&selector.stack_slot_alignments, result.function.stack_slot_alignments);
     result.function.call_targets = arena_allocate(arena, IrSymbolId, selector.call_targets.total_count);
     result.function.call_target_count = selector.call_targets.total_count;
     machine_stream_flatten(&selector.call_targets, result.function.call_targets);
@@ -2013,7 +2020,10 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
     }
     for (u32 slot_index = 0; slot_index < function->stack_slot_count; slot_index += 1)
     {
-        running += function->stack_slot_sizes[slot_index];
+        // The frame base is sixteen-aligned, so a slot whose start offset is
+        // a multiple of its alignment is aligned in memory.
+        u32 slot_alignment = function->stack_slot_alignments ? function->stack_slot_alignments[slot_index] : 8;
+        running = (running + function->stack_slot_sizes[slot_index] + slot_alignment - 1) & ~(slot_alignment - 1);
         placement.stack_slot_offsets[slot_index] = running;
     }
     placement.frame_size = (running + 15u) & ~15u;

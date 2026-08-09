@@ -300,6 +300,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "    return a + i * b; }\n"
                                   "int indirect(int (*callee)(int, int), int a) { return callee(a, 2); }\n"
                                   "int call_indirect(int a) { int (*f)(int, int) = divide; return f(a, 3); }\n"
+                                  "int aligned_local(int x) { _Alignas(16) long buffer[4]; buffer[0] = x; buffer[3] = x * 2; return (int)(buffer[0] + buffer[3]); }\n"
                                   "_Atomic int atomic_cell;\n"
                                   "int atomic_probe(int v) { return __c11_atomic_fetch_add(&atomic_cell, v, 5); }\n"
                                   "typedef struct Big { long a; long b; long c; } Big;\n"
@@ -364,7 +365,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("shl"), S8_INITIALIZER("sar"), S8_INITIALIZER("shr"), S8_INITIALIZER("bump"),
             S8_INITIALIZER("table_get"), S8_INITIALIZER("table_set"), S8_INITIALIZER("pair_sum"),
             S8_INITIALIZER("locals_array"), S8_INITIALIZER("local_pair"), S8_INITIALIZER("pick"),
-            S8_INITIALIZER("span_length"), S8_INITIALIZER("span_make"), S8_INITIALIZER("span_round_trip"),
+            S8_INITIALIZER("aligned_local"), S8_INITIALIZER("span_length"), S8_INITIALIZER("span_make"), S8_INITIALIZER("span_round_trip"),
             S8_INITIALIZER("single_round_trip"), S8_INITIALIZER("fmath"), S8_INITIALIZER("f32math"),
             S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnegate"), S8_INITIALIZER("fnan"), S8_INITIALIZER("fuconv"),
         };
@@ -645,7 +646,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("negate"), S8_INITIALIZER("bitnot"), S8_INITIALIZER("lnot"), S8_INITIALIZER("less"),
             S8_INITIALIZER("uless"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("divide"), S8_INITIALIZER("with_call"),
             S8_INITIALIZER("locals_array"), S8_INITIALIZER("local_pair"), S8_INITIALIZER("pick"),
-            S8_INITIALIZER("span_round_trip"), S8_INITIALIZER("single_round_trip"), S8_INITIALIZER("fmath"),
+            S8_INITIALIZER("aligned_local"), S8_INITIALIZER("span_round_trip"), S8_INITIALIZER("single_round_trip"), S8_INITIALIZER("fmath"),
             S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnan"), S8_INITIALIZER("call_stack"), S8_INITIALIZER("big_round"),
             S8_INITIALIZER("call_indirect"),
         };

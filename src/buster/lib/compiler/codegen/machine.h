@@ -380,6 +380,8 @@ struct MachineFunction
     MachineBlock* blocks;
     u64* immediates;
     u32* stack_slot_sizes;
+    // Power-of-two start alignment per stack slot, at most sixteen.
+    u32* stack_slot_alignments;
     // Direct-call callees, indexed by MACHINE_X64_CALL_DIRECT payloads.
     IrSymbolId* call_targets;
     MachineSwitchCase* switch_cases;
