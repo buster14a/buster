@@ -11980,6 +11980,16 @@ BUSTER_GLOBAL_LOCAL u64 c_parse_entity_lookup_hash(u32 symbol, String8 name, CSc
     return hash;
 }
 
+// Bucket key for the name/typedef chains: the interned id when the parse has
+// a symbol table, the byte-FNV of the spelling when it does not (hand-built
+// tests). Every name reaching a probe site comes from a token the
+// preprocessor already interned, so the probe-side c_parse_name_symbol is an
+// identity-path hit, never an insert.
+BUSTER_GLOBAL_LOCAL u64 c_parse_name_hash(u32 symbol, String8 name)
+{
+    return symbol ? (u64)symbol * UINT64_C(0x9E3779B97F4A7C15) : c_macro_name_hash(name);
+}
+
 BUSTER_GLOBAL_LOCAL void c_parse_scope_add_entity(CParseResult* result, CScopeId scope, CEntityId entity)
 {
     CScope* value = &result->scopes[scope.value];
@@ -11997,7 +12007,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_scope_add_entity(CParseResult* result, CScopeId
     BUSTER_CHECK(result->entity_lookup_bucket_count != 0);
     CEntity* added = &result->entities[entity.value];
     added->symbol = c_parse_name_symbol(result, added->name);
-    u64 name_hash = c_macro_name_hash(added->name);
+    u64 name_hash = c_parse_name_hash(added->symbol, added->name);
     u64 hash = c_parse_entity_lookup_hash(added->symbol, added->name, scope);
     u32 bucket = (u32)hash & (result->entity_lookup_bucket_count - 1);
     added->next_in_lookup = result->entity_lookup_buckets[bucket];
@@ -12078,7 +12088,7 @@ CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult prepr
 
 BUSTER_GLOBAL_LOCAL CEntityId c_parse_lookup_typedef_name(CParseResult* result, String8 name, bool oldest)
 {
-    u32 bucket = (u32)c_macro_name_hash(name) & (result->entity_lookup_bucket_count - 1);
+    u32 bucket = (u32)c_parse_name_hash(c_parse_name_symbol(result, name), name) & (result->entity_lookup_bucket_count - 1);
     CEntityId found = C_ENTITY_ID_INVALID;
     for (CEntityId entity = result->typedef_lookup_buckets[bucket]; entity.value != C_ID_UNDERLYING_INVALID;
          entity = result->entities[entity.value].next_typedef_in_lookup)
@@ -12101,7 +12111,7 @@ BUSTER_GLOBAL_LOCAL CEntity* c_parse_first_constant_entity(CParseResult* result,
     {
         return 0;
     }
-    u32 bucket = (u32)c_macro_name_hash(name) & (result->entity_lookup_bucket_count - 1);
+    u32 bucket = (u32)c_parse_name_hash(c_parse_name_symbol(result, name), name) & (result->entity_lookup_bucket_count - 1);
     // The chain is newest-first; the last predicate match is the lowest entity
     // index, matching an ascending scan over the entity table.
     CEntity* first = 0;
@@ -14917,7 +14927,7 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
         u32 candidate_ids[64];
         u32 candidate_count = 0;
         bool candidates_overflowed = false;
-        u32 name_bucket = (u32)c_macro_name_hash(declaration->name) & (result.entity_lookup_bucket_count - 1);
+        u32 name_bucket = (u32)c_parse_name_hash(c_parse_name_symbol(&result, declaration->name), declaration->name) & (result.entity_lookup_bucket_count - 1);
         for (CEntityId chain = result.name_lookup_buckets[name_bucket]; chain.value != C_ID_UNDERLYING_INVALID;
              chain = result.entities[chain.value].next_by_name)
         {
