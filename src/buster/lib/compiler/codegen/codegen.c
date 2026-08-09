@@ -7282,6 +7282,30 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_integer_aggregate_parts(IrProgram* pr
     return true;
 }
 
+// What one argument of this type wants from the outgoing area it lands in. The
+// area is addressed in eightbytes, so that is the floor; a type that wants more
+// -- a 256- or 512-bit vector, an `_Alignas(64)` aggregate -- is read back by a
+// callee with an alignment-requiring move and has to get what it asked for.
+u32 codegen_canonical_x64_stack_argument_alignment(IrType* type)
+{
+    u64 alignment = type && type->layout.resolved ? type->layout.alignment : 0;
+    if (alignment < 8 || alignment > INT32_MAX || (alignment & (alignment - 1)))
+    {
+        return 8;
+    }
+    return (u32)alignment;
+}
+
+// Where the next argument starts. The System V convention places a stack
+// argument at an address respecting its alignment rather than immediately after
+// the one before it, so the gap this opens is padding the caller writes nothing
+// into and the callee reads nothing out of.
+BUSTER_GLOBAL_LOCAL u64 codegen_canonical_x64_stack_argument_offset(u64 cursor, u32 alignment)
+{
+    u64 remainder = cursor & (alignment - 1);
+    return remainder ? cursor + alignment - remainder : cursor;
+}
+
 CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
                                                                   CodegenAbi abi, CodegenCanonicalCallLayout* layout)
 {
@@ -7395,6 +7419,7 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
             .windows_indirect = windows_indirect,
             .system_v_aggregate = abi == CODEGEN_ABI_X86_64_SYSTEM_V && argument_abi.part_count && !argument_abi.memory,
         };
+        u64 argument_stack_parts = 0;
         if (abi == CODEGEN_ABI_X86_64_SYSTEM_V && type->kind == IR_TYPE_FLOAT)
         {
             if (layout->simulated_float_registers < 8)
@@ -7404,11 +7429,7 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
             else
             {
                 call_argument.on_stack = true;
-                if (stack_part_count == UINT32_MAX)
-                {
-                    return CODEGEN_ERROR_CAPACITY;
-                }
-                stack_part_count += 1;
+                argument_stack_parts = 1;
             }
         }
         else if (call_argument.system_v_aggregate)
@@ -7436,12 +7457,7 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
             else
             {
                 call_argument.on_stack = true;
-                u64 stack_parts = (type->layout.size + 7) / 8;
-                if (stack_part_count > UINT32_MAX - stack_parts)
-                {
-                    return CODEGEN_ERROR_CAPACITY;
-                }
-                stack_part_count += stack_parts;
+                argument_stack_parts = (type->layout.size + 7) / 8;
             }
         }
         else
@@ -7454,12 +7470,23 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
             else
             {
                 call_argument.on_stack = true;
-                if (stack_part_count > UINT32_MAX - part_count)
-                {
-                    return CODEGEN_ERROR_CAPACITY;
-                }
-                stack_part_count += part_count;
+                argument_stack_parts = part_count;
             }
+        }
+        if (call_argument.on_stack)
+        {
+            // Windows gives every stack argument one eightbyte and passes
+            // anything wider by reference, so only System V has an argument
+            // whose alignment the area has to answer for.
+            u32 argument_alignment = abi == CODEGEN_ABI_X86_64_SYSTEM_V ? codegen_canonical_x64_stack_argument_alignment(type) : 8;
+            u64 offset = codegen_canonical_x64_stack_argument_offset(stack_part_count * 8, argument_alignment);
+            if (offset > UINT32_MAX || argument_stack_parts > (UINT32_MAX - offset) / 8)
+            {
+                return CODEGEN_ERROR_CAPACITY;
+            }
+            call_argument.stack_offset = (u32)offset;
+            stack_part_count = (offset + argument_stack_parts * 8) / 8;
+            layout->stack_alignment = BUSTER_MAX(layout->stack_alignment, argument_alignment);
         }
         if (layout->arguments)
         {
@@ -7467,6 +7494,7 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
         }
     }
     layout->stack_part_count = (u32)stack_part_count;
+    layout->stack_alignment = BUSTER_MAX(layout->stack_alignment, (u32)CODEGEN_X64_STACK_ALIGNMENT);
     layout->stack_padding = abi == CODEGEN_ABI_X86_64_SYSTEM_V && (layout->stack_part_count & 1) != 0;
     if (abi == CODEGEN_ABI_X86_64_WINDOWS)
     {
@@ -9401,6 +9429,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     u32 instruction_count = 0;
     u64 debug_location_capacity_64 = 0;
     u64 stack_probe_capacity = 0;
+    u64 aligned_argument_capacity = 0;
     for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
         IrFunction* function = module->functions + function_index;
@@ -9442,6 +9471,14 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 function->instructions[function->values[value_index].definition.value].opcode == IR_OPCODE_LOCAL)
             {
                 function_value_bytes += value_type->layout.size + function->values[value_index].alignment - 1;
+            }
+            // A value this wide can be handed to a call on the stack, and an
+            // area aligned for it is filled an eightbyte at a time rather than
+            // pushed. That is more code than the flat per-instruction reserve
+            // below carries, so the value pays for the copy it can provoke.
+            if (target.cpu_arch == CPU_ARCH_X86_64 && slot_alignment > CODEGEN_X64_STACK_ALIGNMENT)
+            {
+                aligned_argument_capacity += (slot_size / 8) * 15 + 32;
             }
         }
         u64 probe_count = (function_value_bytes + 4079) / 4080;
@@ -9511,7 +9548,8 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         }
     }
     u64 instruction_capacity = target.cpu_arch == CPU_ARCH_AARCH64 ? 128 : 48;
-    u64 capacity = (u64)instruction_count * instruction_capacity + (u64)module->function_count * 64 + stack_probe_capacity + assembly_capacity * 4 + 64;
+    u64 capacity = (u64)instruction_count * instruction_capacity + (u64)module->function_count * 64 + stack_probe_capacity + aligned_argument_capacity +
+                   assembly_capacity * 4 + 64;
     CodegenBuffer buffer = {
         .bytes = arena_allocate(arena, u8, capacity),
         .capacity = capacity,
@@ -9577,6 +9615,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 windows_dynamic_stack |= opcode == IR_OPCODE_STACK_ALLOCATE || opcode == IR_OPCODE_STACK_RESTORE;
             }
         }
+        bool x64_aligned_argument_call = false;
         bool x64_save_rbx = target.cpu_arch == CPU_ARCH_X86_64 && codegen_canonical_x64_function_saves_rbx(function);
         if (target.cpu_arch == CPU_ARCH_X86_64 && !x64_save_rbx)
         {
@@ -9634,6 +9673,14 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 return result;
             }
             value_offsets[value_index] = (u32)value_bytes;
+            // A value wanting more than sixteen bytes is a value a call can be
+            // asked to pass on the stack, and such a call has to realign the
+            // stack pointer and put it back afterwards from somewhere a call
+            // cannot clobber. The slot alignment this loop already computed
+            // answers that, and answers yes a little too often -- an
+            // over-aligned local that is never an argument also reserves the
+            // eight bytes -- which costs a frame slot and no work.
+            x64_aligned_argument_call |= slot_alignment > CODEGEN_X64_STACK_ALIGNMENT;
             if (target.cpu_arch == CPU_ARCH_AARCH64)
             {
                 value_bytes += slot_size;
@@ -9643,6 +9690,17 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     return result;
                 }
             }
+        }
+        u32 x64_stack_save_offset = 0;
+        if (x64_aligned_argument_call && target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_SYSTEM_V)
+        {
+            if (value_bytes > UINT32_MAX - 8)
+            {
+                result.error = CODEGEN_ERROR_CAPACITY;
+                return result;
+            }
+            value_bytes += 8;
+            x64_stack_save_offset = (u32)value_bytes;
         }
         u32 x64_rbx_save_offset = 0;
         if (x64_save_rbx)
@@ -10175,7 +10233,11 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         u32 register_count = result.abi == CODEGEN_ABI_X86_64_WINDOWS ? BUSTER_ARRAY_LENGTH(windows) : BUSTER_ARRAY_LENGTH(system_v);
                         u32 register_index = x64_indirect_return ? 1 : 0;
                         u32 float_register_index = 0;
-                        u32 prior_stack_parts = 0;
+                        // Bytes, not eightbytes: a parameter the caller had to
+                        // align sits past a gap, and reading it back means
+                        // walking the incoming area by the same rule the
+                        // outgoing one was filled by.
+                        u64 prior_stack_bytes = 0;
                         for (u32 prior_index = 0; prior_index < argument_index; prior_index += 1)
                         {
                             u32 prior_parts = 1;
@@ -10211,7 +10273,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 }
                                 else
                                 {
-                                    prior_stack_parts += (u32)((prior_type->layout.size + 7) / 8);
+                                    prior_stack_bytes =
+                                        codegen_canonical_x64_stack_argument_offset(prior_stack_bytes,
+                                                                                    codegen_canonical_x64_stack_argument_alignment(prior_type)) +
+                                        ((prior_type->layout.size + 7) & ~(u64)7);
                                 }
                                 continue;
                             }
@@ -10223,7 +10288,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 }
                                 else
                                 {
-                                    prior_stack_parts += 1;
+                                    prior_stack_bytes =
+                                        codegen_canonical_x64_stack_argument_offset(prior_stack_bytes,
+                                                                                    codegen_canonical_x64_stack_argument_alignment(prior_type)) +
+                                        8;
                                 }
                                 continue;
                             }
@@ -10239,7 +10307,9 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             }
                             else
                             {
-                                prior_stack_parts += prior_parts;
+                                u32 prior_alignment =
+                                    result.abi == CODEGEN_ABI_X86_64_SYSTEM_V ? codegen_canonical_x64_stack_argument_alignment(prior_type) : 8;
+                                prior_stack_bytes = codegen_canonical_x64_stack_argument_offset(prior_stack_bytes, prior_alignment) + (u64)prior_parts * 8;
                             }
                         }
                         u32 part_count = 1;
@@ -10280,7 +10350,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 codegen_emit_u8(&buffer, 0x48);
                                 codegen_emit_u8(&buffer, 0x8b);
                                 codegen_emit_u8(&buffer, 0x85);
-                                codegen_emit_u32(&buffer, 16 + prior_stack_parts * 8);
+                                codegen_emit_u32(&buffer, (u32)(16 + codegen_canonical_x64_stack_argument_offset(prior_stack_bytes, 8)));
                                 C_X64_STORE_RESULT();
                             }
                             instruction_id = instruction->next;
@@ -10342,13 +10412,18 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                                                             : register_index + register_parts > register_count))
                         {
                             u32 first_stack_offset = result.abi == CODEGEN_ABI_X86_64_WINDOWS ? 48 : 16;
+                            // The caller placed this one at its own alignment,
+                            // so skip the padding it left behind.
+                            u64 argument_stack_offset = codegen_canonical_x64_stack_argument_offset(
+                                prior_stack_bytes,
+                                result.abi == CODEGEN_ABI_X86_64_SYSTEM_V ? codegen_canonical_x64_stack_argument_alignment(argument_stack_type) : 8);
                             if (windows_indirect)
                             {
                                 codegen_emit_u8(&buffer, 0x48);
                                 codegen_emit_u8(&buffer, 0x8b);
                                 codegen_emit_u8(&buffer, 0x85);
                                 codegen_emit_u32(&buffer, (u32)codegen_canonical_x64_rebase_frame_displacement(
-                                                                 &buffer, first_stack_offset + (s64)prior_stack_parts * 8, canonical_x64_frame_base_offset));
+                                                                 &buffer, first_stack_offset + (s64)argument_stack_offset, canonical_x64_frame_base_offset));
                                 for (u32 part_index = 0; part_index < part_count; part_index += 1)
                                 {
                                 codegen_emit_u8(&buffer, 0x48);
@@ -10382,7 +10457,8 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 codegen_emit_u8(&buffer, 0x8b);
                                 codegen_emit_u8(&buffer, 0x85);
                                 codegen_emit_u32(&buffer, (u32)codegen_canonical_x64_rebase_frame_displacement(
-                                                                 &buffer, first_stack_offset + (s64)(prior_stack_parts + part_index) * 8, canonical_x64_frame_base_offset));
+                                                                 &buffer, first_stack_offset + (s64)argument_stack_offset + (s64)part_index * 8,
+                                                                 canonical_x64_frame_base_offset));
                                 codegen_emit_u8(&buffer, 0x48);
                                 codegen_emit_u8(&buffer, 0x89);
                                 codegen_emit_u8(&buffer, 0x85);
@@ -11702,6 +11778,26 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             codegen_emit_u8(&buffer, 0x8b);
                             codegen_emit_u8(&buffer, 0x50);
                             codegen_emit_u8(&buffer, 8);
+                            // The caller placed an over-aligned argument at its
+                            // own alignment, so the overflow cursor has to skip
+                            // the same padding before reading one back. Only
+                            // sixteen is reachable: a wider type is refused
+                            // above for being larger than two eightbytes.
+                            if (codegen_canonical_x64_stack_argument_alignment(value_type) > 8)
+                            {
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0x83);
+                                codegen_emit_u8(&buffer, 0xc2);
+                                codegen_emit_u8(&buffer, 15);
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0x83);
+                                codegen_emit_u8(&buffer, 0xe2);
+                                codegen_emit_u8(&buffer, 0xf0);
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0x89);
+                                codegen_emit_u8(&buffer, 0x50);
+                                codegen_emit_u8(&buffer, 8);
+                            }
                             u32 stack_size = (u32)((value_type->layout.size + 7) & ~(u64)7);
                             codegen_emit_u8(&buffer, 0x48);
                             codegen_emit_u8(&buffer, 0x81);
@@ -11780,13 +11876,56 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         bool call_windows_indirect_return = call_layout.windows_indirect_return;
                         bool call_x64_indirect_return = call_layout.indirect_return;
                         u32 simulated_float_registers = call_layout.simulated_float_registers;
-                        bool stack_padding = call_layout.stack_padding;
+                        // An argument wanting more than the sixteen bytes the
+                        // stack pointer is already worth cannot be reached by
+                        // pushing: where the pushes leave it depends on where
+                        // the stack happened to be. Such a call moves the stack
+                        // pointer down to the alignment the area needs instead,
+                        // writes each argument at its own offset within it, and
+                        // puts the stack pointer back from a frame slot after,
+                        // which is the one restore an `and` cannot undo and a
+                        // dynamically grown stack does not invalidate.
+                        bool system_v_aligned_area = result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && call_layout.stack_part_count &&
+                                                     call_layout.stack_alignment > CODEGEN_X64_STACK_ALIGNMENT;
+                        if (system_v_aligned_area && !x64_stack_save_offset)
+                        {
+                            result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                            return result;
+                        }
+                        bool stack_padding = call_layout.stack_padding && !system_v_aligned_area;
                         if (stack_padding)
                         {
                             codegen_emit_u8(&buffer, 0x48);
                             codegen_emit_u8(&buffer, 0x83);
                             codegen_emit_u8(&buffer, 0xec);
                             codegen_emit_u8(&buffer, 8);
+                        }
+                        if (system_v_aligned_area)
+                        {
+                            codegen_emit_u8(&buffer, 0x48);
+                            codegen_emit_u8(&buffer, 0x89);
+                            codegen_emit_u8(&buffer, 0xa5);
+                            codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(x64_stack_save_offset));
+                            codegen_canonical_x64_adjust_stack(&buffer, call_layout.stack_part_count * 8, true);
+                            codegen_emit_u8(&buffer, 0x48);
+                            codegen_emit_u8(&buffer, 0x81);
+                            codegen_emit_u8(&buffer, 0xe4);
+                            codegen_emit_u32(&buffer, 0 - call_layout.stack_alignment);
+                            for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
+                            {
+                                CodegenCanonicalCallArgument* call_argument = arguments + argument_index;
+                                if (!call_argument->on_stack)
+                                {
+                                    continue;
+                                }
+                                u32 argument_offset = value_offsets[instruction->operands[argument_index + 1].value];
+                                if (!codegen_canonical_x64_copy_frame_to_rsp(&buffer, argument_offset, canonical_x64_frame_base_offset,
+                                                                             call_argument->stack_offset, call_argument->stack_part_count * 8))
+                                {
+                                    result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
+                            }
                         }
                         bool windows_dynamic_call = windows_dynamic_stack && result.abi == CODEGEN_ABI_X86_64_WINDOWS;
                         if (windows_dynamic_call)
@@ -11814,7 +11953,11 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 }
                             }
                         }
-                        for (u32 argument_reverse_index = argument_count; argument_reverse_index > 0; argument_reverse_index -= 1)
+                        // The pushes build the area downward, so an argument is
+                        // preceded by whatever padding sits above it: emit that
+                        // first and the one below it lands on its own offset.
+                        u32 stack_cursor = system_v_aligned_area ? 0 : call_layout.stack_part_count * 8;
+                        for (u32 argument_reverse_index = argument_count; argument_reverse_index > 0 && !system_v_aligned_area; argument_reverse_index -= 1)
                         {
                             u32 array_index = argument_reverse_index - 1;
                             if (!arguments[array_index].on_stack || result.abi != CODEGEN_ABI_X86_64_SYSTEM_V)
@@ -11822,12 +11965,18 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 continue;
                             }
                             IrValueId argument = instruction->operands[argument_reverse_index];
+                            for (u32 padding = arguments[array_index].stack_offset + arguments[array_index].stack_part_count * 8; padding < stack_cursor;
+                                 padding += 8)
+                            {
+                                codegen_emit_u8(&buffer, 0x50);
+                            }
                             for (u32 part_index = arguments[array_index].stack_part_count; part_index > 0; part_index -= 1)
                             {
                                 codegen_emit_u8(&buffer, 0xff);
                                 codegen_emit_u8(&buffer, 0xb5);
                                 codegen_emit_u32(&buffer, (u32)(C_X64_FRAME_DISPLACEMENT(value_offsets[argument.value]) + (s32)((part_index - 1) * 8)));
                             }
+                            stack_cursor = arguments[array_index].stack_offset;
                         }
                         if (result.abi == CODEGEN_ABI_X86_64_WINDOWS)
                         {
@@ -12028,7 +12177,14 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 return result;
                             }
                         }
-                        if (result.abi != CODEGEN_ABI_X86_64_WINDOWS && (call_layout.stack_part_count || stack_padding))
+                        if (system_v_aligned_area)
+                        {
+                            codegen_emit_u8(&buffer, 0x48);
+                            codegen_emit_u8(&buffer, 0x8b);
+                            codegen_emit_u8(&buffer, 0xa5);
+                            codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(x64_stack_save_offset));
+                        }
+                        else if (result.abi != CODEGEN_ABI_X86_64_WINDOWS && (call_layout.stack_part_count || stack_padding))
                         {
                             u32 cleanup = call_layout.stack_part_count * 8 + (stack_padding ? 8 : 0);
                             codegen_canonical_x64_adjust_stack(&buffer, cleanup, false);

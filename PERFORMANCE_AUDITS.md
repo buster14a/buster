@@ -12,6 +12,54 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-10a` (Linux x86_64, Zen 4 7940HS; not a throughput audit — the
+System V outgoing-argument alignment fix costed against the gate, measured
+against its own parent on the same tree so the next audit does not read the
+step as a regression of its own. Stage 1 `5.1954 G` to `5.2055 G`
+instructions (`+0.19%`) while the unit grows `1.398.030` to `1.398.884`
+preprocessed tokens, so instructions per token goes `3716.226` to `3721.160`
+(`+0.13%`). Rebased onto `05c8973` the gate reads `5.2608 G` over `1.413.856`
+tokens — `3720.910` per token, the same ratio — and **that is the reference
+point for the next audit**; the pair above is this change against its own
+parent and is not comparable to it. Fixed point deterministic, `test_all`
+green in Release and in sanitized Debug.)
+
+- **What moved.** A stack-passed argument was placed immediately after the one
+  before it, so an argument wanting more than eight bytes of alignment landed
+  wherever the pushes left it. `codegen_canonical_x64_call_layout` now records
+  each stack argument at an offset rounded up to its own alignment and the
+  area's own alignment alongside it; the `IR_OPCODE_ARGUMENT` prologue walks
+  the incoming area by the same rule, and the `va_arg` overflow cursor rounds
+  before reading. A call whose area wants more than sixteen bytes cannot be
+  built by pushing at all — it saves the stack pointer to a frame slot, lowers
+  and rounds it down, fills the area with `mov`, and restores from the slot.
+- **What it cost and why it was paid anyway.** The gate moves for three
+  additions, all of them per value or per argument rather than per
+  instruction: the frame loop's flag for the save slot, the code-buffer
+  reserve for an area filled an eightbyte at a time, and the rounding in the
+  layout and prologue walks. **Two shapes were measured.** Computing the prior
+  parameter's alignment once at the top of the prologue's walk instead of
+  inside the branches that place a stack argument is *not* where the cost is:
+  making it lazy measured `5.2078 G` against `5.2073 G`, inside the `54 K`
+  spread two runs of identical code show. Reading the flag and the reserve off
+  the `slot_alignment` the two value loops already compute, instead of loading
+  `layout.alignment` again, is worth `2.3 M` and is what is in the tree; it
+  over-approximates — an over-aligned local that is never an argument also
+  reserves the eight bytes — which costs a frame slot and no work.
+- **The reserve is the part to revisit.** `aligned_argument_capacity` pays
+  `15` bytes per eightbyte plus `32` for every value wider than sixteen bytes,
+  because the flat 48-bytes-per-instruction module reserve does not carry a
+  call that copies a 64-byte argument in eightbytes. It is charged per value
+  and not per call that actually passes one, since finding those needs the
+  call-layout pre-pass only Windows runs today. **If this is wanted back**, the
+  shape is a flag on `CodegenBuffer` set only where `codegen_emit_u8` refuses a
+  byte and surfaced on the result, so a short estimate becomes a retry with
+  more room rather than a `CODEGEN_ERROR_CAPACITY` that cannot be told apart
+  from the ones a bigger buffer will never fix — an out-of-range frame
+  displacement, a frame past `UINT32_MAX`. The flat per-instruction reserve is
+  short for the same reason anywhere an instruction moves an aggregate, so
+  that flag would pay for more than this entry.
+
 `2026-08-09j` (Linux x86_64, Zen 4 7940HS; incremental IDE workspace
 analysis. **Normal body edits now parse, index, analyze, and invalidate only
 the changed document; exported-interface or import changes reanalyze only the

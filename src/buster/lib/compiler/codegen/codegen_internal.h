@@ -77,6 +77,10 @@ struct X64Builder
 typedef IrAbiPart CodegenCanonicalAbiPart;
 typedef IrAbiValue CodegenCanonicalAbiValue;
 
+// What the stack pointer is worth on entry to a body and at every call, and so
+// the alignment an outgoing-argument area gets for free.
+#define CODEGEN_X64_STACK_ALIGNMENT 16
+
 typedef struct CodegenCanonicalCallArgument CodegenCanonicalCallArgument;
 struct CodegenCanonicalCallArgument
 {
@@ -88,6 +92,10 @@ struct CodegenCanonicalCallArgument
     // differ for a wide vector: one register holds it, but the stack copy is
     // still its whole size.
     u32 stack_part_count;
+    // Where it starts within the outgoing argument area, which is its own
+    // alignment rounded up from where the argument before it ended and so not
+    // simply the sum of the earlier arguments' sizes.
+    u32 stack_offset;
     u32 copy_offset;
     u32 copy_size;
     u32 copy_alignment;
@@ -105,6 +113,10 @@ struct CodegenCanonicalCallLayout
     CodegenCanonicalAbiValue return_abi;
     u32 argument_count;
     u32 stack_part_count;
+    // What the outgoing argument area's base has to be aligned to: sixteen,
+    // which the stack pointer is worth anyway, unless a stack argument wants
+    // more -- a 256- or 512-bit vector, or an over-aligned aggregate.
+    u32 stack_alignment;
     u32 windows_stack_size;
     u32 windows_copy_storage_size;
     u32 simulated_registers;
@@ -121,6 +133,7 @@ BUSTER_F_DECL CodegenError codegen_x64_maximum_call_stack_size(Arena* arena, Ana
                                                                      u32* stack_size);
 BUSTER_F_DECL CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
                                                                     CodegenAbi abi, CodegenCanonicalCallLayout* layout);
+BUSTER_F_DECL u32 codegen_canonical_x64_stack_argument_alignment(IrType* type);
 BUSTER_F_DECL Target codegen_target_for_abi(CodegenAbi abi);
 BUSTER_F_DECL void codegen_record_line(CodegenLineEntry* entries, u32* count, u32 capacity, u32 code_offset, u32 source, u32 line, u32 column);
 BUSTER_F_DECL s32 codegen_debug_frame_offset(u32 offset, Target target, bool negative_offsets, u32 frame_size);

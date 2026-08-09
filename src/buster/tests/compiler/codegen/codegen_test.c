@@ -2990,6 +2990,124 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, dynamic_outgoing_cleanup_valid);
         }
     }
+    // A System V stack argument is placed at an address respecting its own
+    // alignment rather than immediately after the argument before it, and the
+    // area itself starts at the widest alignment any of them asked for. This is
+    // asserted on the layout and on the emitted body rather than by running a
+    // fixture, because a caller and a callee that agree with each other but not
+    // with the psABI pass every fixture this suite can build: the disagreement
+    // only shows against an object some other compiler produced, where a
+    // stack-passed 512-bit vector is read back with `vmovaps` and a
+    // sixteen-aligned aggregate is read from the offset the ABI put it at.
+    String8 stack_alignment_c_source = S8(
+        "typedef unsigned char Bytes64 __attribute__((vector_size(64)));\n"
+        "struct Wide16 { _Alignas(16) long long v[2]; };\n"
+        "struct Wide64 { _Alignas(64) long long v[8]; };\n"
+        "static Bytes64 vector_ninth(Bytes64 a, Bytes64 b, Bytes64 c, Bytes64 d, Bytes64 e, Bytes64 f, Bytes64 g, Bytes64 h, Bytes64 i) {\n"
+        "    return i;\n"
+        "}\n"
+        "static long long after_wide16(long long a, long long b, long long c, long long d, long long e, long long f, long long g,\n"
+        "                              struct Wide16 w) { return g + w.v[0] + w.v[1]; }\n"
+        "static long long after_wide64(long long a, long long b, long long c, long long d, long long e, long long f, long long g,\n"
+        "                              struct Wide64 w) { return g + w.v[0] + w.v[7]; }\n"
+        "long long stack_alignment_calls(Bytes64 v, struct Wide16 w16, struct Wide64 w64) {\n"
+        "    Bytes64 ninth = vector_ninth(v, v, v, v, v, v, v, v, v);\n"
+        "    return after_wide16(1, 2, 3, 4, 5, 6, 7, w16) + after_wide64(1, 2, 3, 4, 5, 6, 7, w64) + ninth[0];\n"
+        "}\n");
+    CPreprocessResult stack_alignment_tokens = c_preprocess(arguments->arena, stack_alignment_c_source, (CPreprocessOptions){0});
+    CParseResult stack_alignment_parse = c_parse(arguments->arena, stack_alignment_tokens);
+    CIRLowerResult stack_alignment_ir =
+        c_lower_to_ir(arguments->arena, S8("system-v-stack-argument-alignment.c"), stack_alignment_tokens, stack_alignment_parse, avx512f_target);
+    BUSTER_TEST(arguments, stack_alignment_tokens.error_count == 0);
+    BUSTER_TEST(arguments, stack_alignment_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, stack_alignment_ir.diagnostic_count == 0);
+    if (stack_alignment_ir.program)
+    {
+        IrProgram* stack_alignment_program = stack_alignment_ir.program;
+        IrModule* stack_alignment_module = stack_alignment_program->modules;
+        CodegenModule stack_alignment_generated = codegen_generate_canonical_module(arguments->arena, stack_alignment_program, stack_alignment_module,
+                                                                                    avx512f_target, (CodegenModuleOptions){0});
+        BUSTER_TEST(arguments, stack_alignment_generated.error == CODEGEN_ERROR_NONE);
+        IrFunction* stack_alignment_function = codegen_test_c_function_find(stack_alignment_module, S8("stack_alignment_calls"));
+        BUSTER_TEST(arguments, stack_alignment_function != 0);
+        bool stack_alignment_offsets_valid = true;
+        bool stack_alignment_area_valid = true;
+        bool found_vector_ninth_layout = false;
+        bool found_wide16_layout = false;
+        bool found_wide64_layout = false;
+        for (u32 instruction_index = 0; stack_alignment_function && instruction_index < stack_alignment_function->instruction_count; instruction_index += 1)
+        {
+            IrInstruction* instruction = stack_alignment_function->instructions + instruction_index;
+            if (instruction->opcode != IR_OPCODE_CALL)
+            {
+                continue;
+            }
+            CodegenCanonicalCallLayout stack_alignment_layout = {0};
+            CodegenError stack_alignment_error = codegen_canonical_x64_call_layout(
+                arguments->arena, stack_alignment_program, stack_alignment_function, instruction, CODEGEN_ABI_X86_64_SYSTEM_V, &stack_alignment_layout);
+            BUSTER_TEST(arguments, stack_alignment_error == CODEGEN_ERROR_NONE);
+            if (stack_alignment_error != CODEGEN_ERROR_NONE)
+            {
+                continue;
+            }
+            u32 widest_stack_argument = CODEGEN_X64_STACK_ALIGNMENT;
+            CodegenCanonicalCallArgument* last_stack_argument = 0;
+            for (u32 argument_index = 0; argument_index < stack_alignment_layout.argument_count; argument_index += 1)
+            {
+                CodegenCanonicalCallArgument* stack_argument = stack_alignment_layout.arguments + argument_index;
+                if (!stack_argument->on_stack)
+                {
+                    continue;
+                }
+                u32 argument_alignment = codegen_canonical_x64_stack_argument_alignment(stack_argument->type);
+                widest_stack_argument = BUSTER_MAX(widest_stack_argument, argument_alignment);
+                stack_alignment_offsets_valid &= (stack_argument->stack_offset & (argument_alignment - 1)) == 0;
+                stack_alignment_offsets_valid &=
+                    stack_argument->stack_offset + stack_argument->stack_part_count * 8 <= stack_alignment_layout.stack_part_count * 8;
+                last_stack_argument = stack_argument;
+            }
+            stack_alignment_area_valid &= stack_alignment_layout.stack_alignment == widest_stack_argument;
+            if (!last_stack_argument)
+            {
+                continue;
+            }
+            // The ninth vector is the only thing on the stack, so it starts the
+            // area; the aggregates follow a seventh integer that took the first
+            // eightbyte and are pushed past it to their own alignment.
+            if (stack_alignment_layout.argument_count == 9)
+            {
+                found_vector_ninth_layout = true;
+                stack_alignment_offsets_valid &= last_stack_argument->stack_offset == 0 && stack_alignment_layout.stack_alignment == 64;
+            }
+            else if (last_stack_argument->type->layout.size == 16)
+            {
+                found_wide16_layout = true;
+                stack_alignment_offsets_valid &= last_stack_argument->stack_offset == 16 && stack_alignment_layout.stack_alignment == 16;
+            }
+            else if (last_stack_argument->type->layout.size == 64)
+            {
+                found_wide64_layout = true;
+                stack_alignment_offsets_valid &= last_stack_argument->stack_offset == 64 && stack_alignment_layout.stack_alignment == 64;
+            }
+        }
+        BUSTER_TEST(arguments, stack_alignment_offsets_valid);
+        BUSTER_TEST(arguments, stack_alignment_area_valid);
+        BUSTER_TEST(arguments, found_vector_ninth_layout);
+        BUSTER_TEST(arguments, found_wide16_layout);
+        BUSTER_TEST(arguments, found_wide64_layout);
+        // An area wanting more than the sixteen bytes the stack pointer is
+        // already worth is reached by rounding the stack pointer down, which
+        // pushing cannot do. `and rsp, -64` is what says the caller did it.
+        bool found_stack_realignment = false;
+        for (u64 byte_index = 0; byte_index + 7 <= stack_alignment_generated.code.length; byte_index += 1)
+        {
+            u8 const* code = stack_alignment_generated.code.pointer + byte_index;
+            u32 realign_mask = 0;
+            memcpy(&realign_mask, code + 3, sizeof(realign_mask));
+            found_stack_realignment |= code[0] == 0x48 && code[1] == 0x81 && code[2] == 0xe4 && realign_mask == (u32)(0 - (u32)64);
+        }
+        BUSTER_TEST(arguments, found_stack_realignment);
+    }
     // Vector operands must be reached through the same frame rebase as every
     // other canonical value. A Win64 function whose scope emits a stack restore
     // -- which every loop body does -- keeps rbp at the bottom of its frame and
