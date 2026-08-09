@@ -2053,15 +2053,34 @@ u64 os_get_resident_memory_size(void)
 #else
     // Resolved at runtime for the same reason GlobalMemoryStatusEx is below:
     // tcc's bundled import stubs do not carry it. K32GetProcessMemoryInfo is
-    // the kernel32 export, so no psapi import library is needed.
-    typedef BOOL(WINAPI * GetProcessMemoryInfoProc)(HANDLE, PROCESS_MEMORY_COUNTERS*, DWORD);
+    // the kernel32 export, so no psapi import library is needed either.
+    //
+    // The counters are declared here rather than taken from psapi.h, which
+    // tcc's bundled headers do not ship: build.c includes this file and is
+    // bootstrapped with tcc, so naming PROCESS_MEMORY_COUNTERS is an "invalid
+    // type" there long before any Windows compiler sees it. The layout is
+    // fixed by the ABI, and `cb` tells the callee which version it received.
+    typedef struct
+    {
+        DWORD cb;
+        DWORD page_fault_count;
+        SIZE_T peak_working_set_size;
+        SIZE_T working_set_size;
+        SIZE_T quota_peak_paged_pool_usage;
+        SIZE_T quota_paged_pool_usage;
+        SIZE_T quota_peak_non_paged_pool_usage;
+        SIZE_T quota_non_paged_pool_usage;
+        SIZE_T pagefile_usage;
+        SIZE_T peak_pagefile_usage;
+    } OsProcessMemoryCounters;
+    typedef BOOL(WINAPI * GetProcessMemoryInfoProc)(HANDLE, OsProcessMemoryCounters*, DWORD);
     GetProcessMemoryInfoProc get_process_memory_info =
         (GetProcessMemoryInfoProc)(void (*)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo");
-    PROCESS_MEMORY_COUNTERS counters = {0};
+    OsProcessMemoryCounters counters = {0};
     counters.cb = sizeof(counters);
     if (get_process_memory_info && get_process_memory_info(GetCurrentProcess(), &counters, sizeof(counters)))
     {
-        result = (u64)counters.WorkingSetSize;
+        result = (u64)counters.working_set_size;
     }
 #endif
     return result;
