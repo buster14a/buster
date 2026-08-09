@@ -20,6 +20,46 @@ typedef struct IrRuntimeStoredValue IrRuntimeStoredValue;
 typedef struct IrRuntimeValue IrRuntimeValue;
 typedef struct IrRuntimeGlobal IrRuntimeGlobal;
 typedef struct IrRuntimeContext IrRuntimeContext;
+typedef struct IrExecutionFunctionCacheEntry IrExecutionFunctionCacheEntry;
+typedef struct IrExecutionFunctionCache IrExecutionFunctionCache;
+
+typedef enum IrExecutionTargetValidation
+{
+    IR_EXECUTION_TARGET_NOT_VALIDATED,
+    IR_EXECUTION_TARGET_VALID,
+    IR_EXECUTION_TARGET_INVALID,
+} IrExecutionTargetValidation;
+
+struct IrExecutionFunctionCacheEntry
+{
+    IrExecutionTarget target;
+    AnalysisEntityId entity;
+    AnalysisInstantiationId instantiation;
+    IrExecutionTargetValidation validation;
+    bool used;
+};
+
+struct IrExecutionFunctionCache
+{
+    IrExecutionFunctionCacheEntry* entries;
+    u32 capacity;
+    u32 count;
+};
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL IrInterpreterTestCounters ir_interpreter_test_counters;
+
+void ir_interpreter_test_counters_reset(void)
+{
+    ir_interpreter_test_counters = (IrInterpreterTestCounters){0};
+}
+
+IrInterpreterTestCounters ir_interpreter_test_counters_read(void)
+{
+    return ir_interpreter_test_counters;
+}
+#endif
+
 struct IrRuntimeValue
 {
     AnalysisEntityId entity;
@@ -61,6 +101,7 @@ struct IrRuntimeGlobal
 struct IrRuntimeContext
 {
     IrRuntimeGlobal* globals;
+    IrExecutionFunctionCache functions;
     u32 global_count;
 };
 
@@ -98,6 +139,9 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_entity_equal(AnalysisEntityId left, Anal
 IrExecutionTarget ir_interpreter_function_find(AnalysisProgram* analysis, IrProgram* program, AnalysisEntityId entity,
                                                                   AnalysisInstantiationId instantiation)
 {
+#if BUSTER_INCLUDE_TESTS
+    ir_interpreter_test_counters.function_lookup_count += 1;
+#endif
     IrExecutionTarget target = {0};
     if (!analysis || !program || analysis->module_count != program->module_count)
     {
@@ -1171,6 +1215,9 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_instruction_shape_valid(IrExecutionFrame
 
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_function_shape_valid(IrExecutionTarget target)
 {
+#if BUSTER_INCLUDE_TESTS
+    ir_interpreter_test_counters.function_validation_count += 1;
+#endif
     IrFunction* function = target.function;
     if (!target.analysis || !function || !function->blocks || !function->values || !function->instructions ||
         function->entry.value >= function->block_count || !ir_interpreter_type_id_valid(target.analysis, function->type))
@@ -1250,14 +1297,124 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_function_shape_valid(IrExecutionTarget t
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL u64 ir_interpreter_function_cache_hash(AnalysisEntityId entity, AnalysisInstantiationId instantiation)
+{
+    u64 hash = ((u64)entity.module.value << 32) | entity.index.value;
+    hash ^= (u64)instantiation.value * UINT64_C(0x9e3779b97f4a7c15);
+    hash ^= hash >> 30;
+    hash *= UINT64_C(0xbf58476d1ce4e5b9);
+    hash ^= hash >> 27;
+    hash *= UINT64_C(0x94d049bb133111eb);
+    return hash ^ (hash >> 31);
+}
+
+BUSTER_GLOBAL_LOCAL IrExecutionFunctionCacheEntry* ir_interpreter_function_cache_slot(IrExecutionFunctionCache* cache, AnalysisEntityId entity,
+                                                                                      AnalysisInstantiationId instantiation)
+{
+    u32 mask = cache->capacity - 1;
+    u32 slot_index = (u32)ir_interpreter_function_cache_hash(entity, instantiation) & mask;
+    IrExecutionFunctionCacheEntry* entry = cache->entries + slot_index;
+    while (entry->used &&
+           (!ir_interpreter_entity_equal(entry->entity, entity) || entry->instantiation.value != instantiation.value))
+    {
+        slot_index = (slot_index + 1) & mask;
+        entry = cache->entries + slot_index;
+    }
+    return entry;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_function_cache_grow(Arena* scratch_arena, IrExecutionFunctionCache* cache)
+{
+    if (!scratch_arena || !cache || cache->capacity > UINT32_MAX / 2)
+    {
+        return false;
+    }
+    u32 capacity = cache->capacity ? cache->capacity * 2 : 16;
+    if (!ir_interpreter_arena_can_allocate_count(scratch_arena, sizeof(IrExecutionFunctionCacheEntry), capacity))
+    {
+        return false;
+    }
+    IrExecutionFunctionCacheEntry* entries = arena_allocate(scratch_arena, IrExecutionFunctionCacheEntry, capacity);
+    memset(entries, 0, sizeof(*entries) * capacity);
+    IrExecutionFunctionCache previous = *cache;
+    cache->entries = entries;
+    cache->capacity = capacity;
+    for (u32 entry_index = 0; entry_index < previous.capacity; entry_index += 1)
+    {
+        IrExecutionFunctionCacheEntry entry = previous.entries[entry_index];
+        if (entry.used)
+        {
+            *ir_interpreter_function_cache_slot(cache, entry.entity, entry.instantiation) = entry;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL IrExecutionTarget ir_interpreter_function_resolve(Arena* scratch_arena, IrRuntimeContext* runtime, AnalysisProgram* analysis,
+                                                                       IrProgram* program, AnalysisEntityId entity,
+                                                                       AnalysisInstantiationId instantiation, IrExecutionTrap* trap_out)
+{
+    IrExecutionTarget target = {0};
+    if (!scratch_arena || !runtime || !trap_out)
+    {
+        if (trap_out)
+        {
+            *trap_out = IR_EXECUTION_TRAP_INVALID_PROGRAM;
+        }
+        return target;
+    }
+    *trap_out = IR_EXECUTION_TRAP_NONE;
+    IrExecutionFunctionCache* cache = &runtime->functions;
+    if (!cache->capacity && !ir_interpreter_function_cache_grow(scratch_arena, cache))
+    {
+        *trap_out = IR_EXECUTION_TRAP_INVALID_PROGRAM;
+        return target;
+    }
+    IrExecutionFunctionCacheEntry* entry = ir_interpreter_function_cache_slot(cache, entity, instantiation);
+    if (!entry->used && cache->count >= cache->capacity / 2)
+    {
+        if (!ir_interpreter_function_cache_grow(scratch_arena, cache))
+        {
+            *trap_out = IR_EXECUTION_TRAP_INVALID_PROGRAM;
+            return target;
+        }
+        entry = ir_interpreter_function_cache_slot(cache, entity, instantiation);
+    }
+    if (!entry->used)
+    {
+        entry->used = true;
+        entry->entity = entity;
+        entry->instantiation = instantiation;
+        entry->target = ir_interpreter_function_find(analysis, program, entity, instantiation);
+        cache->count += 1;
+    }
+    target = entry->target;
+    if (!target.function)
+    {
+        *trap_out = IR_EXECUTION_TRAP_FUNCTION_NOT_FOUND;
+    }
+    else if (target.function->state != IR_FUNCTION_LOWERED)
+    {
+        *trap_out = IR_EXECUTION_TRAP_FUNCTION_NOT_LOWERED;
+    }
+    else
+    {
+        if (entry->validation == IR_EXECUTION_TARGET_NOT_VALIDATED)
+        {
+            entry->validation = ir_interpreter_function_shape_valid(target) ? IR_EXECUTION_TARGET_VALID : IR_EXECUTION_TARGET_INVALID;
+        }
+        if (entry->validation != IR_EXECUTION_TARGET_VALID)
+        {
+            *trap_out = IR_EXECUTION_TRAP_INVALID_PROGRAM;
+        }
+    }
+    return target;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_frame_prepare(Arena* scratch_arena, IrExecutionFrame* frame, IrExecutionTarget target, IrRuntimeValue* arguments,
                                                       u32 argument_count, IrValueId caller_result)
 {
     if (!scratch_arena || !frame || !target.analysis || !target.function || (argument_count && !arguments))
-    {
-        return false;
-    }
-    if (!ir_interpreter_function_shape_valid(target))
     {
         return false;
     }
@@ -2138,23 +2295,16 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
     {
         frames[frame_index] = (IrExecutionFrame){0};
     }
-    IrExecutionTarget entry_target = ir_interpreter_function_find(analysis, program, entry, instantiation);
-    if (!entry_target.function)
+    IrExecutionTrap entry_trap = IR_EXECUTION_TRAP_NONE;
+    IrExecutionTarget entry_target = ir_interpreter_function_resolve(scratch.arena, &runtime, analysis, program, entry, instantiation, &entry_trap);
+    if (entry_trap == IR_EXECUTION_TRAP_FUNCTION_NOT_FOUND)
     {
         arena_set_position(scratch.arena, scratch.position);
         return ir_interpreter_trap(0, IR_EXECUTION_TRAP_FUNCTION_NOT_FOUND, 0);
     }
-    if (entry_target.function->state != IR_FUNCTION_LOWERED)
+    if (entry_trap != IR_EXECUTION_TRAP_NONE)
     {
-        IrExecutionResult result = ir_interpreter_trap(0, IR_EXECUTION_TRAP_FUNCTION_NOT_LOWERED, 0);
-        result.function = entry;
-        result.instantiation = instantiation;
-        arena_set_position(scratch.arena, scratch.position);
-        return result;
-    }
-    if (!ir_interpreter_function_shape_valid(entry_target))
-    {
-        IrExecutionResult result = ir_interpreter_trap(0, IR_EXECUTION_TRAP_INVALID_PROGRAM, 0);
+        IrExecutionResult result = ir_interpreter_trap(0, entry_trap, 0);
         result.function = entry;
         result.instantiation = instantiation;
         arena_set_position(scratch.arena, scratch.position);
@@ -2949,20 +3099,12 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                     callee_instantiation = reference.instantiation;
                 }
             }
-            IrExecutionTarget callee = ir_interpreter_function_find(analysis, program, callee_entity, callee_instantiation);
-            if (!callee.function)
+            IrExecutionTrap callee_trap = IR_EXECUTION_TRAP_NONE;
+            IrExecutionTarget callee =
+                ir_interpreter_function_resolve(scratch.arena, &runtime, analysis, program, callee_entity, callee_instantiation, &callee_trap);
+            if (callee_trap != IR_EXECUTION_TRAP_NONE)
             {
-                operation_trap = IR_EXECUTION_TRAP_FUNCTION_NOT_FOUND;
-                break;
-            }
-            if (callee.function->state != IR_FUNCTION_LOWERED)
-            {
-                operation_trap = IR_EXECUTION_TRAP_FUNCTION_NOT_LOWERED;
-                break;
-            }
-            if (!ir_interpreter_function_shape_valid(callee))
-            {
-                operation_trap = IR_EXECUTION_TRAP_INVALID_PROGRAM;
+                operation_trap = callee_trap;
                 break;
             }
             u32 callee_argument_count = instruction->operand_count - 1;

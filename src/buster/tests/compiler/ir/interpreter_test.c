@@ -425,6 +425,19 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
                                "    }\n"
                                "    return value;\n"
                                "}\n"
+                               "code increment : fn (value: s32) s32\n"
+                               "{\n"
+                               "    return value + 1;\n"
+                               "}\n"
+                               "code repeated_calls : fn () s32\n"
+                               "{\n"
+                               "    data value: s32 = 0;\n"
+                               "    for (data index = 0 .. 8)\n"
+                               "    {\n"
+                               "        value = increment(value);\n"
+                               "    }\n"
+                               "    return value;\n"
+                               "}\n"
                                "code divide : fn (value: s32) s32\n"
                                "{\n"
                                "    return 12 / value;\n"
@@ -666,6 +679,106 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
             indirect_test_call->result = saved_result;
         }
     }
+
+    AnalysisEntity* increment_entity = ir_interpreter_test_entity_find(&scalar_analysis, S8("increment"));
+    AnalysisEntity* repeated_calls_entity = ir_interpreter_test_entity_find(&scalar_analysis, S8("repeated_calls"));
+    BUSTER_TEST(arguments, increment_entity != 0);
+    BUSTER_TEST(arguments, repeated_calls_entity != 0);
+    if (increment_entity && repeated_calls_entity)
+    {
+        IrExecutionTarget increment_target =
+            ir_interpreter_function_find(&scalar_program_analysis, &scalar_program, increment_entity->id, ANALYSIS_INSTANTIATION_ID_INVALID);
+        IrExecutionTarget repeated_calls_target =
+            ir_interpreter_function_find(&scalar_program_analysis, &scalar_program, repeated_calls_entity->id, ANALYSIS_INSTANTIATION_ID_INVALID);
+        IrInstruction* function_reference = 0;
+        IrInstruction* increment_binary = 0;
+        for (u32 instruction_index = 0; repeated_calls_target.function && instruction_index < repeated_calls_target.function->instruction_count;
+             instruction_index += 1)
+        {
+            IrInstruction* instruction = repeated_calls_target.function->instructions + instruction_index;
+            if (instruction->opcode == IR_OPCODE_FUNCTION && instruction->entity.module.value == increment_entity->id.module.value &&
+                instruction->entity.index.value == increment_entity->id.index.value)
+            {
+                function_reference = instruction;
+                break;
+            }
+        }
+        for (u32 instruction_index = 0; increment_target.function && instruction_index < increment_target.function->instruction_count; instruction_index += 1)
+        {
+            IrInstruction* instruction = increment_target.function->instructions + instruction_index;
+            if (instruction->opcode == IR_OPCODE_BINARY)
+            {
+                increment_binary = instruction;
+                break;
+            }
+        }
+        BUSTER_TEST(arguments, function_reference != 0);
+        BUSTER_TEST(arguments, increment_binary != 0);
+
+        ir_interpreter_test_counters_reset();
+        IrExecutionResult repeated = ir_execute(expression_arena, &scalar_program_analysis, &scalar_program, repeated_calls_entity->id,
+                                                ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+        IrInterpreterTestCounters repeated_counters = ir_interpreter_test_counters_read();
+        BUSTER_TEST(arguments, repeated.trap == IR_EXECUTION_TRAP_NONE);
+        BUSTER_TEST(arguments, repeated.has_value && repeated.bits == 8);
+        BUSTER_TEST(arguments, repeated_counters.function_lookup_count == 2);
+        BUSTER_TEST(arguments, repeated_counters.function_validation_count == 2);
+
+        if (function_reference)
+        {
+            AnalysisEntityId saved_entity = function_reference->entity;
+            AnalysisInstantiationId saved_instantiation = function_reference->instantiation;
+            function_reference->entity = ANALYSIS_ENTITY_ID_INVALID;
+            function_reference->instantiation = ANALYSIS_INSTANTIATION_ID_INVALID;
+            ir_interpreter_test_counters_reset();
+            IrExecutionResult missing = ir_execute(expression_arena, &scalar_program_analysis, &scalar_program, repeated_calls_entity->id,
+                                                   ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+            IrInterpreterTestCounters missing_counters = ir_interpreter_test_counters_read();
+            BUSTER_TEST(arguments, missing.trap == IR_EXECUTION_TRAP_FUNCTION_NOT_FOUND);
+            BUSTER_TEST(arguments, missing_counters.function_lookup_count == 2);
+            BUSTER_TEST(arguments, missing_counters.function_validation_count == 1);
+            function_reference->entity = saved_entity;
+            function_reference->instantiation = saved_instantiation;
+        }
+
+        if (increment_target.function)
+        {
+            IrFunctionState saved_state = increment_target.function->state;
+            increment_target.function->state = IR_FUNCTION_NOT_LOWERED;
+            ir_interpreter_test_counters_reset();
+            IrExecutionResult not_lowered = ir_execute(expression_arena, &scalar_program_analysis, &scalar_program, repeated_calls_entity->id,
+                                                       ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+            IrInterpreterTestCounters not_lowered_counters = ir_interpreter_test_counters_read();
+            BUSTER_TEST(arguments, not_lowered.trap == IR_EXECUTION_TRAP_FUNCTION_NOT_LOWERED);
+            BUSTER_TEST(arguments, not_lowered_counters.function_lookup_count == 2);
+            BUSTER_TEST(arguments, not_lowered_counters.function_validation_count == 1);
+            increment_target.function->state = saved_state;
+        }
+
+        if (increment_binary)
+        {
+            u32 saved_operand_count = increment_binary->operand_count;
+            increment_binary->operand_count = 0;
+            ir_interpreter_test_counters_reset();
+            IrExecutionResult malformed_callee = ir_execute(expression_arena, &scalar_program_analysis, &scalar_program, repeated_calls_entity->id,
+                                                             ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+            IrInterpreterTestCounters malformed_counters = ir_interpreter_test_counters_read();
+            BUSTER_TEST(arguments, malformed_callee.trap == IR_EXECUTION_TRAP_INVALID_PROGRAM);
+            BUSTER_TEST(arguments, malformed_counters.function_lookup_count == 2);
+            BUSTER_TEST(arguments, malformed_counters.function_validation_count == 2);
+            increment_binary->operand_count = saved_operand_count;
+
+            ir_interpreter_test_counters_reset();
+            IrExecutionResult restored = ir_execute(expression_arena, &scalar_program_analysis, &scalar_program, repeated_calls_entity->id,
+                                                    ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+            IrInterpreterTestCounters restored_counters = ir_interpreter_test_counters_read();
+            BUSTER_TEST(arguments, restored.trap == IR_EXECUTION_TRAP_NONE);
+            BUSTER_TEST(arguments, restored.has_value && restored.bits == 8);
+            BUSTER_TEST(arguments, restored_counters.function_lookup_count == 2);
+            BUSTER_TEST(arguments, restored_counters.function_validation_count == 2);
+        }
+    }
+
     AnalysisEntity* aggregate_return_entity = ir_interpreter_test_entity_find(&scalar_analysis, S8("aggregate_return"));
     BUSTER_TEST(arguments, aggregate_return_entity != 0);
     if (aggregate_return_entity)
