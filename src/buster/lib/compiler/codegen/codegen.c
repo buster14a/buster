@@ -7524,17 +7524,26 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
                 continue;
             }
             u64 copy_size = call_argument->type->layout.size;
-            if (!call_argument->type->layout.resolved || !copy_size || copy_size > UINT32_MAX || call_argument->type->layout.alignment > 16)
+            // The same question a System V stack argument asks, with the
+            // outgoing area's own floor under it: this slot is measured from
+            // the stack pointer, so nothing below sixteen buys anything.
+            u64 copy_alignment =
+                BUSTER_MAX(codegen_canonical_x64_stack_argument_alignment(call_argument->type), (u32)CODEGEN_X64_STACK_ALIGNMENT);
+            if (!call_argument->type->layout.resolved || !copy_size || copy_size > UINT32_MAX)
             {
-                return call_argument->type->layout.alignment > 16 ? CODEGEN_ERROR_UNSUPPORTED_ABI : CODEGEN_ERROR_INVALID_IR;
+                return CODEGEN_ERROR_INVALID_IR;
             }
-            u32 copy_alignment = 16;
-            u64 remainder = copy_cursor & (copy_alignment - 1);
+            // The slot starts sixteen-aligned like the stack pointer it is
+            // measured from; a wider argument -- a 512-bit vector wants sixty
+            // four -- is rounded up to its own alignment at the call, so the
+            // reserve carries the bytes that round-up can consume.
+            u64 copy_slack = copy_alignment - CODEGEN_X64_STACK_ALIGNMENT;
+            u64 remainder = copy_cursor & (CODEGEN_X64_STACK_ALIGNMENT - 1);
             if (remainder)
             {
-                copy_cursor += copy_alignment - remainder;
+                copy_cursor += CODEGEN_X64_STACK_ALIGNMENT - remainder;
             }
-            if (copy_cursor > UINT32_MAX || copy_size > UINT32_MAX - copy_cursor)
+            if (copy_cursor > UINT32_MAX || copy_size > UINT32_MAX - copy_cursor || copy_slack > UINT32_MAX - copy_cursor - copy_size)
             {
                 return CODEGEN_ERROR_CAPACITY;
             }
@@ -7542,9 +7551,9 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
             {
                 call_argument->copy_offset = (u32)copy_cursor;
                 call_argument->copy_size = (u32)copy_size;
-                call_argument->copy_alignment = copy_alignment;
+                call_argument->copy_alignment = (u32)copy_alignment;
             }
-            copy_cursor += copy_size;
+            copy_cursor += copy_size + copy_slack;
         }
         if (copy_cursor > UINT32_MAX - 15)
         {
@@ -8999,9 +9008,14 @@ BUSTER_GLOBAL_LOCAL u32 codegen_canonical_copy_chunk(u64 remaining, u64 source_o
     return 1;
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_rsp_address(CodegenBuffer* buffer, u32 register_number, u32 offset)
+// The address of an outgoing-argument slot. The stack pointer is only sixteen
+// aligned through the body, so a slot an argument needs more alignment than
+// that is reserved with room to spare and rounded up here, the same lea/add/and
+// an over-aligned local is given.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_rsp_address(CodegenBuffer* buffer, u32 register_number, u32 offset, u32 alignment)
 {
-    if (!buffer || register_number > 15 || offset > INT32_MAX)
+    if (!buffer || register_number > 15 || offset > INT32_MAX ||
+        (alignment > CODEGEN_X64_STACK_ALIGNMENT && (alignment > INT32_MAX || (alignment & (alignment - 1)))))
     {
         return false;
     }
@@ -9010,6 +9024,17 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_rsp_address(CodegenBuffer* buffer
     codegen_emit_u8(buffer, (u8)(0x84 | ((register_number & 7) << 3)));
     codegen_emit_u8(buffer, 0x24);
     codegen_emit_u32(buffer, offset);
+    if (alignment > CODEGEN_X64_STACK_ALIGNMENT)
+    {
+        codegen_emit_u8(buffer, register_number >= 8 ? 0x49 : 0x48);
+        codegen_emit_u8(buffer, 0x81);
+        codegen_emit_u8(buffer, (u8)(0xc0 | (register_number & 7)));
+        codegen_emit_u32(buffer, alignment - 1);
+        codegen_emit_u8(buffer, register_number >= 8 ? 0x49 : 0x48);
+        codegen_emit_u8(buffer, 0x81);
+        codegen_emit_u8(buffer, (u8)(0xe0 | (register_number & 7)));
+        codegen_emit_u32(buffer, 0 - alignment);
+    }
     return buffer->error == CODEGEN_ERROR_NONE;
 }
 
@@ -9027,12 +9052,26 @@ BUSTER_GLOBAL_LOCAL s32 codegen_canonical_x64_rebase_frame_displacement(CodegenB
     return (s32)rebased;
 }
 
+// The caller-owned copy of one indirectly passed argument, moved from its frame
+// slot into the outgoing area an eightbyte at a time. An argument that wants
+// more than the stack pointer's sixteen bytes of alignment is written through
+// r11 instead, holding the rounded-up address of its over-reserved slot: r11 is
+// volatile, carries no argument, and every copy re-materializes it.
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_copy_frame_to_rsp(CodegenBuffer* buffer, u32 source_offset, u32 frame_base_offset,
-                                                                 u32 destination_offset, u32 size)
+                                                                 u32 destination_offset, u32 size, u32 alignment)
 {
     if (!buffer || !size || source_offset > INT32_MAX || destination_offset > INT32_MAX)
     {
         return false;
+    }
+    bool through_scratch = alignment > CODEGEN_X64_STACK_ALIGNMENT;
+    if (through_scratch)
+    {
+        if (!codegen_canonical_x64_rsp_address(buffer, X64_REGISTER_R11, destination_offset, alignment))
+        {
+            return false;
+        }
+        destination_offset = 0;
     }
     u64 copied = 0;
     while (copied < size)
@@ -9060,17 +9099,24 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_copy_frame_to_rsp(CodegenBuffer* 
         }
         codegen_emit_u8(buffer, 0x85);
         codegen_emit_u32(buffer, (u32)source);
-        if (chunk == 8)
-        {
-            codegen_emit_u8(buffer, 0x48);
-        }
-        else if (chunk == 2)
+        if (chunk == 2)
         {
             codegen_emit_u8(buffer, 0x66);
         }
+        if (chunk == 8 || through_scratch)
+        {
+            codegen_emit_u8(buffer, (u8)((chunk == 8 ? 0x48 : 0x40) | (through_scratch ? 0x01 : 0x00)));
+        }
         codegen_emit_u8(buffer, chunk == 1 ? 0x88 : 0x89);
-        codegen_emit_u8(buffer, 0x84);
-        codegen_emit_u8(buffer, 0x24);
+        if (through_scratch)
+        {
+            codegen_emit_u8(buffer, 0x83);
+        }
+        else
+        {
+            codegen_emit_u8(buffer, 0x84);
+            codegen_emit_u8(buffer, 0x24);
+        }
         codegen_emit_u32(buffer, (u32)destination);
         if (buffer->error != CODEGEN_ERROR_NONE)
         {
@@ -9354,6 +9400,24 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_value_is_global_place(IrFunction* fun
     return definition.value < function->instruction_count && function->instructions[definition.value].opcode == IR_OPCODE_GLOBAL;
 }
 
+// What the chunk loops below can encode for one value, and the reserve the
+// module code buffer has to add for it. A value no wider than an eightbyte is
+// already covered by the flat per-instruction reserve; a wider one is moved a
+// chunk at a time, so its encoding grows with the type instead of with the
+// instruction count. Both ends of every copy are eightbyte-aligned frame slots
+// advanced by the same offset, so the loop takes eightbytes until the tail,
+// which splits into at most a four, a two and a one. Each chunk costs a load
+// and a store. A value that names a global is only ever its address, however
+// big the type behind it is, so it is asked about with a size of zero.
+BUSTER_GLOBAL_LOCAL u64 codegen_canonical_copy_capacity(u64 size, u64 chunk_capacity)
+{
+    if (size <= 8)
+    {
+        return 0;
+    }
+    return ((size + 7) / 8 + (size % 8 ? 3 : 0)) * chunk_capacity;
+}
+
 CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options)
 {
     CodegenModule result = {
@@ -9509,6 +9573,15 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     u64 debug_location_capacity_64 = 0;
     u64 stack_probe_capacity = 0;
     u64 aligned_argument_capacity = 0;
+    u64 chunk_capacity = target.cpu_arch == CPU_ARCH_AARCH64 ? 96 : 32;
+    u64 copy_capacity = 0;
+    u32 maximum_value_count = 0;
+    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+    {
+        maximum_value_count = BUSTER_MAX(maximum_value_count, module->functions[function_index].value_count);
+    }
+    TemporalArena copy_scratch = scratch_begin(0, 0);
+    u32* value_copy_capacity = arena_allocate(copy_scratch.arena, u32, maximum_value_count);
     for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
         IrFunction* function = module->functions + function_index;
@@ -9518,18 +9591,23 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         if (debug_location_capacity_64 > UINT32_MAX)
         {
             result.error = CODEGEN_ERROR_CAPACITY;
+            scratch_end(copy_scratch);
             return result;
         }
         u64 function_value_bytes = 0;
+        bool function_copies_wide_value = false;
         for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
         {
             IrType* value_type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
             if (!value_type || !value_type->layout.resolved || value_type->layout.size > UINT32_MAX - 7)
             {
                 result.error = CODEGEN_ERROR_INVALID_IR;
+                scratch_end(copy_scratch);
                 return result;
             }
             bool global_place = codegen_canonical_value_is_global_place(function, value_index);
+            value_copy_capacity[value_index] = (u32)codegen_canonical_copy_capacity(global_place ? 0 : value_type->layout.size, chunk_capacity);
+            function_copies_wide_value |= value_copy_capacity[value_index] != 0;
             u64 slot_size = global_place ? 8 : (value_type->layout.size + 7) & ~(u64)7;
             slot_size = BUSTER_MAX(slot_size, 8u);
             u64 slot_alignment = global_place ? 8 : BUSTER_MAX(BUSTER_MAX(value_type->layout.alignment, function->values[value_index].alignment), 8u);
@@ -9562,7 +9640,33 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         }
         u64 probe_count = (function_value_bytes + 4079) / 4080;
         stack_probe_capacity += probe_count * 11;
+        // An instruction can move its own value and every operand it reads, and
+        // the ones wider than an eightbyte are what the flat reserve above
+        // misses: two of them by value is already more code than the whole
+        // module was given. A function holding none of them -- the loop above
+        // already knows -- skips the walk entirely.
+        if (!function_copies_wide_value)
+        {
+            continue;
+        }
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            IrInstruction* instruction = function->instructions + instruction_index;
+            if (instruction->result.value < function->value_count)
+            {
+                copy_capacity += value_copy_capacity[instruction->result.value];
+            }
+            for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+            {
+                u32 operand = instruction->operands[operand_index].value;
+                if (operand < function->value_count)
+                {
+                    copy_capacity += value_copy_capacity[operand];
+                }
+            }
+        }
     }
+    scratch_end(copy_scratch);
     u32 debug_location_capacity = (u32)debug_location_capacity_64;
     u32 global_relocation_count = 0;
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
@@ -9627,8 +9731,15 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         }
     }
     u64 instruction_capacity = target.cpu_arch == CPU_ARCH_AARCH64 ? 128 : 48;
-    u64 capacity = (u64)instruction_count * instruction_capacity + (u64)module->function_count * 64 + stack_probe_capacity + aligned_argument_capacity +
-                   assembly_capacity * 4 + assembly_alignment_capacity + 64;
+    u64 capacity = (u64)instruction_count * instruction_capacity + copy_capacity + (u64)module->function_count * 64 + stack_probe_capacity +
+                   aligned_argument_capacity + assembly_capacity * 4 + assembly_alignment_capacity + 64;
+    // Every offset the module hands out is a u32, so a buffer past that is
+    // unusable however much of it the arena would give.
+    if (capacity > UINT32_MAX)
+    {
+        result.error = CODEGEN_ERROR_CAPACITY;
+        return result;
+    }
     CodegenBuffer buffer = {
         .bytes = arena_allocate(arena, u8, capacity),
         .capacity = capacity,
@@ -9661,9 +9772,16 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             continue;
         }
         u64 alignment = target.cpu_arch == CPU_ARCH_AARCH64 ? 4 : 16;
-        while (buffer.count % alignment)
+        // A full buffer stops accepting bytes without advancing its count, so
+        // padding to an alignment it can no longer reach never terminates.
+        while (buffer.error == CODEGEN_ERROR_NONE && buffer.count % alignment)
         {
             codegen_emit_u8(&buffer, target.cpu_arch == CPU_ARCH_X86_64 ? 0x90 : 0);
+        }
+        if (buffer.error != CODEGEN_ERROR_NONE)
+        {
+            result.error = buffer.error;
+            return result;
         }
         result.entries[result.entry_count++] = (CodegenModuleEntry){
             .entity = ANALYSIS_ENTITY_ID_INVALID,
@@ -9889,6 +10007,11 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 CodegenError call_error = codegen_canonical_x64_call_layout(arena, program, function, instruction, result.abi, call_layout);
                 if (call_error != CODEGEN_ERROR_NONE)
                 {
+                    // This pass runs before the emitting one that keeps the
+                    // failing instruction up to date, so it has to name its own
+                    // call or the diagnostic blames whatever ran last.
+                    result.failed_instruction = instruction->id;
+                    result.failed_opcode = instruction->opcode;
                     result.error = call_error;
                     return result;
                 }
@@ -12012,8 +12135,14 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                     continue;
                                 }
                                 u32 argument_offset = value_offsets[instruction->operands[argument_index + 1].value];
+                                // No rounding here: a System V stack argument
+                                // is already at an offset respecting its own
+                                // alignment inside an area the call aligned to
+                                // the widest of them, so the slot address is
+                                // whatever the stack pointer already is.
                                 if (!codegen_canonical_x64_copy_frame_to_rsp(&buffer, argument_offset, canonical_x64_frame_base_offset,
-                                                                             call_argument->stack_offset, call_argument->stack_part_count * 8))
+                                                                             call_argument->stack_offset, call_argument->stack_part_count * 8,
+                                                                             CODEGEN_X64_STACK_ALIGNMENT))
                                 {
                                     result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_CAPACITY;
                                     return result;
@@ -12039,7 +12168,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                     (value_offsets[instruction->operands[argument_index + 1].value] > UINT32_MAX - call_argument->copy_size ||
                                      !codegen_canonical_x64_copy_frame_to_rsp(&buffer, value_offsets[instruction->operands[argument_index + 1].value],
                                                                                canonical_x64_frame_base_offset, call_argument->copy_offset,
-                                                                               call_argument->copy_size)))
+                                                                               call_argument->copy_size, call_argument->copy_alignment)))
                                 {
                                     result.error = CODEGEN_ERROR_CAPACITY;
                                     return result;
@@ -12083,7 +12212,8 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 IrValueId argument = instruction->operands[argument_index + 1];
                                 if (arguments[argument_index].windows_indirect)
                                 {
-                                    if (!codegen_canonical_x64_rsp_address(&buffer, X64_REGISTER_RAX, arguments[argument_index].copy_offset))
+                                    if (!codegen_canonical_x64_rsp_address(&buffer, X64_REGISTER_RAX, arguments[argument_index].copy_offset,
+                                                                            arguments[argument_index].copy_alignment))
                                     {
                                         result.error = CODEGEN_ERROR_CAPACITY;
                                         return result;
@@ -12206,7 +12336,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             if (call_argument->windows_indirect)
                             {
                                 u8 reg = registers[register_index++];
-                                if (!codegen_canonical_x64_rsp_address(&buffer, reg, call_argument->copy_offset))
+                                if (!codegen_canonical_x64_rsp_address(&buffer, reg, call_argument->copy_offset, call_argument->copy_alignment))
                                 {
                                     result.error = CODEGEN_ERROR_CAPACITY;
                                     return result;

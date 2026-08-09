@@ -12,6 +12,43 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-10d` (Linux x86_64, Zen 4 7940HS; not a throughput audit — a
+correctness fix costed against the gate, recorded here so the next audit does
+not read the step as a regression of its own. **Gate: stage 1 `5.3537 G` to
+`5.3955 G` instructions (`+0.78%`)** against the parent commit `2997c5a`, not
+against `2026-08-10c`'s tree; fixed point deterministic, `test_all` green in
+Release and in sanitized Debug.)
+
+- **What moved.** The module code buffer was reserved at a flat 48 bytes per
+  IR instruction on x86-64 (128 on aarch64), but an instruction that moves an
+  aggregate encodes a load and a store per eightbyte, so its size grows with
+  the type and not with the instruction count. Two 64-byte vectors by value
+  was already more code than a whole small module was given, and the buffer
+  ran out. `codegen_generate_canonical_module` now adds a reserve for the
+  values wider than an eightbyte that each instruction can move — its own and
+  every operand it reads — which costs one walk of the instruction and operand
+  arrays per function that holds such a value.
+- **What it cost and why it was paid anyway.** The walk is the whole `+0.78%`:
+  a `perf` line profile of one stage-1 compile splits it about evenly between
+  filling the per-value reserve alongside the frame-slot loop that already
+  reads every value's type, and the instruction and operand walk itself. Two
+  cheaper shapes were measured and rejected — recomputing each operand's type
+  in the walk instead of tabling it per value is worse, and splitting the table
+  fill into a second value pass taken only by functions that hold a wide value
+  is also worse, because most C functions hold one. Those two were measured
+  before this work was rebased, against the pre-`2026-08-09h` main, where the
+  shipped shape cost `+0.96%` (`5.1329 G` to `5.1822 G`) against the other
+  two's `+1.59%` and `+1.27%`; the ordering is what the numbers are for, not
+  the absolute values. The alternative that costs nothing in the
+  common case is to keep the cheap estimate and generate the module again with
+  more room when it runs out; it was left untaken because
+  `CODEGEN_ERROR_CAPACITY` is also raised for reasons a bigger buffer cannot
+  fix (an out-of-range frame displacement, a frame past `UINT32_MAX`), so a
+  retry needs a signal that the code buffer specifically overflowed, and there
+  is no return path in that function that carries one today. **If this
+  percent is wanted back, that is the shape to build**: one flag on
+  `CodegenBuffer` set only where `codegen_emit_u8` refuses a byte, surfaced on
+  the result, and the estimate reverts to the flat reserve.
 `2026-08-10c` (Linux x86_64, Zen 4 7940HS; the structural buy-back the
 `2026-08-09g` entry recorded as its next step — IR source ranges stop
 carrying line and column, and the four consumers that print one recover it
