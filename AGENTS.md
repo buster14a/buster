@@ -604,7 +604,7 @@ has hard design constraints:
 - New semantic or IR behavior needs focused unit coverage in addition to the
   fixture-wide pipeline test. IR tests must validate structural invariants, not
   merely check that generation returned a non-null pointer.
-- The single typed IR must not retain parser/AST operation identifiers.
+- The typed IR must not retain parser/AST operation identifiers.
   Unary and binary instructions use IR-native operations that encode the
   semantic domain (integer, float, boolean, or pointer) and signed behavior;
   the IR value type supplies the width.
@@ -616,20 +616,19 @@ has hard design constraints:
   indexing, and arithmetic. Range and reverse operations produce immutable
   iterable values; stateful iterator begin/next/value instructions do not
   belong in the IR.
-- Native code generation consumes the typed IR directly; do not introduce a
-  second machine IR. The Buster-language backends
-  (`codegen_generate_x86_64`/`codegen_generate_aarch64`) perform a conservative
-  linear-scan allocation of same-block scalar IR values to backend-owned
-  caller-saved registers. Values crossing calls or control-flow edges,
-  aggregates, and excess live values retain stack slots as spill storage; block
-  parameters are resolved with parallel edge copies. The canonical path
-  (`codegen_generate_canonical_module`, used by the C frontend and therefore by
-  self-hosting) runs **no** register allocation: every value owns a frame slot
-  and every operand is reloaded from it. Its only register reuse is a local
-  peephole that drops an x86-64 `rax` frame reload when the immediately
-  preceding emission was the store of `rax` to that same slot, tracked by
-  buffer position and reset at every block start so no branch can reach the
-  elided load. Codegen publishes format-neutral function
+- Native code generation consumes the typed IR directly. The Buster-language
+  backends (`codegen_generate_x86_64`/`codegen_generate_aarch64`) perform a
+  conservative linear-scan allocation of same-block scalar IR values to
+  backend-owned caller-saved registers. Values crossing calls or control-flow
+  edges, aggregates, and excess live values retain stack slots as spill
+  storage; block parameters are resolved with parallel edge copies. The
+  canonical path (`codegen_generate_canonical_module`, used by the C frontend
+  and therefore by self-hosting) runs **no** register allocation: every value
+  owns a frame slot and every operand is reloaded from it. Its only register
+  reuse is a local peephole that drops an x86-64 `rax` frame reload when the
+  immediately preceding emission was the store of `rax` to that same slot,
+  tracked by buffer position and reset at every block start so no branch can
+  reach the elided load. Codegen publishes format-neutral function
   descriptors with exact code ranges, ordered prolog unwind actions, and
   AArch64 epilog offsets; object formats consume those descriptors instead of
   inferring sizes from the next symbol. Unwind `nop` actions describe prolog
