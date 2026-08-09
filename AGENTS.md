@@ -822,9 +822,17 @@ has hard design constraints:
   remains a DBI module stream, symbol subsections become that module's symbol
   region, the remaining subsections its C13 region, and checksum entries are
   remapped from object-local string tables onto the PDB `/names` stream. TPI
-  records are merged into the shared type stream. Function and global symbol
-  locations use their actual final PE section number and section-relative
-  offset across text, read-only data, writable data, BSS, and TLS. Readers need
+  records are merged into the shared type stream, but only after every record
+  has been rewritten through its own module's index map: type indices are
+  object-local, so two records can be byte-identical while naming different
+  types, and comparing raw `.debug$T` bytes silently gives one module's symbols
+  the other module's types. Merging then runs over the rewritten records, whose
+  references are global and therefore comparable. Records reference each other
+  in both directions — `LF_STRUCTURE` names an `LF_FIELDLIST` that comes after
+  it — so nothing may assume a record only refers to lower indices. Function
+  and global symbol locations use their actual final PE section number and
+  section-relative offset across text, read-only data, writable data, BSS, and
+  TLS. Readers need
   more than the streams they will read — an empty globals or publics stream
   still needs its GSI hash header, and the DBI needs an edit-and-continue name
   table, or module iteration fails. Windows links with debug enabled derive a

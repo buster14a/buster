@@ -22,6 +22,22 @@ enum
     PDB_TEST_S_LOCAL = 0x113e,
     PDB_TEST_S_GPROC32 = 0x1110,
     PDB_TEST_S_DEFRANGE_FRAMEPOINTER_REL = 0x1142,
+    PDB_TEST_STREAM_TPI = 2,
+    PDB_TEST_TPI_HEADER_SIZE = 56,
+    PDB_TEST_LF_MODIFIER = 0x1001,
+    PDB_TEST_LF_POINTER = 0x1002,
+    PDB_TEST_T_INT32 = 0x0074,
+    PDB_TEST_T_REAL32 = 0x0040,
+    PDB_TEST_TYPE_INDEX_BASE = 0x1000,
+};
+
+// A hand-built .debug$T blob, sized for the handful of records the merge test
+// needs so no growth logic is involved.
+typedef struct PdbTestTypeBuffer PdbTestTypeBuffer;
+struct PdbTestTypeBuffer
+{
+    u8 bytes[64];
+    u64 count;
 };
 
 BUSTER_F_DECL u32 pdb_read_u32(ByteSlice bytes, u64 offset);

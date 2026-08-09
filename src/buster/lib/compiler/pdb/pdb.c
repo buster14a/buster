@@ -2,6 +2,7 @@
 #include <buster/lib/string.h>
 #include <buster/lib/integer.h>
 #include <buster/lib/file.h>
+#include <buster/lib/hash.h>
 
 #include <string.h>
 
@@ -44,6 +45,10 @@ enum
     PDB_PUBLICS_HEADER_SIZE = 28,
     PDB_NAMED_STREAM_CAPACITY = 8,
     PDB_CHECKSUM_ENTRY_SIZE = 8,
+    // A merge round can only expose new matches one level up the type graph,
+    // so rounds are capped rather than run to a fixed point. The cap bounds
+    // how much merging happens, never whether the result is correct.
+    PDB_TYPE_MERGE_ROUND_LIMIT = 8,
 };
 
 #define PDB_STRING_TABLE_SIGNATURE 0xeffeeffeu
@@ -209,16 +214,7 @@ struct PdbTypeRecord
 {
     ByteSlice bytes;
     u32 module_index;
-    u32 local_index;
-};
-
-typedef struct PdbUniqueType PdbUniqueType;
-struct PdbUniqueType
-{
-    ByteSlice bytes;
-    u32 module_index;
-    u32 local_index;
-    u32 type_index;
+    u8 reserved[4];
 };
 
 BUSTER_GLOBAL_LOCAL PdbCodeviewSplit pdb_split_codeview(Arena* arena, ByteSlice blob)
@@ -529,7 +525,7 @@ BUSTER_GLOBAL_LOCAL bool pdb_rewrite_type_record(PdbTypeModule* module, ByteSlic
     }
 }
 
-BUSTER_GLOBAL_LOCAL bool pdb_collect_type_records(ByteSlice types, u32 module_index, PdbTypeRecord* records, u32* cursor)
+BUSTER_GLOBAL_LOCAL bool pdb_collect_type_records(ByteSlice types, u32 module_index, PdbTypeRecord* records, u32* cursor, u32 capacity)
 {
     if (!types.length)
     {
@@ -540,7 +536,6 @@ BUSTER_GLOBAL_LOCAL bool pdb_collect_type_records(ByteSlice types, u32 module_in
         return false;
     }
     u64 offset = 4;
-    u32 local_index = 0;
     while (offset < types.length)
     {
         u16 length = 0;
@@ -550,14 +545,13 @@ BUSTER_GLOBAL_LOCAL bool pdb_collect_type_records(ByteSlice types, u32 module_in
         }
         u64 record_size = 2 + length;
         u64 aligned = (record_size + 3) & ~UINT64_C(3);
-        if (aligned > types.length - offset || local_index == UINT32_MAX)
+        if (aligned > types.length - offset || *cursor == capacity)
         {
             return false;
         }
         records[*cursor] = (PdbTypeRecord){
             .bytes = {.pointer = types.pointer + offset, .length = aligned},
             .module_index = module_index,
-            .local_index = local_index++,
         };
         *cursor += 1;
         offset += aligned;
@@ -704,9 +698,13 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
 
     u32 source_file_count = total_source_file_count;
 
-    // CodeView type indices are local to each object.  Build one deterministic
-    // map per module, deduplicate byte-identical LF records, then rewrite the
-    // references in both the shared TPI records and each module's symbols.
+    // CodeView type indices are local to each object, so give every
+    // module-local record its own provisional global index first and rewrite
+    // each record through the map of the module it came from.  Only then can
+    // records be compared: two records may be byte-identical while their local
+    // indices name different types, and merging those raw bytes would leave one
+    // module's symbols pointing at a record rewritten with the other module's
+    // map.
     u32 total_type_record_count = 0;
     PdbTypeModule* type_modules = arena_allocate(arena, PdbTypeModule, module_count);
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
@@ -717,7 +715,7 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         {
             return result;
         }
-        if (total_type_record_count > UINT32_MAX - count)
+        if (count > UINT32_MAX - 0x1000 - total_type_record_count)
         {
             return result;
         }
@@ -725,7 +723,7 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         type_modules[module_index].local_to_global = arena_allocate(arena, u32, count ? count : 1);
         for (u32 type_index = 0; type_index < count; type_index += 1)
         {
-            type_modules[module_index].local_to_global[type_index] = UINT32_MAX;
+            type_modules[module_index].local_to_global[type_index] = 0x1000 + total_type_record_count + type_index;
         }
         total_type_record_count += count;
     }
@@ -733,64 +731,120 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     u32 record_cursor = 0;
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
     {
-        if (!pdb_collect_type_records(modules[module_index].codeview_types, module_index, records, &record_cursor))
+        if (!pdb_collect_type_records(modules[module_index].codeview_types, module_index, records, &record_cursor, total_type_record_count))
         {
             return result;
         }
     }
-    PdbUniqueType* unique_types = arena_allocate(arena, PdbUniqueType, total_type_record_count ? total_type_record_count : 1);
-    u32 unique_type_count = 0;
-    for (u32 record_index = 0; record_index < record_cursor; record_index += 1)
+    if (record_cursor != total_type_record_count)
+    {
+        return result;
+    }
+    // Normalize: each record is copied and rewritten through its own module's
+    // map, so from here on every reference is a global index and the bytes of
+    // two records mean the same thing exactly when they compare equal.
+    ByteSlice* normalized = arena_allocate(arena, ByteSlice, total_type_record_count ? total_type_record_count : 1);
+    for (u32 record_index = 0; record_index < total_type_record_count; record_index += 1)
     {
         PdbTypeRecord* record = records + record_index;
-        u32 global_type_index = UINT32_MAX;
-        for (u32 unique_index = 0; unique_index < unique_type_count; unique_index += 1)
+        u8* bytes = arena_allocate(arena, u8, record->bytes.length ? record->bytes.length : 1);
+        if (record->bytes.length)
         {
-            PdbUniqueType* candidate = unique_types + unique_index;
-            if (candidate->bytes.length == record->bytes.length &&
-                (!candidate->bytes.length || memcmp(candidate->bytes.pointer, record->bytes.pointer, candidate->bytes.length) == 0))
-            {
-                global_type_index = candidate->type_index;
-                break;
-            }
+            memcpy(bytes, record->bytes.pointer, record->bytes.length);
         }
-        if (global_type_index == UINT32_MAX)
+        normalized[record_index] = (ByteSlice){.pointer = bytes, .length = record->bytes.length};
+        if (!pdb_rewrite_type_record(type_modules + record->module_index, normalized[record_index]))
         {
-            if (unique_type_count > UINT32_MAX - 0x1000)
+            return result;
+        }
+    }
+    // Merge the normalized records.  Each round hashes the survivors, keeps the
+    // first of every equal group, and renumbers the references of what is left;
+    // that renumbering can make records one level up the type graph equal, so
+    // rounds repeat until one merges nothing.  The CodeView emitter references
+    // records both forwards and backwards, so cyclic groups simply stop merging
+    // instead of resolving — every round is sound on its own.
+    u32 slot_count = total_type_record_count ? total_type_record_count : 1;
+    u32* live = arena_allocate(arena, u32, slot_count);
+    u32* survivors = arena_allocate(arena, u32, slot_count);
+    u32* round_map = arena_allocate(arena, u32, slot_count);
+    u32* final_index = arena_allocate(arena, u32, slot_count);
+    for (u32 record_index = 0; record_index < total_type_record_count; record_index += 1)
+    {
+        live[record_index] = record_index;
+        final_index[record_index] = 0x1000 + record_index;
+    }
+    u32 live_count = total_type_record_count;
+    u64 bucket_capacity = 16;
+    while (bucket_capacity < (u64)total_type_record_count * 2)
+    {
+        bucket_capacity *= 2;
+    }
+    u32* buckets = arena_allocate(arena, u32, bucket_capacity);
+    u64* bucket_hashes = arena_allocate(arena, u64, bucket_capacity);
+    for (u32 round = 0; round < PDB_TYPE_MERGE_ROUND_LIMIT && live_count; round += 1)
+    {
+        memset(buckets, 0xff, bucket_capacity * sizeof(*buckets));
+        u32 survivor_count = 0;
+        for (u32 position = 0; position < live_count; position += 1)
+        {
+            ByteSlice bytes = normalized[live[position]];
+            u64 hash = buster_hash_64(bytes.pointer, bytes.length);
+            u64 bucket = hash & (bucket_capacity - 1);
+            u32 match = UINT32_MAX;
+            while (buckets[bucket] != UINT32_MAX)
+            {
+                ByteSlice candidate = normalized[survivors[buckets[bucket]]];
+                if (bucket_hashes[bucket] == hash && candidate.length == bytes.length &&
+                    (!bytes.length || memcmp(candidate.pointer, bytes.pointer, bytes.length) == 0))
+                {
+                    match = buckets[bucket];
+                    break;
+                }
+                bucket = (bucket + 1) & (bucket_capacity - 1);
+            }
+            if (match == UINT32_MAX)
+            {
+                match = survivor_count;
+                survivors[survivor_count++] = live[position];
+                buckets[bucket] = match;
+                bucket_hashes[bucket] = hash;
+            }
+            round_map[position] = 0x1000 + match;
+        }
+        if (survivor_count == live_count)
+        {
+            break;
+        }
+        PdbTypeModule merged = {.local_to_global = round_map, .count = live_count};
+        for (u32 position = 0; position < survivor_count; position += 1)
+        {
+            if (!pdb_rewrite_type_record(&merged, normalized[survivors[position]]))
             {
                 return result;
             }
-            u8* bytes = arena_allocate(arena, u8, record->bytes.length ? record->bytes.length : 1);
-            if (record->bytes.length)
-            {
-                memcpy(bytes, record->bytes.pointer, record->bytes.length);
-            }
-            global_type_index = 0x1000 + unique_type_count;
-            unique_types[unique_type_count++] = (PdbUniqueType){
-                .bytes = {.pointer = bytes, .length = record->bytes.length},
-                .module_index = record->module_index,
-                .local_index = record->local_index,
-                .type_index = global_type_index,
-            };
         }
-        type_modules[record->module_index].local_to_global[record->local_index] = global_type_index;
-    }
-    for (u32 unique_index = 0; unique_index < unique_type_count; unique_index += 1)
-    {
-        PdbUniqueType* type = unique_types + unique_index;
-        if (!pdb_rewrite_type_record(type_modules + type->module_index, type->bytes))
+        for (u32 record_index = 0; record_index < total_type_record_count; record_index += 1)
         {
-            return result;
+            final_index[record_index] = round_map[final_index[record_index] - 0x1000];
         }
+        memcpy(live, survivors, (u64)survivor_count * sizeof(*live));
+        live_count = survivor_count;
     }
+    // Compose each module's local map with the merge result, then point its
+    // symbols at the surviving records.
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
     {
-        if (!pdb_rewrite_symbol_types(splits[module_index].symbols, type_modules + module_index))
+        PdbTypeModule* type_module = type_modules + module_index;
+        for (u32 type_index = 0; type_index < type_module->count; type_index += 1)
+        {
+            type_module->local_to_global[type_index] = final_index[type_module->local_to_global[type_index] - 0x1000];
+        }
+        if (!pdb_rewrite_symbol_types(splits[module_index].symbols, type_module))
         {
             return result;
         }
     }
-
     u64 names_key_capacity = 16;
     u32 stream_count = PDB_STREAM_COUNT + (module_count > 1 ? module_count - 1 : 0);
     PdbBuffer* streams = arena_allocate(arena, PdbBuffer, stream_count);
@@ -828,14 +882,14 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     // records have already been deduplicated and rewritten above; IPI remains
     // an empty but valid stream until the compiler emits id records.
     u64 type_record_bytes = 0;
-    for (u32 unique_index = 0; unique_index < unique_type_count; unique_index += 1)
+    for (u32 live_position = 0; live_position < live_count; live_position += 1)
     {
-        PdbUniqueType* type = unique_types + unique_index;
-        if (type_record_bytes > UINT32_MAX - type->bytes.length)
+        ByteSlice type = normalized[live[live_position]];
+        if (type.length > UINT32_MAX - type_record_bytes)
         {
             return result;
         }
-        type_record_bytes += type->bytes.length;
+        type_record_bytes += type.length;
     }
     for (u32 pass = 0; pass < 2; pass += 1)
     {
@@ -846,7 +900,7 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         pdb_emit_u32(type_stream, PDB_TPI_VERSION_V80);
         pdb_emit_u32(type_stream, PDB_TPI_HEADER_SIZE);
         pdb_emit_u32(type_stream, 0x1000);
-        pdb_emit_u32(type_stream, 0x1000 + (pass ? 0 : unique_type_count));
+        pdb_emit_u32(type_stream, 0x1000 + (pass ? 0 : live_count));
         pdb_emit_u32(type_stream, (u32)(pass ? 0 : type_record_bytes));
         pdb_emit_u16(type_stream, 0xffff);
         pdb_emit_u16(type_stream, 0xffff);
@@ -860,9 +914,9 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         pdb_emit_u32(type_stream, 0);
         if (!pass)
         {
-            for (u32 unique_index = 0; unique_index < unique_type_count; unique_index += 1)
+            for (u32 live_position = 0; live_position < live_count; live_position += 1)
             {
-                ByteSlice type = unique_types[unique_index].bytes;
+                ByteSlice type = normalized[live[live_position]];
                 if (type.length)
                 {
                     pdb_emit_bytes(type_stream, type.pointer, type.length);
