@@ -775,7 +775,7 @@ BUSTER_GLOBAL_LOCAL CodegenRegisterAllocation codegen_allocate_registers(Arena* 
     u32* starts = arena_allocate(arena, u32, function->value_count);
     u32* ends = arena_allocate(arena, u32, function->value_count);
     u32* blocks = arena_allocate(arena, u32, function->value_count);
-    u32* instruction_blocks = arena_allocate(arena, u32, function->instruction_count);
+    IrBlockId* instruction_blocks = arena_allocate(arena, IrBlockId, function->instruction_count);
     bool* candidates = arena_allocate(arena, bool, function->value_count);
     bool* eligible = arena_allocate(arena, bool, function->value_count);
     memset(candidates, 0, sizeof(*candidates) * function->value_count);
@@ -785,28 +785,31 @@ BUSTER_GLOBAL_LOCAL CodegenRegisterAllocation codegen_allocate_registers(Arena* 
         result.registers[value_index] = CODEGEN_REGISTER_UNALLOCATED;
         blocks[value_index] = UINT32_MAX;
     }
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    // The validated owner array replaces the block walk this used to do for
+    // itself, which left instruction_blocks uninitialized for any instruction
+    // no chain reached and then compared against it below. An unproven
+    // function keeps every value in its frame slot instead.
+    if (ir_function_instruction_owners(function, instruction_blocks).error != IR_VALIDATION_NONE)
     {
-        IrBlock* block = function->blocks + block_index;
-        for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+        return result;
+    }
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        IrInstruction* instruction = function->instructions + instruction_index;
+        if (instruction->result.value == IR_ID_UNDERLYING_INVALID)
         {
-            instruction_blocks[id.value] = block_index;
-            IrInstruction* instruction = function->instructions + id.value;
-            if (instruction->result.value == IR_ID_UNDERLYING_INVALID)
-            {
-                continue;
-            }
-            IrValueId value_id = instruction->result;
-            IrValue* value = function->values + value_id.value;
-            AnalysisType* type = analysis_type_from_id(analysis, value->type);
-            bool eligible_type = vectors ? type->kind == ANALYSIS_TYPE_VECTOR && type->layout.size <= 16 : codegen_register_type_eligible(type);
-            bool eligible_instruction = !vectors || instruction->opcode == IR_OPCODE_UNARY || instruction->opcode == IR_OPCODE_BINARY;
-            candidates[value_id.value] = value->category == IR_VALUE_VALUE && eligible_type && eligible_instruction;
-            eligible[value_id.value] = candidates[value_id.value];
-            starts[value_id.value] = id.value;
-            ends[value_id.value] = id.value;
-            blocks[value_id.value] = block_index;
+            continue;
         }
+        IrValueId value_id = instruction->result;
+        IrValue* value = function->values + value_id.value;
+        AnalysisType* type = analysis_type_from_id(analysis, value->type);
+        bool eligible_type = vectors ? type->kind == ANALYSIS_TYPE_VECTOR && type->layout.size <= 16 : codegen_register_type_eligible(type);
+        bool eligible_instruction = !vectors || instruction->opcode == IR_OPCODE_UNARY || instruction->opcode == IR_OPCODE_BINARY;
+        candidates[value_id.value] = value->category == IR_VALUE_VALUE && eligible_type && eligible_instruction;
+        eligible[value_id.value] = candidates[value_id.value];
+        starts[value_id.value] = instruction_index;
+        ends[value_id.value] = instruction_index;
+        blocks[value_id.value] = instruction_blocks[instruction_index].value;
     }
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
     {
@@ -818,7 +821,7 @@ BUSTER_GLOBAL_LOCAL CodegenRegisterAllocation codegen_allocate_registers(Arena* 
             {
                 continue;
             }
-            if (blocks[operand.value] != instruction_blocks[instruction_index])
+            if (blocks[operand.value] != instruction_blocks[instruction_index].value)
             {
                 candidates[operand.value] = false;
                 continue;
@@ -9598,15 +9601,14 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             IrBlock* emitted_block = function->blocks + block_index;
             block_offsets[block_index] = (u32)buffer.count;
             x64_forwarded_store_end = UINT64_MAX;
+            // Validation's ownership proof covers this walk: every chain is a
+            // simple path of in-range ids ending at last_instruction. The
+            // counter that used to stand in for that proof re-walked the whole
+            // function before it could notice a cycle, and the emitter already
+            // trusts validation for everything it indexes below.
             IrInstructionId instruction_id = emitted_block->first_instruction;
-            u32 visited = 0;
             while (instruction_id.value != IR_ID_UNDERLYING_INVALID)
             {
-                if (instruction_id.value >= function->instruction_count || visited++ >= function->instruction_count)
-                {
-                    result.error = CODEGEN_ERROR_INVALID_IR;
-                    return result;
-                }
                 IrInstruction* instruction = function->instructions + instruction_id.value;
                 result.failed_instruction = instruction_id;
                 result.failed_opcode = instruction->opcode;

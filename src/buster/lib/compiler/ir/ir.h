@@ -558,6 +558,7 @@ typedef enum IrValidationError
     IR_VALIDATION_BLOCK_PARAMETER,
     IR_VALIDATION_OPERATION,
     IR_VALIDATION_ALIGNMENT,
+    IR_VALIDATION_INSTRUCTION_OWNERSHIP,
     IR_VALIDATION_COUNT,
 } IrValidationError;
 
@@ -566,6 +567,19 @@ struct IrValidationResult
 {
     IrValidationError error;
     IrFunctionId function;
+    IrBlockId block;
+    IrInstructionId instruction;
+};
+
+// The result of proving that every instruction of a function belongs to
+// exactly one block chain. Walking `next` alone cannot say that: a chain can
+// cycle, two blocks can share a tail, `last_instruction` can name an
+// instruction the chain never reaches, and an instruction can sit in no chain
+// at all while later passes still read it out of the dense array.
+typedef struct IrInstructionOwnership IrInstructionOwnership;
+struct IrInstructionOwnership
+{
+    IrValidationError error;
     IrBlockId block;
     IrInstructionId instruction;
 };
@@ -609,6 +623,13 @@ BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFuncti
 BUSTER_F_DECL bool ir_label_block_parameter_provenance_valid(IrFunction* function, IrBlockParameter* parameter);
 BUSTER_F_DECL u32 ir_inline_assembly_label_operand_base(IrInstruction* instruction);
 BUSTER_F_DECL bool ir_inline_assembly_jump_target(IrFunction* function, IrInstruction* instruction, String8 literal, String8 prefix, u32* target_index_out);
+// Writes the owning block of every instruction into `owners`, which the
+// caller sizes to function->instruction_count, and returns the first
+// ownership violation. One O(instructions + blocks) pass: the array doubles
+// as the visited set that bounds every chain walk, so consumers past
+// validation - register allocation and the emitters - reuse it instead of
+// re-deriving block membership or guarding their walks with a counter.
+BUSTER_F_DECL IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners);
 BUSTER_F_DECL IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module);
 BUSTER_F_DECL IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module);
 BUSTER_F_DECL String8 ir_print_module(Arena* arena, AnalysisResult* analysis, IrModule* module);

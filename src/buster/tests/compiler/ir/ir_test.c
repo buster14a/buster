@@ -201,6 +201,89 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, restored_operation.error == IR_VALIDATION_NONE);
     }
 
+    // Following `next` proves nothing about ownership: the chains can cycle,
+    // two blocks can share one, last_instruction can name an instruction the
+    // chain never reaches, and an instruction can belong to no block while
+    // every later pass still reads it out of the dense array. The owner array
+    // is what rules those out, and each mutation below is invisible to the
+    // per-instruction checks that follow it.
+    IrBlockId* focused_owners = arena_allocate(arguments->arena, IrBlockId, focused_function->instruction_count);
+    IrInstructionOwnership focused_ownership = ir_function_instruction_owners(focused_function, focused_owners);
+    BUSTER_TEST(arguments, focused_ownership.error == IR_VALIDATION_NONE);
+    u32 focused_owned_count = 0;
+    IrBlock* focused_first_block = 0;
+    IrBlock* focused_second_block = 0;
+    IrBlock* focused_long_block = 0;
+    for (u32 block_index = 0; block_index < focused_function->block_count; block_index += 1)
+    {
+        IrBlock* block = focused_function->blocks + block_index;
+        for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = focused_function->instructions[id.value].next)
+        {
+            BUSTER_TEST(arguments, focused_owners[id.value].value == block_index);
+            focused_owned_count += 1;
+        }
+        if (block->first_instruction.value == IR_ID_UNDERLYING_INVALID)
+        {
+            continue;
+        }
+        if (!focused_first_block)
+        {
+            focused_first_block = block;
+        }
+        else if (!focused_second_block)
+        {
+            focused_second_block = block;
+        }
+        if (!focused_long_block && block->first_instruction.value != block->last_instruction.value)
+        {
+            focused_long_block = block;
+        }
+    }
+    BUSTER_TEST(arguments, focused_owned_count == focused_function->instruction_count);
+    BUSTER_TEST(arguments, focused_second_block != 0);
+    BUSTER_TEST(arguments, focused_long_block != 0);
+    if (focused_long_block)
+    {
+        IrInstructionId saved_next = focused_function->instructions[focused_long_block->last_instruction.value].next;
+        focused_function->instructions[focused_long_block->last_instruction.value].next = focused_long_block->first_instruction;
+        IrValidationResult cycle = ir_validate_module(&focused_analysis, &focused_module);
+        BUSTER_TEST(arguments, cycle.error == IR_VALIDATION_INSTRUCTION_OWNERSHIP);
+        BUSTER_TEST(arguments, cycle.block.value == focused_long_block->id.value);
+        BUSTER_TEST(arguments, cycle.instruction.value == focused_long_block->first_instruction.value);
+        focused_function->instructions[focused_long_block->last_instruction.value].next = saved_next;
+        BUSTER_TEST(arguments, ir_validate_module(&focused_analysis, &focused_module).error == IR_VALIDATION_NONE);
+
+        IrInstructionId saved_first = focused_long_block->first_instruction;
+        focused_long_block->first_instruction = focused_function->instructions[saved_first.value].next;
+        IrValidationResult unowned = ir_validate_module(&focused_analysis, &focused_module);
+        BUSTER_TEST(arguments, unowned.error == IR_VALIDATION_INSTRUCTION_OWNERSHIP);
+        BUSTER_TEST(arguments, unowned.instruction.value == saved_first.value);
+        focused_long_block->first_instruction = saved_first;
+        BUSTER_TEST(arguments, ir_validate_module(&focused_analysis, &focused_module).error == IR_VALIDATION_NONE);
+
+        IrInstructionId saved_last = focused_long_block->last_instruction;
+        focused_long_block->last_instruction = focused_long_block->first_instruction;
+        IrValidationResult tail = ir_validate_module(&focused_analysis, &focused_module);
+        BUSTER_TEST(arguments, tail.error == IR_VALIDATION_INSTRUCTION_OWNERSHIP);
+        BUSTER_TEST(arguments, tail.block.value == focused_long_block->id.value);
+        focused_long_block->last_instruction = saved_last;
+        BUSTER_TEST(arguments, ir_validate_module(&focused_analysis, &focused_module).error == IR_VALIDATION_NONE);
+    }
+    if (focused_first_block && focused_second_block)
+    {
+        IrInstructionId saved_first = focused_second_block->first_instruction;
+        IrInstructionId saved_last = focused_second_block->last_instruction;
+        focused_second_block->first_instruction = focused_first_block->first_instruction;
+        focused_second_block->last_instruction = focused_first_block->last_instruction;
+        IrValidationResult shared = ir_validate_module(&focused_analysis, &focused_module);
+        BUSTER_TEST(arguments, shared.error == IR_VALIDATION_INSTRUCTION_OWNERSHIP);
+        BUSTER_TEST(arguments, shared.block.value == focused_second_block->id.value);
+        BUSTER_TEST(arguments, shared.instruction.value == focused_first_block->first_instruction.value);
+        focused_second_block->first_instruction = saved_first;
+        focused_second_block->last_instruction = saved_last;
+        BUSTER_TEST(arguments, ir_validate_module(&focused_analysis, &focused_module).error == IR_VALIDATION_NONE);
+    }
+
     String8 typed_operation_source = S8("code typed_operations : fn (\n"
                                         "    signed_value: s32,\n"
                                         "    unsigned_value: u32,\n"

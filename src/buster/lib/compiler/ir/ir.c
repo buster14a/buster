@@ -5218,6 +5218,122 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_error(IrValidationError err
     };
 }
 
+IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners)
+{
+    IrInstructionOwnership result = {
+        .error = IR_VALIDATION_NONE,
+        .block = IR_BLOCK_ID_INVALID,
+        .instruction = IR_INSTRUCTION_ID_INVALID,
+    };
+    if (!function || (function->instruction_count && !owners))
+    {
+        result.error = IR_VALIDATION_INVALID_ID;
+        return result;
+    }
+    // IR_ID_UNDERLYING_INVALID is UINT32_MAX, so the unowned marker is a byte
+    // fill; the walk below is the only part that costs a pass.
+    memset(owners, 0xff, sizeof(*owners) * function->instruction_count);
+    u32 owned_count = 0;
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        IrInstructionId tail = IR_INSTRUCTION_ID_INVALID;
+        IrInstructionId id = block->first_instruction;
+        while (id.value != IR_ID_UNDERLYING_INVALID)
+        {
+            if (id.value >= function->instruction_count)
+            {
+                result.error = IR_VALIDATION_INVALID_ID;
+                result.block = block->id;
+                result.instruction = id;
+                return result;
+            }
+            // Reaching an instruction twice is either a cycle in this chain or
+            // a chain shared with an earlier block. Both give the instruction
+            // two owners, and refusing the second visit is also what bounds
+            // the walk: every step past this point consumes a fresh id, so the
+            // whole function costs one pass rather than a per-block counter
+            // that only notices a cycle after re-walking every instruction.
+            if (owners[id.value].value != IR_ID_UNDERLYING_INVALID)
+            {
+                result.error = IR_VALIDATION_INSTRUCTION_OWNERSHIP;
+                result.block = block->id;
+                result.instruction = id;
+                return result;
+            }
+            owners[id.value] = block->id;
+            owned_count += 1;
+            tail = id;
+            id = function->instructions[id.value].next;
+        }
+        // last_instruction is what the appenders extend and what the emitters
+        // treat as the terminator slot, so a value the chain never reaches
+        // would let both walk different instruction sequences.
+        if (tail.value != block->last_instruction.value)
+        {
+            result.error = IR_VALIDATION_INSTRUCTION_OWNERSHIP;
+            result.block = block->id;
+            result.instruction = block->last_instruction;
+            return result;
+        }
+    }
+    if (owned_count != function->instruction_count)
+    {
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            if (owners[instruction_index].value == IR_ID_UNDERLYING_INVALID)
+            {
+                result.error = IR_VALIDATION_INSTRUCTION_OWNERSHIP;
+                result.instruction = (IrInstructionId){
+                    .value = instruction_index,
+                };
+                return result;
+            }
+        }
+    }
+    return result;
+}
+
+// Runs the ownership proof over every lowered function ahead of the
+// per-instruction checks, so those can walk `next` without a cycle guard and
+// can trust that block->last_instruction really terminates its chain. One
+// scratch array sized to the largest function serves the whole module.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* module)
+{
+    IrValidationResult result = {
+        .function = IR_FUNCTION_ID_INVALID,
+        .block = IR_BLOCK_ID_INVALID,
+        .instruction = IR_INSTRUCTION_ID_INVALID,
+    };
+    u32 capacity = 0;
+    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+    {
+        IrFunction* function = module->functions + function_index;
+        if (function->state == IR_FUNCTION_LOWERED)
+        {
+            capacity = BUSTER_MAX(capacity, function->instruction_count);
+        }
+    }
+    TemporalArena scratch = scratch_begin(0, 0);
+    IrBlockId* owners = arena_allocate(scratch.arena, IrBlockId, capacity);
+    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+    {
+        IrFunction* function = module->functions + function_index;
+        if (function->state != IR_FUNCTION_LOWERED)
+        {
+            continue;
+        }
+        IrInstructionOwnership ownership = ir_function_instruction_owners(function, owners);
+        if (ownership.error != IR_VALIDATION_NONE)
+        {
+            result = ir_validation_error(ownership.error, function, ownership.block, ownership.instruction);
+            break;
+        }
+    }
+    scratch_end(scratch);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_canonical_conversion_valid(IrType* source, IrType* destination, IrConversionOperation operation)
 {
     if (!source || !destination)
@@ -5517,11 +5633,11 @@ BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(AnalysisResult* analysis
 
 IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module)
 {
-    IrValidationResult result = {
-        .function = IR_FUNCTION_ID_INVALID,
-        .block = IR_BLOCK_ID_INVALID,
-        .instruction = IR_INSTRUCTION_ID_INVALID,
-    };
+    IrValidationResult result = ir_validate_module_ownership(module);
+    if (result.error != IR_VALIDATION_NONE)
+    {
+        return result;
+    }
     for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
         IrFunction* function = module->functions + function_index;
@@ -5595,14 +5711,13 @@ IrValidationResult ir_validate_module(AnalysisResult* analysis, IrModule* module
                     return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, IR_INSTRUCTION_ID_INVALID);
                 }
             }
+            // ir_validate_module_ownership proved the chain is a simple path of
+            // in-range ids, so this walk needs neither a range test nor the
+            // cycle guard it never had.
             IrInstructionId instruction_id = block->first_instruction;
             bool saw_terminator = false;
             while (instruction_id.value != IR_ID_UNDERLYING_INVALID)
             {
-                if (instruction_id.value >= function->instruction_count)
-                {
-                    return ir_validation_error(IR_VALIDATION_INVALID_ID, function, block->id, instruction_id);
-                }
                 IrInstruction* instruction = function->instructions + instruction_id.value;
                 if (saw_terminator)
                 {
@@ -5761,6 +5876,11 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
     if (!program || !module)
     {
         result.error = IR_VALIDATION_INVALID_ID;
+        return result;
+    }
+    result = ir_validate_module_ownership(module);
+    if (result.error != IR_VALIDATION_NONE)
+    {
         return result;
     }
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
@@ -5933,15 +6053,14 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                     return ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
                 }
             }
+            // No range or revisit guard here: ir_validate_module_ownership
+            // already proved every chain is a simple path of in-range ids, and
+            // its owner array bounds the walk in one pass instead of the
+            // per-block counter this used to carry.
             IrInstructionId instruction_id = block->first_instruction;
             bool terminated = false;
-            u32 visited = 0;
             while (instruction_id.value != IR_ID_UNDERLYING_INVALID)
             {
-                if (instruction_id.value >= function->instruction_count || visited++ >= function->instruction_count)
-                {
-                    return ir_validation_error(IR_VALIDATION_INVALID_ID, function, block->id, instruction_id);
-                }
                 IrInstruction* instruction = function->instructions + instruction_id.value;
                 if (terminated || instruction->opcode >= IR_OPCODE_COUNT || !ir_type_from_id(&program->types, instruction->canonical_type))
                 {

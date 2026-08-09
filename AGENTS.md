@@ -665,6 +665,21 @@ has hard design constraints:
 - New semantic or IR behavior needs focused unit coverage in addition to the
   fixture-wide pipeline test. IR tests must validate structural invariants, not
   merely check that generation returned a non-null pointer.
+- **Both validators prove instruction ownership before they check anything
+  else**, through `ir_function_instruction_owners` and the
+  `ir_validate_module_ownership` pre-pass: one `owner[instruction_count]` array
+  per function, filled by walking each block's chain, where a second visit to
+  an instruction is the error. That one O(instructions + blocks) pass rules out
+  cycles, chains shared between blocks, a `last_instruction` the chain never
+  reaches, and instructions owned by no block at all while later passes still
+  read them out of the dense array — none of which chain traversal alone can
+  see. Everything downstream depends on it and must not re-derive it: the
+  validators' own walks, the canonical emitter's block loop, and
+  `codegen_allocate_registers` all carry no cycle guard and no range test,
+  because a counter that only notices a cycle after re-walking the function is
+  both slower and weaker than the proof. Keep new consumers on the same array
+  rather than adding another local one, and report an ownership failure as
+  `IR_VALIDATION_INSTRUCTION_OWNERSHIP`.
 - The typed IR must not retain parser/AST operation identifiers.
   Unary and binary instructions use IR-native operations that encode the
   semantic domain (integer, float, boolean, or pointer) and signed behavior;

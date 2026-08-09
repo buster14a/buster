@@ -3195,6 +3195,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
         BUSTER_TEST(arguments, function->values[0].canonical_type.value != IR_ID_UNDERLYING_INVALID);
         IrValidationResult validation = ir_validate_canonical_module(c_ir.program, &c_ir.program->modules[0]);
         BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE);
+        // The canonical validator owes codegen the same ownership proof as the
+        // analysis-backed one: codegen walks these chains with no guard of its
+        // own and indexes the dense array by what they hand it.
+        IrBlock* block = function->blocks;
+        IrInstructionId saved_next = function->instructions[block->last_instruction.value].next;
+        function->instructions[block->last_instruction.value].next = block->first_instruction;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(c_ir.program, &c_ir.program->modules[0]).error == IR_VALIDATION_INSTRUCTION_OWNERSHIP);
+        function->instructions[block->last_instruction.value].next = saved_next;
+
+        IrInstructionId saved_first = block->first_instruction;
+        block->first_instruction = function->instructions[saved_first.value].next;
+        IrValidationResult unowned = ir_validate_canonical_module(c_ir.program, &c_ir.program->modules[0]);
+        BUSTER_TEST(arguments, unowned.error == IR_VALIDATION_INSTRUCTION_OWNERSHIP);
+        BUSTER_TEST(arguments, unowned.instruction.value == saved_first.value);
+        block->first_instruction = saved_first;
+
+        IrInstructionId saved_last = block->last_instruction;
+        block->last_instruction = block->first_instruction;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(c_ir.program, &c_ir.program->modules[0]).error == IR_VALIDATION_INSTRUCTION_OWNERSHIP);
+        block->last_instruction = saved_last;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(c_ir.program, &c_ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
     CPreprocessResult nullability_tokens = c_preprocess(arguments->arena,
                                                         S8("void *select_pointer("
