@@ -3849,6 +3849,11 @@ IdeDocumentErrorKind ide_document_model_set_text(IdeDocumentModel* model, String
     IdeDocumentWorkspace workspace = {0};
     ide_workspace_copy_to_arena(model->staging_arena, &workspace, &model->workspace);
     u32 index = ide_workspace_find_path(model->staging_arena, &workspace, path);
+    if (index == IDE_DOCUMENT_INDEX_INVALID || index >= workspace.document_count)
+    {
+        ide_model_reset_staging(model);
+        return IDE_DOCUMENT_ERROR_DOCUMENT_NOT_FOUND;
+    }
     IdeDocument* document = workspace.documents + index;
     IdeSyntaxBatch* syntax_batch = ide_syntax_batch_create(model);
     if (!syntax_batch)
@@ -3876,12 +3881,9 @@ IdeDocumentErrorKind ide_document_model_set_text(IdeDocumentModel* model, String
         ide_model_reset_staging(model);
         return error;
     }
-    bool* affected = workspace.document_count ? arena_allocate(model->staging_arena, bool, workspace.document_count) : 0;
-    u32* queue = workspace.document_count ? arena_allocate(model->staging_arena, u32, workspace.document_count) : 0;
-    if (workspace.document_count)
-    {
-        memset(affected, 0, sizeof(bool) * workspace.document_count);
-    }
+    bool* affected = arena_allocate(model->staging_arena, bool, workspace.document_count);
+    u32* queue = arena_allocate(model->staging_arena, u32, workspace.document_count);
+    memset(affected, 0, sizeof(bool) * workspace.document_count);
     affected[index] = true;
     bool interface_equal = ide_module_fingerprint_equal(revision, model->workspace.revision_states[index].module);
     bool bindings_equal = ide_module_bindings_equal(&model->workspace, &workspace, index);
