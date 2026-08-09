@@ -9,6 +9,13 @@ struct CodegenBuffer
     u64 count;
     u64 capacity;
     u8* value_registers;
+    // Raised where a byte is refused for want of room, and nowhere else. Most
+    // capacity failures are things a bigger buffer cannot fix -- a frame past
+    // what a displacement can name, a reserve already at the limit of a u32
+    // offset -- and they share `CODEGEN_ERROR_CAPACITY` with this one. Only the
+    // module generator's code buffer carries the flag, and only so that it can
+    // reserve cheaply and generate the module again when the estimate is short.
+    bool* exhausted;
     u8 allocated_register_base;
     CodegenError error;
 };
