@@ -152,6 +152,131 @@ BUSTER_GLOBAL_LOCAL u32* link_global_symbol_table_slot(LinkGlobalSymbolTable* ta
     return 0;
 }
 
+// PE assigns each undefined symbol to the first dynamic library that exports
+// it, falling back to the runtime export list only when no library does. Build
+// that ordered relation once instead of rescanning every export list for every
+// import.
+typedef struct LinkPeExportSlot LinkPeExportSlot;
+struct LinkPeExportSlot
+{
+    String8 name;
+    u32 group;
+    bool used;
+    u8 reserved[3];
+};
+
+typedef struct LinkPeExportIndex LinkPeExportIndex;
+struct LinkPeExportIndex
+{
+    LinkPeExportSlot* slots;
+    u64 capacity;
+};
+
+BUSTER_GLOBAL_LOCAL LinkPeExportSlot* link_pe_export_slot(LinkPeExportIndex* table, String8 name)
+{
+    if (!table->capacity)
+    {
+        return 0;
+    }
+    u64 mask = table->capacity - 1;
+    u64 slot_index = buster_hash_64((u8*)name.pointer, name.length) & mask;
+    for (u64 probe = 0; probe < table->capacity; probe += 1)
+    {
+        LinkPeExportSlot* slot = table->slots + slot_index;
+        if (!slot->used || string_equal(slot->name, name))
+        {
+            return slot;
+        }
+        slot_index = (slot_index + 1) & mask;
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_pe_export_insert(LinkPeExportIndex* table, String8 name, u32 group)
+{
+    if (name.length && !name.pointer)
+    {
+        return false;
+    }
+    LinkPeExportSlot* slot = link_pe_export_slot(table, name);
+    if (!slot)
+    {
+        return false;
+    }
+    if (!slot->used)
+    {
+        slot->name = name;
+        slot->group = group;
+        slot->used = true;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_pe_export_index_initialize(Arena* arena, NativeExecutableLinkOptions options, LinkPeExportIndex* table)
+{
+    *table = (LinkPeExportIndex){0};
+    u64 export_count = options.runtime_exported_symbol_count;
+    for (u32 library_index = 0; library_index < options.dynamic_library_count; library_index += 1)
+    {
+        NativeDynamicLibrary* library = options.dynamic_libraries + library_index;
+        if ((library->exported_symbol_count && !library->exported_symbols) || library->exported_symbol_count > UINT64_MAX - export_count)
+        {
+            return false;
+        }
+        export_count += library->exported_symbol_count;
+    }
+    if (!export_count)
+    {
+        return true;
+    }
+    if (export_count > UINT64_MAX / 2)
+    {
+        return false;
+    }
+    u64 required_capacity = export_count * 2;
+    u64 capacity = 1;
+    while (capacity < required_capacity)
+    {
+        if (capacity > UINT64_MAX / 2)
+        {
+            return false;
+        }
+        capacity *= 2;
+    }
+    if (capacity > UINT64_MAX / sizeof(*table->slots))
+    {
+        return false;
+    }
+    table->slots = arena_allocate(arena, LinkPeExportSlot, capacity);
+    table->capacity = capacity;
+    memset(table->slots, 0, sizeof(*table->slots) * capacity);
+    for (u32 library_index = 0; library_index < options.dynamic_library_count; library_index += 1)
+    {
+        NativeDynamicLibrary* library = options.dynamic_libraries + library_index;
+        for (u32 export_index = 0; export_index < library->exported_symbol_count; export_index += 1)
+        {
+            if (!link_pe_export_insert(table, library->exported_symbols[export_index], library_index + 1))
+            {
+                return false;
+            }
+        }
+    }
+    for (u32 export_index = 0; export_index < options.runtime_exported_symbol_count; export_index += 1)
+    {
+        if (!link_pe_export_insert(table, options.runtime_exported_symbols[export_index], 0))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL u32 link_pe_export_group(LinkPeExportIndex* table, String8 name)
+{
+    LinkPeExportSlot* slot = link_pe_export_slot(table, name);
+    return slot && slot->used ? slot->group : UINT32_MAX;
+}
+
 BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, ObjectSymbol* source, ObjectFile* object, u64* section_offsets, Arena* arena)
 {
     *destination = *source;
@@ -2372,7 +2497,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     bool aarch64 = object->target.cpu_arch == CPU_ARCH_AARCH64;
     if ((options.dynamic_library_count && !options.dynamic_libraries) || (options.runtime_exported_symbol_count && !options.runtime_exported_symbols) ||
         object->section_count < OBJECT_SECTION_COUNT || !object->sections || (object->symbol_count && !object->symbols) ||
-        (object->relocation_count && !object->relocations) || (object->target.cpu_arch != CPU_ARCH_X86_64 && !aarch64))
+        (object->relocation_count && !object->relocations) || options.dynamic_library_count == UINT32_MAX ||
+        (object->target.cpu_arch != CPU_ARCH_X86_64 && !aarch64))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
         return result;
@@ -2385,6 +2511,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     u32 library_group_count = options.dynamic_library_count + 1;
     u32* group_import_counts = arena_allocate(arena, u32, library_group_count);
     memset(group_import_counts, 0, sizeof(*group_import_counts) * library_group_count);
+    Arena* export_conflicts[] = {
+        arena,
+    };
+    TemporalArena export_temporary = scratch_begin(export_conflicts, BUSTER_ARRAY_LENGTH(export_conflicts));
+    LinkPeExportIndex export_index = {0};
+    if (options.dynamic_library_count && !link_pe_export_index_initialize(export_temporary.arena, options, &export_index))
+    {
+        scratch_end(export_temporary);
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
         import_indices[symbol_index] = UINT32_MAX;
@@ -2401,42 +2538,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         {
             result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
             result.symbol = symbol->name;
+            scratch_end(export_temporary);
             return result;
         }
         u32 group = 0;
-        bool library_found = false;
-        for (u32 library_index = 0; library_index < options.dynamic_library_count; library_index += 1)
+        if (options.dynamic_library_count)
         {
-            NativeDynamicLibrary* library = &options.dynamic_libraries[library_index];
-            for (u32 export_index = 0; export_index < library->exported_symbol_count; export_index += 1)
-            {
-                if (string_equal(symbol->name, library->exported_symbols[export_index]))
-                {
-                    group = library_index + 1;
-                    library_found = true;
-                    break;
-                }
-            }
-            if (group)
-            {
-                break;
-            }
-        }
-        if (!library_found && options.dynamic_library_count)
-        {
-            bool runtime_found = false;
-            for (u32 export_index = 0; export_index < options.runtime_exported_symbol_count; export_index += 1)
-            {
-                if (string_equal(symbol->name, options.runtime_exported_symbols[export_index]))
-                {
-                    runtime_found = true;
-                    break;
-                }
-            }
-            if (!options.runtime_exports_known || !runtime_found)
+            group = link_pe_export_group(&export_index, symbol->name);
+            if (group == UINT32_MAX || (group == 0 && !options.runtime_exports_known))
             {
                 result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
                 result.symbol = symbol->name;
+                scratch_end(export_temporary);
                 return result;
             }
         }
@@ -2446,6 +2559,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         imported_name_size += align_forward(symbol->name.length + 3, 2);
         import_count += 1;
     }
+    scratch_end(export_temporary);
     if (!aarch64)
     {
         group_import_counts[0] += (u32)BUSTER_ARRAY_LENGTH(startup_names);

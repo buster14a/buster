@@ -236,6 +236,11 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_import_matches(ByteSlice executable, Strin
         return false;
     }
     u32 import_rva = link_read_u32(executable.pointer, optional + 120);
+    u32 import_size = link_read_u32(executable.pointer, optional + 124);
+    if (!import_size || import_size % 20)
+    {
+        return false;
+    }
     u64 section_table = optional + optional_size;
     u64 import_offset = 0;
     bool import_mapped = false;
@@ -262,7 +267,7 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_import_matches(ByteSlice executable, Strin
     {
         return false;
     }
-    for (u32 descriptor_index = 0; descriptor_index <= (u32)section_count + 2; descriptor_index += 1)
+    for (u32 descriptor_index = 0; descriptor_index < import_size / 20; descriptor_index += 1)
     {
         u64 descriptor = import_offset + (u64)descriptor_index * 20;
         if (descriptor > executable.length || 20 > executable.length - descriptor)
@@ -1914,6 +1919,91 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                             });
     BUSTER_TEST(arguments, pe_missing_external.error == LINK_ERROR_UNRESOLVED_SYMBOL);
     BUSTER_STRING_TEST(arguments, pe_missing_external.symbol, S8("missing_value"));
+
+    enum
+    {
+        LINK_PE_LOOKUP_LIBRARY_COUNT = 64,
+        LINK_PE_LOOKUP_EXPORTS_PER_LIBRARY = 16,
+        LINK_PE_LOOKUP_IMPORT_COUNT = 256,
+    };
+    NativeDynamicLibrary* lookup_libraries = arena_allocate(arguments->arena, NativeDynamicLibrary, LINK_PE_LOOKUP_LIBRARY_COUNT);
+    String8* lookup_exports =
+        arena_allocate(arguments->arena, String8, LINK_PE_LOOKUP_LIBRARY_COUNT * LINK_PE_LOOKUP_EXPORTS_PER_LIBRARY);
+    for (u32 library_index = 0; library_index < LINK_PE_LOOKUP_LIBRARY_COUNT; library_index += 1)
+    {
+        lookup_libraries[library_index] = (NativeDynamicLibrary){
+            .name = string_format(arguments->arena, S8("lookup-{u32}.dll"), library_index),
+            .exported_symbols = lookup_exports + library_index * LINK_PE_LOOKUP_EXPORTS_PER_LIBRARY,
+            .exported_symbol_count = LINK_PE_LOOKUP_EXPORTS_PER_LIBRARY,
+            .exports_known = true,
+        };
+        for (u32 export_index = 0; export_index < LINK_PE_LOOKUP_EXPORTS_PER_LIBRARY; export_index += 1)
+        {
+            lookup_libraries[library_index].exported_symbols[export_index] =
+                string_format(arguments->arena, S8("lookup_{u32}_{u32}"), library_index, export_index);
+        }
+    }
+    String8 shared_lookup_export = S8("lookup_shared");
+    lookup_libraries[2].exported_symbols[7] = shared_lookup_export;
+    lookup_libraries[10].exported_symbols[9] = shared_lookup_export;
+    String8 runtime_lookup_exports[] = {
+        S8("lookup_runtime"),
+    };
+    ObjectSymbol* lookup_symbols = arena_allocate(arguments->arena, ObjectSymbol, LINK_PE_LOOKUP_IMPORT_COUNT + 3);
+    memset(lookup_symbols, 0, sizeof(*lookup_symbols) * (LINK_PE_LOOKUP_IMPORT_COUNT + 3));
+    lookup_symbols[0] = (ObjectSymbol){
+        .name = S8("main"),
+        .size = 1,
+        .section = OBJECT_SECTION_TEXT,
+        .kind = OBJECT_SYMBOL_FUNCTION,
+        .global = true,
+    };
+    for (u32 import_index = 0; import_index < LINK_PE_LOOKUP_IMPORT_COUNT; import_index += 1)
+    {
+        u32 library_index = LINK_PE_LOOKUP_LIBRARY_COUNT - 1 - import_index % 16;
+        u32 export_index = (import_index / 16) % LINK_PE_LOOKUP_EXPORTS_PER_LIBRARY;
+        lookup_symbols[import_index + 1] = (ObjectSymbol){
+            .name = lookup_libraries[library_index].exported_symbols[export_index],
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        };
+    }
+    lookup_symbols[LINK_PE_LOOKUP_IMPORT_COUNT + 1] = (ObjectSymbol){
+        .name = shared_lookup_export,
+        .section = OBJECT_SECTION_UNDEFINED,
+        .kind = OBJECT_SYMBOL_FUNCTION,
+        .global = true,
+    };
+    lookup_symbols[LINK_PE_LOOKUP_IMPORT_COUNT + 2] = (ObjectSymbol){
+        .name = runtime_lookup_exports[0],
+        .section = OBJECT_SECTION_UNDEFINED,
+        .kind = OBJECT_SYMBOL_FUNCTION,
+        .global = true,
+    };
+    u8 lookup_main_text[] = {0xc3};
+    ObjectFile lookup_object = link_test_object_make(arguments->arena, windows_object.target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(lookup_main_text),
+                                                     lookup_symbols, LINK_PE_LOOKUP_IMPORT_COUNT + 3, 0, 0);
+    NativeExecutableLinkResult lookup_executable = link_native_executable(arguments->arena, &lookup_object,
+                                                                           (NativeExecutableLinkOptions){
+                                                                               .entry_symbol = S8("main"),
+                                                                               .dynamic_libraries = lookup_libraries,
+                                                                               .runtime_exported_symbols = runtime_lookup_exports,
+                                                                               .dynamic_library_count = LINK_PE_LOOKUP_LIBRARY_COUNT,
+                                                                               .runtime_exported_symbol_count = BUSTER_ARRAY_LENGTH(runtime_lookup_exports),
+                                                                               .runtime_exports_known = true,
+                                                                           });
+    BUSTER_TEST(arguments, lookup_executable.error == LINK_ERROR_NONE);
+    for (u32 import_index = 0; import_index < LINK_PE_LOOKUP_IMPORT_COUNT; import_index += 37)
+    {
+        u32 library_index = LINK_PE_LOOKUP_LIBRARY_COUNT - 1 - import_index % 16;
+        BUSTER_TEST(arguments,
+                    link_test_pe_import_matches(lookup_executable.executable, lookup_libraries[library_index].name,
+                                                lookup_symbols[import_index + 1].name));
+    }
+    BUSTER_TEST(arguments, link_test_pe_import_matches(lookup_executable.executable, lookup_libraries[2].name, shared_lookup_export));
+    BUSTER_TEST(arguments, !link_test_pe_import_matches(lookup_executable.executable, lookup_libraries[10].name, shared_lookup_export));
+    BUSTER_TEST(arguments, link_test_pe_import_matches(lookup_executable.executable, S8("ucrtbase.dll"), runtime_lookup_exports[0]));
 #endif
     u32 aarch64_main_instructions[] = {
         0x52800000,

@@ -639,6 +639,89 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                    candidate->kind == OBJECT_RELOCATION_X86_64_PC32;
     }
     BUSTER_TEST(arguments, separate_cfi_relocation);
+
+    enum
+    {
+        OBJECT_LOOKUP_STRESS_ENTRY_COUNT = 128,
+        OBJECT_LOOKUP_STRESS_RELOCATION_COUNT = 512,
+    };
+    u8* lookup_stress_code = arena_allocate(arguments->arena, u8, OBJECT_LOOKUP_STRESS_RELOCATION_COUNT * 4);
+    CodegenModuleEntry* lookup_stress_entries = arena_allocate(arguments->arena, CodegenModuleEntry, OBJECT_LOOKUP_STRESS_ENTRY_COUNT);
+    CodegenFunctionDescriptor* lookup_stress_functions = arena_allocate(arguments->arena, CodegenFunctionDescriptor, OBJECT_LOOKUP_STRESS_ENTRY_COUNT);
+    CodegenModuleRelocation* lookup_stress_relocations =
+        arena_allocate(arguments->arena, CodegenModuleRelocation, OBJECT_LOOKUP_STRESS_RELOCATION_COUNT);
+    memset(lookup_stress_code, 0xcc, OBJECT_LOOKUP_STRESS_RELOCATION_COUNT * 4);
+    memset(lookup_stress_entries, 0, sizeof(*lookup_stress_entries) * OBJECT_LOOKUP_STRESS_ENTRY_COUNT);
+    memset(lookup_stress_functions, 0, sizeof(*lookup_stress_functions) * OBJECT_LOOKUP_STRESS_ENTRY_COUNT);
+    memset(lookup_stress_relocations, 0, sizeof(*lookup_stress_relocations) * OBJECT_LOOKUP_STRESS_RELOCATION_COUNT);
+    for (u32 index = 0; index < OBJECT_LOOKUP_STRESS_ENTRY_COUNT; index += 1)
+    {
+        lookup_stress_entries[index] = (CodegenModuleEntry){
+            .entity =
+                {
+                    .module = {.value = 1000 + index},
+                    .index = {.value = index * 3 + 1},
+                },
+            .instantiation = {.value = index * 5 + 2},
+            .symbol = {.value = index},
+            .offset = index * 4,
+        };
+        lookup_stress_functions[index] = (CodegenFunctionDescriptor){
+            .symbol = lookup_stress_entries[index].symbol,
+            .code_offset = lookup_stress_entries[index].offset,
+            .code_size = 4,
+        };
+    }
+    // Duplicate tuple lookup is deliberately first-entry-wins.
+    lookup_stress_entries[OBJECT_LOOKUP_STRESS_ENTRY_COUNT - 1].entity = lookup_stress_entries[0].entity;
+    lookup_stress_entries[OBJECT_LOOKUP_STRESS_ENTRY_COUNT - 1].instantiation = lookup_stress_entries[0].instantiation;
+    AnalysisEntityId missing_lookup_entity = {
+        .module = {.value = 9000},
+        .index = {.value = 77},
+    };
+    AnalysisInstantiationId missing_lookup_instantiation = {.value = 19};
+    for (u32 index = 0; index < OBJECT_LOOKUP_STRESS_RELOCATION_COUNT; index += 1)
+    {
+        u32 target_index = (index * 37) % OBJECT_LOOKUP_STRESS_ENTRY_COUNT;
+        bool missing = index % 29 == 0;
+        lookup_stress_relocations[index] = (CodegenModuleRelocation){
+            .entity = missing ? missing_lookup_entity : lookup_stress_entries[target_index].entity,
+            .instantiation = missing ? missing_lookup_instantiation : lookup_stress_entries[target_index].instantiation,
+            .offset = index * 4,
+        };
+    }
+    AnalysisResult lookup_stress_analysis = {
+        .module.id = {.value = 1},
+    };
+    CodegenModule lookup_stress_module = {
+        .code = {.pointer = lookup_stress_code, .length = OBJECT_LOOKUP_STRESS_RELOCATION_COUNT * 4},
+        .entries = lookup_stress_entries,
+        .functions = lookup_stress_functions,
+        .relocations = lookup_stress_relocations,
+        .abi = CODEGEN_ABI_X86_64_SYSTEM_V,
+        .entry_count = OBJECT_LOOKUP_STRESS_ENTRY_COUNT,
+        .function_count = OBJECT_LOOKUP_STRESS_ENTRY_COUNT,
+        .relocation_count = OBJECT_LOOKUP_STRESS_RELOCATION_COUNT,
+    };
+    ObjectFile lookup_stress_object = object_from_codegen_module(arguments->arena, &lookup_stress_analysis, &lookup_stress_module,
+                                                                  (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX});
+    BUSTER_TEST(arguments, lookup_stress_object.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, lookup_stress_object.symbol_count == OBJECT_LOOKUP_STRESS_ENTRY_COUNT + 1);
+    BUSTER_TEST(arguments, lookup_stress_object.relocation_count >= OBJECT_LOOKUP_STRESS_RELOCATION_COUNT);
+    if (lookup_stress_object.error == OBJECT_ERROR_NONE && lookup_stress_object.relocation_count >= OBJECT_LOOKUP_STRESS_RELOCATION_COUNT)
+    {
+        bool lookup_stress_mapping_valid = true;
+        for (u32 index = 0; index < OBJECT_LOOKUP_STRESS_RELOCATION_COUNT; index += 1)
+        {
+            u32 target_index = (index * 37) % OBJECT_LOOKUP_STRESS_ENTRY_COUNT;
+            u32 expected_symbol = index % 29 == 0                             ? OBJECT_LOOKUP_STRESS_ENTRY_COUNT
+                                  : target_index == OBJECT_LOOKUP_STRESS_ENTRY_COUNT - 1 ? 0
+                                                                                       : target_index;
+            lookup_stress_mapping_valid &= lookup_stress_object.relocations[index].symbol == expected_symbol;
+        }
+        BUSTER_TEST(arguments, lookup_stress_mapping_valid);
+    }
+
     ObjectArtifact separate_elf = object_write(arguments->arena, &separate_object, OBJECT_FORMAT_ELF64);
     BUSTER_TEST(arguments, separate_elf.error == OBJECT_ERROR_NONE);
     BUSTER_TEST(arguments, object_bytes_contain(separate_elf.bytes, S8(".eh_frame")));

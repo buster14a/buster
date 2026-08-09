@@ -6299,87 +6299,6 @@ BUSTER_GLOBAL_LOCAL void object_metadata_sections_initialize(ObjectFile* object)
     }
 }
 
-// Appends the built CodeView sections. Relocations resolve against the
-// per-entry function symbols, which both module object builders place at
-// symbol indices [0, entry_count).
-BUSTER_GLOBAL_LOCAL void object_append_codeview(ObjectFile* object, CodeviewResult built)
-{
-    if (!built.valid)
-    {
-        return;
-    }
-    object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data = built.symbols;
-    object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data = built.types;
-    object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].alignment = 4;
-    object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].alignment = 4;
-    for (u32 relocation_index = 0; relocation_index < built.relocation_count; relocation_index += 1)
-    {
-        CodeviewRelocation relocation = built.relocations[relocation_index];
-        u32 symbol_index = relocation.function;
-        if (relocation.symbol_name.length)
-        {
-            symbol_index = UINT32_MAX;
-            for (u32 candidate_index = 0; candidate_index < object->symbol_count; candidate_index += 1)
-            {
-                ObjectSymbol* candidate = object->symbols + candidate_index;
-                if (candidate->section != OBJECT_SECTION_UNDEFINED && string_equal(candidate->name, relocation.symbol_name))
-                {
-                    symbol_index = candidate_index;
-                    break;
-                }
-            }
-        }
-        if (symbol_index == UINT32_MAX || symbol_index >= object->symbol_count)
-        {
-            continue;
-        }
-        object->relocations[object->relocation_count++] = (ObjectRelocation){
-            .offset = relocation.offset,
-            .section = OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS,
-            .symbol = symbol_index,
-            .kind = relocation.kind == CODEVIEW_RELOCATION_SECREL32 ? OBJECT_RELOCATION_COFF_SECREL32 : OBJECT_RELOCATION_COFF_SECTION16,
-        };
-    }
-}
-
-BUSTER_GLOBAL_LOCAL void object_debug_module_set(Arena* arena, ObjectFile* object, String8 name, u64 code_size)
-{
-    if (!arena || !object || !object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.length)
-    {
-        return;
-    }
-    object->debug_modules = arena_allocate(arena, ObjectDebugModule, 1);
-    object->debug_module_count = 1;
-    object->debug_modules[0] = (ObjectDebugModule){
-        .name = string_duplicate_arena(arena, name.length ? name : S8("buster.obj"), false),
-        .code_size = code_size,
-        .symbols_size = object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.length,
-        .types_size = object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length,
-    };
-}
-
-BUSTER_GLOBAL_LOCAL ObjectSectionKind object_section_kind_for_dwarf(DwarfSectionKind kind)
-{
-    switch (kind)
-    {
-    case DWARF_SECTION_INFO:
-        return OBJECT_SECTION_DEBUG_INFO;
-    case DWARF_SECTION_ABBREV:
-        return OBJECT_SECTION_DEBUG_ABBREV;
-    case DWARF_SECTION_LINE:
-        return OBJECT_SECTION_DEBUG_LINE;
-    case DWARF_SECTION_STR:
-        return OBJECT_SECTION_DEBUG_STR;
-    case DWARF_SECTION_LOC:
-        return OBJECT_SECTION_DEBUG_LOC;
-    case DWARF_SECTION_RANGES:
-        return OBJECT_SECTION_DEBUG_RANGES;
-    case DWARF_SECTION_COUNT:
-        break;
-    }
-    return OBJECT_SECTION_COUNT;
-}
-
 // Symbol references resolve by the first defined then the first undefined
 // name match in symbol index order. The probe table records the lowest-index
 // match of each class per name, so a lookup returns exactly what the linear
@@ -6467,6 +6386,152 @@ BUSTER_GLOBAL_LOCAL ObjectSymbolNameIndex object_symbol_name_index_build(Arena* 
         object_symbol_name_index_add(table, symbols + symbol_index, symbol_index);
     }
     return table;
+}
+
+// Legacy buster relocations identify their target with the full
+// (module, entity, instantiation) tuple rather than an IrSymbolId. Keep the
+// first entry for duplicate tuples, matching the former ascending scan.
+typedef struct ObjectCodegenEntryIndex ObjectCodegenEntryIndex;
+struct ObjectCodegenEntryIndex
+{
+    CodegenModuleEntry* entries;
+    u32* slots;
+    u64 mask;
+};
+
+BUSTER_GLOBAL_LOCAL u64 object_codegen_entry_hash(AnalysisEntityId entity, AnalysisInstantiationId instantiation)
+{
+    u64 entity_key = ((u64)entity.module.value << 32) | entity.index.value;
+    return object_reader_hash_u64(entity_key ^ object_reader_hash_u64(instantiation.value));
+}
+
+BUSTER_GLOBAL_LOCAL u32* object_codegen_entry_slot(ObjectCodegenEntryIndex table, AnalysisEntityId entity, AnalysisInstantiationId instantiation)
+{
+    u64 slot_index = object_codegen_entry_hash(entity, instantiation) & table.mask;
+    for (u64 probe = 0; probe <= table.mask; probe += 1)
+    {
+        u32* slot = table.slots + slot_index;
+        if (*slot == UINT32_MAX)
+        {
+            return slot;
+        }
+        CodegenModuleEntry* candidate = table.entries + *slot;
+        if (candidate->entity.module.value == entity.module.value && candidate->entity.index.value == entity.index.value &&
+            candidate->instantiation.value == instantiation.value)
+        {
+            return slot;
+        }
+        slot_index = (slot_index + 1) & table.mask;
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL ObjectCodegenEntryIndex object_codegen_entry_index_build(Arena* arena, CodegenModuleEntry* entries, u32 entry_count)
+{
+    u64 capacity = 16;
+    while (capacity < (u64)entry_count * 2 + 1)
+    {
+        capacity <<= 1;
+    }
+    ObjectCodegenEntryIndex table = {
+        .entries = entries,
+        .slots = arena_allocate(arena, u32, capacity),
+        .mask = capacity - 1,
+    };
+    memset(table.slots, 0xff, sizeof(*table.slots) * capacity);
+    for (u32 entry_index = 0; entry_index < entry_count; entry_index += 1)
+    {
+        CodegenModuleEntry* entry = entries + entry_index;
+        u32* slot = object_codegen_entry_slot(table, entry->entity, entry->instantiation);
+        if (slot && *slot == UINT32_MAX)
+        {
+            *slot = entry_index;
+        }
+    }
+    return table;
+}
+
+// Appends the built CodeView sections. Relocations resolve against the
+// per-entry function symbols, which both module object builders place at
+// symbol indices [0, entry_count).
+BUSTER_GLOBAL_LOCAL void object_append_codeview(ObjectFile* object, CodeviewResult built)
+{
+    if (!built.valid)
+    {
+        return;
+    }
+    object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data = built.symbols;
+    object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data = built.types;
+    object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].alignment = 4;
+    object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].alignment = 4;
+    TemporalArena name_temporary = scratch_begin(0, 0);
+    ObjectSymbolNameIndex name_index = object_symbol_name_index_build(name_temporary.arena, object->symbols, object->symbol_count, object->symbol_count);
+    for (u32 relocation_index = 0; relocation_index < built.relocation_count; relocation_index += 1)
+    {
+        CodeviewRelocation relocation = built.relocations[relocation_index];
+        u32 symbol_index = relocation.function;
+        if (relocation.symbol_name.length)
+        {
+            ObjectSymbolNameSlot* slot = object_symbol_name_slot(name_index, relocation.symbol_name);
+            if (slot->used && slot->defined != UINT32_MAX)
+            {
+                symbol_index = slot->defined;
+            }
+            else
+            {
+                symbol_index = UINT32_MAX;
+            }
+        }
+        if (symbol_index == UINT32_MAX || symbol_index >= object->symbol_count)
+        {
+            continue;
+        }
+        object->relocations[object->relocation_count++] = (ObjectRelocation){
+            .offset = relocation.offset,
+            .section = OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS,
+            .symbol = symbol_index,
+            .kind = relocation.kind == CODEVIEW_RELOCATION_SECREL32 ? OBJECT_RELOCATION_COFF_SECREL32 : OBJECT_RELOCATION_COFF_SECTION16,
+        };
+    }
+    scratch_end(name_temporary);
+}
+
+BUSTER_GLOBAL_LOCAL void object_debug_module_set(Arena* arena, ObjectFile* object, String8 name, u64 code_size)
+{
+    if (!arena || !object || !object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.length)
+    {
+        return;
+    }
+    object->debug_modules = arena_allocate(arena, ObjectDebugModule, 1);
+    object->debug_module_count = 1;
+    object->debug_modules[0] = (ObjectDebugModule){
+        .name = string_duplicate_arena(arena, name.length ? name : S8("buster.obj"), false),
+        .code_size = code_size,
+        .symbols_size = object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.length,
+        .types_size = object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL ObjectSectionKind object_section_kind_for_dwarf(DwarfSectionKind kind)
+{
+    switch (kind)
+    {
+    case DWARF_SECTION_INFO:
+        return OBJECT_SECTION_DEBUG_INFO;
+    case DWARF_SECTION_ABBREV:
+        return OBJECT_SECTION_DEBUG_ABBREV;
+    case DWARF_SECTION_LINE:
+        return OBJECT_SECTION_DEBUG_LINE;
+    case DWARF_SECTION_STR:
+        return OBJECT_SECTION_DEBUG_STR;
+    case DWARF_SECTION_LOC:
+        return OBJECT_SECTION_DEBUG_LOC;
+    case DWARF_SECTION_RANGES:
+        return OBJECT_SECTION_DEBUG_RANGES;
+    case DWARF_SECTION_COUNT:
+        break;
+    }
+    return OBJECT_SECTION_COUNT;
 }
 
 // Appends the built DWARF sections plus local base symbols carrying the
@@ -7372,30 +7437,25 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
         };
     }
     result.relocations = arena_allocate(arena, ObjectRelocation, module->relocation_count + metadata_relocation_count);
+    Arena* lookup_conflicts[] = {
+        arena,
+    };
+    TemporalArena lookup_temporary = scratch_begin(lookup_conflicts, BUSTER_ARRAY_LENGTH(lookup_conflicts));
+    ObjectCodegenEntryIndex entry_index = object_codegen_entry_index_build(lookup_temporary.arena, module->entries, module->entry_count);
+    ObjectSymbolNameIndex name_index = object_symbol_name_index_build(lookup_temporary.arena, result.symbols, result.symbol_count,
+                                                                      (u64)result.symbol_count + module->relocation_count);
     for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
     {
         CodegenModuleRelocation* source = module->relocations + relocation_index;
-        u32 symbol_index = UINT32_MAX;
-        for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
-        {
-            CodegenModuleEntry* entry = module->entries + entry_index;
-            if (entry->entity.module.value == source->entity.module.value && entry->entity.index.value == source->entity.index.value &&
-                entry->instantiation.value == source->instantiation.value)
-            {
-                symbol_index = entry_index;
-                break;
-            }
-        }
+        u32* entry_slot = object_codegen_entry_slot(entry_index, source->entity, source->instantiation);
+        u32 symbol_index = entry_slot ? *entry_slot : UINT32_MAX;
         if (symbol_index == UINT32_MAX)
         {
             String8 name = object_entity_name(arena, analysis, source->entity, source->instantiation);
-            for (u32 existing = 0; existing < result.symbol_count; existing += 1)
+            ObjectSymbolNameSlot* name_slot = object_symbol_name_slot(name_index, name);
+            if (name_slot->used)
             {
-                if (result.symbols[existing].section == OBJECT_SECTION_UNDEFINED && string_equal(result.symbols[existing].name, name))
-                {
-                    symbol_index = existing;
-                    break;
-                }
+                symbol_index = name_slot->undefined;
             }
             if (symbol_index == UINT32_MAX)
             {
@@ -7406,6 +7466,7 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
                     .kind = OBJECT_SYMBOL_FUNCTION,
                     .global = true,
                 };
+                object_symbol_name_index_add(name_index, result.symbols + symbol_index, symbol_index);
             }
         }
         ObjectRelocationKind kind = source->absolute  ? OBJECT_RELOCATION_ABSOLUTE64
@@ -7423,6 +7484,7 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
             if (source->offset + 8 > module->code.length)
             {
                 result.error = OBJECT_ERROR_INVALID_INPUT;
+                scratch_end(lookup_temporary);
                 return result;
             }
             memset(text + source->offset, 0, 8);
@@ -7432,6 +7494,7 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
             if (source->offset + 4 > module->code.length)
             {
                 result.error = OBJECT_ERROR_INVALID_INPUT;
+                scratch_end(lookup_temporary);
                 return result;
             }
             u32 instruction = 0x94000000;
@@ -7442,11 +7505,13 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
             if (source->offset + 4 > module->code.length)
             {
                 result.error = OBJECT_ERROR_INVALID_INPUT;
+                scratch_end(lookup_temporary);
                 return result;
             }
             memset(text + source->offset, 0, 4);
         }
     }
+    scratch_end(lookup_temporary);
     if (module->data_relocation_count)
     {
         u32 data_symbol = result.symbol_count++;
