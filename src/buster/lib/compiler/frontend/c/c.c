@@ -15993,6 +15993,27 @@ struct CIrQueryFrame
     u8 reserved[2];
 };
 
+// Saved mid-expression state for a suspended constant-evaluation frame,
+// parallel to the machine's frame stack by slot. When the evaluator stops on
+// a missing sub-query it records the token index and shunting-yard stack
+// heights it had reached, and keeps its value/operator regions reserved so
+// the sub-query builds above them; the re-run after the sub-query completes
+// resumes at that token instead of re-evaluating the whole prefix. A slot is
+// cleared when its frame is pushed and consumed by the attempt that reads
+// it, so a frame that fails without a pending request completes as before.
+typedef struct CIrQueryResume CIrQueryResume;
+struct CIrQueryResume
+{
+    u32 index;
+    u32 value_start;
+    u32 operator_start;
+    u32 value_count;
+    u32 operator_count;
+    bool expect_operand;
+    bool valid;
+    u8 reserved[2];
+};
+
 typedef struct CIrQueryMachine CIrQueryMachine;
 struct CIrQueryMachine
 {
@@ -16000,6 +16021,7 @@ struct CIrQueryMachine
     CIrQueryFrame* completed;
     CIrConstantValue* values;
     CIrConstantOperator* operators;
+    CIrQueryResume* resumes;
     CIrQueryFrame request;
     u32 frame_count;
     u32 frame_capacity;
@@ -16431,6 +16453,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQuery
     u32 completed_start = machine->completed_count;
     u32 value_start = machine->value_count;
     u32 operator_start = machine->operator_count;
+    machine->resumes[machine->frame_count] = (CIrQueryResume){0};
     machine->frames[machine->frame_count++] = root;
     while (machine->frame_count > frame_start)
     {
@@ -16483,6 +16506,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQuery
                 machine->has_request = false;
                 return false;
             }
+            machine->resumes[machine->frame_count] = (CIrQueryResume){0};
             machine->frames[machine->frame_count++] = machine->request;
             continue;
         }
@@ -40562,8 +40586,29 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_apply_operator(CIntegerIrBuilder* builder
     return true;
 }
 
+// Failure exit for the query call sites in c_ir_constant_evaluate_impl: a
+// pending request means the frame is suspended, not failed, so record where
+// to pick the scan back up once the sub-query completes.
+BUSTER_GLOBAL_LOCAL bool c_ir_constant_evaluate_suspend(CIntegerIrBuilder* builder, CIrQueryResume* resume, u32 index, bool expect_operand, u32 value_start,
+                                                        u32 operator_start, u32 value_count, u32 operator_count)
+{
+    if (builder->queries->has_request)
+    {
+        *resume = (CIrQueryResume){
+            .index = index,
+            .value_start = value_start,
+            .operator_start = operator_start,
+            .value_count = value_count,
+            .operator_count = operator_count,
+            .expect_operand = expect_operand,
+            .valid = true,
+        };
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u32 start, u32 end, CIrConstantValue* result_out, u32 value_start,
-                                                     u32 operator_start)
+                                                     u32 operator_start, CIrQueryResume* resume)
 {
     if (start >= end || end > builder->preprocess.token_count || !builder->queries)
     {
@@ -40582,7 +40627,16 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder,
     u32 value_count = 0;
     u32 operator_count = 0;
     bool expect_operand = true;
-    for (u32 index = start; index < end; index += 1)
+    u32 scan_start = start;
+    if (resume->valid)
+    {
+        scan_start = resume->index;
+        value_count = resume->value_count;
+        operator_count = resume->operator_count;
+        expect_operand = resume->expect_operand;
+        resume->valid = false;
+    }
+    for (u32 index = scan_start; index < end; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
         if (token.kind == C_TOKEN_INVALID)
@@ -40634,7 +40688,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder,
                 builder->queries->operator_count = operator_start + operator_count;
                 IrTypeId type_id = IR_TYPE_ID_INVALID;
                 bool type_resolved = c_ir_query_type_name(builder, index + 2, close, true, &type_id);
-                if (!type_resolved && builder->queries->has_request) return false;
+                if (!type_resolved && builder->queries->has_request)
+                {
+                    return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
+                }
                 u64 size = 0;
                 u32 alignment = 0;
                 if (type_id.value != IR_ID_UNDERLYING_INVALID)
@@ -40644,7 +40701,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder,
                     size = type->layout.size;
                     alignment = type->layout.alignment;
                 }
-                else if (!c_ir_query_sizeof(builder, index + 2, close, &size, &alignment)) return false;
+                else if (!c_ir_query_sizeof(builder, index + 2, close, &size, &alignment))
+                {
+                    return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
+                }
                 values[value_count++] = c_ir_constant_integer(builder->size_type, c_parse_alignof_word(token.spelling) ? alignment : size);
                 expect_operand = false;
                 index = close;
@@ -40657,7 +40717,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder,
                 u64 offset = 0;
                 builder->queries->value_count = value_start + value_count;
                 builder->queries->operator_count = operator_start + operator_count;
-                if (close >= end || !c_ir_query_offsetof(builder, index + 2, close, &offset)) return false;
+                if (close >= end || !c_ir_query_offsetof(builder, index + 2, close, &offset))
+                {
+                    return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
+                }
                 values[value_count++] = c_ir_constant_integer(builder->size_type, offset);
                 expect_operand = false;
                 index = close;
@@ -40672,7 +40735,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder,
                 if (close < end)
                 {
                     c_ir_query_type_name(builder, index + 1, close, true, &cast_type);
-                    if (builder->queries->has_request) return false;
+                    if (builder->queries->has_request)
+                    {
+                        return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
+                    }
                 }
                 if (cast_type.value != IR_ID_UNDERLYING_INVALID)
                 {
@@ -40754,7 +40820,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder,
             builder->queries->value_count = value_start + value_count;
             builder->queries->operator_count = operator_start + operator_count;
             if (!value_count || close >= end || !c_ir_query_constant(builder, index + 1, close, &index_value) ||
-                index_value.kind != C_IR_CONSTANT_INTEGER || !c_ir_constant_index(builder, &values[value_count - 1], index_value.integer)) return false;
+                index_value.kind != C_IR_CONSTANT_INTEGER || !c_ir_constant_index(builder, &values[value_count - 1], index_value.integer))
+            {
+                return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
+            }
             index = close;
             continue;
         }
@@ -40833,11 +40902,19 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_evaluate_attempt(CIntegerIrBuilder* build
     {
         return false;
     }
-    u32 value_start = builder->queries->value_count;
-    u32 operator_start = builder->queries->operator_count;
-    bool result = c_ir_constant_evaluate_impl(builder, start, end, result_out, value_start, operator_start);
-    builder->queries->value_count = value_start;
-    builder->queries->operator_count = operator_start;
+    CIrQueryMachine* machine = builder->queries;
+    CIrQueryResume* resume = machine->resumes + (machine->frame_count - 1);
+    u32 value_start = resume->valid ? resume->value_start : machine->value_count;
+    u32 operator_start = resume->valid ? resume->operator_start : machine->operator_count;
+    bool result = c_ir_constant_evaluate_impl(builder, start, end, result_out, value_start, operator_start, resume);
+    // A pending request means this frame is suspended with its stack regions
+    // reserved for the sub-query to build above; every other exit releases
+    // them.
+    if (!machine->has_request)
+    {
+        machine->value_count = value_start;
+        machine->operator_count = operator_start;
+    }
     return result;
 }
 
@@ -41844,6 +41921,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         .completed = arena_allocate(temporary_arena, CIrQueryFrame, (u32)query_frame_capacity),
         .values = arena_allocate(temporary_arena, CIrConstantValue, (u32)query_frame_capacity),
         .operators = arena_allocate(temporary_arena, CIrConstantOperator, (u32)query_frame_capacity),
+        .resumes = arena_allocate(temporary_arena, CIrQueryResume, (u32)query_frame_capacity),
         .frame_capacity = (u32)query_frame_capacity,
         .completed_capacity = (u32)query_frame_capacity,
         .value_capacity = (u32)query_frame_capacity,
