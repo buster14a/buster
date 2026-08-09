@@ -272,7 +272,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         .cpu_arch = CPU_ARCH_X86_64,
         .os = OPERATING_SYSTEM_LINUX,
     };
-    String8 machine_c_source = S8("int add(int a, int b) { return a + b; }\n"
+    String8 machine_c_source_head = S8("int add(int a, int b) { return a + b; }\n"
                                   "int mul(int a, int b) { return a * b; }\n"
                                   "long widen(int a, unsigned b) { return (long)a + (long)b; }\n"
                                   "int narrow(long v) { return (int)v; }\n"
@@ -299,6 +299,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "double nine(double a, double b, double c, double d, double e, double f, double g, double h, double i) {\n"
                                   "    return a + i * b; }\n"
                                   "int indirect(int (*callee)(int, int), int a) { return callee(a, 2); }\n"
+                                  "typedef struct Big { long a; long b; long c; } Big;\n"
+                                  "Big big_make(long a) { Big b; b.a = a; b.b = a * 2; b.c = a ^ 5; return b; }\n"
+                                  "long big_sum(Big b) { return b.a + b.b + b.c; }\n"
+                                  "long big_round(long a) { Big b = big_make(a); return big_sum(b) + b.c; }\n"
                                   "int counter;\n"
                                   "int bump(int by) { counter = counter + by; return counter; }\n"
                                   "int table[8];\n"
@@ -309,7 +313,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "long pair_sum(void) { return pair.first + pair.second; }\n"
                                   "int locals_array(int n) { int a[4]; a[0] = n; a[1] = n + 1; a[2] = a[0] * a[1]; a[3] = a[2] - n; return a[3]; }\n"
                                   "int local_pair(int x) { Pair p; p.first = x; p.second = x * 2; return p.first + (int)p.second; }\n"
-                                  "int pick(int k) { switch (k) { case 1: return 10; case 3: return 30; case 7: return 70; default: return -k; } }\n"
+                                  "int pick(int k) { switch (k) { case 1: return 10; case 3: return 30; case 7: return 70; default: return -k; } }\n");
+    String8 machine_c_source_tail = S8(
                                   "int printf(const char* format, ...);\n"
                                   "int call_variadic(int a, long b) { return printf(\"%d %ld\", a, b); }\n"
                                   "typedef struct Span { char* data; unsigned long length; } Span;\n"
@@ -337,6 +342,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "typedef struct Tagged { long tag; double v; } Tagged;\n"
                                   "double tagged_get(Tagged t) { return t.tag ? t.v : -t.v; }\n"
                                   "double dcall(double a, double b) { DPair p = dpair_make(a, b); return dpair_sum(p) * dadd(a, b); }\n");
+    String8 machine_c_source = string_format(arguments->arena, S8("{S8}{S8}"), machine_c_source_head, machine_c_source_tail);
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
     BUSTER_TEST(arguments, machine_program != 0);
     if (machine_program && machine_program->module_count)
@@ -629,7 +635,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("uless"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("divide"), S8_INITIALIZER("with_call"),
             S8_INITIALIZER("locals_array"), S8_INITIALIZER("local_pair"), S8_INITIALIZER("pick"),
             S8_INITIALIZER("span_round_trip"), S8_INITIALIZER("single_round_trip"), S8_INITIALIZER("fmath"),
-            S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnan"), S8_INITIALIZER("call_stack"),
+            S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnan"), S8_INITIALIZER("call_stack"), S8_INITIALIZER("big_round"),
         };
         typedef s64 MachineTestModuleCall2(s64, s64);
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(module_names) && none_module_executable.address && mir_module_executable.address;
@@ -789,6 +795,40 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, none_stack_mix(1, 2, 3, 4, 5, 6, 7, -11) == mir_stack_mix(1, 2, 3, 4, 5, 6, 7, -11));
                 BUSTER_TEST(arguments,
                             none_nine(1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, -0.25) == mir_nine(1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, -0.25));
+                typedef struct MachineTestBig
+                {
+                    s64 a;
+                    s64 b;
+                    s64 c;
+                } MachineTestBig;
+                typedef MachineTestBig MachineTestCallBigMake(s64);
+                typedef s64 MachineTestCallBigSum(MachineTestBig);
+                u32 none_big_make_offset = machine_test_module_offset(&none_module, machine_module, S8("big_make"));
+                u32 mir_big_make_offset = machine_test_module_offset(&mir_module, machine_module, S8("big_make"));
+                u32 none_big_sum_offset = machine_test_module_offset(&none_module, machine_module, S8("big_sum"));
+                u32 mir_big_sum_offset = machine_test_module_offset(&mir_module, machine_module, S8("big_sum"));
+                BUSTER_TEST(arguments, none_big_make_offset != UINT32_MAX && mir_big_make_offset != UINT32_MAX &&
+                                           none_big_sum_offset != UINT32_MAX && mir_big_sum_offset != UINT32_MAX);
+                if (none_big_make_offset != UINT32_MAX && mir_big_make_offset != UINT32_MAX && none_big_sum_offset != UINT32_MAX &&
+                    mir_big_sum_offset != UINT32_MAX)
+                {
+                    MachineTestCallBigMake* none_big_make;
+                    MachineTestCallBigMake* mir_big_make;
+                    MachineTestCallBigSum* none_big_sum;
+                    MachineTestCallBigSum* mir_big_sum;
+                    void* none_big_make_address = (u8*)none_module_executable.address + none_big_make_offset;
+                    void* mir_big_make_address = (u8*)mir_module_executable.address + mir_big_make_offset;
+                    void* none_big_sum_address = (u8*)none_module_executable.address + none_big_sum_offset;
+                    void* mir_big_sum_address = (u8*)mir_module_executable.address + mir_big_sum_offset;
+                    memcpy(&none_big_make, &none_big_make_address, sizeof(none_big_make));
+                    memcpy(&mir_big_make, &mir_big_make_address, sizeof(mir_big_make));
+                    memcpy(&none_big_sum, &none_big_sum_address, sizeof(none_big_sum));
+                    memcpy(&mir_big_sum, &mir_big_sum_address, sizeof(mir_big_sum));
+                    MachineTestBig none_big = none_big_make(37);
+                    MachineTestBig mir_big = mir_big_make(37);
+                    BUSTER_TEST(arguments, none_big.a == mir_big.a && none_big.b == mir_big.b && none_big.c == mir_big.c);
+                    BUSTER_TEST(arguments, none_big_sum(none_big) == mir_big_sum(mir_big));
+                }
             }
         }
         codegen_release_executable(none_module_executable);

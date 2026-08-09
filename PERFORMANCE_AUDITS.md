@@ -12,6 +12,29 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09n` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+stack arguments and the memory-class aggregate ABI, crossing half the tree.)
+
+- **What was built.** Stack arguments both directions (the canonical
+  all-or-nothing placement rule, right-to-left pushes from value slots
+  with alignment padding and explicit RSP cleanup, LOAD_INCOMING reads of
+  the caller-pushed area) with the argument-list cap at sixteen; then
+  memory-class aggregates: large results return through a hidden RDI
+  pointer saved into a frame slot and copied through at return with RAX
+  carrying the pointer, callers pass the result slot's address in the
+  first integer register (synthesized scratch storage when the result is
+  unused), and memory-class arguments travel by value in outgoing stack
+  eightbytes. No new encoder forms were needed for the indirect return —
+  it composes from the existing lea/load/copy/copy-through-pointer rows.
+- **Gates:** `machine_tests` 451/451 (24-byte struct make/sum/round-trip
+  executed typed against the oracle, machine-to-machine); test_all green;
+  fixed point `bytes=27138592`; soak byte-identical. Coverage: fallbacks
+  1650 → 1615 (stack args) → 1377 — **1540 of 2917 (52.8%)
+  machine-compiled**, the majority of the unity tree. Remaining mass:
+  indirect calls, atomics, va_start machinery, inline assembly,
+  over-aligned locals, STACK_ALLOCATE, label addresses, and machine-path
+  debug locations.
+
 `2026-08-09m` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 scalar float operations and the XMM ABI.)
 

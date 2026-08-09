@@ -25,7 +25,11 @@ struct MachineX64ValueShape
     u32 part_count;
     u32 byte_size;
     bool aggregate;
-    u8 reserved[3];
+    // Memory-class argument: passed by value in outgoing stack eightbytes.
+    bool force_stack;
+    // Indirect result: returned through a hidden pointer in RDI.
+    bool indirect;
+    u8 reserved;
 };
 
 // One argument's placement after running register assignment: either its
@@ -68,6 +72,8 @@ struct MachineX64Selector
     MachineX64ValueShape parameter_shapes[MACHINE_X64_MAX_ARGUMENTS];
     MachineX64ArgumentPlacement parameter_placements[MACHINE_X64_MAX_ARGUMENTS];
     MachineX64ValueShape return_shape;
+    // Frame slot holding the incoming hidden result pointer, or UINT32_MAX.
+    u32 hidden_return_slot;
     // Definition point per virtual register, patched into the flattened
     // rows because builder chunks are write-once.
     u32* virtual_register_definitions;
@@ -121,6 +127,30 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
     IrAbiValue abi = ir_type_abi_value(program, type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, use);
     if (abi.indirect || abi.memory || !abi.part_count || abi.part_count > 2)
     {
+        if (type->layout.size > UINT32_MAX - 7)
+        {
+            return false;
+        }
+        if (use == IR_ABI_USE_RESULT && (abi.indirect || abi.memory))
+        {
+            // Large results return through a hidden pointer.
+            *shape = (MachineX64ValueShape){
+                .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
+                .aggregate = true,
+                .indirect = true,
+            };
+            return true;
+        }
+        if (use != IR_ABI_USE_RESULT && abi.memory && !abi.indirect)
+        {
+            // Memory-class arguments pass by value on the stack.
+            *shape = (MachineX64ValueShape){
+                .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
+                .aggregate = true,
+                .force_stack = true,
+            };
+            return true;
+        }
         return false;
     }
     if (type->layout.size > UINT32_MAX - 7)
@@ -167,7 +197,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_place_argument(MachineX64ValueShape* shape,
 {
     u32 integer_parts = machine_x64_shape_class_parts(shape, false);
     u32 float_parts = machine_x64_shape_class_parts(shape, true);
-    if (*integer_count + integer_parts > BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments) || *float_count + float_parts > 8)
+    if (shape->force_stack || *integer_count + integer_parts > BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments) || *float_count + float_parts > 8)
     {
         *placement = (MachineX64ArgumentPlacement){
             .first_stack_part = (u16)*stack_part_count,
@@ -1155,9 +1185,28 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         // Aggregate variadic tails stay outside the subset.
         MachineX64ValueShape argument_shapes[MACHINE_X64_MAX_ARGUMENTS];
         MachineX64ArgumentPlacement argument_placements[MACHINE_X64_MAX_ARGUMENTS];
-        u32 call_integer_count = 0;
+        u32 call_integer_count = callee_return_shape.indirect ? 1 : 0;
         u32 call_float_count = 0;
         u32 call_stack_part_count = 0;
+        u32 indirect_result_slot = UINT32_MAX;
+        if (callee_return_shape.indirect)
+        {
+            if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
+            {
+                indirect_result_slot = selector->value_stack_slots[instruction->result.value];
+                if (indirect_result_slot == UINT32_MAX)
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                // An unused indirect result still needs backing storage.
+                indirect_result_slot = selector->stack_slots.total_count;
+                u32* scratch_slot_size = (u32*)machine_stream_append(selector->arena, &selector->stack_slots);
+                *scratch_slot_size = callee_return_shape.byte_size;
+            }
+        }
         for (u32 argument_index = 0; argument_index < call_argument_count; argument_index += 1)
         {
             IrTypeId argument_type_id = argument_index < callee_type->parameter_count
@@ -1229,7 +1278,22 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         // Explicit fixed-register argument copies; integer targets load
         // directly (never through a scratch that could disturb an already
         // placed argument), and float parts bounce through RAX into their
-        // XMM registers, which no general-register write can touch.
+        // XMM registers, which no general-register write can touch. The
+        // hidden result pointer takes the first integer register.
+        if (callee_return_shape.indirect)
+        {
+            u32 result_pointer_register = machine_x64_synthesize_register(selector);
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_pointer_register),
+                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, indirect_result_slot)},
+                                                 .opcode = MACHINE_X64_LEA_FRAME,
+                                             });
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RDI),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_pointer_register)},
+                                                 .opcode = MACHINE_X64_MOV_RR,
+                                             });
+        }
         for (u32 argument_index = 0; argument_index < call_argument_count; argument_index += 1)
         {
             MachineX64ValueShape* shape = argument_shapes + argument_index;
@@ -1308,6 +1372,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         }
         if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
         {
+            if (callee_return_shape.indirect)
+            {
+                // The callee already stored the value through the hidden
+                // pointer into the result slot.
+                return true;
+            }
             if (callee_return_shape.aggregate)
             {
                 u32 result_slot = selector->value_stack_slots[instruction->result.value];
@@ -1443,7 +1513,35 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     {
         if (instruction->operand_count)
         {
-            if (selector->return_shape.aggregate)
+            if (selector->return_shape.indirect)
+            {
+                u32 value_slot = instruction->operands[0].value < function->value_count
+                                     ? selector->value_stack_slots[instruction->operands[0].value]
+                                     : UINT32_MAX;
+                if (value_slot == UINT32_MAX || selector->hidden_return_slot == UINT32_MAX)
+                {
+                    return false;
+                }
+                u32 pointer_register = machine_x64_synthesize_register(selector);
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, selector->hidden_return_slot)},
+                                                     .opcode = MACHINE_X64_LOAD_FRAME,
+                                                 });
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                     .payload = selector->return_shape.byte_size,
+                                                     .opcode = MACHINE_X64_COPY_PTR_FROM_FRAME,
+                                                 });
+                // The System V contract returns the hidden pointer in RAX.
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register)},
+                                                     .opcode = MACHINE_X64_MOV_RR,
+                                                 });
+            }
+            else if (selector->return_shape.aggregate)
             {
                 u32 value_slot = instruction->operands[0].value < function->value_count
                                      ? selector->value_stack_slots[instruction->operands[0].value]
@@ -1546,7 +1644,7 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
     }
     MachineX64ValueShape signature_parameter_shapes[MACHINE_X64_MAX_ARGUMENTS] = {0};
     MachineX64ArgumentPlacement signature_parameter_placements[MACHINE_X64_MAX_ARGUMENTS] = {0};
-    u32 signature_integer_count = 0;
+    u32 signature_integer_count = signature_return_shape.indirect ? 1 : 0;
     u32 signature_float_count = 0;
     u32 signature_stack_count = 0;
     for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
@@ -1582,6 +1680,13 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
     machine_stream_initialize(&selector.call_targets, sizeof(IrSymbolId));
     machine_stream_initialize(&selector.switch_cases, sizeof(MachineSwitchCase));
     selector.return_shape = signature_return_shape;
+    selector.hidden_return_slot = UINT32_MAX;
+    if (signature_return_shape.indirect)
+    {
+        selector.hidden_return_slot = selector.stack_slots.total_count;
+        u32* hidden_slot_size = (u32*)machine_stream_append(arena, &selector.stack_slots);
+        *hidden_slot_size = 8;
+    }
     for (u32 parameter_index = 0; parameter_index < BUSTER_ARRAY_LENGTH(selector.parameter_shapes); parameter_index += 1)
     {
         selector.parameter_shapes[parameter_index] = signature_parameter_shapes[parameter_index];
@@ -1680,6 +1785,14 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
             // body row can use an argument register as an operand scratch.
             // Integer parts capture first because float captures scratch
             // general registers; XMM state survives that pass untouched.
+            if (selector.return_shape.indirect)
+            {
+                machine_x64_select_row(&selector, (MachineInstruction){
+                                                      .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector.hidden_return_slot),
+                                                                   machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RDI)},
+                                                      .opcode = MACHINE_X64_STORE_FRAME64,
+                                                  });
+            }
             for (u32 capture_pass = 0; capture_pass < 2 && selector.supported; capture_pass += 1)
             {
                 bool float_pass = capture_pass == 1;
