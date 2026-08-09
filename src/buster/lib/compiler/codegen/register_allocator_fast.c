@@ -259,23 +259,6 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
         .stack_slot_offsets = arena_allocate(arena, u32, function->stack_slot_count),
         .operand_registers = arena_allocate(arena, u8, (u64)function->instruction_count * 4),
     };
-    u32 running = 0;
-    for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
-    {
-        running += 8;
-        placement.virtual_register_offsets[register_index] = running;
-    }
-    for (u32 slot_index = 0; slot_index < function->stack_slot_count; slot_index += 1)
-    {
-        u32 slot_alignment = function->stack_slot_alignments ? function->stack_slot_alignments[slot_index] : 8;
-        running = (running + function->stack_slot_sizes[slot_index] + slot_alignment - 1) & ~(slot_alignment - 1);
-        placement.stack_slot_offsets[slot_index] = running;
-    }
-    placement.frame_size = (running + 15u) & ~15u;
-    if (placement.frame_size >= 4080)
-    {
-        return placement;
-    }
     MachineBuilderStream edits;
     machine_stream_initialize(&edits, sizeof(MachineEdit));
     MachineFastState state = {
@@ -528,6 +511,40 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
     placement.edits = arena_allocate(arena, MachineEdit, edits.total_count);
     placement.edit_count = edits.total_count;
     machine_stream_flatten(&edits, placement.edits);
+    // Frame layout runs after the scan: every touch of a vreg slot flows
+    // through the edit stream, so only edit subjects get backing slots.
+    // Values that never left their registers cost no frame bytes, and the
+    // guard-page-probe bail applies to the compacted frame.
+    u8* slot_needed = state.escapes;
+    for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
+    {
+        slot_needed[register_index] = 0;
+    }
+    for (u32 edit_index = 0; edit_index < placement.edit_count; edit_index += 1)
+    {
+        slot_needed[placement.edits[edit_index].subject] = 1;
+    }
+    u32 running = 0;
+    for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
+    {
+        placement.virtual_register_offsets[register_index] = 0;
+        if (slot_needed[register_index])
+        {
+            running += 8;
+            placement.virtual_register_offsets[register_index] = running;
+        }
+    }
+    for (u32 slot_index = 0; slot_index < function->stack_slot_count; slot_index += 1)
+    {
+        u32 slot_alignment = function->stack_slot_alignments ? function->stack_slot_alignments[slot_index] : 8;
+        running = (running + function->stack_slot_sizes[slot_index] + slot_alignment - 1) & ~(slot_alignment - 1);
+        placement.stack_slot_offsets[slot_index] = running;
+    }
+    placement.frame_size = (running + 15u) & ~15u;
+    if (placement.frame_size >= 4080)
+    {
+        return placement;
+    }
     placement.valid = true;
     return placement;
 }

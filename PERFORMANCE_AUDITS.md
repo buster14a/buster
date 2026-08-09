@@ -12,6 +12,27 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09r` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6,
+first slice — spill slots only for values that touch memory.)
+
+- **What was built.** The fast placement's frame layout moved after the
+  scan: every touch of a vreg slot flows through the edit stream, so
+  only edit subjects get backing slots and values that never left their
+  registers cost no frame bytes. The guard-page-probe bail (frames
+  >= 4080 fall back to canonical, stage-2 restriction) now applies to
+  the compacted frame.
+- **Numbers** (buster-built stage comparison, compiling ide.c under
+  NONE): fallbacks 1373 -> 1321 — 52 functions whose all-vregs frames
+  exceeded the probe limit now fit, coverage **1596 of 2917 (54.7%)**.
+  Fast-built compiler 63.62G instructions (from 63.76G), text
+  24,784,468 (from 24,958,388; canonical 25,699,964).
+- **Gates:** test_all green, FAST soak byte-identical on fresh
+  references, self-host fixed point holds.
+- **Left open in stage 6:** spill-slot reuse across dead ranges,
+  callee-saved RBX/R12-R15 with prologue saves and unwind actions,
+  within-block debug location ranges, and making FAST cover the full
+  canonical self-host path.
+
 `2026-08-09q` (Linux x86_64, Zen 4 7940HS; register-allocator stage 5,
 first slice — liveness-driven spill kills put FAST ahead of canonical.)
 
