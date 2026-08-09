@@ -3,6 +3,7 @@
 #include <buster/lib/compiler/pdb/pdb.h>
 
 #include <buster/lib/file.h>
+#include <buster/lib/hash.h>
 #include <buster/lib/integer.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
@@ -92,16 +93,63 @@ BUSTER_GLOBAL_LOCAL bool link_target_matches(Target left, Target right)
     return left.cpu_arch == right.cpu_arch && left.os == right.os;
 }
 
-BUSTER_GLOBAL_LOCAL u32 link_global_symbol_find(ObjectSymbol* symbols, u32 symbol_count, String8 name)
+typedef struct LinkGlobalSymbolTable LinkGlobalSymbolTable;
+struct LinkGlobalSymbolTable
 {
-    for (u32 index = 0; index < symbol_count; index += 1)
+    ObjectSymbol* symbols;
+    u32* slots;
+    u64 capacity;
+};
+
+BUSTER_GLOBAL_LOCAL bool link_global_symbol_table_initialize(Arena* arena, ObjectSymbol* symbols, u64 total_symbols, LinkGlobalSymbolTable* table)
+{
+    *table = (LinkGlobalSymbolTable){.symbols = symbols};
+    if (!total_symbols)
     {
-        if (symbols[index].global && string_equal(symbols[index].name, name))
-        {
-            return index;
-        }
+        return true;
     }
-    return UINT32_MAX;
+    if (total_symbols > UINT64_MAX / 2)
+    {
+        return false;
+    }
+    u64 required_capacity = total_symbols * 2;
+    u64 capacity = 1;
+    while (capacity < required_capacity)
+    {
+        if (capacity > UINT64_MAX / 2)
+        {
+            return false;
+        }
+        capacity *= 2;
+    }
+    if (capacity > UINT64_MAX / sizeof(*table->slots))
+    {
+        return false;
+    }
+    table->slots = arena_allocate(arena, u32, capacity);
+    table->capacity = capacity;
+    memset(table->slots, 0xff, sizeof(*table->slots) * capacity);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL u32* link_global_symbol_table_slot(LinkGlobalSymbolTable* table, String8 name)
+{
+    if (!table->capacity)
+    {
+        return 0;
+    }
+    u64 mask = table->capacity - 1;
+    u64 slot_index = buster_hash_64((u8*)name.pointer, name.length) & mask;
+    for (u64 probe = 0; probe < table->capacity; probe += 1)
+    {
+        u32* slot = table->slots + slot_index;
+        if (*slot == UINT32_MAX || string_equal(table->symbols[*slot].name, name))
+        {
+            return slot;
+        }
+        slot_index = (slot_index + 1) & mask;
+    }
+    return 0;
 }
 
 BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, ObjectSymbol* source, ObjectFile* object, u64* section_offsets, Arena* arena)
@@ -246,6 +294,12 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         }
     }
     u32** symbol_maps = arena_allocate(arena, u32*, object_count);
+    LinkGlobalSymbolTable global_symbols = {0};
+    if (!link_global_symbol_table_initialize(arena, result.object.symbols, total_symbols, &global_symbols))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = &objects[object_index];
@@ -269,9 +323,16 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 return result;
             }
             u32 destination_index = UINT32_MAX;
+            u32* global_slot = 0;
             if (source->global)
             {
-                destination_index = link_global_symbol_find(result.object.symbols, result.object.symbol_count, source->name);
+                global_slot = link_global_symbol_table_slot(&global_symbols, source->name);
+                if (!global_slot)
+                {
+                    result.error = LINK_ERROR_INVALID_INPUT;
+                    return result;
+                }
+                destination_index = *global_slot;
             }
             if (destination_index == UINT32_MAX)
             {
@@ -281,6 +342,10 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 {
                     result.error = LINK_ERROR_INVALID_INPUT;
                     return result;
+                }
+                if (global_slot)
+                {
+                    *global_slot = destination_index;
                 }
             }
             else

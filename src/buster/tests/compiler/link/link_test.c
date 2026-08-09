@@ -3,6 +3,7 @@
 
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/file.h>
+#include <buster/lib/hash.h>
 
 BUSTER_GLOBAL_LOCAL String8 link_test_temporary_executable_path(Arena* arena, String8 name, String8 suffix)
 {
@@ -38,6 +39,18 @@ BUSTER_GLOBAL_LOCAL ObjectFile link_test_object_make(Arena* arena, Target target
         .symbol_count = symbol_count,
         .relocation_count = relocation_count,
     };
+}
+
+BUSTER_GLOBAL_LOCAL String8 link_test_symbol_name_write(char8* destination, u32 value)
+{
+    static char8 const hexadecimal[] = "0123456789abcdef";
+    destination[0] = 's';
+    for (u32 digit = 0; digit < 8; digit += 1)
+    {
+        u32 shift = (7 - digit) * 4;
+        destination[digit + 1] = hexadecimal[(value >> shift) & 15];
+    }
+    return (String8){.pointer = destination, .length = 9};
 }
 
 BUSTER_GLOBAL_LOCAL bool link_test_elf_section_find(ByteSlice image, String8 name, u32* section_index, u64* section_header)
@@ -1153,6 +1166,293 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                     link_pe_resolved_codeview(arguments->arena, &object, &debug_module, object_output_sections, object_section_offsets, 5).length == 0);
     }
     Target target = target_native;
+    {
+        u8 first_text[24] = {0};
+        u8 second_text[32] = {0};
+        u8 third_text[16] = {0};
+        ObjectSymbol first_symbols[] = {
+            {
+                .name = S8("upgrade"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            },
+            {
+                .name = S8("private"),
+                .value = 1,
+                .size = 1,
+                .section = OBJECT_SECTION_TEXT,
+                .kind = OBJECT_SYMBOL_DATA,
+            },
+            {
+                .name = S8("first"),
+                .value = 2,
+                .size = 1,
+                .section = OBJECT_SECTION_TEXT,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            },
+        };
+        ObjectSymbol second_symbols[] = {
+            {
+                .name = S8("upgrade"),
+                .value = 3,
+                .size = 1,
+                .section = OBJECT_SECTION_TEXT,
+                .kind = OBJECT_SYMBOL_DATA,
+                .global = true,
+            },
+            {
+                .name = S8("private"),
+                .value = 4,
+                .size = 1,
+                .section = OBJECT_SECTION_TEXT,
+                .kind = OBJECT_SYMBOL_DATA,
+            },
+            {
+                .name = S8("first"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            },
+            {
+                .name = S8("private"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            },
+        };
+        ObjectSymbol third_symbols[] = {
+            {
+                .name = S8("upgrade"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            },
+            {
+                .name = S8("private"),
+                .value = 1,
+                .size = 1,
+                .section = OBJECT_SECTION_TEXT,
+                .kind = OBJECT_SYMBOL_DATA,
+                .global = true,
+            },
+        };
+        ObjectRelocation first_relocations[] = {
+            {.section = OBJECT_SECTION_TEXT, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = 8, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = 16, .section = OBJECT_SECTION_TEXT, .symbol = 2, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        };
+        ObjectRelocation second_relocations[] = {
+            {.section = OBJECT_SECTION_TEXT, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = 8, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = 16, .section = OBJECT_SECTION_TEXT, .symbol = 2, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = 24, .section = OBJECT_SECTION_TEXT, .symbol = 3, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        };
+        ObjectRelocation third_relocations[] = {
+            {.section = OBJECT_SECTION_TEXT, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = 8, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        };
+        ObjectFile ordered_objects[] = {
+            link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(first_text), first_symbols,
+                                  BUSTER_ARRAY_LENGTH(first_symbols), first_relocations, BUSTER_ARRAY_LENGTH(first_relocations)),
+            link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(second_text), second_symbols,
+                                  BUSTER_ARRAY_LENGTH(second_symbols), second_relocations, BUSTER_ARRAY_LENGTH(second_relocations)),
+            link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(third_text), third_symbols,
+                                  BUSTER_ARRAY_LENGTH(third_symbols), third_relocations, BUSTER_ARRAY_LENGTH(third_relocations)),
+        };
+        LinkObjectResult ordered = link_objects(arguments->arena, ordered_objects, BUSTER_ARRAY_LENGTH(ordered_objects), (LinkOptions){0});
+        BUSTER_TEST(arguments, ordered.error == LINK_ERROR_NONE);
+        BUSTER_TEST(arguments, ordered.object.symbol_count == 5);
+        BUSTER_TEST(arguments, ordered.object.relocation_count == 9);
+        if (ordered.error == LINK_ERROR_NONE && ordered.object.symbol_count == 5 && ordered.object.relocation_count == 9)
+        {
+            String8 expected_names[] = {
+                S8("upgrade"),
+                S8("private"),
+                S8("first"),
+                S8("private"),
+                S8("private"),
+            };
+            u32 expected_relocation_symbols[] = {0, 1, 2, 0, 3, 2, 4, 0, 4};
+            bool names_match = true;
+            bool relocations_match = true;
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected_names); index += 1)
+            {
+                names_match = names_match && string_equal(ordered.object.symbols[index].name, expected_names[index]);
+            }
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected_relocation_symbols); index += 1)
+            {
+                relocations_match = relocations_match && ordered.object.relocations[index].symbol == expected_relocation_symbols[index];
+            }
+            u64 second_text_offset = align_forward(sizeof(first_text), object_section_default_alignment(OBJECT_SECTION_TEXT));
+            u64 third_text_offset = align_forward(second_text_offset + sizeof(second_text), object_section_default_alignment(OBJECT_SECTION_TEXT));
+            BUSTER_TEST(arguments, names_match);
+            BUSTER_TEST(arguments, relocations_match);
+            BUSTER_TEST(arguments, ordered.object.symbols[0].section == OBJECT_SECTION_TEXT && ordered.object.symbols[0].kind == OBJECT_SYMBOL_DATA &&
+                                       ordered.object.symbols[0].value == second_text_offset + 3 && ordered.object.symbols[0].size == 1);
+            BUSTER_TEST(arguments, !ordered.object.symbols[1].global && !ordered.object.symbols[3].global &&
+                                       ordered.object.symbols[1].value == 1 && ordered.object.symbols[3].value == second_text_offset + 4);
+            BUSTER_TEST(arguments, ordered.object.symbols[4].global && ordered.object.symbols[4].section == OBJECT_SECTION_TEXT &&
+                                       ordered.object.symbols[4].value == third_text_offset + 1);
+        }
+    }
+    {
+        enum
+        {
+            LINK_TEST_COLLISION_SYMBOL_COUNT = 32,
+            LINK_TEST_COLLISION_NAME_LENGTH = 9,
+        };
+        u64 table_capacity = 1;
+        u64 total_symbols = LINK_TEST_COLLISION_SYMBOL_COUNT * 2;
+        while (table_capacity < total_symbols * 2)
+        {
+            table_capacity *= 2;
+        }
+        char8 collision_names[LINK_TEST_COLLISION_SYMBOL_COUNT][LINK_TEST_COLLISION_NAME_LENGTH];
+        u32 collision_name_count = 0;
+        for (u32 candidate = 0; candidate < (1u << 20) && collision_name_count < LINK_TEST_COLLISION_SYMBOL_COUNT; candidate += 1)
+        {
+            char8 candidate_name[LINK_TEST_COLLISION_NAME_LENGTH];
+            String8 name = link_test_symbol_name_write(candidate_name, candidate);
+            if ((buster_hash_64((u8*)name.pointer, name.length) & (table_capacity - 1)) ==
+                table_capacity - LINK_TEST_COLLISION_SYMBOL_COUNT / 2)
+            {
+                memcpy(collision_names[collision_name_count], candidate_name, sizeof(candidate_name));
+                collision_name_count += 1;
+            }
+        }
+        BUSTER_TEST(arguments, collision_name_count == LINK_TEST_COLLISION_SYMBOL_COUNT);
+        if (collision_name_count == LINK_TEST_COLLISION_SYMBOL_COUNT)
+        {
+            ObjectSymbol definition_symbols[LINK_TEST_COLLISION_SYMBOL_COUNT];
+            ObjectSymbol reference_symbols[LINK_TEST_COLLISION_SYMBOL_COUNT];
+            ObjectRelocation reference_relocations[LINK_TEST_COLLISION_SYMBOL_COUNT];
+            u8 reference_text[LINK_TEST_COLLISION_SYMBOL_COUNT * 8] = {0};
+            for (u32 index = 0; index < LINK_TEST_COLLISION_SYMBOL_COUNT; index += 1)
+            {
+                u32 reverse = LINK_TEST_COLLISION_SYMBOL_COUNT - 1 - index;
+                definition_symbols[index] = (ObjectSymbol){
+                    .name = {.pointer = collision_names[index], .length = LINK_TEST_COLLISION_NAME_LENGTH},
+                    .section = OBJECT_SECTION_TEXT,
+                    .kind = OBJECT_SYMBOL_FUNCTION,
+                    .global = true,
+                };
+                reference_symbols[index] = (ObjectSymbol){
+                    .name = {.pointer = collision_names[reverse], .length = LINK_TEST_COLLISION_NAME_LENGTH},
+                    .section = OBJECT_SECTION_UNDEFINED,
+                    .kind = OBJECT_SYMBOL_FUNCTION,
+                    .global = true,
+                };
+                reference_relocations[index] = (ObjectRelocation){
+                    .offset = (u64)index * 8,
+                    .section = OBJECT_SECTION_TEXT,
+                    .symbol = index,
+                    .kind = OBJECT_RELOCATION_ABSOLUTE64,
+                };
+            }
+            ObjectFile collision_objects[] = {
+                link_test_object_make(arguments->arena, target, (ByteSlice){0}, definition_symbols, BUSTER_ARRAY_LENGTH(definition_symbols), 0, 0),
+                link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(reference_text), reference_symbols,
+                                      BUSTER_ARRAY_LENGTH(reference_symbols), reference_relocations, BUSTER_ARRAY_LENGTH(reference_relocations)),
+            };
+            LinkObjectResult collision = link_objects(arguments->arena, collision_objects, BUSTER_ARRAY_LENGTH(collision_objects), (LinkOptions){0});
+            BUSTER_TEST(arguments, collision.error == LINK_ERROR_NONE);
+            BUSTER_TEST(arguments, collision.object.symbol_count == LINK_TEST_COLLISION_SYMBOL_COUNT);
+            BUSTER_TEST(arguments, collision.object.relocation_count == LINK_TEST_COLLISION_SYMBOL_COUNT);
+            if (collision.error == LINK_ERROR_NONE && collision.object.symbol_count == LINK_TEST_COLLISION_SYMBOL_COUNT &&
+                collision.object.relocation_count == LINK_TEST_COLLISION_SYMBOL_COUNT)
+            {
+                bool collision_results_match = true;
+                for (u32 index = 0; index < LINK_TEST_COLLISION_SYMBOL_COUNT; index += 1)
+                {
+                    collision_results_match = collision_results_match &&
+                                              string_equal(collision.object.symbols[index].name,
+                                                           (String8){.pointer = collision_names[index], .length = LINK_TEST_COLLISION_NAME_LENGTH}) &&
+                                              collision.object.relocations[index].symbol == LINK_TEST_COLLISION_SYMBOL_COUNT - 1 - index;
+                }
+                BUSTER_TEST(arguments, collision_results_match);
+            }
+        }
+    }
+    {
+        enum
+        {
+            LINK_TEST_STRESS_SYMBOL_COUNT = 4097,
+            LINK_TEST_STRESS_NAME_LENGTH = 9,
+        };
+        char8* name_storage = arena_allocate(arguments->arena, char8, (u64)LINK_TEST_STRESS_SYMBOL_COUNT * LINK_TEST_STRESS_NAME_LENGTH);
+        ObjectSymbol* definition_symbols = arena_allocate(arguments->arena, ObjectSymbol, LINK_TEST_STRESS_SYMBOL_COUNT);
+        ObjectSymbol* reference_symbols = arena_allocate(arguments->arena, ObjectSymbol, LINK_TEST_STRESS_SYMBOL_COUNT);
+        for (u32 index = 0; index < LINK_TEST_STRESS_SYMBOL_COUNT; index += 1)
+        {
+            char8* name = name_storage + (u64)index * LINK_TEST_STRESS_NAME_LENGTH;
+            String8 symbol_name = link_test_symbol_name_write(name, index);
+            definition_symbols[index] = (ObjectSymbol){
+                .name = symbol_name,
+                .section = OBJECT_SECTION_TEXT,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            };
+            reference_symbols[index] = (ObjectSymbol){
+                .name = {.pointer = name_storage + (u64)(LINK_TEST_STRESS_SYMBOL_COUNT - 1 - index) * LINK_TEST_STRESS_NAME_LENGTH,
+                         .length = LINK_TEST_STRESS_NAME_LENGTH},
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            };
+        }
+        ObjectFile stress_objects[] = {
+            link_test_object_make(arguments->arena, target, (ByteSlice){0}, definition_symbols, LINK_TEST_STRESS_SYMBOL_COUNT, 0, 0),
+            link_test_object_make(arguments->arena, target, (ByteSlice){0}, reference_symbols, LINK_TEST_STRESS_SYMBOL_COUNT, 0, 0),
+        };
+        LinkObjectResult stress = link_objects(arguments->arena, stress_objects, BUSTER_ARRAY_LENGTH(stress_objects), (LinkOptions){0});
+        BUSTER_TEST(arguments, stress.error == LINK_ERROR_NONE);
+        BUSTER_TEST(arguments, stress.object.symbol_count == LINK_TEST_STRESS_SYMBOL_COUNT);
+        if (stress.error == LINK_ERROR_NONE && stress.object.symbol_count == LINK_TEST_STRESS_SYMBOL_COUNT)
+        {
+            bool order_matches = true;
+            for (u32 index = 0; index < LINK_TEST_STRESS_SYMBOL_COUNT; index += 1)
+            {
+                order_matches = order_matches && string_equal(stress.object.symbols[index].name, definition_symbols[index].name);
+            }
+            BUSTER_TEST(arguments, order_matches);
+        }
+    }
+    {
+        u8 text[1] = {0};
+        ObjectSymbol first = {
+            .name = S8("duplicate"),
+            .size = 1,
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        };
+        ObjectSymbol second = first;
+        ObjectFile duplicate_objects[] = {
+            link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(text), &first, 1, 0, 0),
+            link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(text), &second, 1, 0, 0),
+        };
+        LinkObjectResult duplicate = link_objects(arguments->arena, duplicate_objects, BUSTER_ARRAY_LENGTH(duplicate_objects), (LinkOptions){0});
+        BUSTER_TEST(arguments, duplicate.error == LINK_ERROR_DUPLICATE_SYMBOL);
+        BUSTER_STRING_TEST(arguments, duplicate.symbol, S8("duplicate"));
+
+        ObjectSymbol empty_name = {
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        };
+        ObjectFile empty_name_object = link_test_object_make(arguments->arena, target, (ByteSlice){0}, &empty_name, 1, 0, 0);
+        LinkObjectResult empty = link_objects(arguments->arena, &empty_name_object, 1,
+                                              (LinkOptions){
+                                                  .allow_undefined_symbols = true,
+                                              });
+        BUSTER_TEST(arguments, empty.error == LINK_ERROR_INVALID_INPUT);
+
+        ObjectFile no_symbols_object = link_test_object_make(arguments->arena, target, (ByteSlice){0}, 0, 0, 0, 0);
+        LinkObjectResult no_symbols = link_objects(arguments->arena, &no_symbols_object, 1, (LinkOptions){0});
+        BUSTER_TEST(arguments, no_symbols.error == LINK_ERROR_NONE && no_symbols.object.symbol_count == 0);
+    }
 #if BUSTER_CPU_ARCH_X86_64
     u8 answer_text[] = {
         0xb8, 42, 0, 0, 0, 0xc3,
