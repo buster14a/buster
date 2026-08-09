@@ -12,6 +12,46 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09am` (Linux x86_64, Zen 4 7940HS; local promotion built,
+measured, and reverted — with the sequencing it proves.)
+
+- **What was tried.** The pass `2026-08-09al` called for: at selection,
+  every C local of register width whose address never leaves a load or a
+  store becomes a virtual register instead of a frame slot, so loads and
+  stores of it become copies. Roughly 90 lines in the selector: a
+  two-pass promotability scan (eligible by type, then disqualified by any
+  use that is not the place of a same-width scalar load or store), vreg
+  creation in classification, copy lowering in the LOAD and STORE cases,
+  and a refusal in the address helper so a promoted local can never
+  acquire an address behind the analysis's back.
+- **It was correct.** test_all green and the FAST soak byte-identical —
+  the promoted compiler still reproduces canonical stage-2 bytes exactly.
+- **It was slower, on both corpora.** Self-host: **46.72G** instructions
+  against 45.17G (+3.4%), text +0.9%. Pressure corpus: FAST **212.3M**
+  against 186.9M, QUALITY **205.8M**.
+- **Why, in one number.** Boundary spills went from 2,891 to **26,672**,
+  a factor of nine; reloads tripled, 32,205 to 95,957. Promotion does
+  exactly what it promises — it turns short two-instruction lifetimes
+  into long-lived values — and the local scan then writes every one of
+  them back at every block boundary, which for a loop body is the store
+  and load per iteration that promotion was supposed to remove, plus the
+  copies.
+- **The sequencing this proves.** On the pressure corpus QUALITY beat
+  FAST for the first time with promotion in place (205.8M vs 212.3M):
+  the global layer only has something to hold once values are long-lived.
+  So the two changes are a pair. Promotion alone is a regression;
+  promotion plus cross-block register assignment is the design clang is
+  beating us with. **Land them together, or not at all**, and the
+  gating measurement is boundary spills, not instruction count.
+- **What is needed for the pair.** Full stage-5 edge contracts: agreeing
+  a register assignment across each edge and resolving the difference
+  with parallel copies, so a promoted local stays in its register through
+  a loop instead of round-tripping at every boundary. Stage 8 recoloring
+  refines that; it does not substitute for it.
+- **State of the tree.** Reverted — the branch keeps the 45.17G / -35.5%
+  configuration. The patch is described here in enough detail to rebuild
+  in an afternoon, and should be rebuilt only alongside edge contracts.
+
 `2026-08-09al` (Linux x86_64, Zen 4 7940HS; the pressure corpus, and the
 finding that reframes the rest of the register-allocator plan.)
 
