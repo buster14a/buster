@@ -255,6 +255,29 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_ADD_RSP] = {
         .name = S8_INITIALIZER("x64_add_rsp"),
     },
+    [MACHINE_X64_ATOMIC_STORE_XCHG] = {
+        .name = S8_INITIALIZER("x64_atomic_store_xchg"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
+    [MACHINE_X64_ATOMIC_RMW] = {
+        .name = S8_INITIALIZER("x64_atomic_rmw"),
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
+        .implicit_mask = 1u << MACHINE_X64_R8,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+    },
+    [MACHINE_X64_ATOMIC_CMPXCHG] = {
+        .name = S8_INITIALIZER("x64_atomic_cmpxchg"),
+        .operand_count = 4,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+    },
+    [MACHINE_X64_MFENCE] = {
+        .name = S8_INITIALIZER("x64_mfence"),
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
     [MACHINE_X64_CALL_INDIRECT] = {
         .name = S8_INITIALIZER("x64_call_indirect"),
         .operand_count = 1,

@@ -303,6 +303,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "int aligned_local(int x) { _Alignas(16) long buffer[4]; buffer[0] = x; buffer[3] = x * 2; return (int)(buffer[0] + buffer[3]); }\n"
                                   "_Atomic int atomic_cell;\n"
                                   "int atomic_probe(int v) { return __c11_atomic_fetch_add(&atomic_cell, v, 5); }\n"
+                                  "int atomic_ops(int v) { _Atomic int cell; _Atomic long wide; __c11_atomic_store(&cell, v, 5);\n"
+                                  "    __c11_atomic_store(&wide, (long)v * 7, 5);\n"
+                                  "    int old = __c11_atomic_fetch_add(&cell, 3, 5); old += __c11_atomic_fetch_and(&cell, 6, 5);\n"
+                                  "    old += __c11_atomic_exchange(&cell, v * 2, 5); int expected = v * 2;\n"
+                                  "    __c11_atomic_compare_exchange_strong(&cell, &expected, 9, 5, 5); __c11_atomic_thread_fence(5);\n"
+                                  "    return old + __c11_atomic_load(&cell, 5) + expected + (int)__c11_atomic_fetch_sub(&wide, 2, 5); }\n"
+                                  "int goto_probe(int v) { void* t = v ? &&a : &&b; goto *t; a: return 1; b: return 2; }\n"
                                   "typedef struct Big { long a; long b; long c; } Big;\n"
                                   "Big big_make(long a) { Big b; b.a = a; b.b = a * 2; b.c = a ^ 5; return b; }\n"
                                   "long big_sum(Big b) { return b.a + b.b + b.c; }\n"
@@ -438,13 +445,21 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             MachineSelectResult indirect_selected = machine_select_canonical_function(arguments->arena, machine_program, indirect_function, machine_target);
             BUSTER_TEST(arguments, indirect_selected.supported);
         }
-        // Atomic operations stay the explicit unsupported representative.
+        // Atomics now select; computed goto stays the explicit unsupported
+        // representative.
         IrFunction* atomic_function = machine_test_ir_function_find(machine_module, S8("atomic_probe"));
         BUSTER_TEST(arguments, atomic_function != 0);
         if (atomic_function)
         {
             MachineSelectResult atomic_selected = machine_select_canonical_function(arguments->arena, machine_program, atomic_function, machine_target);
-            BUSTER_TEST(arguments, !atomic_selected.supported);
+            BUSTER_TEST(arguments, atomic_selected.supported);
+        }
+        IrFunction* goto_function = machine_test_ir_function_find(machine_module, S8("goto_probe"));
+        BUSTER_TEST(arguments, goto_function != 0);
+        if (goto_function)
+        {
+            MachineSelectResult goto_selected = machine_select_canonical_function(arguments->arena, machine_program, goto_function, machine_target);
+            BUSTER_TEST(arguments, !goto_selected.supported);
         }
         // Variadic direct calls select (AL zero, register-only integer
         // arguments); execution is proven by the linked soak because the
@@ -648,7 +663,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("locals_array"), S8_INITIALIZER("local_pair"), S8_INITIALIZER("pick"),
             S8_INITIALIZER("aligned_local"), S8_INITIALIZER("span_round_trip"), S8_INITIALIZER("single_round_trip"), S8_INITIALIZER("fmath"),
             S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnan"), S8_INITIALIZER("call_stack"), S8_INITIALIZER("big_round"),
-            S8_INITIALIZER("call_indirect"),
+            S8_INITIALIZER("call_indirect"), S8_INITIALIZER("atomic_ops"),
         };
         typedef s64 MachineTestModuleCall2(s64, s64);
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(module_names) && none_module_executable.address && mir_module_executable.address;

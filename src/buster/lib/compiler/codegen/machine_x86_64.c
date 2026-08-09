@@ -961,7 +961,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     }
     break;
     case IR_OPCODE_LOAD:
+    case IR_OPCODE_ATOMIC_LOAD:
     {
+        // Aligned x86 loads are already atomic; the atomic form only
+        // excludes the aggregate paths.
         if (instruction->operands[0].value >= function->value_count || instruction->result.value == IR_ID_UNDERLYING_INVALID)
         {
             return false;
@@ -976,6 +979,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         u32 result_slot = selector->value_stack_slots[instruction->result.value];
         if (result_register == UINT32_MAX && result_slot != UINT32_MAX)
         {
+            if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD)
+            {
+                return false;
+            }
             // Aggregate load: exact-size chunk copy into the result slot,
             // from a direct local slot or through an address vreg.
             IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
@@ -1053,6 +1060,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     }
     break;
     case IR_OPCODE_STORE:
+    case IR_OPCODE_ATOMIC_STORE:
     {
         if (instruction->operands[0].value >= function->value_count || instruction->operands[1].value >= function->value_count)
         {
@@ -1068,8 +1076,34 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         u64 size = stored_type && stored_type->layout.resolved ? stored_type->layout.size : 0;
         u32 slot = selector->value_stack_slots[instruction->operands[0].value];
         u32 value_slot = selector->value_stack_slots[instruction->operands[1].value];
+        if (instruction->opcode == IR_OPCODE_ATOMIC_STORE && instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL)
+        {
+            // Sequentially consistent stores exchange, exactly like the
+            // canonical path; weaker orders are plain x86 stores below.
+            u32 atomic_value_register;
+            if (!machine_x64_operand_register(selector, instruction->operands[1], &atomic_value_register) || (size != 1 && size != 2 && size != 4 && size != 8))
+            {
+                return false;
+            }
+            u32 address_register = machine_x64_synthesize_register(selector);
+            if (!machine_x64_select_place_address(selector, instruction->operands[0], address_register))
+            {
+                return false;
+            }
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, atomic_value_register)},
+                                                 .payload = (u32)size,
+                                                 .opcode = MACHINE_X64_ATOMIC_STORE_XCHG,
+                                             });
+            return true;
+        }
         if (value_slot != UINT32_MAX && selector->value_virtual_registers[instruction->operands[1].value] == UINT32_MAX)
         {
+            if (instruction->opcode == IR_OPCODE_ATOMIC_STORE)
+            {
+                return false;
+            }
             // Aggregate store: exact-size chunk copy out of the value slot.
             if (!size || size > UINT32_MAX)
             {
@@ -1482,6 +1516,81 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                              .operands = {machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[0].value)},
                                              .opcode = MACHINE_X64_JMP,
                                          });
+        return true;
+    }
+    break;
+    case IR_OPCODE_ATOMIC_READ_MODIFY_WRITE:
+    {
+        u32 value_register;
+        if (result_register == UINT32_MAX || instruction->operand_count < 2 ||
+            !machine_x64_operand_register(selector, instruction->operands[1], &value_register) ||
+            instruction->atomic_operation >= IR_ATOMIC_OPERATION_COUNT)
+        {
+            return false;
+        }
+        IrType* atomic_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        u64 size = atomic_type && atomic_type->layout.resolved ? atomic_type->layout.size : 0;
+        if (size != 1 && size != 2 && size != 4 && size != 8)
+        {
+            return false;
+        }
+        u32 address_register = machine_x64_synthesize_register(selector);
+        if (!machine_x64_select_place_address(selector, instruction->operands[0], address_register))
+        {
+            return false;
+        }
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                       .payload = (u32)size | ((u32)instruction->atomic_operation << 8),
+                                                       .opcode = MACHINE_X64_ATOMIC_RMW,
+                                                   });
+        machine_x64_define(selector, result_register, row);
+        return true;
+    }
+    break;
+    case IR_OPCODE_ATOMIC_COMPARE_EXCHANGE:
+    {
+        u32 expected_register;
+        u32 desired_register;
+        if (result_register == UINT32_MAX || instruction->operand_count < 3 ||
+            !machine_x64_operand_register(selector, instruction->operands[1], &expected_register) ||
+            !machine_x64_operand_register(selector, instruction->operands[2], &desired_register))
+        {
+            return false;
+        }
+        IrType* atomic_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        u64 size = atomic_type && atomic_type->layout.resolved ? atomic_type->layout.size : 0;
+        if (size != 1 && size != 2 && size != 4 && size != 8)
+        {
+            return false;
+        }
+        u32 address_register = machine_x64_synthesize_register(selector);
+        if (!machine_x64_select_place_address(selector, instruction->operands[0], address_register))
+        {
+            return false;
+        }
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, expected_register),
+                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, desired_register)},
+                                                       .payload = (u32)size,
+                                                       .opcode = MACHINE_X64_ATOMIC_CMPXCHG,
+                                                   });
+        machine_x64_define(selector, result_register, row);
+        return true;
+    }
+    break;
+    case IR_OPCODE_ATOMIC_FENCE:
+    {
+        if (!instruction->atomic_signal_fence && instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL)
+        {
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .opcode = MACHINE_X64_MFENCE,
+                                             });
+        }
         return true;
     }
     break;
@@ -2311,6 +2420,9 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         case MACHINE_X64_FCMP_SET:
             capacity64 += 40;
             break;
+        case MACHINE_X64_ATOMIC_RMW:
+            capacity64 += 48;
+            break;
         default:
             capacity64 += 24;
         }
@@ -2855,6 +2967,102 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 machine_x64_emit8(&encoder, 0x81);
                 machine_x64_emit8(&encoder, 0xc4);
                 machine_x64_emit32(&encoder, instruction->payload);
+            }
+            break;
+            case MACHINE_X64_ATOMIC_STORE_XCHG:
+            {
+                u32 size = instruction->payload & 0xff;
+                if (size == 2)
+                {
+                    machine_x64_emit8(&encoder, 0x66);
+                }
+                if (size == 8)
+                {
+                    machine_x64_emit8(&encoder, 0x48);
+                }
+                machine_x64_emit8(&encoder, size == 1 ? 0x86 : 0x87);
+                machine_x64_emit8(&encoder, 0x08);
+            }
+            break;
+            case MACHINE_X64_ATOMIC_RMW:
+            {
+                // Sized load, then a lock cmpxchg retry loop with R8 holding
+                // the proposed value, mirroring the canonical sequence.
+                u32 size = instruction->payload & 0xff;
+                u32 atomic_operation = instruction->payload >> 8;
+                machine_x64_emit_chunk_load_prefix(&encoder, size);
+                machine_x64_emit_memory_modrm(&encoder, MACHINE_X64_RAX, MACHINE_X64_RCX, 0);
+                u32 retry_offset = encoder.count;
+                if (size == 2)
+                {
+                    machine_x64_emit8(&encoder, 0x66);
+                }
+                machine_x64_emit8(&encoder, size == 8 ? 0x49 : 0x41);
+                machine_x64_emit8(&encoder, size == 1 ? 0x88 : 0x89);
+                machine_x64_emit8(&encoder, 0xc0);
+                if (size == 2)
+                {
+                    machine_x64_emit8(&encoder, 0x66);
+                }
+                machine_x64_emit8(&encoder, size == 8 ? 0x49 : 0x41);
+                if (atomic_operation == IR_ATOMIC_EXCHANGE)
+                {
+                    machine_x64_emit8(&encoder, size == 1 ? 0x88 : 0x89);
+                }
+                else
+                {
+                    u8 operation_opcode = atomic_operation == IR_ATOMIC_ADD           ? (size == 1 ? 0x00 : 0x01)
+                                          : atomic_operation == IR_ATOMIC_SUBTRACT    ? (size == 1 ? 0x28 : 0x29)
+                                          : atomic_operation == IR_ATOMIC_BITWISE_AND ? (size == 1 ? 0x20 : 0x21)
+                                          : atomic_operation == IR_ATOMIC_BITWISE_OR  ? (size == 1 ? 0x08 : 0x09)
+                                                                                      : (size == 1 ? 0x30 : 0x31);
+                    machine_x64_emit8(&encoder, operation_opcode);
+                }
+                machine_x64_emit8(&encoder, 0xd0);
+                if (size == 2)
+                {
+                    machine_x64_emit8(&encoder, 0x66);
+                }
+                machine_x64_emit8(&encoder, 0xf0);
+                machine_x64_emit8(&encoder, size == 8 ? 0x4c : 0x44);
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, size == 1 ? 0xb0 : 0xb1);
+                machine_x64_emit8(&encoder, 0x01);
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0x85);
+                machine_x64_emit32(&encoder, retry_offset - (encoder.count + 4));
+            }
+            break;
+            case MACHINE_X64_ATOMIC_CMPXCHG:
+            {
+                u32 size = instruction->payload & 0xff;
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x89);
+                machine_x64_emit8(&encoder, 0xd0);
+                if (size == 2)
+                {
+                    machine_x64_emit8(&encoder, 0x66);
+                }
+                machine_x64_emit8(&encoder, 0xf0);
+                if (size == 8)
+                {
+                    machine_x64_emit8(&encoder, 0x48);
+                }
+                else if (size == 1)
+                {
+                    // SIL needs a plain REX prefix.
+                    machine_x64_emit8(&encoder, 0x40);
+                }
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, size == 1 ? 0xb0 : 0xb1);
+                machine_x64_emit8(&encoder, 0x31);
+            }
+            break;
+            case MACHINE_X64_MFENCE:
+            {
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0xae);
+                machine_x64_emit8(&encoder, 0xf0);
             }
             break;
             case MACHINE_X64_SWITCH:

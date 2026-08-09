@@ -298,6 +298,13 @@ typedef enum MachineOpcode
     // neither the argument registers nor the variadic AL setup can clobber
     // it. Same flags as CALL_DIRECT.
     MACHINE_X64_CALL_INDIRECT, // use callee pointer
+    // Atomics, mirroring the canonical sequences. Payload low byte is the
+    // operand size; ATOMIC_RMW carries the IrAtomicOperation in bits 8+ and
+    // loops through a lock cmpxchg with R8 as the retry scratch.
+    MACHINE_X64_ATOMIC_STORE_XCHG, // use address, use value; implicit-lock xchg
+    MACHINE_X64_ATOMIC_RMW,        // def old, use address, use value
+    MACHINE_X64_ATOMIC_CMPXCHG,    // def old, use address, use expected, use desired
+    MACHINE_X64_MFENCE,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
