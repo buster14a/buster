@@ -20,9 +20,10 @@ BUSTER_GLOBAL_LOCAL u64 analysis_bytes_hash(String8 bytes);
 enum
 {
     // The checked-in corpus tops out below this boundary. Keep its compact
-    // modules on the scalar path; the table exists to cap genuinely large
-    // generated interfaces without taxing the common case.
+    // modules and type sets on scalar paths; indexes cap genuinely large
+    // generated inputs without taxing the common case.
     ANALYSIS_NAME_LOOKUP_THRESHOLD = 128,
+    ANALYSIS_TYPE_INTERN_LOOKUP_THRESHOLD = 128,
 };
 
 BUSTER_GLOBAL_LOCAL u64 analysis_name_lookup_pack(u32 first_index, u32 match_count)
@@ -2032,15 +2033,186 @@ BUSTER_GLOBAL_LOCAL bool analysis_type_matches(AnalysisType* existing, AnalysisT
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_intern(Arena* result_arena, AnalysisTypeTable* table, AnalysisType candidate)
+BUSTER_GLOBAL_LOCAL bool analysis_type_is_interned_kind(AnalysisTypeKind kind)
 {
+    switch (kind)
+    {
+    case ANALYSIS_TYPE_COMPILE_TIME_PARAMETER:
+    case ANALYSIS_TYPE_POINTER:
+    case ANALYSIS_TYPE_SLICE:
+    case ANALYSIS_TYPE_INFERRED_ARRAY:
+    case ANALYSIS_TYPE_ARRAY:
+    case ANALYSIS_TYPE_VECTOR:
+    case ANALYSIS_TYPE_FUNCTION:
+    case ANALYSIS_TYPE_RANGE:
+    case ANALYSIS_TYPE_STRUCT:
+    case ANALYSIS_TYPE_UNION:
+    case ANALYSIS_TYPE_ENUM:
+        return true;
+    case ANALYSIS_TYPE_POISON:
+    case ANALYSIS_TYPE_VOID:
+    case ANALYSIS_TYPE_BOOL:
+    case ANALYSIS_TYPE_INTEGER:
+    case ANALYSIS_TYPE_FLOAT:
+    case ANALYSIS_TYPE_VA_LIST:
+    case ANALYSIS_TYPE_COUNT:
+        return false;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL u64 analysis_type_hash_mix(u64 hash, u64 value)
+{
+    hash ^= value;
+    hash *= UINT64_C(1099511628211);
+    hash ^= value >> 32;
+    hash *= UINT64_C(1099511628211);
+    return hash;
+}
+
+BUSTER_GLOBAL_LOCAL u64 analysis_type_hash(AnalysisType* type)
+{
+    u64 hash = analysis_type_hash_mix(UINT64_C(1469598103934665603), (u64)type->kind);
+    switch (type->kind)
+    {
+    case ANALYSIS_TYPE_POINTER:
+    case ANALYSIS_TYPE_SLICE:
+    case ANALYSIS_TYPE_INFERRED_ARRAY:
+    case ANALYSIS_TYPE_RANGE:
+        hash = analysis_type_hash_mix(hash, type->as.element_type.value);
+        break;
+    case ANALYSIS_TYPE_ARRAY:
+        hash = analysis_type_hash_mix(hash, type->as.array.element_type.value);
+        hash = analysis_type_hash_mix(hash, type->as.array.count);
+        break;
+    case ANALYSIS_TYPE_VECTOR:
+        hash = analysis_type_hash_mix(hash, type->as.vector.element_type.value);
+        hash = analysis_type_hash_mix(hash, type->as.vector.count);
+        break;
+    case ANALYSIS_TYPE_FUNCTION:
+        hash = analysis_type_hash_mix(hash, type->as.function.return_type.value);
+        hash = analysis_type_hash_mix(hash, type->as.function.calling_convention);
+        hash = analysis_type_hash_mix(hash, type->as.function.argument_count);
+        hash = analysis_type_hash_mix(hash, type->as.function.is_variadic);
+        for (u32 index = 0; index < type->as.function.argument_count; index += 1)
+        {
+            hash = analysis_type_hash_mix(hash, type->as.function.argument_types[index].value);
+        }
+        break;
+    case ANALYSIS_TYPE_COMPILE_TIME_PARAMETER:
+        hash = analysis_type_hash_mix(hash, analysis_bytes_hash(type->name));
+        hash = analysis_type_hash_mix(hash, type->name.length);
+        break;
+    case ANALYSIS_TYPE_STRUCT:
+    case ANALYSIS_TYPE_UNION:
+    case ANALYSIS_TYPE_ENUM:
+        hash = analysis_type_hash_mix(hash, type->as.declaration.module.value);
+        hash = analysis_type_hash_mix(hash, type->as.declaration.index.value);
+        break;
+    case ANALYSIS_TYPE_POISON:
+    case ANALYSIS_TYPE_VOID:
+    case ANALYSIS_TYPE_BOOL:
+    case ANALYSIS_TYPE_INTEGER:
+    case ANALYSIS_TYPE_FLOAT:
+    case ANALYSIS_TYPE_VA_LIST:
+    case ANALYSIS_TYPE_COUNT:
+        break;
+    }
+    return hash ^ (hash >> 32);
+}
+
+BUSTER_GLOBAL_LOCAL u32* analysis_type_intern_lookup_slot(AnalysisTypeTable* table, AnalysisType* candidate, u64 hash)
+{
+    BUSTER_CHECK(table->intern_lookup_slots);
+    u32 slot_index = (u32)hash & table->intern_lookup_mask;
+    u32* slot = table->intern_lookup_slots + slot_index;
+    while (*slot)
+    {
+        u32 type_index = *slot - 1;
+        BUSTER_CHECK(type_index < table->count);
+        if (analysis_type_matches(table->types + type_index, candidate))
+        {
+            break;
+        }
+        slot_index = (slot_index + 1) & table->intern_lookup_mask;
+        slot = table->intern_lookup_slots + slot_index;
+    }
+    return slot;
+}
+
+BUSTER_GLOBAL_LOCAL void analysis_type_intern_lookup_rebuild(Arena* result_arena, AnalysisTypeTable* table, u32 required_count)
+{
+    // Give the first dynamic table one growth interval of headroom. Later
+    // rebuilds retain the usual at-most-half-full probing guarantee.
+    u32 capacity_scale = table->intern_lookup_slots ? 2 : 4;
+    u32 maximum_count = table->intern_lookup_slots ? (UINT32_C(1) << 30) : (UINT32_C(1) << 29);
+    BUSTER_CHECK(required_count <= maximum_count);
+    u32 minimum_capacity = required_count * capacity_scale;
+    u32 capacity = 1;
+    while (capacity < minimum_capacity)
+    {
+        BUSTER_CHECK(capacity <= UINT32_MAX / 2);
+        capacity *= 2;
+    }
+    table->intern_lookup_slots = arena_allocate(result_arena, u32, capacity);
+    memset(table->intern_lookup_slots, 0, sizeof(*table->intern_lookup_slots) * capacity);
+    table->intern_lookup_mask = capacity - 1;
     for (u32 index = 0; index < table->count; index += 1)
     {
-        if (analysis_type_matches(table->types + index, &candidate))
+        AnalysisType* type = table->types + index;
+        if (!analysis_type_is_interned_kind(type->kind))
         {
-            return (AnalysisTypeId){.value = index};
+            continue;
+        }
+        u32* slot = analysis_type_intern_lookup_slot(table, type, analysis_type_hash(type));
+        if (!*slot)
+        {
+            BUSTER_CHECK(index < UINT32_MAX);
+            *slot = index + 1;
         }
     }
+}
+
+BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_intern(Arena* result_arena, AnalysisTypeTable* table, AnalysisType candidate)
+{
+    bool indexed_kind = analysis_type_is_interned_kind(candidate.kind);
+    bool indexed_lookup = indexed_kind && (table->intern_lookup_slots || table->count >= ANALYSIS_TYPE_INTERN_LOOKUP_THRESHOLD);
+    u64 hash = indexed_lookup ? analysis_type_hash(&candidate) : 0;
+    if (indexed_kind && !table->intern_lookup_slots && table->count >= ANALYSIS_TYPE_INTERN_LOOKUP_THRESHOLD)
+    {
+        analysis_type_intern_lookup_rebuild(result_arena, table, table->count);
+    }
+    if (table->intern_lookup_slots && indexed_kind)
+    {
+        u32 slot = *analysis_type_intern_lookup_slot(table, &candidate, hash);
+        if (slot)
+        {
+            return (AnalysisTypeId){.value = slot - 1};
+        }
+    }
+    else
+    {
+        for (u32 index = 0; index < table->count; index += 1)
+        {
+            if (analysis_type_matches(table->types + index, &candidate))
+            {
+                return (AnalysisTypeId){.value = index};
+            }
+        }
+    }
+    BUSTER_CHECK(table->count < UINT32_MAX);
+    u32 required_count = table->count + 1;
+    if (indexed_kind &&
+        ((!table->intern_lookup_slots && required_count >= ANALYSIS_TYPE_INTERN_LOOKUP_THRESHOLD) ||
+         (table->intern_lookup_slots && required_count > (table->intern_lookup_mask + 1) / 2)))
+    {
+        analysis_type_intern_lookup_rebuild(result_arena, table, required_count);
+    }
+    if (table->intern_lookup_slots && indexed_kind && !indexed_lookup)
+    {
+        hash = analysis_type_hash(&candidate);
+    }
+    u32* intern_slot = table->intern_lookup_slots && indexed_kind ? analysis_type_intern_lookup_slot(table, &candidate, hash) : 0;
     if (candidate.kind == ANALYSIS_TYPE_FUNCTION && candidate.as.function.argument_count)
     {
         u32 count = candidate.as.function.argument_count;
@@ -2063,7 +2235,13 @@ BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_type_intern(Arena* result_arena, Ana
         table->types = types;
         table->capacity = new_capacity;
     }
-    return analysis_type_add(table, candidate);
+    AnalysisTypeId added = analysis_type_add(table, candidate);
+    if (intern_slot)
+    {
+        BUSTER_CHECK(!*intern_slot && added.value < UINT32_MAX);
+        *intern_slot = added.value + 1;
+    }
+    return added;
 }
 
 BUSTER_GLOBAL_LOCAL AnalysisTypeId analysis_builtin_type_find(AnalysisTypeTable* table, String8 name);

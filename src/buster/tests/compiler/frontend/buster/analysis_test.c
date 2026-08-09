@@ -665,6 +665,7 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
     analysis_resolve_module_interfaces(arguments->arena, &resolved);
 
     BUSTER_TEST(arguments, resolved.types.count > 13);
+    BUSTER_TEST(arguments, resolved.types.intern_lookup_slots == 0);
     BUSTER_TEST(arguments, resolved.module.semantics[0].type.value == resolved.types.builtin.s32_type.value);
     BUSTER_TEST(arguments, resolved.module.semantics[1].type.value == resolved.types.builtin.s32_type.value);
     AnalysisType* pointer_type = analysis_type_from_id(&resolved, resolved.module.semantics[2].type);
@@ -749,6 +750,56 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
             }
             BUSTER_TEST(arguments, dependency_precedes);
         }
+    }
+
+    {
+        TemporalArena stress = arena_begin_temporal(arguments->arena);
+        enum
+        {
+            ANALYSIS_TEST_STRESS_UNIQUE_TYPE_COUNT = 2048,
+            ANALYSIS_TEST_STRESS_TYPE_COUNT = ANALYSIS_TEST_STRESS_UNIQUE_TYPE_COUNT + 1,
+        };
+        AstType named_u8 = {
+            .id = AST_TYPE_NAMED,
+            .name = S8("u8"),
+        };
+        AstType* array_types = arena_allocate(stress.arena, AstType, ANALYSIS_TEST_STRESS_TYPE_COUNT);
+        AstTypeDeclaration* aliases = arena_allocate(stress.arena, AstTypeDeclaration, ANALYSIS_TEST_STRESS_TYPE_COUNT);
+        for (u32 index = 0; index < ANALYSIS_TEST_STRESS_TYPE_COUNT; index += 1)
+        {
+            u64 element_count = index == ANALYSIS_TEST_STRESS_UNIQUE_TYPE_COUNT ? 18 : index + 1;
+            array_types[index] = (AstType){
+                .range = analysis_test_range(index),
+                .id = AST_TYPE_ARRAY,
+                .array =
+                    {
+                        .element_type = &named_u8,
+                        .count = {.value = element_count, .fits_u64 = true},
+                    },
+            };
+            aliases[index] = (AstTypeDeclaration){
+                .next = index + 1 < ANALYSIS_TEST_STRESS_TYPE_COUNT ? aliases + index + 1 : 0,
+                .alias_type = array_types + index,
+                .name = {.text = string_format(stress.arena, S8("StressType{u32}"), index)},
+                .range = analysis_test_range(index),
+                .kind = AST_TYPE_DECLARATION_ALIAS,
+            };
+        }
+        ParserResult parser = {
+            .first_type_declaration = aliases,
+            .last_type_declaration = aliases + ANALYSIS_TEST_STRESS_TYPE_COUNT - 1,
+            .type_declaration_count = ANALYSIS_TEST_STRESS_TYPE_COUNT,
+        };
+        AnalysisSourceInput input = {.path = S8("stress-types.bbb"), .parser = &parser};
+        AnalysisResult stress_types =
+            analysis_index_module(stress.arena, (AnalysisModuleId){.value = 201}, S8("stress-types"), &input, 1);
+        analysis_resolve_module_interfaces(stress.arena, &stress_types);
+        BUSTER_TEST(arguments, stress_types.diagnostic_count == 0);
+        BUSTER_TEST(arguments, stress_types.types.count == 14 + ANALYSIS_TEST_STRESS_UNIQUE_TYPE_COUNT);
+        BUSTER_TEST(arguments, stress_types.types.intern_lookup_slots != 0);
+        BUSTER_TEST(arguments, stress_types.module.semantics[17].type.value ==
+                                   stress_types.module.semantics[ANALYSIS_TEST_STRESS_UNIQUE_TYPE_COUNT].type.value);
+        arena_set_position(stress.arena, stress.position);
     }
 
     String8 body_source = S8("code add : fn (a: s32, b: s32) s32\n"

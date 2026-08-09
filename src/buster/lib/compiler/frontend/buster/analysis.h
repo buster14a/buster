@@ -219,9 +219,14 @@ typedef struct AnalysisTypeTable AnalysisTypeTable;
 struct AnalysisTypeTable
 {
     AnalysisType* types;
+    // Interned types retain deterministic dense IDs in `types`. Large tables
+    // additionally index those IDs; small tables leave this null and keep the
+    // cheaper scalar scan.
+    u32* intern_lookup_slots;
     AnalysisBuiltinTypes builtin;
     u32 count;
     u32 capacity;
+    u32 intern_lookup_mask;
 };
 
 typedef struct AnalysisField AnalysisField;
