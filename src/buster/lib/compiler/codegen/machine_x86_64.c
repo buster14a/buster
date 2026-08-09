@@ -500,10 +500,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         u32 slot = selector->value_stack_slots[instruction->operands[0].value];
         if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
         {
+            // Direct-slot stores always write the full eight-byte slot,
+            // exactly like the canonical path: the slot is the value's
+            // exclusive home, and narrower stores would leave stale upper
+            // bytes for the sixty-four-bit slot loads and tests that
+            // follow. The pointer stores below stay exactly sized.
             machine_x64_select_row(selector, (MachineInstruction){
                                                  .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
                                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
-                                                 .opcode = (u16)(MACHINE_X64_STORE_FRAME8 + size_index),
+                                                 .opcode = MACHINE_X64_STORE_FRAME64,
                                              });
             return true;
         }

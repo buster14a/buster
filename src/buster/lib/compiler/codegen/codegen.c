@@ -1,5 +1,6 @@
 #include <buster/lib/compiler/codegen/codegen_internal.h>
 
+#include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/ir/interpreter.h>
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/os.h>
@@ -10397,9 +10398,62 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         result.statistics.stack_value_bytes += value_bytes;
         result.statistics.stack_frame_bytes += frame_size;
         result.statistics.maximum_stack_frame_bytes = BUSTER_MAX(result.statistics.maximum_stack_frame_bytes, frame_size);
-        // The machine selector does not exist yet, so every function under a
-        // non-NONE allocator mode takes the canonical stack path and is
-        // counted as an explicit fallback rather than silently ignored.
+        // MIR_STACK routes eligible functions through machine selection,
+        // stack placement, and the machine encoder; everything else falls
+        // back to the canonical path below and is counted. The machine
+        // prologue byte-for-byte matches the canonical plain x64 prologue,
+        // so the descriptor's unwind actions keep their exact meaning.
+        bool machine_function_emitted = false;
+        if (options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_MIR_STACK && target.cpu_arch == CPU_ARCH_X86_64 &&
+            result.abi == CODEGEN_ABI_X86_64_SYSTEM_V)
+        {
+            bool label_address_target = false;
+            for (u32 side_index = 0; side_index < label_address_relocation_count; side_index += 1)
+            {
+                label_address_target |= result.relocations[label_address_relocation_indices[side_index]].symbol.value == function->symbol.value;
+            }
+            TemporalArena machine_scratch = scratch_begin(&arena, 1);
+            MachineSelectResult selected = {0};
+            if (!label_address_target)
+            {
+                selected = machine_select_canonical_function(machine_scratch.arena, program, function, target);
+            }
+            if (selected.supported && machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE)
+            {
+                MachineStackPlacement placement = machine_stack_placement_build(machine_scratch.arena, &selected.function);
+                if (placement.valid)
+                {
+                    MachineEncodeResult encoded = machine_encode_x86_64(machine_scratch.arena, &selected.function, &placement);
+                    if (encoded.valid && buffer.count + encoded.byte_count <= buffer.capacity)
+                    {
+                        bool machine_unwind_valid =
+                            codegen_unwind_action_append(descriptor, unwind_action_capacity, 1, CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_RBP, 0);
+                        machine_unwind_valid =
+                            codegen_unwind_action_append(descriptor, unwind_action_capacity, 4, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, X64_REGISTER_RBP, 0) &&
+                            machine_unwind_valid;
+                        if (placement.frame_size)
+                        {
+                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, 11, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0,
+                                                                                placement.frame_size) &&
+                                                   machine_unwind_valid;
+                        }
+                        if (machine_unwind_valid)
+                        {
+                            memcpy(buffer.bytes + buffer.count, encoded.bytes, encoded.byte_count);
+                            buffer.count += encoded.byte_count;
+                            descriptor->prolog_size = placement.frame_size ? 11 : 4;
+                            descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
+                            machine_function_emitted = true;
+                        }
+                    }
+                }
+            }
+            scratch_end(machine_scratch);
+        }
+        if (machine_function_emitted)
+        {
+            continue;
+        }
         result.statistics.fallback_function_count += options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE;
         if (target.cpu_arch == CPU_ARCH_X86_64)
         {

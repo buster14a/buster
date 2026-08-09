@@ -434,6 +434,109 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         }
         codegen_release_executable(none_executable);
 #endif
+        // Stage 3 wiring: the same module generated under MIR_STACK routes
+        // every eligible function through the machine path and counts the
+        // rest as explicit fallbacks; the canonical NONE module is the
+        // execution oracle for both kinds.
+        CodegenModule mir_module = codegen_generate_canonical_module(arguments->arena, machine_program, machine_module, machine_target,
+                                                                     (CodegenModuleOptions){
+                                                                         .register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+                                                                     });
+        BUSTER_TEST(arguments, mir_module.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, none_module.statistics.fallback_function_count == 0);
+        BUSTER_TEST_RAW(arguments, mir_module.statistics.fallback_function_count == 1,
+                        string_format(arguments->arena, S8("mir fallbacks {u32}"), mir_module.statistics.fallback_function_count));
+        IrFunction* mir_add_function = machine_test_ir_function_find(machine_module, S8("add"));
+        if (mir_add_function)
+        {
+            CodegenFunctionDescriptor* mir_add_descriptor = 0;
+            for (u32 descriptor_index = 0; descriptor_index < mir_module.function_count; descriptor_index += 1)
+            {
+                if (mir_module.functions[descriptor_index].symbol.value == mir_add_function->symbol.value)
+                {
+                    mir_add_descriptor = mir_module.functions + descriptor_index;
+                    break;
+                }
+            }
+            BUSTER_TEST(arguments, mir_add_descriptor != 0);
+            BUSTER_TEST(arguments, mir_add_descriptor && mir_add_descriptor->code_size > 8);
+            BUSTER_TEST(arguments, mir_add_descriptor && mir_add_descriptor->unwind_action_count >= 2 &&
+                                       mir_add_descriptor->unwind_actions[0].kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER);
+            BUSTER_TEST(arguments, mir_add_descriptor && (mir_add_descriptor->prolog_size == 4 || mir_add_descriptor->prolog_size == 11));
+        }
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
+        CodegenExecutable none_module_executable = codegen_make_executable((CodegenFunction){
+            .code = none_module.code,
+        });
+        CodegenExecutable mir_module_executable = codegen_make_executable((CodegenFunction){
+            .code = mir_module.code,
+        });
+        BUSTER_TEST(arguments, none_module_executable.error == CODEGEN_ERROR_NONE && mir_module_executable.error == CODEGEN_ERROR_NONE);
+        String8 module_names[] = {
+            S8_INITIALIZER("add"), S8_INITIALIZER("mul"), S8_INITIALIZER("widen"), S8_INITIALIZER("narrow"),
+            S8_INITIALIZER("negate"), S8_INITIALIZER("bitnot"), S8_INITIALIZER("lnot"), S8_INITIALIZER("less"),
+            S8_INITIALIZER("uless"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("divide"),
+        };
+        typedef s64 MachineTestModuleCall2(s64, s64);
+        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(module_names) && none_module_executable.address && mir_module_executable.address;
+             name_index += 1)
+        {
+            IrFunction* module_function = machine_test_ir_function_find(machine_module, module_names[name_index]);
+            u32 none_offset = UINT32_MAX;
+            u32 mir_offset = UINT32_MAX;
+            for (u32 entry_index = 0; module_function && entry_index < none_module.entry_count; entry_index += 1)
+            {
+                if (none_module.entries[entry_index].symbol.value == module_function->symbol.value)
+                {
+                    none_offset = none_module.entries[entry_index].offset;
+                }
+            }
+            for (u32 entry_index = 0; module_function && entry_index < mir_module.entry_count; entry_index += 1)
+            {
+                if (mir_module.entries[entry_index].symbol.value == module_function->symbol.value)
+                {
+                    mir_offset = mir_module.entries[entry_index].offset;
+                }
+            }
+            BUSTER_TEST(arguments, none_offset != UINT32_MAX && mir_offset != UINT32_MAX);
+            if (none_offset == UINT32_MAX || mir_offset == UINT32_MAX)
+            {
+                continue;
+            }
+            bool module_wide = string_equal(module_names[name_index], S8("widen")) || string_equal(module_names[name_index], S8("bitnot"));
+            bool module_loop = string_equal(module_names[name_index], S8("sum_to"));
+            s64 module_probes[][2] = {
+                {5, 3}, {-7, 9}, {0, 1}, {2147483646, -2},
+            };
+            bool module_equal = true;
+            for (u32 probe_index = 0; probe_index < BUSTER_ARRAY_LENGTH(module_probes); probe_index += 1)
+            {
+                s64 left = module_probes[probe_index][0];
+                s64 right = module_probes[probe_index][1];
+                if (module_loop)
+                {
+                    left &= 63;
+                }
+                void* none_address = (u8*)none_module_executable.address + none_offset;
+                void* mir_address = (u8*)mir_module_executable.address + mir_offset;
+                MachineTestModuleCall2* none_call = 0;
+                MachineTestModuleCall2* mir_call = 0;
+                memcpy(&none_call, &none_address, sizeof(none_call));
+                memcpy(&mir_call, &mir_address, sizeof(mir_call));
+                if (module_wide)
+                {
+                    module_equal &= none_call(left, right) == mir_call(left, right);
+                }
+                else
+                {
+                    module_equal &= (s32)none_call(left, right) == (s32)mir_call(left, right);
+                }
+            }
+            BUSTER_TEST_RAW(arguments, module_equal, module_names[name_index]);
+        }
+        codegen_release_executable(none_module_executable);
+        codegen_release_executable(mir_module_executable);
+#endif
     }
 
     return result;

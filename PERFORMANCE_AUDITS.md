@@ -12,6 +12,53 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09j` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3, first
+increment — MIR_STACK wired into `codegen_generate_canonical_module` with
+per-function counted fallback, soaked on the full unity self-compile.)
+
+- **What was built.** Under `-fregister-allocator=mir-stack` on x86-64
+  System V, each lowered function attempts machine selection → structural
+  verification → stack placement → machine encoding into the module buffer;
+  the machine prologue byte-matches the canonical plain prologue so the
+  descriptor's PUSH/SET_FRAME_POINTER/ALLOCATE_STACK unwind actions keep
+  their exact meaning, and every ineligible function falls back to the
+  canonical path and is counted (functions targeted by label-address
+  relocations are conservatively excluded). Machine-path functions carry a
+  function-start line row but no per-instruction lines or debug locations
+  yet — recorded as an open stage-3 item, acceptable only because MIR_STACK
+  is an internal verification mode. `machine_tests` grew to 213 assertions
+  with a module-level differential (NONE module vs MIR_STACK module,
+  fallback accounting, descriptor/unwind shape, execution equality
+  including the fallback divide).
+- **The soak and the bug it caught.** Full unity compile with mir-stack:
+  130 of 2917 functions (4.5%) take the machine path; the mir-built
+  compiler then recompiles ide.c under NONE and the output is
+  **byte-identical** to the canonical stage 2. Getting there required one
+  real fix a small differential corpus could not see: sized direct-slot
+  frame stores (`mov [rbp+slot], ecx`) left stale upper bytes that the
+  64-bit slot loads and `test rax, rax` short-circuit branches consumed —
+  harmless on fresh zero stack pages, wrong on the deep dirty compiler
+  stack (first symptom: the stage-2 parse failing at an unrelated line).
+  Direct-slot stores now always write the full 8-byte slot, exactly like
+  the canonical `C_X64_STORE_RESULT`. The debugging lever worth keeping in
+  mind: a temporary BUSTER_MACHINE_LIMIT env bisection over machine
+  functions, deleted before commit, and cross-checking any byte-diff
+  criterion against a *current-tree* reference — a stale stage-2 reference
+  produced a phantom culprit first.
+- **Gates:** Release `test_all` 19773/19773 across 30/30 modules;
+  `test_self_host` token (`1396539`) and executable (`bytes=26910088`)
+  fixed points hold; the mir soak above. Stage-1 cost: `5.1716 G` to
+  `5.1865 G` (`+14.9 M`, `+0.29%`) at only `+328` tokens — instructions
+  per token `3704.027` to `3713.821` (`+0.26%`), the first per-token
+  regression of the project; the suspects are the wiring block enlarging
+  the already-huge canonical generator function. Flagged for the stage-6
+  audit: if the per-token cost keeps climbing with wiring code, move the
+  machine path out of the canonical function body.
+- Reference points for the next audit: stage 1 `5.1865 G` / `1396539`
+  tokens / `3713.821` per token, stage 2 `69.1864 G` / `49541.307` per
+  token, fixed point `bytes=26910088`, mir soak 130/2917 machine functions
+  byte-identical.
+
 `2026-08-09i` (Linux x86_64, Zen 4 7940HS; register-allocator stage 2 — the
 x86-64 scalar selector, MIR_STACK placement, and encoder over the compact
 machine IR, differentially executed against the canonical NONE path.)
