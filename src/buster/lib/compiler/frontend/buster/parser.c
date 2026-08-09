@@ -2306,7 +2306,7 @@ enum
     // storage a page-fragment at a time, then retain the largest capacity for
     // the rest of this parse. Most expressions therefore emit with one pointer
     // compare and bump rather than one arena-watermark check per node.
-    PARSER_EXPRESSION_NODE_BATCH_CAPACITY = 32,
+    PARSER_EXPRESSION_NODE_BATCH_CAPACITY = 128,
 };
 
 #if BUSTER_INCLUDE_TESTS
@@ -2320,11 +2320,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST AstNode* parser_expression_
 {
     AstNode* batch = (AstNode*)parser_bump_allocate(parser->expression_arena, sizeof(AstNode) * PARSER_EXPRESSION_NODE_BATCH_CAPACITY,
                                                    BUSTER_ALIGN_OF(AstNode));
-    BUSTER_CHECK(!parser->expression_node_end || batch == parser->expression_node_end);
-    if (!parser->expression_node_base)
-    {
-        parser->expression_node_base = batch;
-    }
+    BUSTER_CHECK(batch == parser->expression_node_end);
     parser->expression_node_end = batch + PARSER_EXPRESSION_NODE_BATCH_CAPACITY;
     return batch;
 }
@@ -5217,6 +5213,11 @@ ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 
     parser.state.minimum_position = scratch.arena->position;
     parser.result_arena = result_arena;
     parser.expression_arena = expression_arena;
+    parser.expression_node_base = (AstNode*)parser_bump_allocate(expression_arena,
+                                                                 sizeof(AstNode) * PARSER_EXPRESSION_NODE_BATCH_CAPACITY,
+                                                                 BUSTER_ALIGN_OF(AstNode));
+    parser.expression_node_next = parser.expression_node_base;
+    parser.expression_node_end = parser.expression_node_base + PARSER_EXPRESSION_NODE_BATCH_CAPACITY;
     parser.result = &result;
 
     // Push a dummy state so the stack is never empty
