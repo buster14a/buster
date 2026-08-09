@@ -265,6 +265,21 @@ typedef enum MachineOpcode
     MACHINE_X64_COPY_FRAME_FROM_FRAME, // slot ref destination, slot ref source
     MACHINE_X64_COPY_FRAME_FROM_PTR,   // slot ref destination, use address
     MACHINE_X64_COPY_PTR_FROM_FRAME,   // use address destination, slot ref source
+    // Scalar float operations. Float values travel as IEEE bit patterns in
+    // general registers and slots exactly like the canonical path; each row
+    // moves through XMM0/XMM1 internally. FARITH payload: low byte is the
+    // SSE opcode (0x58 add, 0x5c sub, 0x59 mul, 0x5e div), bit 8 selects
+    // the 64-bit form. FCMP_SET payload: low nibble is the setcc condition,
+    // bit 8 selects 64-bit compare, bits 9-10 the NaN-parity fixup
+    // (1 = and-not-parity, 2 = or-parity).
+    MACHINE_X64_FARITH,       // def, use, use
+    MACHINE_X64_FCMP_SET,     // def, use, use; result pinned to RAX
+    MACHINE_X64_CVT_F32_TO_F64, // def, use
+    MACHINE_X64_CVT_F64_TO_F32,
+    MACHINE_X64_CVT_I64_TO_F32,
+    MACHINE_X64_CVT_I64_TO_F64,
+    MACHINE_X64_CVT_F32_TO_I64,
+    MACHINE_X64_CVT_F64_TO_I64,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

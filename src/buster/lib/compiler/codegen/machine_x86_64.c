@@ -309,13 +309,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     }
     break;
     case IR_OPCODE_CONSTANT_INTEGER:
+    case IR_OPCODE_CONSTANT_FLOAT:
     {
         if (result_register == UINT32_MAX)
         {
             return false;
         }
+        // Float constants carry their IEEE bit pattern in the immediate,
+        // exactly like the canonical shared constant path.
         u64 immediate = instruction->immediates[0];
-        if (instruction->immediate_is_negative)
+        if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER && instruction->immediate_is_negative)
         {
             immediate = 0 - immediate;
         }
@@ -339,7 +342,73 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             return false;
         }
         IrType* source_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+        IrType* cast_target_type = ir_type_from_id(&program->types, instruction->canonical_type);
         u32 source_bits = machine_x64_scalar_bit_width(source_type);
+        // Float conversions mirror the canonical forms: the 64-bit convert
+        // instructions carry every narrower case after an integer extension,
+        // and the branchy unsigned-64 sequences stay outside the subset.
+        if (instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND || instruction->conversion_operation == IR_CONVERSION_FLOAT_TRUNCATE)
+        {
+            bool extend = instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND;
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                           .opcode = (u16)(extend ? MACHINE_X64_CVT_F32_TO_F64 : MACHINE_X64_CVT_F64_TO_F32),
+                                                       });
+            machine_x64_define(selector, result_register, row);
+            return true;
+        }
+        if (instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT ||
+            instruction->conversion_operation == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT)
+        {
+            bool cast_signed = instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT;
+            if (!cast_target_type || cast_target_type->kind != IR_TYPE_FLOAT ||
+                (cast_target_type->bit_width != 32 && cast_target_type->bit_width != 64) || !source_bits ||
+                (!cast_signed && source_bits == 64))
+            {
+                return false;
+            }
+            u32 extended_register = source_register;
+            if (source_bits < 64)
+            {
+                u16 extend_opcode = (u16)(cast_signed ? (source_bits == 8 ? MACHINE_X64_MOVSX8_RR : source_bits == 16 ? MACHINE_X64_MOVSX16_RR
+                                                         : MACHINE_X64_MOVSX32_RR)
+                                                      : (source_bits == 8 ? MACHINE_X64_MOVZX8_RR : source_bits == 16 ? MACHINE_X64_MOVZX16_RR
+                                                         : MACHINE_X64_MOV32_RR));
+                extended_register = machine_x64_synthesize_register(selector);
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, extended_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                     .opcode = extend_opcode,
+                                                 });
+            }
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, extended_register)},
+                                                           .opcode = (u16)(cast_target_type->bit_width == 64 ? MACHINE_X64_CVT_I64_TO_F64
+                                                                                                             : MACHINE_X64_CVT_I64_TO_F32),
+                                                       });
+            machine_x64_define(selector, result_register, row);
+            return true;
+        }
+        if (instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER ||
+            instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER)
+        {
+            bool to_unsigned = instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER;
+            if (!source_type || source_type->kind != IR_TYPE_FLOAT || (source_type->bit_width != 32 && source_type->bit_width != 64) ||
+                (to_unsigned && cast_target_type && cast_target_type->kind == IR_TYPE_INTEGER && cast_target_type->bit_width == 64))
+            {
+                return false;
+            }
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                           .opcode = (u16)(source_type->bit_width == 64 ? MACHINE_X64_CVT_F64_TO_I64
+                                                                                                        : MACHINE_X64_CVT_F32_TO_I64),
+                                                       });
+            machine_x64_define(selector, result_register, row);
+            return true;
+        }
         u16 opcode = 0;
         switch (instruction->conversion_operation)
         {
@@ -400,6 +469,37 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                    });
             return true;
         }
+        if (instruction->unary_operation == IR_UNARY_FLOAT_NEGATE)
+        {
+            IrType* float_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+            if (!float_type || float_type->kind != IR_TYPE_FLOAT || (float_type->bit_width != 32 && float_type->bit_width != 64))
+            {
+                return false;
+            }
+            // Sign-bit flip in the general-register domain is the exact
+            // IEEE negation for every input including NaN.
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                           .opcode = MACHINE_X64_MOV_RR,
+                                                       });
+            machine_x64_define(selector, result_register, row);
+            u32 mask_register = machine_x64_synthesize_register(selector);
+            u32 immediate_index = selector->immediates.total_count;
+            u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+            *immediate_row = float_type->bit_width == 64 ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register),
+                                                              machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
+                                                 .opcode = MACHINE_X64_MOV_RI,
+                                             });
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register)},
+                                                 .opcode = (u16)(float_type->bit_width == 64 ? MACHINE_X64_XOR64 : MACHINE_X64_XOR32),
+                                             });
+            return true;
+        }
         if (instruction->unary_operation == IR_UNARY_BOOLEAN_NOT)
         {
             machine_x64_select_row(selector, (MachineInstruction){
@@ -429,6 +529,61 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         }
         IrTypeId operand_type_id = function->values[instruction->operands[0].value].canonical_type;
         IrType* operand_type = ir_type_from_id(&program->types, operand_type_id);
+        if (operand_type && operand_type->kind == IR_TYPE_FLOAT)
+        {
+            if (operand_type->bit_width != 32 && operand_type->bit_width != 64)
+            {
+                return false;
+            }
+            u32 float_wide_bit = operand_type->bit_width == 64 ? 0x100u : 0;
+            u32 sse_opcode = 0;
+            u32 compare_payload = 0;
+            switch (instruction->binary_operation)
+            {
+                break;
+            case IR_BINARY_FLOAT_ADD:
+                sse_opcode = 0x58;
+                break;
+            case IR_BINARY_FLOAT_SUBTRACT:
+                sse_opcode = 0x5c;
+                break;
+            case IR_BINARY_FLOAT_MULTIPLY:
+                sse_opcode = 0x59;
+                break;
+            case IR_BINARY_FLOAT_DIVIDE:
+                sse_opcode = 0x5e;
+                break;
+            case IR_BINARY_FLOAT_EQUAL:
+                compare_payload = 0x4u | (1u << 9);
+                break;
+            case IR_BINARY_FLOAT_NOT_EQUAL:
+                compare_payload = 0x5u | (2u << 9);
+                break;
+            case IR_BINARY_FLOAT_LESS:
+                compare_payload = 0x2u | (1u << 9);
+                break;
+            case IR_BINARY_FLOAT_LESS_EQUAL:
+                compare_payload = 0x6u | (1u << 9);
+                break;
+            case IR_BINARY_FLOAT_GREATER:
+                compare_payload = 0x7u;
+                break;
+            case IR_BINARY_FLOAT_GREATER_EQUAL:
+                compare_payload = 0x3u;
+                break;
+            default:
+                return false;
+            }
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                                           .payload = (sse_opcode ? sse_opcode : compare_payload) | float_wide_bit,
+                                                           .opcode = (u16)(sse_opcode ? MACHINE_X64_FARITH : MACHINE_X64_FCMP_SET),
+                                                       });
+            machine_x64_define(selector, result_register, row);
+            return true;
+        }
         if (!machine_x64_type_is_scalar_register(operand_type))
         {
             return false;
@@ -1266,7 +1421,9 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
             // Address producers hold an 8-byte address in their vreg no
             // matter what their declared canonical type is, exactly like
             // the canonical path stores an address in the value's slot.
-            if (machine_x64_type_is_scalar_register(value_type) || machine_x64_opcode_produces_address(instruction->opcode))
+            bool float_scalar = value_type && value_type->layout.resolved && value_type->kind == IR_TYPE_FLOAT &&
+                                (value_type->bit_width == 32 || value_type->bit_width == 64);
+            if (machine_x64_type_is_scalar_register(value_type) || float_scalar || machine_x64_opcode_produces_address(instruction->opcode))
             {
                 u32 register_index = machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
                                                                                              .definition_point = MACHINE_POINT_INVALID,
@@ -1628,6 +1785,26 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_copy_chunk(u64 remaining)
     return remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
 }
 
+// Bit-exact 64-bit moves between the low XMM registers and general
+// registers, used by the float rows whose values travel as bit patterns.
+BUSTER_GLOBAL_LOCAL void machine_x64_emit_movq_to_xmm(MachineX64Encoder* encoder, u32 xmm, u32 general)
+{
+    machine_x64_emit8(encoder, 0x66);
+    machine_x64_emit8(encoder, (u8)(0x48 | (general >= 8 ? 0x01 : 0)));
+    machine_x64_emit8(encoder, 0x0f);
+    machine_x64_emit8(encoder, 0x6e);
+    machine_x64_emit8(encoder, machine_x64_modrm_register(xmm, general));
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_emit_movq_from_xmm(MachineX64Encoder* encoder, u32 xmm, u32 general)
+{
+    machine_x64_emit8(encoder, 0x66);
+    machine_x64_emit8(encoder, (u8)(0x48 | (general >= 8 ? 0x01 : 0)));
+    machine_x64_emit8(encoder, 0x0f);
+    machine_x64_emit8(encoder, 0x7e);
+    machine_x64_emit8(encoder, machine_x64_modrm_register(xmm, general));
+}
+
 // Two-operand register form with an explicit REX policy: `wide` forces
 // REX.W, and extended registers add REX.R/REX.B as required.
 BUSTER_GLOBAL_LOCAL void machine_x64_emit_rr(MachineX64Encoder* encoder, bool wide, bool two_byte, u8 opcode, u32 reg, u32 rm)
@@ -1668,6 +1845,9 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         case MACHINE_X64_COPY_FRAME_FROM_PTR:
         case MACHINE_X64_COPY_PTR_FROM_FRAME:
             capacity64 += ((u64)capacity_row->payload / 8 + 4) * 24;
+            break;
+        case MACHINE_X64_FCMP_SET:
+            capacity64 += 40;
             break;
         default:
             capacity64 += 24;
@@ -2076,6 +2256,81 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     machine_x64_emit_memory_modrm(&encoder, MACHINE_X64_RDX, destination_register, copied);
                     copied += chunk;
                 }
+            }
+            break;
+            case MACHINE_X64_FARITH:
+            {
+                machine_x64_emit_movq_to_xmm(&encoder, 0, operand_registers[1]);
+                machine_x64_emit_movq_to_xmm(&encoder, 1, operand_registers[2]);
+                machine_x64_emit8(&encoder, (instruction->payload & 0x100) ? 0xf2 : 0xf3);
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, (u8)instruction->payload);
+                machine_x64_emit8(&encoder, 0xc1);
+                machine_x64_emit_movq_from_xmm(&encoder, 0, operand_registers[0]);
+            }
+            break;
+            case MACHINE_X64_FCMP_SET:
+            {
+                // comis + setcc with the canonical NaN-parity fixups; the
+                // destination is pinned to RAX so AL/DL stay legal.
+                machine_x64_emit_movq_to_xmm(&encoder, 0, operand_registers[1]);
+                machine_x64_emit_movq_to_xmm(&encoder, 1, operand_registers[2]);
+                if (instruction->payload & 0x100)
+                {
+                    machine_x64_emit8(&encoder, 0x66);
+                }
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0x2e);
+                machine_x64_emit8(&encoder, 0xc1);
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, (u8)(0x90 | (instruction->payload & 0xf)));
+                machine_x64_emit8(&encoder, 0xc0);
+                u32 parity_mode = (instruction->payload >> 9) & 0x3;
+                if (parity_mode)
+                {
+                    machine_x64_emit8(&encoder, 0x0f);
+                    machine_x64_emit8(&encoder, parity_mode == 1 ? 0x9b : 0x9a);
+                    machine_x64_emit8(&encoder, 0xc2);
+                    machine_x64_emit8(&encoder, parity_mode == 1 ? 0x20 : 0x08);
+                    machine_x64_emit8(&encoder, 0xd0);
+                }
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0xb6);
+                machine_x64_emit8(&encoder, 0xc0);
+            }
+            break;
+            case MACHINE_X64_CVT_F32_TO_F64:
+            case MACHINE_X64_CVT_F64_TO_F32:
+            {
+                machine_x64_emit_movq_to_xmm(&encoder, 0, operand_registers[1]);
+                machine_x64_emit8(&encoder, instruction->opcode == MACHINE_X64_CVT_F32_TO_F64 ? 0xf3 : 0xf2);
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0x5a);
+                machine_x64_emit8(&encoder, 0xc0);
+                machine_x64_emit_movq_from_xmm(&encoder, 0, operand_registers[0]);
+            }
+            break;
+            case MACHINE_X64_CVT_I64_TO_F32:
+            case MACHINE_X64_CVT_I64_TO_F64:
+            {
+                machine_x64_emit8(&encoder, instruction->opcode == MACHINE_X64_CVT_I64_TO_F32 ? 0xf3 : 0xf2);
+                machine_x64_emit8(&encoder, (u8)(0x48 | (operand_registers[1] >= 8 ? 0x01 : 0)));
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0x2a);
+                machine_x64_emit8(&encoder, machine_x64_modrm_register(0, operand_registers[1]));
+                machine_x64_emit_movq_from_xmm(&encoder, 0, operand_registers[0]);
+            }
+            break;
+            case MACHINE_X64_CVT_F32_TO_I64:
+            case MACHINE_X64_CVT_F64_TO_I64:
+            {
+                machine_x64_emit_movq_to_xmm(&encoder, 0, operand_registers[1]);
+                machine_x64_emit8(&encoder, instruction->opcode == MACHINE_X64_CVT_F32_TO_I64 ? 0xf3 : 0xf2);
+                machine_x64_emit8(&encoder, (u8)(0x48 | (operand_registers[0] >= 8 ? 0x04 : 0)));
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0x2c);
+                machine_x64_emit8(&encoder, machine_x64_modrm_register(operand_registers[0], 0));
             }
             break;
             case MACHINE_X64_SWITCH:

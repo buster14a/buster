@@ -208,6 +208,23 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, 0},
         .implicit_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RDX),
     },
+    [MACHINE_X64_FARITH] = {
+        .name = S8_INITIALIZER("x64_farith"),
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
+    },
+    [MACHINE_X64_FCMP_SET] = {
+        .name = S8_INITIALIZER("x64_fcmp_set"),
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+    },
+    [MACHINE_X64_CVT_F32_TO_F64] = MACHINE_INFO_MOVE("x64_cvt_f32_to_f64"),
+    [MACHINE_X64_CVT_F64_TO_F32] = MACHINE_INFO_MOVE("x64_cvt_f64_to_f32"),
+    [MACHINE_X64_CVT_I64_TO_F32] = MACHINE_INFO_MOVE("x64_cvt_i64_to_f32"),
+    [MACHINE_X64_CVT_I64_TO_F64] = MACHINE_INFO_MOVE("x64_cvt_i64_to_f64"),
+    [MACHINE_X64_CVT_F32_TO_I64] = MACHINE_INFO_MOVE("x64_cvt_f32_to_i64"),
+    [MACHINE_X64_CVT_F64_TO_I64] = MACHINE_INFO_MOVE("x64_cvt_f64_to_i64"),
     [MACHINE_X64_CALL_DIRECT] = {
         .name = S8_INITIALIZER("x64_call_direct"),
         .implicit_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX) | (1u << MACHINE_X64_RDX) | (1u << MACHINE_X64_RSI) | (1u << MACHINE_X64_RDI) |

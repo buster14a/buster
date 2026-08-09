@@ -301,7 +301,14 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "    return (long)span_length(s) + (s.data == data ? 1 : 0);\n"
                                   "}\n"
                                   "typedef struct Single { long only; } Single;\n"
-                                  "long single_round_trip(int a) { Single o; o.only = a * 3; Single copy = o; return copy.only; }\n");
+                                  "long single_round_trip(int a) { Single o; o.only = a * 3; Single copy = o; return copy.only; }\n"
+                                  "int fmath(int a, int b) { double x = a; double y = b; double z = (x + y) * 0.5 - x / (y + 3.0); return (int)z; }\n"
+                                  "int f32math(int a) { float x = (float)a; float y = x * 2.0f + 1.5f; return (int)(y - x); }\n"
+                                  "int fcompare(int a, int b) { double x = a; double y = b;\n"
+                                  "    return (x < y) + (x <= y) * 2 + (x == y) * 4 + (x != y) * 8 + (x > y) * 16 + (x >= y) * 32; }\n"
+                                  "int fnegate(int a) { double x = a; return (int)-x; }\n"
+                                  "int fnan(int a) { double n = a * 0.0; n = n / n; return (n == n) ? 1 : 0; }\n"
+                                  "unsigned fuconv(unsigned a) { double x = a; return (unsigned)(x + 1.5); }\n");
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
     BUSTER_TEST(arguments, machine_program != 0);
     if (machine_program && machine_program->module_count)
@@ -321,7 +328,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("table_get"), S8_INITIALIZER("table_set"), S8_INITIALIZER("pair_sum"),
             S8_INITIALIZER("locals_array"), S8_INITIALIZER("local_pair"), S8_INITIALIZER("pick"),
             S8_INITIALIZER("span_length"), S8_INITIALIZER("span_make"), S8_INITIALIZER("span_round_trip"),
-            S8_INITIALIZER("single_round_trip"),
+            S8_INITIALIZER("single_round_trip"), S8_INITIALIZER("fmath"), S8_INITIALIZER("f32math"),
+            S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnegate"), S8_INITIALIZER("fnan"), S8_INITIALIZER("fuconv"),
         };
         MachineEncodeResult machine_encoded[BUSTER_ARRAY_LENGTH(supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(supported_names); name_index += 1)
@@ -576,7 +584,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("negate"), S8_INITIALIZER("bitnot"), S8_INITIALIZER("lnot"), S8_INITIALIZER("less"),
             S8_INITIALIZER("uless"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("divide"), S8_INITIALIZER("with_call"),
             S8_INITIALIZER("locals_array"), S8_INITIALIZER("local_pair"), S8_INITIALIZER("pick"),
-            S8_INITIALIZER("span_round_trip"), S8_INITIALIZER("single_round_trip"),
+            S8_INITIALIZER("span_round_trip"), S8_INITIALIZER("single_round_trip"), S8_INITIALIZER("fmath"),
+            S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnan"),
         };
         typedef s64 MachineTestModuleCall2(s64, s64);
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(module_names) && none_module_executable.address && mir_module_executable.address;
