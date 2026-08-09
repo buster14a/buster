@@ -12,6 +12,58 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09ai` (Linux x86_64, Zen 4 7940HS; register-allocator stage 7 —
+QUALITY exists, is verified, and does not beat FAST here.)
+
+- **What was built.** `machine_quality_placement_build`: a live interval
+  and a weight per virtual register, loop extension across every backward
+  edge, a max-heap priority walk, and greedy assignment of the
+  highest-weight non-overlapping intervals to callee-saved registers for
+  the whole function. The local scan then places everything else around
+  the pins and never picks, binds, spills, or reloads a pinned value.
+  Callee-saved is the class that makes a whole-function binding sound
+  without a clobber analysis: calls preserve it and every encoder scratch
+  and macro-op sequence in this backend works out of the caller-saved
+  half. Functions with a case table opt out, because switch targets live
+  outside the block-ref operands the loop extension walks.
+- **A pin verifier is part of the mode, not a debug aid.** After
+  placement, every operand naming a pinned register must belong to that
+  pin's value, and no edit may land on one; a violation falls back to the
+  local allocator. It earned itself immediately: copy coalescing steals a
+  dying source's register, and when that source was pinned it handed a
+  globally-reserved register to an unrelated value. The symptom was
+  `lea r15,[rbp-0x310]` / `mov r15,rax` / `mov [r15],r15` — a store
+  through a pointer that had just been overwritten by the value being
+  stored. Coalescing now refuses pinned registers.
+- **The negative result, measured four ways.** Compiling ide.c, FAST is
+  **45.16G** instructions. QUALITY: five callee-saved registers ungated
+  **49.28G**; gated on crossing a call **45.74G**; also requiring loop
+  residency **45.64G**; capped at two registers **45.35G**. Every
+  loosening costs more, and the limit of the series is FAST itself.
+- **Why.** A pin costs a push and a pop on every entry, and it removes
+  the register from the local pool for the whole function — allocator
+  traffic confirms the pressure, with spills and copies rising as pin
+  count rises. FRA already binds callee-saved registers for call-crossing
+  values where it locally pays, so it collects most of the benefit
+  without the function-wide reservation. The self-host corpus is not
+  register-pressure-bound, which is exactly the corpus the plan's
+  stage-7 acceptance criterion ("quality wins over FRA on pressure
+  corpus") asks about.
+- **Status against the plan.** Stage 7 lands its scaffolding — exact-ish
+  intervals, priority queue, hints, budget bound
+  (`MACHINE_QUALITY_MAXIMUM_CANDIDATES`), rematerialization (already in
+  FAST from `2026-08-09af`) — but **not** its acceptance criterion.
+  QUALITY must stay opt-in and must not become any optimization level's
+  default until it wins on a pressure corpus. Eviction cascades, live
+  range splitting, and stage 8 recoloring are the remaining levers that
+  could change the verdict; splitting is the one that directly attacks
+  the cost measured here, since it would let a pin cover only the loop
+  that needs it instead of the whole function.
+- **Gates:** test_all green (a corpus assertion holds QUALITY's traffic
+  at or below the everything-in-slots baseline), all three soaks —
+  MIR_STACK, FAST, QUALITY — byte-identical on fresh references,
+  self-host fixed point holds.
+
 `2026-08-09ah` (Linux x86_64, Zen 4 7940HS; selection quality — member
 addresses become one instruction.)
 

@@ -501,6 +501,8 @@ struct MachineStackPlacement
     u32 spill_count;
     u32 copy_count;
     u32 rematerialize_count;
+    // Values QUALITY gave a register for their whole lifetime.
+    u32 pinned_register_count;
     // Subset of spill_count emitted by the block-boundary write-back
     // rather than by eviction pressure: the two want different fixes.
     u32 boundary_spill_count;
@@ -625,4 +627,8 @@ BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, Mac
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target);
 BUSTER_F_DECL MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function);
+// QUALITY: a global pass pins the highest-weight non-overlapping live
+// intervals to callee-saved registers for their whole lifetime, then the
+// same local scan places everything else around them.
+BUSTER_F_DECL MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);

@@ -50,6 +50,10 @@ struct MachineFastState
     // materialization, or UINT32_MAX. Such a value is never stored and
     // never occupies a slot: any reload of it re-materializes instead.
     u32* rematerialize_immediates;
+    // Globally pinned registers, owned for the whole function by the
+    // QUALITY pass and invisible to the local scan.
+    u32 const* pinned_registers;
+    u32 pinned_mask;
     u32 clock;
     u32 current_point;
     // Set once the current instruction's uses and defines are placed: from
@@ -234,7 +238,7 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_crosses_call(MachineFastState* state, u32 
 // once another binding has already paid their push.
 BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u32 forbidden_mask, bool prefers_callee_saved)
 {
-    u32 candidates = MACHINE_FAST_ALLOCATABLE_MASK & ~forbidden_mask;
+    u32 candidates = MACHINE_FAST_ALLOCATABLE_MASK & ~forbidden_mask & ~state->pinned_mask;
     if (!prefers_callee_saved)
     {
         candidates &= ~(MACHINE_FAST_CALLEE_SAVED_MASK & ~state->placement->callee_saved_mask);
@@ -367,7 +371,11 @@ BUSTER_GLOBAL_LOCAL void machine_fast_bind(MachineFastState* state, u32 virtual_
     state->placement->callee_saved_mask |= (1u << target) & MACHINE_FAST_CALLEE_SAVED_MASK;
 }
 
-MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function)
+// `pinned_registers` holds a physical register per virtual register that
+// owns it for the whole function, or UINT32_MAX; `pinned_mask` collects
+// them. The local scan never picks, binds, spills, or reloads a pinned
+// value: its operands simply name the register. FAST passes neither.
+MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineFunction* function, u32 const* pinned_registers, u32 pinned_mask)
 {
     // Frame layout is shared with the stack placement for now; slot
     // elimination is the stage-6 optimization.
@@ -378,6 +386,7 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
     };
     MachineBuilderStream edits;
     machine_stream_initialize(&edits, sizeof(MachineEdit));
+    placement.callee_saved_mask |= pinned_mask;
     MachineFastState state = {
         .arena = arena,
         .function = function,
@@ -388,6 +397,8 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
         .escapes = arena_allocate(arena, u8, function->virtual_register_count),
         .next_call = arena_allocate(arena, u32, function->instruction_count),
         .rematerialize_immediates = arena_allocate(arena, u32, function->virtual_register_count),
+        .pinned_registers = pinned_registers,
+        .pinned_mask = pinned_mask,
     };
     // Constant definitions are recreatable anywhere, so they never pay for
     // a store or a slot. A second definition of the same value disables
@@ -624,6 +635,11 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
                 {
                     continue;
                 }
+                if (state.pinned_registers && state.pinned_registers[machine_ref_payload(ref)] != UINT32_MAX)
+                {
+                    operand_registers[slot] = (u8)state.pinned_registers[machine_ref_payload(ref)];
+                    continue;
+                }
                 u32 target = constrained ? machine_x64_slot_scratch[slot]
                              : instruction->opcode == MACHINE_X64_CALL_INDIRECT ? (u32)MACHINE_X64_R10
                                                                                 : UINT32_MAX;
@@ -689,6 +705,11 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
                 {
                     continue;
                 }
+                if (state.pinned_registers && state.pinned_registers[machine_ref_payload(ref)] != UINT32_MAX)
+                {
+                    operand_registers[slot] = (u8)state.pinned_registers[machine_ref_payload(ref)];
+                    continue;
+                }
                 u32 target;
                 if (constrained)
                 {
@@ -707,7 +728,8 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
                 else if (instruction->opcode == MACHINE_X64_MOV_RR && slot == 0 &&
                          machine_ref_kind(instruction->operands[1]) == MACHINE_REF_VIRTUAL_REGISTER &&
                          machine_ref_payload(instruction->operands[1]) != machine_ref_payload(ref) &&
-                         operand_registers[1] != UINT8_MAX && machine_fast_source_dies_here(&state, machine_ref_payload(instruction->operands[1])))
+                         operand_registers[1] != UINT8_MAX && !((state.pinned_mask >> operand_registers[1]) & 1u) &&
+                         machine_fast_source_dies_here(&state, machine_ref_payload(instruction->operands[1])))
                 {
                     // Coalesce: the source's last use is this copy, so the
                     // destination takes its register and the row encodes to
@@ -828,4 +850,9 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
     placement.frame_size = ((running - 8 * push_count + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u);
     placement.valid = true;
     return placement;
+}
+
+MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function)
+{
+    return machine_fast_placement_build_pinned(arena, function, 0, 0);
 }

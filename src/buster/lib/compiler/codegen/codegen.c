@@ -10406,7 +10406,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // prologue byte-for-byte matches the canonical plain x64 prologue,
         // so the descriptor's unwind actions keep their exact meaning.
         bool machine_function_emitted = false;
-        if ((options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_MIR_STACK || options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST) &&
+        if ((options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_MIR_STACK || options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST ||
+             options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY) &&
             target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_SYSTEM_V)
         {
             bool label_address_target = false;
@@ -10431,9 +10432,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             }
             if (selected.supported && machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE)
             {
-                MachineStackPlacement placement = options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST
-                                                      ? machine_fast_placement_build(machine_scratch.arena, &selected.function)
-                                                      : machine_stack_placement_build(machine_scratch.arena, &selected.function);
+                MachineStackPlacement placement =
+                    options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST    ? machine_fast_placement_build(machine_scratch.arena, &selected.function)
+                    : options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY
+                        ? machine_quality_placement_build(machine_scratch.arena, &selected.function)
+                        : machine_stack_placement_build(machine_scratch.arena, &selected.function);
                 if (!placement.valid)
                 {
                     result.statistics.fallback_placement_count += 1;
@@ -10535,6 +10538,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.statistics.allocator_copy_count += placement.copy_count;
                             result.statistics.allocator_boundary_spill_count += placement.boundary_spill_count;
                             result.statistics.allocator_rematerialize_count += placement.rematerialize_count;
+                            result.statistics.allocator_pinned_register_count += placement.pinned_register_count;
                         }
                     }
                 }

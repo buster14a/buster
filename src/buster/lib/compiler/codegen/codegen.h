@@ -274,6 +274,7 @@ struct CodegenStatistics
     u64 allocator_copy_count;
     u64 allocator_boundary_spill_count;
     u64 allocator_rematerialize_count;
+    u64 allocator_pinned_register_count;
 };
 
 struct CodegenModule

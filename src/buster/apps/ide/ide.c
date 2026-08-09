@@ -2718,10 +2718,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         if (compile.codegen_statistics.allocator_reload_count || compile.codegen_statistics.allocator_spill_count ||
             compile.codegen_statistics.allocator_copy_count)
         {
-            string_print(S8("CODEGEN_ALLOCATOR reloads={u64} spills={u64} boundary_spills={u64} copies={u64} rematerializations={u64}\n"),
+            string_print(S8("CODEGEN_ALLOCATOR reloads={u64} spills={u64} boundary_spills={u64} copies={u64} rematerializations={u64} pins={u64}\n"),
                          compile.codegen_statistics.allocator_reload_count, compile.codegen_statistics.allocator_spill_count,
                          compile.codegen_statistics.allocator_boundary_spill_count, compile.codegen_statistics.allocator_copy_count,
-                         compile.codegen_statistics.allocator_rematerialize_count);
+                         compile.codegen_statistics.allocator_rematerialize_count, compile.codegen_statistics.allocator_pinned_register_count);
         }
         if (compile.codegen_statistics.fallback_verify_count || compile.codegen_statistics.fallback_placement_count ||
             compile.codegen_statistics.fallback_encode_count)

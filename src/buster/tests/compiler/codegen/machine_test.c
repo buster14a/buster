@@ -984,6 +984,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 // Coalescing must survive: copies whose source dies land on
                 // the source register and encode to nothing, so the fast
                 // encoding stays strictly smaller than the stack one.
+                // QUALITY must be at least as correct and never spill more
+                // than the local scan it is built on.
+                MachineStackPlacement quality_placement = machine_quality_placement_build(arguments->arena, &traffic_selected.function);
+                BUSTER_TEST(arguments, quality_placement.valid);
+                BUSTER_TEST_RAW(arguments,
+                                quality_placement.reload_count + quality_placement.spill_count <=
+                                    stack_placement.reload_count + stack_placement.spill_count,
+                                string_format(arguments->arena, S8("quality traffic {u32}+{u32} vs stack {u32}+{u32}"), quality_placement.reload_count,
+                                              quality_placement.spill_count, stack_placement.reload_count, stack_placement.spill_count));
                 MachineEncodeResult stack_encoded = machine_encode_x86_64(arguments->arena, &traffic_selected.function, &stack_placement);
                 MachineEncodeResult fast_encoded = machine_encode_x86_64(arguments->arena, &traffic_selected.function, &fast_placement);
                 BUSTER_TEST(arguments, stack_encoded.valid && fast_encoded.valid);
