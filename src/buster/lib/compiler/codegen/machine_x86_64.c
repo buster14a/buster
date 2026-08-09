@@ -19,6 +19,7 @@ struct MachineX64Selector
     MachineBuilderStream immediates;
     MachineBuilderStream stack_slots;
     MachineBuilderStream call_targets;
+    MachineBuilderStream switch_cases;
     // Per IrValue: virtual register index, stack slot index, or UINT32_MAX.
     u32* value_virtual_registers;
     u32* value_stack_slots;
@@ -841,6 +842,43 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         return true;
     }
     break;
+    case IR_OPCODE_UNREACHABLE:
+    {
+        // Control never reaches this terminator; a plain return keeps the
+        // block verifier-well-formed with the cheapest legal bytes.
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .opcode = MACHINE_X64_RET,
+                                         });
+        return true;
+    }
+    break;
+    case IR_OPCODE_SWITCH:
+    {
+        u32 condition_register;
+        if (!machine_x64_operand_register(selector, instruction->operands[0], &condition_register) || !instruction->target_count ||
+            instruction->target_count != instruction->immediate_count + 1 || instruction->immediate_count > UINT16_MAX || !instruction->immediates)
+        {
+            return false;
+        }
+        u32 first_case = selector->switch_cases.total_count;
+        for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
+        {
+            MachineSwitchCase* case_row = (MachineSwitchCase*)machine_stream_append(selector->arena, &selector->switch_cases);
+            *case_row = (MachineSwitchCase){
+                .value = instruction->immediates[case_index],
+                .target_block = instruction->targets[case_index].value,
+            };
+        }
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, condition_register),
+                                                          machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[instruction->target_count - 1].value)},
+                                             .payload = first_case,
+                                             .opcode = MACHINE_X64_SWITCH,
+                                             .flags = (u16)instruction->immediate_count,
+                                         });
+        return true;
+    }
+    break;
     case IR_OPCODE_BRANCH_IF:
     {
         u32 condition_register;
@@ -939,6 +977,7 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
     machine_stream_initialize(&selector.immediates, sizeof(u64));
     machine_stream_initialize(&selector.stack_slots, sizeof(u32));
     machine_stream_initialize(&selector.call_targets, sizeof(IrSymbolId));
+    machine_stream_initialize(&selector.switch_cases, sizeof(MachineSwitchCase));
     for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
     {
         selector.value_virtual_registers[value_index] = UINT32_MAX;
@@ -1065,6 +1104,9 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
     result.function.call_targets = arena_allocate(arena, IrSymbolId, selector.call_targets.total_count);
     result.function.call_target_count = selector.call_targets.total_count;
     machine_stream_flatten(&selector.call_targets, result.function.call_targets);
+    result.function.switch_cases = arena_allocate(arena, MachineSwitchCase, selector.switch_cases.total_count);
+    result.function.switch_case_count = selector.switch_cases.total_count;
+    machine_stream_flatten(&selector.switch_cases, result.function.switch_cases);
     // Only classification vregs need their definition patched; synthesized
     // temporaries carried their points from creation.
     for (u32 register_index = 0; register_index < selector.virtual_register_count; register_index += 1)
@@ -1278,7 +1320,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     {
         return result;
     }
-    u64 capacity64 = (u64)function->instruction_count * 24 + (u64)placement->edit_count * 8 + 64;
+    u64 capacity64 = (u64)function->instruction_count * 24 + (u64)placement->edit_count * 8 + (u64)function->switch_case_count * 24 + 64;
     if (capacity64 > UINT32_MAX)
     {
         return result;
@@ -1624,6 +1666,38 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 *site = (MachineCallSite){
                     .code_offset = encoder.count,
                     .target = instruction->payload,
+                };
+                machine_x64_emit32(&encoder, 0);
+            }
+            break;
+            case MACHINE_X64_SWITCH:
+            {
+                // The canonical compare chain: the condition sits in the
+                // operand scratch, each case constant is materialized in
+                // RCX, equality jumps to the case block, and the tail jump
+                // takes the default edge.
+                u32 condition = operand_registers[0];
+                for (u32 case_index = 0; case_index < instruction->flags; case_index += 1)
+                {
+                    MachineSwitchCase* case_row = function->switch_cases + instruction->payload + case_index;
+                    machine_x64_emit8(&encoder, 0x48);
+                    machine_x64_emit8(&encoder, 0xb9);
+                    machine_x64_emit64(&encoder, case_row->value);
+                    machine_x64_emit_rr(&encoder, true, false, 0x39, MACHINE_X64_RCX, condition);
+                    machine_x64_emit8(&encoder, 0x0f);
+                    machine_x64_emit8(&encoder, 0x84);
+                    MachineX64BranchFixup* case_fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
+                    *case_fixup = (MachineX64BranchFixup){
+                        .patch_offset = encoder.count,
+                        .block = case_row->target_block,
+                    };
+                    machine_x64_emit32(&encoder, 0);
+                }
+                machine_x64_emit8(&encoder, 0xe9);
+                MachineX64BranchFixup* default_fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
+                *default_fixup = (MachineX64BranchFixup){
+                    .patch_offset = encoder.count,
+                    .block = machine_ref_payload(instruction->operands[1]),
                 };
                 machine_x64_emit32(&encoder, 0);
             }

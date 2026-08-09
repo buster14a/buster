@@ -255,8 +255,21 @@ typedef enum MachineOpcode
     MACHINE_X64_CALL_DIRECT,
     MACHINE_X64_LEA_FRAME,    // def, stack-slot ref: address of a frame slot
     MACHINE_X64_LEA_SYMBOL,   // def; payload indexes call_targets: rip-relative symbol address
+    // Terminator compare chain: use condition, block ref default; payload
+    // is the first row in the switch-case side table and flags holds the
+    // case count.
+    MACHINE_X64_SWITCH,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
+
+typedef struct MachineSwitchCase MachineSwitchCase;
+struct MachineSwitchCase
+{
+    u64 value;
+    u32 target_block;
+    u32 reserved;
+};
+BUSTER_CT_CHECK(sizeof(MachineSwitchCase) == 16);
 
 // x86 condition-code low nibble as used by SETcc (0x0f 0x90+cc) and Jcc
 // (0x0f 0x80+cc).
@@ -330,12 +343,15 @@ struct MachineFunction
     u32* stack_slot_sizes;
     // Direct-call callees, indexed by MACHINE_X64_CALL_DIRECT payloads.
     IrSymbolId* call_targets;
+    MachineSwitchCase* switch_cases;
     u32 instruction_count;
     u32 virtual_register_count;
     u32 block_count;
     u32 immediate_count;
     u32 stack_slot_count;
     u32 call_target_count;
+    u32 switch_case_count;
+    u32 reserved;
 };
 
 // x86-64 physical general registers in encoding order.
