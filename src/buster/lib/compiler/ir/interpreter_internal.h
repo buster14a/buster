@@ -22,8 +22,14 @@ struct IrInterpreterTestCounters
 {
     u32 function_lookup_count;
     u32 function_validation_count;
+    u64 stored_value_linear_clear_probe_count;
+    u64 stored_value_linear_find_probe_count;
+    u64 stored_value_index_probe_count;
+    u64 stored_value_index_moved_count;
+    u32 stored_value_index_build_count;
 };
 
 BUSTER_F_DECL void ir_interpreter_test_counters_reset(void);
 BUSTER_F_DECL IrInterpreterTestCounters ir_interpreter_test_counters_read(void);
+BUSTER_F_DECL bool ir_interpreter_test_stored_value_stress(Arena* arena, u32 stored_value_count);
 #endif

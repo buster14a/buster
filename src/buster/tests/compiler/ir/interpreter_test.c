@@ -590,6 +590,24 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, scalar_validation.error == IR_VALIDATION_NONE);
     BUSTER_TEST(arguments, ir_interpreter_test_static_label_relocations(arguments->arena));
 
+    ir_interpreter_test_counters_reset();
+    BUSTER_TEST(arguments, ir_interpreter_test_stored_value_stress(arguments->arena, 2));
+    IrInterpreterTestCounters small_store_counters = ir_interpreter_test_counters_read();
+    BUSTER_TEST(arguments, small_store_counters.stored_value_index_build_count == 0);
+    BUSTER_TEST(arguments, small_store_counters.stored_value_linear_clear_probe_count == 10);
+
+    const u32 large_store_count = 256;
+    const u64 legacy_large_store_clear_probes = (u64)large_store_count * (large_store_count - 1) / 2;
+    ir_interpreter_test_counters_reset();
+    BUSTER_TEST(arguments, ir_interpreter_test_stored_value_stress(arguments->arena, large_store_count));
+    IrInterpreterTestCounters large_store_counters = ir_interpreter_test_counters_read();
+    BUSTER_TEST(arguments, large_store_counters.stored_value_index_build_count == 3);
+    BUSTER_TEST(arguments, large_store_counters.stored_value_linear_clear_probe_count == 28);
+    BUSTER_TEST(arguments, large_store_counters.stored_value_linear_find_probe_count == 0);
+    BUSTER_TEST(arguments, large_store_counters.stored_value_linear_clear_probe_count * 100 < legacy_large_store_clear_probes);
+    BUSTER_TEST(arguments, large_store_counters.stored_value_index_probe_count < (u64)large_store_count * 96);
+    BUSTER_TEST(arguments, large_store_counters.stored_value_index_moved_count <= (u64)large_store_count * 3);
+
     AnalysisEntity* main_entity = ir_interpreter_test_entity_find(&scalar_analysis, S8("main"));
     BUSTER_TEST(arguments, main_entity != 0);
     if (main_entity)

@@ -17,6 +17,7 @@ typedef enum IrRuntimeValueKind
 
 typedef struct IrRuntimeObject IrRuntimeObject;
 typedef struct IrRuntimeStoredValue IrRuntimeStoredValue;
+typedef struct IrRuntimeStoredValueIndex IrRuntimeStoredValueIndex;
 typedef struct IrRuntimeValue IrRuntimeValue;
 typedef struct IrRuntimeGlobal IrRuntimeGlobal;
 typedef struct IrRuntimeContext IrRuntimeContext;
@@ -85,6 +86,7 @@ struct IrRuntimeValue
 struct IrRuntimeObject
 {
     IrRuntimeStoredValue* first_stored_value;
+    IrRuntimeStoredValueIndex* stored_value_index;
     u8* bytes;
     u8* initialized;
     u64 size;
@@ -111,6 +113,21 @@ struct IrRuntimeStoredValue
     IrRuntimeValue value;
     u64 offset;
     u64 size;
+};
+
+struct IrRuntimeStoredValueIndex
+{
+    IrRuntimeStoredValue** values;
+    u64 count;
+    u64 capacity;
+};
+
+enum
+{
+    // A single pointer keeps the common one- and two-entry objects on the
+    // linked path.  The flat sorted index starts paying for itself once a
+    // clear would otherwise chase this many unrelated arena nodes.
+    IR_INTERPRETER_STORED_VALUE_INDEX_THRESHOLD = 8,
 };
 
 typedef struct IrExecutionFrame IrExecutionFrame;
@@ -835,12 +852,186 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_ranges_overlap(u64 left_offset, u64 left
            right_offset < left_offset + left_size;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_interpreter_stored_values_clear(IrRuntimeObject* object, u64 offset, u64 size)
+BUSTER_GLOBAL_LOCAL u64 ir_interpreter_stored_value_index_offset_lower_bound(IrRuntimeStoredValueIndex* index, u64 offset)
 {
+    u64 low = 0;
+    u64 high = index->count;
+    while (low < high)
+    {
+        u64 middle = low + (high - low) / 2;
+#if BUSTER_INCLUDE_TESTS
+        ir_interpreter_test_counters.stored_value_index_probe_count += 1;
+#endif
+        if (index->values[middle]->offset < offset)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low;
+}
+
+BUSTER_GLOBAL_LOCAL u64 ir_interpreter_stored_value_index_first_ending_after(IrRuntimeStoredValueIndex* index, u64 offset)
+{
+    u64 low = 0;
+    u64 high = index->count;
+    while (low < high)
+    {
+        u64 middle = low + (high - low) / 2;
+        IrRuntimeStoredValue* stored = index->values[middle];
+#if BUSTER_INCLUDE_TESTS
+        ir_interpreter_test_counters.stored_value_index_probe_count += 1;
+#endif
+        if (stored->offset + stored->size <= offset)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low;
+}
+
+BUSTER_GLOBAL_LOCAL void ir_interpreter_stored_value_index_abandon(IrRuntimeObject* object)
+{
+    IrRuntimeStoredValueIndex* index = object->stored_value_index;
+    object->first_stored_value = 0;
+    for (u64 stored_index = index->count; stored_index; stored_index -= 1)
+    {
+        IrRuntimeStoredValue* stored = index->values[stored_index - 1];
+        stored->next = object->first_stored_value;
+        object->first_stored_value = stored;
+    }
+    object->stored_value_index = 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_stored_value_index_reserve(Arena* arena, IrRuntimeStoredValueIndex* index, u64 required_capacity)
+{
+    if (required_capacity <= index->capacity)
+    {
+        return true;
+    }
+    if (index->capacity > UINT64_MAX / 2)
+    {
+        return false;
+    }
+    u64 capacity = index->capacity ? index->capacity * 2 : IR_INTERPRETER_STORED_VALUE_INDEX_THRESHOLD * 2;
+    if (capacity < required_capacity || !ir_interpreter_arena_can_allocate_count(arena, sizeof(*index->values), capacity))
+    {
+        return false;
+    }
+    IrRuntimeStoredValue** values = arena_allocate(arena, IrRuntimeStoredValue*, capacity);
+    if (index->count)
+    {
+        memcpy(values, index->values, sizeof(*values) * index->count);
+#if BUSTER_INCLUDE_TESTS
+        ir_interpreter_test_counters.stored_value_index_moved_count += index->count;
+#endif
+    }
+    index->values = values;
+    index->capacity = capacity;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_stored_value_index_build(Arena* arena, IrRuntimeObject* object, u64 stored_value_count)
+{
+    u64 actual_count = 0;
+    for (IrRuntimeStoredValue* stored = object->first_stored_value; stored; stored = stored->next)
+    {
+        // Zero-sized metadata never overlaps, so more than one newest-first
+        // entry may legally share an offset on the list.  Keep that rare
+        // representation on the list rather than changing first-match rules.
+        if (!stored->size || actual_count == stored_value_count)
+        {
+            return false;
+        }
+        actual_count += 1;
+    }
+    u64 values_size = 0;
+    u64 allocation_size = 0;
+    u64 capacity = IR_INTERPRETER_STORED_VALUE_INDEX_THRESHOLD * 2;
+    if (stored_value_count != IR_INTERPRETER_STORED_VALUE_INDEX_THRESHOLD || actual_count != stored_value_count ||
+        !ir_interpreter_u64_multiply(sizeof(IrRuntimeStoredValue*), capacity, &values_size) ||
+        !ir_interpreter_u64_add(values_size,
+                                sizeof(IrRuntimeStoredValueIndex) + BUSTER_ALIGN_OF(IrRuntimeStoredValueIndex) + BUSTER_ALIGN_OF(IrRuntimeStoredValue*),
+                                &allocation_size) ||
+        !ir_interpreter_arena_can_allocate(arena, allocation_size))
+    {
+        return false;
+    }
+    IrRuntimeStoredValueIndex* index = arena_allocate(arena, IrRuntimeStoredValueIndex, 1);
+    *index = (IrRuntimeStoredValueIndex){
+        .values = arena_allocate(arena, IrRuntimeStoredValue*, capacity),
+        .capacity = capacity,
+    };
+    for (IrRuntimeStoredValue* stored = object->first_stored_value; stored; stored = stored->next)
+    {
+        index->values[index->count] = stored;
+        index->count += 1;
+    }
+    for (u64 stored_index = 1; stored_index < index->count; stored_index += 1)
+    {
+        IrRuntimeStoredValue* stored = index->values[stored_index];
+        u64 insertion_index = stored_index;
+        while (insertion_index && index->values[insertion_index - 1]->offset > stored->offset)
+        {
+            index->values[insertion_index] = index->values[insertion_index - 1];
+            insertion_index -= 1;
+        }
+        index->values[insertion_index] = stored;
+    }
+    object->first_stored_value = 0;
+    object->stored_value_index = index;
+#if BUSTER_INCLUDE_TESTS
+    ir_interpreter_test_counters.stored_value_index_build_count += 1;
+#endif
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL u64 ir_interpreter_stored_values_clear(IrRuntimeObject* object, u64 offset, u64 size)
+{
+    if (BUSTER_UNLIKELY(object->stored_value_index))
+    {
+        IrRuntimeStoredValueIndex* index = object->stored_value_index;
+        if (!size || !index->count)
+        {
+            return index->count;
+        }
+        u64 first = ir_interpreter_stored_value_index_first_ending_after(index, offset);
+        u64 end = offset + size;
+        u64 after = first;
+        while (after < index->count && index->values[after]->offset < end)
+        {
+#if BUSTER_INCLUDE_TESTS
+            ir_interpreter_test_counters.stored_value_index_probe_count += 1;
+#endif
+            after += 1;
+        }
+        u64 removed = after - first;
+        u64 tail = index->count - after;
+        if (removed && tail)
+        {
+            memmove(index->values + first, index->values + after, sizeof(*index->values) * tail);
+#if BUSTER_INCLUDE_TESTS
+            ir_interpreter_test_counters.stored_value_index_moved_count += tail;
+#endif
+        }
+        index->count -= removed;
+        return index->count;
+    }
+    u64 stored_value_count = 0;
     IrRuntimeStoredValue** link = &object->first_stored_value;
     while (*link)
     {
         IrRuntimeStoredValue* stored = *link;
+#if BUSTER_INCLUDE_TESTS
+        ir_interpreter_test_counters.stored_value_linear_clear_probe_count += 1;
+#endif
         if (ir_interpreter_ranges_overlap(stored->offset, stored->size, offset, size))
         {
             *link = stored->next;
@@ -848,26 +1039,73 @@ BUSTER_GLOBAL_LOCAL void ir_interpreter_stored_values_clear(IrRuntimeObject* obj
         else
         {
             link = &stored->next;
+            stored_value_count += 1;
         }
     }
+    return stored_value_count;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_interpreter_stored_value_add(Arena* arena, IrRuntimeObject* object, u64 offset, u64 size, IrRuntimeValue value)
+BUSTER_GLOBAL_LOCAL void ir_interpreter_stored_value_add(Arena* arena, IrRuntimeObject* object, u64 offset, u64 size, IrRuntimeValue value,
+                                                          u64 existing_count)
 {
     IrRuntimeStoredValue* stored = arena_allocate(arena, IrRuntimeStoredValue, 1);
     *stored = (IrRuntimeStoredValue){
-        .next = object->first_stored_value,
         .value = value,
         .offset = offset,
         .size = size,
     };
+    if (!size && BUSTER_UNLIKELY(object->stored_value_index))
+    {
+        ir_interpreter_stored_value_index_abandon(object);
+    }
+    if (BUSTER_UNLIKELY(object->stored_value_index))
+    {
+        IrRuntimeStoredValueIndex* index = object->stored_value_index;
+        if (!ir_interpreter_stored_value_index_reserve(arena, index, index->count + 1))
+        {
+            ir_interpreter_stored_value_index_abandon(object);
+        }
+        else
+        {
+            u64 insertion_index = ir_interpreter_stored_value_index_offset_lower_bound(index, offset);
+            u64 tail = index->count - insertion_index;
+            if (tail)
+            {
+                memmove(index->values + insertion_index + 1, index->values + insertion_index, sizeof(*index->values) * tail);
+#if BUSTER_INCLUDE_TESTS
+                ir_interpreter_test_counters.stored_value_index_moved_count += tail;
+#endif
+            }
+            index->values[insertion_index] = stored;
+            index->count += 1;
+            return;
+        }
+    }
+    stored->next = object->first_stored_value;
     object->first_stored_value = stored;
+    if (BUSTER_UNLIKELY(existing_count + 1 == IR_INTERPRETER_STORED_VALUE_INDEX_THRESHOLD))
+    {
+        ir_interpreter_stored_value_index_build(arena, object, existing_count + 1);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL IrRuntimeStoredValue* ir_interpreter_stored_value_find(IrRuntimeObject* object, u64 offset, u64 size)
 {
+    if (BUSTER_UNLIKELY(object->stored_value_index))
+    {
+        IrRuntimeStoredValueIndex* index = object->stored_value_index;
+        u64 stored_index = ir_interpreter_stored_value_index_offset_lower_bound(index, offset);
+        if (stored_index < index->count && index->values[stored_index]->offset == offset && index->values[stored_index]->size == size)
+        {
+            return index->values[stored_index];
+        }
+        return 0;
+    }
     for (IrRuntimeStoredValue* stored = object->first_stored_value; stored; stored = stored->next)
     {
+#if BUSTER_INCLUDE_TESTS
+        ir_interpreter_test_counters.stored_value_linear_find_probe_count += 1;
+#endif
         if (stored->offset == offset && stored->size == size)
         {
             return stored;
@@ -877,9 +1115,12 @@ BUSTER_GLOBAL_LOCAL IrRuntimeStoredValue* ir_interpreter_stored_value_find(IrRun
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_object_region_copy(Arena* arena, IrRuntimeObject* destination, u64 destination_offset, IrRuntimeObject* source,
-                                                           u64 source_offset, u64 size)
+                                                           u64 source_offset, u64 size, u64 destination_stored_value_count)
 {
-    if (!ir_interpreter_object_range_valid(destination, destination_offset, size) || !ir_interpreter_object_range_valid(source, source_offset, size))
+    // memory_write snapshots aggregate self-copies before reaching this path,
+    // and memory_read always copies into a fresh object.
+    if (destination == source || !ir_interpreter_object_range_valid(destination, destination_offset, size) ||
+        !ir_interpreter_object_range_valid(source, source_offset, size))
     {
         return false;
     }
@@ -888,13 +1129,31 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_object_region_copy(Arena* arena, IrRunti
         destination->bytes[destination_offset + index] = source->bytes[source_offset + index];
         destination->initialized[destination_offset + index] = source->initialized[source_offset + index];
     }
+    u64 source_end = source_offset + size;
+    if (BUSTER_UNLIKELY(source->stored_value_index))
+    {
+        IrRuntimeStoredValueIndex* index = source->stored_value_index;
+        u64 first = ir_interpreter_stored_value_index_first_ending_after(index, source_offset);
+        for (u64 stored_index = first; stored_index < index->count && index->values[stored_index]->offset < source_end; stored_index += 1)
+        {
+            IrRuntimeStoredValue* stored = index->values[stored_index];
+            if (stored->offset >= source_offset && stored->size <= source_end - stored->offset)
+            {
+                ir_interpreter_stored_value_add(arena, destination, destination_offset + stored->offset - source_offset, stored->size, stored->value,
+                                                destination_stored_value_count);
+                destination_stored_value_count += 1;
+            }
+        }
+        return true;
+    }
     for (IrRuntimeStoredValue* stored = source->first_stored_value; stored; stored = stored->next)
     {
-        u64 source_end = 0;
-        if (ir_interpreter_u64_add(source_offset, size, &source_end) && ir_interpreter_object_range_valid(source, stored->offset, stored->size) &&
-            stored->offset >= source_offset && stored->size <= source_end - stored->offset)
+        if (ir_interpreter_object_range_valid(source, stored->offset, stored->size) && stored->offset >= source_offset && stored->offset <= source_end &&
+            stored->size <= source_end - stored->offset)
         {
-            ir_interpreter_stored_value_add(arena, destination, destination_offset + stored->offset - source_offset, stored->size, stored->value);
+            ir_interpreter_stored_value_add(arena, destination, destination_offset + stored->offset - source_offset, stored->size, stored->value,
+                                            destination_stored_value_count);
+            destination_stored_value_count += 1;
         }
     }
     return true;
@@ -906,7 +1165,23 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_write(Arena* arena, IrRuntimeObje
     {
         return false;
     }
-    ir_interpreter_stored_values_clear(object, offset, size);
+    if (!size && value.initialized && value.kind == IR_RUNTIME_VALUE_AGGREGATE && value.object == object &&
+        ir_interpreter_object_range_valid(value.object, value.offset, size))
+    {
+        return true;
+    }
+    if (value.initialized && size && value.kind == IR_RUNTIME_VALUE_AGGREGATE && value.object == object &&
+        ir_interpreter_object_range_valid(value.object, value.offset, size))
+    {
+        IrRuntimeObject* snapshot = ir_interpreter_object_create(arena, size);
+        if (!snapshot || !ir_interpreter_object_region_copy(arena, snapshot, 0, object, value.offset, size, 0))
+        {
+            return false;
+        }
+        value.object = snapshot;
+        value.offset = 0;
+    }
+    u64 stored_value_count = ir_interpreter_stored_values_clear(object, offset, size);
     if (!value.initialized)
     {
         for (u64 index = 0; index < size; index += 1)
@@ -924,20 +1199,20 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_write(Arena* arena, IrRuntimeObje
         }
         if (value.has_label_provenance)
         {
-            ir_interpreter_stored_value_add(arena, object, offset, size, value);
+            ir_interpreter_stored_value_add(arena, object, offset, size, value, stored_value_count);
         }
         return true;
     }
     if (value.kind == IR_RUNTIME_VALUE_AGGREGATE && ir_interpreter_object_range_valid(value.object, value.offset, size))
     {
-        return ir_interpreter_object_region_copy(arena, object, offset, value.object, value.offset, size);
+        return ir_interpreter_object_region_copy(arena, object, offset, value.object, value.offset, size, stored_value_count);
     }
     for (u64 index = 0; index < size; index += 1)
     {
         object->bytes[offset + index] = 0;
         object->initialized[offset + index] = 1;
     }
-    ir_interpreter_stored_value_add(arena, object, offset, size, value);
+    ir_interpreter_stored_value_add(arena, object, offset, size, value, stored_value_count);
     return true;
 }
 
@@ -986,7 +1261,7 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_read(Arena* arena, AnalysisResult
     if (type->kind == ANALYSIS_TYPE_ARRAY || type->kind == ANALYSIS_TYPE_VECTOR || type->kind == ANALYSIS_TYPE_STRUCT || type->kind == ANALYSIS_TYPE_UNION)
     {
         IrRuntimeObject* copy = ir_interpreter_object_create(arena, size);
-        if (!ir_interpreter_object_region_copy(arena, copy, 0, object, offset, size))
+        if (!ir_interpreter_object_region_copy(arena, copy, 0, object, offset, size, 0))
         {
             return false;
         }
@@ -1006,6 +1281,203 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_read(Arena* arena, AnalysisResult
     *value_out = stored->value;
     return true;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool ir_interpreter_test_stored_value_stress(Arena* arena, u32 stored_value_count)
+{
+    const u64 stored_value_size = 8;
+    u64 object_size = 0;
+    if (!arena || stored_value_count < 2 || !ir_interpreter_u64_multiply(stored_value_count, stored_value_size, &object_size))
+    {
+        return false;
+    }
+    IrRuntimeObject* alias_target = ir_interpreter_object_create(arena, stored_value_count);
+    IrRuntimeObject* source = ir_interpreter_object_create(arena, object_size);
+    IrRuntimeObject* copy = ir_interpreter_object_create(arena, object_size);
+    if (!alias_target || !source || !copy)
+    {
+        return false;
+    }
+    for (u32 stored_index = 0; stored_index < stored_value_count; stored_index += 1)
+    {
+        IrRuntimeValue address = {
+            .object = alias_target,
+            .offset = stored_index,
+            .kind = IR_RUNTIME_VALUE_ADDRESS,
+            .initialized = true,
+        };
+        if (!ir_interpreter_memory_write(arena, source, (u64)stored_index * stored_value_size, stored_value_size, address))
+        {
+            return false;
+        }
+    }
+    for (u32 stored_index = 0; stored_index < stored_value_count; stored_index += 1)
+    {
+        IrRuntimeStoredValue* stored = ir_interpreter_stored_value_find(source, (u64)stored_index * stored_value_size, stored_value_size);
+        if (!stored || stored->value.kind != IR_RUNTIME_VALUE_ADDRESS || stored->value.object != alias_target || stored->value.offset != stored_index)
+        {
+            return false;
+        }
+    }
+    u64 zero_self_copy_position = arena->position;
+    IrRuntimeValue zero_self_copy = {
+        .object = source,
+        .offset = object_size,
+        .kind = IR_RUNTIME_VALUE_AGGREGATE,
+        .initialized = true,
+    };
+    if (!ir_interpreter_memory_write(arena, source, object_size, 0, zero_self_copy) || arena->position != zero_self_copy_position)
+    {
+        return false;
+    }
+    if (stored_value_count >= IR_INTERPRETER_STORED_VALUE_INDEX_THRESHOLD)
+    {
+        IrRuntimeValue self_copy = {
+            .object = source,
+            .length = object_size,
+            .kind = IR_RUNTIME_VALUE_AGGREGATE,
+            .initialized = true,
+        };
+        if (!ir_interpreter_memory_write(arena, source, 0, object_size, self_copy))
+        {
+            return false;
+        }
+        for (u32 stored_index = 0; stored_index < stored_value_count; stored_index += 1)
+        {
+            IrRuntimeStoredValue* stored = ir_interpreter_stored_value_find(source, (u64)stored_index * stored_value_size, stored_value_size);
+            if (!stored || stored->value.kind != IR_RUNTIME_VALUE_ADDRESS || stored->value.object != alias_target || stored->value.offset != stored_index)
+            {
+                return false;
+            }
+        }
+    }
+    IrRuntimeValue aggregate = {
+        .object = source,
+        .length = object_size,
+        .kind = IR_RUNTIME_VALUE_AGGREGATE,
+        .initialized = true,
+    };
+    if (!ir_interpreter_memory_write(arena, copy, 0, object_size, aggregate))
+    {
+        return false;
+    }
+    for (u32 stored_index = 0; stored_index < stored_value_count; stored_index += 1)
+    {
+        IrRuntimeStoredValue* stored = ir_interpreter_stored_value_find(copy, (u64)stored_index * stored_value_size, stored_value_size);
+        if (!stored || stored->value.kind != IR_RUNTIME_VALUE_ADDRESS || stored->value.object != alias_target || stored->value.offset != stored_index)
+        {
+            return false;
+        }
+    }
+    if (stored_value_count < 4)
+    {
+        IrRuntimeValue older_zero_sized = {
+            .object = alias_target,
+            .kind = IR_RUNTIME_VALUE_ADDRESS,
+            .initialized = true,
+        };
+        IrRuntimeValue newer_zero_sized = older_zero_sized;
+        newer_zero_sized.offset = 1;
+        if (!ir_interpreter_memory_write(arena, copy, object_size, 0, older_zero_sized) ||
+            !ir_interpreter_memory_write(arena, copy, object_size, 0, newer_zero_sized))
+        {
+            return false;
+        }
+        IrRuntimeStoredValue* zero_sized = ir_interpreter_stored_value_find(copy, object_size, 0);
+        if (!zero_sized || zero_sized->value.object != alias_target || zero_sized->value.offset != 1)
+        {
+            return false;
+        }
+        u64 uninitialized_position = arena->position;
+        IrRuntimeValue uninitialized_self_copy = {
+            .object = copy,
+            .kind = IR_RUNTIME_VALUE_AGGREGATE,
+        };
+        if (!ir_interpreter_memory_write(arena, copy, 0, object_size, uninitialized_self_copy) || arena->position != uninitialized_position ||
+            ir_interpreter_stored_value_find(copy, 0, stored_value_size) ||
+            ir_interpreter_stored_value_find(copy, stored_value_size, stored_value_size))
+        {
+            return false;
+        }
+        zero_sized = ir_interpreter_stored_value_find(copy, object_size, 0);
+        if (!zero_sized || zero_sized->value.offset != 1)
+        {
+            return false;
+        }
+        for (u64 byte_index = 0; byte_index < object_size; byte_index += 1)
+        {
+            if (copy->initialized[byte_index])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    u64 overwrite_offset = stored_value_size + stored_value_size / 2;
+    u64 overwrite_size = object_size - stored_value_size * 3;
+    IrRuntimeValue scalar = {
+        .bits = UINT64_C(0x123456789abcdef0),
+        .kind = IR_RUNTIME_VALUE_SCALAR,
+        .initialized = true,
+    };
+    if (!ir_interpreter_memory_write(arena, copy, overwrite_offset, overwrite_size, scalar))
+    {
+        return false;
+    }
+    IrRuntimeStoredValue* first = ir_interpreter_stored_value_find(copy, 0, stored_value_size);
+    IrRuntimeStoredValue* last = ir_interpreter_stored_value_find(copy, object_size - stored_value_size, stored_value_size);
+    IrRuntimeStoredValue* overwritten = ir_interpreter_stored_value_find(copy, stored_value_size, stored_value_size);
+    if (!first || first->value.object != alias_target || first->value.offset != 0 || !last || last->value.object != alias_target ||
+        last->value.offset != stored_value_count - 1 || overwritten)
+    {
+        return false;
+    }
+
+    u64 replacement_offset = (u64)(stored_value_count / 2) * stored_value_size;
+    IrRuntimeValue replacement = {
+        .object = alias_target,
+        .offset = stored_value_count / 2,
+        .kind = IR_RUNTIME_VALUE_ADDRESS,
+        .initialized = true,
+    };
+    if (!ir_interpreter_memory_write(arena, copy, replacement_offset, stored_value_size, replacement))
+    {
+        return false;
+    }
+    IrRuntimeStoredValue* replaced = ir_interpreter_stored_value_find(copy, replacement_offset, stored_value_size);
+    if (!replaced || replaced->value.object != alias_target || replaced->value.offset != stored_value_count / 2)
+    {
+        return false;
+    }
+    if (!ir_interpreter_memory_write(arena, copy, replacement_offset + 3, 1, (IrRuntimeValue){.kind = IR_RUNTIME_VALUE_SCALAR}) ||
+        ir_interpreter_stored_value_find(copy, replacement_offset, stored_value_size) ||
+        !ir_interpreter_stored_value_find(copy, 0, stored_value_size) ||
+        !ir_interpreter_stored_value_find(copy, object_size - stored_value_size, stored_value_size))
+    {
+        return false;
+    }
+    u64 uninitialized_position = arena->position;
+    IrRuntimeValue uninitialized_self_copy = {
+        .object = copy,
+        .kind = IR_RUNTIME_VALUE_AGGREGATE,
+    };
+    if (!ir_interpreter_memory_write(arena, copy, 0, object_size, uninitialized_self_copy) || arena->position != uninitialized_position ||
+        ir_interpreter_stored_value_find(copy, 0, stored_value_size) ||
+        ir_interpreter_stored_value_find(copy, object_size - stored_value_size, stored_value_size))
+    {
+        return false;
+    }
+    for (u64 byte_index = 0; byte_index < object_size; byte_index += 1)
+    {
+        if (copy->initialized[byte_index])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_field(IrExecutionFrame* frame, AnalysisTypeId aggregate_type_id, u32 field_index, AnalysisField** field_out)
 {
