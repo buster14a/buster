@@ -1993,6 +1993,80 @@ u64 os_get_page_size(void)
     return page_size;
 }
 
+// Resident set size of this process, right now. Used to budget a memory limit
+// against what a process has *already* used rather than from zero; returns 0
+// where the platform does not report it, which every caller has to treat as
+// "no information" rather than "no memory".
+u64 os_get_resident_memory_size(void)
+{
+    u64 result = 0;
+#if defined(__linux__)
+    // /proc/self/statm is "size resident shared ..." in pages. The second
+    // field is what /proc/self/status calls VmRSS, without the string parse.
+    int statm_fd = open("/proc/self/statm", O_RDONLY);
+    if (statm_fd >= 0)
+    {
+        char statm_buffer[128];
+        ssize_t read_byte_count = read(statm_fd, statm_buffer, sizeof(statm_buffer) - 1);
+        close(statm_fd);
+        if (read_byte_count > 0)
+        {
+            statm_buffer[read_byte_count] = 0;
+            // "size resident shared ...": skip one field to land on resident.
+            u64 field_index = 0;
+            u64 cursor = 0;
+            while (field_index < 1 && statm_buffer[cursor])
+            {
+                while (statm_buffer[cursor] && statm_buffer[cursor] != ' ')
+                {
+                    cursor += 1;
+                }
+                while (statm_buffer[cursor] == ' ')
+                {
+                    cursor += 1;
+                }
+                field_index += 1;
+            }
+            u64 pages = 0;
+            bool any = false;
+            while (statm_buffer[cursor] >= '0' && statm_buffer[cursor] <= '9')
+            {
+                pages = pages * 10 + (u64)(statm_buffer[cursor] - '0');
+                cursor += 1;
+                any = true;
+            }
+            if (any)
+            {
+                result = pages * os_get_page_size();
+            }
+        }
+    }
+#elif defined(__APPLE__)
+    // ru_maxrss is a peak rather than the current value, and is in bytes on
+    // Apple where Linux reports kilobytes.
+    struct rusage usage;
+    memset(&usage, 0, sizeof(usage));
+    if (getrusage(RUSAGE_SELF, &usage) == 0)
+    {
+        result = (u64)usage.ru_maxrss;
+    }
+#else
+    // Resolved at runtime for the same reason GlobalMemoryStatusEx is below:
+    // tcc's bundled import stubs do not carry it. K32GetProcessMemoryInfo is
+    // the kernel32 export, so no psapi import library is needed.
+    typedef BOOL(WINAPI * GetProcessMemoryInfoProc)(HANDLE, PROCESS_MEMORY_COUNTERS*, DWORD);
+    GetProcessMemoryInfoProc get_process_memory_info =
+        (GetProcessMemoryInfoProc)(void (*)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo");
+    PROCESS_MEMORY_COUNTERS counters = {0};
+    counters.cb = sizeof(counters);
+    if (get_process_memory_info && get_process_memory_info(GetCurrentProcess(), &counters, sizeof(counters)))
+    {
+        result = (u64)counters.WorkingSetSize;
+    }
+#endif
+    return result;
+}
+
 u64 os_get_physical_memory_size(void)
 {
     u64 result = 0;

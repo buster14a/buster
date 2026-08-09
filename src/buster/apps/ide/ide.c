@@ -2759,9 +2759,24 @@ ProcessResult entry_point(void)
         // instead of being swept up with the corpus.
         String8 artifact_prefix = string_format_z(program_state->arena, S8("-artifact_prefix={S8}buster-fuzz-{u64}-"), ide_fuzz_scratch_root(),
                                                   os_get_current_process_id());
+        // -rss_limit_mb bounds the whole process, and this session runs in the
+        // same one as the unit tests that precede it -- including the window
+        // and rendering tests, which bring Vulkan up. On a CI runner with the
+        // validation layers enabled that leaves 1.0 to 1.4 GB resident before
+        // the fuzzer allocates anything, so libFuzzer's 2048 default had under
+        // 700 MB of headroom and the session died on an ordinary input at
+        // 2141 MB. Headless, where those tests never reach Vulkan, the same
+        // session starts at 229 MB and finishes its runs. The limit was
+        // measuring the process's history rather than the fuzz target's
+        // growth: budget the target its own 2 GB on top of whatever is already
+        // resident. A platform that does not report RSS reports 0 and gets
+        // exactly the old limit.
+        u64 fuzz_resident_megabytes = os_get_resident_memory_size() / (1024 * 1024);
+        String8 rss_limit = string_format_z(program_state->arena, S8("-rss_limit_mb={u64}"), fuzz_resident_megabytes + 2048);
         String8 fuzz_arguments[] = {
             S8("-max_len=65536"),
             S8("-max_total_time=2"),
+            rss_limit,
             artifact_prefix,
             ide_fuzz_output_corpus,
             S8("tests/fuzz"),

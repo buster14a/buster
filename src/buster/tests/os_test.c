@@ -144,6 +144,70 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     // Physical-memory size feeds the build driver's MACHINE_INFO line.
     BUSTER_TEST(arguments, os_get_physical_memory_size() > 0);
 
+    // Resident size budgets the fuzz session's RSS limit against what the
+    // process has already used, so a platform silently reporting 0 would put
+    // that limit straight back to where it was firing on inherited memory.
+    // A process running its own test suite holds at least a page and less than
+    // the machine.
+    u64 resident_memory_size = os_get_resident_memory_size();
+    BUSTER_TEST(arguments, resident_memory_size >= os_get_page_size());
+    BUSTER_TEST(arguments, resident_memory_size <= os_get_physical_memory_size());
+#if defined(__linux__)
+    // Bounds that loose would accept the wrong /proc/self/statm column -- the
+    // first cut of this read `shared` instead of `resident` and reported 20 MB
+    // for a process holding 1.3 GB, which passed every test above and silently
+    // put the fuzz limit back where it started. Cross-check the parse against
+    // VmRSS, which /proc/self/status states in kilobytes and in words.
+    int status_descriptor = open("/proc/self/status", O_RDONLY);
+    BUSTER_TEST(arguments, status_descriptor >= 0);
+    if (status_descriptor >= 0)
+    {
+        char status_buffer[8192];
+        ssize_t status_bytes = read(status_descriptor, status_buffer, sizeof(status_buffer) - 1);
+        close(status_descriptor);
+        BUSTER_TEST(arguments, status_bytes > 0);
+        if (status_bytes > 0)
+        {
+            status_buffer[status_bytes] = 0;
+            String8 status = string_from_pointer((char8*)status_buffer);
+            String8 label_text = S8("VmRSS:");
+            u64 label = status.length;
+            for (u64 offset = 0; offset + label_text.length <= status.length; offset += 1)
+            {
+                String8 tail = {.pointer = status.pointer + offset, .length = status.length - offset};
+                if (string_starts_with_sequence(tail, label_text))
+                {
+                    label = offset;
+                    break;
+                }
+            }
+            BUSTER_TEST(arguments, label < status.length);
+            if (label < status.length)
+            {
+                // status separates the label from the value with a tab and
+                // then pads with spaces.
+                u64 cursor = label + label_text.length;
+                while (cursor < status.length && (status.pointer[cursor] == ' ' || status.pointer[cursor] == '\t'))
+                {
+                    cursor += 1;
+                }
+                u64 kilobytes = 0;
+                while (cursor < status.length && status.pointer[cursor] >= '0' && status.pointer[cursor] <= '9')
+                {
+                    kilobytes = kilobytes * 10 + (u64)(status.pointer[cursor] - '0');
+                    cursor += 1;
+                }
+                // The two are sampled a few instructions apart, so they agree
+                // to a wide tolerance rather than exactly; picking a different
+                // column would miss by far more than half.
+                u64 reported = kilobytes * 1024;
+                BUSTER_TEST(arguments, reported > 0);
+                BUSTER_TEST(arguments, resident_memory_size * 2 >= reported && resident_memory_size <= reported * 2);
+            }
+        }
+    }
+#endif
+
 #if defined(__APPLE__)
     BUSTER_TEST(arguments, !os_apple_process_is_traced(0));
     BUSTER_TEST(arguments, os_apple_process_is_traced(P_TRACED));
