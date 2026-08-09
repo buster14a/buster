@@ -75,22 +75,16 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     }
     u32* interval_starts = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
     u32* interval_ends = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
-    u32* weights = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
     u8* disqualified = arena_allocate(scratch.arena, u8, register_count ? register_count : 1);
-    u8* crosses_call = arena_allocate(scratch.arena, u8, register_count ? register_count : 1);
-    u8* loop_resident = arena_allocate(scratch.arena, u8, register_count ? register_count : 1);
     for (u32 register_index = 0; register_index < register_count; register_index += 1)
     {
         interval_starts[register_index] = UINT32_MAX;
         interval_ends[register_index] = 0;
-        weights[register_index] = 0;
         disqualified[register_index] = 0;
-        crosses_call[register_index] = 0;
-        loop_resident[register_index] = 0;
     }
-    // Interval and weight pass. A value touched by an opcode whose encoder
-    // pins its operands cannot hold an arbitrary register for its whole
-    // life, so it is disqualified rather than special-cased.
+    // Interval pass. A value touched by an opcode whose encoder pins its
+    // operands cannot hold an arbitrary register for its whole life, so it
+    // is disqualified rather than special-cased.
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
     {
         MachineInstruction* instruction = function->instructions + instruction_index;
@@ -111,7 +105,6 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             u32 virtual_register = machine_ref_payload(ref);
             interval_starts[virtual_register] = BUSTER_MIN(interval_starts[virtual_register], instruction_index);
             interval_ends[virtual_register] = BUSTER_MAX(interval_ends[virtual_register], instruction_index);
-            weights[virtual_register] += 1;
             disqualified[virtual_register] |= constrained ? 1u : 0u;
         }
     }
@@ -148,30 +141,32 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
                     }
                     interval_starts[register_index] = BUSTER_MIN(interval_starts[register_index], loop_start);
                     interval_ends[register_index] = BUSTER_MAX(interval_ends[register_index], loop_end);
-                    // Surviving a loop is what makes a global binding pay.
-                    weights[register_index] += 8;
-                    loop_resident[register_index] = 1;
                 }
             }
         }
     }
-    // A pinned register costs its function a push and a pop on every
-    // call, so it only pays for a value that would otherwise cross a call
-    // in memory. Values that never meet a call are already served by the
-    // local scan out of the caller-saved half.
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    // Rather than guess which values would spill, run the local scan once
+    // and count what it actually did. A pin's benefit is the memory
+    // traffic it removes, which is exactly the edit count of that value,
+    // and heuristics guessing at this were measurably worse than the
+    // truth (2026-08-09ai).
+    MachineStackPlacement baseline = machine_fast_placement_build_pinned(arena, function, 0, 0);
+    if (!baseline.valid)
     {
-        MachineOpcodeInfo const* info = machine_opcode_info(function->instructions[instruction_index].opcode);
-        if (!(info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL))
+        scratch_end(scratch);
+        return baseline;
+    }
+    u32* baseline_traffic = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
+    for (u32 register_index = 0; register_index < register_count; register_index += 1)
+    {
+        baseline_traffic[register_index] = 0;
+    }
+    for (u32 edit_index = 0; edit_index < baseline.edit_count; edit_index += 1)
+    {
+        MachineEdit* edit = baseline.edits + edit_index;
+        if (edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD)
         {
-            continue;
-        }
-        for (u32 register_index = 0; register_index < register_count; register_index += 1)
-        {
-            crosses_call[register_index] |= interval_starts[register_index] != UINT32_MAX && interval_starts[register_index] < instruction_index &&
-                                                    instruction_index < interval_ends[register_index]
-                                                ? 1u
-                                                : 0u;
+            baseline_traffic[edit->subject] += 1;
         }
     }
     // Priority walk. The heap orders by weight; each candidate takes the
@@ -182,12 +177,10 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     {
         // The threshold is the break-even point: fewer touches than this
         // and the push/pop pair costs more than the memory traffic saved.
-        // Break-even: a pin costs a push and a pop on every entry, so it
-        // must serve a value that lives in a loop *and* crosses a call
-        // there. Anything narrower is already served by the local scan out
-        // of the caller-saved half, which pays nothing at entry.
-        if (disqualified[register_index] || interval_starts[register_index] == UINT32_MAX || !crosses_call[register_index] ||
-            !loop_resident[register_index] || weights[register_index] < 12)
+        // A pin must remove more memory operations than the push and pop
+        // it adds, so the value has to have cost the local scan at least
+        // three. Priority is the measured traffic, not the guess.
+        if (disqualified[register_index] || interval_starts[register_index] == UINT32_MAX || baseline_traffic[register_index] < 3)
         {
             continue;
         }
@@ -195,7 +188,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             .virtual_register = register_index,
             .start = interval_starts[register_index],
             .end = interval_ends[register_index],
-            .weight = weights[register_index],
+            .weight = baseline_traffic[register_index],
         };
         heap_count += 1;
     }
@@ -240,8 +233,32 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             break;
         }
     }
+    u32 baseline_traffic_total = baseline.reload_count + baseline.spill_count;
     scratch_end(scratch);
+    if (!pinned_mask)
+    {
+        return baseline;
+    }
     MachineStackPlacement placement = machine_fast_placement_build_pinned(arena, function, pinned_registers, pinned_mask);
+    // Accept only on modeled improvement: the traffic removed has to beat
+    // the push and pop each newly reserved register costs at entry, and a
+    // pin also raises local pressure, which can add traffic elsewhere.
+    u32 baseline_saved_registers = 0;
+    for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
+    {
+        baseline_saved_registers += (baseline.callee_saved_mask >> physical_register) & 1u;
+    }
+    u32 placement_saved_registers = 0;
+    for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
+    {
+        placement_saved_registers += (placement.callee_saved_mask >> physical_register) & 1u;
+    }
+    u32 added_prologue_cost = 2 * (placement_saved_registers - BUSTER_MIN(placement_saved_registers, baseline_saved_registers));
+    u32 placement_traffic_total = placement.reload_count + placement.spill_count;
+    if (!placement.valid || placement_traffic_total + added_prologue_cost >= baseline_traffic_total)
+    {
+        return baseline;
+    }
     // Pin verification. A pinned register belongs to its value for the
     // whole interval, so no other value's operand and no edit may name it.
     // The local scan has several paths that bypass its own register pool —
@@ -270,7 +287,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     }
     if (!pins_hold)
     {
-        return machine_fast_placement_build(arena, function);
+        return baseline;
     }
     placement.pinned_register_count = 0;
     for (u32 register_index = 0; register_index < register_count; register_index += 1)
