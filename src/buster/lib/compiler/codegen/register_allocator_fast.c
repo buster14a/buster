@@ -33,9 +33,26 @@ struct MachineFastState
     bool dirty[MACHINE_X64_REGISTER_COUNT];
     // Current register per vreg, or UINT32_MAX when the slot is the home.
     u32* virtual_register_locations;
+    // Stage-5 liveness: the instruction index of each vreg's last textual
+    // use, and whether any use sits outside the defining block. Escaping
+    // values always reach their slots (loop-carried and layout-order
+    // hazards live only across blocks); a non-escaping value strictly past
+    // its last use is dead and its spill store is dropped.
+    u32* last_use;
+    u8* escapes;
     u32 clock;
     u32 current_point;
 };
+
+BUSTER_GLOBAL_LOCAL bool machine_fast_owner_is_dead(MachineFastState* state, u32 physical_register)
+{
+    u32 owner = state->owner[physical_register];
+    if (owner == UINT32_MAX)
+    {
+        return false;
+    }
+    return !state->escapes[owner] && (state->current_point >> 2) > state->last_use[owner];
+}
 
 // The encoder sequences of these opcodes pin operand registers (divides,
 // shift counts in CL, setcc through AL/DL, switch chains, atomic layouts,
@@ -116,7 +133,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_spill(MachineFastState* state, u32 physica
     {
         return;
     }
-    if (state->dirty[physical_register])
+    if (state->dirty[physical_register] && !machine_fast_owner_is_dead(state, physical_register))
     {
         MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, state->edits);
         *edit = (MachineEdit){
@@ -147,6 +164,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u32 forbidden
     u32 candidates = MACHINE_FAST_ALLOCATABLE_MASK & ~forbidden_mask;
     u32 best = UINT32_MAX;
     u32 best_age = UINT32_MAX;
+    u32 dead = UINT32_MAX;
     for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
     {
         if (!(candidates & (1u << physical_register)))
@@ -157,11 +175,20 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u32 forbidden
         {
             return physical_register;
         }
+        // A dead owner costs nothing to displace: its spill is dropped.
+        if (dead == UINT32_MAX && machine_fast_owner_is_dead(state, physical_register))
+        {
+            dead = physical_register;
+        }
         if (state->age[physical_register] < best_age)
         {
             best_age = state->age[physical_register];
             best = physical_register;
         }
+    }
+    if (dead != UINT32_MAX)
+    {
+        best = dead;
     }
     machine_fast_spill(state, best);
     return best;
@@ -257,10 +284,82 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
         .placement = &placement,
         .edits = &edits,
         .virtual_register_locations = arena_allocate(arena, u32, function->virtual_register_count),
+        .last_use = arena_allocate(arena, u32, function->virtual_register_count),
+        .escapes = arena_allocate(arena, u8, function->virtual_register_count),
     };
     for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
     {
         state.virtual_register_locations[register_index] = UINT32_MAX;
+        state.last_use[register_index] = 0;
+        state.escapes[register_index] = 0;
+    }
+    // Liveness pre-passes: defining blocks first (a def dominates its uses,
+    // but layout order does not prove it precedes them), then last textual
+    // uses and block escapes.
+    u32* definition_blocks = arena_allocate(arena, u32, function->virtual_register_count);
+    for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
+    {
+        definition_blocks[register_index] = UINT32_MAX;
+    }
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        MachineBlock* block = function->blocks + block_index;
+        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
+        {
+            u32 instruction_index = block->first_instruction + offset;
+            MachineInstruction* instruction = function->instructions + instruction_index;
+            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+            if (!info)
+            {
+                return placement;
+            }
+            for (u32 slot = 0; slot < info->operand_count; slot += 1)
+            {
+                MachineRef ref = instruction->operands[slot];
+                if (machine_ref_kind(ref) != MACHINE_REF_VIRTUAL_REGISTER)
+                {
+                    continue;
+                }
+                u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                u32 virtual_register = machine_ref_payload(ref);
+                if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+                {
+                    if (definition_blocks[virtual_register] == UINT32_MAX)
+                    {
+                        definition_blocks[virtual_register] = block_index;
+                    }
+                }
+                if (role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+                {
+                    state.last_use[virtual_register] = BUSTER_MAX(state.last_use[virtual_register], instruction_index);
+                }
+            }
+        }
+    }
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        MachineBlock* block = function->blocks + block_index;
+        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
+        {
+            u32 instruction_index = block->first_instruction + offset;
+            MachineInstruction* instruction = function->instructions + instruction_index;
+            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+            for (u32 slot = 0; slot < info->operand_count; slot += 1)
+            {
+                MachineRef ref = instruction->operands[slot];
+                if (machine_ref_kind(ref) != MACHINE_REF_VIRTUAL_REGISTER)
+                {
+                    continue;
+                }
+                u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                u32 virtual_register = machine_ref_payload(ref);
+                if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) &&
+                    definition_blocks[virtual_register] != block_index)
+                {
+                    state.escapes[virtual_register] = 1;
+                }
+            }
+        }
     }
     for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
     {
