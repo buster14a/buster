@@ -173,6 +173,12 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_SREM64] = MACHINE_INFO_READ_MODIFY("x64_srem64"),
     [MACHINE_X64_UREM32] = MACHINE_INFO_READ_MODIFY("x64_urem32"),
     [MACHINE_X64_UREM64] = MACHINE_INFO_READ_MODIFY("x64_urem64"),
+    [MACHINE_X64_CALL_DIRECT] = {
+        .name = S8_INITIALIZER("x64_call_direct"),
+        .implicit_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX) | (1u << MACHINE_X64_RDX) | (1u << MACHINE_X64_RSI) | (1u << MACHINE_X64_RDI) |
+                         (1u << MACHINE_X64_R8) | (1u << MACHINE_X64_R9) | (1u << MACHINE_X64_R10) | (1u << MACHINE_X64_R11),
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
 };
 
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode)

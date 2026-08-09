@@ -12,6 +12,38 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09k` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3,
+subset growth — shifts, the divide family, and direct System V calls in the
+machine path.)
+
+- **What was built.** Shifts (count in CL), signed/unsigned divide and
+  remainder (dividend/result in RAX, RDX clobbered) mirror the canonical
+  sequences and are the subset's first fixed-register constraints. Direct
+  calls lower to explicit fixed-register argument copies plus a
+  MACHINE_X64_CALL_DIRECT row whose payload indexes a call-target side
+  table; the encoder returns call sites and the canonical-module wrapper
+  converts them to ordinary symbol relocations. The placement rule that
+  makes argument sequences safe: a copy into a fixed physical register
+  reloads its source directly into that register, so no staging scratch
+  can clobber an already-placed argument. FUNCTION values are legal only
+  as direct-call callees; any other use is an explicit unsupported result.
+- **Two wiring bugs the differentials caught:** the call-relocation offset
+  was computed with the post-copy formula before the buffer advanced
+  (calls landed on garbage displacements), and the module-level test had
+  to resolve internal call relocations linker-style before taking the
+  executable copy.
+- **Gates:** `machine_tests` 271/271 (machine-to-machine calls execute in
+  the module differential); Release `test_all` all passing; self-host
+  token (`1399519`) and executable (`bytes=26936064`) fixed points hold;
+  unity soak now **314 of 2917 functions (10.8%)** machine-compiled with
+  byte-identical mir-built stage 2 (was 130 at the first wiring, 159 with
+  shifts/divide). Stage-1 instructions per token `3712.397`, flat.
+- Reference points: stage 1 `1399519` tokens / `3712.397` per token,
+  fixed point `bytes=26936064`, soak 314/2917 byte-identical. Remaining
+  fallback mass: float/aggregate signatures, GLOBAL/INDEX/FIELD places,
+  SWITCH, variadics, >6 arguments, and inline assembly — the next
+  stage-3 increments in fallback-frequency order.
+
 `2026-08-09j` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3, first
 increment — MIR_STACK wired into `codegen_generate_canonical_module` with
 per-function counted fallback, soaked on the full unity self-compile.)

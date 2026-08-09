@@ -278,7 +278,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "int shl(int a, int b) { return a << b; }\n"
                                   "long sar(long a, int b) { return a >> b; }\n"
                                   "unsigned shr(unsigned a, int b) { return a >> b; }\n"
-                                  "int with_call(int a) { return divide(a, 2); }\n");
+                                  "int with_call(int a, int b) { return divide(a, 2) + srem(b, 3); }\n"
+                                  "int fadd(float a, float b) { return a + b > 1.0f; }\n");
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
     BUSTER_TEST(arguments, machine_program != 0);
     if (machine_program && machine_program->module_count)
@@ -331,15 +332,23 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, add_placement.reload_count + add_placement.spill_count <= add_selected.function.instruction_count * 4);
             BUSTER_TEST(arguments, add_placement.frame_size % 16 == 0);
         }
-        // Explicit unsupported fallback: calls are outside the subset until
-        // the ABI-lowering increment lands.
+        // Direct calls select into fixed-register argument copies plus a
+        // relocated call row; float signatures are the current explicit
+        // unsupported representative.
         IrFunction* call_function = machine_test_ir_function_find(machine_module, S8("with_call"));
         BUSTER_TEST(arguments, call_function != 0);
         if (call_function)
         {
             MachineSelectResult call_selected = machine_select_canonical_function(arguments->arena, machine_program, call_function, machine_target);
-            BUSTER_TEST(arguments, !call_selected.supported);
-            BUSTER_TEST(arguments, call_selected.failed_opcode == IR_OPCODE_CALL || call_selected.failed_opcode == IR_OPCODE_FUNCTION);
+            BUSTER_TEST(arguments, call_selected.supported);
+            BUSTER_TEST(arguments, call_selected.function.call_target_count == 2);
+        }
+        IrFunction* float_function = machine_test_ir_function_find(machine_module, S8("fadd"));
+        BUSTER_TEST(arguments, float_function != 0);
+        if (float_function)
+        {
+            MachineSelectResult float_selected = machine_select_canonical_function(arguments->arena, machine_program, float_function, machine_target);
+            BUSTER_TEST(arguments, !float_selected.supported);
         }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
         CodegenExecutable none_executable = codegen_make_executable((CodegenFunction){
@@ -483,6 +492,28 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, mir_add_descriptor && (mir_add_descriptor->prolog_size == 4 || mir_add_descriptor->prolog_size == 11));
         }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
+        // Both modules resolve their internal direct-call relocations the
+        // way the linker would, so machine-to-machine calls execute; this
+        // must happen before the executable copies are taken.
+        for (u32 relocation_index = 0; relocation_index < none_module.relocation_count + mir_module.relocation_count; relocation_index += 1)
+        {
+            CodegenModule* patched = relocation_index < none_module.relocation_count ? &none_module : &mir_module;
+            u32 local_index = relocation_index < none_module.relocation_count ? relocation_index : relocation_index - none_module.relocation_count;
+            CodegenModuleRelocation* relocation = patched->relocations + local_index;
+            if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute)
+            {
+                continue;
+            }
+            for (u32 entry_index = 0; entry_index < patched->entry_count; entry_index += 1)
+            {
+                if (patched->entries[entry_index].symbol.value == relocation->symbol.value)
+                {
+                    u32 displacement = patched->entries[entry_index].offset - (relocation->offset + 4);
+                    memcpy(patched->code.pointer + relocation->offset, &displacement, sizeof(displacement));
+                    break;
+                }
+            }
+        }
         CodegenExecutable none_module_executable = codegen_make_executable((CodegenFunction){
             .code = none_module.code,
         });
@@ -493,7 +524,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         String8 module_names[] = {
             S8_INITIALIZER("add"), S8_INITIALIZER("mul"), S8_INITIALIZER("widen"), S8_INITIALIZER("narrow"),
             S8_INITIALIZER("negate"), S8_INITIALIZER("bitnot"), S8_INITIALIZER("lnot"), S8_INITIALIZER("less"),
-            S8_INITIALIZER("uless"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("divide"),
+            S8_INITIALIZER("uless"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("divide"), S8_INITIALIZER("with_call"),
         };
         typedef s64 MachineTestModuleCall2(s64, s64);
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(module_names) && none_module_executable.address && mir_module_executable.address;

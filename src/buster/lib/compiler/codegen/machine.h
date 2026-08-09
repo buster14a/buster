@@ -249,6 +249,10 @@ typedef enum MachineOpcode
     MACHINE_X64_SREM64,
     MACHINE_X64_UREM32,
     MACHINE_X64_UREM64,
+    // Direct call: payload indexes the function's call-target side table;
+    // argument placement was lowered into explicit fixed-register copies
+    // before this row. Clobbers the System V caller-saved set.
+    MACHINE_X64_CALL_DIRECT,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -322,12 +326,14 @@ struct MachineFunction
     MachineBlock* blocks;
     u64* immediates;
     u32* stack_slot_sizes;
+    // Direct-call callees, indexed by MACHINE_X64_CALL_DIRECT payloads.
+    IrSymbolId* call_targets;
     u32 instruction_count;
     u32 virtual_register_count;
     u32 block_count;
     u32 immediate_count;
     u32 stack_slot_count;
-    u32 reserved;
+    u32 call_target_count;
 };
 
 // x86-64 physical general registers in encoding order.
@@ -399,14 +405,25 @@ struct MachineStackPlacement
     u8 reserved[3];
 };
 
+// A direct-call relocation site: the function-relative offset of the rel32
+// field and the call-target index it must resolve to.
+typedef struct MachineCallSite MachineCallSite;
+struct MachineCallSite
+{
+    u32 code_offset;
+    u32 target;
+};
+
 typedef struct MachineEncodeResult MachineEncodeResult;
 struct MachineEncodeResult
 {
     u8* bytes;
     u32 byte_count;
     u32* block_offsets;
+    MachineCallSite* call_sites;
+    u32 call_site_count;
     bool valid;
-    u8 reserved[7];
+    u8 reserved[3];
 };
 
 // Chunked construction: one selection pass appends rows into fixed-size arena

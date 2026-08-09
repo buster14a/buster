@@ -10440,6 +10440,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         if (machine_unwind_valid)
                         {
                             memcpy(buffer.bytes + buffer.count, encoded.bytes, encoded.byte_count);
+                            for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)
+                            {
+                                result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
+                                    .entity = ANALYSIS_ENTITY_ID_INVALID,
+                                    .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
+                                    .symbol = selected.function.call_targets[encoded.call_sites[site_index].target],
+                                    .offset = (u32)buffer.count + encoded.call_sites[site_index].code_offset,
+                                };
+                            }
                             buffer.count += encoded.byte_count;
                             descriptor->prolog_size = placement.frame_size ? 11 : 4;
                             descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
