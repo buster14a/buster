@@ -1460,42 +1460,25 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ByteSlice wide_argument_bytes = wide_argument_map.bytes;
         BUSTER_TEST(arguments, wide_argument_bytes.length != 0);
         file_map_unmap(wide_argument_map);
-        scratch_end(cross_temp);
-    }
-    {
-        // The same shapes as a 512-bit vector, on the targets whose convention
-        // hands one over by reference. Win64 is the one that has to align the
-        // caller-owned copy past what the stack pointer is worth. The SIMD
-        // fixture above crosses a call boundary with a Simd512 as well, but
-        // without an `-march` that turns BUSTER_SIMD_512 on it is the
-        // fallback's 64-byte struct, aligned to eight; only a native vector
-        // asks for sixty four. The x86-64 SystemV and Darwin conventions
-        // classify one as a single 512-bit vector part instead, and the
-        // canonical return path encodes vector parts of four, eight and
-        // sixteen bytes only.
-        String8 wide_vector_targets[] = {
-            S8("x86_64-pc-windows-msvc"),  S8("aarch64-unknown-linux-gnu"), S8("aarch64-pc-windows-msvc"),
-            S8("aarch64-apple-macos"),     S8("aarch64-linux-android"),     S8("aarch64-apple-ios"),
+        // The same shapes as a 512-bit vector, which the conventions answer
+        // differently: Win64 and aarch64 pass one by reference, and x86-64
+        // SystemV and Darwin in a vector register -- or, on a model with no
+        // register that wide, split across the ones it has. Every row here
+        // builds at its target's default model, so the x86-64 ones are the
+        // split, and the host run below is what covers the whole one.
+        String8 wide_vector_object_path =
+            buster_test_temporary_path(cross_temp.arena, S8("buster-c-wide-vector-argument"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
+        String8 wide_vector_command_line[] = {
+            S8("-c"), S8("-target"), c_object_targets[target_index], S8("-o"), wide_vector_object_path, S8("tests/basic_c_wide_vector_argument.c"),
         };
-        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(wide_vector_targets); target_index += 1)
-        {
-            TemporalArena wide_vector_temp = arena_begin_temporal(c_object_arena);
-            String8 wide_vector_object_path = buster_test_temporary_path(wide_vector_temp.arena, S8("buster-c-wide-vector-argument"),
-                                                                         string_format(wide_vector_temp.arena, S8("-{u32}.o"), target_index));
-            String8 wide_vector_command_line[] = {
-                S8("-c"),  S8("-target"), wide_vector_targets[target_index], S8("-o"), wide_vector_object_path,
-                S8("tests/basic_c_wide_vector_argument.c"),
-            };
-            CompilerDriverResult wide_vector = compiler_driver_execute_invocation(
-                wide_vector_temp.arena,
-                compiler_driver_parse_arguments(wide_vector_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wide_vector_command_line)));
-            BUSTER_TEST(arguments, wide_vector.error == COMPILER_DRIVER_ERROR_NONE);
-            FileMapRead wide_vector_map = file_map_read(wide_vector_temp.arena, wide_vector_object_path, (FileReadOptions){0});
-            ByteSlice wide_vector_bytes = wide_vector_map.bytes;
-            BUSTER_TEST(arguments, wide_vector_bytes.length != 0);
-            file_map_unmap(wide_vector_map);
-            scratch_end(wide_vector_temp);
-        }
+        CompilerDriverResult wide_vector = compiler_driver_execute_invocation(
+            cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wide_vector_command_line)));
+        BUSTER_TEST(arguments, wide_vector.error == COMPILER_DRIVER_ERROR_NONE);
+        FileMapRead wide_vector_map = file_map_read(cross_temp.arena, wide_vector_object_path, (FileReadOptions){0});
+        ByteSlice wide_vector_bytes = wide_vector_map.bytes;
+        BUSTER_TEST(arguments, wide_vector_bytes.length != 0);
+        file_map_unmap(wide_vector_map);
+        scratch_end(cross_temp);
     }
     {
         TemporalArena large_frame_temporary = arena_begin_temporal(c_object_arena);
@@ -1870,6 +1853,41 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             ProcessWaitResult c_wide_argument_wait = os_process_wait_sync(arguments->arena, c_wide_argument_spawn);
             BUSTER_TEST(arguments, c_wide_argument_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    // And the same for the vector shapes, whose x86-64 answer is registers
+    // rather than a reference: the host model decides how many of them one
+    // vector takes, and running it is what says the caller and the callee
+    // counted the same way. It exits 1, 2 or 3 to name which shape disagreed.
+    String8 c_wide_vector_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-wide-vector-argument"),
+#if BUSTER_WINDOWS
+                                                                        S8(".exe"));
+#else
+                                                                        S8(""));
+#endif
+    String8 c_wide_vector_command_line[] = {
+        S8("-o"),
+        c_wide_vector_executable_path,
+        S8("tests/basic_c_wide_vector_argument.c"),
+    };
+    CompilerDriverResult c_wide_vector = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_wide_vector_command_line)));
+    BUSTER_TEST(arguments, c_wide_vector.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_wide_vector.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_wide_vector_run_arguments[] = {
+            c_wide_vector_executable_path,
+        };
+        ProcessSpawnResult c_wide_vector_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_wide_vector_run_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_wide_vector_spawn.handle != 0);
+        if (c_wide_vector_spawn.handle)
+        {
+            ProcessWaitResult c_wide_vector_wait = os_process_wait_sync(arguments->arena, c_wide_vector_spawn);
+            BUSTER_TEST(arguments, c_wide_vector_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
     String8 c_infinite_loop_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-infinite-loop"),

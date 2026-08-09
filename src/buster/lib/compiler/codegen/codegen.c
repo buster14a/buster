@@ -7198,6 +7198,62 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_abi_part_is_float(IrAbiClass abi_clas
     return abi_class == IR_ABI_CLASS_FLOAT || abi_class == IR_ABI_CLASS_VECTOR;
 }
 
+// How many consecutive vector registers one ABI part occupies on this target,
+// and how much of it each one carries. The IR ABI classifies a vector by the
+// psABI rule alone -- a 512-bit vector is one vector part whatever the machine
+// -- so a part can be wider than any register the target owns. It then travels
+// in as many registers as it takes, which is the lowering clang emits for the
+// same declaration: xmm0 through xmm3 for a 64-byte vector without AVX, ymm0
+// and ymm1 with it. Zero means the target cannot carry the part at all.
+BUSTER_GLOBAL_LOCAL u32 codegen_canonical_x64_vector_part_registers(Target const* target, u32 size, u32* register_size)
+{
+    // Every x86-64 target has a sixteen-byte vector register -- the psABI puts
+    // one in the baseline -- so only a part wider than that has to ask the
+    // target what it owns, and every part of a scalar signature can skip a
+    // question whose answer is a feature-set walk.
+    if (size && size <= 16)
+    {
+        *register_size = size;
+        return 1;
+    }
+    u32 width = target_vector_register_size(*target);
+    if (!width || !size)
+    {
+        return 0;
+    }
+    if (size <= width)
+    {
+        *register_size = size;
+        return 1;
+    }
+    if (size % width)
+    {
+        return 0;
+    }
+    *register_size = width;
+    return size / width;
+}
+
+// Whether this target hands the value over in the registers the classification
+// named. A part it has to split is one the psABI expected a single register to
+// hold, and the split is only available to a return, whose registers are its
+// own; an argument competing for the shared pool is passed in memory instead,
+// which is again what clang does for the same declaration.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_abi_value_in_registers(CodegenCanonicalAbiValue const* value, Target const* target)
+{
+    for (u32 part_index = 0; part_index < value->part_count; part_index += 1)
+    {
+        CodegenCanonicalAbiPart const* part = value->parts + part_index;
+        u32 register_size = 0;
+        if (part->size > 16 && codegen_canonical_abi_part_is_float(part->abi_class) &&
+            codegen_canonical_x64_vector_part_registers(target, part->size, &register_size) != 1)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL CodegenCanonicalAbiValue codegen_canonical_aggregate_abi(IrProgram* program, IrTypeId type_id, CodegenAbi abi, bool is_result,
                                                                              bool variadic_argument)
 {
@@ -7337,7 +7393,7 @@ BUSTER_GLOBAL_LOCAL u64 codegen_canonical_x64_stack_argument_offset(u64 cursor, 
 }
 
 CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
-                                                                  CodegenAbi abi, CodegenCanonicalCallLayout* layout)
+                                                                  CodegenAbi abi, Target target, CodegenCanonicalCallLayout* layout)
 {
     if (!layout)
     {
@@ -7421,10 +7477,17 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
         u32 part_count = 1;
         bool aggregate = codegen_canonical_integer_aggregate_parts(program, type_id, &part_count);
         CodegenCanonicalAbiValue argument_abi = codegen_canonical_aggregate_abi(program, type_id, abi, false, false);
+        // A value the target cannot carry in the registers its classification
+        // named goes on the stack, and its stack image is the eightbyte count
+        // the aggregate walk already produced rather than the register count.
+        bool argument_in_registers = codegen_canonical_x64_abi_value_in_registers(&argument_abi, &target);
         if (argument_abi.part_count && !argument_abi.memory && !argument_abi.indirect)
         {
             aggregate = true;
-            part_count = argument_abi.part_count;
+            if (argument_in_registers)
+            {
+                part_count = argument_abi.part_count;
+            }
         }
         if (!type || ((type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) && !aggregate))
         {
@@ -7447,7 +7510,7 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
             .float_register = UINT8_MAX,
             .aggregate = aggregate,
             .windows_indirect = windows_indirect,
-            .system_v_aggregate = abi == CODEGEN_ABI_X86_64_SYSTEM_V && argument_abi.part_count && !argument_abi.memory,
+            .system_v_aggregate = abi == CODEGEN_ABI_X86_64_SYSTEM_V && argument_abi.part_count && !argument_abi.memory && argument_in_registers,
         };
         u64 argument_stack_parts = 0;
         if (abi == CODEGEN_ABI_X86_64_SYSTEM_V && type->kind == IR_TYPE_FLOAT)
@@ -9955,7 +10018,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 }
                 CodegenCanonicalCallLayout* call_layout = arena_allocate(arena, CodegenCanonicalCallLayout, 1);
                 *call_layout = (CodegenCanonicalCallLayout){0};
-                CodegenError call_error = codegen_canonical_x64_call_layout(arena, program, function, instruction, result.abi, call_layout);
+                CodegenError call_error = codegen_canonical_x64_call_layout(arena, program, function, instruction, result.abi, target, call_layout);
                 if (call_error != CODEGEN_ERROR_NONE)
                 {
                     // This pass runs before the emitting one that keeps the
@@ -10413,12 +10476,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             IrType* prior_type = ir_type_from_id(&program->types, function_type->parameter_types[prior_index]);
                             CodegenCanonicalAbiValue prior_aggregate_abi =
                                 codegen_canonical_aggregate_abi(program, function_type->parameter_types[prior_index], result.abi, false, false);
+                            bool prior_in_registers = codegen_canonical_x64_abi_value_in_registers(&prior_aggregate_abi, &target);
                             if (prior_aggregate_abi.part_count && !prior_aggregate_abi.memory && !prior_aggregate_abi.indirect)
                             {
                                 prior_aggregate = true;
-                                prior_parts = prior_aggregate_abi.part_count;
+                                if (prior_in_registers)
+                                {
+                                    prior_parts = prior_aggregate_abi.part_count;
+                                }
                             }
-                            if (result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && prior_aggregate_abi.part_count && !prior_aggregate_abi.memory)
+                            if (result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && prior_aggregate_abi.part_count && !prior_aggregate_abi.memory && prior_in_registers)
                             {
                                 u32 integer_count = 0;
                                 u32 float_count = 0;
@@ -10490,10 +10557,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         IrType* argument_stack_type = ir_type_from_id(&program->types, instruction->canonical_type);
                         u32 stack_part_count =
                             argument_stack_type && argument_stack_type->layout.resolved ? (u32)((argument_stack_type->layout.size + 7) / 8) : part_count;
+                        bool argument_in_registers = codegen_canonical_x64_abi_value_in_registers(&argument_aggregate_abi, &target);
                         if (argument_aggregate_abi.part_count && !argument_aggregate_abi.memory && !argument_aggregate_abi.indirect)
                         {
                             aggregate = true;
-                            part_count = argument_aggregate_abi.part_count;
+                            if (argument_in_registers)
+                            {
+                                part_count = argument_aggregate_abi.part_count;
+                            }
                         }
                         bool windows_indirect = result.abi == CODEGEN_ABI_X86_64_WINDOWS && argument_aggregate_abi.indirect;
                         IrType* argument_type = ir_type_from_id(&program->types, instruction->canonical_type);
@@ -10542,12 +10613,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 system_v_integer_parts = 0;
                         u32 system_v_float_parts = 0;
                         bool system_v_register_aggregate =
-                            result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && argument_aggregate_abi.part_count && !argument_aggregate_abi.memory;
+                            result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && argument_aggregate_abi.part_count && !argument_aggregate_abi.memory && argument_in_registers;
                         // "Aggregates over two eightbytes are MEMORY" is a rule
-                        // about aggregates; a 32- or 64-byte vector still
-                        // arrives in a vector register. The IR ABI has already
+                        // about aggregates; a 32- or 64-byte vector arrives in
+                        // a vector register on a target that has one that wide.
+                        // The IR ABI and the target between them have already
                         // said which of the two this is, so the size heuristic
-                        // only speaks when it did not.
+                        // only speaks when they did not.
                         bool system_v_memory = aggregate && argument_type && argument_type->layout.size > 16 &&
                                                result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && !system_v_register_aggregate;
                         if (system_v_register_aggregate)
@@ -12019,7 +12091,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         else
                         {
                             CodegenError call_error =
-                                codegen_canonical_x64_call_layout(arena, program, function, instruction, result.abi, &call_layout);
+                                codegen_canonical_x64_call_layout(arena, program, function, instruction, result.abi, target, &call_layout);
                             if (call_error != CODEGEN_ERROR_NONE)
                             {
                                 result.error = call_error;
@@ -12390,18 +12462,24 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     CodegenCanonicalAbiPart* part = call_return_abi.parts + part_index;
                                     if (codegen_canonical_abi_part_is_float(part->abi_class))
                                     {
-                                        if (float_index >= 2)
+                                        u32 register_size = 0;
+                                        u32 register_count_used = codegen_canonical_x64_vector_part_registers(&target, part->size, &register_size);
+                                        if (!register_count_used || float_index + register_count_used > BUSTER_MAX((u32)2, register_count_used))
                                         {
                                             result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                             return result;
                                         }
-                                        if (!codegen_canonical_x64_float_memory(&buffer, target, float_index, result_displacement + (s32)part->value_offset,
-                                                                                part->size, true))
+                                        for (u32 chunk = 0; chunk < register_count_used; chunk += 1)
                                         {
-                                            result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
-                                            return result;
+                                            if (!codegen_canonical_x64_float_memory(&buffer, target, float_index,
+                                                                                    result_displacement + (s32)part->value_offset + (s32)(chunk * register_size),
+                                                                                    register_size, true))
+                                            {
+                                                result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                                                return result;
+                                            }
+                                            float_index += 1;
                                         }
-                                        float_index += 1;
                                     }
                                     else
                                     {
@@ -13499,17 +13577,27 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     s32 displacement = C_X64_FRAME_DISPLACEMENT(value_offsets[return_value.value]) + (s32)part->value_offset;
                                     if (codegen_canonical_abi_part_is_float(part->abi_class))
                                     {
-                                        if (float_index >= 2)
+                                        u32 register_size = 0;
+                                        u32 register_count_used = codegen_canonical_x64_vector_part_registers(&target, part->size, &register_size);
+                                        // Two vector registers is what a result
+                                        // gets, unless the part is one this
+                                        // target has to split, which takes as
+                                        // many as it takes and starts at zero.
+                                        if (!register_count_used || float_index + register_count_used > BUSTER_MAX((u32)2, register_count_used))
                                         {
                                             result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                             return result;
                                         }
-                                        if (!codegen_canonical_x64_float_memory(&buffer, target, float_index, displacement, part->size, false))
+                                        for (u32 chunk = 0; chunk < register_count_used; chunk += 1)
                                         {
-                                            result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
-                                            return result;
+                                            if (!codegen_canonical_x64_float_memory(&buffer, target, float_index, displacement + (s32)(chunk * register_size),
+                                                                                    register_size, false))
+                                            {
+                                                result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                                                return result;
+                                            }
+                                            float_index += 1;
                                         }
-                                        float_index += 1;
                                     }
                                     else
                                     {

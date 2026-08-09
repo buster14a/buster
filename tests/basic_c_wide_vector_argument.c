@@ -8,11 +8,12 @@
 // the type is the fallback's 64-byte struct and its alignment is eight. Only a
 // native vector asks for sixty four.
 //
-// The driver builds this for the targets whose convention passes a vector this
-// wide by reference -- Win64 and every aarch64 one. The x86-64 SystemV and
-// Darwin conventions classify it as one 512-bit vector part instead, and the
-// canonical backend's return path encodes vector parts of four, eight and
-// sixteen bytes only, so they are not on that list.
+// The driver builds this for every cross target and runs it on the host, so
+// the same shapes cover both answers a convention can give: Win64 and every
+// aarch64 one pass a vector this wide by reference, and x86-64 SystemV and
+// Darwin classify it as one 512-bit vector part -- which a model with no
+// register that wide, the default for those targets, splits across the ones it
+// has.
 
 typedef unsigned char u8;
 typedef u8 Byte64 __attribute__((vector_size(64)));

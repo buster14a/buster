@@ -2673,7 +2673,8 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 }
                 CodegenCanonicalCallLayout call_layout = {0};
                 CodegenError call_error = codegen_canonical_x64_call_layout(arguments->arena, canonical_program, layout_mix_function, instruction,
-                                                                             CODEGEN_ABI_X86_64_WINDOWS, &call_layout);
+                                                                             CODEGEN_ABI_X86_64_WINDOWS,
+                                                                             codegen_target_for_abi(CODEGEN_ABI_X86_64_WINDOWS), &call_layout);
                 BUSTER_TEST(arguments, call_error == CODEGEN_ERROR_NONE);
                 if (call_error != CODEGEN_ERROR_NONE)
                 {
@@ -2788,7 +2789,8 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 }
                 CodegenCanonicalCallLayout call_layout = {0};
                 CodegenError call_error = codegen_canonical_x64_call_layout(arguments->arena, canonical_program, dynamic_layout_function, instruction,
-                                                                             CODEGEN_ABI_X86_64_WINDOWS, &call_layout);
+                                                                             CODEGEN_ABI_X86_64_WINDOWS,
+                                                                             codegen_target_for_abi(CODEGEN_ABI_X86_64_WINDOWS), &call_layout);
                 BUSTER_TEST(arguments, call_error == CODEGEN_ERROR_NONE);
                 if (call_error == CODEGEN_ERROR_NONE)
                 {
@@ -3044,7 +3046,8 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             }
             CodegenCanonicalCallLayout stack_alignment_layout = {0};
             CodegenError stack_alignment_error = codegen_canonical_x64_call_layout(
-                arguments->arena, stack_alignment_program, stack_alignment_function, instruction, CODEGEN_ABI_X86_64_SYSTEM_V, &stack_alignment_layout);
+                arguments->arena, stack_alignment_program, stack_alignment_function, instruction, CODEGEN_ABI_X86_64_SYSTEM_V, avx512f_target,
+                &stack_alignment_layout);
             BUSTER_TEST(arguments, stack_alignment_error == CODEGEN_ERROR_NONE);
             if (stack_alignment_error != CODEGEN_ERROR_NONE)
             {

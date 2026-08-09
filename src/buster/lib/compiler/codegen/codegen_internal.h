@@ -139,7 +139,7 @@ BUSTER_F_DECL CodegenAbiSignature codegen_classify_signature_with_arguments(Aren
 BUSTER_F_DECL CodegenError codegen_x64_maximum_call_stack_size(Arena* arena, AnalysisResult* analysis, IrFunction* function, Target target,
                                                                      u32* stack_size);
 BUSTER_F_DECL CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
-                                                                    CodegenAbi abi, CodegenCanonicalCallLayout* layout);
+                                                                    CodegenAbi abi, Target target, CodegenCanonicalCallLayout* layout);
 BUSTER_F_DECL u32 codegen_canonical_x64_stack_argument_alignment(IrType* type);
 BUSTER_F_DECL Target codegen_target_for_abi(CodegenAbi abi);
 BUSTER_F_DECL void codegen_record_line(CodegenLineEntry* entries, u32* count, u32 capacity, u32 code_offset, u32 source, u32 line, u32 column);
