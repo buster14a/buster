@@ -353,6 +353,64 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_synthesize_register(MachineX64Selector* sele
 
 // Emits result-vreg definition rows for one typed instruction. Returns false
 // when the construct falls outside the selected subset.
+// One member of an aggregate or array literal lands in the value's slot
+// at `member_offset`: scalar members store sized, slot-backed members
+// copy through the member's address.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_member_write(MachineX64Selector* selector, u32 slot, u64 member_offset, u64 member_size, IrValueId operand)
+{
+    u32 value_register = selector->value_virtual_registers[operand.value];
+    u32 value_slot = selector->value_stack_slots[operand.value];
+    if (value_register != UINT32_MAX || value_slot == UINT32_MAX)
+    {
+        u16 store_opcode = member_size == 1   ? MACHINE_X64_STORE_FRAME8
+                           : member_size == 2 ? MACHINE_X64_STORE_FRAME16
+                           : member_size == 4 ? MACHINE_X64_STORE_FRAME32
+                           : member_size == 8 ? MACHINE_X64_STORE_FRAME64
+                                              : 0;
+        if (!store_opcode || !machine_x64_operand_register(selector, operand, &value_register))
+        {
+            return false;
+        }
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                             .payload = (u32)member_offset,
+                                             .opcode = store_opcode,
+                                         });
+        return true;
+    }
+    u32 address_register = machine_x64_synthesize_register(selector);
+    machine_x64_select_row(selector, (MachineInstruction){
+                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                      machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
+                                         .opcode = MACHINE_X64_LEA_FRAME,
+                                     });
+    if (member_offset)
+    {
+        u32 offset_register = machine_x64_synthesize_register(selector);
+        u32 immediate_index = selector->immediates.total_count;
+        u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+        *immediate_row = member_offset;
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, offset_register),
+                                                          machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
+                                             .opcode = MACHINE_X64_MOV_RI,
+                                         });
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, offset_register)},
+                                             .opcode = MACHINE_X64_ADD64,
+                                         });
+    }
+    machine_x64_select_row(selector, (MachineInstruction){
+                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                      machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                         .payload = (u32)member_size,
+                                         .opcode = MACHINE_X64_COPY_PTR_FROM_FRAME,
+                                     });
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* selector, IrInstruction* instruction)
 {
     IrProgram* program = selector->program;
@@ -947,56 +1005,37 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             {
                 return false;
             }
-            u32 value_register = selector->value_virtual_registers[instruction->operands[index].value];
-            u32 value_slot = selector->value_stack_slots[instruction->operands[index].value];
-            if (value_register != UINT32_MAX || value_slot == UINT32_MAX)
+            if (!machine_x64_select_member_write(selector, slot, field_offset, field_size, instruction->operands[index]))
             {
-                u16 store_opcode = field_size == 1   ? MACHINE_X64_STORE_FRAME8
-                                   : field_size == 2 ? MACHINE_X64_STORE_FRAME16
-                                   : field_size == 4 ? MACHINE_X64_STORE_FRAME32
-                                   : field_size == 8 ? MACHINE_X64_STORE_FRAME64
-                                                     : 0;
-                if (!store_opcode || !machine_x64_operand_register(selector, instruction->operands[index], &value_register))
-                {
-                    return false;
-                }
-                machine_x64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
-                                                     .payload = (u32)field_offset,
-                                                     .opcode = store_opcode,
-                                                 });
-                continue;
+                return false;
             }
-            u32 address_register = machine_x64_synthesize_register(selector);
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
-                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
-                                                 .opcode = MACHINE_X64_LEA_FRAME,
-                                             });
-            if (field_offset)
+        }
+        return true;
+    }
+    break;
+    case IR_OPCODE_ARRAY:
+    {
+        // Element-by-element construction into the value's slot at scaled
+        // offsets; the frontend materializes every element including the
+        // zero tail, so position times element size covers the object.
+        IrType* type = ir_type_from_id(&program->types, function->values[instruction->result.value].canonical_type);
+        u32 slot = selector->value_stack_slots[instruction->result.value];
+        if (!type || type->kind != IR_TYPE_ARRAY || slot == UINT32_MAX)
+        {
+            return false;
+        }
+        IrType* element_type = ir_type_from_id(&program->types, type->element_type);
+        u64 element_size = element_type && element_type->layout.resolved ? element_type->layout.size : 0;
+        if (!element_size || (u64)instruction->operand_count * element_size > INT32_MAX)
+        {
+            return false;
+        }
+        for (u32 index = 0; index < instruction->operand_count; index += 1)
+        {
+            if (!machine_x64_select_member_write(selector, slot, (u64)index * element_size, element_size, instruction->operands[index]))
             {
-                u32 offset_register = machine_x64_synthesize_register(selector);
-                u32 immediate_index = selector->immediates.total_count;
-                u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
-                *immediate_row = field_offset;
-                machine_x64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, offset_register),
-                                                                  machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
-                                                     .opcode = MACHINE_X64_MOV_RI,
-                                                 });
-                machine_x64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, offset_register)},
-                                                     .opcode = MACHINE_X64_ADD64,
-                                                 });
+                return false;
             }
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
-                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
-                                                 .payload = (u32)field_size,
-                                                 .opcode = MACHINE_X64_COPY_PTR_FROM_FRAME,
-                                             });
         }
         return true;
     }
@@ -1992,9 +2031,10 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
                 selector.value_virtual_registers[instruction->result.value] = register_index;
             }
             else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD || instruction->opcode == IR_OPCODE_CALL ||
-                      instruction->opcode == IR_OPCODE_AGGREGATE) &&
+                      instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY) &&
                      value_type && value_type->layout.resolved && value_type->layout.size <= UINT32_MAX - 7 &&
-                     (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE))
+                     (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE ||
+                      (instruction->opcode == IR_OPCODE_ARRAY && value_type->kind == IR_TYPE_ARRAY)))
             {
                 // Aggregate values own a frame slot like the canonical
                 // path's per-value storage; copies and ABI part transfers

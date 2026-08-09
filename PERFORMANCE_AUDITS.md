@@ -12,6 +12,29 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09w` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+array literals: coverage reaches ninety percent.)
+
+- **What was built.** IR_OPCODE_ARRAY selection as a sibling of the
+  aggregate case, sharing a member-write helper: elements land in the
+  value's slot at position times element size — scalar elements store
+  sized, slot-backed elements copy through the element's address. The
+  frontend materializes every element including the zero tail, so no
+  descriptor components are needed for the C subset (LENGTH/SLICE
+  consumers stay outside it). ARRAY-typed results join the slot
+  pre-pass.
+- **Numbers** (buster-built stage comparison, compiling ide.c under
+  NONE): fallbacks 575 -> 297, coverage **2620 of 2917 (89.8%)**.
+  Fast-built compiler 58.40G instructions (canonical 70.05G, -16.6%),
+  text 23,198,204 (canonical 25,699,964, -9.7%).
+- **Gates:** test_all green (arr_lit standalone differential added),
+  MIR and FAST soaks byte-identical on fresh references, self-host
+  fixed point holds.
+- **Remaining fallback mass** (from the `2026-08-09v` census, post-
+  aggregate): CALL 55, CAST 10, UNARY 4, GLOBAL 3, LOAD 2, plus the
+  bitfield-aggregate rejects and the untyped remainder — re-census
+  before choosing the next lift.
+
 `2026-08-09v` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 aggregate literals and debug traps lift coverage past eighty percent.)
 

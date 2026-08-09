@@ -282,6 +282,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "int less(int a, int b) { return a < b; }\n"
                                   "int uless(unsigned a, unsigned b) { return a < b; }\n"
                                   "int six(int a, int b, int c, int d, int e, int f) { return a + b + c + d + e + f; }\n"
+                                  "long arr_lit(long a, long b) { long t[4] = {a, b, a + b, 5}; return t[0] * 1000 + t[1] * 100 + t[2] * 10 + t[3]; }\n"
                                   "struct KPair { long low; long high; };\n"
                                   "static long kagg_take(struct KPair pair, long salt) { return pair.low * 3 + pair.high + salt; }\n"
                                   "long kagg(long a, long b) { struct KPair pair = {.low = a + 1, .high = b}; return kagg_take(pair, a) + pair.high; }\n"
@@ -370,7 +371,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         String8 supported_names[] = {
             S8_INITIALIZER("add"), S8_INITIALIZER("mul"), S8_INITIALIZER("widen"), S8_INITIALIZER("narrow"),
             S8_INITIALIZER("negate"), S8_INITIALIZER("bitnot"), S8_INITIALIZER("lnot"), S8_INITIALIZER("less"),
-            S8_INITIALIZER("uless"), S8_INITIALIZER("six"), S8_INITIALIZER("kagg"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("readp"),
+            S8_INITIALIZER("uless"), S8_INITIALIZER("six"), S8_INITIALIZER("kagg"), S8_INITIALIZER("arr_lit"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("readp"),
             S8_INITIALIZER("writep"), S8_INITIALIZER("divide"), S8_INITIALIZER("srem"), S8_INITIALIZER("udiv"),
             S8_INITIALIZER("shl"), S8_INITIALIZER("sar"), S8_INITIALIZER("shr"), S8_INITIALIZER("bump"),
             S8_INITIALIZER("table_get"), S8_INITIALIZER("table_set"), S8_INITIALIZER("pair_sum"),
