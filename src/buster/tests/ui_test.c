@@ -230,6 +230,15 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_test_build_positioned_fastpath_box(String8 label,
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UI_Box* ui_test_build_keyed_box(UI_Key key, UI_BoxFlags flags, f32 x, f32 y, f32 width, f32 height)
+{
+    ui_set_next_fixed_x(x);
+    ui_set_next_fixed_y(y);
+    ui_set_next_fixed_width(width);
+    ui_set_next_fixed_height(height);
+    return ui_build_box_from_key(flags, key);
+}
+
 BUSTER_GLOBAL_LOCAL void ui_test_build_clipped_hit_tree(UI_Box** disjoint_child, UI_Box** empty_child)
 {
     ui_set_next_fixed_width(240.0f);
@@ -297,6 +306,66 @@ BUSTER_GLOBAL_LOCAL void ui_test_flag_inventory(UnitTestArguments* arguments, Un
     BUSTER_TEST(arguments, (UI_BoxFlag_All & UI_BoxFlag_AllContiguous) == UI_BoxFlag_AllContiguous);
     BUSTER_TEST(arguments, (UI_BoxFlag_All & UI_BoxFlag_Debug) == UI_BoxFlag_Debug);
     BUSTER_TEST(arguments, (UI_BoxFlag_All & ((UI_BoxFlags)0x3full << 57)) == 0);
+#undef result
+    result->succeeded_test_count += result_local.succeeded_test_count;
+    result->test_count += result_local.test_count;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_test_dense_active_box_list(UnitTestArguments* arguments, UnitTestResult* result)
+{
+    BUSTER_UNUSED(arguments);
+    UnitTestResult result_local = {0};
+#define result result_local
+    UI_State* state = ui_state_allocate(0, 0);
+    UI_Box** initial_active_boxes = state->active_boxes;
+    state->active_box_capacity = 2;
+
+    ui_test_frame(state, arguments->arena, (UI_EventList){0}, 0.016);
+    UI_Box* root = state->root;
+    UI_Key a_key = ui_key_make(root->key.value ^ (1ull << 63));
+    UI_Key b_key = ui_key_make(root->key.value ^ (1ull << 62));
+    UI_Key c_key = ui_key_make(root->key.value ^ (1ull << 61));
+    UI_Key replacement_key = ui_key_make(root->key.value ^ (1ull << 60));
+    UI_Box* a = ui_test_build_keyed_box(a_key, UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_Clickable, 10.0f, 10.0f, 30.0f, 30.0f);
+    UI_Box* b = ui_test_build_keyed_box(b_key, UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_Clickable, 10.0f, 10.0f, 30.0f, 30.0f);
+    UI_Box* c = ui_test_build_keyed_box(c_key, UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY, 60.0f, 10.0f, 20.0f, 20.0f);
+    ui_build_end();
+
+    BUSTER_TEST(arguments, state->active_box_capacity == 4 && state->active_boxes != initial_active_boxes);
+    BUSTER_TEST(arguments, state->box_count == 4 && state->active_box_count == 4);
+    BUSTER_TEST(arguments, state->active_boxes[0] == root && state->active_boxes[1] == a && state->active_boxes[2] == b && state->active_boxes[3] == c);
+    BUSTER_TEST(arguments, a->hash_next == b && b->hash_prev == a);
+
+    float2 overlap = ui_test_box_center(b);
+    UI_EventList press_events = ui_test_single_event(arguments->arena, UI_EventKind_Press, WM_KEY_MOUSE_LEFT, overlap, float2_make(0, 0), S8(""));
+    ui_test_frame(state, arguments->arena, press_events, 0.016);
+    root = state->root;
+    b = ui_test_build_keyed_box(b_key, UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_Clickable, 10.0f, 10.0f, 30.0f, 30.0f);
+    c = ui_test_build_keyed_box(c_key, UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY, 60.0f, 10.0f, 20.0f, 20.0f);
+    UI_Signal press = ui_signal_from_box(b);
+    ui_build_end();
+
+    BUSTER_TEST(arguments, ui_pressed(press) && ui_key_match(state->active_box_key[UI_MouseButtonKind_Left], b_key));
+    BUSTER_TEST(arguments, state->box_count == 3 && state->active_box_count == 3 && state->first_free_box == a);
+    BUSTER_TEST(arguments, state->active_boxes[0] == root && state->active_boxes[1] == b && state->active_boxes[2] == c);
+
+    UI_EventList release_events = ui_test_single_event(arguments->arena, UI_EventKind_Release, WM_KEY_MOUSE_LEFT, overlap, float2_make(0, 0), S8(""));
+    ui_test_frame(state, arguments->arena, release_events, 0.016);
+    root = state->root;
+    UI_Box* replacement =
+        ui_test_build_keyed_box(replacement_key, UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_Clickable, 10.0f, 10.0f, 30.0f, 30.0f);
+    b = ui_test_build_keyed_box(b_key, UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY | UI_BoxFlag_Clickable, 10.0f, 10.0f, 30.0f, 30.0f);
+    c = ui_test_build_keyed_box(c_key, UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY, 60.0f, 10.0f, 20.0f, 20.0f);
+    UI_Signal release = ui_signal_from_box(b);
+    ui_build_end();
+
+    BUSTER_TEST(arguments, replacement == a && ui_clicked(release) && ui_released(release));
+    BUSTER_TEST(arguments, state->box_count == 4 && state->active_box_count == 4);
+    BUSTER_TEST(arguments,
+                state->active_boxes[0] == root && state->active_boxes[1] == b && state->active_boxes[2] == c && state->active_boxes[3] == replacement);
+    BUSTER_TEST(arguments, c->hash_next == replacement && replacement->hash_prev == c);
+
+    ui_state_deinitialize(state);
 #undef result
     result->succeeded_test_count += result_local.succeeded_test_count;
     result->test_count += result_local.test_count;
@@ -2683,6 +2752,7 @@ UnitTestResult ui_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     ui_test_flag_inventory(arguments, &result);
+    ui_test_dense_active_box_list(arguments, &result);
     ui_test_background_blur_ui_audit(arguments, &result);
     ui_test_background_blur_renderer_order(arguments, &result);
     ui_test_background_blur_clipping(arguments, &result);

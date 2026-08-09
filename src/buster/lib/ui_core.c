@@ -766,6 +766,8 @@ UI_State* ui_state_allocate(RenderingHandle* rendering, RenderingWindowHandle* w
     state->rendering_window = window;
     state->box_table_size = 4096;
     state->box_table = arena_allocate(arena, UI_BoxHashSlot, state->box_table_size);
+    state->active_box_capacity = state->box_table_size;
+    state->active_boxes = arena_allocate(arena, UI_Box*, state->active_box_capacity);
 
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(state->build_arenas); i += 1)
     {
@@ -861,6 +863,8 @@ BUSTER_GLOBAL_LOCAL void ui_box_hash_push(UI_Box* box)
         box->hash_prev = slot->last;
         slot->last = box;
     }
+    BUSTER_CHECK(ui_state->box_count != UINT64_MAX);
+    ui_state->box_count += 1;
 }
 
 BUSTER_GLOBAL_LOCAL void ui_box_hash_remove(UI_Box* box, u64 slot_index)
@@ -884,6 +888,8 @@ BUSTER_GLOBAL_LOCAL void ui_box_hash_remove(UI_Box* box, u64 slot_index)
     }
     box->hash_next = 0;
     box->hash_prev = 0;
+    BUSTER_CHECK(ui_state->box_count != 0);
+    ui_state->box_count -= 1;
 }
 
 BUSTER_GLOBAL_LOCAL void ui_box_equip_tree_links(UI_Box* box, UI_Box* parent)
@@ -1254,6 +1260,21 @@ UI_BoxRec ui_box_rec_df(UI_Box* box, UI_Box* root, u64 sibling_offset, u64 child
 
 BUSTER_GLOBAL_LOCAL void ui_prune_untouched_boxes(void)
 {
+    if (ui_state->active_box_capacity < ui_state->box_count)
+    {
+        u64 capacity = ui_state->active_box_capacity ? ui_state->active_box_capacity : 1;
+        while (capacity < ui_state->box_count)
+        {
+            BUSTER_CHECK(capacity <= UINT64_MAX / 2);
+            capacity *= 2;
+        }
+        // Event routing has already consumed the preceding frame's list, so
+        // growth does not need to copy entries that this pass will replace.
+        ui_state->active_boxes = arena_allocate(ui_state->arena, UI_Box*, capacity);
+        ui_state->active_box_capacity = capacity;
+    }
+
+    u64 active_box_count = 0;
     for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
     {
         UI_BoxHashSlot* slot = &ui_state->box_table[slot_index];
@@ -1266,8 +1287,16 @@ BUSTER_GLOBAL_LOCAL void ui_prune_untouched_boxes(void)
                 box->next = ui_state->first_free_box;
                 ui_state->first_free_box = box;
             }
+            else
+            {
+                BUSTER_CHECK(active_box_count < ui_state->active_box_capacity);
+                ui_state->active_boxes[active_box_count] = box;
+                active_box_count += 1;
+            }
         }
     }
+    BUSTER_CHECK(active_box_count == ui_state->box_count);
+    ui_state->active_box_count = active_box_count;
 }
 
 UI_EventList ui_event_list_from_wm_events(Arena* arena, WmWindowHandle* window, WmEventList event_queue)
@@ -1994,62 +2023,58 @@ void ui_build_end(void)
         ui_layout_compute_clips(ui_state->root);
     }
 
-    for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
+    for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
     {
-        for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
+        UI_Box* box = ui_state->active_boxes[active_box_index];
+        if ((box->flags & UI_BoxFlag_RoundChildrenByParent) && box->first && box->last)
         {
-            if ((box->flags & UI_BoxFlag_RoundChildrenByParent) && box->first && box->last)
+            for (UI_Box* child = box; child; child = ui_box_rec_df_pre(child, box).next)
             {
-                for (UI_Box* child = box; child; child = ui_box_rec_df_pre(child, box).next)
+                if (floor_f32(child->rect.x0) <= floor_f32(box->rect.x0) && floor_f32(child->rect.y0) <= floor_f32(box->rect.y0))
                 {
-                    if (floor_f32(child->rect.x0) <= floor_f32(box->rect.x0) && floor_f32(child->rect.y0) <= floor_f32(box->rect.y0))
-                    {
-                        child->corner_radii[CORNER_00] = box->corner_radii[CORNER_00];
-                    }
-                    if (floor_f32(child->rect.x1) >= floor_f32(box->rect.x1) && floor_f32(child->rect.y0) <= floor_f32(box->rect.y0))
-                    {
-                        child->corner_radii[CORNER_10] = box->corner_radii[CORNER_10];
-                    }
-                    if (floor_f32(child->rect.x0) <= floor_f32(box->rect.x0) && floor_f32(child->rect.y1) >= floor_f32(box->rect.y1))
-                    {
-                        child->corner_radii[CORNER_01] = box->corner_radii[CORNER_01];
-                    }
-                    if (floor_f32(child->rect.x1) >= floor_f32(box->rect.x1) && floor_f32(child->rect.y1) >= floor_f32(box->rect.y1))
-                    {
-                        child->corner_radii[CORNER_11] = box->corner_radii[CORNER_11];
-                    }
+                    child->corner_radii[CORNER_00] = box->corner_radii[CORNER_00];
                 }
+                if (floor_f32(child->rect.x1) >= floor_f32(box->rect.x1) && floor_f32(child->rect.y0) <= floor_f32(box->rect.y0))
+                {
+                    child->corner_radii[CORNER_10] = box->corner_radii[CORNER_10];
+                }
+                if (floor_f32(child->rect.x0) <= floor_f32(box->rect.x0) && floor_f32(child->rect.y1) >= floor_f32(box->rect.y1))
+                {
+                    child->corner_radii[CORNER_01] = box->corner_radii[CORNER_01];
+                }
+                if (floor_f32(child->rect.x1) >= floor_f32(box->rect.x1) && floor_f32(child->rect.y1) >= floor_f32(box->rect.y1))
+                {
+                    child->corner_radii[CORNER_11] = box->corner_radii[CORNER_11];
+                }
+            }
 
-                if (box->child_layout_axis == AXIS2_X)
-                {
-                    box->first->corner_radii[CORNER_00] = box->corner_radii[CORNER_00];
-                    box->first->corner_radii[CORNER_01] = box->corner_radii[CORNER_01];
-                    box->last->corner_radii[CORNER_10] = box->corner_radii[CORNER_10];
-                    box->last->corner_radii[CORNER_11] = box->corner_radii[CORNER_11];
-                }
-                else
-                {
-                    box->first->corner_radii[CORNER_00] = box->corner_radii[CORNER_00];
-                    box->first->corner_radii[CORNER_10] = box->corner_radii[CORNER_10];
-                    box->last->corner_radii[CORNER_01] = box->corner_radii[CORNER_01];
-                    box->last->corner_radii[CORNER_11] = box->corner_radii[CORNER_11];
-                }
+            if (box->child_layout_axis == AXIS2_X)
+            {
+                box->first->corner_radii[CORNER_00] = box->corner_radii[CORNER_00];
+                box->first->corner_radii[CORNER_01] = box->corner_radii[CORNER_01];
+                box->last->corner_radii[CORNER_10] = box->corner_radii[CORNER_10];
+                box->last->corner_radii[CORNER_11] = box->corner_radii[CORNER_11];
+            }
+            else
+            {
+                box->first->corner_radii[CORNER_00] = box->corner_radii[CORNER_00];
+                box->first->corner_radii[CORNER_10] = box->corner_radii[CORNER_10];
+                box->last->corner_radii[CORNER_01] = box->corner_radii[CORNER_01];
+                box->last->corner_radii[CORNER_11] = box->corner_radii[CORNER_11];
             }
         }
     }
 
     f32 hot_rate = 0.35f;
     f32 active_rate = 0.45f;
-    for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
+    for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
     {
-        for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
-        {
-            bool hot = ui_key_match(box->key, ui_state->hot_box_key);
-            bool active = ui_key_match(box->key, ui_state->active_box_key[UI_MouseButtonKind_Left]);
-            box->hot_t += ((f32)hot - box->hot_t) * hot_rate;
-            box->active_t += ((f32)active - box->active_t) * active_rate;
-            ui_state->is_animating = ui_state->is_animating || (box->hot_t > 0.01f && box->hot_t < 0.99f) || (box->active_t > 0.01f && box->active_t < 0.99f);
-        }
+        UI_Box* box = ui_state->active_boxes[active_box_index];
+        bool hot = ui_key_match(box->key, ui_state->hot_box_key);
+        bool active = ui_key_match(box->key, ui_state->active_box_key[UI_MouseButtonKind_Left]);
+        box->hot_t += ((f32)hot - box->hot_t) * hot_rate;
+        box->active_t += ((f32)active - box->active_t) * active_rate;
+        ui_state->is_animating = ui_state->is_animating || (box->hot_t > 0.01f && box->hot_t < 0.99f) || (box->active_t > 0.01f && box->active_t < 0.99f);
     }
 
 }
@@ -2093,24 +2118,22 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_topmost_box_at_point_for_build(float2 point, UI_B
     UI_Box* disabled_blocker = 0;
     u64 result_order = 0;
     u64 blocker_order = 0;
-    for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
+    for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
     {
-        for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
+        UI_Box* box = ui_state->active_boxes[active_box_index];
+        if (box->last_touched_build_index != build_index || !ui_box_contains_point(box, point))
         {
-            if (box->last_touched_build_index != build_index || !ui_box_contains_point(box, point))
-            {
-                continue;
-            }
-            if (!allow_disabled && (box->flags & UI_BoxFlag_Disabled) && (!disabled_blocker || box->build_order >= blocker_order))
-            {
-                disabled_blocker = box;
-                blocker_order = box->build_order;
-            }
-            if ((box->flags & required_flags) && (allow_disabled || !(box->flags & UI_BoxFlag_Disabled)) && (!result || box->build_order >= result_order))
-            {
-                result = box;
-                result_order = box->build_order;
-            }
+            continue;
+        }
+        if (!allow_disabled && (box->flags & UI_BoxFlag_Disabled) && (!disabled_blocker || box->build_order >= blocker_order))
+        {
+            disabled_blocker = box;
+            blocker_order = box->build_order;
+        }
+        if ((box->flags & required_flags) && (allow_disabled || !(box->flags & UI_BoxFlag_Disabled)) && (!result || box->build_order >= result_order))
+        {
+            result = box;
+            result_order = box->build_order;
         }
     }
     if (disabled_blocker && (!result || blocker_order >= result_order))
@@ -2128,24 +2151,22 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_topmost_focus_box_at_point_for_build(float2 point
     u64 blocker_order = 0;
     UI_BoxFlags focus_flags = UI_BoxFlag_FocusHot | UI_BoxFlag_FocusActive | UI_BoxFlag_KeyboardClickable | UI_BoxFlag_ClickToFocus |
                               UI_BoxFlag_DefaultFocusNavX | UI_BoxFlag_DefaultFocusNavY | UI_BoxFlag_DefaultFocusEdit;
-    for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
+    for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
     {
-        for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
+        UI_Box* box = ui_state->active_boxes[active_box_index];
+        if (box->last_touched_build_index != build_index || !ui_box_contains_point(box, point))
         {
-            if (box->last_touched_build_index != build_index || !ui_box_contains_point(box, point))
-            {
-                continue;
-            }
-            if ((box->flags & UI_BoxFlag_Disabled) && (!disabled_blocker || box->build_order >= blocker_order))
-            {
-                disabled_blocker = box;
-                blocker_order = box->build_order;
-            }
-            if ((box->flags & focus_flags) && ui_box_focusable(box, false) && (!result || box->build_order >= result_order))
-            {
-                result = box;
-                result_order = box->build_order;
-            }
+            continue;
+        }
+        if ((box->flags & UI_BoxFlag_Disabled) && (!disabled_blocker || box->build_order >= blocker_order))
+        {
+            disabled_blocker = box;
+            blocker_order = box->build_order;
+        }
+        if ((box->flags & focus_flags) && ui_box_focusable(box, false) && (!result || box->build_order >= result_order))
+        {
+            result = box;
+            result_order = box->build_order;
         }
     }
     if (disabled_blocker && (!result || blocker_order >= result_order))
@@ -2625,55 +2646,53 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI
     UI_Box* scope = ui_focus_scope_from_box(current, root);
     UI_Box* directional = 0;
     f32 directional_score = 0.0f;
-    for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
+    for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
     {
-        for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
+        UI_Box* box = ui_state->active_boxes[active_box_index];
+        if (box->last_touched_build_index != build_index || !ui_box_in_focus_scope(box, scope) || !(box->flags & axis_flag) || !ui_box_focusable(box, true))
         {
-            if (box->last_touched_build_index != build_index || !ui_box_in_focus_scope(box, scope) || !(box->flags & axis_flag) || !ui_box_focusable(box, true))
+            continue;
+        }
+        if (!first || box->build_order < first->build_order)
+        {
+            first = box;
+        }
+        if (!last || box->build_order > last->build_order)
+        {
+            last = box;
+        }
+        if (current_found && ui_key_match(box->key, current_key) && direction >= UI_FocusDirection_Left)
+        {
+            continue;
+        }
+        if (current_found && direction >= UI_FocusDirection_Left)
+        {
+            f32 current_x = (current->rect.x0 + current->rect.x1) * 0.5f;
+            f32 current_y = (current->rect.y0 + current->rect.y1) * 0.5f;
+            f32 candidate_x = (box->rect.x0 + box->rect.x1) * 0.5f;
+            f32 candidate_y = (box->rect.y0 + box->rect.y1) * 0.5f;
+            f32 primary_delta = 0.0f;
+            f32 cross_delta = 0.0f;
+            bool in_direction = false;
+            if (direction == UI_FocusDirection_Left || direction == UI_FocusDirection_Right)
             {
-                continue;
+                primary_delta = candidate_x - current_x;
+                cross_delta = fabs_f32(candidate_y - current_y);
+                in_direction = direction == UI_FocusDirection_Left ? primary_delta < 0.0f : primary_delta > 0.0f;
             }
-            if (!first || box->build_order < first->build_order)
+            else
             {
-                first = box;
+                primary_delta = candidate_y - current_y;
+                cross_delta = fabs_f32(candidate_x - current_x);
+                in_direction = direction == UI_FocusDirection_Up ? primary_delta < 0.0f : primary_delta > 0.0f;
             }
-            if (!last || box->build_order > last->build_order)
+            if (in_direction)
             {
-                last = box;
-            }
-            if (current_found && ui_key_match(box->key, current_key) && direction >= UI_FocusDirection_Left)
-            {
-                continue;
-            }
-            if (current_found && direction >= UI_FocusDirection_Left)
-            {
-                f32 current_x = (current->rect.x0 + current->rect.x1) * 0.5f;
-                f32 current_y = (current->rect.y0 + current->rect.y1) * 0.5f;
-                f32 candidate_x = (box->rect.x0 + box->rect.x1) * 0.5f;
-                f32 candidate_y = (box->rect.y0 + box->rect.y1) * 0.5f;
-                f32 primary_delta = 0.0f;
-                f32 cross_delta = 0.0f;
-                bool in_direction = false;
-                if (direction == UI_FocusDirection_Left || direction == UI_FocusDirection_Right)
+                f32 score = fabs_f32(primary_delta) * 1024.0f + cross_delta;
+                if (!directional || score < directional_score || (score == directional_score && box->build_order < directional->build_order))
                 {
-                    primary_delta = candidate_x - current_x;
-                    cross_delta = fabs_f32(candidate_y - current_y);
-                    in_direction = direction == UI_FocusDirection_Left ? primary_delta < 0.0f : primary_delta > 0.0f;
-                }
-                else
-                {
-                    primary_delta = candidate_y - current_y;
-                    cross_delta = fabs_f32(candidate_x - current_x);
-                    in_direction = direction == UI_FocusDirection_Up ? primary_delta < 0.0f : primary_delta > 0.0f;
-                }
-                if (in_direction)
-                {
-                    f32 score = fabs_f32(primary_delta) * 1024.0f + cross_delta;
-                    if (!directional || score < directional_score || (score == directional_score && box->build_order < directional->build_order))
-                    {
-                        directional = box;
-                        directional_score = score;
-                    }
+                    directional = box;
+                    directional_score = score;
                 }
             }
         }
@@ -2685,35 +2704,33 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI
             return directional;
         }
         // Directional navigation wraps within the current parent scope.
-        for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
+        for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
         {
-            for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
+            UI_Box* box = ui_state->active_boxes[active_box_index];
+            if (box->last_touched_build_index != build_index || !ui_box_in_focus_scope(box, scope) || !(box->flags & axis_flag) || !ui_box_focusable(box, true) || ui_key_match(box->key, current_key))
             {
-                if (box->last_touched_build_index != build_index || !ui_box_in_focus_scope(box, scope) || !(box->flags & axis_flag) || !ui_box_focusable(box, true) || ui_key_match(box->key, current_key))
-                {
-                    continue;
-                }
-                bool better = false;
-                if (!directional)
-                {
-                    better = true;
-                }
-                else if (direction == UI_FocusDirection_Left || direction == UI_FocusDirection_Right)
-                {
-                    f32 value = (box->rect.x0 + box->rect.x1) * 0.5f;
-                    f32 old_value = (directional->rect.x0 + directional->rect.x1) * 0.5f;
-                    better = direction == UI_FocusDirection_Left ? value > old_value : value < old_value;
-                }
-                else if (directional)
-                {
-                    f32 value = (box->rect.y0 + box->rect.y1) * 0.5f;
-                    f32 old_value = (directional->rect.y0 + directional->rect.y1) * 0.5f;
-                    better = direction == UI_FocusDirection_Up ? value > old_value : value < old_value;
-                }
-                if (better)
-                {
-                    directional = box;
-                }
+                continue;
+            }
+            bool better = false;
+            if (!directional)
+            {
+                better = true;
+            }
+            else if (direction == UI_FocusDirection_Left || direction == UI_FocusDirection_Right)
+            {
+                f32 value = (box->rect.x0 + box->rect.x1) * 0.5f;
+                f32 old_value = (directional->rect.x0 + directional->rect.x1) * 0.5f;
+                better = direction == UI_FocusDirection_Left ? value > old_value : value < old_value;
+            }
+            else if (directional)
+            {
+                f32 value = (box->rect.y0 + box->rect.y1) * 0.5f;
+                f32 old_value = (directional->rect.y0 + directional->rect.y1) * 0.5f;
+                better = direction == UI_FocusDirection_Up ? value > old_value : value < old_value;
+            }
+            if (better)
+            {
+                directional = box;
             }
         }
         return directional;
@@ -2726,29 +2743,25 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_focus_navigation_candidate(UI_Key current_key, UI
     if (direction == UI_FocusDirection_LinearBackward)
     {
         UI_Box* before = 0;
-        for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
+        for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
         {
-            for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
+            UI_Box* box = ui_state->active_boxes[active_box_index];
+            if (box->last_touched_build_index == build_index && ui_box_in_focus_scope(box, scope) && (box->flags & axis_flag) && ui_box_focusable(box, true) && box->build_order < current->build_order &&
+                (!before || box->build_order > before->build_order))
             {
-                if (box->last_touched_build_index == build_index && ui_box_in_focus_scope(box, scope) && (box->flags & axis_flag) && ui_box_focusable(box, true) && box->build_order < current->build_order &&
-                    (!before || box->build_order > before->build_order))
-                {
-                    before = box;
-                }
+                before = box;
             }
         }
         return before ? before : last;
     }
     UI_Box* after = 0;
-    for (u64 slot_index = 0; slot_index < ui_state->box_table_size; slot_index += 1)
+    for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
     {
-        for (UI_Box* box = ui_state->box_table[slot_index].first; box; box = box->hash_next)
+        UI_Box* box = ui_state->active_boxes[active_box_index];
+        if (box->last_touched_build_index == build_index && ui_box_in_focus_scope(box, scope) && (box->flags & axis_flag) && ui_box_focusable(box, true) && box->build_order > current->build_order &&
+            (!after || box->build_order < after->build_order))
         {
-            if (box->last_touched_build_index == build_index && ui_box_in_focus_scope(box, scope) && (box->flags & axis_flag) && ui_box_focusable(box, true) && box->build_order > current->build_order &&
-                (!after || box->build_order < after->build_order))
-            {
-                after = box;
-            }
+            after = box;
         }
     }
     return after ? after : first;

@@ -611,6 +611,13 @@ struct UI_State
     UI_Box* first_free_box;
     u64 box_table_size;
     UI_BoxHashSlot* box_table;
+    // Dense view of the keyed boxes in the last completed build.  It keeps
+    // the hash table's slot/chain order, but lets frame-wide passes skip the
+    // empty slots and lets pre-build event routing use the preceding frame.
+    UI_Box** active_boxes;
+    u64 active_box_count;
+    u64 active_box_capacity;
+    u64 box_count;
     UI_DrawCommand* draw_commands;
     u64 draw_command_count;
     u64 draw_command_capacity;
