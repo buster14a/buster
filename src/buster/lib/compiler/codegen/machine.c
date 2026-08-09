@@ -606,9 +606,13 @@ BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* 
         memcpy(bytes + offset, function->blocks, block_bytes);
         offset += block_bytes;
     }
+    // The length is what was actually written, which the running offset
+    // already holds; `total` only had to size the allocation. Keeping the
+    // final increment live also means a section appended after this one
+    // cannot silently drop out of the length.
     return (ByteSlice){
         .pointer = bytes,
-        .length = total,
+        .length = offset,
     };
 }
 

@@ -85,6 +85,11 @@ BUSTER_GLOBAL_LOCAL MachineEncodeResult machine_test_encode(Arena* arena, IrProg
     return machine_encode_x86_64(arena, &selected.function, &placement);
 }
 
+// Every caller sits inside the executing-differential sections below, so
+// the definition carries their guard: configurations that compile those
+// out (non-x86-64, or the sanitized and fuzzing builds) do not pass
+// -Wno-unused-function and would reject an unreferenced helper.
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
 BUSTER_GLOBAL_LOCAL u32 machine_test_module_offset(CodegenModule* module, IrModule* ir_module, String8 name)
 {
     IrFunction* ir_function = machine_test_ir_function_find(ir_module, name);
@@ -97,6 +102,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_test_module_offset(CodegenModule* module, IrModu
     }
     return UINT32_MAX;
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_function(Arena* arena)
 {
