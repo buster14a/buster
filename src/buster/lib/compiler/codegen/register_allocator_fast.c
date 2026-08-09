@@ -662,9 +662,8 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
     machine_stream_flatten(&edits, placement.edits);
     // Frame layout runs after the scan: every touch of a vreg slot flows
     // through the edit stream, so only edit subjects get backing slots.
-    // Values that never left their registers cost no frame bytes, and the
-    // guard-page-probe bail applies to the compacted frame.
-    u8* slot_needed = state.escapes;
+    // Values that never left their registers cost no frame bytes.
+    u8* slot_needed = arena_allocate(arena, u8, function->virtual_register_count);
     for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
     {
         slot_needed[register_index] = 0;
@@ -672,6 +671,31 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
     for (u32 edit_index = 0; edit_index < placement.edit_count; edit_index += 1)
     {
         slot_needed[placement.edits[edit_index].subject] = 1;
+    }
+    // Slot reuse by defining block: a non-escaping value's every edit sits
+    // inside the block that defines it, so two such values from different
+    // blocks never hold their slots at the same time and draw from one
+    // shared pool. Escaping values keep dedicated slots — proving their
+    // ranges disjoint needs the cross-block liveness the global stage
+    // brings. The pool is as wide as the busiest single block.
+    u32* pool_indices = arena_allocate(arena, u32, function->virtual_register_count);
+    u32* block_pool_cursors = arena_allocate(arena, u32, function->block_count);
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        block_pool_cursors[block_index] = 0;
+    }
+    u32 pool_size = 0;
+    for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
+    {
+        pool_indices[register_index] = UINT32_MAX;
+        if (!slot_needed[register_index] || state.escapes[register_index] || definition_blocks[register_index] == UINT32_MAX)
+        {
+            continue;
+        }
+        u32 definition_block = definition_blocks[register_index];
+        pool_indices[register_index] = block_pool_cursors[definition_block];
+        block_pool_cursors[definition_block] += 1;
+        pool_size = BUSTER_MAX(pool_size, block_pool_cursors[definition_block]);
     }
     // The pushed callee-saved registers sit between the frame base and the
     // slots, so every offset starts past them, and the stack allocation
@@ -681,15 +705,22 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
     {
         push_count += (placement.callee_saved_mask >> physical_register) & 1u;
     }
-    u32 running = 8 * push_count;
+    u32 pool_base = 8 * push_count;
+    u32 running = pool_base + 8 * pool_size;
     for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
     {
         placement.virtual_register_offsets[register_index] = 0;
-        if (slot_needed[register_index])
+        if (!slot_needed[register_index])
         {
-            running += 8;
-            placement.virtual_register_offsets[register_index] = running;
+            continue;
         }
+        if (pool_indices[register_index] != UINT32_MAX)
+        {
+            placement.virtual_register_offsets[register_index] = pool_base + 8 * (pool_indices[register_index] + 1);
+            continue;
+        }
+        running += 8;
+        placement.virtual_register_offsets[register_index] = running;
     }
     for (u32 slot_index = 0; slot_index < function->stack_slot_count; slot_index += 1)
     {
