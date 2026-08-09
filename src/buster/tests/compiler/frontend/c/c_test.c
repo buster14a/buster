@@ -5712,6 +5712,63 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         }
     }
     scratch_end(alignas_temporary);
+    // An alignment specifier is part of the declaration specifiers, so the
+    // specifier scan has to step over it to reach the type whether the type is
+    // a builtin keyword, a typedef name, or a struct tag. Only the keyword
+    // spelling used to work; the other two lost the declarator entirely and
+    // reported the declared name as undeclared.
+    TemporalArena alignas_typedef_temporary = scratch_begin(0, 0);
+    CPreprocessResult alignas_typedef_tokens = c_preprocess(alignas_typedef_temporary.arena,
+                                                            S8("typedef unsigned char u8;"
+                                                               " static _Alignas(64) u8 file_scope_array[64];"
+                                                               " typedef struct Bytes { _Alignas(64) u8 bytes[64]; } Bytes;"
+                                                               " struct Tag { int value; };"
+                                                               " _Alignas(64) struct Tag tag_aligned;"
+                                                               " u8 _Alignas(64) trailing_specifier;"
+                                                               " int main(void) {"
+                                                               " _Alignas(64) u8 local_array[64];"
+                                                               " Bytes bytes;"
+                                                               " local_array[0] = 1;"
+                                                               " bytes.bytes[0] = 2;"
+                                                               " return file_scope_array[0] + local_array[0] + bytes.bytes[0] + tag_aligned.value + trailing_specifier;"
+                                                               " }\n"),
+                                                            (CPreprocessOptions){0});
+    CParseResult alignas_typedef_parse = c_parse(alignas_typedef_temporary.arena, alignas_typedef_tokens);
+    CIRLowerResult alignas_typedef_ir =
+        c_lower_to_ir(alignas_typedef_temporary.arena, S8("alignas-typedef.c"), alignas_typedef_tokens, alignas_typedef_parse, target_native);
+    BUSTER_TEST(arguments, alignas_typedef_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, alignas_typedef_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, alignas_typedef_ir.diagnostic_count == 0);
+    if (alignas_typedef_ir.program)
+    {
+        IrModule* alignas_typedef_module = &alignas_typedef_ir.program->modules[0];
+        u32 aligned_global_count = 0;
+        bool found_aligned_local = false;
+        bool found_aligned_struct = false;
+        for (u32 global_index = 0; global_index < alignas_typedef_module->global_count; global_index += 1)
+        {
+            aligned_global_count += alignas_typedef_module->globals[global_index].alignment == 64;
+        }
+        for (u32 type_index = 0; type_index < alignas_typedef_ir.program->types.count; type_index += 1)
+        {
+            IrType* type = alignas_typedef_ir.program->types.types + type_index;
+            found_aligned_struct |= type->kind == IR_TYPE_STRUCT && type->layout.alignment == 64 && type->layout.size == 64 && type->field_count == 1;
+        }
+        for (u32 function_index = 0; function_index < alignas_typedef_module->function_count; function_index += 1)
+        {
+            IrFunction* function = alignas_typedef_module->functions + function_index;
+            for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+            {
+                found_aligned_local |= function->values[value_index].alignment == 64;
+            }
+        }
+        // file_scope_array, tag_aligned, and trailing_specifier.
+        BUSTER_TEST(arguments, aligned_global_count == 3);
+        BUSTER_TEST(arguments, found_aligned_local);
+        BUSTER_TEST(arguments, found_aligned_struct);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(alignas_typedef_ir.program, alignas_typedef_module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(alignas_typedef_temporary);
     TemporalArena invalid_alignas_temporary = scratch_begin(0, 0);
     CPreprocessResult invalid_alignas_tokens = c_preprocess(invalid_alignas_temporary.arena, S8("_Alignas(3) int value;\n"), (CPreprocessOptions){0});
     CParseResult invalid_alignas_parse = c_parse(invalid_alignas_temporary.arena, invalid_alignas_tokens);

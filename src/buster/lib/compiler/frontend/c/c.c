@@ -9303,6 +9303,49 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_qualifier_word(String8 spelling, CType* ty
 
 BUSTER_GLOBAL_LOCAL u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 index, u32 end);
 
+// Skips the run of `_Alignas ( ... )` alignment specifiers at `index`. An
+// alignment specifier belongs to the declaration specifiers, so every scan
+// that walks the specifier prefix looking for the type — a builtin keyword, a
+// typedef name, or a struct/union/enum tag — has to step over it to reach the
+// declarator. `c_parse_alignment_specifiers` is what actually collects and
+// evaluates the alignments; this only moves past them.
+//
+// Returns `index` unchanged when there is no specifier here, or when the
+// specifier is malformed (no `(`, or unbalanced parentheses). Callers treat
+// that as "the scan cannot advance" and stop, which both avoids spinning and
+// leaves the malformed specifier for the collector to diagnose.
+BUSTER_GLOBAL_LOCAL u32 c_parse_skip_alignment_specifiers(CPreprocessResult preprocess, u32 index, u32 end)
+{
+    while (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+           string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("_Alignas")))
+    {
+        if (index + 2 >= end || !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            break;
+        }
+        u32 depth = 1;
+        u32 scan = index + 2;
+        while (scan < end && depth)
+        {
+            if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                depth += 1;
+            }
+            else if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                depth -= 1;
+            }
+            scan += 1;
+        }
+        if (depth)
+        {
+            break;
+        }
+        index = scan;
+    }
+    return index;
+}
+
 BUSTER_GLOBAL_LOCAL CTypeId c_parse_primitive_type(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start)
 {
     bool seen_type = false;
@@ -9325,31 +9368,18 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_primitive_type(CParseResult* result, CPrepro
     u32 index = start;
     while (index < end)
     {
+        u32 alignment_end = c_parse_skip_alignment_specifiers(preprocess, index, end);
+        if (alignment_end != index)
+        {
+            index = alignment_end;
+            continue;
+        }
+        // A malformed `_Alignas` leaves the index where it was; stop the scan
+        // there rather than falling through and treating `_Alignas` as the
+        // type word it is spelled like.
         if (preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("_Alignas")))
         {
-            if (index + 2 >= end || !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                break;
-            }
-            u32 depth = 1;
-            index += 2;
-            while (index < end && depth)
-            {
-                if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    depth += 1;
-                }
-                else if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
-                {
-                    depth -= 1;
-                }
-                index += 1;
-            }
-            if (depth)
-            {
-                break;
-            }
-            continue;
+            break;
         }
         u32 attribute_end = c_parse_skip_attributes(preprocess, index, end);
         if (attribute_end != index)
@@ -9796,31 +9826,18 @@ BUSTER_GLOBAL_LOCAL CTypeKind c_ir_primitive_type_kind(CPreprocessResult preproc
     u32 index = start;
     while (index < end)
     {
+        u32 alignment_end = c_parse_skip_alignment_specifiers(preprocess, index, end);
+        if (alignment_end != index)
+        {
+            index = alignment_end;
+            continue;
+        }
+        // A malformed `_Alignas` leaves the index where it was; stop the scan
+        // there rather than falling through and treating `_Alignas` as the
+        // type word it is spelled like.
         if (preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("_Alignas")))
         {
-            if (index + 2 >= end || !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                break;
-            }
-            u32 depth = 1;
-            index += 2;
-            while (index < end && depth)
-            {
-                if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    depth += 1;
-                }
-                else if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
-                {
-                    depth -= 1;
-                }
-                index += 1;
-            }
-            if (depth)
-            {
-                break;
-            }
-            continue;
+            break;
         }
         u32 attribute_end = c_parse_skip_attributes(preprocess, index, end);
         if (attribute_end != index)
@@ -10060,6 +10077,12 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_qualified_typedef_type(CParseResult* result,
     u32 typedef_index = start;
     while (typedef_index < end && preprocess.tokens[typedef_index].kind == C_TOKEN_IDENTIFIER)
     {
+        u32 alignment_end = c_parse_skip_alignment_specifiers(preprocess, typedef_index, end);
+        if (alignment_end != typedef_index)
+        {
+            typedef_index = c_parse_skip_attributes(preprocess, alignment_end, end);
+            continue;
+        }
         String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[typedef_index]);
         if (c_parse_type_qualifier_word(spelling, &qualifiers))
         {
@@ -10097,6 +10120,12 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_qualified_typedef_type(CParseResult* result,
     u32 qualifier_index = typedef_index + 1;
     while (qualifier_index < end && preprocess.tokens[qualifier_index].kind == C_TOKEN_IDENTIFIER)
     {
+        u32 alignment_end = c_parse_skip_alignment_specifiers(preprocess, qualifier_index, end);
+        if (alignment_end != qualifier_index)
+        {
+            qualifier_index = c_parse_skip_attributes(preprocess, alignment_end, end);
+            continue;
+        }
         String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[qualifier_index]);
         if (c_parse_type_qualifier_word(spelling, &qualifiers))
         {
@@ -11368,7 +11397,8 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* ma
     u32 aggregate_index = start;
     while (aggregate_index < end && preprocess.tokens[aggregate_index].kind == C_TOKEN_IDENTIFIER)
     {
-        u32 attribute_end = c_parse_skip_attributes(preprocess, aggregate_index, end);
+        u32 attribute_end = c_parse_skip_alignment_specifiers(preprocess, aggregate_index, end);
+        attribute_end = c_parse_skip_attributes(preprocess, attribute_end, end);
         if (attribute_end != aggregate_index)
         {
             aggregate_index = attribute_end;
@@ -13239,26 +13269,7 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_auto_skip_specifier(CPreprocessResult preprocess
     {
         return skipped;
     }
-    if (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("_Alignas")) &&
-        index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-    {
-        u32 depth = 1;
-        index += 2;
-        while (index < end && depth)
-        {
-            if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                depth += 1;
-            }
-            else if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
-            {
-                depth -= 1;
-            }
-            index += 1;
-        }
-        return index;
-    }
-    return index;
+    return c_parse_skip_alignment_specifiers(preprocess, index, end);
 }
 
 BUSTER_GLOBAL_LOCAL bool c_parse_auto_storage_word(String8 spelling, CAutoDeclarationInfo* info)
