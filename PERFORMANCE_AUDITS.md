@@ -12,10 +12,33 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
-`2026-08-09am` (Linux x86_64, Zen 4 7940HS; local promotion built,
+`2026-08-10a` (Linux x86_64, Zen 4 7940HS; rebase onto main, and the
+numbers refreshed on the merged tree.)
+
+- **Why the entries above are renumbered.** Main independently used
+  `2026-08-09h`, `i` and `j` while this branch was building `h` through
+  `am`. The branch's block moved up by three letters, `h` becoming `k`
+  and `am` becoming `ap`, with every cross-reference between entries
+  shifted to match; main's three entries are unchanged. Nothing else in
+  those entries was edited — the measurements are as they were taken.
+- **One semantic conflict git could not see.** Main added `simd_tests`
+  and this branch added `machine_tests`, each bumping the module-count
+  assertion from 29 to 30 in different commits. The two merged cleanly
+  into an array of 31 with an assertion demanding 30. The count is 31
+  now, and the check earned its keep.
+- **Refreshed numbers on the merged tree** (compiling ide.c, whose
+  sources main grew, so absolute counts are not comparable with the
+  entries above — the ratio is): canonical **73.44G** instructions,
+  **fast 47.07G (-35.9%)**, quality **47.03G**. Coverage 2994 of 3025
+  functions (**99.0%**). Both track the pre-rebase -35.5% and 99.0%.
+- **Gates on the merged tree:** test_all green (20454 unit, 31 module),
+  all three soaks — MIR_STACK, FAST and QUALITY — byte-identical against
+  a fresh canonical reference, self-host fixed point holds.
+
+`2026-08-09ap` (Linux x86_64, Zen 4 7940HS; local promotion built,
 measured, and reverted — with the sequencing it proves.)
 
-- **What was tried.** The pass `2026-08-09al` called for: at selection,
+- **What was tried.** The pass `2026-08-09ao` called for: at selection,
   every C local of register width whose address never leaves a load or a
   store becomes a virtual register instead of a frame slot, so loads and
   stores of it become copies. Roughly 90 lines in the selector: a
@@ -52,7 +75,7 @@ measured, and reverted — with the sequencing it proves.)
   configuration. The patch is described here in enough detail to rebuild
   in an afternoon, and should be rebuilt only alongside edge contracts.
 
-`2026-08-09al` (Linux x86_64, Zen 4 7940HS; the pressure corpus, and the
+`2026-08-09ao` (Linux x86_64, Zen 4 7940HS; the pressure corpus, and the
 finding that reframes the rest of the register-allocator plan.)
 
 **Read this before starting stage 8, 9, or any further allocator work.**
@@ -62,7 +85,7 @@ finding that reframes the rest of the register-allocator plan.)
   across a call in every iteration, and a deep expression tree whose
   intermediates all survive to one combine. It self-checks, so it is an
   execution test under every mode as well as a benchmark. Built because
-  `2026-08-09ai` and `ak` could not evaluate QUALITY honestly on the
+  `2026-08-09al` and `ak` could not evaluate QUALITY honestly on the
   self-host sources, which keep almost nothing live.
 - **Numbers** (200 iterations of the three bodies, executed
   instructions): canonical **395.95M**, MIR_STACK **595.95M**, FAST
@@ -90,17 +113,17 @@ finding that reframes the rest of the register-allocator plan.)
   bulk of the 1.96x gap to clang, and it is the precondition that makes
   QRA's machinery meaningful. **Do that first.**
 - **Corollary for the wins already banked.** The gains from
-  `2026-08-09ad` (copy coalescing) and `ag`/`ah` (folded addressing) were
+  `2026-08-09ag` (copy coalescing) and `ag`/`ah` (folded addressing) were
   large precisely because they attack the short-lifetime, copy-heavy
   shape this lowering produces. That was the right thing to optimize for
   the IR as it stands, and it stays right after promotion lands.
 - **Gates:** test_all green, the corpus executes identically under NONE,
   MIR_STACK, FAST and QUALITY.
 
-`2026-08-09ak` (Linux x86_64, Zen 4 7940HS; register-allocator stage 7 —
+`2026-08-09an` (Linux x86_64, Zen 4 7940HS; register-allocator stage 7 —
 QUALITY stops guessing and starts measuring, and finally wins.)
 
-- **What changed.** Every heuristic from `2026-08-09ai` is gone —
+- **What changed.** Every heuristic from `2026-08-09al` is gone —
   crossing a call, loop residency, occurrence weights, the register-file
   cap. QUALITY now runs the local scan once with no pins, counts the
   memory edits each value actually cost, and pins by that measured
@@ -129,7 +152,7 @@ QUALITY stops guessing and starts measuring, and finally wins.)
 - **Gates:** test_all green, MIR, FAST and QUALITY soaks all
   byte-identical on fresh references, self-host fixed point holds.
 
-`2026-08-09aj` (Linux x86_64, Zen 4 7940HS; register-allocator stage 13
+`2026-08-09am` (Linux x86_64, Zen 4 7940HS; register-allocator stage 13
 — optimization intent selects the allocator.)
 
 - **What was built.** The driver understands `-O` levels now, and they
@@ -138,7 +161,7 @@ QUALITY stops guessing and starts measuring, and finally wins.)
   `-Os`, `-Oz`, and `-Ofast` take FAST. An unknown level is an error
   rather than a silent no-op. QUALITY is deliberately left out of the
   mapping: it does not beat FAST on a measured corpus
-  (`2026-08-09ai`), so it stays reachable only by naming it with
+  (`2026-08-09al`), so it stays reachable only by naming it with
   `-fregister-allocator=quality`.
 - **Reproducible flags.** `-fregister-allocator=none|mir-stack|fast|
   quality` selects a mode directly and overrides nothing else;
@@ -152,7 +175,7 @@ QUALITY stops guessing and starts measuring, and finally wins.)
   fresh canonical reference (the mapping really does route through
   FAST), self-host fixed point holds.
 
-`2026-08-09ai` (Linux x86_64, Zen 4 7940HS; register-allocator stage 7 —
+`2026-08-09al` (Linux x86_64, Zen 4 7940HS; register-allocator stage 7 —
 QUALITY exists, is verified, and does not beat FAST here.)
 
 - **What was built.** `machine_quality_placement_build`: a live interval
@@ -192,7 +215,7 @@ QUALITY exists, is verified, and does not beat FAST here.)
 - **Status against the plan.** Stage 7 lands its scaffolding — exact-ish
   intervals, priority queue, hints, budget bound
   (`MACHINE_QUALITY_MAXIMUM_CANDIDATES`), rematerialization (already in
-  FAST from `2026-08-09af`) — but **not** its acceptance criterion.
+  FAST from `2026-08-09ai`) — but **not** its acceptance criterion.
   QUALITY must stay opt-in and must not become any optimization level's
   default until it wins on a pressure corpus. Eviction cascades, live
   range splitting, and stage 8 recoloring are the remaining levers that
@@ -204,7 +227,7 @@ QUALITY exists, is verified, and does not beat FAST here.)
   MIR_STACK, FAST, QUALITY — byte-identical on fresh references,
   self-host fixed point holds.
 
-`2026-08-09ah` (Linux x86_64, Zen 4 7940HS; selection quality — member
+`2026-08-09ak` (Linux x86_64, Zen 4 7940HS; selection quality — member
 addresses become one instruction.)
 
 - **What was built.** The address-placement helper takes a constant byte
@@ -213,7 +236,7 @@ addresses become one instruction.)
   use), and a pointer folds it into `lea dst, [base + disp]` through a
   new LEA_OFFSET opcode. Only a zero offset on a pointer stays a plain
   copy, which the allocator can then coalesce away. Field selection is
-  one row end to end, down from three before `2026-08-09ag`.
+  one row end to end, down from three before `2026-08-09aj`.
 - **Numbers** (buster-built stage comparison, compiling ide.c under
   NONE): instructions **45.45G -> 45.09G (-0.8%)**, against canonical's
   70.05G now **-35.6%**. Text 19,419,666 (canonical 25,699,964,
@@ -221,7 +244,7 @@ addresses become one instruction.)
 - **Gates:** test_all green, MIR and FAST soaks byte-identical on fresh
   references, self-host fixed point holds.
 
-`2026-08-09ag` (Linux x86_64, Zen 4 7940HS; selection quality — folded
+`2026-08-09aj` (Linux x86_64, Zen 4 7940HS; selection quality — folded
 address arithmetic.)
 
 - **What was built.** Two opcodes that take their constant inline:
@@ -242,7 +265,7 @@ address arithmetic.)
   references, self-host fixed point holds. Both allocators benefit,
   since this is selection, not placement.
 
-`2026-08-09af` (Linux x86_64, Zen 4 7940HS; register-allocator stage 7
+`2026-08-09ai` (Linux x86_64, Zen 4 7940HS; register-allocator stage 7
 lead — constant rematerialization, taken early because it is local.)
 
 - **What was built.** A pre-pass marks every virtual register whose
@@ -256,7 +279,7 @@ lead — constant rematerialization, taken early because it is local.)
   register* and a rematerialization's is an *immediate index*. With few
   virtual registers in a function that write ran past the end of the
   array — a live out-of-bounds write introduced with copy edits in
-  `2026-08-09s` and never triggered because the arrays were usually long
+  `2026-08-09v` and never triggered because the arrays were usually long
   enough. The derivation now filters on edit kind. Separately, the first
   draft of the remat table let a constant definition *after* a
   non-constant one enable the recipe; a definition-seen flag fixes it.
@@ -274,7 +297,7 @@ lead — constant rematerialization, taken early because it is local.)
 - **Gates:** test_all green, MIR and FAST soaks byte-identical on fresh
   references, self-host fixed point holds.
 
-`2026-08-09ae` (Linux x86_64, Zen 4 7940HS; register-allocator stage 5 —
+`2026-08-09ah` (Linux x86_64, Zen 4 7940HS; register-allocator stage 5 —
 allocator traffic metrics, and two negative results they explain.)
 
 - **What was built.** `cc -v` now reports `CODEGEN_ALLOCATOR reloads=
@@ -295,7 +318,7 @@ allocator traffic metrics, and two negative results they explain.)
   defer down the chain. Implemented, byte-identical, and worthless:
   spills moved 90,154 -> 90,157 and text grew 26KB from shifted
   allocation decisions. The 3.1% boundary share is the reason, and the
-  earlier flat result for straight-line inheritance (`2026-08-09t`) has
+  earlier flat result for straight-line inheritance (`2026-08-09w`) has
   the same root: this frontend's block graph has almost no
   single-predecessor/single-successor chains. Reverted. **Do not
   retry any boundary-write-back optimization without first moving that
@@ -310,12 +333,12 @@ allocator traffic metrics, and two negative results they explain.)
   `spills ~= reloads + values-ever-spilled` is the expected shape, and
   49K distinct values spilling once each accounts for it exactly.
 - **Numbers unchanged** at 47.20G instructions (the +34KB of text
-  against `2026-08-09ad` is the statistics code itself entering the
+  against `2026-08-09ag` is the statistics code itself entering the
   self-compiled binary, not worse codegen).
 - **Gates:** test_all green, MIR and FAST soaks byte-identical on
   fresh references, self-host fixed point holds.
 
-`2026-08-09ad` (Linux x86_64, Zen 4 7940HS; register-allocator stage 5 —
+`2026-08-09ag` (Linux x86_64, Zen 4 7940HS; register-allocator stage 5 —
 copy coalescing: the largest single quality win of the project.)
 
 - **What was built.** Two halves. The encoder skips a full-width
@@ -343,7 +366,7 @@ copy coalescing: the largest single quality win of the project.)
   coalescing), MIR and FAST soaks byte-identical on fresh references,
   self-host fixed point holds.
 
-`2026-08-09ac` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6 —
+`2026-08-09af` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6 —
 spill-slot reuse by defining block.)
 
 - **What was built.** A non-escaping value's every edit sits inside the
@@ -365,7 +388,7 @@ spill-slot reuse by defining block.)
 - **Gates:** test_all green, FAST soak byte-identical on fresh
   references, self-host fixed point holds.
 
-`2026-08-09ab` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6 —
+`2026-08-09ae` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6 —
 machine-path debug line entries reach canonical parity.)
 
 - **What was built.** Selection records one MachineLineMark per lowered
@@ -384,7 +407,7 @@ machine-path debug line entries reach canonical parity.)
 - **Gates:** test_all green, MIR and FAST soaks byte-identical on
   fresh references, self-host fixed point holds.
 
-`2026-08-09aa` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+`2026-08-09ad` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 array loads, bit scans, and unsigned-64 float conversions: ninety-nine
 percent.)
 
@@ -412,7 +435,7 @@ percent.)
   Coverage work stops here; stage 5/6 quality and latency (spill-slot
   reuse, debug locations, edge contracts) and the QRA stages are next.
 
-`2026-08-09z` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+`2026-08-09ac` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 bit-field aggregate literals: coverage reaches ninety-eight percent.)
 
 - **What was built.** Bit-field members of an aggregate literal
@@ -436,7 +459,7 @@ bit-field aggregate literals: coverage reaches ninety-eight percent.)
   to stage 5/6 quality work (spill-slot reuse, debug locations, edge
   contracts) and the QRA stages.
 
-`2026-08-09y` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+`2026-08-09ab` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 variadic aggregate arguments: coverage reaches ninety-seven percent.)
 
 - **How the target was chosen.** Reject-site instrumentation (local,
@@ -459,7 +482,7 @@ variadic aggregate arguments: coverage reaches ninety-seven percent.)
 - **Gates:** test_all green, MIR and FAST soaks byte-identical on
   fresh references, self-host fixed point holds.
 
-`2026-08-09x` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+`2026-08-09aa` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 guard-page probes lift the frame bail; coverage reaches ninety-five
 percent.)
 
@@ -488,7 +511,7 @@ percent.)
 - **Remaining census:** CALL 68, AGGREGATE 31 (bit-field members),
   LOAD 14, no-opcode 11, CAST 10, GLOBAL 4, UNARY 4, va 3, icache 1.
 
-`2026-08-09w` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+`2026-08-09z` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 array literals: coverage reaches ninety percent.)
 
 - **What was built.** IR_OPCODE_ARRAY selection as a sibling of the
@@ -506,12 +529,12 @@ array literals: coverage reaches ninety percent.)
 - **Gates:** test_all green (arr_lit standalone differential added),
   MIR and FAST soaks byte-identical on fresh references, self-host
   fixed point holds.
-- **Remaining fallback mass** (from the `2026-08-09v` census, post-
+- **Remaining fallback mass** (from the `2026-08-09y` census, post-
   aggregate): CALL 55, CAST 10, UNARY 4, GLOBAL 3, LOAD 2, plus the
   bitfield-aggregate rejects and the untyped remainder — re-census
   before choosing the next lift.
 
-`2026-08-09v` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+`2026-08-09y` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 aggregate literals and debug traps lift coverage past eighty percent.)
 
 - **How the target was chosen.** A local rejection dump over the unity
@@ -552,7 +575,7 @@ aggregate literals and debug traps lift coverage past eighty percent.)
   relocation resolves), MIR and FAST soaks byte-identical on fresh
   references, self-host fixed point holds.
 
-`2026-08-09u` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6 —
+`2026-08-09x` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6 —
 R12/R13 complete the callee-saved file; ModRM base quirks fixed.)
 
 - **What was built.** `machine_x64_emit_memory_modrm` now handles the
@@ -565,7 +588,7 @@ R12/R13 complete the callee-saved file; ModRM base quirks fixed.)
   was one allocator change away from being false, so the fix removes a
   loaded trap even where the measure is flat.
 - **Honest measure:** flat — 63.60G instructions, +3.6KB text against
-  `2026-08-09t`, run-to-run noise territory. Few blocks keep more than
+  `2026-08-09w`, run-to-run noise territory. Few blocks keep more than
   three call-crossing values live at once, so the fourth and fifth
   callee-saved members rarely bind, and [r12]/[r13] addressing costs an
   extra byte per touch.
@@ -575,7 +598,7 @@ R12/R13 complete the callee-saved file; ModRM base quirks fixed.)
   gives no rejection breakdown; instrument locally before choosing the
   next stage-3 construct to lift.
 
-`2026-08-09t` (Linux x86_64, Zen 4 7940HS; register-allocator stage 5 —
+`2026-08-09w` (Linux x86_64, Zen 4 7940HS; register-allocator stage 5 —
 straight-line edge contracts land structurally, and measure flat.)
 
 - **What was built.** Block boundaries write back instead of flushing:
@@ -585,7 +608,7 @@ straight-line edge contracts land structurally, and measure flat.)
   targets over-count predecessors conservatively; the entry block always
   starts cold).
 - **Honest measure:** flat — 63.59G instructions and +5KB text against
-  `2026-08-09s`, both noise-level. The canonical C frontend does not
+  `2026-08-09v`, both noise-level. The canonical C frontend does not
   split blocks needlessly, so single-predecessor layout-neighbor edges
   are rare: conditional joins and loop headers all have two
   predecessors and start cold. The value is structural: the write-back
@@ -599,7 +622,7 @@ straight-line edge contracts land structurally, and measure flat.)
   (ModRM base quirks in the pointer load/store encoders) widening the
   callee-saved file.
 
-`2026-08-09s` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6 —
+`2026-08-09v` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6 —
 callee-saved registers, and register-copy edits instead of memory moves.)
 
 - **What was built.** Three coupled pieces. (1) RBX/R14/R15 join the
@@ -626,7 +649,7 @@ callee-saved registers, and register-copy edits instead of memory moves.)
 - **Gates:** test_all green, FAST soak byte-identical on fresh
   references, self-host fixed point holds.
 
-`2026-08-09r` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6,
+`2026-08-09u` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6,
 first slice — spill slots only for values that touch memory.)
 
 - **What was built.** The fast placement's frame layout moved after the
@@ -647,7 +670,7 @@ first slice — spill slots only for values that touch memory.)
   within-block debug location ranges, and making FAST cover the full
   canonical self-host path.
 
-`2026-08-09q` (Linux x86_64, Zen 4 7940HS; register-allocator stage 5,
+`2026-08-09t` (Linux x86_64, Zen 4 7940HS; register-allocator stage 5,
 first slice — liveness-driven spill kills put FAST ahead of canonical.)
 
 - **What was built.** Two linear pre-passes over the machine IR before
@@ -662,7 +685,7 @@ first slice — liveness-driven spill kills put FAST ahead of canonical.)
 - **Numbers** (buster-built stage comparison, compiling ide.c under
   NONE): fast-built compiler 63.76G instructions vs canonical 70.05G —
   **9.0% below the canonical stack emitter**, from +1.0% in
-  `2026-08-09p`; the everything-in-slots penalty was +14.6%. Text
+  `2026-08-09s`; the everything-in-slots penalty was +14.6%. Text
   24,958,388 vs canonical 25,699,964 (−2.9%). Block-local expression
   temporaries dominate the vreg population, so killing their dead stores
   converts most of MIR_STACK's store traffic into pure register traffic
@@ -674,7 +697,7 @@ first slice — liveness-driven spill kills put FAST ahead of canonical.)
   buckets, loop-carried retention in registers, and edge parallel-copy
   resolution.
 
-`2026-08-09p` (Linux x86_64, Zen 4 7940HS; register-allocator stage 4 —
+`2026-08-09s` (Linux x86_64, Zen 4 7940HS; register-allocator stage 4 —
 the FAST local allocator, first allocator to survive the soak.)
 
 - **What was built.** `register_allocator_fast.c`: a forward block-local
@@ -720,7 +743,7 @@ the FAST local allocator, first allocator to survive the soak.)
   fail universally and fingers an innocent function; both false leads
   cost real time.
 
-`2026-08-09o` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+`2026-08-09r` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 indirect calls, aligned locals, and atomics.)
 
 - **What was built.** FUNCTION references became ordinary rip-relative
@@ -746,7 +769,7 @@ indirect calls, aligned locals, and atomics.)
   locations — after which stages 4-6 (FRA) begin against a majority-
   coverage soak corpus.
 
-`2026-08-09n` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+`2026-08-09q` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 stack arguments and the memory-class aggregate ABI, crossing half the tree.)
 
 - **What was built.** Stack arguments both directions (the canonical
@@ -769,7 +792,7 @@ stack arguments and the memory-class aggregate ABI, crossing half the tree.)
   over-aligned locals, STACK_ALLOCATE, label addresses, and machine-path
   debug locations.
 
-`2026-08-09m` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+`2026-08-09p` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 scalar float operations and the XMM ABI.)
 
 - **What was built.** Float values travel as IEEE bit patterns in general
@@ -793,7 +816,7 @@ scalar float operations and the XMM ABI.)
   over-aligned locals, STACK_ALLOCATE, indirect calls, label addresses,
   and machine-path debug locations.
 
-`2026-08-09l` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+`2026-08-09o` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 switch chains, variadic calls, and the aggregate ABI, taking the machine
 path to 40.7% of the unity tree.)
 
@@ -811,7 +834,7 @@ path to 40.7% of the unity tree.)
   side data.
 - **Coverage:** fallbacks 2267 → 1730 — **1187 of 2917 functions (40.7%)
   machine-compiled**, mir-built stage 2 still byte-identical; the
-  String8-by-value hypothesis from `2026-08-09k` confirmed (aggregates
+  String8-by-value hypothesis from `2026-08-09n` confirmed (aggregates
   nearly doubled coverage; variadic support alone had moved nothing).
   `machine_tests` 367/367 including Span (String8-shaped) pass/return/
   round-trip differentials. Fixed point `bytes=27013000`. Remaining
@@ -819,7 +842,7 @@ path to 40.7% of the unity tree.)
   va_start machinery, inline assembly, over-aligned locals, and
   machine-path debug locations.
 
-`2026-08-09k` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3,
+`2026-08-09n` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3,
 subset growth — shifts, the divide family, and direct System V calls in the
 machine path.)
 
@@ -863,7 +886,7 @@ machine path.)
   **608 of 2917 functions (20.8%)** machine-compiled, byte-identical;
   fixed point `bytes=26957032`; stage-1 per token `3712.501`, flat.
 
-`2026-08-09j` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3, first
+`2026-08-09m` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3, first
 increment — MIR_STACK wired into `codegen_generate_canonical_module` with
 per-function counted fallback, soaked on the full unity self-compile.)
 
@@ -910,7 +933,7 @@ per-function counted fallback, soaked on the full unity self-compile.)
   token, fixed point `bytes=26910088`, mir soak 130/2917 machine functions
   byte-identical.
 
-`2026-08-09i` (Linux x86_64, Zen 4 7940HS; register-allocator stage 2 — the
+`2026-08-09l` (Linux x86_64, Zen 4 7940HS; register-allocator stage 2 — the
 x86-64 scalar selector, MIR_STACK placement, and encoder over the compact
 machine IR, differentially executed against the canonical NONE path.)
 
@@ -947,7 +970,7 @@ machine IR, differentially executed against the canonical NONE path.)
   per token, stage 2 `69.1392 G` / `49519.146` per token, fixed point
   `bytes=26897064`.
 
-`2026-08-09h` (Linux x86_64, Zen 4 7940HS; register-allocator project stage
+`2026-08-09k` (Linux x86_64, Zen 4 7940HS; register-allocator project stage
 0+1 — the current-HEAD rebaseline under the new token metrics, plus the
 allocator-mode option and the compact machine-IR skeleton with **no
 production-path change**. Baseline measured on the clean `41814eaa` tree,
@@ -1005,6 +1028,237 @@ patched numbers on the same host, clang-built, quiet machine.)
   ratio `13.366` (validation only), `ide bench` reference remains `343.2 M`
   from `2026-08-09g` (parser untouched), fixed point
   `SELF_HOST deterministic bytes=26743112`.
+
+`2026-08-09j` (Linux x86_64, Zen 4 7940HS; incremental IDE workspace
+analysis. **Normal body edits now parse, index, analyze, and invalidate only
+the changed document; exported-interface or import changes reanalyze only the
+old/new reverse dependency cone.**)
+
+- **What was built.** IDE documents now publish immutable, reference-counted
+  syntax and module snapshots. Unchanged source/token/parser storage is shared
+  across revisions. A normalized import graph carries forward and reverse
+  edges plus deterministic dependency order, and exact tagged interface
+  fingerprints distinguish body-only edits from import/type/data/code-signature
+  changes. Publication is transactional: allocation or diagnostic-limit
+  failure leaves the committed workspace generation and pointers untouched.
+  Generic and cyclic workspaces retain a conservative full-semantic fallback,
+  but still parse only the changed source. Recovered imports from syntax-invalid
+  documents remain visible to the UI without participating in the semantic
+  dependency graph. Incremental analysis owners retain a dense
+  `affected_count` snapshot array; workspace-wide pointer/visibility scratch
+  stays in staging storage, and each syntax/analysis owner initially commits
+  one native OS page.
+  Rebase integration with main's allocator and lazy-global hardening widens
+  document-count arithmetic before allocation, uses a non-wrapping reverse
+  prefix walk, and prewarms tokenizer tables at the model's serial
+  initialization boundary.
+- **Measured work sets.** A body edit in a four-document workspace is exactly
+  `parsed=1 indexed=1 analyzed=1 invalidated=1`; an interface edit of the leaf
+  of a three-document chain is `1/3/3/3`, while an independent fourth document
+  keeps both its work flags and source-storage pointer. Import retargeting is
+  restricted to the importer and its dependent. Exact same-text updates are
+  true no-ops, and rollback, full-rebuild equivalence, generic fallback, cycle
+  fallback, normalized/canonical import paths, and invalid-module recovered
+  imports all have direct regressions. Two edits of independent documents each
+  prove that exactly one semantic snapshot is allocated, rather than one slot
+  per workspace document.
+- **Compiler-throughput cost.** Against current main `4530f074`, stage 1 moved
+  from `5,151,608,556` to `5,204,253,939` instructions (`+1.022%`) while
+  preprocessed tokens moved from `1,383,454` to `1,398,096` (`+1.058%`);
+  instructions per token therefore moved from `3723.730` to `3722.387`
+  (`-0.036%`, effectively neutral). The deterministic executable grew from
+  `26,787,912` to `26,990,352` bytes (`+0.756%`). Stage 2 moved from
+  `69,625,494,331` to `70,352,079,541` instructions (`+1.044%`). Five
+  alternating stage-2 benchmark pairs were neutral: minimum I/O was
+  `1.951 ms` on main versus `1.954 ms` here (`+0.1%`), and minimum parse was
+  `1.730 ms` versus `1.724 ms` (`-0.4%`).
+- **Gates.** The clean rebased branch reached a byte-identical self-host fixed
+  point at `26,990,352` bytes with identical `1,398,096`-token streams. Release
+  and Debug passed `19,696/19,696` assertions, ASan+UBSan Debug passed
+  `18,828/18,828`, and all three completed all 29 module tests. Tests-disabled
+  self-host compilation and independent rebase review passed.
+- **Known capacity limit.** Every live syntax or analysis owner still reserves
+  128 MiB of uncommitted virtual address space because repository arenas cannot
+  grow and shrinking the reservation would impose a new hard per-document
+  allocation cap. Native-page initial commit avoids the physical multiplier,
+  but a worst-case 4,096-document workspace in which every document has been
+  touched can reserve roughly 1 TiB of VA. Slab compaction or a proven dynamic
+  upper bound remains follow-up work for constrained mobile address spaces.
+
+`2026-08-09i` (Linux x86_64, Zen 4 7940HS; the 512-bit SIMD builtin
+vocabulary and the tokenizer port onto it, measured against `2026-08-09g` on
+the same tree. **The self-hosted compiler now runs the AVX-512 tokenizer:
+stage-2 benchmark instructions `8.3788 G` to `6.7761 G` (`-19.1%`) and
+`BENCH_PARSE` median `1.999.827 ns` to `1.609.780 ns` (`-19.5%`). The stage-1
+gate moves `5.1203 G` to `5.1617 G` (`+0.81%`) while the unit being compiled
+grows `1.378.839` to `1.391.850` preprocessed tokens (`+0.94%`), so
+instructions per token goes `3713.476` to `3708.488` (`-0.13%`) — the
+compiler did not get slower per unit of work, there is simply more source in
+the tree. Stages byte-identical.**)
+
+- **What was built.** `<buster/lib/simd.h>` — fifteen target-fixed AVX-512
+  operations with three implementations behind one spelling (self-hosted
+  `__builtin_buster_simd_*`, host intrinsics, scalar fallback), plus
+  `IR_OPCODE_SIMD` and its EVEX lowering in the canonical backend, and
+  `__builtin_popcount`/`popcountll`. `parser.c`'s tokenizer moved off
+  `<immintrin.h>` onto it, which is what unblocked the self-hosted stages:
+  the compaction emitter was previously disabled under `__BUSTER__`.
+- **The clang-built tokenizer did not change.** `tokenize` disassembles to
+  the same 827 instructions with the same opcode histogram before and after
+  the port, and HEAD-plus-port-only benches at `52.7`–`55.6 µs` median
+  against HEAD's `53.9`–`54.1 µs` — inside the noise band. The vocabulary is
+  a rename of the intrinsics on that path, not a re-implementation.
+- **The `+0.81%` on stage 1 is tree growth, not throughput.** Read it with
+  the token denominator, as the `SELF_HOST throughput` line is there for; a
+  change that only adds source moves the absolute counter and leaves the
+  ratio alone, which is exactly what happened here.
+- **The 512-bit vector ABI is now wired**, so a vector can cross a call
+  boundary by value. SystemV passes and returns it in a vector register and
+  spills to the stack past the eighth, verified against clang for a plain
+  identity, for a ninth argument that has to go on the stack, and interleaved
+  with integers so both register files advance together
+  (`vector_identity`/`vector_ninth`/`vector_mixed` in `tests/basic_c_simd.c`,
+  which the driver runs in both the vector and the fallback build). Three
+  things were wrong and are worth naming because each produced *plausible*
+  code: the callee prologue let the "aggregates over two eightbytes are
+  MEMORY" size rule override a classification the IR ABI had already made, so
+  the parameter was read off the stack that the caller had put in `zmm0`; the
+  stack copy on both sides used the ABI's *register* part count, which is 1
+  for a vector, so eight eightbytes of argument were passed as one; and
+  `codegen_canonical_x64_float_memory` only knew sizes 4, 8 and 16. That last
+  one is now the single authority on which part sizes ride in a vector
+  register — the four call sites report `CODEGEN_ERROR_UNSUPPORTED_ABI` on a
+  false return instead of repeating the test — and it also refuses a part
+  wider than `target_vector_register_size`, so a baseline or AVX2 target still
+  gets a clean diagnostic rather than a `zmm` move it cannot execute. A
+  32-byte vector now travels in `ymm` where it used to go on the stack, which
+  is the psABI answer and a behaviour change for anything that passed one.
+  AArch64 gained the indirect path for free. Win64 remains broken for two or
+  more wide vector arguments — pre-existing, reproduces on `main`, filed
+  separately.
+- **Forwarding a SIMD result between adjacent instructions was implemented,
+  measured at zero, and removed.** The strict-adjacency rule the `rax` reload
+  peephole uses cannot fire here: the C frontend materializes every operand
+  expression, so even a fully nested `simd512_store(out,
+  simd512_compress_byte(simd512_equal_byte(a, b), a))` has pointer
+  loads and a `vzeroupper` between each pair of SIMD instructions. Measured
+  `simd_forwarded_operands=0` on a self-compile of the unity `ide.c` and on
+  that nested expression; two hits on the synthetic fixture. What *would* pay
+  is a mask-only rule that survives intervening scalar code — `k1` is written
+  by nothing in the backend except the SIMD lowering, so a mask stays live
+  across the `mov`/`vzeroupper` traffic between uses, and every masked
+  operation would save its reload `kmovq`. It would have to invalidate on
+  three things: a block start (a branch could arrive at a register it did not
+  fill), any emission that can reach a `call` (k registers are volatile in
+  both conventions), and the next SIMD instruction that writes `k1`. That was
+  judged not worth the wrong-code risk for a gain that only lands in
+  buster-compiled binaries, which are validation and not where performance is
+  quoted from. What was kept from the attempt is the register discipline it
+  needed: `vpcompressb` now leaves its result in the first vector register
+  like every other operation, instead of the second.
+
+`2026-08-09h` (Linux x86_64, Zen 4 7940HS; not a throughput audit — a
+robustness change costed against the gate. An external audit reported that the
+arena and emitter bounds checks are bypassable by integer wraparound
+(`if (count + size > capacity)` passes when the sum wraps) and proposed
+centralized `u64_add_checked`/`u64_mul_checked`/`u64_align_forward_checked`/
+`arena_allocate_array_checked` helpers. The holes are real; the prescription
+was measured at `+19.5 M` and shipped at `+3.5 M` instead. **Gate: stage 1
+`5.1203 G` to `5.1373 G` (`+0.33%`); a fixed-workload cross-check attributes
+`+3.5 M` to compiler efficiency (`+0.068%`) and the rest to the tree's own
+growth (`+1.997 k` preprocessed tokens). `ide bench` neutral on an interleaved
+A/B. Fixed point byte-identical, 19560 Release and all sanitized tests pass.**
+Baselines here are the current main (`41814ea`), not `2026-08-09g`'s tree,
+which is why stage 1 starts at `5.1203 G` rather than `5.0824 G`.)
+
+- **The exchange rate this entry exists to record.** `arena_allocate_bytes`
+  runs **`~7.3 M` times per stage-1 compile**, so one instruction retired on
+  its fast path costs `~7 M` instructions, or `0.14%`. That number was read
+  off the disassembly and then confirmed against the counter three times: the
+  two-compare form measured `+19.5 M` for `+2` instructions plus a branch,
+  the single-compare form `+7.3 M` for `+1`, and the shipped form `+3.5 M`
+  for a `+1` that is a 10-byte `movabs`. Price any future check on this path
+  against that rate before writing it.
+- **What was built.** `arena_array_size` in `arena.h` guards every
+  `sizeof(T) * count` (1187 sites) with `count > ARENA_MAX_RESERVATION /
+  element_size`; `arena_allocate_bytes` bounds `size` against
+  `ARENA_MAX_RESERVATION` so the sum-form capacity test is exact rather than
+  bypassable, and the granularity round-up moved into the commit branch,
+  which pays for the bound; `parser_bump_allocate` takes the same bound;
+  `pdb.c`, `codeview.c` and `object.c`'s patch-back helpers move to the
+  remaining-space form `dwarf.c` and `object_buffer_write` already used; and
+  `ir.c`'s `ast.count * 3 + 1` is widened, because `count` is a `u32` and the
+  product wrapped in 32 bits before any allocator could object to it.
+- **Bound the operands, not the results.** A result check (`did a + b
+  wrap?`) needs both operands live and never folds. An operand bound (`is
+  size sane?`) folds to nothing wherever the operand is a constant —
+  `parser_bump_allocate` gained one and `state_push` came out at the same 17
+  instructions as baseline. This works because `os_fail_raw` is
+  `BUSTER_NORETURN BUSTER_COLD`, so a bound established early lets the
+  optimizer delete every later check it implies; verified in isolation, a
+  redundant multiply guard behind an earlier range check disappears
+  entirely.
+- **`__builtin_mul_overflow` is unavailable and unnecessary.** The C
+  frontend implements no `__builtin_*_overflow`
+  (`c_conditional_builtin_supported`), so a builtin-based helper breaks the
+  fixed point. It buys nothing anyway: the portable `count > UINT64_MAX /
+  sizeof(T)` emits byte-identical code for power-of-two element sizes
+  (`shr $60`/`jne`) and strictly better code for others (`cmp` against an
+  immediate plus `lea`, against the builtin's `mulq`/`jo`). The guard folds
+  away entirely when the count is a `u32` or a literal, which is why 1187
+  guarded multiplies cost `+1.08 M` and not `+15 M`.
+- **The gate charges for source size, not only for speed.** The first
+  spelling, `arena_array_size(sizeof(T), (u64)(count))`, cost `+24.7 M` on
+  the gate while costing only `+1.08 M` of real work — the other `+23.6 M`
+  was the compiler compiling `+6.477 k` extra preprocessed tokens from a
+  macro that expands at 1187 sites. Dropping the `(u64)` cast recovered
+  `~4.7 k` tokens. Hardening spelled into a widely-expanded macro must be
+  token-lean; nothing outside a self-hosting compiler would show this.
+- **Measured negative or rejected, do not retry as written:** (1) the
+  audit's remaining-space form as literally proposed, `aligned_offset <=
+  reserved_size && size <= reserved_size - aligned_offset`, `+19.5 M`; (2)
+  the same with the precondition hoisted to a hot `alignment <=
+  ARENA_MAX_ALIGNMENT` check, `+7.3 M` — the constant alignment cannot fold
+  in an out-of-line callee, which is the whole cost; (3) a saturating
+  product instead of a trapping one, rejected on codegen inspection at 4
+  instructions against the trapping form's 2, with no branch to win back
+  since the trapping branch is never taken; (4) `u64_align_forward_checked`
+  as a per-allocation check — alignment is a `BUSTER_ALIGN_OF` or a literal
+  at every site but `disk_builder`'s, so it is not input-reachable and
+  checking it is exactly find (2).
+- **Traps paid for.** (1) The fastest variant measured, `-2.60 M`,
+  establishes `aligned_offset <= reserved_size` by rounding reservations up
+  to 4 KB at creation — and silently enlarges the 256-byte arenas
+  `rendering_test.c` reserves on purpose to test exact boundary behaviour,
+  which surfaced as an `os_commit` failure at the pre-existing `position <=
+  os_position` assertion rather than anywhere near the change. Reservation
+  granularity is not a property of this codebase's arenas; do not make it
+  one to buy `0.05%`. (2) A `static inline` helper in a widely-included
+  header needs `BUSTER_UNUSED_DECL`: the Release unity build passes
+  `-Wno-unused-function` and the split Debug build does not, so it compiles
+  everywhere except the configuration CI runs sanitized. (3) `ide bench`
+  varies `~4%` between separately linked binaries from code layout alone,
+  and a single-binary reading of it produced a phantom `+5%` regression
+  early in this session; interleave the two binaries' runs and compare
+  minima. Stage-1 instructions reproduce to `0.005%` and are the instrument
+  to trust.
+- **Recorded next step, verified rather than proposed.** No checked-allocator
+  API can catch a count that wrapped before the call — `ast.count * 3 + 1` is
+  the proof. Adding `unsigned-integer-overflow` to the sanitizer set in
+  `CMakeLists.txt` was trialled end to end: **46 reports across the whole
+  sanitized suite, every one deliberate** (`hash.c` mixing, the SWAR
+  byte-scan at `c.c:325`, `u128` negation in `string.c`, djb2 in
+  `ui_core.c`, `s64`-to-`u64` time diffs), and zero test failures. Annotating
+  those `~10` functions with `no_sanitize("unsigned-integer-overflow")` makes
+  the row run clean and catches this class permanently, in a configuration
+  that pays no Release cost. The CMake change was reverted rather than
+  shipped, because it reds the sanitized row until the annotations land.
+- Reference points for the next audit, all clang-built on this host:
+  stage 1 `5.1373 G` instructions, stage 2 `69.26 G` (validation only),
+  `BENCH_PARSE` `~48.8 us` minimum, byte-identical fixed point
+  (`SELF_HOST deterministic bytes=26743800`), 19560 Release unit tests and
+  29 module tests.
+
 
 `2026-08-09g` (Linux x86_64, Zen 4 7940HS; proposal 3 of `2026-08-08k` taken
 as its own session — `CToken` 48 to 16 bytes with offset-based spellings and
