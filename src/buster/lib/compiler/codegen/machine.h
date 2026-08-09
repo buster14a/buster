@@ -1,6 +1,8 @@
 #pragma once
 
 #include <buster/lib/arena.h>
+#include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/target.h>
 
 // Compact target-specific machine SSA representation shared by the FAST and
 // QUALITY register allocators, the machine verifier, frame layout, and the
@@ -183,8 +185,70 @@ typedef enum MachineOpcode
     MACHINE_OPCODE_SKELETON_NOP,
     MACHINE_OPCODE_SKELETON_COPY,
     MACHINE_OPCODE_SKELETON_RETURN,
+    // x86-64 scalar subset. Operand slot 0 is the destination where one
+    // exists; two-address forms tie slot 0 to the first source in metadata.
+    MACHINE_X64_MOV_RI,       // def, immediate-pool ref; 64-bit materialize
+    MACHINE_X64_MOV_RR,       // def, use; 64-bit register copy
+    MACHINE_X64_MOV32_RR,     // def, use; 32-bit move, zero-extends
+    MACHINE_X64_MOVSX8_RR,    // def, use; sign-extend from 8 bits
+    MACHINE_X64_MOVSX16_RR,   // def, use; sign-extend from 16 bits
+    MACHINE_X64_MOVSX32_RR,   // def, use; sign-extend from 32 bits
+    MACHINE_X64_MOVZX8_RR,    // def, use; zero-extend from 8 bits
+    MACHINE_X64_MOVZX16_RR,   // def, use; zero-extend from 16 bits
+    MACHINE_X64_ADD32,        // def tied use, use
+    MACHINE_X64_ADD64,
+    MACHINE_X64_SUB32,
+    MACHINE_X64_SUB64,
+    MACHINE_X64_AND32,
+    MACHINE_X64_AND64,
+    MACHINE_X64_OR32,
+    MACHINE_X64_OR64,
+    MACHINE_X64_XOR32,
+    MACHINE_X64_XOR64,
+    MACHINE_X64_IMUL32,
+    MACHINE_X64_IMUL64,
+    MACHINE_X64_NEG32,        // def tied use
+    MACHINE_X64_NEG64,
+    MACHINE_X64_NOT32,
+    MACHINE_X64_NOT64,
+    MACHINE_X64_CMP32,        // use, use; defines flags
+    MACHINE_X64_CMP64,
+    MACHINE_X64_TEST_RR,      // use, use; defines flags (64-bit)
+    MACHINE_X64_SETCC,        // def; payload = MachineX64Condition; uses flags
+    MACHINE_X64_LOAD_FRAME,   // def, stack-slot ref; 64-bit slot read
+    MACHINE_X64_STORE_FRAME8, // stack-slot ref, use; sized frame store
+    MACHINE_X64_STORE_FRAME16,
+    MACHINE_X64_STORE_FRAME32,
+    MACHINE_X64_STORE_FRAME64,
+    MACHINE_X64_LOAD_PTR8,    // def, use address; zero-extends
+    MACHINE_X64_LOAD_PTR16,
+    MACHINE_X64_LOAD_PTR32,
+    MACHINE_X64_LOAD_PTR64,
+    MACHINE_X64_STORE_PTR8,   // use address, use value
+    MACHINE_X64_STORE_PTR16,
+    MACHINE_X64_STORE_PTR32,
+    MACHINE_X64_STORE_PTR64,
+    MACHINE_X64_JMP,          // block ref; terminator
+    MACHINE_X64_JCC,          // block ref taken, block ref fallthrough; payload = condition; terminator
+    MACHINE_X64_RET,          // terminator; implicit RAX use when returning a value
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
+
+// x86 condition-code low nibble as used by SETcc (0x0f 0x90+cc) and Jcc
+// (0x0f 0x80+cc).
+typedef enum MachineX64Condition
+{
+    MACHINE_X64_CONDITION_BELOW = 0x2,
+    MACHINE_X64_CONDITION_ABOVE_EQUAL = 0x3,
+    MACHINE_X64_CONDITION_EQUAL = 0x4,
+    MACHINE_X64_CONDITION_NOT_EQUAL = 0x5,
+    MACHINE_X64_CONDITION_BELOW_EQUAL = 0x6,
+    MACHINE_X64_CONDITION_ABOVE = 0x7,
+    MACHINE_X64_CONDITION_LESS = 0xc,
+    MACHINE_X64_CONDITION_GREATER_EQUAL = 0xd,
+    MACHINE_X64_CONDITION_LESS_EQUAL = 0xe,
+    MACHINE_X64_CONDITION_GREATER = 0xf,
+} MachineX64Condition;
 
 typedef enum MachineOperandRole
 {
@@ -227,16 +291,104 @@ struct MachineOpcodeInfo
 
 // The contiguous per-function machine streams the builder flattens into.
 // Owned by whatever arena the caller passed to `machine_function_builder_finish`;
-// intended to live in a temporal scope released after encoding.
+// intended to live in a temporal scope released after encoding. The
+// immediate pool and stack-slot table are cold selector-owned side arrays:
+// MACHINE_REF_IMMEDIATE payloads index `immediates`, MACHINE_REF_STACK_SLOT
+// payloads index `stack_slot_sizes` (slot offsets are frame-layout output,
+// not selection output).
 typedef struct MachineFunction MachineFunction;
 struct MachineFunction
 {
     MachineInstruction* instructions;
     MachineVirtualRegister* virtual_registers;
     MachineBlock* blocks;
+    u64* immediates;
+    u32* stack_slot_sizes;
     u32 instruction_count;
     u32 virtual_register_count;
     u32 block_count;
+    u32 immediate_count;
+    u32 stack_slot_count;
+    u32 reserved;
+};
+
+// x86-64 physical general registers in encoding order.
+typedef enum MachineX64Register
+{
+    MACHINE_X64_RAX,
+    MACHINE_X64_RCX,
+    MACHINE_X64_RDX,
+    MACHINE_X64_RBX,
+    MACHINE_X64_RSP,
+    MACHINE_X64_RBP,
+    MACHINE_X64_RSI,
+    MACHINE_X64_RDI,
+    MACHINE_X64_R8,
+    MACHINE_X64_R9,
+    MACHINE_X64_R10,
+    MACHINE_X64_R11,
+    MACHINE_X64_R12,
+    MACHINE_X64_R13,
+    MACHINE_X64_R14,
+    MACHINE_X64_R15,
+    MACHINE_X64_REGISTER_COUNT,
+} MachineX64Register;
+
+typedef enum MachineEditKind
+{
+    MACHINE_EDIT_NONE,
+    MACHINE_EDIT_RELOAD, // subject vreg loads into location preg at point
+    MACHINE_EDIT_SPILL,  // subject vreg stores from location preg at point
+    MACHINE_EDIT_KIND_COUNT,
+} MachineEditKind;
+
+// Result of selecting one canonical typed-IR function into machine IR.
+// `supported` false is an explicit per-function fallback: `failed_opcode`
+// names the first construct outside the selected subset.
+typedef struct MachineSelectResult MachineSelectResult;
+struct MachineSelectResult
+{
+    MachineFunction function;
+    IrOpcode failed_opcode;
+    bool supported;
+    bool returns_value;
+    u8 reserved[2];
+    // Selector expansion statistics: typed instructions consumed and machine
+    // rows produced.
+    u32 selected_typed_instructions;
+    u32 machine_instructions;
+};
+
+// MIR_STACK placement: every virtual register owns one 8-byte frame slot and
+// every operand round-trips through a fixed scratch register. This is the
+// selector/encoder verification mode, not an allocator.
+typedef struct MachineStackPlacement MachineStackPlacement;
+struct MachineStackPlacement
+{
+    MachineEdit* edits;
+    // Frame offsets (positive displacements below the frame base) per vreg
+    // slot and per selector stack slot.
+    u32* virtual_register_offsets;
+    u32* stack_slot_offsets;
+    u32 edit_count;
+    u32 frame_size;
+    // Scratch register per operand slot for every instruction, packed four
+    // u8 per instruction, parallel to the instruction array.
+    u8* operand_registers;
+    u32 reload_count;
+    u32 spill_count;
+    bool valid;
+    u8 reserved[3];
+};
+
+typedef struct MachineEncodeResult MachineEncodeResult;
+struct MachineEncodeResult
+{
+    u8* bytes;
+    u32 byte_count;
+    u32* block_offsets;
+    bool valid;
+    u8 reserved[7];
 };
 
 // Chunked construction: one selection pass appends rows into fixed-size arena
@@ -314,6 +466,9 @@ BUSTER_F_DECL MachinePoint machine_point_make(u32 instruction_index, MachinePoin
 BUSTER_F_DECL u32 machine_point_instruction(MachinePoint point);
 BUSTER_F_DECL MachinePointPhase machine_point_phase(MachinePoint point);
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode);
+BUSTER_F_DECL void machine_stream_initialize(MachineBuilderStream* stream, u64 element_size);
+BUSTER_F_DECL void* machine_stream_append(Arena* arena, MachineBuilderStream* stream);
+BUSTER_F_DECL void machine_stream_flatten(MachineBuilderStream* stream, void* destination);
 BUSTER_F_DECL MachineFunctionBuilder machine_function_builder_begin(Arena* arena);
 BUSTER_F_DECL u32 machine_builder_virtual_register(MachineFunctionBuilder* builder, MachineVirtualRegister virtual_register);
 BUSTER_F_DECL u32 machine_builder_block_begin(MachineFunctionBuilder* builder);
@@ -323,3 +478,6 @@ BUSTER_F_DECL MachineFunction machine_function_builder_finish(Arena* arena, Mach
 BUSTER_F_DECL MachineVerifyResult machine_verify_function(MachineFunction* function);
 BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* function);
+BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target);
+BUSTER_F_DECL MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function);
+BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
