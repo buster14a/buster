@@ -8435,7 +8435,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_instruction_preserves_wide_vector
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* output, IrProgram* program, IrFunction* function, IrInstruction* instruction,
-                                                                u32 const* value_offsets, Target target, u64* native_operation_count,
+                                                                u32 const* value_offsets, u32 frame_base_offset, Target target, u64* native_operation_count,
                                                                 u64* split_operation_count, bool* upper_vector_dirty, IrValueId* last_wide_vector_result,
                                                                 u32* last_wide_vector_size, u64* forwarded_wide_vector_load_count)
 {
@@ -8457,15 +8457,27 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
     {
         return false;
     }
+    // Frame slots are addressed through the same rebase every other canonical
+    // emission uses: a Win64 function with a dynamic stack sets rbp to the
+    // bottom of the frame and reaches its values at positive displacements,
+    // where every other target keeps rbp at the top and uses negative ones.
+    // Spelling the displacement as a bare negation is only right where the
+    // rebase is the identity, so it silently addressed outside the frame for
+    // exactly the Windows functions this path is reached from.
+    s32 left_displacement =
+        codegen_canonical_x64_rebase_frame_displacement(output, -(s64)value_offsets[instruction->operands[0].value], frame_base_offset);
+    s32 result_displacement =
+        codegen_canonical_x64_rebase_frame_displacement(output, -(s64)value_offsets[instruction->result.value], frame_base_offset);
+    s32 right_displacement =
+        instruction->operand_count == 2
+            ? codegen_canonical_x64_rebase_frame_displacement(output, -(s64)value_offsets[instruction->operands[1].value], frame_base_offset)
+            : 0;
     X64Builder builder = {
         .buffer = *output,
     };
-    s32 left_displacement = -(s32)(value_offsets[instruction->operands[0].value]);
-    s32 result_displacement = -(s32)(value_offsets[instruction->result.value]);
     codegen_canonical_x64_address(&builder.buffer, X64_REGISTER_R8, left_displacement);
     if (instruction->operand_count == 2)
     {
-        s32 right_displacement = -(s32)(value_offsets[instruction->operands[1].value]);
         codegen_canonical_x64_address(&builder.buffer, X64_REGISTER_R9, right_displacement);
     }
     codegen_canonical_x64_address(&builder.buffer, X64_REGISTER_R10, result_displacement);
@@ -12273,9 +12285,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         if (canonical_unary_type && canonical_unary_type->kind == IR_TYPE_VECTOR)
                         {
                             if (!codegen_canonical_x64_vector_operation(
-                                    &buffer, program, function, instruction, value_offsets, target, &result.statistics.native_vector_operation_count,
-                                    &result.statistics.split_vector_operation_count, &x64_upper_vector_dirty, &x64_last_wide_vector_result,
-                                    &x64_last_wide_vector_size, &result.statistics.forwarded_wide_vector_load_count))
+                                    &buffer, program, function, instruction, value_offsets, canonical_x64_frame_base_offset, target,
+                                    &result.statistics.native_vector_operation_count, &result.statistics.split_vector_operation_count,
+                                    &x64_upper_vector_dirty, &x64_last_wide_vector_result, &x64_last_wide_vector_size,
+                                    &result.statistics.forwarded_wide_vector_load_count))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
@@ -12378,9 +12391,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         if (operand_type_value && operand_type_value->kind == IR_TYPE_VECTOR)
                         {
                             if (!codegen_canonical_x64_vector_operation(
-                                    &buffer, program, function, instruction, value_offsets, target, &result.statistics.native_vector_operation_count,
-                                    &result.statistics.split_vector_operation_count, &x64_upper_vector_dirty, &x64_last_wide_vector_result,
-                                    &x64_last_wide_vector_size, &result.statistics.forwarded_wide_vector_load_count))
+                                    &buffer, program, function, instruction, value_offsets, canonical_x64_frame_base_offset, target,
+                                    &result.statistics.native_vector_operation_count, &result.statistics.split_vector_operation_count,
+                                    &x64_upper_vector_dirty, &x64_last_wide_vector_result, &x64_last_wide_vector_size,
+                                    &result.statistics.forwarded_wide_vector_load_count))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
@@ -13018,14 +13032,15 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             if (indirect[operand_index])
                             {
                                 codegen_canonical_x64_asm_load(&buffer, X64_REGISTER_R11, X64_REGISTER_RBP,
-                                                              (u32)(-(s32)value_offsets[input.value]), 8);
+                                                              (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[input.value]), 8);
                                 codegen_canonical_x64_asm_load(&buffer, asm_registers[operand_index], X64_REGISTER_R11, 0,
                                                               (u32)input_type->layout.size);
                             }
                             else
                             {
                                 codegen_canonical_x64_asm_load(&buffer, asm_registers[operand_index], X64_REGISTER_RBP,
-                                                              (u32)(-(s32)value_offsets[input.value]), (u32)input_type->layout.size);
+                                                              (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[input.value]),
+                                                              (u32)input_type->layout.size);
                             }
                         }
                         if (cpuid || xgetbv || undefined)
@@ -13082,14 +13097,15 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             if (output_indirect)
                             {
                                 codegen_canonical_x64_asm_load(&buffer, X64_REGISTER_R11, X64_REGISTER_RBP,
-                                                              (u32)(-(s32)value_offsets[place_id.value]), 8);
+                                                              (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[place_id.value]), 8);
                                 codegen_canonical_x64_asm_store(&buffer, X64_REGISTER_R11, asm_registers[operand_index], 0,
                                                                (u32)output_type->layout.size);
                             }
                             else
                             {
                                 codegen_canonical_x64_asm_store(&buffer, X64_REGISTER_RBP, asm_registers[operand_index],
-                                                               (u32)(-(s32)value_offsets[place_id.value]), (u32)output_type->layout.size);
+                                                               (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[place_id.value]),
+                                                               (u32)output_type->layout.size);
                             }
                         }
                         // Inline assembly may use RBX for a fixed b operand or

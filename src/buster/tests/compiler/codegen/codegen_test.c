@@ -2990,6 +2990,91 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, dynamic_outgoing_cleanup_valid);
         }
     }
+    // Vector operands must be reached through the same frame rebase as every
+    // other canonical value. A Win64 function whose scope emits a stack restore
+    // -- which every loop body does -- keeps rbp at the bottom of its frame and
+    // addresses values at positive displacements, where every other target
+    // keeps rbp at the top and uses negative ones. Spelling a vector operand's
+    // displacement as a bare negation is only right where the rebase is the
+    // identity, so it addressed outside the frame on Windows alone, and only in
+    // a function that also has a loop: the self-hosted tokenizer's window loop
+    // is exactly that shape, and its classification masks came back garbage.
+    String8 vector_frame_c_source = S8(
+        "typedef unsigned char Bytes16 __attribute__((vector_size(16)));\n"
+        "void vector_with_loop(Bytes16 *out, Bytes16 *left, Bytes16 *right, int count, int *total_out) {\n"
+        "    int total = 0;\n"
+        "    for (int index = 0; index < count; index += 1) { total += index; }\n"
+        "    *total_out = total;\n"
+        "    Bytes16 sum = *left + *right;\n"
+        "    *out = sum;\n"
+        "}\n"
+        "void vector_without_loop(Bytes16 *out, Bytes16 *left, Bytes16 *right) {\n"
+        "    Bytes16 sum = *left + *right;\n"
+        "    *out = sum;\n"
+        "}\n");
+    Target vector_frame_targets[] = {canonical_windows_target, target};
+    for (u32 vector_frame_index = 0; vector_frame_index < BUSTER_ARRAY_LENGTH(vector_frame_targets); vector_frame_index += 1)
+    {
+        Target vector_frame_target = vector_frame_targets[vector_frame_index];
+        bool vector_frame_windows = vector_frame_target.os == OPERATING_SYSTEM_WINDOWS;
+        CPreprocessResult vector_frame_tokens = c_preprocess(arguments->arena, vector_frame_c_source, (CPreprocessOptions){0});
+        CParseResult vector_frame_parse = c_parse(arguments->arena, vector_frame_tokens);
+        CIRLowerResult vector_frame_ir =
+            c_lower_to_ir(arguments->arena, S8("canonical-vector-frame.c"), vector_frame_tokens, vector_frame_parse, vector_frame_target);
+        BUSTER_TEST(arguments, vector_frame_tokens.error_count == 0);
+        BUSTER_TEST(arguments, vector_frame_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, vector_frame_ir.diagnostic_count == 0);
+        if (!vector_frame_ir.program)
+        {
+            continue;
+        }
+        IrModule* vector_frame_module_ir = vector_frame_ir.program->modules;
+        CodegenModule vector_frame_module = codegen_generate_canonical_module(arguments->arena, vector_frame_ir.program, vector_frame_module_ir,
+                                                                              vector_frame_target, (CodegenModuleOptions){0});
+        BUSTER_TEST(arguments, vector_frame_module.error == CODEGEN_ERROR_NONE);
+        if (vector_frame_module.error != CODEGEN_ERROR_NONE)
+        {
+            continue;
+        }
+        String8 vector_frame_names[] = {S8("vector_with_loop"), S8("vector_without_loop")};
+        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(vector_frame_names); name_index += 1)
+        {
+            IrFunction* vector_frame_function = codegen_test_c_function_find(vector_frame_module_ir, vector_frame_names[name_index]);
+            BUSTER_TEST(arguments, vector_frame_function != 0);
+            CodegenFunctionDescriptor* vector_frame_descriptor =
+                vector_frame_function ? codegen_test_c_descriptor_find(&vector_frame_module, vector_frame_function->symbol) : 0;
+            BUSTER_TEST(arguments, vector_frame_descriptor != 0);
+            if (!vector_frame_descriptor || (u64)vector_frame_descriptor->code_offset + vector_frame_descriptor->code_size > vector_frame_module.code.length)
+            {
+                continue;
+            }
+            // The vector path is the only emission that addresses a frame slot
+            // through r8/r9/r10, so `lea r8|r9|r10, [rbp+disp32]` names its
+            // operand and result slots exactly.
+            u8* vector_frame_code = vector_frame_module.code.pointer + vector_frame_descriptor->code_offset;
+            u32 vector_frame_lea_count = 0;
+            bool vector_frame_displacements_valid = true;
+            for (u32 byte_index = 0; byte_index + 7 <= vector_frame_descriptor->code_size; byte_index += 1)
+            {
+                u8 modrm = vector_frame_code[byte_index + 2];
+                if (vector_frame_code[byte_index] != 0x4c || vector_frame_code[byte_index + 1] != 0x8d ||
+                    (modrm != 0x85 && modrm != 0x8d && modrm != 0x95))
+                {
+                    continue;
+                }
+                s32 displacement = (s32)((u32)vector_frame_code[byte_index + 3] | ((u32)vector_frame_code[byte_index + 4] << 8) |
+                                         ((u32)vector_frame_code[byte_index + 5] << 16) | ((u32)vector_frame_code[byte_index + 6] << 24));
+                vector_frame_lea_count += 1;
+                // A Windows frame holding a stack restore is addressed upward
+                // from its bottom; every other frame is addressed downward from
+                // its top. Either way the slot has to be inside the frame.
+                bool dynamic_frame = vector_frame_windows && string_equal(vector_frame_names[name_index], S8("vector_with_loop"));
+                vector_frame_displacements_valid = vector_frame_displacements_valid && (dynamic_frame ? displacement >= 0 : displacement < 0);
+            }
+            BUSTER_TEST(arguments, vector_frame_lea_count >= 3);
+            BUSTER_TEST(arguments, vector_frame_displacements_valid);
+        }
+    }
     String8 static_aggregate_c_source = S8(
         "typedef struct LargeAggregate { char padding[1024 * 1024]; int first; int second; } LargeAggregate;\n"
         "static LargeAggregate global_aggregate;\n"
