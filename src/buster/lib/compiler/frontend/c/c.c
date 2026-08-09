@@ -22,6 +22,9 @@ struct CTranslatedSource
     u32 checkpoint_count;
     // Spelling-space offset of source.pointer (0 without a space).
     u32 translated_offset;
+    // Physical lines of the untranslated file, spliced ones included. The
+    // line counter the checkpoints already need makes this free.
+    u32 raw_lines;
 };
 
 // The single contiguous byte space every token offset of one preprocess run
@@ -432,6 +435,9 @@ BUSTER_GLOBAL_LOCAL CTranslatedSource c_translate_source(Arena* arena, CSpelling
     result.checkpoints = checkpoints;
     result.checkpoint_offsets = checkpoint_offsets;
     result.checkpoint_count = checkpoint_count;
+    // `line` counts breaks, so it is one past the lines that ended; a column
+    // past the first means bytes followed the last break and opened one more.
+    result.raw_lines = line - 1 + (column > 1);
     return result;
 }
 
@@ -640,6 +646,93 @@ BUSTER_GLOBAL_LOCAL CSourceLocation c_preprocess_token_location_cursor(CPreproce
     cursor->memo_offset = token.offset;
     cursor->memo_location = location;
     return location;
+}
+
+// One finished line, classified by what the lexer saw on it. Branchless: the
+// flags are 0/1 and every bucket is an unconditional add, so a line of code,
+// a line of comment and a blank line all cost the same four adds.
+BUSTER_GLOBAL_LOCAL void c_source_metrics_line(CSourceMetrics* metrics, u32 has_code, u32 has_comment)
+{
+    metrics->translated_lines += 1;
+    metrics->code_lines += has_code;
+    metrics->comment_lines += has_comment;
+    metrics->mixed_lines += has_code & has_comment;
+    metrics->blank_lines += (has_code | has_comment) ^ 1;
+}
+
+void c_source_metrics_add(CSourceMetrics* total, CSourceMetrics const* part)
+{
+    total->files += part->files;
+    total->bytes += part->bytes;
+    total->translated_bytes += part->translated_bytes;
+    total->lines += part->lines;
+    total->translated_lines += part->translated_lines;
+    total->spliced_lines += part->spliced_lines;
+    total->code_lines += part->code_lines;
+    total->comment_lines += part->comment_lines;
+    total->mixed_lines += part->mixed_lines;
+    total->blank_lines += part->blank_lines;
+    total->comment_bytes += part->comment_bytes;
+    total->blank_bytes += part->blank_bytes;
+    total->literal_bytes += part->literal_bytes;
+    total->comments += part->comments;
+    total->tokens += part->tokens;
+}
+
+u64 c_source_metrics_code_bytes(CSourceMetrics metrics)
+{
+    return metrics.translated_bytes - metrics.comment_bytes - metrics.blank_bytes;
+}
+
+// Paths already lexed, so the unique aggregate counts a header once however
+// often it is included. Hashes only: two distinct paths colliding on 64 bits
+// would merge into one entry, which is cheaper to accept than a string table
+// on a counter that feeds no decision.
+typedef struct CSourceMetricsFileSet CSourceMetricsFileSet;
+struct CSourceMetricsFileSet
+{
+    u64* hashes;
+    u32 capacity;
+    u32 count;
+};
+
+BUSTER_GLOBAL_LOCAL bool c_source_metrics_file_first(Arena* arena, CSourceMetricsFileSet* set, String8 path)
+{
+    if (set->count * 2 >= set->capacity)
+    {
+        u32 capacity = set->capacity ? set->capacity * 2 : 256;
+        u64* hashes = arena_allocate(arena, u64, capacity);
+        memset(hashes, 0, capacity * sizeof(*hashes));
+        for (u32 index = 0; index < set->capacity; index += 1)
+        {
+            u64 moved = set->hashes[index];
+            if (moved)
+            {
+                u32 slot = (u32)moved & (capacity - 1);
+                while (hashes[slot])
+                {
+                    slot = (slot + 1) & (capacity - 1);
+                }
+                hashes[slot] = moved;
+            }
+        }
+        set->hashes = hashes;
+        set->capacity = capacity;
+    }
+    // Zero marks an empty slot, so no path may hash to it.
+    u64 hash = buster_hash_64((u8*)path.pointer, path.length) | 1;
+    u32 slot = (u32)hash & (set->capacity - 1);
+    while (set->hashes[slot])
+    {
+        if (set->hashes[slot] == hash)
+        {
+            return false;
+        }
+        slot = (slot + 1) & (set->capacity - 1);
+    }
+    set->hashes[slot] = hash;
+    set->count += 1;
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL void c_token_push(CLexResult* result, CTranslatedSource translated, u64 start, u64 end, CTokenKind kind, CPunctuator punctuator)
@@ -885,28 +978,48 @@ BUSTER_GLOBAL_LOCAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, 
     u64 maximum_diagnostic_count = translated.source.length + 1;
     u64 diagnostic_capacity = BUSTER_MIN(maximum_diagnostic_count, UINT64_C(64));
     result.diagnostics = arena_allocate(diagnostic_arena, CDiagnostic, diagnostic_capacity);
+    // Source measurement rides the branches below; see CSourceMetrics.
+    result.metrics.files = 1;
+    result.metrics.bytes = source.length;
+    result.metrics.translated_bytes = translated.source.length;
+    result.metrics.lines = translated.raw_lines;
+    u64 line_start = 0;
+    u64 newline_tokens = 0;
+    u32 line_has_code = 0;
+    u32 line_has_comment = 0;
     u64 offset = 0;
     while (offset < translated.source.length)
     {
         char8 character = translated.source.pointer[offset];
         if (c_horizontal_whitespace(character))
         {
+            result.metrics.blank_bytes += 1;
             offset += 1;
             continue;
         }
         if (character == '\n')
         {
             c_token_push(&result, translated, offset, offset + 1, C_TOKEN_NEWLINE, C_PUNCTUATOR_NONE);
+            c_source_metrics_line(&result.metrics, line_has_code, line_has_comment);
+            result.metrics.blank_bytes += 1;
+            newline_tokens += 1;
+            line_has_code = 0;
+            line_has_comment = 0;
             offset += 1;
+            line_start = offset;
             continue;
         }
         if (character == '/' && offset + 1 < translated.source.length && translated.source.pointer[offset + 1] == '/')
         {
+            u64 comment_start = offset;
             offset += 2;
             while (offset < translated.source.length && translated.source.pointer[offset] != '\n')
             {
                 offset += 1;
             }
+            result.metrics.comment_bytes += offset - comment_start;
+            result.metrics.comments += 1;
+            line_has_comment = 1;
             continue;
         }
         if (character == '/' && offset + 1 < translated.source.length && translated.source.pointer[offset + 1] == '*')
@@ -914,6 +1027,9 @@ BUSTER_GLOBAL_LOCAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, 
             u64 comment_start = offset;
             offset += 2;
             bool terminated = false;
+            // Set before the scan so the lines a multi-line comment crosses
+            // are all attributed to it as they end.
+            line_has_comment = 1;
             while (offset < translated.source.length)
             {
                 if (translated.source.pointer[offset] == '*' && offset + 1 < translated.source.length && translated.source.pointer[offset + 1] == '/')
@@ -925,9 +1041,15 @@ BUSTER_GLOBAL_LOCAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, 
                 if (translated.source.pointer[offset] == '\n')
                 {
                     c_token_push(&result, translated, offset, offset + 1, C_TOKEN_NEWLINE, C_PUNCTUATOR_NONE);
+                    c_source_metrics_line(&result.metrics, line_has_code, 1);
+                    newline_tokens += 1;
+                    line_has_code = 0;
+                    line_start = offset + 1;
                 }
                 offset += 1;
             }
+            result.metrics.comment_bytes += offset - comment_start;
+            result.metrics.comments += 1;
             if (!terminated)
             {
                 c_diagnostic_push(&result, diagnostic_arena, &diagnostic_capacity, maximum_diagnostic_count, comment_start,
@@ -935,6 +1057,9 @@ BUSTER_GLOBAL_LOCAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, 
             }
             continue;
         }
+        // Everything past this point produces a token, so one store here
+        // covers every kind instead of one per lexing branch.
+        line_has_code = 1;
         u64 literal_prefix_length = 0;
         char8 literal_delimiter = 0;
         if (c_literal_prefix(translated.source, offset, &literal_prefix_length, &literal_delimiter))
@@ -971,6 +1096,7 @@ BUSTER_GLOBAL_LOCAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, 
             }
             CTokenKind kind = literal_delimiter == '\'' ? C_TOKEN_CHARACTER_LITERAL : C_TOKEN_STRING_LITERAL;
             c_token_push(&result, translated, start, offset, kind, C_PUNCTUATOR_NONE);
+            result.metrics.literal_bytes += offset - start;
             if (!terminated)
             {
                 c_diagnostic_push(&result, diagnostic_arena, &diagnostic_capacity, maximum_diagnostic_count, start,
@@ -1017,6 +1143,13 @@ BUSTER_GLOBAL_LOCAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, 
                           string_format(diagnostic_arena, S8("invalid character byte {u32} in C source"), (u32)character));
         offset += 1;
     }
+    // A file whose last line has no terminating newline still ends a line.
+    if (translated.source.length > line_start)
+    {
+        c_source_metrics_line(&result.metrics, line_has_code, line_has_comment);
+    }
+    result.metrics.spliced_lines = result.metrics.lines - result.metrics.translated_lines;
+    result.metrics.tokens = result.token_count - newline_tokens;
     c_token_push(&result, translated, translated.source.length, translated.source.length, C_TOKEN_END_OF_FILE, C_PUNCTUATOR_NONE);
     CDiagnostic* diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_count);
     if (result.diagnostic_count)
@@ -2374,6 +2507,7 @@ BUSTER_GLOBAL_LOCAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space
             }
         }
         expansion_count += 1;
+        result->preprocessed.expansions += 1;
         if (expansion_count > expansion_limit)
         {
             c_preprocess_diagnostic_push(arena, result, token.location, C_DIAGNOSTIC_MACRO_EXPANSION_LIMIT, S8("macro expansion limit exceeded"));
@@ -4355,6 +4489,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                   .kind = C_SOURCE_MAP_EXPANSION,
                               });
     CLexResult root_lex = c_lex_space(arena, space, source);
+    CSourceMetricsFileSet metrics_files = {0};
+    c_source_metrics_add(&result.source_lexed, &root_lex.metrics);
+    if (c_source_metrics_file_first(arena, &metrics_files, options.source_path))
+    {
+        c_source_metrics_add(&result.source_unique, &root_lex.metrics);
+    }
     CSymbolTable* symbol_table = arena_allocate(arena, CSymbolTable, 1);
     *symbol_table = c_symbol_table_create(arena);
     result.symbols = symbol_table;
@@ -4892,6 +5032,9 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 else if (active && c_token_spelling_equal(base, directive, S8("define")))
                 {
                     c_preprocess_define_directive(arena, symbol_table, lex, &token_index, &first_macro, &last_macro, &result, directive_location);
+                    // Directives reached, not macros surviving: a header
+                    // included twice defines its macros twice.
+                    result.preprocessed.definitions += 1;
                 }
                 else if (active && c_token_spelling_equal(base, directive, S8("undef")))
                 {
@@ -4970,6 +5113,14 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                 once_paths[once_path_count++] = include_path;
                             }
                             CLexResult include_lex = include_once ? (CLexResult){0} : c_lex_space(arena, space, include_source);
+                            // A suppressed include lexed nothing and adds
+                            // zeroes; its path was already counted by the
+                            // inclusion that did the lexing.
+                            c_source_metrics_add(&result.source_lexed, &include_lex.metrics);
+                            if (c_source_metrics_file_first(arena, &metrics_files, include_path))
+                            {
+                                c_source_metrics_add(&result.source_unique, &include_lex.metrics);
+                            }
                             c_symbols_intern_tokens(symbol_table, include_lex.spelling_base, include_lex.tokens, include_lex.token_count);
                             for (u64 index = 0; index < include_lex.diagnostic_count; index += 1)
                             {
@@ -5165,6 +5316,14 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .kind = C_TOKEN_END_OF_FILE,
     };
     result.token_count = output_index;
+    // The stream is contiguous by now, so the spellings sum in one linear
+    // pass rather than one add per token as the ranges were appended.
+    result.preprocessed.tokens = output_count;
+    for (u64 token_index = 0; token_index < output_count; token_index += 1)
+    {
+        result.preprocessed.bytes += result.tokens[token_index].length;
+    }
+    result.preprocessed.spelling_bytes = space->used;
     result.files = file_table.files;
     result.file_count = file_table.count;
     // The map was append-only while the stream was built; sort it once so

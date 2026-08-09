@@ -177,6 +177,71 @@ struct CDiagnostic
     u32 reserved;
 };
 
+// What one lex consumed, measured in the units a human uses to describe
+// source: bytes, lines, code, comments, whitespace. Every field falls out of
+// a branch c_lex_space already takes, so measuring costs a counter update per
+// whitespace byte, per comment and per line rather than a second pass.
+//
+// Two exact partitions hold per lex, and survive summation:
+//   translated_bytes == code_bytes + comment_bytes + blank_bytes
+//   translated_lines == code_lines + (comment_lines - mixed_lines) + blank_lines
+// `code_bytes` is derived, not stored: translated_bytes - comment - blank.
+//
+// `bytes`/`lines` measure the file as written; `translated_bytes`/
+// `translated_lines` measure what the lexer actually scanned, after
+// translation phases 1-2 delete carriage returns and fold line splices.
+// `spliced_lines` is the difference in lines, and the two byte counts differ
+// by that plus the deleted carriage returns.
+typedef struct CSourceMetrics CSourceMetrics;
+struct CSourceMetrics
+{
+    // Lexed aggregates count one per inclusion, unique aggregates one per
+    // distinct path; a single lex reports 1.
+    u64 files;
+    u64 bytes;
+    u64 translated_bytes;
+    u64 lines;
+    u64 translated_lines;
+    u64 spliced_lines;
+    // sLOC: lines carrying at least one preprocessing token.
+    u64 code_lines;
+    u64 comment_lines;
+    // Lines carrying both code and comment, counted in both totals above.
+    u64 mixed_lines;
+    u64 blank_lines;
+    // Comment text including its delimiters, and the newlines inside a block
+    // comment; those newlines are therefore not in blank_bytes.
+    u64 comment_bytes;
+    // Whitespace outside comments, newlines included.
+    u64 blank_bytes;
+    // String and character literal spellings; a subset of the derived
+    // code_bytes.
+    u64 literal_bytes;
+    u64 comments;
+    // Preprocessing tokens, excluding the newline markers and the end marker.
+    u64 tokens;
+};
+
+// The other half of the frontend's work: what preprocessing produced, as
+// against what it read. Macro expansion multiplies the source by whatever
+// factor the macros ask for, so parsing and lowering scale with these numbers
+// and not with the file sizes in CSourceMetrics.
+typedef struct CPreprocessedMetrics CPreprocessedMetrics;
+struct CPreprocessedMetrics
+{
+    // Tokens handed to the parser, the end marker excluded.
+    u64 tokens;
+    // Their spellings summed: the -E output with all layout removed.
+    u64 bytes;
+    // Every spelling byte the run retained — the translated files plus each
+    // synthesized spelling (stringify, paste, builtins, expansion copies).
+    // Its excess over the scanned bytes is what preprocessing invented.
+    u64 spelling_bytes;
+    // Macro replacements performed, and #define directives that defined them.
+    u64 expansions;
+    u64 definitions;
+};
+
 typedef struct CLexResult CLexResult;
 struct CLexResult
 {
@@ -196,6 +261,7 @@ struct CLexResult
     u32 checkpoint_count;
     // Spelling-space offset of translated_source.pointer (0 standalone).
     u32 translated_offset;
+    CSourceMetrics metrics;
     u64 token_count;
     u64 diagnostic_count;
     // Cursor into the checkpoints; location queries at non-decreasing
@@ -338,6 +404,13 @@ struct CPreprocessResult
     String8* files;
     Target target;
     TargetDataLayout data_layout;
+    // Every file the preprocessor lexed, summed twice: once per inclusion,
+    // and once per distinct path. A header without #pragma once is re-read
+    // and re-lexed at every #include, so their ratio is the translation
+    // unit's include amplification.
+    CSourceMetrics source_lexed;
+    CSourceMetrics source_unique;
+    CPreprocessedMetrics preprocessed;
     u64 token_count;
     u64 diagnostic_count;
     u64 error_count;
@@ -818,6 +891,10 @@ struct CIRLowerResult
 
 BUSTER_F_DECL CLexResult c_lex(Arena* arena, String8 source);
 BUSTER_F_DECL CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options);
+BUSTER_F_DECL void c_source_metrics_add(CSourceMetrics* total, CSourceMetrics const* part);
+// translated_bytes minus comments and whitespace: the bytes that became
+// tokens, literal spellings included.
+BUSTER_F_DECL u64 c_source_metrics_code_bytes(CSourceMetrics metrics);
 // The spelling of a token relative to its owning result's spelling base.
 BUSTER_F_DECL String8 c_token_spelling(char8 const* spelling_base, CToken token);
 // On-demand line/column/file recovery. The lex variant serves standalone lex

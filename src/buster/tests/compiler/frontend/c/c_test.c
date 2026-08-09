@@ -1595,6 +1595,123 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_repeated_incomplete_arrays(UnitTestArg
     return result;
 }
 
+// Source measurement, checked against counts done by hand on the fixtures
+// below. The two partitions are asserted on every fixture: they are what makes
+// the numbers add up rather than merely look plausible.
+BUSTER_GLOBAL_LOCAL void c_test_source_metrics_partitions(UnitTestArguments* arguments, UnitTestResult* outer_result, CSourceMetrics metrics)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    BUSTER_TEST(arguments, c_source_metrics_code_bytes(metrics) + metrics.comment_bytes + metrics.blank_bytes == metrics.translated_bytes);
+    BUSTER_TEST(arguments, metrics.code_lines + (metrics.comment_lines - metrics.mixed_lines) + metrics.blank_lines == metrics.translated_lines);
+    BUSTER_TEST(arguments, metrics.lines - metrics.spliced_lines == metrics.translated_lines);
+    outer_result->test_count += result.test_count;
+    outer_result->succeeded_test_count += result.succeeded_test_count;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // 49 bytes over five lines: code with a trailing comment, a blank line, a
+    // two-line block comment, and a line whose literal is code.
+    CLexResult mixed = c_lex(arguments->arena, S8("int a; // one\n"
+                                                  "\n"
+                                                  "/* two\n"
+                                                  "   lines */\n"
+                                                  "char* s = \"x\";\n"));
+    BUSTER_TEST(arguments, mixed.diagnostic_count == 0);
+    BUSTER_TEST(arguments, mixed.metrics.files == 1);
+    BUSTER_TEST(arguments, mixed.metrics.bytes == 49);
+    BUSTER_TEST(arguments, mixed.metrics.translated_bytes == 49);
+    BUSTER_TEST(arguments, mixed.metrics.lines == 5);
+    BUSTER_TEST(arguments, mixed.metrics.translated_lines == 5);
+    BUSTER_TEST(arguments, mixed.metrics.spliced_lines == 0);
+    BUSTER_TEST(arguments, mixed.metrics.code_lines == 2);
+    BUSTER_TEST(arguments, mixed.metrics.comment_lines == 3);
+    BUSTER_TEST(arguments, mixed.metrics.mixed_lines == 1);
+    BUSTER_TEST(arguments, mixed.metrics.blank_lines == 1);
+    BUSTER_TEST(arguments, mixed.metrics.comment_bytes == 24);
+    BUSTER_TEST(arguments, mixed.metrics.blank_bytes == 9);
+    BUSTER_TEST(arguments, mixed.metrics.literal_bytes == 3);
+    BUSTER_TEST(arguments, mixed.metrics.comments == 2);
+    BUSTER_TEST(arguments, mixed.metrics.tokens == 9);
+    BUSTER_TEST(arguments, c_source_metrics_code_bytes(mixed.metrics) == 16);
+    c_test_source_metrics_partitions(arguments, &result, mixed.metrics);
+
+    // Two physical lines spliced into one logical line, with CRLF endings: the
+    // file is seven bytes, the lexer scans three.
+    CLexResult spliced = c_lex(arguments->arena, S8("a\\\r\nb\r\n"));
+    BUSTER_TEST(arguments, spliced.diagnostic_count == 0);
+    BUSTER_TEST(arguments, spliced.metrics.bytes == 7);
+    BUSTER_TEST(arguments, spliced.metrics.translated_bytes == 3);
+    BUSTER_TEST(arguments, spliced.metrics.lines == 2);
+    BUSTER_TEST(arguments, spliced.metrics.translated_lines == 1);
+    BUSTER_TEST(arguments, spliced.metrics.spliced_lines == 1);
+    BUSTER_TEST(arguments, spliced.metrics.code_lines == 1);
+    BUSTER_TEST(arguments, spliced.metrics.tokens == 1);
+    BUSTER_TEST(arguments, c_source_metrics_code_bytes(spliced.metrics) == 2);
+    c_test_source_metrics_partitions(arguments, &result, spliced.metrics);
+
+    // An unterminated last line still ends a line.
+    CLexResult unterminated = c_lex(arguments->arena, S8("x"));
+    BUSTER_TEST(arguments, unterminated.metrics.bytes == 1);
+    BUSTER_TEST(arguments, unterminated.metrics.lines == 1);
+    BUSTER_TEST(arguments, unterminated.metrics.code_lines == 1);
+    BUSTER_TEST(arguments, unterminated.metrics.blank_bytes == 0);
+    BUSTER_TEST(arguments, unterminated.metrics.tokens == 1);
+    c_test_source_metrics_partitions(arguments, &result, unterminated.metrics);
+
+    CLexResult empty = c_lex(arguments->arena, S8(""));
+    BUSTER_TEST(arguments, empty.metrics.files == 1);
+    BUSTER_TEST(arguments, empty.metrics.lines == 0);
+    BUSTER_TEST(arguments, empty.metrics.translated_lines == 0);
+    BUSTER_TEST(arguments, empty.metrics.tokens == 0);
+    c_test_source_metrics_partitions(arguments, &result, empty.metrics);
+
+    // Without includes the two aggregates are the same one file, and the
+    // preprocessor's totals are the root lex's.
+    CPreprocessResult preprocess = c_preprocess(arguments->arena,
+                                                S8("#define ONE 1\n"
+                                                   "int v = ONE; // used\n"),
+                                                (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, preprocess.source_lexed.files == 1);
+    BUSTER_TEST(arguments, preprocess.source_unique.files == 1);
+    BUSTER_TEST(arguments, preprocess.source_lexed.bytes == 35);
+    BUSTER_TEST(arguments, preprocess.source_unique.bytes == preprocess.source_lexed.bytes);
+    BUSTER_TEST(arguments, preprocess.source_lexed.lines == 2);
+    BUSTER_TEST(arguments, preprocess.source_lexed.code_lines == 2);
+    BUSTER_TEST(arguments, preprocess.source_lexed.comments == 1);
+    BUSTER_TEST(arguments, preprocess.source_lexed.mixed_lines == 1);
+    c_test_source_metrics_partitions(arguments, &result, preprocess.source_lexed);
+    c_test_source_metrics_partitions(arguments, &result, preprocess.source_unique);
+
+    // The other side of the frontend: the directive and the comment are gone,
+    // ONE expanded once, and `int v = 1 ;` is what the parser receives. The
+    // end marker is in token_count but not in the measured token total.
+    BUSTER_TEST(arguments, preprocess.token_count == 6);
+    BUSTER_TEST(arguments, preprocess.preprocessed.tokens == 5);
+    BUSTER_TEST(arguments, preprocess.preprocessed.bytes == 7);
+    BUSTER_TEST(arguments, preprocess.preprocessed.definitions == 1);
+    BUSTER_TEST(arguments, preprocess.preprocessed.expansions == 1);
+    // Every translated file lands in the spelling space, plus the prelude and
+    // anything preprocessing synthesized.
+    BUSTER_TEST(arguments, preprocess.preprocessed.spelling_bytes >= preprocess.source_lexed.translated_bytes);
+
+    // An unreferenced macro is defined but never expanded, and a function-like
+    // macro used twice expands twice.
+    CPreprocessResult expansions = c_preprocess(arguments->arena,
+                                                S8("#define UNUSED 9\n"
+                                                   "#define TWICE(x) x + x\n"
+                                                   "int a = TWICE(1);\n"
+                                                   "int b = TWICE(2);\n"),
+                                                (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, expansions.diagnostic_count == 0);
+    BUSTER_TEST(arguments, expansions.preprocessed.definitions == 2);
+    BUSTER_TEST(arguments, expansions.preprocessed.expansions == 2);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6568,6 +6685,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
+    c_test_result_add(&result, c_test_frontend_source_metrics(arguments));
     c_test_result_add(&result, c_test_frontend_semantic_basics(arguments));
     c_test_result_add(&result, c_test_frontend_global_types(arguments));
     c_test_result_add(&result, c_test_global_array_sizeof_bound(arguments));

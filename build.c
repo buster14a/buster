@@ -2441,6 +2441,16 @@ BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 comp
     os_argument_builder_append(&builder, S8("-DBUSTER_UNITY_BUILD=1"));
     os_argument_builder_append(&builder, S8("-DBUSTER_INCLUDE_TESTS=0"));
     os_argument_builder_append(&builder, S8("-g"));
+    // Both stages report their target, code generation, and source measurement
+    // beside this step's wall clock and STEP_INSTRUCTIONS line, so throughput
+    // can be read per byte, per line, or per token instead of per compile.
+    //
+    // The two SOURCE lines do not match and are not expected to: the bootstrap
+    // is built by the host compiler and finds its resource headers, while the
+    // self-hosted stages fall back to the builtin ones (see the map_entry note
+    // in c.c). Stage 2 compares against stage 3, not stage 1, for that. The
+    // fixed point is the executable bytes, which do match.
+    os_argument_builder_append(&builder, S8("-v"));
 #if BUSTER_MACOS
     os_argument_builder_append(&builder, S8("-isysroot"));
     os_argument_builder_append(&builder, sysroot);

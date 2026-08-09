@@ -36,8 +36,8 @@ expanded equivalent is:
 
 ```sh
 ./build.sh build --config Release -t ide
-build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -o build/ide-self
-build/ide-self cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -o build/ide-self-stage2
+build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v src/buster/apps/ide/ide.c -o build/ide-self
+build/ide-self cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v src/buster/apps/ide/ide.c -o build/ide-self-stage2
 cmp build/ide-self build/ide-self-stage2
 build/ide-self-stage2 bench
 ```
@@ -271,6 +271,32 @@ enabled.
   the sole child running; that holds for the sequential self-host stages and
   CMake generation, but concurrent matrix steps overlap and must not be read as
   per-step totals.
+- **The `SOURCE` table** gives `STEP_INSTRUCTIONS` a denominator: it reports
+  what the C frontend read, in bytes, physical lines, sLOC, comments, blank
+  lines, literals, and preprocessing tokens, each with its share of the whole.
+  `ide cc -v` prints it, and the self-host stages pass `-v` so it lands in the
+  log beside their instruction counts. The `unique` column covers the distinct
+  files of the include closure, the `lexed` column every inclusion: a header
+  without `#pragma once` is re-read and re-lexed at each `#include`, so the
+  two columns' ratio is the unit's include amplification (currently 283
+  files/15.4 MB against 487/18.1 MB). `bytes on disk`/`physical lines` measure
+  the files as written, `bytes scanned`/`lines scanned` what the lexer saw
+  after carriage returns and line splices are folded out, and two partitions
+  hold exactly: bytes are code plus comment plus whitespace, and lines are
+  code plus comment plus blank once the `both` row is subtracted. A closing
+  `preprocessed output` block measures the other side — the tokens actually
+  handed to the parser, their spelling bytes, every spelling byte the run
+  retained, macro expansions, and `#define` directives — because macro
+  expansion multiplies the input by whatever factor the macros ask for, so
+  parsing and lowering scale with those and not with the file sizes. The
+  measurement is always on and costs 0.19% of stage-1 instructions (measured
+  on Clang 22/Linux x86-64), because every source unit falls out of a branch
+  the lexer already takes rather than a second pass over the bytes, and the
+  output side is one linear sum over the finished token stream. The
+  bootstrap's table does not match the self-hosted stages' and is not meant
+  to: the bootstrap finds its host compiler's resource headers and the
+  self-hosted stages fall back to the builtin ones, which is why the file
+  table is populated lazily (see `map_entry` in `c.c`).
 - **`ninja_log_summary <build-dir> [--limit N]`** and **`time_trace_summary
   <json-path>... [--limit N]`** (both new `build/build` commands, same
   shape as `cmake_profile_summary` — see `build.c`) are diagnostics for

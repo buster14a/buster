@@ -1,6 +1,7 @@
 #pragma once
 
 #include <buster/lib/compiler/assembly/assembly.h>
+#include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/link/link.h>
 
 // A unity C translation unit retains preprocessing, semantic, typed IR, and
@@ -113,6 +114,11 @@ struct CompilerDriverResult
     NativeExecutableLinkResult native_link;
     ObjectFile object;
     CodegenStatistics codegen_statistics;
+    // What the C frontend consumed, per inclusion and per distinct file, and
+    // what preprocessing made of it.
+    CSourceMetrics source_lexed;
+    CSourceMetrics source_unique;
+    CPreprocessedMetrics preprocessed;
     CompilerDriverError error;
     CodegenError codegen_error;
     ObjectError object_error;

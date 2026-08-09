@@ -1285,6 +1285,12 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .include_path_count = invocation.include_path_count,
                                                     .system_include_path_count = invocation.system_include_path_count,
                                                 });
+    // Reported even when a later stage fails: the units the frontend read are
+    // measured by then, and a failing compile is exactly when the size of
+    // what it read is worth knowing.
+    result.source_lexed = preprocess.source_lexed;
+    result.source_unique = preprocess.source_unique;
+    result.preprocessed = preprocess.preprocessed;
     for (u64 diagnostic_index = 0; diagnostic_index < preprocess.diagnostic_count; diagnostic_index += 1)
     {
         compiler_driver_append_warning(warnings, invocation.input_paths[0], preprocess.diagnostics[diagnostic_index]);
@@ -1987,6 +1993,16 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.tokenizer_warning_count += unit.tokenizer_warning_count;
         result.parser_diagnostic_count += unit.parser_diagnostic_count;
         result.analysis_diagnostic_count += unit.analysis_diagnostic_count;
+        // Each unit dedups its own include closure, so across several inputs
+        // the unique aggregate is a sum of per-unit uniques and still counts
+        // a shared header once per unit that included it.
+        c_source_metrics_add(&result.source_lexed, &unit.source_lexed);
+        c_source_metrics_add(&result.source_unique, &unit.source_unique);
+        result.preprocessed.tokens += unit.preprocessed.tokens;
+        result.preprocessed.bytes += unit.preprocessed.bytes;
+        result.preprocessed.spelling_bytes += unit.preprocessed.spelling_bytes;
+        result.preprocessed.expansions += unit.preprocessed.expansions;
+        result.preprocessed.definitions += unit.preprocessed.definitions;
         result.codegen_statistics.instruction_count += unit.codegen_statistics.instruction_count;
         result.codegen_statistics.value_count += unit.codegen_statistics.value_count;
         result.codegen_statistics.stack_value_bytes += unit.codegen_statistics.stack_value_bytes;

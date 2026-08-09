@@ -2415,6 +2415,124 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_compiler(void)
     return result;
 }
 
+// The source measurement table (see CSourceMetrics), two aggregates side by
+// side so include amplification reads off the page: `unique` covers the
+// distinct files of the include closure, `lexed` every inclusion, and a
+// header without #pragma once is re-read at each one.
+#define REPORT_SOURCE_LABEL_WIDTH 26
+#define REPORT_SOURCE_VALUE_WIDTH 14
+#define REPORT_SOURCE_SHARE_WIDTH 9
+#define REPORT_SOURCE_TABLE_WIDTH (REPORT_SOURCE_LABEL_WIDTH + 2 * (REPORT_SOURCE_VALUE_WIDTH + REPORT_SOURCE_SHARE_WIDTH) + 2)
+
+BUSTER_GLOBAL_LOCAL String8 report_source_fill(Arena* arena, char8 character, u64 width)
+{
+    char8* cell = arena_allocate(arena, char8, width);
+    for (u64 index = 0; index < width; index += 1)
+    {
+        cell[index] = character;
+    }
+    return (String8){.pointer = cell, .length = width};
+}
+
+// Right-aligned into a fixed column. The integer formatter's own width option
+// counts digits before grouping inserts its separators, so columns of grouped
+// numbers have to be padded on the finished text instead.
+BUSTER_GLOBAL_LOCAL String8 report_source_cell(Arena* arena, String8 text, u64 width)
+{
+    if (text.length >= width)
+    {
+        return text;
+    }
+    u64 padding = width - text.length;
+    char8* cell = arena_allocate(arena, char8, width);
+    for (u64 index = 0; index < padding; index += 1)
+    {
+        cell[index] = ' ';
+    }
+    if (text.length)
+    {
+        memcpy(cell + padding, text.pointer, text.length);
+    }
+    return (String8){.pointer = cell, .length = width};
+}
+
+BUSTER_GLOBAL_LOCAL String8 report_source_number(Arena* arena, u64 value, u64 width)
+{
+    return report_source_cell(arena, string_format(arena, S8("{u64:digit_group}"), value), width);
+}
+
+// One tenth of a percent, rounded, without reaching for floating point. A
+// share with no parent is blank, and blank in the last column of a row is
+// empty rather than padded so no line ends in whitespace.
+BUSTER_GLOBAL_LOCAL String8 report_source_share(Arena* arena, u64 value, u64 total, bool trailing)
+{
+    if (!total)
+    {
+        return trailing ? (String8){0} : report_source_cell(arena, (String8){0}, REPORT_SOURCE_SHARE_WIDTH);
+    }
+    u64 tenths = (value * 1000 + total / 2) / total;
+    return report_source_cell(arena, string_format(arena, S8("{u64}.{u64} %"), tenths / 10, tenths % 10), REPORT_SOURCE_SHARE_WIDTH);
+}
+
+BUSTER_GLOBAL_LOCAL String8 report_source_label(Arena* arena, String8 label)
+{
+    u64 padding = label.length < REPORT_SOURCE_LABEL_WIDTH ? REPORT_SOURCE_LABEL_WIDTH - label.length : 0;
+    return string_format(arena, S8("{S8}{S8}"), label, report_source_fill(arena, ' ', padding));
+}
+
+// One row of both aggregates. A zero total leaves that share column empty, so
+// the same row prints an absolute count or a count with its share of a parent.
+BUSTER_GLOBAL_LOCAL void report_source_row(Arena* arena, String8 label, u64 unique_value, u64 unique_total, u64 lexed_value, u64 lexed_total)
+{
+    string_print(S8("{S8}{S8}{S8}  {S8}{S8}\n"), report_source_label(arena, label), report_source_number(arena, unique_value, REPORT_SOURCE_VALUE_WIDTH),
+                 report_source_share(arena, unique_value, unique_total, false), report_source_number(arena, lexed_value, REPORT_SOURCE_VALUE_WIDTH),
+                 report_source_share(arena, lexed_value, lexed_total, true));
+}
+
+// The preprocessed side has no unique/lexed split, so its rows carry one
+// value and its share of the lexed source it came from.
+BUSTER_GLOBAL_LOCAL void report_preprocessed_row(Arena* arena, String8 label, u64 value, u64 total)
+{
+    string_print(S8("{S8}{S8}{S8}\n"), report_source_label(arena, label), report_source_number(arena, value, REPORT_SOURCE_VALUE_WIDTH),
+                 report_source_share(arena, value, total, true));
+}
+
+BUSTER_GLOBAL_LOCAL void report_source_metrics(Arena* arena, String8 unit, CSourceMetrics unique, CSourceMetrics lexed, CPreprocessedMetrics preprocessed)
+{
+    string_print(S8("SOURCE {S8}\n"), unit);
+    string_print(S8("{S8}{S8}{S8}  {S8}\n"), report_source_label(arena, S8("")), report_source_cell(arena, S8("unique"), REPORT_SOURCE_VALUE_WIDTH),
+                 report_source_share(arena, 0, 0, false), report_source_cell(arena, S8("lexed"), REPORT_SOURCE_VALUE_WIDTH));
+    string_print(S8("{S8}\n"), report_source_fill(arena, '-', REPORT_SOURCE_TABLE_WIDTH));
+    report_source_row(arena, S8("files"), unique.files, 0, lexed.files, 0);
+    report_source_row(arena, S8("bytes on disk"), unique.bytes, 0, lexed.bytes, 0);
+    report_source_row(arena, S8("physical lines"), unique.lines, 0, lexed.lines, 0);
+    string_print(S8("\n"));
+    report_source_row(arena, S8("bytes scanned"), unique.translated_bytes, 0, lexed.translated_bytes, 0);
+    report_source_row(arena, S8("  code"), c_source_metrics_code_bytes(unique), unique.translated_bytes, c_source_metrics_code_bytes(lexed),
+                      lexed.translated_bytes);
+    report_source_row(arena, S8("  comment"), unique.comment_bytes, unique.translated_bytes, lexed.comment_bytes, lexed.translated_bytes);
+    report_source_row(arena, S8("  whitespace"), unique.blank_bytes, unique.translated_bytes, lexed.blank_bytes, lexed.translated_bytes);
+    report_source_row(arena, S8("  literals, within code"), unique.literal_bytes, unique.translated_bytes, lexed.literal_bytes, lexed.translated_bytes);
+    string_print(S8("\n"));
+    report_source_row(arena, S8("lines scanned"), unique.translated_lines, 0, lexed.translated_lines, 0);
+    report_source_row(arena, S8("  code, the sLOC"), unique.code_lines, unique.translated_lines, lexed.code_lines, lexed.translated_lines);
+    report_source_row(arena, S8("  comment"), unique.comment_lines, unique.translated_lines, lexed.comment_lines, lexed.translated_lines);
+    report_source_row(arena, S8("  blank"), unique.blank_lines, unique.translated_lines, lexed.blank_lines, lexed.translated_lines);
+    report_source_row(arena, S8("  both, counted twice"), unique.mixed_lines, unique.translated_lines, lexed.mixed_lines, lexed.translated_lines);
+    string_print(S8("\n"));
+    report_source_row(arena, S8("comments"), unique.comments, 0, lexed.comments, 0);
+    report_source_row(arena, S8("tokens"), unique.tokens, 0, lexed.tokens, 0);
+    report_source_row(arena, S8("spliced-away lines"), unique.spliced_lines, unique.lines, lexed.spliced_lines, lexed.lines);
+    string_print(S8("\n"));
+    string_print(S8("{S8}{S8}{S8}\n"), report_source_label(arena, S8("preprocessed output")), report_source_cell(arena, (String8){0}, REPORT_SOURCE_VALUE_WIDTH),
+                 report_source_cell(arena, S8("of lexed"), REPORT_SOURCE_SHARE_WIDTH));
+    report_preprocessed_row(arena, S8("  tokens to the parser"), preprocessed.tokens, lexed.tokens);
+    report_preprocessed_row(arena, S8("  their spelling bytes"), preprocessed.bytes, c_source_metrics_code_bytes(lexed));
+    report_preprocessed_row(arena, S8("  bytes retained"), preprocessed.spelling_bytes, lexed.translated_bytes);
+    report_preprocessed_row(arena, S8("  macro expansions"), preprocessed.expansions, 0);
+    report_preprocessed_row(arena, S8("  #define directives"), preprocessed.definitions, 0);
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
 {
     Arena* arena = arena_create((ArenaCreation){
@@ -2444,6 +2562,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     {
         string_print(S8("TARGET cpu={S8} features={S8}\n"), cpu_model_to_string_os(invocation.target.cpu_model),
                      target_cpu_features_to_string(arena, invocation.target));
+    }
+    if (invocation.verbose && compile.source_lexed.files)
+    {
+        String8 unit = invocation.input_count == 1 ? invocation.input_paths[0] : string_format(arena, S8("{u32} inputs"), invocation.input_count);
+        report_source_metrics(arena, unit, compile.source_unique, compile.source_lexed, compile.preprocessed);
     }
     if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verbose && compile.codegen_statistics.function_count)
     {
