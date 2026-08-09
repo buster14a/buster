@@ -46,6 +46,10 @@ struct MachineFastState
     // block, or UINT32_MAX: a value whose last use lies past it crosses
     // the call and is worth a callee-saved binding.
     u32* next_call;
+    // Immediate index per vreg whose entire definition is one constant
+    // materialization, or UINT32_MAX. Such a value is never stored and
+    // never occupies a slot: any reload of it re-materializes instead.
+    u32* rematerialize_immediates;
     u32 clock;
     u32 current_point;
     // Set once the current instruction's uses and defines are placed: from
@@ -152,7 +156,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_spill(MachineFastState* state, u32 physica
     {
         return;
     }
-    if (state->dirty[physical_register] && !machine_fast_owner_is_dead(state, physical_register))
+    if (state->dirty[physical_register] && state->rematerialize_immediates[owner] == UINT32_MAX && !machine_fast_owner_is_dead(state, physical_register))
     {
         MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, state->edits);
         *edit = (MachineEdit){
@@ -191,7 +195,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_writeback(MachineFastState* state)
         {
             continue;
         }
-        if (state->dirty[physical_register] && !machine_fast_owner_is_dead(state, physical_register))
+        if (state->dirty[physical_register] && state->rematerialize_immediates[state->owner[physical_register]] == UINT32_MAX &&
+            !machine_fast_owner_is_dead(state, physical_register))
         {
             MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, state->edits);
             *edit = (MachineEdit){
@@ -317,6 +322,17 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_ensure(MachineFastState* state, u32 virtual
         state->owner[current] = UINT32_MAX;
         state->dirty[current] = false;
     }
+    else if (state->rematerialize_immediates[virtual_register] != UINT32_MAX)
+    {
+        *edit = (MachineEdit){
+            .point = state->current_point,
+            .kind = MACHINE_EDIT_REMATERIALIZE,
+            .subject = state->rematerialize_immediates[virtual_register],
+            .location = target,
+        };
+        state->placement->rematerialize_count += 1;
+        state->dirty[target] = false;
+    }
     else
     {
         *edit = (MachineEdit){
@@ -371,7 +387,45 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
         .last_use = arena_allocate(arena, u32, function->virtual_register_count),
         .escapes = arena_allocate(arena, u8, function->virtual_register_count),
         .next_call = arena_allocate(arena, u32, function->instruction_count),
+        .rematerialize_immediates = arena_allocate(arena, u32, function->virtual_register_count),
     };
+    // Constant definitions are recreatable anywhere, so they never pay for
+    // a store or a slot. A second definition of the same value disables
+    // the recipe: which constant is current would then depend on the path.
+    u8* definition_seen = arena_allocate(arena, u8, function->virtual_register_count);
+    for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
+    {
+        state.rematerialize_immediates[register_index] = UINT32_MAX;
+        definition_seen[register_index] = 0;
+    }
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        MachineInstruction* instruction = function->instructions + instruction_index;
+        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+        if (!info)
+        {
+            return placement;
+        }
+        for (u32 slot = 0; slot < info->operand_count; slot += 1)
+        {
+            MachineRef ref = instruction->operands[slot];
+            if (machine_ref_kind(ref) != MACHINE_REF_VIRTUAL_REGISTER)
+            {
+                continue;
+            }
+            u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+            if (role != MACHINE_OPERAND_ROLE_DEFINE && role != MACHINE_OPERAND_ROLE_USE_DEFINE)
+            {
+                continue;
+            }
+            u32 defined = machine_ref_payload(ref);
+            bool constant_definition = instruction->opcode == MACHINE_X64_MOV_RI && slot == 0 &&
+                                       machine_ref_kind(instruction->operands[1]) == MACHINE_REF_IMMEDIATE;
+            state.rematerialize_immediates[defined] =
+                constant_definition && !definition_seen[defined] ? machine_ref_payload(instruction->operands[1]) : UINT32_MAX;
+            definition_seen[defined] = 1;
+        }
+    }
     // Edge contract, straight-line form: a block whose only predecessor is
     // its layout neighbor sees exactly the scan state the neighbor's
     // write-back left behind, so it inherits the register file; every
@@ -706,7 +760,14 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
     }
     for (u32 edit_index = 0; edit_index < placement.edit_count; edit_index += 1)
     {
-        slot_needed[placement.edits[edit_index].subject] = 1;
+        // Only the memory edits name a virtual register: a copy's subject
+        // is a physical register and a rematerialization's is an immediate
+        // index, and neither indexes this array.
+        MachineEdit* edit = placement.edits + edit_index;
+        if (edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD)
+        {
+            slot_needed[edit->subject] = 1;
+        }
     }
     // Slot reuse by defining block: a non-escaping value's every edit sits
     // inside the block that defines it, so two such values from different

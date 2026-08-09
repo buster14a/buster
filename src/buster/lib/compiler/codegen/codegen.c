@@ -10534,6 +10534,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.statistics.allocator_spill_count += placement.spill_count;
                             result.statistics.allocator_copy_count += placement.copy_count;
                             result.statistics.allocator_boundary_spill_count += placement.boundary_spill_count;
+                            result.statistics.allocator_rematerialize_count += placement.rematerialize_count;
                         }
                     }
                 }

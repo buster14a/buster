@@ -455,6 +455,9 @@ typedef enum MachineEditKind
     MACHINE_EDIT_RELOAD, // subject vreg loads into location preg at point
     MACHINE_EDIT_SPILL,  // subject vreg stores from location preg at point
     MACHINE_EDIT_COPY,   // subject preg copies into location preg at point
+    // subject immediate index materializes into location preg at point:
+    // the reload of a value whose whole definition is a constant.
+    MACHINE_EDIT_REMATERIALIZE,
     MACHINE_EDIT_KIND_COUNT,
 } MachineEditKind;
 
@@ -494,6 +497,7 @@ struct MachineStackPlacement
     u32 reload_count;
     u32 spill_count;
     u32 copy_count;
+    u32 rematerialize_count;
     // Subset of spill_count emitted by the block-boundary write-back
     // rather than by eviction pressure: the two want different fixes.
     u32 boundary_spill_count;

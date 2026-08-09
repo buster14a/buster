@@ -12,6 +12,38 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09af` (Linux x86_64, Zen 4 7940HS; register-allocator stage 7
+lead — constant rematerialization, taken early because it is local.)
+
+- **What was built.** A pre-pass marks every virtual register whose
+  entire definition is one constant materialization; a second definition
+  of any kind disables the recipe, since which constant is current would
+  then depend on the path. Such a value never pays for a store and never
+  occupies a frame slot: eviction drops it silently and a later reload
+  becomes `MACHINE_EDIT_REMATERIALIZE`, which re-emits the immediate.
+- **Two latent bugs fixed on the way.** The slot-needed derivation keyed
+  on every edit's `subject`, but a copy edit's subject is a *physical
+  register* and a rematerialization's is an *immediate index*. With few
+  virtual registers in a function that write ran past the end of the
+  array — a live out-of-bounds write introduced with copy edits in
+  `2026-08-09s` and never triggered because the arrays were usually long
+  enough. The derivation now filters on edit kind. Separately, the first
+  draft of the remat table let a constant definition *after* a
+  non-constant one enable the recipe; a definition-seen flag fixes it.
+- **Numbers** (buster-built stage comparison, compiling ide.c under
+  NONE): spills **90,157 -> 77,394 (-14.2%)**, reloads **41,253 ->
+  32,693 (-20.7%)**, with 8,570 rematerializations taking their place —
+  21,323 memory operations removed for 8,570 immediate loads. Frame
+  bytes 3,663,056 -> 3,602,392. Instructions 47.07G (canonical 70.05G,
+  **-32.8%**), text 20,038,638.
+- **Honest scale note:** the instruction win is small (-0.3%) because a
+  rematerialization replaces a reload one-for-one and only the dropped
+  *stores* are pure profit. The memory-traffic and frame-size wins are
+  the real result, and the out-of-bounds fix is worth the patch on its
+  own.
+- **Gates:** test_all green, MIR and FAST soaks byte-identical on fresh
+  references, self-host fixed point holds.
+
 `2026-08-09ae` (Linux x86_64, Zen 4 7940HS; register-allocator stage 5 —
 allocator traffic metrics, and two negative results they explain.)
 

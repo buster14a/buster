@@ -2601,6 +2601,17 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_frame_load(MachineX64Encoder* encoder,
     machine_x64_emit_frame_modrm(encoder, reg, offset);
 }
 
+// Materializes a constant. The canonical path always spends the ten-byte
+// movabs, so the machine rows keep that form to stay byte-comparable;
+// only the rematerialized reloads, which have no canonical counterpart,
+// take the five-byte zero-extending form when the value fits.
+BUSTER_GLOBAL_LOCAL void machine_x64_emit_immediate(MachineX64Encoder* encoder, u32 reg, u64 value)
+{
+    machine_x64_emit8(encoder, (u8)(0x48 | (reg >= 8 ? 0x01 : 0)));
+    machine_x64_emit8(encoder, (u8)(0xb8 | (reg & 7)));
+    machine_x64_emit64(encoder, value);
+}
+
 BUSTER_GLOBAL_LOCAL void machine_x64_emit_frame_store(MachineX64Encoder* encoder, u32 reg, u32 offset)
 {
     machine_x64_emit8(encoder, (u8)(0x48 | (reg >= 8 ? 0x04 : 0)));
@@ -2834,6 +2845,10 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 {
                     machine_x64_emit_rr(&encoder, true, false, 0x89, edit->subject, edit->location);
                 }
+                else if (edit->kind == MACHINE_EDIT_REMATERIALIZE)
+                {
+                    machine_x64_emit_immediate(&encoder, edit->location, function->immediates[edit->subject]);
+                }
                 else
                 {
                     machine_x64_emit_frame_load(&encoder, edit->location, placement->virtual_register_offsets[edit->subject]);
@@ -2844,13 +2859,8 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             {
                 break;
             case MACHINE_X64_MOV_RI:
-            {
-                u32 reg = operand_registers[0];
-                machine_x64_emit8(&encoder, (u8)(0x48 | (reg >= 8 ? 0x01 : 0)));
-                machine_x64_emit8(&encoder, (u8)(0xb8 | (reg & 7)));
-                machine_x64_emit64(&encoder, function->immediates[machine_ref_payload(instruction->operands[1])]);
-            }
-            break;
+                machine_x64_emit_immediate(&encoder, operand_registers[0], function->immediates[machine_ref_payload(instruction->operands[1])]);
+                break;
             case MACHINE_X64_MOV_RR:
                 // A full-width self-copy is the coalesced form of this row
                 // and encodes to nothing. The narrower moves below are not
@@ -3701,6 +3711,10 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 else if (edit->kind == MACHINE_EDIT_COPY)
                 {
                     machine_x64_emit_rr(&encoder, true, false, 0x89, edit->subject, edit->location);
+                }
+                else if (edit->kind == MACHINE_EDIT_REMATERIALIZE)
+                {
+                    machine_x64_emit_immediate(&encoder, edit->location, function->immediates[edit->subject]);
                 }
                 else
                 {
