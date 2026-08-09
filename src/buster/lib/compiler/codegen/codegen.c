@@ -10530,6 +10530,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             descriptor->prolog_size = machine_prologue_cursor;
                             descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                             machine_function_emitted = true;
+                            result.statistics.allocator_reload_count += placement.reload_count;
+                            result.statistics.allocator_spill_count += placement.spill_count;
+                            result.statistics.allocator_copy_count += placement.copy_count;
+                            result.statistics.allocator_boundary_spill_count += placement.boundary_spill_count;
                         }
                     }
                 }

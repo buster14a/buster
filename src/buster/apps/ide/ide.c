@@ -2715,6 +2715,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                 string_print(S8("CODEGEN_FALLBACK opcode={u32} count={u32}\n"), reason, compile.codegen_statistics.fallback_opcode_counts[reason]);
             }
         }
+        if (compile.codegen_statistics.allocator_reload_count || compile.codegen_statistics.allocator_spill_count ||
+            compile.codegen_statistics.allocator_copy_count)
+        {
+            string_print(S8("CODEGEN_ALLOCATOR reloads={u64} spills={u64} boundary_spills={u64} copies={u64}\n"),
+                         compile.codegen_statistics.allocator_reload_count, compile.codegen_statistics.allocator_spill_count,
+                         compile.codegen_statistics.allocator_boundary_spill_count, compile.codegen_statistics.allocator_copy_count);
+        }
         if (compile.codegen_statistics.fallback_verify_count || compile.codegen_statistics.fallback_placement_count ||
             compile.codegen_statistics.fallback_encode_count)
         {

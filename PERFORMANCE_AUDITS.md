@@ -12,6 +12,47 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09ae` (Linux x86_64, Zen 4 7940HS; register-allocator stage 5 —
+allocator traffic metrics, and two negative results they explain.)
+
+- **What was built.** `cc -v` now reports `CODEGEN_ALLOCATOR reloads=
+  spills= boundary_spills= copies=` summed over the machine-emitted
+  functions, splitting boundary write-backs from eviction pressure
+  because the two want different fixes. Also a small correctness
+  refinement: once an instruction's uses and defines are placed, a
+  value whose last use *is* that instruction has been read for the last
+  time, so the call flush and the block write-back drop its store
+  instead of keeping the strict "past the last use" test.
+- **The measurement that matters.** FAST against MIR_STACK on the same
+  compile: reloads **41,253 vs 988,799 (-95.8%)**, spills **90,157 vs
+  968,541 (-90.7%)**, plus 58,268 register copies FAST introduces and
+  MIR_STACK cannot. Only **2,805 of 90,157 spills (3.1%)** come from
+  block boundaries.
+- **Negative result 1 — deferring the boundary write-back.** When a
+  block's sole successor inherits its register file, the write-back can
+  defer down the chain. Implemented, byte-identical, and worthless:
+  spills moved 90,154 -> 90,157 and text grew 26KB from shifted
+  allocation decisions. The 3.1% boundary share is the reason, and the
+  earlier flat result for straight-line inheritance (`2026-08-09t`) has
+  the same root: this frontend's block graph has almost no
+  single-predecessor/single-successor chains. Reverted. **Do not
+  retry any boundary-write-back optimization without first moving that
+  3.1%.**
+- **Negative result 2 — a loop-reentry floor for escaping values.**
+  Escaping values can never be declared dead, which looked like the
+  reason spills (90K) run 2.2x reloads (41K). Added a floor — the
+  lowest instruction any backward edge can land on — so an escaping
+  value whose last use sits below it retires for good. Zero effect
+  (90,157 -> 90,161). Reverted. The ratio needed no fix: read-modify-
+  write rows re-dirty a value after each reload, so
+  `spills ~= reloads + values-ever-spilled` is the expected shape, and
+  49K distinct values spilling once each accounts for it exactly.
+- **Numbers unchanged** at 47.20G instructions (the +34KB of text
+  against `2026-08-09ad` is the statistics code itself entering the
+  self-compiled binary, not worse codegen).
+- **Gates:** test_all green, MIR and FAST soaks byte-identical on
+  fresh references, self-host fixed point holds.
+
 `2026-08-09ad` (Linux x86_64, Zen 4 7940HS; register-allocator stage 5 —
 copy coalescing: the largest single quality win of the project.)
 

@@ -266,6 +266,13 @@ struct CodegenStatistics
     u32 fallback_verify_count;
     u32 fallback_placement_count;
     u32 fallback_encode_count;
+    // Allocator traffic summed over the functions the machine path
+    // emitted: slot reloads, slot spills, and register-to-register moves
+    // the placement inserted. Zero under NONE.
+    u64 allocator_reload_count;
+    u64 allocator_spill_count;
+    u64 allocator_copy_count;
+    u64 allocator_boundary_spill_count;
 };
 
 struct CodegenModule

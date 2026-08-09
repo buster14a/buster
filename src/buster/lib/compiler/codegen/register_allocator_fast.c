@@ -48,6 +48,10 @@ struct MachineFastState
     u32* next_call;
     u32 clock;
     u32 current_point;
+    // Set once the current instruction's uses and defines are placed: from
+    // there a value whose last use is this instruction has been read for
+    // the final time, so the flush and write-back can drop its store.
+    bool uses_consumed;
 };
 
 BUSTER_GLOBAL_LOCAL bool machine_fast_owner_is_dead(MachineFastState* state, u32 physical_register)
@@ -57,7 +61,12 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_owner_is_dead(MachineFastState* state, u32
     {
         return false;
     }
-    return !state->escapes[owner] && (state->current_point >> 2) > state->last_use[owner];
+    u32 current_index = state->current_point >> 2;
+    u32 last = state->last_use[owner];
+    // A value confined to its defining block is redefined before every
+    // repeat of that block, so passing its last use retires it. Escaping
+    // values always reach their slots.
+    return !state->escapes[owner] && (state->uses_consumed ? current_index >= last : current_index > last);
 }
 
 // The encoder sequences of these opcodes pin operand registers (divides,
@@ -192,6 +201,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_writeback(MachineFastState* state)
                 .location = physical_register,
             };
             state->placement->spill_count += 1;
+            state->placement->boundary_spill_count += 1;
         }
         state->dirty[physical_register] = false;
     }
@@ -515,6 +525,7 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
                 return placement;
             }
             state.current_point = machine_point_make(instruction_index, MACHINE_POINT_BEFORE);
+            state.uses_consumed = false;
             u8* operand_registers = placement.operand_registers + (u64)instruction_index * 4;
             bool constrained = machine_fast_opcode_is_constrained(instruction->opcode);
             bool is_call = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL) != 0;
@@ -662,6 +673,7 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
                 machine_fast_bind(&state, machine_ref_payload(ref), target);
                 operand_registers[slot] = (u8)target;
             }
+            state.uses_consumed = true;
             if (is_call)
             {
                 // Callee-saved members survive the call by definition;

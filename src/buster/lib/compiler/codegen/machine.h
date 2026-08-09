@@ -494,6 +494,9 @@ struct MachineStackPlacement
     u32 reload_count;
     u32 spill_count;
     u32 copy_count;
+    // Subset of spill_count emitted by the block-boundary write-back
+    // rather than by eviction pressure: the two want different fixes.
+    u32 boundary_spill_count;
     // Callee-saved registers the placement assigned; the encoder pushes and
     // pops them around the frame and the unwind actions record the pushes.
     u32 callee_saved_mask;
