@@ -4790,6 +4790,43 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
     return result;
 }
 
+// A conditional nested in the then arm produces `identifier : ... :` token
+// runs (`b ? b ? c : s : l`) whose middle identifier must not be mistaken
+// for a label; the misdetection left an unreachable, unterminated label
+// block behind and failed canonical validation.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_then_nested_conditionals(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena nested_conditional_temporary = scratch_begin(0, 0);
+    CPreprocessResult nested_conditional_tokens = c_preprocess(nested_conditional_temporary.arena,
+                                                               S8("int probe(void)\n"
+                                                                  "{\n"
+                                                                  "    char c = 1; short s = 2; long l = 3; _Bool b = 1;\n"
+                                                                  "    return (int)sizeof(b ? b ? c : s : l);\n"
+                                                                  "}\n"
+                                                                  "long select_then(int which)\n"
+                                                                  "{\n"
+                                                                  "    char c = 1; short s = 2; long l = 3;\n"
+                                                                  "    return which ? which > 1 ? c : s : l;\n"
+                                                                  "}\n"),
+                                                               (CPreprocessOptions){0});
+    CParseResult nested_conditional_parse = c_parse(nested_conditional_temporary.arena, nested_conditional_tokens);
+    BUSTER_TEST(arguments, nested_conditional_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, nested_conditional_parse.diagnostic_count == 0);
+    CIRLowerResult nested_conditional_ir = c_lower_to_ir(nested_conditional_temporary.arena, S8("nested-conditional.c"), nested_conditional_tokens,
+                                                         nested_conditional_parse, target_native);
+    BUSTER_TEST(arguments, nested_conditional_ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, nested_conditional_ir.program != 0);
+    if (nested_conditional_ir.program)
+    {
+        IrModule* module = &nested_conditional_ir.program->modules[0];
+        BUSTER_TEST(arguments, ir_validate_canonical_module(nested_conditional_ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(nested_conditional_temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vectors(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6377,6 +6414,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_frontend_global_types(arguments));
     c_test_result_add(&result, c_test_global_array_sizeof_bound(arguments));
     c_test_result_add(&result, c_test_frontend_control_flow(arguments));
+    c_test_result_add(&result, c_test_then_nested_conditionals(arguments));
     c_test_result_add(&result, c_test_frontend_vectors(arguments));
     c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));
     c_test_result_add(&result, c_test_frontend_vla_and_ir(arguments));

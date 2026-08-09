@@ -819,6 +819,18 @@ typedef ThreadReturnType ThreadCallback(void*);
 #define BUSTER_COLD __attribute__((cold))
 #endif
 
+// Cold helpers called from hot inlined code: preserve_most keeps the caller's
+// register allocation intact, so adding the call does not degrade the hot
+// path. Optimization only; expands to nothing where unsupported.
+#if !BUSTER_COMPILER_MSVC && defined(__has_attribute)
+#if __has_attribute(preserve_most)
+#define BUSTER_PRESERVE_MOST __attribute__((preserve_most))
+#endif
+#endif
+#if !defined(BUSTER_PRESERVE_MOST)
+#define BUSTER_PRESERVE_MOST
+#endif
+
 #if defined(__cplusplus)
 #define BUSTER_ALIGN_OF(T) alignof(T)
 #elif defined(_MSC_VER)

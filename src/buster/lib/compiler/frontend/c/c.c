@@ -32075,6 +32075,81 @@ struct CIrSwitchCase
 
 typedef struct CIrLabel CIrLabel;
 
+// A colon only introduces a labeled statement when it is itself a label,
+// case, or default colon; a conditional's colon can directly precede an
+// `identifier :` pair (`b ? b ? c : s : l`), where `s` is not a label. Pair
+// nested `? :` groups backward to the statement boundary: an unmatched `?`
+// claims the colon for a conditional expression.
+BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST bool c_ir_label_colon_at(CToken* tokens, u32 body_start, u32 colon_index)
+{
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    u32 braces = 0;
+    u32 pending_colons = 0;
+    u32 scan = colon_index;
+    while (scan > body_start)
+    {
+        scan -= 1;
+        CToken token = tokens[scan];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            parentheses += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            if (!parentheses)
+            {
+                return false;
+            }
+            parentheses -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            brackets += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            if (!brackets)
+            {
+                return false;
+            }
+            brackets -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            braces += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            if (!braces)
+            {
+                break;
+            }
+            braces -= 1;
+        }
+        else if (!parentheses && !brackets && !braces)
+        {
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
+            {
+                break;
+            }
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+            {
+                pending_colons += 1;
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+            {
+                if (!pending_colons)
+                {
+                    return false;
+                }
+                pending_colons -= 1;
+            }
+        }
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_ir_named_label_at(CPreprocessResult preprocess, u32 body_start, u32 index, u32 body_end)
 {
     if (body_start >= body_end || body_end > preprocess.token_count || index < body_start || index >= body_end || index == UINT32_MAX ||
@@ -32126,7 +32201,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_named_label_at(CPreprocessResult preprocess, u32 b
         return false;
     }
     return c_token_is_punctuator(&previous, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_BRACE) ||
-           c_token_is_punctuator(&previous, C_PUNCTUATOR_SEMICOLON) || c_token_is_punctuator(&previous, C_PUNCTUATOR_COLON) ||
+           c_token_is_punctuator(&previous, C_PUNCTUATOR_SEMICOLON) ||
+           (c_token_is_punctuator(&previous, C_PUNCTUATOR_COLON) && c_ir_label_colon_at(preprocess.tokens, body_start, index - 1)) ||
            (previous.kind == C_TOKEN_IDENTIFIER && (string_equal(previous.spelling, S8("do")) || string_equal(previous.spelling, S8("else"))));
 }
 
