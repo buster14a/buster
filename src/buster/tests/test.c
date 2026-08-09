@@ -44,6 +44,7 @@
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.h>
 #include <buster/tests/compiler/ir/ir_test.h>
 #include <buster/tests/compiler/ir/interpreter_test.h>
+#include <buster/tests/compiler/codegen/machine_test.h>
 #include <buster/tests/compiler/codegen/codegen_test.h>
 #include <buster/tests/compiler/debug/debug_test.h>
 #include <buster/tests/compiler/dwarf/dwarf_test.h>
@@ -76,6 +77,7 @@
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.c>
 #include <buster/tests/compiler/ir/ir_test.c>
 #include <buster/tests/compiler/ir/interpreter_test.c>
+#include <buster/tests/compiler/codegen/machine_test.c>
 #include <buster/tests/compiler/codegen/codegen_test.c>
 #include <buster/tests/compiler/debug/debug_test.c>
 #include <buster/tests/compiler/dwarf/dwarf_test.c>
@@ -196,6 +198,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
     {S8_INITIALIZER("analysis_tests"), &analysis_tests},
     {S8_INITIALIZER("ir_tests"), &ir_tests},
     {S8_INITIALIZER("ir_interpreter_tests"), &ir_interpreter_tests},
+    {S8_INITIALIZER("machine_tests"), &machine_tests},
     {S8_INITIALIZER("codegen_tests"), &codegen_tests},
     {S8_INITIALIZER("debug_model_tests"), &debug_model_tests},
     {S8_INITIALIZER("dwarf_tests"), &dwarf_tests},

@@ -844,6 +844,7 @@ buster_register_module(compiler_assembly_metadata "${BUSTER_SOURCE_DIR}/compiler
 buster_register_module(compiler_ir "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTENSION}")
 buster_register_module(compiler_ir_interpreter "${BUSTER_SOURCE_DIR}/compiler/ir/interpreter${COMMON_EXTENSION}")
 buster_register_module(compiler_debug "${BUSTER_SOURCE_DIR}/compiler/debug/debug${COMMON_EXTENSION}")
+buster_register_module(compiler_machine "${BUSTER_SOURCE_DIR}/compiler/codegen/machine${COMMON_EXTENSION}")
 buster_register_module(compiler_codegen "${BUSTER_SOURCE_DIR}/compiler/codegen/codegen${COMMON_EXTENSION}")
 buster_register_module(compiler_dwarf "${BUSTER_SOURCE_DIR}/compiler/dwarf/dwarf${COMMON_EXTENSION}")
 buster_register_module(compiler_codeview "${BUSTER_SOURCE_DIR}/compiler/codeview/codeview${COMMON_EXTENSION}")
@@ -886,6 +887,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/assembly/x86_64_metadata_test.c
     src/buster/tests/compiler/ir/ir_test.c
     src/buster/tests/compiler/ir/interpreter_test.c
+    src/buster/tests/compiler/codegen/machine_test.c
     src/buster/tests/compiler/codegen/codegen_test.c
     src/buster/tests/compiler/debug/debug_test.c
     src/buster/tests/compiler/dwarf/dwarf_test.c
@@ -916,6 +918,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/assembly/x86_64_metadata_test.h
     src/buster/tests/compiler/ir/ir_test.h
     src/buster/tests/compiler/ir/interpreter_test.h
+    src/buster/tests/compiler/codegen/machine_test.h
     src/buster/tests/compiler/codegen/codegen_test.h
     src/buster/tests/compiler/debug/debug_test.h
     src/buster/tests/compiler/dwarf/dwarf_test.h
@@ -1754,6 +1757,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_ir
     compiler_ir_interpreter
     compiler_debug
+    compiler_machine
     compiler_codegen
     compiler_dwarf
     compiler_codeview

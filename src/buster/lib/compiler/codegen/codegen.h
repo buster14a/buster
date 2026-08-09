@@ -250,6 +250,12 @@ struct CodegenStatistics
     u64 simd_operation_count;
     u32 function_count;
     u32 maximum_stack_frame_bytes;
+    // Functions a non-NONE register-allocator mode handed to the canonical
+    // stack path because machine selection does not cover them yet. Zero
+    // under NONE; equal to the lowered function count until the machine
+    // selector lands.
+    u32 fallback_function_count;
+    u32 reserved;
 };
 
 struct CodegenModule
@@ -293,6 +299,23 @@ struct CodegenExecutable
     CodegenError error;
 };
 
+// Register-allocation strategy for the machine-IR backend path. `NONE` is
+// the existing canonical direct emitter and stays the production default
+// during migration. `MIR_STACK` places every eligible value in a stack
+// location through the machine selector/encoder for differential testing.
+// `FAST` minimizes allocation latency; `QUALITY` maximizes generated-code
+// performance under a compile-time budget. Until the machine selector
+// lands, every non-NONE mode falls back to the canonical path per function
+// and the fallback is counted in CodegenStatistics.
+typedef enum CodegenRegisterAllocatorMode
+{
+    CODEGEN_REGISTER_ALLOCATOR_NONE,
+    CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+    CODEGEN_REGISTER_ALLOCATOR_FAST,
+    CODEGEN_REGISTER_ALLOCATOR_QUALITY,
+    CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT,
+} CodegenRegisterAllocatorMode;
+
 typedef struct CodegenModuleOptions CodegenModuleOptions;
 struct CodegenModuleOptions
 {
@@ -301,7 +324,10 @@ struct CodegenModuleOptions
     u32 lane_count;
     bool debug_info;
     bool assume_validated;
-    u8 reserved[2];
+    // A CodegenRegisterAllocatorMode value; u8 storage keeps the options
+    // record at its existing size.
+    u8 register_allocator;
+    u8 reserved[1];
 };
 
 // Fills the per-abi target cache on the calling thread. Call before lane_run;
@@ -309,6 +335,7 @@ struct CodegenModuleOptions
 // unwarmed reports through BUSTER_CHECK_SERIAL_INITIALIZATION instead of
 // racing. compiler_prewarm() covers this along with the rest of the compiler.
 BUSTER_F_DECL void codegen_prewarm(void);
+BUSTER_F_DECL String8 codegen_register_allocator_mode_string(CodegenRegisterAllocatorMode mode);
 BUSTER_F_DECL CodegenAbi codegen_abi_for_target(Target target);
 BUSTER_F_DECL CodegenAbiSignature codegen_classify_signature(Arena* arena, AnalysisResult* analysis, AnalysisTypeId function_type, CodegenAbi abi);
 BUSTER_F_DECL CodegenFunction codegen_generate_function(Arena* arena, AnalysisResult* analysis, IrFunction* function, Target target);

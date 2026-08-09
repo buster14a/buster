@@ -347,6 +347,29 @@ BUSTER_GLOBAL_LOCAL bool codegen_epilog_offset_append(CodegenFunctionDescriptor*
     return true;
 }
 
+String8 codegen_register_allocator_mode_string(CodegenRegisterAllocatorMode mode)
+{
+    switch (mode)
+    {
+        break;
+    case CODEGEN_REGISTER_ALLOCATOR_NONE:
+        return S8("none");
+        break;
+    case CODEGEN_REGISTER_ALLOCATOR_MIR_STACK:
+        return S8("mir-stack");
+        break;
+    case CODEGEN_REGISTER_ALLOCATOR_FAST:
+        return S8("fast");
+        break;
+    case CODEGEN_REGISTER_ALLOCATOR_QUALITY:
+        return S8("quality");
+        break;
+    case CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT:
+        break;
+    }
+    return S8("invalid");
+}
+
 CodegenAbi codegen_abi_for_target(Target target)
 {
     switch (target.cpu_arch)
@@ -7186,6 +7209,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_module_fragments_merge(Arena* arena, I
         {
             continue;
         }
+        // The machine selector does not exist yet: a non-NONE allocator mode
+        // still emits through the direct backend, counted as a fallback.
+        result.statistics.fallback_function_count += options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE;
         if (generated[index].error != CODEGEN_ERROR_NONE)
         {
             result.error = generated[index].error;
@@ -10371,6 +10397,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         result.statistics.stack_value_bytes += value_bytes;
         result.statistics.stack_frame_bytes += frame_size;
         result.statistics.maximum_stack_frame_bytes = BUSTER_MAX(result.statistics.maximum_stack_frame_bytes, frame_size);
+        // The machine selector does not exist yet, so every function under a
+        // non-NONE allocator mode takes the canonical stack path and is
+        // counted as an explicit fallback rather than silently ignored.
+        result.statistics.fallback_function_count += options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE;
         if (target.cpu_arch == CPU_ARCH_X86_64)
         {
             codegen_emit_u8(&buffer, 0x55);

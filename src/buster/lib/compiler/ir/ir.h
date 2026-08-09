@@ -370,8 +370,9 @@ struct IrPredecessor
 // string/float literal bytes — live in a sorted per-function side table
 // (ir_instruction_extra_find/ensure) instead of widening every instruction
 // row; the buster-frontend source range lives in a dense parallel array on
-// IrFunction for the same reason. Together they cut the row from 216 to
-// 152 bytes, and every consumer walks instructions linearly.
+// IrFunction for the same reason. The row is 112 bytes on 64-bit builds —
+// asserted by the size census in machine_test.c, which is where a designed
+// change must be recorded — and every consumer walks instructions linearly.
 typedef struct IrInstructionExtra IrInstructionExtra;
 struct IrInstructionExtra
 {

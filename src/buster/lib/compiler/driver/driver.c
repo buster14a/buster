@@ -436,6 +436,32 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.source_metrics_path = value;
             continue;
         }
+        value = compiler_driver_option_value(argument, S8("-fregister-allocator="));
+        if (value.length)
+        {
+            if (string_equal(value, S8("none")))
+            {
+                invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_NONE;
+            }
+            else if (string_equal(value, S8("mir-stack")))
+            {
+                invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK;
+            }
+            else if (string_equal(value, S8("fast")))
+            {
+                invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST;
+            }
+            else if (string_equal(value, S8("quality")))
+            {
+                invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_QUALITY;
+            }
+            else
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("unsupported register allocator: {S8}"), value);
+                return invocation;
+            }
+            continue;
+        }
         value = compiler_driver_option_value(argument, S8("-march="));
         if (!value.length)
         {
@@ -1413,6 +1439,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                            (CodegenModuleOptions){
                                                                .debug_info = invocation.debug_info,
                                                                .assume_validated = true,
+                                                               .register_allocator = invocation.register_allocator,
                                                            });
     result.codegen_statistics = code.statistics;
     result.codegen_error = code.error;
@@ -1691,6 +1718,7 @@ static CompilerDriverResult compiler_driver_execute_buster(Arena* arena, Compile
         CodegenModule code = codegen_generate_module(arena, module_analysis, module_ir, invocation.target,
                                                      (CodegenModuleOptions){
                                                          .debug_info = invocation.debug_info,
+                                                         .register_allocator = invocation.register_allocator,
                                                      });
         result.codegen_statistics = code.statistics;
         result.codegen_error = code.error;
@@ -2310,6 +2338,7 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
         CodegenModule code = codegen_generate_module(arena, module_analysis, module_ir, options.target,
                                                      (CodegenModuleOptions){
                                                          .debug_info = options.debug_info,
+                                                         .register_allocator = options.register_allocator,
                                                      });
         result.codegen_error = code.error;
         if (code.error != CODEGEN_ERROR_NONE)

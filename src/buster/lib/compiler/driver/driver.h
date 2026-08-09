@@ -95,7 +95,8 @@ struct CompilerDriverInvocation
     bool verbose;
     bool no_standard_includes;
     bool debug_info;
-    u8 reserved;
+    // A CodegenRegisterAllocatorMode value from -fregister-allocator=.
+    u8 register_allocator;
 };
 
 typedef struct CompilerDriverOptions CompilerDriverOptions;
@@ -106,7 +107,9 @@ struct CompilerDriverOptions
     String8 module_root;
     Target target;
     bool debug_info;
-    u8 reserved[7];
+    // A CodegenRegisterAllocatorMode value.
+    u8 register_allocator;
+    u8 reserved[6];
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;
