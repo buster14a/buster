@@ -3303,6 +3303,69 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                                                                                     target, (CodegenModuleOptions){0});
         BUSTER_TEST(arguments, aggregate_copy_codegen.error == CODEGEN_ERROR_NONE);
     }
+    // A `.p2align` in global assembly can demand far more padding than the
+    // directive's own source bytes, which is what the module code buffer's
+    // reserve is otherwise sized from. Two page-sized alignments over a dozen
+    // source bytes each is the case a source-length reserve cannot serve.
+    String8 alignment_assembly_c_source = S8("extern void aligned_asm_body(void);\n"
+                                             "__asm__(\".text\\n\"\n"
+                                             "        \".globl aligned_asm_body\\n\"\n"
+                                             "        \".p2align 12\\n\"\n"
+                                             "        \"aligned_asm_body:\\n\"\n"
+                                             "        \".byte 0xc3\\n\"\n"
+                                             "        \".p2align 12\\n\"\n"
+                                             "        \".byte 0xc3\\n\");\n"
+                                             "void call_aligned_asm(void) { aligned_asm_body(); }\n");
+    CPreprocessResult alignment_assembly_tokens = c_preprocess(arguments->arena, alignment_assembly_c_source, (CPreprocessOptions){0});
+    CParseResult alignment_assembly_parse = c_parse(arguments->arena, alignment_assembly_tokens);
+    CIRLowerResult alignment_assembly_ir =
+        c_lower_to_ir(arguments->arena, S8("global-assembly-alignment.c"), alignment_assembly_tokens, alignment_assembly_parse, target);
+    BUSTER_TEST(arguments, alignment_assembly_tokens.error_count == 0);
+    BUSTER_TEST(arguments, alignment_assembly_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, alignment_assembly_ir.diagnostic_count == 0);
+    if (alignment_assembly_ir.program)
+    {
+        IrProgram* alignment_assembly_program = alignment_assembly_ir.program;
+        IrModule* alignment_assembly_module = alignment_assembly_program->modules;
+        BUSTER_TEST(arguments, alignment_assembly_module->assembly_count == 1);
+        IrSymbolId aligned_body_symbol = IR_SYMBOL_ID_INVALID;
+        for (u32 symbol_index = 0; symbol_index < alignment_assembly_program->symbols.count; symbol_index += 1)
+        {
+            IrSymbol* symbol = alignment_assembly_program->symbols.symbols + symbol_index;
+            String8 link_name = symbol->link_name.length ? symbol->link_name : symbol->name;
+            if (string_equal(link_name, S8("aligned_asm_body")))
+            {
+                aligned_body_symbol = (IrSymbolId){
+                    .value = symbol_index,
+                };
+                break;
+            }
+        }
+        BUSTER_TEST(arguments, aligned_body_symbol.value != IR_ID_UNDERLYING_INVALID);
+        CodegenModule alignment_assembly_codegen = codegen_generate_canonical_module(arguments->arena, alignment_assembly_program, alignment_assembly_module,
+                                                                                        target, (CodegenModuleOptions){0});
+        BUSTER_TEST(arguments, alignment_assembly_codegen.error == CODEGEN_ERROR_NONE);
+        CodegenFunctionDescriptor* aligned_body_descriptor =
+            alignment_assembly_codegen.error == CODEGEN_ERROR_NONE ? codegen_test_c_descriptor_find(&alignment_assembly_codegen, aligned_body_symbol) : 0;
+        BUSTER_TEST(arguments, aligned_body_descriptor != 0);
+        if (aligned_body_descriptor)
+        {
+            // The label lands on the boundary the directive before it asked
+            // for, its own byte follows it, and the second directive carries
+            // the byte after that to the next boundary.
+            u64 aligned_body_offset = aligned_body_descriptor->code_offset;
+            BUSTER_TEST(arguments, (aligned_body_offset & (BUSTER_KB(4) - 1)) == 0);
+            BUSTER_TEST(arguments, aligned_body_offset != 0);
+            BUSTER_TEST(arguments, alignment_assembly_codegen.code.length > aligned_body_offset + BUSTER_KB(4));
+            if (alignment_assembly_codegen.code.length > aligned_body_offset + BUSTER_KB(4))
+            {
+                BUSTER_TEST(arguments, alignment_assembly_codegen.code.pointer[aligned_body_offset] == 0xc3);
+                BUSTER_TEST(arguments, alignment_assembly_codegen.code.pointer[aligned_body_offset + 1] == 0x90);
+                BUSTER_TEST(arguments, alignment_assembly_codegen.code.pointer[aligned_body_offset + BUSTER_KB(4) - 1] == 0x90);
+                BUSTER_TEST(arguments, alignment_assembly_codegen.code.pointer[aligned_body_offset + BUSTER_KB(4)] == 0xc3);
+            }
+        }
+    }
     BUSTER_CHECK(arena_destroy(expression_arena, 1));
     arena_set_position(temporary.arena, temporary.position);
     return result;

@@ -7875,6 +7875,62 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_unsigned(String8 value, u64* re
     return true;
 }
 
+// Prices one `.p2align` directive from the text following the directive name.
+// Both the emitter and the module code buffer's reserve go through here, so the
+// exponent's spelling and its accepted range cannot drift apart and leave a
+// directive demanding more padding than was reserved for it.
+BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_alignment(String8 operand, u64* alignment)
+{
+    u64 exponent = 0;
+    if (!codegen_global_assembly_unsigned(operand, &exponent) || exponent > 12)
+    {
+        return false;
+    }
+    *alignment = UINT64_C(1) << exponent;
+    return true;
+}
+
+// Upper bound on the padding a source's `.p2align` directives can demand: each
+// one pads to its own boundary, so it can ask for one byte less than its
+// alignment. The scan matches the directive spelling anywhere in the source
+// instead of re-walking lines the way the emitter does — a match inside a
+// comment only over-reserves, and no directive the emitter would honor can
+// escape it. Assembly with no alignment directives is charged nothing.
+BUSTER_GLOBAL_LOCAL u64 codegen_global_assembly_alignment_padding(String8 source)
+{
+    String8 directive = S8(".p2align");
+    u64 padding = 0;
+    u64 index = 0;
+    while (index + directive.length <= source.length)
+    {
+        if (source.pointer[index] != '.' || memcmp(source.pointer + index, directive.pointer, directive.length) != 0)
+        {
+            index += 1;
+            continue;
+        }
+        u64 operand = index + directive.length;
+        u64 line_end = operand;
+        while (line_end < source.length && source.pointer[line_end] != '\n')
+        {
+            line_end += 1;
+        }
+        u64 alignment = 0;
+        // The emitter reads at most one directive per line, so charging the
+        // line once and resuming after it cannot miss padding.
+        if (codegen_global_assembly_alignment(
+                (String8){
+                    .pointer = source.pointer + operand,
+                    .length = line_end - operand,
+                },
+                &alignment))
+        {
+            padding += alignment - 1;
+        }
+        index = line_end + 1;
+    }
+    return padding;
+}
+
 BUSTER_GLOBAL_LOCAL IrSymbolId codegen_global_assembly_symbol(IrProgram* program, String8 name, Target target)
 {
     String8 alternate = name;
@@ -8002,19 +8058,20 @@ BUSTER_GLOBAL_LOCAL bool codegen_emit_global_assembly(Arena* arena, IrProgram* p
             }
             if (line.length >= 8 && memcmp(line.pointer, ".p2align", 8) == 0)
             {
-                u64 exponent = 0;
-                if (!codegen_global_assembly_unsigned(
+                u64 alignment = 0;
+                if (!codegen_global_assembly_alignment(
                         (String8){
                             .pointer = line.pointer + 8,
                             .length = line.length - 8,
                         },
-                        &exponent) ||
-                    exponent > 12)
+                        &alignment))
                 {
                     return false;
                 }
-                u64 alignment = UINT64_C(1) << exponent;
-                while (buffer->count & (alignment - 1))
+                // The emit helpers refuse a byte the buffer cannot hold without
+                // advancing its count, so a reserve too small for this padding
+                // has to end the loop here instead of asking forever.
+                while ((buffer->count & (alignment - 1)) && buffer->error == CODEGEN_ERROR_NONE)
                 {
                     if (target.cpu_arch == CPU_ARCH_X86_64)
                     {
@@ -9435,9 +9492,15 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     };
     result.thread_local_zero_size = thread_local_zero_count;
     u64 assembly_capacity = 0;
+    // Alignment padding is the one part of global assembly whose size is not
+    // bounded by the source that asks for it: a dozen source bytes of
+    // `.p2align 12` can demand 4095 bytes of padding. It is reserved separately
+    // so the source-length term keeps bounding the label entries below.
+    u64 assembly_alignment_capacity = 0;
     for (u32 assembly_index = 0; assembly_index < module->assembly_count; assembly_index += 1)
     {
         assembly_capacity += module->assemblies[assembly_index].source.length;
+        assembly_alignment_capacity += codegen_global_assembly_alignment_padding(module->assemblies[assembly_index].source);
     }
     u32 entry_capacity = module->function_count + (u32)BUSTER_MIN(assembly_capacity, UINT32_MAX - module->function_count);
     result.entries = arena_allocate(arena, CodegenModuleEntry, entry_capacity);
@@ -9565,7 +9628,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     }
     u64 instruction_capacity = target.cpu_arch == CPU_ARCH_AARCH64 ? 128 : 48;
     u64 capacity = (u64)instruction_count * instruction_capacity + (u64)module->function_count * 64 + stack_probe_capacity + aligned_argument_capacity +
-                   assembly_capacity * 4 + 64;
+                   assembly_capacity * 4 + assembly_alignment_capacity + 64;
     CodegenBuffer buffer = {
         .bytes = arena_allocate(arena, u8, capacity),
         .capacity = capacity,
