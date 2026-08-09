@@ -28,6 +28,7 @@
 
 #include <buster/tests/arena_test.h>
 #include <buster/tests/hash_test.h>
+#include <buster/tests/simd_test.h>
 #include <buster/tests/string_test.h>
 #include <buster/tests/os_test.h>
 #include <buster/tests/file_test.h>
@@ -59,6 +60,7 @@
 #if BUSTER_UNITY_BUILD
 #include <buster/tests/arena_test.c>
 #include <buster/tests/hash_test.c>
+#include <buster/tests/simd_test.c>
 #include <buster/tests/string_test.c>
 #include <buster/tests/os_test.c>
 #include <buster/tests/file_test.c>
@@ -175,6 +177,7 @@ BUSTER_GLOBAL_LOCAL void test_timing_report(UnitTestArguments* arguments, TestTi
 BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
     {S8_INITIALIZER("arena_tests"), &arena_tests},
     {S8_INITIALIZER("hash_tests"), &hash_tests},
+    {S8_INITIALIZER("simd_tests"), &simd_tests},
     {S8_INITIALIZER("string_tests"), &string_tests},
     {S8_INITIALIZER("os_tests"), &os_tests},
     {S8_INITIALIZER("file_tests"), &file_tests},
@@ -207,9 +210,9 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
 };
 
 #if BUSTER_CPU_ARCH_X86_64
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 29);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 30);
 #else
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 28);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 29);
 #endif
 #endif
 

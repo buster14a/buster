@@ -2957,11 +2957,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, c_vector_cross.error == COMPILER_DRIVER_ERROR_NONE);
         BUSTER_TEST(arguments, c_vector_cross.has_object);
     }
-    // The 512-bit vocabulary of <buster/lib/simd.h>. The fixture returns a
-    // distinct code per failed check and has to pass identically whichever
-    // implementation the header selected, so running it natively and building
-    // it for every target is how the AVX-512 path and the scalar fallback are
-    // held to the same meaning.
+    // The 512-bit vocabulary. The fixture is self-contained and guards itself
+    // on the predefined feature macros, so it builds for every target and
+    // compiles its body out where the vocabulary is unavailable; that is what
+    // lets the cross-target loop below cover it on a host whose sysroot has
+    // nobody else's libc in it.
     String8 c_simd_path = buster_test_temporary_path(arguments->arena, S8("buster-c-simd"),
 #if BUSTER_WINDOWS
                                                      S8(".exe"));
@@ -2969,7 +2969,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                                                      S8(""));
 #endif
     String8 c_simd_command_line[] = {
-        S8("-Isrc"),
         S8("-o"),
         c_simd_path,
         S8("tests/basic_c_simd.c"),
@@ -2994,12 +2993,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
     // znver5 has every feature the vocabulary needs, so this build must go
-    // through the builtins; baseline has none of them and must go through the
-    // fallback. Without the statistic a fixture that quietly took the fallback
-    // everywhere would still pass and cover nothing.
+    // through the builtins; baseline has none of them and must emit no SIMD
+    // instruction at all. Without the statistic a fixture that quietly guarded
+    // itself out everywhere would still pass and cover nothing.
     String8 c_simd_avx512_path = buster_test_temporary_path(arguments->arena, S8("buster-c-simd-avx512"), S8(".o"));
     String8 c_simd_avx512_command_line[] = {
-        S8("-c"), S8("--target=x86_64-linux"), S8("-march=znver5"), S8("-Isrc"), S8("-o"), c_simd_avx512_path, S8("tests/basic_c_simd.c"),
+        S8("-c"), S8("--target=x86_64-linux"), S8("-march=znver5"), S8("-o"), c_simd_avx512_path, S8("tests/basic_c_simd.c"),
     };
     Arena* c_simd_target_arena = arena_create((ArenaCreation){0});
     CompilerDriverResult c_simd_avx512 = compiler_driver_execute_invocation(
@@ -3007,39 +3006,27 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_simd_avx512.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, c_simd_avx512.codegen_statistics.simd_operation_count > 0);
     BUSTER_TEST(arguments, arena_destroy(c_simd_target_arena, 1));
-    // The scalar fallback, built for the host and actually run: on an AVX-512
-    // machine the native build above never reaches it, so without this the
-    // fallback would only ever be type-checked and its answers would go
-    // unchecked exactly where the vector path is available to disagree with.
-    String8 c_simd_baseline_path = buster_test_temporary_path(arguments->arena, S8("buster-c-simd-baseline"),
-#if BUSTER_WINDOWS
-                                                              S8(".exe"));
-#else
-                                                              S8(""));
-#endif
+    String8 c_simd_baseline_path = buster_test_temporary_path(arguments->arena, S8("buster-c-simd-baseline"), S8(".o"));
     String8 c_simd_baseline_command_line[] = {
-        S8("-march=baseline"), S8("-Isrc"), S8("-o"), c_simd_baseline_path, S8("tests/basic_c_simd.c"),
+        S8("-c"), S8("--target=x86_64-linux"), S8("-march=baseline"), S8("-o"), c_simd_baseline_path, S8("tests/basic_c_simd.c"),
     };
+    c_simd_target_arena = arena_create((ArenaCreation){0});
     CompilerDriverResult c_simd_baseline = compiler_driver_execute_invocation(
-        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_simd_baseline_command_line)));
+        c_simd_target_arena, compiler_driver_parse_arguments(c_simd_target_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_simd_baseline_command_line)));
     BUSTER_TEST(arguments, c_simd_baseline.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, c_simd_baseline.codegen_statistics.simd_operation_count == 0);
-    if (c_simd_baseline.error == COMPILER_DRIVER_ERROR_NONE)
+    BUSTER_TEST(arguments, arena_destroy(c_simd_target_arena, 1));
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(c_vector_cross_targets); target_index += 1)
     {
-        String8 c_simd_baseline_arguments[] = {
-            c_simd_baseline_path,
+        String8 c_simd_cross_path =
+            buster_test_temporary_path(arguments->arena, S8("buster-c-simd-cross"), string_format(arguments->arena, S8("-{u32}.o"), target_index));
+        String8 c_simd_cross_command_line[] = {
+            S8("-c"), S8("-target"), c_vector_cross_targets[target_index], S8("-o"), c_simd_cross_path, S8("tests/basic_c_simd.c"),
         };
-        ProcessSpawnResult c_simd_baseline_spawn =
-            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_simd_baseline_arguments), (SliceString8){0}, (SliceString8){0},
-                             (ProcessSpawnOptions){
-                                 .use_process_environment = true,
-                             });
-        BUSTER_TEST(arguments, c_simd_baseline_spawn.handle != 0);
-        if (c_simd_baseline_spawn.handle)
-        {
-            ProcessWaitResult c_simd_baseline_wait = os_process_wait_sync(arguments->arena, c_simd_baseline_spawn);
-            BUSTER_TEST(arguments, c_simd_baseline_wait.result == PROCESS_RESULT_SUCCESS);
-        }
+        CompilerDriverResult c_simd_cross = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_simd_cross_command_line)));
+        BUSTER_TEST(arguments, c_simd_cross.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, c_simd_cross.has_object);
     }
 
     String8 c_conversions_path = buster_test_temporary_path(arguments->arena, S8("buster-c-conversions"), S8(""));

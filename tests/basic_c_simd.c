@@ -1,13 +1,67 @@
-// The target-fixed 512-bit vocabulary of <buster/lib/simd.h>, checked against
-// hand-computed results. The same source has to pass whether BUSTER_SIMD_512
-// selected the AVX-512 instructions or the scalar fallback, so building it for
-// several targets is what proves the two agree: a fallback that disagrees with
-// the instruction it stands in for would silently change what a kernel means
-// on the machines that take it.
+// The target-fixed 512-bit vocabulary, checked against hand-computed results.
+//
+// Self-contained on purpose. A driver fixture has to compile for every target
+// `ide cc` supports, and including <buster/lib/simd.h> would pull <string.h>
+// and <stdlib.h> in through base.h -- headers that exist for the host and for
+// nobody else, so the fixture would build only where the sysroot happens to
+// match. That is what every other fixture in this directory avoids by
+// declaring what it needs; this one does the same and calls the builtins
+// directly. The header's own three implementations are covered by
+// simd_tests in src/buster/tests/simd_test.c, which the host compiler builds
+// on every platform.
+//
+// The guard is the same condition <buster/lib/simd.h> uses, spelled out:
+// `ide cc` predefines these from its target, so on a machine without the
+// features the whole body compiles out and the fixture trivially succeeds.
 //
 // Every failure returns a distinct code so a driver run names the check.
 
-#include <buster/lib/simd.h>
+typedef unsigned char u8;
+typedef unsigned int u32;
+typedef unsigned long long u64;
+
+#if defined(__x86_64__) && defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512VBMI__) && defined(__AVX512VBMI2__)
+#define FIXTURE_SIMD_512 1
+#else
+#define FIXTURE_SIMD_512 0
+#endif
+
+#if FIXTURE_SIMD_512
+
+typedef u8 Simd512 __attribute__((vector_size(64)));
+typedef u64 Mask64;
+
+#define simd512_load(address) __builtin_buster_simd_load(address)
+#define simd512_load_masked(address, mask) __builtin_buster_simd_load_masked((address), (mask))
+#define simd512_store(address, value) __builtin_buster_simd_store((address), (value))
+#define simd512_store_masked(address, mask, value) __builtin_buster_simd_store_masked((address), (mask), (value))
+#define simd512_splat(byte) __builtin_buster_simd_splat_byte(byte)
+#define simd512_zero() simd512_splat(0)
+#define simd512_equal_byte(left, right) __builtin_buster_simd_equal_byte((left), (right))
+#define simd512_less_byte(left, right) __builtin_buster_simd_less_byte((left), (right))
+#define simd512_sign_byte(value) __builtin_buster_simd_sign_byte(value)
+#define simd512_test_byte(left, right) __builtin_buster_simd_test_byte((left), (right))
+#define simd512_permute2_byte(mask, low, indices, high) __builtin_buster_simd_permute2_byte((mask), (low), (indices), (high))
+#define simd512_compress_byte(mask, value) __builtin_buster_simd_compress_byte((mask), (value))
+#define simd512_compress_store_byte(address, mask, value) __builtin_buster_simd_compress_store_byte((address), (mask), (value))
+#define simd512_widen_byte(value, quarter) __builtin_buster_simd_widen_byte((value), (quarter))
+#define simd512_shift_left_word(value, count) __builtin_buster_simd_shift_left_word((value), (count))
+#define simd512_ternary_word(a, b, c, table) __builtin_buster_simd_ternary_word((a), (b), (c), (table))
+#define simd512_add_byte(left, right) ((Simd512)((left) + (right)))
+
+#define mask64_prefix(count) ((count) >= 64 ? ~(Mask64)0 : (((Mask64)1 << (count)) - 1))
+#define mask64_shift_left(mask, count) ((Mask64)(mask) << (count))
+#define mask64_shift_right(mask, count) ((Mask64)(mask) >> (count))
+#define mask64_and(left, right) ((Mask64)(left) & (Mask64)(right))
+#define mask64_and_not(left, right) ((Mask64)(left) & ~(Mask64)(right))
+#define mask64_or(left, right) ((Mask64)(left) | (Mask64)(right))
+#define mask64_xor(left, right) ((Mask64)(left) ^ (Mask64)(right))
+#define mask64_not(mask) (~(Mask64)(mask))
+#define mask64_run_starts(mask) ((Mask64)(mask) & ~((Mask64)(mask) << 1))
+#define mask64_run_ends(mask) ((Mask64)(mask) & ~((Mask64)(mask) >> 1))
+#define mask64_count(mask) ((u32)__builtin_popcountll(mask))
+#define mask64_first_set(mask) ((u32)__builtin_ctzll(mask))
+#define mask64_leading_ones(mask) mask64_first_set(~(Mask64)(mask))
 
 typedef union Lanes Lanes;
 union Lanes
@@ -209,7 +263,7 @@ int main(void)
         return 23;
     }
     // 128..255 are the high-bit bytes, and an unsigned compare has to agree.
-    if (simd512_sign_byte(simd512_load(sign_bytes)) != UINT64_C(0xAAAAAAAAAAAAAAAA))
+    if (simd512_sign_byte(simd512_load(sign_bytes)) != 0xAAAAAAAAAAAAAAAAULL)
     {
         return 24;
     }
@@ -222,7 +276,7 @@ int main(void)
         return 26;
     }
     // lane & 3 is non-zero for three lanes in every four.
-    if (simd512_test_byte(value, simd512_splat(3)) != UINT64_C(0xEEEEEEEEEEEEEEEE))
+    if (simd512_test_byte(value, simd512_splat(3)) != 0xEEEEEEEEEEEEEEEEULL)
     {
         return 27;
     }
@@ -253,7 +307,7 @@ int main(void)
     }
 
     // vpcompressb packs the selected lanes down and zeroes the rest.
-    probe.vector = simd512_compress_byte(UINT64_C(0x5555555555555555), value);
+    probe.vector = simd512_compress_byte(0x5555555555555555ULL, value);
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         if (probe.bytes[lane] != (lane < 32 ? (u8)(lane * 2) : 0))
@@ -505,3 +559,12 @@ int main(void)
     }
     return 0;
 }
+
+#else
+
+int main(void)
+{
+    return 0;
+}
+
+#endif

@@ -870,6 +870,7 @@ buster_register_module(ide_document "${BUSTER_SOURCE_DIR}/ide_document${COMMON_E
 set(BUSTER_TEST_SOURCES
     src/buster/tests/arena_test.c
     src/buster/tests/hash_test.c
+    src/buster/tests/simd_test.c
     src/buster/tests/string_test.c
     src/buster/tests/os_test.c
     src/buster/tests/file_test.c
@@ -898,6 +899,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/test.h
     src/buster/tests/arena_test.h
     src/buster/tests/hash_test.h
+    src/buster/tests/simd_test.h
     src/buster/tests/string_test.h
     src/buster/tests/os_test.h
     src/buster/tests/file_test.h
