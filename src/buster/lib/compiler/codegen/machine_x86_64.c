@@ -532,10 +532,20 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         {
             bool cast_signed = instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT;
             if (!cast_target_type || cast_target_type->kind != IR_TYPE_FLOAT ||
-                (cast_target_type->bit_width != 32 && cast_target_type->bit_width != 64) || !source_bits ||
-                (!cast_signed && source_bits == 64))
+                (cast_target_type->bit_width != 32 && cast_target_type->bit_width != 64) || !source_bits)
             {
                 return false;
+            }
+            if (!cast_signed && source_bits == 64)
+            {
+                u32 branchy_row = machine_x64_select_row(
+                    selector, (MachineInstruction){
+                                  .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                  .opcode = (u16)(cast_target_type->bit_width == 64 ? MACHINE_X64_CVT_U64_TO_F64 : MACHINE_X64_CVT_U64_TO_F32),
+                              });
+                machine_x64_define(selector, result_register, branchy_row);
+                return true;
             }
             u32 extended_register = source_register;
             if (source_bits < 64)
@@ -564,10 +574,20 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER)
         {
             bool to_unsigned = instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER;
-            if (!source_type || source_type->kind != IR_TYPE_FLOAT || (source_type->bit_width != 32 && source_type->bit_width != 64) ||
-                (to_unsigned && cast_target_type && cast_target_type->kind == IR_TYPE_INTEGER && cast_target_type->bit_width == 64))
+            if (!source_type || source_type->kind != IR_TYPE_FLOAT || (source_type->bit_width != 32 && source_type->bit_width != 64))
             {
                 return false;
+            }
+            if (to_unsigned && cast_target_type && cast_target_type->kind == IR_TYPE_INTEGER && cast_target_type->bit_width == 64)
+            {
+                u32 branchy_row = machine_x64_select_row(
+                    selector, (MachineInstruction){
+                                  .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                  .opcode = (u16)(source_type->bit_width == 64 ? MACHINE_X64_CVT_F64_TO_U64 : MACHINE_X64_CVT_F32_TO_U64),
+                              });
+                machine_x64_define(selector, result_register, branchy_row);
+                return true;
             }
             u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
@@ -649,6 +669,38 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
                                        .opcode = (u16)(negate ? (wide ? MACHINE_X64_NEG64 : MACHINE_X64_NEG32) : (wide ? MACHINE_X64_NOT64 : MACHINE_X64_NOT32)),
                                    });
+            return true;
+        }
+        if (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS || instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS)
+        {
+            // Canonical form: bsf for trailing zeros, bsr xor width-1 for
+            // leading — both undefined on zero input, exactly like the
+            // builtins they lower.
+            bool leading = instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS;
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                           .opcode = (u16)(leading ? (wide ? MACHINE_X64_BSR64 : MACHINE_X64_BSR32)
+                                                                                   : (wide ? MACHINE_X64_BSF64 : MACHINE_X64_BSF32)),
+                                                       });
+            machine_x64_define(selector, result_register, row);
+            if (leading)
+            {
+                u32 flip_immediate = selector->immediates.total_count;
+                u64* flip_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+                *flip_row = wide ? 63 : 31;
+                u32 flip_register = machine_x64_synthesize_register(selector);
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, flip_register),
+                                                                  machine_ref_make(MACHINE_REF_IMMEDIATE, flip_immediate)},
+                                                     .opcode = MACHINE_X64_MOV_RI,
+                                                 });
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, flip_register)},
+                                                     .opcode = (u16)(wide ? MACHINE_X64_XOR64 : MACHINE_X64_XOR32),
+                                                 });
+            }
             return true;
         }
         if (instruction->unary_operation == IR_UNARY_FLOAT_NEGATE)
@@ -2137,7 +2189,7 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
                       instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY) &&
                      value_type && value_type->layout.resolved && value_type->layout.size <= UINT32_MAX - 7 &&
                      (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE ||
-                      (instruction->opcode == IR_OPCODE_ARRAY && value_type->kind == IR_TYPE_ARRAY)))
+                      ((instruction->opcode == IR_OPCODE_ARRAY || instruction->opcode == IR_OPCODE_LOAD) && value_type->kind == IR_TYPE_ARRAY)))
             {
                 // Aggregate values own a frame slot like the canonical
                 // path's per-value storage; copies and ABI part transfers
@@ -2787,6 +2839,14 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             case MACHINE_X64_MOV32_RR:
                 machine_x64_emit_rr(&encoder, false, false, 0x89, operand_registers[1], operand_registers[0]);
                 break;
+            case MACHINE_X64_BSF32:
+            case MACHINE_X64_BSF64:
+            case MACHINE_X64_BSR32:
+            case MACHINE_X64_BSR64:
+                machine_x64_emit_rr(&encoder, instruction->opcode == MACHINE_X64_BSF64 || instruction->opcode == MACHINE_X64_BSR64, true,
+                                    instruction->opcode == MACHINE_X64_BSF32 || instruction->opcode == MACHINE_X64_BSF64 ? 0xbc : 0xbd,
+                                    operand_registers[0], operand_registers[1]);
+                break;
             case MACHINE_X64_MOVSX8_RR:
                 machine_x64_emit_rr(&encoder, true, true, 0xbe, operand_registers[0], operand_registers[1]);
                 break;
@@ -3288,6 +3348,123 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 machine_x64_emit8(&encoder, 0x2a);
                 machine_x64_emit8(&encoder, machine_x64_modrm_register(0, operand_registers[1]));
                 machine_x64_emit_movq_from_xmm(&encoder, 0, operand_registers[0]);
+            }
+            break;
+            case MACHINE_X64_CVT_U64_TO_F32:
+            case MACHINE_X64_CVT_U64_TO_F64:
+            {
+                // Canonical branchy form: non-negative converts directly;
+                // a set sign bit halves with a sticky rounding bit, then
+                // doubles the float. Value in RAX, RCX is the scratch, the
+                // f32/f64 bit pattern lands back in RAX.
+                bool to_f64 = instruction->opcode == MACHINE_X64_CVT_U64_TO_F64;
+                u8 cvt_prefix = to_f64 ? 0xf2 : 0xf3;
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x89);
+                machine_x64_emit8(&encoder, 0xc8);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x85);
+                machine_x64_emit8(&encoder, 0xc0);
+                machine_x64_emit8(&encoder, 0x79);
+                machine_x64_emit8(&encoder, 0x17);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x89);
+                machine_x64_emit8(&encoder, 0xc1);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0xd1);
+                machine_x64_emit8(&encoder, 0xe8);
+                machine_x64_emit8(&encoder, 0x83);
+                machine_x64_emit8(&encoder, 0xe1);
+                machine_x64_emit8(&encoder, 0x01);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x09);
+                machine_x64_emit8(&encoder, 0xc8);
+                machine_x64_emit8(&encoder, cvt_prefix);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0x2a);
+                machine_x64_emit8(&encoder, 0xc0);
+                machine_x64_emit8(&encoder, cvt_prefix);
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0x58);
+                machine_x64_emit8(&encoder, 0xc0);
+                machine_x64_emit8(&encoder, 0xeb);
+                machine_x64_emit8(&encoder, 0x05);
+                machine_x64_emit8(&encoder, cvt_prefix);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0x2a);
+                machine_x64_emit8(&encoder, 0xc0);
+                machine_x64_emit8(&encoder, 0x66);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0x7e);
+                machine_x64_emit8(&encoder, 0xc0);
+            }
+            break;
+            case MACHINE_X64_CVT_F32_TO_U64:
+            case MACHINE_X64_CVT_F64_TO_U64:
+            {
+                // Canonical threshold form: values below 2^63 convert
+                // directly, larger ones subtract the threshold first and
+                // set the top bit after. Pattern arrives in RCX, RCX is
+                // also the constant scratch, the integer lands in RAX.
+                bool from_f64 = instruction->opcode == MACHINE_X64_CVT_F64_TO_U64;
+                u8 cvt_prefix = from_f64 ? 0xf2 : 0xf3;
+                machine_x64_emit8(&encoder, 0x66);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0x6e);
+                machine_x64_emit8(&encoder, 0xc1);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0xb8);
+                if (from_f64)
+                {
+                    machine_x64_emit32(&encoder, 0);
+                    machine_x64_emit32(&encoder, 0x43e00000u);
+                }
+                else
+                {
+                    machine_x64_emit32(&encoder, 0x5f000000u);
+                    machine_x64_emit32(&encoder, 0);
+                }
+                machine_x64_emit8(&encoder, 0x66);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0x6e);
+                machine_x64_emit8(&encoder, 0xc8);
+                if (from_f64)
+                {
+                    machine_x64_emit8(&encoder, 0x66);
+                }
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0x2e);
+                machine_x64_emit8(&encoder, 0xc1);
+                machine_x64_emit8(&encoder, 0x72);
+                machine_x64_emit8(&encoder, 0x18);
+                machine_x64_emit8(&encoder, cvt_prefix);
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0x5c);
+                machine_x64_emit8(&encoder, 0xc1);
+                machine_x64_emit8(&encoder, cvt_prefix);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0x2c);
+                machine_x64_emit8(&encoder, 0xc0);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0xb9);
+                machine_x64_emit32(&encoder, 0);
+                machine_x64_emit32(&encoder, 0x80000000u);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x09);
+                machine_x64_emit8(&encoder, 0xc8);
+                machine_x64_emit8(&encoder, 0xeb);
+                machine_x64_emit8(&encoder, 0x05);
+                machine_x64_emit8(&encoder, cvt_prefix);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0x2c);
+                machine_x64_emit8(&encoder, 0xc0);
             }
             break;
             case MACHINE_X64_CVT_F32_TO_I64:

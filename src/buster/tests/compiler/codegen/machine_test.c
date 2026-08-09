@@ -332,6 +332,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "int local_pair(int x) { Pair p; p.first = x; p.second = x * 2; return p.first + (int)p.second; }\n"
                                   "int pick(int k) { switch (k) { case 1: return 10; case 3: return 30; case 7: return 70; default: return -k; } }\n");
     String8 machine_c_source_tail = S8(
+                                  "long ucvt(long a, long b) { unsigned long u = ((unsigned long)a << 32) | 5u; double d = (double)u; unsigned long r = (unsigned long)d; float f = (float)(((unsigned long)b << 31) | 1u); return (long)(r >> 33) + (long)(f * 0.25f) + (long)(unsigned long)(double)((unsigned long)b | 3u); }\n"
                                   "int printf(const char* format, ...);\n"
                                   "int call_variadic(int a, long b) { return printf(\"%d %ld\", a, b); }\n"
                                   "typedef struct Span { char* data; unsigned long length; } Span;\n"
@@ -373,7 +374,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         String8 supported_names[] = {
             S8_INITIALIZER("add"), S8_INITIALIZER("mul"), S8_INITIALIZER("widen"), S8_INITIALIZER("narrow"),
             S8_INITIALIZER("negate"), S8_INITIALIZER("bitnot"), S8_INITIALIZER("lnot"), S8_INITIALIZER("less"),
-            S8_INITIALIZER("uless"), S8_INITIALIZER("six"), S8_INITIALIZER("kagg"), S8_INITIALIZER("arr_lit"), S8_INITIALIZER("bits"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("readp"),
+            S8_INITIALIZER("uless"), S8_INITIALIZER("six"), S8_INITIALIZER("kagg"), S8_INITIALIZER("arr_lit"), S8_INITIALIZER("bits"), S8_INITIALIZER("ucvt"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("readp"),
             S8_INITIALIZER("writep"), S8_INITIALIZER("divide"), S8_INITIALIZER("srem"), S8_INITIALIZER("udiv"),
             S8_INITIALIZER("shl"), S8_INITIALIZER("sar"), S8_INITIALIZER("shr"), S8_INITIALIZER("bump"),
             S8_INITIALIZER("table_get"), S8_INITIALIZER("table_set"), S8_INITIALIZER("pair_sum"),

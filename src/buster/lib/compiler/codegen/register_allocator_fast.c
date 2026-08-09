@@ -91,6 +91,10 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_opcode_is_constrained(u16 opcode)
     case MACHINE_X64_ATOMIC_CMPXCHG:
     case MACHINE_X64_COPY_FRAME_FROM_PTR:
     case MACHINE_X64_COPY_PTR_FROM_FRAME:
+    case MACHINE_X64_CVT_U64_TO_F32:
+    case MACHINE_X64_CVT_U64_TO_F64:
+    case MACHINE_X64_CVT_F32_TO_U64:
+    case MACHINE_X64_CVT_F64_TO_U64:
         return true;
     default:
         return false;

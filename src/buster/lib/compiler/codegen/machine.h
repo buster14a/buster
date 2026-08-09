@@ -211,6 +211,14 @@ typedef enum MachineOpcode
     MACHINE_X64_NEG64,
     MACHINE_X64_NOT32,
     MACHINE_X64_NOT64,
+    MACHINE_X64_CVT_U64_TO_F32, // dest def, source use; canonical branchy round-to-nearest
+    MACHINE_X64_CVT_U64_TO_F64,
+    MACHINE_X64_CVT_F32_TO_U64, // dest def, source use; canonical threshold-subtract form
+    MACHINE_X64_CVT_F64_TO_U64,
+    MACHINE_X64_BSF32, // dest def, source use; undefined on zero input
+    MACHINE_X64_BSF64,
+    MACHINE_X64_BSR32,
+    MACHINE_X64_BSR64,
     MACHINE_X64_CMP32,        // use, use; defines flags
     MACHINE_X64_CMP64,
     MACHINE_X64_TEST_RR,      // use, use; defines flags (64-bit)

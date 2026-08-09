@@ -12,6 +12,34 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09aa` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+array loads, bit scans, and unsigned-64 float conversions: ninety-nine
+percent.)
+
+- **What was built.** Three lifts from the reject-detail census.
+  (1) Array-typed loads join the slot pre-pass, so struct-member array
+  copies stop rejecting (15 functions). (2) count-trailing/leading-
+  zeros select as bsf, and bsr xor width-1, mirroring canonical —
+  undefined on zero like the builtins (4 functions). (3) The branchy
+  unsigned-64 float conversions land as constrained macro-ops in the
+  encoder (precedent: the atomic retry loop): u64-to-float halves with
+  a sticky bit and doubles when the sign bit is set; float-to-u64
+  subtracts the 2^63 threshold and sets the top bit past it — the
+  canonical byte sequences with RAX/RCX/XMM0/XMM1 scratches (10
+  functions, mostly ui).
+- **Numbers** (buster-built stage comparison, compiling ide.c under
+  NONE): fallbacks 52 -> 28, coverage **2914 of 2942 (99.0%)**.
+  Fast-built compiler 53.27G instructions (canonical 70.05G,
+  **-24.0%**), text 20,783,355 (canonical 25,699,964, -19.1%).
+- **Gates:** test_all green (a ucvt differential crosses the 2^63
+  threshold in both directions), MIR and FAST soaks byte-identical on
+  fresh references, self-host fixed point holds.
+- **The remaining 28 are the legitimate tail:** thread-local globals
+  (fs-segment addressing), label addresses/computed goto, the va_start
+  machinery, clear-instruction-cache, and a few residual call shapes.
+  Coverage work stops here; stage 5/6 quality and latency (spill-slot
+  reuse, debug locations, edge contracts) and the QRA stages are next.
+
 `2026-08-09z` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 bit-field aggregate literals: coverage reaches ninety-eight percent.)
 
