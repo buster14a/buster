@@ -12,6 +12,73 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09f` (Linux x86_64, Zen 4 7940HS; the `c_parse_scope_add_entity`
+byte-FNV lead the `2026-08-09d` entry left on the table — every number
+clang-built, counter medians of 5 runs on a quiet machine, exact call
+volumes from temporary probe counters. The proposed shape measured
+negative and was not taken; a stronger shape measured positive and was.
+Baseline re-measured on the 2026-08-09 main with the `2026-08-09d` intern
+change and the sizeof operand-type resolver in: stage 1 `4.9774 G`
+instructions / `2537.9 M` cycles / `146.8 M` L1d / `242.9 k` minor faults
+— the `+15.9 M` over the `2026-08-09d` reference is the strict sizeof
+resolver's own cost, priced before this session started.)
+
+- **The proposed fix (per-id stored FNV on `CSymbolTable`, reused at
+  entity adds) measured negative: gate `+1.42 M`, fixed-workload
+  cross-check `+1.07 M`. Probe counters killed its premise.** Stage 1
+  runs 46,244 entity adds hashing 614,480 name bytes, but only 29,604
+  unique names totalling 584,646 bytes — added-entity names average 13.3
+  bytes while unique interned names average 19.7, so storing the hash at
+  insert re-hashes 95% of the byte volume the adds were paying and the
+  reuse ratio is ~1.6x, not the ~3.4x the estimate assumed. The stored
+  row then loses on its own overhead: a dependent random `hashes[symbol]`
+  load per add (+~0.5 M L1d misses), the growth memcpys, and +90 minor
+  faults for the array pages. Not merged.
+- **What was taken instead: the name/typedef buckets key on the interned
+  id itself, exactly the `c_parse_entity_lookup_hash` idiom.**
+  `c_parse_name_hash(symbol, name)` returns `symbol * 0x9E3779B97F4A7C15`
+  when the parse has a symbol table and the byte-FNV only in the
+  table-less hand-built-test path. All four FNV sites convert: entity adds
+  (46,245 calls / 614,503 bytes), `c_parse_lookup_typedef_name` (13,466 /
+  60,949), `c_parse_first_constant_entity` (1,209 / 26,517), and the
+  declaration-finalize candidate probe (9,994 / 263,111). The three probe
+  sites intern first — every name reaching them comes from a token the
+  preprocessor already interned, so post-`2026-08-09d` that is a pure
+  identity-path hit, cheaper than the FNV it replaces. Chain membership
+  changes bucket, never order: same-named entities keep their
+  newest-first chain order and every probe still confirms by
+  `string_equal`/symbol, so results are identical in both keying modes.
+- **Stage 1 `4.9774 G` to `4.9751 G` instructions (`-2.25 M`, `-0.045%`);
+  fixed-workload cross-check attributes `-1.98 M` to compiler efficiency.
+  Byte-identical output verified directly: the old and new compilers
+  produce identical objects on the same tree.** Cycles `2537.9 M` to
+  `2529.4 M` medians (`-0.34%`, inside the noise band, directionally
+  consistent), L1d neutral (`146.8 M` to `146.7 M`), minor faults neutral
+  (`243.0 k`). Stage 2 `70.32 G` to `70.28 G` (validation only). Fixed
+  point deterministic (`bytes=26111904`). All 16487 Release and 15619
+  sanitized tests pass; `ide bench` unchanged (`409.8 M`,
+  pre-`2026-08-09c`-Deus-Lex tokenizer).
+- **Method note: the `-2.25 M` is 1000x the gate's measurement noise but
+  22x smaller than run-to-run cycle noise.** The stage-1 instruction
+  counter reproduces to ~1 k on this host (five runs spanned 958
+  instructions); nothing this size is visible in wall time or cycles, and
+  only the fixed-workload cross-check separates the `-1.98 M` efficiency
+  gain from the `-0.27 M` the modified tree's own compile-cost delta
+  contributes to the gate.
+- **Leads left standing:** the 08l-scoped `c_ir_query_execute` and
+  `c_parse_type_layout` leads were taken by the concurrent `2026-08-09e`
+  session (PR 219, merged mid-session); the Token 4 B to 2 B, vectorized
+  keyword hash, and CToken 48 to 16 items from `2026-08-08g` remain open.
+- Reference points for the next audit, re-measured on this branch rebased
+  onto the post-`2026-08-09e` main (the layout-cache and resumable-frames
+  landings in), all clang-built on this host: stage 1 **`4.8793 G`**
+  instructions / `~2453.6 M` cycles / `~234.5 k` minor faults /
+  `~142.7 M` L1d load misses — within `~0.3 M` of additive with the
+  `2026-08-09e` `4.8818 G` merged reference; stage 2 `64.13 G`
+  (validation only), fixed point `SELF_HOST deterministic
+  bytes=26124760`, `ide bench` `409.8 M` (pre-Deus-Lex; PR 217 lands its
+  own bench reference).
+
 `2026-08-09e` (Linux x86_64, Zen 4 7940HS; the two remaining `2026-08-08l`
 stage-1 leads — the `c_parse_type_layout` persistent cache and the
 `c_ir_query_execute` resumable frames — taken as one session, one measured
