@@ -278,6 +278,14 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("x64_mfence"),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
     },
+    [MACHINE_X64_INT3] = {
+        .name = S8_INITIALIZER("x64_int3"),
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
+    [MACHINE_X64_UD2] = {
+        .name = S8_INITIALIZER("x64_ud2"),
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_TERMINATOR,
+    },
     [MACHINE_X64_CALL_INDIRECT] = {
         .name = S8_INITIALIZER("x64_call_indirect"),
         .operand_count = 1,

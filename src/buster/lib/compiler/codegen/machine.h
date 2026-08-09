@@ -305,6 +305,8 @@ typedef enum MachineOpcode
     MACHINE_X64_ATOMIC_RMW,        // def old, use address, use value
     MACHINE_X64_ATOMIC_CMPXCHG,    // def old, use address, use expected, use desired
     MACHINE_X64_MFENCE,
+    MACHINE_X64_INT3, // debug trap
+    MACHINE_X64_UD2,  // unreachable; terminator
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

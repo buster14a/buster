@@ -12,6 +12,47 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09v` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+aggregate literals and debug traps lift coverage past eighty percent.)
+
+- **How the target was chosen.** A local rejection dump over the unity
+  compile (temporary `BUSTER_MACHINE_REJECTS` knob, removed) showed the
+  fallback mass was never the exotic constructs: IR_OPCODE_AGGREGATE
+  (struct literals) caused 1142 of 1321 fallbacks, and behind it
+  DEBUG_TRAP 208 and ARRAY 391 (ARRAY needs the four-component
+  collection value model and stays open).
+- **What was built.** AGGREGATE selection: field-by-field construction
+  into the value's slot — scalar members store sized at their offsets,
+  aggregate members copy from their own slots through the field's
+  address, bit-field members reject to canonical (masked insertion is
+  not worth mirroring yet). DEBUG_TRAP selects int3; UNREACHABLE now
+  emits ud2 instead of a full return epilogue (smaller, faults loudly,
+  canonical bytes).
+- **The bug that cost a day of soak red: narrowing casts kept the
+  discarded bits.** INTEGER_TRUNCATE and POINTER_TO_INTEGER selected as
+  plain 64-bit copies, violating the register model's zero-extension
+  invariant. The failure needed a source with meaningful high bits
+  feeding a 64-bit consumer: `u32 id = (u32)length_and_id` followed by
+  `table->names[id]` scaled the full `length<<32|id` word — the symbol
+  table's rehash scattered writes 400GB past the heap and the crash
+  surfaced two calls later in a different field. Found by extracting
+  `c_symbol_intern` verbatim into a standalone probe after three
+  hand-built probe shapes all passed: the trigger was the long-name
+  lookup path my simplifications had dropped. Narrowing casts now emit
+  mov r32 / movzx by destination width. Lesson recorded: when a
+  bisected function's obvious new construct probes clean, extract the
+  function verbatim before reading more disassembly — the defect was in
+  a years-old-looking line the simplified probes silently fixed.
+- **Numbers** (buster-built stage comparison, compiling ide.c under
+  NONE): fallbacks 1321 -> 575, coverage **2342 of 2917 (80.3%)**.
+  Fast-built compiler 59.41G instructions (from 63.58G; canonical
+  70.05G — **15.2% below the canonical stack emitter**), text
+  23,662,996 (canonical 25,699,964, -7.9%).
+- **Gates:** test_all green (20098 unit / 30 module, kagg aggregate
+  differential routed through the module section where its call
+  relocation resolves), MIR and FAST soaks byte-identical on fresh
+  references, self-host fixed point holds.
+
 `2026-08-09u` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6 —
 R12/R13 complete the callee-saved file; ModRM base quirks fixed.)
 

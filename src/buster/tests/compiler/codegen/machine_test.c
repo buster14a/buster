@@ -282,6 +282,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "int less(int a, int b) { return a < b; }\n"
                                   "int uless(unsigned a, unsigned b) { return a < b; }\n"
                                   "int six(int a, int b, int c, int d, int e, int f) { return a + b + c + d + e + f; }\n"
+                                  "struct KPair { long low; long high; };\n"
+                                  "static long kagg_take(struct KPair pair, long salt) { return pair.low * 3 + pair.high + salt; }\n"
+                                  "long kagg(long a, long b) { struct KPair pair = {.low = a + 1, .high = b}; return kagg_take(pair, a) + pair.high; }\n"
                                   "int sum_to(int n) { int s = 0; int i = 1; while (i <= n) { s = s + i; i = i + 1; } return s; }\n"
                                   "long readp(long* p) { return *p; }\n"
                                   "void writep(int* p, int v) { *p = v; }\n"
@@ -367,7 +370,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         String8 supported_names[] = {
             S8_INITIALIZER("add"), S8_INITIALIZER("mul"), S8_INITIALIZER("widen"), S8_INITIALIZER("narrow"),
             S8_INITIALIZER("negate"), S8_INITIALIZER("bitnot"), S8_INITIALIZER("lnot"), S8_INITIALIZER("less"),
-            S8_INITIALIZER("uless"), S8_INITIALIZER("six"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("readp"),
+            S8_INITIALIZER("uless"), S8_INITIALIZER("six"), S8_INITIALIZER("kagg"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("readp"),
             S8_INITIALIZER("writep"), S8_INITIALIZER("divide"), S8_INITIALIZER("srem"), S8_INITIALIZER("udiv"),
             S8_INITIALIZER("shl"), S8_INITIALIZER("sar"), S8_INITIALIZER("shr"), S8_INITIALIZER("bump"),
             S8_INITIALIZER("table_get"), S8_INITIALIZER("table_set"), S8_INITIALIZER("pair_sum"),
@@ -493,7 +496,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                    string_equal(supported_names[name_index], S8("pair_sum"));
             // Call-containing functions execute only through the module
             // differential, where their call relocations resolve.
-            bool contains_calls = string_equal(supported_names[name_index], S8("span_round_trip"));
+            bool contains_calls = string_equal(supported_names[name_index], S8("span_round_trip")) ||
+                                  string_equal(supported_names[name_index], S8("kagg"));
             if (touches_globals || contains_calls)
             {
                 continue;
@@ -663,7 +667,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("locals_array"), S8_INITIALIZER("local_pair"), S8_INITIALIZER("pick"),
             S8_INITIALIZER("aligned_local"), S8_INITIALIZER("span_round_trip"), S8_INITIALIZER("single_round_trip"), S8_INITIALIZER("fmath"),
             S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnan"), S8_INITIALIZER("call_stack"), S8_INITIALIZER("big_round"),
-            S8_INITIALIZER("call_indirect"), S8_INITIALIZER("atomic_ops"),
+            S8_INITIALIZER("call_indirect"), S8_INITIALIZER("atomic_ops"), S8_INITIALIZER("kagg"),
         };
         typedef s64 MachineTestModuleCall2(s64, s64);
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(module_names) && none_module_executable.address && mir_module_executable.address;
