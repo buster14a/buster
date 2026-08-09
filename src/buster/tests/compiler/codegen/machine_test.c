@@ -981,6 +981,14 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                     stack_placement.reload_count + stack_placement.spill_count,
                                 string_format(arguments->arena, S8("fast traffic {u32}+{u32} vs stack {u32}+{u32}"), fast_placement.reload_count,
                                               fast_placement.spill_count, stack_placement.reload_count, stack_placement.spill_count));
+                // Coalescing must survive: copies whose source dies land on
+                // the source register and encode to nothing, so the fast
+                // encoding stays strictly smaller than the stack one.
+                MachineEncodeResult stack_encoded = machine_encode_x86_64(arguments->arena, &traffic_selected.function, &stack_placement);
+                MachineEncodeResult fast_encoded = machine_encode_x86_64(arguments->arena, &traffic_selected.function, &fast_placement);
+                BUSTER_TEST(arguments, stack_encoded.valid && fast_encoded.valid);
+                BUSTER_TEST_RAW(arguments, fast_encoded.byte_count < stack_encoded.byte_count,
+                                string_format(arguments->arena, S8("fast bytes {u32} vs stack {u32}"), fast_encoded.byte_count, stack_encoded.byte_count));
             }
         }
         codegen_release_executable(none_module_executable);

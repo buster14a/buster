@@ -2852,7 +2852,13 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             }
             break;
             case MACHINE_X64_MOV_RR:
-                machine_x64_emit_rr(&encoder, true, false, 0x89, operand_registers[1], operand_registers[0]);
+                // A full-width self-copy is the coalesced form of this row
+                // and encodes to nothing. The narrower moves below are not
+                // identities: they clear the upper bits.
+                if (operand_registers[0] != operand_registers[1])
+                {
+                    machine_x64_emit_rr(&encoder, true, false, 0x89, operand_registers[1], operand_registers[0]);
+                }
                 break;
             case MACHINE_X64_MOV32_RR:
                 machine_x64_emit_rr(&encoder, false, false, 0x89, operand_registers[1], operand_registers[0]);

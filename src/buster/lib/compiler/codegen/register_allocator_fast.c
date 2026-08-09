@@ -197,6 +197,14 @@ BUSTER_GLOBAL_LOCAL void machine_fast_writeback(MachineFastState* state)
     }
 }
 
+// True when the virtual register has no use after the instruction being
+// scanned: its uses are all in the defining block and the last of them is
+// this instruction, which the use pass has already consumed.
+BUSTER_GLOBAL_LOCAL bool machine_fast_source_dies_here(MachineFastState* state, u32 virtual_register)
+{
+    return !state->escapes[virtual_register] && state->last_use[virtual_register] == (state->current_point >> 2);
+}
+
 // True when the virtual register stays live past the next call in the
 // current block, making a callee-saved binding worth its push/pop pair.
 BUSTER_GLOBAL_LOCAL bool machine_fast_crosses_call(MachineFastState* state, u32 virtual_register)
@@ -630,6 +638,22 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
                     // could land on an argument register whose own capture
                     // has not executed yet and destroy it.
                     target = machine_ref_payload(instruction->operands[1]);
+                }
+                else if (instruction->opcode == MACHINE_X64_MOV_RR && slot == 0 &&
+                         machine_ref_kind(instruction->operands[1]) == MACHINE_REF_VIRTUAL_REGISTER &&
+                         machine_ref_payload(instruction->operands[1]) != machine_ref_payload(ref) &&
+                         operand_registers[1] != UINT8_MAX && machine_fast_source_dies_here(&state, machine_ref_payload(instruction->operands[1])))
+                {
+                    // Coalesce: the source's last use is this copy, so the
+                    // destination takes its register and the row encodes to
+                    // nothing. Ownership transfers directly — routing it
+                    // through an eviction would write the dying source back
+                    // to a slot nobody reads.
+                    target = operand_registers[1];
+                    u32 dying = machine_ref_payload(instruction->operands[1]);
+                    state.owner[target] = UINT32_MAX;
+                    state.dirty[target] = false;
+                    state.virtual_register_locations[dying] = UINT32_MAX;
                 }
                 else
                 {
