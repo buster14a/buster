@@ -12,6 +12,29 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09aj` (Linux x86_64, Zen 4 7940HS; register-allocator stage 13
+— optimization intent selects the allocator.)
+
+- **What was built.** The driver understands `-O` levels now, and they
+  map to the only budget this compiler currently spends: `-O0` (and no
+  flag) keeps the canonical stack emitter, while `-O1`, `-O2`, `-O3`,
+  `-Os`, `-Oz`, and `-Ofast` take FAST. An unknown level is an error
+  rather than a silent no-op. QUALITY is deliberately left out of the
+  mapping: it does not beat FAST on a measured corpus
+  (`2026-08-09ai`), so it stays reachable only by naming it with
+  `-fregister-allocator=quality`.
+- **Reproducible flags.** `-fregister-allocator=none|mir-stack|fast|
+  quality` selects a mode directly and overrides nothing else;
+  `mir-stack` is the internal verification mode that routes the machine
+  path with every value in a slot. `cc -v` reports the mode, the
+  per-opcode fallback census, and allocator traffic, which is what every
+  entry above was measured with.
+- **Default unchanged.** With no optimization flag the compiler still
+  uses the canonical path, so nothing about existing invocations moves.
+- **Gates:** test_all green, the `-O2` soak byte-identical against a
+  fresh canonical reference (the mapping really does route through
+  FAST), self-host fixed point holds.
+
 `2026-08-09ai` (Linux x86_64, Zen 4 7940HS; register-allocator stage 7 —
 QUALITY exists, is verified, and does not beat FAST here.)
 

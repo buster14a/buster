@@ -436,6 +436,30 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.source_metrics_path = value;
             continue;
         }
+        // Optimization intent selects the register allocator, which is the
+        // only budget this compiler currently spends. -O0 keeps the
+        // canonical stack emitter; -O1 and above take FAST, which the
+        // self-host soak holds byte-identical and which emits about a
+        // third fewer instructions. QUALITY stays out of the mapping on
+        // purpose: it does not yet beat FAST on a measured corpus (see the
+        // 2026-08-09ai audit entry), so it is reachable only by naming it.
+        if (string_starts_with_sequence(argument, S8("-O")) && argument.length <= 4)
+        {
+            String8 level = string_slice(argument, 2, argument.length);
+            if (!level.length || string_equal(level, S8("0")))
+            {
+                invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_NONE;
+                continue;
+            }
+            if (string_equal(level, S8("1")) || string_equal(level, S8("2")) || string_equal(level, S8("3")) || string_equal(level, S8("s")) ||
+                string_equal(level, S8("z")) || string_equal(level, S8("fast")))
+            {
+                invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST;
+                continue;
+            }
+            compiler_driver_argument_error(arena, &invocation, S8("unsupported optimization level: {S8}"), argument);
+            return invocation;
+        }
         value = compiler_driver_option_value(argument, S8("-fregister-allocator="));
         if (value.length)
         {
