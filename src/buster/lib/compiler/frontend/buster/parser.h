@@ -760,6 +760,10 @@ struct LineAndColumn
 };
 
 BUSTER_F_DECL TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length);
+// The portable reference tokenizer; tokenize() dispatches to a SIMD
+// compaction emitter on hosts that have one, and the differential tests
+// compare the two streams byte for byte.
+BUSTER_F_DECL TokenizerResult tokenize_scalar(Arena* arena, const char8* restrict file_pointer, u64 file_length);
 BUSTER_F_DECL ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 source, TokenizerResult tokenizer);
 
 #if BUSTER_INSTRUMENT

@@ -398,6 +398,25 @@ BUSTER_GLOBAL_LOCAL bool tokenizer_stream_covers_source(TokenizerResult tokenize
     return result;
 }
 
+// The dispatched tokenizer (the compaction emitter on hosts that have one)
+// must produce a byte-identical token stream to the scalar reference loop
+// for every input; TokenizerResult carries no pointers into the source, so
+// one memcmp over the token rows plus the two counters is the whole
+// comparison.
+BUSTER_GLOBAL_LOCAL bool tokenizer_paths_agree(Arena* arena, const char8* source, u64 source_length)
+{
+    u64 position = arena->position;
+    TokenizerResult dispatched = tokenize(arena, source, source_length);
+    TokenizerResult scalar = tokenize_scalar(arena, source, source_length);
+    bool result = dispatched.token_count == scalar.token_count && dispatched.error_count == scalar.error_count;
+    if (result && dispatched.token_count)
+    {
+        result = memcmp(dispatched.tokens, scalar.tokens, dispatched.token_count * sizeof(Token)) == 0;
+    }
+    arena->position = position;
+    return result;
+}
+
 UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -757,6 +776,158 @@ UnitTestResult parser_tokenizer_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, parsed.import_count == 0);
         arena->position = position;
     }
+
+    // Differential check: every construct the compaction emitter models with
+    // masks and every shape it escapes on, each slid across the 64-byte
+    // window boundary by a growing space prefix, plus long tokens that cross
+    // or fill whole windows, the parser file corpus, and deterministic fuzz
+    // blobs over the tokenizer's full alphabet.
+    {
+        String8 differential_cases[] = {
+            S8("\"simple\""),
+            S8("\"unterminated"),
+            S8("\"unterminated\n after\""),
+            S8("\"recovery; call()\nnext"),
+            S8("\"escaped semi \\; stays; recovery\nx"),
+            S8("\"esc\\\"aped\" x"),
+            S8("\"bs at end\\"),
+            S8("\"\\\\\" \"\\\\\\\"\" y"),
+            S8("\"\""),
+            S8("\"\"\"\""),
+            S8("\"a\" \"b\" \"c\" // \"not a string\"\n\"d\""),
+            S8("// comment with ' and \" inside\ncode"),
+            S8("///\n////=\n//=\n"),
+            S8("'a'"),
+            S8("''"),
+            S8("'\\n'"),
+            S8("'unterminated; x"),
+            S8("'x, y'"),
+            S8("'\"' \"'\""),
+            S8("s['a'] = '\\''"),
+            S8("a and? b or? c"),
+            S8("foo? and?b banana? or?"),
+            S8("and? or?"),
+            S8("xand? andx?"),
+            S8("123 0x1f 0o17 0b101 1_000 0x_ 0x 0b12 0o18 1..2 9.5.3"),
+            S8("1.5e+3 1.5e3 1.e+5 1.e5 0x1.8p-3 0x1p3 1e+5 5.x 1.foo"),
+            S8("0xZ 123abc 0b1cd 0x1fgh 0 00x1 9.5.3.7 1.5p3 0x1.8e+3 1___ 0b_1"),
+            S8("=== <<< >>>> .... ..= =>> <<= >>= ... != <= >= == => .."),
+            S8("+ - * / % & | ^ ~ ! < > = . , : ; @ $ _"),
+            S8("a+=b-=c*=d/=e%=f&=g|=h^=i<<=j>>=k"),
+            S8("/=/ //= x"),
+            S8("? # ` \x01 \x7f"),
+            S8("[](){}:;,~@$._"),
+            S8("\\ \\\\ \\\"after\""),
+            S8("\r\n \n\r \r \n"),
+            S8("line\r\nnext\rlast\n"),
+            S8("caf\xC3\xA9 x"),
+            S8("\xC3(bad continuation"),
+            S8("\xE2\x82\xAC \xF0\x9F\x98\x80 \x80 \xFF"),
+            S8("\"utf8 caf\xC3\xA9 in string\" x"),
+            S8("'\xC3\xA9'"),
+            S8("fn if else switch return break continue for while loop code data type import struct union enum vector and or undefined"),
+        };
+        for (u64 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(differential_cases); case_index += 1)
+        {
+            String8 differential_case = differential_cases[case_index];
+            for (u64 pad = 0; pad < 67; pad += 1)
+            {
+                u64 padded_length = pad + differential_case.length;
+                char8* padded = arena_allocate(arena, char8, padded_length);
+                memset(padded, ' ', pad);
+                memcpy(padded + pad, differential_case.pointer, differential_case.length);
+                BUSTER_TEST(arguments, tokenizer_paths_agree(arena, padded, padded_length));
+                arena->position = position;
+            }
+        }
+    }
+
+    {
+        u64 run_lengths[] = {62, 63, 64, 65, 66, 127, 128, 200};
+        for (u64 length_index = 0; length_index < BUSTER_ARRAY_LENGTH(run_lengths); length_index += 1)
+        {
+            u64 run_length = run_lengths[length_index];
+            u64 buffer_length = run_length + 8;
+            char8* buffer = arena_allocate(arena, char8, buffer_length);
+
+            memset(buffer, 'a', run_length);
+            buffer[run_length] = '?';
+            BUSTER_TEST(arguments, tokenizer_paths_agree(arena, buffer, run_length + 1));
+
+            memset(buffer, ' ', run_length);
+            buffer[run_length] = 'x';
+            BUSTER_TEST(arguments, tokenizer_paths_agree(arena, buffer, run_length + 1));
+
+            buffer[0] = '/';
+            buffer[1] = '/';
+            memset(buffer + 2, 'c', run_length);
+            buffer[run_length + 2] = '\n';
+            buffer[run_length + 3] = 'x';
+            BUSTER_TEST(arguments, tokenizer_paths_agree(arena, buffer, run_length + 4));
+
+            buffer[0] = '"';
+            memset(buffer + 1, 'b', run_length);
+            buffer[run_length + 1] = '"';
+            buffer[run_length + 2] = ' ';
+            buffer[run_length + 3] = 'y';
+            BUSTER_TEST(arguments, tokenizer_paths_agree(arena, buffer, run_length + 4));
+
+            buffer[0] = '"';
+            memset(buffer + 1, 'b', run_length);
+            buffer[1 + run_length / 2] = ';';
+            buffer[run_length + 1] = '\n';
+            buffer[run_length + 2] = 'x';
+            BUSTER_TEST(arguments, tokenizer_paths_agree(arena, buffer, run_length + 3));
+
+            buffer[0] = '1';
+            memset(buffer + 1, '0', run_length);
+            BUSTER_TEST(arguments, tokenizer_paths_agree(arena, buffer, run_length + 1));
+
+            buffer[0] = '0';
+            buffer[1] = 'x';
+            memset(buffer + 2, 'f', run_length);
+            BUSTER_TEST(arguments, tokenizer_paths_agree(arena, buffer, run_length + 2));
+
+            arena->position = position;
+        }
+    }
+
+    {
+        for (u64 i = 0; i < PARSER_FILE_TEST_CASE_COUNT; i += 1)
+        {
+            FileMapRead source_file = file_map_read(arena, parser_file_test_cases[i].path, (FileReadOptions){0});
+            String8 source = BYTE_SLICE_TO_STRING(8, source_file.bytes);
+            BUSTER_TEST(arguments, source.pointer != 0);
+            if (source.pointer)
+            {
+                BUSTER_TEST(arguments, tokenizer_paths_agree(arena, source.pointer, source.length));
+            }
+            file_map_unmap(source_file);
+            arena->position = position;
+        }
+    }
+
+    {
+        static const char8 fuzz_alphabet[] = " \t\n\r\"\\'/;?._abcxyzABZ0189=<>!+-*%&|^~@$(){}[]:,#";
+        static const char8 fuzz_high_bytes[] = {(char8)0xC3u, (char8)0xA9u, (char8)0xF0u, (char8)0x80u};
+        u64 fuzz_alphabet_length = BUSTER_ARRAY_LENGTH(fuzz_alphabet) - 1;
+        u64 fuzz_lengths[] = {256, 1024, 4096};
+        u64 seed = 0x12345678u;
+        for (u64 round = 0; round < 9; round += 1)
+        {
+            u64 fuzz_length = fuzz_lengths[round % BUSTER_ARRAY_LENGTH(fuzz_lengths)];
+            char8* blob = arena_allocate(arena, char8, fuzz_length);
+            for (u64 i = 0; i < fuzz_length; i += 1)
+            {
+                seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+                u64 pick = (seed >> 33) % (fuzz_alphabet_length + BUSTER_ARRAY_LENGTH(fuzz_high_bytes));
+                blob[i] = pick < fuzz_alphabet_length ? fuzz_alphabet[pick] : fuzz_high_bytes[pick - fuzz_alphabet_length];
+            }
+            BUSTER_TEST(arguments, tokenizer_paths_agree(arena, blob, fuzz_length));
+            arena->position = position;
+        }
+    }
+
 
     bool expression_arena_destroyed = arena_destroy(expression_arena, 1);
     BUSTER_CHECK(expression_arena_destroyed);

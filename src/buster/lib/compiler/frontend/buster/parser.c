@@ -19,6 +19,17 @@
 #define BUSTER_TOKENIZER_AVX512 0
 #endif
 
+// The compaction emitter additionally needs vpcompressb (VBMI2) and vpermi2b
+// (VBMI); both are present on every AVX-512 part this project tunes for
+// (Zen 4/Zen 5), so on those hosts tokenize() runs the Deus-Lex-Machina
+// window pipeline below and the scalar loop remains as the byte-identical
+// fallback for every other host and for the self-hosted stages.
+#if BUSTER_TOKENIZER_AVX512 && defined(__AVX512VBMI__) && defined(__AVX512VBMI2__)
+#define BUSTER_TOKENIZER_COMPACT 1
+#else
+#define BUSTER_TOKENIZER_COMPACT 0
+#endif
+
 #define first_keyword TOKEN_KEYWORD_RETURN
 #define last_keyword (TOKEN_COUNT - 1)
 
@@ -189,6 +200,19 @@ BUSTER_GLOBAL_LOCAL const char8* tokenizer_class_run_end(TokenizerClassifier* re
     return classifier->base + classifier->length;
 }
 
+#endif
+
+// The single-token scanner below takes the chunk classifier when the host
+// build has one so its run scans stay accelerated; other hosts compile the
+// same signature with an empty placeholder type and a null argument.
+#if BUSTER_TOKENIZER_AVX512
+typedef TokenizerClassifier TokenizerRunAccelerator;
+#else
+typedef struct TokenizerRunAccelerator TokenizerRunAccelerator;
+struct TokenizerRunAccelerator
+{
+    u8 unused;
+};
 #endif
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL const char8* tokenizer_string_plain_run_end(const char8* it, const char8* top)
@@ -433,6 +457,25 @@ BUSTER_GLOBAL_LOCAL void tokenizer_keyword_slots_build(void)
     tokenizer_keyword_slots_built = true;
 }
 
+BUSTER_GLOBAL_LOCAL TokenId tokenizer_identifier_kind(String8 identifier)
+{
+    TokenId id;
+    if (identifier.length >= 2)
+    {
+        if (!tokenizer_keyword_slots_built)
+        {
+            tokenizer_keyword_slots_build();
+        }
+        u32 slot = tokenizer_keyword_slots[tokenizer_keyword_hash(identifier.pointer, identifier.length)];
+        id = slot && string_equal(identifier, tokenizer_keyword_names[slot - 1]) ? (TokenId)((slot - 1) + (u64)first_keyword) : TOKEN_IDENTIFIER;
+    }
+    else
+    {
+        id = identifier.pointer[0] == '_' ? TOKEN_UNDERSCORE : TOKEN_IDENTIFIER;
+    }
+    return id;
+}
+
 BUSTER_GLOBAL_LOCAL void tokenizer_emit_token(TokenizerResult* restrict result, Token* restrict tokens, u64* restrict token_count,
                                               TokenId id, u64 length, bool overflow)
 {
@@ -456,7 +499,576 @@ BUSTER_GLOBAL_LOCAL void tokenizer_emit_token(TokenizerResult* restrict result, 
     } while (length);
 }
 
-TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length)
+// Scans one numeric literal starting at start (which must be a decimal
+// digit) and returns its end; shared verbatim between the single-token
+// scanner and the compaction emitter's number resolution so both paths agree
+// on every extent and validity rule.
+BUSTER_GLOBAL_LOCAL const char8* tokenizer_scan_number(const char8* restrict start, const char8* top, TokenId* restrict id_out)
+{
+    const char8* restrict it = start;
+    u8 start_ch = (u8)*start;
+    TokenId id = TOKEN_ERROR;
+    bool is_valid = true;
+    bool has_integer_digit = false;
+    IntegerFormat format = INTEGER_FORMAT_DECIMAL;
+
+    if (start_ch == '0' && it + 1 < top)
+    {
+        u8 second_ch = (u8)it[1];
+        switch (second_ch)
+        {
+            break;
+        case 'x':
+            it += 2;
+            format = INTEGER_FORMAT_HEXADECIMAL;
+            break;
+        case 'o':
+            it += 2;
+            format = INTEGER_FORMAT_OCTAL;
+            break;
+        case 'b':
+            it += 2;
+            format = INTEGER_FORMAT_BINARY;
+            break;
+        default:
+        {
+        }
+        }
+    }
+
+    while (it < top && tokenizer_is_integer_digit(format, (u8)*it))
+    {
+        has_integer_digit = has_integer_digit || *it != '_';
+        it += 1;
+    }
+
+    is_valid = is_valid && (format == INTEGER_FORMAT_DECIMAL || has_integer_digit);
+
+    bool is_float =
+        (format == INTEGER_FORMAT_DECIMAL || format == INTEGER_FORMAT_HEXADECIMAL) && it < top && *it == '.' && !(it + 1 < top && it[1] == '.');
+
+    if (is_float)
+    {
+        it += 1;
+
+        while (it < top && tokenizer_is_real_digit(format, (u8)*it))
+        {
+            it += 1;
+        }
+
+        u8 exponent_ch = it < top ? (u8)*it : 0;
+
+        switch (exponent_ch)
+        {
+            break;
+        case 'E':
+        case 'e':
+        case 'P':
+        case 'p':
+        {
+            switch (format)
+            {
+                break;
+            case INTEGER_FORMAT_HEXADECIMAL:
+            {
+                id = TOKEN_HEXADECIMAL_FLOAT_LITERAL_EXPONENT;
+                is_valid = is_valid && (exponent_ch == 'P' || exponent_ch == 'p');
+            }
+            break;
+            case INTEGER_FORMAT_DECIMAL:
+            {
+                id = TOKEN_DECIMAL_FLOAT_LITERAL_EXPONENT;
+                is_valid = is_valid && (exponent_ch == 'E' || exponent_ch == 'e');
+            }
+            break;
+            default:
+                BUSTER_UNREACHABLE();
+            }
+
+            it += 1;
+
+            u8 exponent_sign = it < top ? (u8)*it : 0;
+            bool has_exponent_sign = exponent_sign == '+' || exponent_sign == '-';
+            is_valid = is_valid && has_exponent_sign;
+            it += has_exponent_sign;
+
+            bool has_exponent_digit = false;
+            while (it < top && (tokenizer_is_ascii_decimal_digit((u8)*it) || *it == '_'))
+            {
+                has_exponent_digit = has_exponent_digit || *it != '_';
+                it += 1;
+            }
+            is_valid = is_valid && has_exponent_digit;
+        }
+        break;
+        default:
+        {
+            switch (format)
+            {
+                break;
+            case INTEGER_FORMAT_HEXADECIMAL:
+                id = TOKEN_HEXADECIMAL_FLOAT_LITERAL;
+                break;
+            case INTEGER_FORMAT_DECIMAL:
+                id = TOKEN_DECIMAL_FLOAT_LITERAL;
+                break;
+            default:
+                BUSTER_UNREACHABLE();
+            }
+        }
+        }
+    }
+    else
+    {
+        switch (format)
+        {
+            break;
+        case INTEGER_FORMAT_HEXADECIMAL:
+            id = TOKEN_HEXADECIMAL_INTEGER_LITERAL;
+            break;
+        case INTEGER_FORMAT_DECIMAL:
+            id = TOKEN_DECIMAL_INTEGER_LITERAL;
+            break;
+        case INTEGER_FORMAT_OCTAL:
+            id = TOKEN_OCTAL_INTEGER_LITERAL;
+            break;
+        case INTEGER_FORMAT_BINARY:
+            id = TOKEN_BINARY_INTEGER_LITERAL;
+            break;
+        case INTEGER_FORMAT_COUNT:
+            BUSTER_UNREACHABLE();
+        }
+    }
+
+    id = is_valid ? id : TOKEN_ERROR;
+    *id_out = id;
+    return it;
+}
+
+// Scans exactly one token starting at start and returns its end; the scan is
+// the reference semantics for the whole tokenizer — the compaction emitter
+// escapes to it for the rare shapes it does not model, so both paths agree
+// on every hard case by construction.
+typedef struct TokenizerScan TokenizerScan;
+struct TokenizerScan
+{
+    const char8* end;
+    TokenId id;
+};
+
+BUSTER_GLOBAL_LOCAL TokenizerScan tokenizer_scan_one_token(TokenizerRunAccelerator* restrict accelerator, const char8* restrict start, const char8* top)
+{
+#if !BUSTER_TOKENIZER_AVX512
+    BUSTER_UNUSED(accelerator);
+#endif
+    const char8* restrict it = start;
+    u8 start_ch = (u8)*start;
+    TokenId id = TOKEN_ERROR;
+
+    switch (start_ch)
+    {
+        break;
+    BUSTER_SWITCH_ALPHA_UPPER:
+    BUSTER_SWITCH_ALPHA_LOWER:
+    case '_':
+    {
+#if BUSTER_TOKENIZER_AVX512
+        it = tokenizer_class_run_end(accelerator, it, TOKENIZER_CLASS_IDENTIFIER);
+#else
+        it = tokenizer_identifier_run_end(it, top);
+#endif
+
+        String8 identifier = string_from_pointer_length(start, (u64)(it - start));
+        if (it < top && *it == '?' && (string_equal(identifier, S8("and")) || string_equal(identifier, S8("or"))))
+        {
+            it += 1;
+            identifier.length += 1;
+        }
+
+        id = tokenizer_identifier_kind(identifier);
+    }
+    break;
+    case ' ':
+    {
+        id = TOKEN_SPACE;
+
+#if BUSTER_TOKENIZER_AVX512
+        it = tokenizer_class_run_end(accelerator, it, TOKENIZER_CLASS_SPACE);
+#else
+        while (it < top && *it == ' ')
+        {
+            it += 1;
+        }
+#endif
+    }
+    break;
+    case '\t':
+    {
+        id = TOKEN_TAB;
+
+#if BUSTER_TOKENIZER_AVX512
+        it = tokenizer_class_run_end(accelerator, it, TOKENIZER_CLASS_TAB);
+#else
+        while (it < top && *it == '\t')
+        {
+            it += 1;
+        }
+#endif
+    }
+    break;
+    BUSTER_SWITCH_DECIMAL_DIGIT:
+    {
+        it = tokenizer_scan_number(start, top, &id);
+    }
+    break;
+    case '\n':
+    {
+        id = TOKEN_LINE_FEED;
+        it += 1;
+    }
+    break;
+    case '\r':
+    {
+        id = TOKEN_CARRIAGE_RETURN;
+        it += 1;
+    }
+    break;
+    case '\'':
+    {
+        id = TOKEN_CHARACTER_LITERAL;
+        it += 1;
+        if (it < top && *it == '\'')
+        {
+            it += 1;
+        }
+        else
+        {
+            if (it < top && *it == '\\')
+            {
+                it += 1;
+            }
+            if (it < top && *it != '\n' && *it != '\r')
+            {
+                // ASCII bytes are always one-byte sequences; the call is
+                // reserved for lead bytes that need validation.
+                it += (u8)*it < 0x80u ? 1 : tokenizer_utf8_sequence_length(it, top);
+            }
+
+            while (it < top && *it != '\n' && *it != '\r')
+            {
+                if (*it == '\'')
+                {
+                    it += 1;
+                    break;
+                }
+                if (*it == ';' || *it == ',' || *it == ')' || *it == ']' || *it == '}' || *it == ' ' || *it == '\t')
+                {
+                    break;
+                }
+                it += (u8)*it < 0x80u ? 1 : tokenizer_utf8_sequence_length(it, top);
+            }
+        }
+    }
+    break;
+    case '"':
+    {
+        id = TOKEN_STRING_LITERAL;
+        const char8* recovery = 0;
+        bool terminated = false;
+        it += 1;
+        while (it < top && *it != '\n' && *it != '\r')
+        {
+#if BUSTER_TOKENIZER_AVX512
+            it = tokenizer_class_run_end(accelerator, it, TOKENIZER_CLASS_STRING_PLAIN);
+#else
+            it = tokenizer_string_plain_run_end(it, top);
+#endif
+            if (it >= top || *it == '\n' || *it == '\r')
+            {
+                break;
+            }
+            if (*it == '"')
+            {
+                it += 1;
+                terminated = true;
+                break;
+            }
+            if (*it == '\\')
+            {
+                it += 1;
+                if (it == top || *it == '\n' || *it == '\r')
+                {
+                    break;
+                }
+            }
+            else if (*it == ';' && !recovery)
+            {
+                recovery = it;
+            }
+            it += (u8)*it < 0x80u ? 1 : tokenizer_utf8_sequence_length(it, top);
+        }
+        if (!terminated && recovery)
+        {
+            it = recovery;
+        }
+    }
+    break;
+    case '[':
+    {
+        id = TOKEN_LEFT_BRACKET;
+        it += 1;
+    }
+    break;
+    case ']':
+    {
+        id = TOKEN_RIGHT_BRACKET;
+        it += 1;
+    }
+    break;
+    case '{':
+    {
+        id = TOKEN_LEFT_BRACE;
+        it += 1;
+    }
+    break;
+    case '}':
+    {
+        id = TOKEN_RIGHT_BRACE;
+        it += 1;
+    }
+    break;
+    case '(':
+    {
+        id = TOKEN_LEFT_PARENTHESIS;
+        it += 1;
+    }
+    break;
+    case ')':
+    {
+        id = TOKEN_RIGHT_PARENTHESIS;
+        it += 1;
+    }
+    break;
+    case '<':
+    {
+        if (it + 1 < top && it[1] == '<')
+        {
+            bool has_equal = it + 2 < top && it[2] == '=';
+            id = has_equal ? TOKEN_SHIFT_LEFT_EQUAL : TOKEN_SHIFT_LEFT;
+            it += has_equal ? 3 : 2;
+        }
+        else if (it + 1 < top && it[1] == '=')
+        {
+            id = TOKEN_LESS_EQUAL;
+            it += 2;
+        }
+        else
+        {
+            id = TOKEN_LESS;
+            it += 1;
+        }
+    }
+    break;
+    case '>':
+    {
+        if (it + 1 < top && it[1] == '>')
+        {
+            bool has_equal = it + 2 < top && it[2] == '=';
+            id = has_equal ? TOKEN_SHIFT_RIGHT_EQUAL : TOKEN_SHIFT_RIGHT;
+            it += has_equal ? 3 : 2;
+        }
+        else if (it + 1 < top && it[1] == '=')
+        {
+            id = TOKEN_GREATER_EQUAL;
+            it += 2;
+        }
+        else
+        {
+            id = TOKEN_GREATER;
+            it += 1;
+        }
+    }
+    break;
+    case '+':
+    {
+        if (it + 1 < top && it[1] == '=')
+        {
+            id = TOKEN_PLUS_EQUAL;
+            it += 2;
+        }
+        else
+        {
+            id = TOKEN_PLUS;
+            it += 1;
+        }
+    }
+    break;
+    case '-':
+    {
+        bool has_equal = it + 1 < top && it[1] == '=';
+        id = has_equal ? TOKEN_MINUS_EQUAL : TOKEN_MINUS;
+        it += has_equal ? 2 : 1;
+    }
+    break;
+    case '*':
+    {
+        bool has_equal = it + 1 < top && it[1] == '=';
+        id = has_equal ? TOKEN_ASTERISK_EQUAL : TOKEN_ASTERISK;
+        it += has_equal ? 2 : 1;
+    }
+    break;
+    case '=':
+    {
+        if (it + 1 < top && it[1] == '>')
+        {
+            id = TOKEN_FAT_ARROW;
+            it += 2;
+        }
+        else if (it + 1 < top && it[1] == '=')
+        {
+            id = TOKEN_EQUAL_EQUAL;
+            it += 2;
+        }
+        else
+        {
+            id = TOKEN_EQUAL;
+            it += 1;
+        }
+    }
+    break;
+    case '!':
+    {
+        if (it + 1 < top && it[1] == '=')
+        {
+            id = TOKEN_BANG_EQUAL;
+            it += 2;
+        }
+        else
+        {
+            id = TOKEN_BANG;
+            it += 1;
+        }
+    }
+    break;
+    case ':':
+    {
+        id = TOKEN_COLON;
+        it += 1;
+    }
+    break;
+    case ';':
+    {
+        id = TOKEN_SEMICOLON;
+        it += 1;
+    }
+    break;
+    case ',':
+    {
+        id = TOKEN_COMMA;
+        it += 1;
+    }
+    break;
+    case '&':
+    {
+        bool has_equal = it + 1 < top && it[1] == '=';
+        id = has_equal ? TOKEN_AMPERSAND_EQUAL : TOKEN_AMPERSAND;
+        it += has_equal ? 2 : 1;
+    }
+    break;
+    case '%':
+    {
+        bool has_equal = it + 1 < top && it[1] == '=';
+        id = has_equal ? TOKEN_PERCENTAGE_EQUAL : TOKEN_PERCENTAGE;
+        it += has_equal ? 2 : 1;
+    }
+    break;
+    case '|':
+    {
+        bool has_equal = it + 1 < top && it[1] == '=';
+        id = has_equal ? TOKEN_BAR_EQUAL : TOKEN_BAR;
+        it += has_equal ? 2 : 1;
+    }
+    break;
+    case '^':
+    {
+        bool has_equal = it + 1 < top && it[1] == '=';
+        id = has_equal ? TOKEN_CARET_EQUAL : TOKEN_CARET;
+        it += has_equal ? 2 : 1;
+    }
+    break;
+    case '~':
+    {
+        id = TOKEN_TILDE;
+        it += 1;
+    }
+    break;
+    case '@':
+    {
+        id = TOKEN_AT;
+        it += 1;
+    }
+    break;
+    case '$':
+    {
+        id = TOKEN_DOLLAR;
+        it += 1;
+    }
+    break;
+    case '/':
+    {
+        if (it + 1 < top && it[1] == '/')
+        {
+            id = TOKEN_COMMENT;
+            it += 2;
+#if BUSTER_TOKENIZER_AVX512
+            it = tokenizer_class_run_end(accelerator, it, TOKENIZER_CLASS_COMMENT_BODY);
+#else
+            while (it < top && *it != '\n' && *it != '\r')
+            {
+                it += 1;
+            }
+#endif
+        }
+        else if (it + 1 < top && it[1] == '=')
+        {
+            id = TOKEN_SLASH_EQUAL;
+            it += 2;
+        }
+        else
+        {
+            id = TOKEN_SLASH;
+            it += 1;
+        }
+    }
+    break;
+    case '.':
+    {
+        if (it + 2 < top && it[1] == '.' && it[2] == '.')
+        {
+            id = TOKEN_TRIPLE_DOT;
+        }
+        else if (it + 1 < top && it[1] == '.')
+        {
+            id = TOKEN_DOUBLE_DOT;
+        }
+        else
+        {
+            id = TOKEN_DOT;
+        }
+
+        it += (u64)id - (u64)TOKEN_DOT + 1;
+    }
+    break;
+    default:
+    {
+        it += tokenizer_utf8_sequence_length(it, top);
+    }
+    }
+
+    return (TokenizerScan){.end = it, .id = id};
+}
+
+TokenizerResult tokenize_scalar(Arena* arena, const char8* restrict file_pointer, u64 file_length)
 {
     TokenizerResult result = {0};
     u64 token_count = 0;
@@ -487,561 +1099,18 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
         .length = file_length,
         .chunk_index = UINT64_MAX,
     };
+    TokenizerRunAccelerator* accelerator = &classifier;
+#else
+    TokenizerRunAccelerator* accelerator = 0;
 #endif
 
     while (it < top)
     {
         const char8* restrict start = it;
-        u8 start_ch = (u8)*start;
-        TokenId id = TOKEN_ERROR;
-
-        switch (start_ch)
-        {
-            break;
-        BUSTER_SWITCH_ALPHA_UPPER:
-        BUSTER_SWITCH_ALPHA_LOWER:
-        case '_':
-        {
-#if BUSTER_TOKENIZER_AVX512
-            it = tokenizer_class_run_end(&classifier, it, TOKENIZER_CLASS_IDENTIFIER);
-#else
-            it = tokenizer_identifier_run_end(it, top);
-#endif
-
-            String8 identifier = string_from_pointer_length(start, (u64)(it - start));
-            if (it < top && *it == '?' && (string_equal(identifier, S8("and")) || string_equal(identifier, S8("or"))))
-            {
-                it += 1;
-                identifier.length += 1;
-            }
-
-            if (identifier.length >= 2)
-            {
-                if (!tokenizer_keyword_slots_built)
-                {
-                    tokenizer_keyword_slots_build();
-                }
-                u32 slot = tokenizer_keyword_slots[tokenizer_keyword_hash(identifier.pointer, identifier.length)];
-                id = slot && string_equal(identifier, tokenizer_keyword_names[slot - 1]) ? (TokenId)((slot - 1) + (u64)first_keyword) : TOKEN_IDENTIFIER;
-            }
-            else
-            {
-                id = identifier.pointer[0] == '_' ? TOKEN_UNDERSCORE : TOKEN_IDENTIFIER;
-            }
-        }
-        break;
-        case ' ':
-        {
-            id = TOKEN_SPACE;
-
-#if BUSTER_TOKENIZER_AVX512
-            it = tokenizer_class_run_end(&classifier, it, TOKENIZER_CLASS_SPACE);
-#else
-            while (it < top && *it == ' ')
-            {
-                it += 1;
-            }
-#endif
-        }
-        break;
-        case '\t':
-        {
-            id = TOKEN_TAB;
-
-#if BUSTER_TOKENIZER_AVX512
-            it = tokenizer_class_run_end(&classifier, it, TOKENIZER_CLASS_TAB);
-#else
-            while (it < top && *it == '\t')
-            {
-                it += 1;
-            }
-#endif
-        }
-        break;
-        BUSTER_SWITCH_DECIMAL_DIGIT:
-        {
-            bool is_valid = true;
-            bool has_integer_digit = false;
-            IntegerFormat format = INTEGER_FORMAT_DECIMAL;
-
-            if (start_ch == '0' && it + 1 < top)
-            {
-                u8 second_ch = (u8)it[1];
-                switch (second_ch)
-                {
-                    break;
-                case 'x':
-                    it += 2;
-                    format = INTEGER_FORMAT_HEXADECIMAL;
-                    break;
-                case 'o':
-                    it += 2;
-                    format = INTEGER_FORMAT_OCTAL;
-                    break;
-                case 'b':
-                    it += 2;
-                    format = INTEGER_FORMAT_BINARY;
-                    break;
-                default:
-                {
-                }
-                }
-            }
-
-            while (it < top && tokenizer_is_integer_digit(format, (u8)*it))
-            {
-                has_integer_digit = has_integer_digit || *it != '_';
-                it += 1;
-            }
-
-            is_valid = is_valid && (format == INTEGER_FORMAT_DECIMAL || has_integer_digit);
-
-            bool is_float =
-                (format == INTEGER_FORMAT_DECIMAL || format == INTEGER_FORMAT_HEXADECIMAL) && it < top && *it == '.' && !(it + 1 < top && it[1] == '.');
-
-            if (is_float)
-            {
-                it += 1;
-
-                while (it < top && tokenizer_is_real_digit(format, (u8)*it))
-                {
-                    it += 1;
-                }
-
-                u8 exponent_ch = it < top ? (u8)*it : 0;
-
-                switch (exponent_ch)
-                {
-                    break;
-                case 'E':
-                case 'e':
-                case 'P':
-                case 'p':
-                {
-                    switch (format)
-                    {
-                        break;
-                    case INTEGER_FORMAT_HEXADECIMAL:
-                    {
-                        id = TOKEN_HEXADECIMAL_FLOAT_LITERAL_EXPONENT;
-                        is_valid = is_valid && (exponent_ch == 'P' || exponent_ch == 'p');
-                    }
-                    break;
-                    case INTEGER_FORMAT_DECIMAL:
-                    {
-                        id = TOKEN_DECIMAL_FLOAT_LITERAL_EXPONENT;
-                        is_valid = is_valid && (exponent_ch == 'E' || exponent_ch == 'e');
-                    }
-                    break;
-                    default:
-                        BUSTER_UNREACHABLE();
-                    }
-
-                    it += 1;
-
-                    u8 exponent_sign = it < top ? (u8)*it : 0;
-                    bool has_exponent_sign = exponent_sign == '+' || exponent_sign == '-';
-                    is_valid = is_valid && has_exponent_sign;
-                    it += has_exponent_sign;
-
-                    bool has_exponent_digit = false;
-                    while (it < top && (tokenizer_is_ascii_decimal_digit((u8)*it) || *it == '_'))
-                    {
-                        has_exponent_digit = has_exponent_digit || *it != '_';
-                        it += 1;
-                    }
-                    is_valid = is_valid && has_exponent_digit;
-                }
-                break;
-                default:
-                {
-                    switch (format)
-                    {
-                        break;
-                    case INTEGER_FORMAT_HEXADECIMAL:
-                        id = TOKEN_HEXADECIMAL_FLOAT_LITERAL;
-                        break;
-                    case INTEGER_FORMAT_DECIMAL:
-                        id = TOKEN_DECIMAL_FLOAT_LITERAL;
-                        break;
-                    default:
-                        BUSTER_UNREACHABLE();
-                    }
-                }
-                }
-            }
-            else
-            {
-                switch (format)
-                {
-                    break;
-                case INTEGER_FORMAT_HEXADECIMAL:
-                    id = TOKEN_HEXADECIMAL_INTEGER_LITERAL;
-                    break;
-                case INTEGER_FORMAT_DECIMAL:
-                    id = TOKEN_DECIMAL_INTEGER_LITERAL;
-                    break;
-                case INTEGER_FORMAT_OCTAL:
-                    id = TOKEN_OCTAL_INTEGER_LITERAL;
-                    break;
-                case INTEGER_FORMAT_BINARY:
-                    id = TOKEN_BINARY_INTEGER_LITERAL;
-                    break;
-                case INTEGER_FORMAT_COUNT:
-                    BUSTER_UNREACHABLE();
-                }
-            }
-
-            id = is_valid ? id : TOKEN_ERROR;
-        }
-        break;
-        case '\n':
-        {
-            id = TOKEN_LINE_FEED;
-            it += 1;
-        }
-        break;
-        case '\r':
-        {
-            id = TOKEN_CARRIAGE_RETURN;
-            it += 1;
-        }
-        break;
-        case '\'':
-        {
-            id = TOKEN_CHARACTER_LITERAL;
-            it += 1;
-            if (it < top && *it == '\'')
-            {
-                it += 1;
-            }
-            else
-            {
-                if (it < top && *it == '\\')
-                {
-                    it += 1;
-                }
-                if (it < top && *it != '\n' && *it != '\r')
-                {
-                    // ASCII bytes are always one-byte sequences; the call is
-                    // reserved for lead bytes that need validation.
-                    it += (u8)*it < 0x80u ? 1 : tokenizer_utf8_sequence_length(it, top);
-                }
-
-                while (it < top && *it != '\n' && *it != '\r')
-                {
-                    if (*it == '\'')
-                    {
-                        it += 1;
-                        break;
-                    }
-                    if (*it == ';' || *it == ',' || *it == ')' || *it == ']' || *it == '}' || *it == ' ' || *it == '\t')
-                    {
-                        break;
-                    }
-                    it += (u8)*it < 0x80u ? 1 : tokenizer_utf8_sequence_length(it, top);
-                }
-            }
-        }
-        break;
-        case '"':
-        {
-            id = TOKEN_STRING_LITERAL;
-            const char8* recovery = 0;
-            bool terminated = false;
-            it += 1;
-            while (it < top && *it != '\n' && *it != '\r')
-            {
-#if BUSTER_TOKENIZER_AVX512
-                it = tokenizer_class_run_end(&classifier, it, TOKENIZER_CLASS_STRING_PLAIN);
-#else
-                it = tokenizer_string_plain_run_end(it, top);
-#endif
-                if (it >= top || *it == '\n' || *it == '\r')
-                {
-                    break;
-                }
-                if (*it == '"')
-                {
-                    it += 1;
-                    terminated = true;
-                    break;
-                }
-                if (*it == '\\')
-                {
-                    it += 1;
-                    if (it == top || *it == '\n' || *it == '\r')
-                    {
-                        break;
-                    }
-                }
-                else if (*it == ';' && !recovery)
-                {
-                    recovery = it;
-                }
-                it += (u8)*it < 0x80u ? 1 : tokenizer_utf8_sequence_length(it, top);
-            }
-            if (!terminated && recovery)
-            {
-                it = recovery;
-            }
-        }
-        break;
-        case '[':
-        {
-            id = TOKEN_LEFT_BRACKET;
-            it += 1;
-        }
-        break;
-        case ']':
-        {
-            id = TOKEN_RIGHT_BRACKET;
-            it += 1;
-        }
-        break;
-        case '{':
-        {
-            id = TOKEN_LEFT_BRACE;
-            it += 1;
-        }
-        break;
-        case '}':
-        {
-            id = TOKEN_RIGHT_BRACE;
-            it += 1;
-        }
-        break;
-        case '(':
-        {
-            id = TOKEN_LEFT_PARENTHESIS;
-            it += 1;
-        }
-        break;
-        case ')':
-        {
-            id = TOKEN_RIGHT_PARENTHESIS;
-            it += 1;
-        }
-        break;
-        case '<':
-        {
-            if (it + 1 < top && it[1] == '<')
-            {
-                bool has_equal = it + 2 < top && it[2] == '=';
-                id = has_equal ? TOKEN_SHIFT_LEFT_EQUAL : TOKEN_SHIFT_LEFT;
-                it += has_equal ? 3 : 2;
-            }
-            else if (it + 1 < top && it[1] == '=')
-            {
-                id = TOKEN_LESS_EQUAL;
-                it += 2;
-            }
-            else
-            {
-                id = TOKEN_LESS;
-                it += 1;
-            }
-        }
-        break;
-        case '>':
-        {
-            if (it + 1 < top && it[1] == '>')
-            {
-                bool has_equal = it + 2 < top && it[2] == '=';
-                id = has_equal ? TOKEN_SHIFT_RIGHT_EQUAL : TOKEN_SHIFT_RIGHT;
-                it += has_equal ? 3 : 2;
-            }
-            else if (it + 1 < top && it[1] == '=')
-            {
-                id = TOKEN_GREATER_EQUAL;
-                it += 2;
-            }
-            else
-            {
-                id = TOKEN_GREATER;
-                it += 1;
-            }
-        }
-        break;
-        case '+':
-        {
-            if (it + 1 < top && it[1] == '=')
-            {
-                id = TOKEN_PLUS_EQUAL;
-                it += 2;
-            }
-            else
-            {
-                id = TOKEN_PLUS;
-                it += 1;
-            }
-        }
-        break;
-        case '-':
-        {
-            bool has_equal = it + 1 < top && it[1] == '=';
-            id = has_equal ? TOKEN_MINUS_EQUAL : TOKEN_MINUS;
-            it += has_equal ? 2 : 1;
-        }
-        break;
-        case '*':
-        {
-            bool has_equal = it + 1 < top && it[1] == '=';
-            id = has_equal ? TOKEN_ASTERISK_EQUAL : TOKEN_ASTERISK;
-            it += has_equal ? 2 : 1;
-        }
-        break;
-        case '=':
-        {
-            if (it + 1 < top && it[1] == '>')
-            {
-                id = TOKEN_FAT_ARROW;
-                it += 2;
-            }
-            else if (it + 1 < top && it[1] == '=')
-            {
-                id = TOKEN_EQUAL_EQUAL;
-                it += 2;
-            }
-            else
-            {
-                id = TOKEN_EQUAL;
-                it += 1;
-            }
-        }
-        break;
-        case '!':
-        {
-            if (it + 1 < top && it[1] == '=')
-            {
-                id = TOKEN_BANG_EQUAL;
-                it += 2;
-            }
-            else
-            {
-                id = TOKEN_BANG;
-                it += 1;
-            }
-        }
-        break;
-        case ':':
-        {
-            id = TOKEN_COLON;
-            it += 1;
-        }
-        break;
-        case ';':
-        {
-            id = TOKEN_SEMICOLON;
-            it += 1;
-        }
-        break;
-        case ',':
-        {
-            id = TOKEN_COMMA;
-            it += 1;
-        }
-        break;
-        case '&':
-        {
-            bool has_equal = it + 1 < top && it[1] == '=';
-            id = has_equal ? TOKEN_AMPERSAND_EQUAL : TOKEN_AMPERSAND;
-            it += has_equal ? 2 : 1;
-        }
-        break;
-        case '%':
-        {
-            bool has_equal = it + 1 < top && it[1] == '=';
-            id = has_equal ? TOKEN_PERCENTAGE_EQUAL : TOKEN_PERCENTAGE;
-            it += has_equal ? 2 : 1;
-        }
-        break;
-        case '|':
-        {
-            bool has_equal = it + 1 < top && it[1] == '=';
-            id = has_equal ? TOKEN_BAR_EQUAL : TOKEN_BAR;
-            it += has_equal ? 2 : 1;
-        }
-        break;
-        case '^':
-        {
-            bool has_equal = it + 1 < top && it[1] == '=';
-            id = has_equal ? TOKEN_CARET_EQUAL : TOKEN_CARET;
-            it += has_equal ? 2 : 1;
-        }
-        break;
-        case '~':
-        {
-            id = TOKEN_TILDE;
-            it += 1;
-        }
-        break;
-        case '@':
-        {
-            id = TOKEN_AT;
-            it += 1;
-        }
-        break;
-        case '$':
-        {
-            id = TOKEN_DOLLAR;
-            it += 1;
-        }
-        break;
-        case '/':
-        {
-            if (it + 1 < top && it[1] == '/')
-            {
-                id = TOKEN_COMMENT;
-                it += 2;
-#if BUSTER_TOKENIZER_AVX512
-                it = tokenizer_class_run_end(&classifier, it, TOKENIZER_CLASS_COMMENT_BODY);
-#else
-                while (it < top && *it != '\n' && *it != '\r')
-                {
-                    it += 1;
-                }
-#endif
-            }
-            else if (it + 1 < top && it[1] == '=')
-            {
-                id = TOKEN_SLASH_EQUAL;
-                it += 2;
-            }
-            else
-            {
-                id = TOKEN_SLASH;
-                it += 1;
-            }
-        }
-        break;
-        case '.':
-        {
-            if (it + 2 < top && it[1] == '.' && it[2] == '.')
-            {
-                id = TOKEN_TRIPLE_DOT;
-            }
-            else if (it + 1 < top && it[1] == '.')
-            {
-                id = TOKEN_DOUBLE_DOT;
-            }
-            else
-            {
-                id = TOKEN_DOT;
-            }
-
-            it += (u64)id - (u64)TOKEN_DOT + 1;
-        }
-        break;
-        default:
-        {
-            it += tokenizer_utf8_sequence_length(it, top);
-        }
-        }
-
-        const char8* restrict end = it;
-        u64 length = (u64)(end - start);
-        tokenizer_emit_token(&result, token_start, &token_count, id, length, length > TOKEN_MAX_LENGTH);
+        TokenizerScan scan = tokenizer_scan_one_token(accelerator, start, top);
+        it = scan.end;
+        u64 length = (u64)(it - start);
+        tokenizer_emit_token(&result, token_start, &token_count, scan.id, length, length > TOKEN_MAX_LENGTH);
     }
 
     tokenizer_emit_token(&result, token_start, &token_count, TOKEN_EOF, 0, false);
@@ -1053,6 +1122,546 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
     BUSTER_CHECK(token_count <= UINT32_MAX);
     result.token_count = (u32)token_count;
     return result;
+}
+
+#if BUSTER_TOKENIZER_COMPACT
+
+// Deus-Lex-Machina compaction emitter (see the AGENTS.md SIMD lexing/parsing
+// method notes and validark.dev/posts/deus-lex-machina): the file is walked
+// in token-aligned 64-byte windows. Each window classifies once into
+// per-class bitmasks, resolves string/comment spans with forward-seeking
+// cursor arithmetic (escape parity per the simdjson backslash algorithm),
+// legalizes multi-character operators through a bit-channel vpshufb NFA
+// (three per-position tables AND-ed, one channel per operator family),
+// resolves numeric extents with the shared scalar number scanner, and then
+// materializes every complete token at once: vpcompressb pulls the start and
+// end positions of an iota vector through the token-boundary masks, a byte
+// subtract yields all lengths, and the kinds vector compressed by the same
+// starts mask interleaves with them on store. Windows always begin at a
+// token boundary, so no tokenizer state crosses a window; the token that
+// touches the window's last byte is deferred to the next window, and the
+// rare shapes the masks do not model (character literals, stray backslashes,
+// non-ASCII bytes, and-?/or-? candidates, unterminated strings with a
+// recovery semicolon) escape to tokenizer_scan_one_token, which is the same
+// code the scalar loop runs.
+
+BUSTER_CT_CHECK(TOKEN_ERROR == 0);
+
+BUSTER_GLOBAL_LOCAL _Alignas(64) u8 tokenizer_compact_base_kinds[128];
+BUSTER_GLOBAL_LOCAL _Alignas(64) u8 tokenizer_compact_nfa_first[128];
+BUSTER_GLOBAL_LOCAL _Alignas(64) u8 tokenizer_compact_nfa_second[128];
+BUSTER_GLOBAL_LOCAL _Alignas(64) u8 tokenizer_compact_nfa_third[128];
+BUSTER_GLOBAL_LOCAL _Alignas(64) u8 tokenizer_compact_iota[64];
+BUSTER_GLOBAL_LOCAL u8 tokenizer_compact_equal_kinds[128];
+BUSTER_GLOBAL_LOCAL bool tokenizer_compact_tables_built;
+
+// Bit channels of the operator NFA: a byte pair (or triple) forms an
+// operator when the AND of the per-position table lookups is nonzero in some
+// channel. Channel 0 is the whole X= family and keys its kind through
+// tokenizer_compact_equal_kinds; the other channels each legalize one
+// spelled-out family.
+enum
+{
+    TOKENIZER_NFA_EQUAL_FAMILY = 1 << 0,
+    TOKENIZER_NFA_FAT_ARROW = 1 << 1,
+    TOKENIZER_NFA_SHIFT_LEFT = 1 << 2,
+    TOKENIZER_NFA_SHIFT_RIGHT = 1 << 3,
+    TOKENIZER_NFA_DOT = 1 << 4,
+};
+
+BUSTER_GLOBAL_LOCAL void tokenizer_compact_tables_build(void)
+{
+    for (u32 ch = 0; ch < 64; ch += 1)
+    {
+        tokenizer_compact_iota[ch] = (u8)ch;
+    }
+
+    u8* kinds = tokenizer_compact_base_kinds;
+    for (u32 ch = 0; ch < 128; ch += 1)
+    {
+        bool alpha = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
+        kinds[ch] = alpha ? TOKEN_IDENTIFIER : TOKEN_ERROR;
+    }
+    kinds['_'] = TOKEN_UNDERSCORE;
+    for (u32 ch = '0'; ch <= '9'; ch += 1)
+    {
+        kinds[ch] = TOKEN_DECIMAL_INTEGER_LITERAL;
+    }
+    kinds[' '] = TOKEN_SPACE;
+    kinds['\t'] = TOKEN_TAB;
+    kinds['\n'] = TOKEN_LINE_FEED;
+    kinds['\r'] = TOKEN_CARRIAGE_RETURN;
+    kinds['"'] = TOKEN_STRING_LITERAL;
+    kinds['\''] = TOKEN_CHARACTER_LITERAL;
+    kinds['['] = TOKEN_LEFT_BRACKET;
+    kinds[']'] = TOKEN_RIGHT_BRACKET;
+    kinds['{'] = TOKEN_LEFT_BRACE;
+    kinds['}'] = TOKEN_RIGHT_BRACE;
+    kinds['('] = TOKEN_LEFT_PARENTHESIS;
+    kinds[')'] = TOKEN_RIGHT_PARENTHESIS;
+    kinds[':'] = TOKEN_COLON;
+    kinds[';'] = TOKEN_SEMICOLON;
+    kinds[','] = TOKEN_COMMA;
+    kinds['~'] = TOKEN_TILDE;
+    kinds['@'] = TOKEN_AT;
+    kinds['$'] = TOKEN_DOLLAR;
+    kinds['<'] = TOKEN_LESS;
+    kinds['>'] = TOKEN_GREATER;
+    kinds['='] = TOKEN_EQUAL;
+    kinds['!'] = TOKEN_BANG;
+    kinds['+'] = TOKEN_PLUS;
+    kinds['-'] = TOKEN_MINUS;
+    kinds['*'] = TOKEN_ASTERISK;
+    kinds['/'] = TOKEN_SLASH;
+    kinds['%'] = TOKEN_PERCENTAGE;
+    kinds['&'] = TOKEN_AMPERSAND;
+    kinds['|'] = TOKEN_BAR;
+    kinds['^'] = TOKEN_CARET;
+    kinds['.'] = TOKEN_DOT;
+
+    const char* equal_family = "!%&*+-/<=>^|";
+    for (const char* ch = equal_family; *ch; ch += 1)
+    {
+        tokenizer_compact_nfa_first[(u8)*ch] |= TOKENIZER_NFA_EQUAL_FAMILY;
+    }
+    tokenizer_compact_nfa_second['='] |= TOKENIZER_NFA_EQUAL_FAMILY;
+    tokenizer_compact_nfa_first['='] |= TOKENIZER_NFA_FAT_ARROW;
+    tokenizer_compact_nfa_second['>'] |= TOKENIZER_NFA_FAT_ARROW;
+    tokenizer_compact_nfa_first['<'] |= TOKENIZER_NFA_SHIFT_LEFT;
+    tokenizer_compact_nfa_second['<'] |= TOKENIZER_NFA_SHIFT_LEFT;
+    tokenizer_compact_nfa_third['='] |= TOKENIZER_NFA_SHIFT_LEFT;
+    tokenizer_compact_nfa_first['>'] |= TOKENIZER_NFA_SHIFT_RIGHT;
+    tokenizer_compact_nfa_second['>'] |= TOKENIZER_NFA_SHIFT_RIGHT;
+    tokenizer_compact_nfa_third['='] |= TOKENIZER_NFA_SHIFT_RIGHT;
+    tokenizer_compact_nfa_first['.'] |= TOKENIZER_NFA_DOT;
+    tokenizer_compact_nfa_second['.'] |= TOKENIZER_NFA_DOT;
+    tokenizer_compact_nfa_third['.'] |= TOKENIZER_NFA_DOT;
+
+    tokenizer_compact_equal_kinds['!'] = TOKEN_BANG_EQUAL;
+    tokenizer_compact_equal_kinds['%'] = TOKEN_PERCENTAGE_EQUAL;
+    tokenizer_compact_equal_kinds['&'] = TOKEN_AMPERSAND_EQUAL;
+    tokenizer_compact_equal_kinds['*'] = TOKEN_ASTERISK_EQUAL;
+    tokenizer_compact_equal_kinds['+'] = TOKEN_PLUS_EQUAL;
+    tokenizer_compact_equal_kinds['-'] = TOKEN_MINUS_EQUAL;
+    tokenizer_compact_equal_kinds['/'] = TOKEN_SLASH_EQUAL;
+    tokenizer_compact_equal_kinds['<'] = TOKEN_LESS_EQUAL;
+    tokenizer_compact_equal_kinds['='] = TOKEN_EQUAL_EQUAL;
+    tokenizer_compact_equal_kinds['>'] = TOKEN_GREATER_EQUAL;
+    tokenizer_compact_equal_kinds['^'] = TOKEN_CARET_EQUAL;
+    tokenizer_compact_equal_kinds['|'] = TOKEN_BAR_EQUAL;
+
+    tokenizer_compact_tables_built = true;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE u64 tokenizer_compact_mask_below(u64 bit_index)
+{
+    return bit_index >= 64 ? ~(u64)0 : (((u64)1 << bit_index) - 1);
+}
+
+BUSTER_GLOBAL_LOCAL TokenizerResult tokenize_compact(Arena* arena, const char8* restrict file_pointer, u64 file_length)
+{
+    TokenizerResult result = {0};
+    u64 token_count = 0;
+
+    if (file_length > UINT32_MAX)
+    {
+        Token* token_start = arena_allocate(arena, Token, 1);
+        tokenizer_emit_token(&result, token_start, &token_count, TOKEN_EOF, 0, false);
+        result.tokens = token_start;
+        result.token_count = 1;
+        result.error_count = 1;
+        return result;
+    }
+
+    if (!tokenizer_compact_tables_built)
+    {
+        tokenizer_compact_tables_build();
+    }
+
+    // file_length + 1 tokens bound the stream including EOF exactly as in
+    // the scalar path; 63 extra slots absorb the tail lanes of the full-width
+    // interleaved stores, which the next window overwrites and the final
+    // arena_set_position hands back.
+    Token* token_start = arena_allocate(arena, Token, file_length + 1 + 63);
+
+    const char8* restrict it = file_pointer;
+    const char8* top = file_pointer + file_length;
+
+    // Escape tokens run the exact single-token scanner the scalar loop runs;
+    // it keeps its own chunk classifier for the run scans inside long tokens.
+    TokenizerClassifier escape_classifier = {
+        .base = file_pointer,
+        .length = file_length,
+        .chunk_index = UINT64_MAX,
+    };
+
+    const __m512i kinds_low = _mm512_load_si512((const __m512i*)tokenizer_compact_base_kinds);
+    const __m512i kinds_high = _mm512_load_si512((const __m512i*)(tokenizer_compact_base_kinds + 64));
+    const __m512i nfa_first_low = _mm512_load_si512((const __m512i*)tokenizer_compact_nfa_first);
+    const __m512i nfa_first_high = _mm512_load_si512((const __m512i*)(tokenizer_compact_nfa_first + 64));
+    const __m512i nfa_second_low = _mm512_load_si512((const __m512i*)tokenizer_compact_nfa_second);
+    const __m512i nfa_second_high = _mm512_load_si512((const __m512i*)(tokenizer_compact_nfa_second + 64));
+    const __m512i nfa_third_low = _mm512_load_si512((const __m512i*)tokenizer_compact_nfa_third);
+    const __m512i nfa_third_high = _mm512_load_si512((const __m512i*)(tokenizer_compact_nfa_third + 64));
+    const __m512i iota = _mm512_load_si512((const __m512i*)tokenizer_compact_iota);
+
+    while (it < top)
+    {
+        u64 remaining = (u64)(top - it);
+        u64 window_length = remaining < 64 ? remaining : 64;
+        bool at_eof = window_length == remaining;
+        __mmask64 valid_k = window_length == 64 ? ~(__mmask64)0 : ((((__mmask64)1) << window_length) - 1);
+        u64 valid = (u64)valid_k;
+
+        __m512i chunk0 = _mm512_maskz_loadu_epi8(valid_k, it);
+        __m512i chunk1 = _mm512_maskz_loadu_epi8(valid_k >> 1, it + 1);
+        __m512i chunk2 = _mm512_maskz_loadu_epi8(valid_k >> 2, it + 2);
+
+        __m512i lower = _mm512_or_si512(chunk0, _mm512_set1_epi8(0x20));
+        u64 alpha = (u64)_mm512_cmplt_epu8_mask(_mm512_sub_epi8(lower, _mm512_set1_epi8('a')), _mm512_set1_epi8(26));
+        u64 digit = (u64)_mm512_cmplt_epu8_mask(_mm512_sub_epi8(chunk0, _mm512_set1_epi8('0')), _mm512_set1_epi8(10));
+        u64 underscore = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('_'));
+        u64 space = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8(' '));
+        u64 tab = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\t'));
+        u64 line_feed = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\n'));
+        u64 carriage = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\r'));
+        u64 quote = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('"'));
+        u64 backslash = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\\'));
+        u64 apostrophe = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\''));
+        u64 semicolon = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8(';'));
+        u64 slash = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('/'));
+        u64 question = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('?'));
+        u64 high = (u64)_mm512_movepi8_mask(chunk0);
+        u64 ident_continue = alpha | digit | underscore;
+        u64 ident_start_chars = alpha | underscore;
+
+        // Operator NFA: per-position table lookups AND together; high bytes
+        // zero their lanes so they can never masquerade as operator chars.
+        u64 high1 = (u64)_mm512_movepi8_mask(chunk1);
+        u64 high2 = (u64)_mm512_movepi8_mask(chunk2);
+        __m512i base_kind_vector = _mm512_maskz_permutex2var_epi8((__mmask64)~high, kinds_low, chunk0, kinds_high);
+        __m512i first_vector = _mm512_maskz_permutex2var_epi8((__mmask64)~high, nfa_first_low, chunk0, nfa_first_high);
+        __m512i second_vector = _mm512_maskz_permutex2var_epi8((__mmask64)~high1, nfa_second_low, chunk1, nfa_second_high);
+        __m512i third_vector = _mm512_maskz_permutex2var_epi8((__mmask64)~high2, nfa_third_low, chunk2, nfa_third_high);
+        __m512i pair_vector = _mm512_and_si512(first_vector, second_vector);
+        __m512i triple_vector = _mm512_and_si512(pair_vector, third_vector);
+        u64 op_chars = (u64)_mm512_test_epi8_mask(first_vector, first_vector);
+        u64 op2 = (u64)_mm512_test_epi8_mask(pair_vector, pair_vector);
+        u64 op3 = (u64)_mm512_test_epi8_mask(triple_vector, triple_vector);
+        u64 op2_fat_arrow = (u64)_mm512_test_epi8_mask(pair_vector, _mm512_set1_epi8(TOKENIZER_NFA_FAT_ARROW));
+        u64 op2_shift_left = (u64)_mm512_test_epi8_mask(pair_vector, _mm512_set1_epi8(TOKENIZER_NFA_SHIFT_LEFT));
+        u64 op2_shift_right = (u64)_mm512_test_epi8_mask(pair_vector, _mm512_set1_epi8(TOKENIZER_NFA_SHIFT_RIGHT));
+        u64 op2_dot = (u64)_mm512_test_epi8_mask(pair_vector, _mm512_set1_epi8(TOKENIZER_NFA_DOT));
+        u64 op3_shift_left = (u64)_mm512_test_epi8_mask(triple_vector, _mm512_set1_epi8(TOKENIZER_NFA_SHIFT_LEFT));
+        u64 op3_shift_right = (u64)_mm512_test_epi8_mask(triple_vector, _mm512_set1_epi8(TOKENIZER_NFA_SHIFT_RIGHT));
+
+        _Alignas(64) u8 kinds[64];
+        _mm512_store_si512((__m512i*)kinds, base_kind_vector);
+
+        // Escaped positions: the simdjson backslash-parity algorithm. A
+        // window always begins at a token boundary, so no escape state
+        // crosses windows.
+        u64 escaped = 0;
+        if (backslash)
+        {
+            u64 run_starts = backslash & ~(backslash << 1);
+            u64 even_starts = run_starts & 0x5555555555555555ull;
+            u64 odd_starts = run_starts & 0xAAAAAAAAAAAAAAAAull;
+            u64 even_carry_ends = (backslash + even_starts) & ~backslash;
+            u64 odd_carry_ends = (backslash + odd_starts) & ~backslash;
+            escaped = (even_carry_ends & 0xAAAAAAAAAAAAAAAAull) | (odd_carry_ends & 0x5555555555555555ull);
+        }
+
+        // String and comment spans: forward-seeking cursors resolve, for
+        // every line in the window in parallel, which quote/comment/trigger
+        // bound comes first and where its span ends. Character literals,
+        // stray backslashes, and unterminated strings holding a recovery
+        // semicolon become scalar-escape triggers instead of spans.
+        u64 newline_like = line_feed | carriage;
+        u64 newline_or_eof = newline_like | ~valid;
+        u64 unescaped_quotes = quote & ~escaped;
+        u64 double_slash = slash & (slash >> 1);
+        u64 trigger_chars = apostrophe | backslash;
+        u64 bounds = (unescaped_quotes | double_slash | trigger_chars) & valid;
+        u64 trigger_at = 64;
+        u64 defer_at = 64;
+        u64 span_starts = 0;
+        u64 span_ends = 0;
+        u64 closed_quote_ends = 0;
+        u64 span_suppress = 0;
+
+        if (bounds)
+        {
+            u64 iter = ~newline_like & ~((~newline_like) << 1) & valid;
+            u64 live_bounds = bounds;
+            while (iter)
+            {
+                u64 universe = live_bounds | newline_or_eof;
+                u64 starts = live_bounds & ~(universe - iter);
+                if (!starts)
+                {
+                    break;
+                }
+                u64 trigger_starts = starts & trigger_chars;
+                if (trigger_starts)
+                {
+                    u64 t = (u64)__builtin_ctzll(trigger_starts);
+                    if (t < trigger_at)
+                    {
+                        trigger_at = t;
+                    }
+                    starts &= ~trigger_starts;
+                }
+                u64 quote_starts = starts & unescaped_quotes;
+                u64 interleaved = newline_or_eof | (unescaped_quotes & (newline_or_eof - quote_starts));
+                interleaved &= ~starts;
+                u64 ends = interleaved & ~(interleaved - starts);
+                if (__builtin_popcountll(ends) < __builtin_popcountll(starts))
+                {
+                    // The one span the window's last line leaves open; the
+                    // next window rescans it from its start.
+                    u64 open_start = 63 - (u64)__builtin_clzll(starts);
+                    defer_at = open_start;
+                    starts &= ~((u64)1 << open_start);
+                    quote_starts &= ~((u64)1 << open_start);
+                }
+                span_starts |= starts;
+                span_ends |= ends;
+                u64 closed = ends & unescaped_quotes;
+                closed_quote_ends |= closed;
+                for (u64 q = quote_starts; q; q &= q - 1)
+                {
+                    u64 s = (u64)__builtin_ctzll(q);
+                    u64 above = ~tokenizer_compact_mask_below(s + 1);
+                    u64 pair_ends = ends & above;
+                    u64 e = pair_ends ? (u64)__builtin_ctzll(pair_ends) : 64;
+                    bool closed_here = e < 64 && ((closed >> e) & 1);
+                    if (!closed_here)
+                    {
+                        u64 span_body = tokenizer_compact_mask_below(e) & above;
+                        if (semicolon & ~escaped & span_body)
+                        {
+                            if (s < trigger_at)
+                            {
+                                trigger_at = s;
+                            }
+                        }
+                    }
+                }
+                iter = closed;
+                live_bounds ^= closed;
+            }
+            span_suppress = (span_ends - span_starts) | closed_quote_ends;
+
+            u64 comment_starts = span_starts & double_slash;
+            for (u64 m = comment_starts; m; m &= m - 1)
+            {
+                kinds[(u64)__builtin_ctzll(m)] = TOKEN_COMMENT;
+            }
+        }
+
+        // Non-ASCII bytes outside spans start tokens the masks do not model.
+        u64 high_outside = high & valid & ~span_suppress;
+        if (high_outside)
+        {
+            u64 t = (u64)__builtin_ctzll(high_outside);
+            if (t < trigger_at)
+            {
+                trigger_at = t;
+            }
+        }
+
+        // Numbers: candidate starts from the masks, extents and kinds from
+        // the shared scalar number scanner, chained so a literal ending on a
+        // digit or letter seeds the next start exactly like the scalar loop.
+        u64 available_base = valid & ~span_suppress;
+        u64 number_span = 0;
+        u64 number_starts = 0;
+        u64 extra_ident_starts = 0;
+        u64 work = digit & available_base & ~(ident_continue << 1);
+        while (work)
+        {
+            u64 t = (u64)__builtin_ctzll(work);
+            TokenId number_id;
+            const char8* number_end = tokenizer_scan_number(it + t, top, &number_id);
+            u64 e = (u64)(number_end - it);
+            number_starts |= (u64)1 << t;
+            kinds[t] = number_id;
+            u64 e_capped = e < 64 ? e : 64;
+            u64 span_bits = tokenizer_compact_mask_below(e_capped) & ~tokenizer_compact_mask_below(t);
+            number_span |= span_bits;
+            work &= ~span_bits;
+            if (e < window_length)
+            {
+                u64 next_bit = (u64)1 << e;
+                if (digit & next_bit)
+                {
+                    work |= next_bit;
+                }
+                else if (ident_start_chars & next_bit)
+                {
+                    extra_ident_starts |= next_bit;
+                }
+            }
+        }
+
+        // Identifiers: keyword kinds by the shared perfect hash; an
+        // identifier run followed by '?' escapes so the scalar scanner
+        // decides between and?/or? and a plain identifier plus error byte.
+        u64 available = available_base & ~number_span;
+        u64 ident_starts = ((ident_start_chars & ~(ident_continue << 1)) | extra_ident_starts) & available;
+        for (u64 m = ident_starts; m; m &= m - 1)
+        {
+            u64 i = (u64)__builtin_ctzll(m);
+            u64 run_tail = ~(ident_continue >> i);
+            u64 run_length = run_tail ? (u64)__builtin_ctzll(run_tail) : 64;
+            u64 run_end = i + run_length;
+            if (run_end >= window_length && !at_eof)
+            {
+                break; // the window's last token; deferred and rescanned
+            }
+            if (run_end < window_length && ((question >> run_end) & 1))
+            {
+                if (i < trigger_at)
+                {
+                    trigger_at = i;
+                }
+                continue;
+            }
+            if (run_length >= 2)
+            {
+                String8 identifier = string_from_pointer_length(it + i, run_length);
+                kinds[i] = (u8)tokenizer_identifier_kind(identifier);
+            }
+        }
+
+        // Operators: left-greedy maximal munch over the NFA legality masks.
+        u64 ops = op_chars & available;
+        u64 op_starts = 0;
+        while (ops)
+        {
+            u64 c = (u64)__builtin_ctzll(ops);
+            u64 b = (u64)1 << c;
+            op_starts |= b;
+            u64 length = 1;
+            if (op3 & b)
+            {
+                length = 3;
+                kinds[c] = (u8)((op3_shift_left & b)    ? TOKEN_SHIFT_LEFT_EQUAL
+                               : (op3_shift_right & b) ? TOKEN_SHIFT_RIGHT_EQUAL
+                                                       : TOKEN_TRIPLE_DOT);
+            }
+            else if (op2 & b)
+            {
+                length = 2;
+                kinds[c] = (u8)((op2_fat_arrow & b)     ? TOKEN_FAT_ARROW
+                               : (op2_shift_left & b)  ? TOKEN_SHIFT_LEFT
+                               : (op2_shift_right & b) ? TOKEN_SHIFT_RIGHT
+                               : (op2_dot & b)         ? TOKEN_DOUBLE_DOT
+                                                       : tokenizer_compact_equal_kinds[(u8)it[c]]);
+            }
+            ops &= ~tokenizer_compact_mask_below(c + length);
+        }
+
+        u64 space_starts = space & ~(space << 1) & available;
+        u64 tab_starts = tab & ~(tab << 1) & available;
+        u64 singles = available & ~ident_continue & ~space & ~tab & ~quote & ~apostrophe & ~backslash & ~op_chars & ~high;
+        u64 starts_all = span_starts | number_starts | ident_starts | op_starts | space_starts | tab_starts | singles;
+
+        u64 emit_bound;
+        bool escape_after = false;
+        if (trigger_at < 64 && trigger_at <= defer_at)
+        {
+            emit_bound = trigger_at;
+            escape_after = true;
+        }
+        else if (defer_at < 64)
+        {
+            emit_bound = defer_at;
+        }
+        else if (at_eof)
+        {
+            emit_bound = window_length;
+        }
+        else
+        {
+            emit_bound = 63 - (u64)__builtin_clzll(starts_all);
+        }
+
+        if (emit_bound)
+        {
+            u64 emit_mask = starts_all & tokenizer_compact_mask_below(emit_bound);
+            u64 ends_mask = (emit_mask >> 1) | ((u64)1 << (emit_bound - 1));
+            u32 emit_count = (u32)__builtin_popcountll(emit_mask);
+            __m512i start_positions = _mm512_maskz_compress_epi8(emit_mask, iota);
+            __m512i end_positions = _mm512_maskz_compress_epi8(ends_mask, iota);
+            __m512i lengths = _mm512_add_epi8(_mm512_sub_epi8(end_positions, start_positions), _mm512_set1_epi8(1));
+            __m512i kind_vector = _mm512_load_si512((const __m512i*)kinds);
+            __m512i kinds_compressed = _mm512_maskz_compress_epi8(emit_mask, kind_vector);
+
+            u64 emitted_lanes = tokenizer_compact_mask_below(emit_count);
+            u64 error_lanes = (u64)_mm512_cmpeq_epi8_mask(kinds_compressed, _mm512_setzero_si512()) & emitted_lanes;
+            result.error_count += (u32)__builtin_popcountll(error_lanes);
+
+            Token* out = token_start + token_count;
+            __m512i lengths_16 = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(lengths));
+            __m512i kinds_16 = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(kinds_compressed));
+            _mm512_storeu_si512((__m512i*)(out + 0), _mm512_or_si512(lengths_16, _mm512_slli_epi32(kinds_16, 24)));
+            if (emit_count > 16)
+            {
+                lengths_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(lengths, 1));
+                kinds_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(kinds_compressed, 1));
+                _mm512_storeu_si512((__m512i*)(out + 16), _mm512_or_si512(lengths_16, _mm512_slli_epi32(kinds_16, 24)));
+            }
+            if (emit_count > 32)
+            {
+                lengths_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(lengths, 2));
+                kinds_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(kinds_compressed, 2));
+                _mm512_storeu_si512((__m512i*)(out + 32), _mm512_or_si512(lengths_16, _mm512_slli_epi32(kinds_16, 24)));
+            }
+            if (emit_count > 48)
+            {
+                lengths_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(lengths, 3));
+                kinds_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(kinds_compressed, 3));
+                _mm512_storeu_si512((__m512i*)(out + 48), _mm512_or_si512(lengths_16, _mm512_slli_epi32(kinds_16, 24)));
+            }
+            token_count += emit_count;
+            it += emit_bound;
+            if (!escape_after)
+            {
+                continue;
+            }
+        }
+
+        // Either the whole window is one unfinished token or a scalar-escape
+        // trigger sits at the emission bound: scan exactly one token with the
+        // reference scanner and re-enter the window loop at its end.
+        TokenizerScan scan = tokenizer_scan_one_token(&escape_classifier, it, top);
+        u64 scan_length = (u64)(scan.end - it);
+        tokenizer_emit_token(&result, token_start, &token_count, scan.id, scan_length, scan_length > TOKEN_MAX_LENGTH);
+        it = scan.end;
+    }
+
+    tokenizer_emit_token(&result, token_start, &token_count, TOKEN_EOF, 0, false);
+
+    arena_set_position(arena, (u64)((u8*)(token_start + token_count) - (u8*)arena));
+
+    result.tokens = token_start;
+
+    BUSTER_CHECK(token_count <= UINT32_MAX);
+    result.token_count = (u32)token_count;
+    return result;
+}
+
+#endif
+
+TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 file_length)
+{
+#if BUSTER_TOKENIZER_COMPACT
+    return tokenize_compact(arena, file_pointer, file_length);
+#else
+    return tokenize_scalar(arena, file_pointer, file_length);
+#endif
 }
 
 typedef enum ParserStateId
