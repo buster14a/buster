@@ -161,3 +161,6 @@ BUSTER_F_DECL void a64_emit_initialize_aggregate_result(CodegenBuffer* buffer, u
 BUSTER_F_DECL void a64_emit_copy_memory_registers(CodegenBuffer* buffer, u32 destination, u32 source, u32 scratch, u32 size);
 BUSTER_F_DECL void a64_emit_float_load_offset(CodegenBuffer* buffer, u32 target, u32 offset, u32 size);
 BUSTER_F_DECL void a64_emit_float_store_offset(CodegenBuffer* buffer, u32 source, u32 offset, u32 size);
+#if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL void codegen_test_emit_scalar(CodegenBuffer* buffer, u32 byte_count, u64 value);
+#endif

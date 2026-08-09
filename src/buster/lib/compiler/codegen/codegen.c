@@ -664,11 +664,10 @@ CodegenAbiSignature codegen_classify_signature(Arena* arena, AnalysisResult* ana
     return codegen_classify_signature_with_arguments(arena, analysis, function_type_id, 0, 0, codegen_target_for_abi(abi));
 }
 
-// The one place a byte is refused for want of room. It lives out of line
-// because `codegen_emit_u8` is inlined into every emitter in the backend and
-// this is the only path none of them take: reporting it in the caller costs
-// more per emitted byte, across nineteen megabytes of them, than the report is
-// worth.
+// The one place code-buffer exhaustion is reported. It lives out of line
+// because the scalar emitters are inlined throughout the backend and this is
+// the only path none of them take: reporting it in a caller costs more per
+// emitted byte, across nineteen megabytes of them, than the report is worth.
 BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST void codegen_buffer_report_exhausted(CodegenBuffer* buffer)
 {
     buffer->error = CODEGEN_ERROR_CAPACITY;
@@ -676,6 +675,18 @@ BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST void codegen_buffer_report_
     {
         *buffer->exhausted = true;
     }
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_ALWAYS_INLINE bool codegen_buffer_reserve(CodegenBuffer* buffer, u64 byte_count, u8** output)
+{
+    if (buffer->count > buffer->capacity || byte_count > buffer->capacity - buffer->count)
+    {
+        codegen_buffer_report_exhausted(buffer);
+        return false;
+    }
+    *output = buffer->bytes + buffer->count;
+    buffer->count += byte_count;
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL void codegen_emit_u8(CodegenBuffer* buffer, u8 value)
@@ -690,19 +701,54 @@ BUSTER_GLOBAL_LOCAL void codegen_emit_u8(CodegenBuffer* buffer, u8 value)
 
 BUSTER_GLOBAL_LOCAL void codegen_emit_u32(CodegenBuffer* buffer, u32 value)
 {
-    for (u32 index = 0; index < 4; index += 1)
+    u8* output;
+    if (!codegen_buffer_reserve(buffer, 4, &output))
     {
-        codegen_emit_u8(buffer, (u8)(value >> (index * 8)));
+        return;
     }
+    output[0] = (u8)value;
+    output[1] = (u8)(value >> 8);
+    output[2] = (u8)(value >> 16);
+    output[3] = (u8)(value >> 24);
 }
 
 BUSTER_GLOBAL_LOCAL void codegen_emit_u64(CodegenBuffer* buffer, u64 value)
 {
-    for (u32 index = 0; index < 8; index += 1)
+    u8* output;
+    if (!codegen_buffer_reserve(buffer, 8, &output))
     {
-        codegen_emit_u8(buffer, (u8)(value >> (index * 8)));
+        return;
+    }
+    output[0] = (u8)value;
+    output[1] = (u8)(value >> 8);
+    output[2] = (u8)(value >> 16);
+    output[3] = (u8)(value >> 24);
+    output[4] = (u8)(value >> 32);
+    output[5] = (u8)(value >> 40);
+    output[6] = (u8)(value >> 48);
+    output[7] = (u8)(value >> 56);
+}
+
+#if BUSTER_INCLUDE_TESTS
+void codegen_test_emit_scalar(CodegenBuffer* buffer, u32 byte_count, u64 value)
+{
+    switch (byte_count)
+    {
+    case 1:
+        codegen_emit_u8(buffer, (u8)value);
+        break;
+    case 4:
+        codegen_emit_u32(buffer, (u32)value);
+        break;
+    case 8:
+        codegen_emit_u64(buffer, value);
+        break;
+    default:
+        buffer->error = CODEGEN_ERROR_CAPACITY;
+        break;
     }
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL s32 x64_value_displacement_component(IrValueId value, u32 component)
 {

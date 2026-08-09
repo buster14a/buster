@@ -1070,6 +1070,64 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                                .cpu_arch = CPU_ARCH_AARCH64,
                                .cpu_model = CPU_MODEL_BASELINE,
                            }) == 16);
+    u8 scalar_packet_bytes[13] = {0};
+    CodegenBuffer scalar_packet_buffer = {
+        .bytes = scalar_packet_bytes,
+        .capacity = sizeof(scalar_packet_bytes),
+    };
+    codegen_test_emit_scalar(&scalar_packet_buffer, 1, 0xa5);
+    codegen_test_emit_scalar(&scalar_packet_buffer, 4, UINT32_C(0x44332211));
+    codegen_test_emit_scalar(&scalar_packet_buffer, 8, UINT64_C(0xccbbaa9988776655));
+    static u8 const expected_scalar_packets[] = {
+        0xa5, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+    };
+    BUSTER_TEST(arguments, scalar_packet_buffer.error == CODEGEN_ERROR_NONE);
+    BUSTER_TEST(arguments, scalar_packet_buffer.count == sizeof(scalar_packet_bytes));
+    BUSTER_TEST(arguments, !memcmp(scalar_packet_bytes, expected_scalar_packets, sizeof(expected_scalar_packets)));
+
+    u8 short_packet_bytes[8];
+    memset(short_packet_bytes, 0x5a, sizeof(short_packet_bytes));
+    CodegenBuffer short_packet_buffer = {
+        .bytes = short_packet_bytes,
+        .capacity = sizeof(short_packet_bytes) - 1,
+    };
+    codegen_test_emit_scalar(&short_packet_buffer, 8, UINT64_MAX);
+    BUSTER_TEST(arguments, short_packet_buffer.error == CODEGEN_ERROR_CAPACITY);
+    BUSTER_TEST(arguments, short_packet_buffer.count == 0);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(short_packet_bytes); index += 1)
+    {
+        BUSTER_TEST(arguments, short_packet_bytes[index] == 0x5a);
+    }
+
+    u8 boundary_packet_bytes[8];
+    memset(boundary_packet_bytes, 0x3c, sizeof(boundary_packet_bytes));
+    CodegenBuffer boundary_packet_buffer = {
+        .bytes = boundary_packet_bytes,
+        .count = 3,
+        .capacity = 7,
+    };
+    codegen_test_emit_scalar(&boundary_packet_buffer, 4, UINT32_C(0x04030201));
+    BUSTER_TEST(arguments, boundary_packet_buffer.error == CODEGEN_ERROR_NONE);
+    BUSTER_TEST(arguments, boundary_packet_buffer.count == 7);
+    BUSTER_TEST(arguments, boundary_packet_bytes[3] == 1 && boundary_packet_bytes[4] == 2 && boundary_packet_bytes[5] == 3 &&
+                               boundary_packet_bytes[6] == 4 && boundary_packet_bytes[7] == 0x3c);
+    codegen_test_emit_scalar(&boundary_packet_buffer, 1, 0xff);
+    BUSTER_TEST(arguments, boundary_packet_buffer.error == CODEGEN_ERROR_CAPACITY);
+    BUSTER_TEST(arguments, boundary_packet_buffer.count == 7 && boundary_packet_bytes[7] == 0x3c);
+
+    CodegenBuffer zero_capacity_packet_buffer = {0};
+    codegen_test_emit_scalar(&zero_capacity_packet_buffer, 1, 0xff);
+    BUSTER_TEST(arguments, zero_capacity_packet_buffer.error == CODEGEN_ERROR_CAPACITY);
+    BUSTER_TEST(arguments, zero_capacity_packet_buffer.count == 0);
+
+    CodegenBuffer overflow_packet_buffer = {
+        .count = UINT64_MAX - 1,
+        .capacity = UINT64_MAX,
+    };
+    codegen_test_emit_scalar(&overflow_packet_buffer, 4, UINT32_MAX);
+    BUSTER_TEST(arguments, overflow_packet_buffer.error == CODEGEN_ERROR_CAPACITY);
+    BUSTER_TEST(arguments, overflow_packet_buffer.count == UINT64_MAX - 1);
+
     u8 x64_stack_adjust_bytes[32] = {0};
     CodegenBuffer x64_stack_adjust_buffer = {
         .bytes = x64_stack_adjust_bytes,
