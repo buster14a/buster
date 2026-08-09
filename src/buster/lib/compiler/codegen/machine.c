@@ -225,6 +225,16 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_CVT_I64_TO_F64] = MACHINE_INFO_MOVE("x64_cvt_i64_to_f64"),
     [MACHINE_X64_CVT_F32_TO_I64] = MACHINE_INFO_MOVE("x64_cvt_f32_to_i64"),
     [MACHINE_X64_CVT_F64_TO_I64] = MACHINE_INFO_MOVE("x64_cvt_f64_to_i64"),
+    [MACHINE_X64_MOVQ_TO_XMM] = {
+        .name = S8_INITIALIZER("x64_movq_to_xmm"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL},
+    },
+    [MACHINE_X64_MOVQ_FROM_XMM] = {
+        .name = S8_INITIALIZER("x64_movq_from_xmm"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+    },
     [MACHINE_X64_CALL_DIRECT] = {
         .name = S8_INITIALIZER("x64_call_direct"),
         .implicit_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX) | (1u << MACHINE_X64_RDX) | (1u << MACHINE_X64_RSI) | (1u << MACHINE_X64_RDI) |

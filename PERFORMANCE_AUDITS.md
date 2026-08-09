@@ -12,6 +12,30 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09m` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+scalar float operations and the XMM ABI.)
+
+- **What was built.** Float values travel as IEEE bit patterns in general
+  registers and slots (canonical-identical); FARITH/FCMP_SET/conversion
+  rows bridge through XMM0/XMM1 internally, with the canonical NaN-parity
+  fixups and the 64-bit convert forms (unsigned-64 sequences stay outside
+  the subset). Then the ABI: shapes carry per-part classes, parameters and
+  call arguments use per-class running register assignment (six integer,
+  eight XMM), entry captures integer parts before float parts because
+  float captures scratch general registers, float parts bounce through
+  RAX via MOVQ_TO/FROM_XMM rows, variadic AL carries the true XMM count,
+  and one/two-part returns place integer parts in RAX/RDX and float parts
+  in XMM0/XMM1.
+- **Gates:** `machine_tests` 439/439 with typed float-signature
+  executions (mixed argument sequences, all-float and tagged aggregates,
+  aggregate float returns, machine-to-machine float calls); test_all
+  green; fixed point `bytes=27064000`; soak byte-identical. Coverage
+  1729 → 1650 fallbacks: **1267 of 2917 (43.4%)** machine-compiled.
+  Remaining mass: stack arguments (>6 integer parts — the `seven`
+  representative), atomics, va_start machinery, inline assembly,
+  over-aligned locals, STACK_ALLOCATE, indirect calls, label addresses,
+  and machine-path debug locations.
+
 `2026-08-09l` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 switch chains, variadic calls, and the aggregate ABI, taking the machine
 path to 40.7% of the unity tree.)

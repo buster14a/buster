@@ -280,6 +280,10 @@ typedef enum MachineOpcode
     MACHINE_X64_CVT_I64_TO_F64,
     MACHINE_X64_CVT_F32_TO_I64,
     MACHINE_X64_CVT_F64_TO_I64,
+    // Bit-exact bridges between general registers and the low XMM file for
+    // the float ABI; payload is the XMM register index.
+    MACHINE_X64_MOVQ_TO_XMM,   // use general source; xmm[payload] = bits
+    MACHINE_X64_MOVQ_FROM_XMM, // def general destination = xmm[payload] bits
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

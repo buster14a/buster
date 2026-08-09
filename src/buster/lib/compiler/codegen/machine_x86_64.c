@@ -18,6 +18,7 @@ typedef struct MachineX64ValueShape MachineX64ValueShape;
 struct MachineX64ValueShape
 {
     u32 part_offsets[2];
+    u8 part_is_float[2];
     u32 part_count;
     bool aggregate;
     u8 reserved[3];
@@ -44,10 +45,12 @@ struct MachineX64Selector
     // register can clobber the incoming fixed registers; IR_ID_UNDERLYING_INVALID
     // when the function has no such argument.
     u32 argument_values[6];
-    // Register shape and first System V register per parameter, plus the
-    // return shape, computed once from the IR-owned ABI classification.
+    // Register shape and first System V integer/XMM register per
+    // parameter, plus the return shape, computed once from the IR-owned
+    // ABI classification.
     MachineX64ValueShape parameter_shapes[6];
-    u8 parameter_first_registers[6];
+    u8 parameter_first_integers[6];
+    u8 parameter_first_floats[6];
     MachineX64ValueShape return_shape;
     // Definition point per virtual register, patched into the flattened
     // rows because builder chunks are write-once.
@@ -85,6 +88,14 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
         };
         return true;
     }
+    if (type && type->layout.resolved && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64))
+    {
+        *shape = (MachineX64ValueShape){
+            .part_is_float = {1},
+            .part_count = 1,
+        };
+        return true;
+    }
     if (!type || !type->layout.resolved || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_SLICE))
     {
         return false;
@@ -100,15 +111,29 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
     };
     for (u32 part_index = 0; part_index < abi.part_count; part_index += 1)
     {
-        if ((abi.parts[part_index].abi_class != IR_ABI_CLASS_INTEGER && abi.parts[part_index].abi_class != IR_ABI_CLASS_POINTER) ||
+        bool part_float = abi.parts[part_index].abi_class == IR_ABI_CLASS_FLOAT;
+        if ((abi.parts[part_index].abi_class != IR_ABI_CLASS_INTEGER && abi.parts[part_index].abi_class != IR_ABI_CLASS_POINTER && !part_float) ||
             abi.parts[part_index].size > 8)
         {
             return false;
         }
         built.part_offsets[part_index] = abi.parts[part_index].value_offset;
+        built.part_is_float[part_index] = part_float ? 1 : 0;
     }
     *shape = built;
     return true;
+}
+
+// Consecutive-register assignment per class: integer parts take the next
+// System V general register, float parts the next XMM register.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_shape_class_parts(MachineX64ValueShape* shape, bool floats)
+{
+    u32 count = 0;
+    for (u32 part_index = 0; part_index < shape->part_count; part_index += 1)
+    {
+        count += (shape->part_is_float[part_index] != 0) == floats;
+    }
+    return count;
 }
 
 // Mirrors codegen_canonical_register_is_64_bit for the integer subset.
@@ -1080,21 +1105,30 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         // vector registers in AL, matching the canonical convention.
         // Aggregate variadic tails stay outside the subset.
         MachineX64ValueShape argument_shapes[BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments)];
-        u32 argument_first_registers[BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments)];
-        u32 call_register_count = 0;
+        u32 argument_first_integers[BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments)];
+        u32 argument_first_floats[BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments)];
+        u32 call_integer_count = 0;
+        u32 call_float_count = 0;
         for (u32 argument_index = 0; argument_index < call_argument_count; argument_index += 1)
         {
             IrTypeId argument_type_id = argument_index < callee_type->parameter_count
                                             ? callee_type->parameter_types[argument_index]
                                             : function->values[instruction->operands[argument_index + 1].value].canonical_type;
             if (!machine_x64_value_shape(program, argument_type_id, IR_ABI_USE_ARGUMENT, argument_shapes + argument_index) ||
-                (argument_shapes[argument_index].aggregate && argument_index >= callee_type->parameter_count) ||
-                call_register_count + argument_shapes[argument_index].part_count > BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments))
+                (argument_shapes[argument_index].aggregate && argument_index >= callee_type->parameter_count))
             {
                 return false;
             }
-            argument_first_registers[argument_index] = call_register_count;
-            call_register_count += argument_shapes[argument_index].part_count;
+            u32 integer_parts = machine_x64_shape_class_parts(argument_shapes + argument_index, false);
+            u32 float_parts = machine_x64_shape_class_parts(argument_shapes + argument_index, true);
+            if (call_integer_count + integer_parts > BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments) || call_float_count + float_parts > 8)
+            {
+                return false;
+            }
+            argument_first_integers[argument_index] = call_integer_count;
+            argument_first_floats[argument_index] = call_float_count;
+            call_integer_count += integer_parts;
+            call_float_count += float_parts;
         }
         u32 argument_registers[BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments)];
         u32 argument_slots[BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments)];
@@ -1115,32 +1149,63 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                 return false;
             }
         }
-        // Explicit fixed-register argument copies; the placement loads each
-        // value directly into its target register, so no copy can disturb a
-        // previously placed argument. Aggregate parts load straight from
-        // the value's frame slot.
+        // Explicit fixed-register argument copies; integer targets load
+        // directly (never through a scratch that could disturb an already
+        // placed argument), and float parts bounce through RAX into their
+        // XMM registers, which no general-register write can touch.
         for (u32 argument_index = 0; argument_index < call_argument_count; argument_index += 1)
         {
             MachineX64ValueShape* shape = argument_shapes + argument_index;
-            u32 first_register = argument_first_registers[argument_index];
+            u32 next_integer = argument_first_integers[argument_index];
+            u32 next_float = argument_first_floats[argument_index];
             if (shape->aggregate)
             {
                 for (u32 part_index = 0; part_index < shape->part_count; part_index += 1)
                 {
-                    machine_x64_select_row(selector,
-                                           (MachineInstruction){
-                                               .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
-                                                                             machine_x64_system_v_arguments[first_register + part_index]),
-                                                            machine_ref_make(MACHINE_REF_STACK_SLOT, argument_slots[argument_index])},
-                                               .payload = shape->part_offsets[part_index],
-                                               .opcode = MACHINE_X64_LOAD_FRAME,
-                                           });
+                    bool part_float = shape->part_is_float[part_index] != 0;
+                    if (part_float)
+                    {
+                        u32 bounce_register = machine_x64_synthesize_register(selector);
+                        machine_x64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register),
+                                                                          machine_ref_make(MACHINE_REF_STACK_SLOT, argument_slots[argument_index])},
+                                                             .payload = shape->part_offsets[part_index],
+                                                             .opcode = MACHINE_X64_LOAD_FRAME,
+                                                         });
+                        machine_x64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                             .payload = next_float,
+                                                             .opcode = MACHINE_X64_MOVQ_TO_XMM,
+                                                         });
+                        next_float += 1;
+                    }
+                    else
+                    {
+                        machine_x64_select_row(selector,
+                                               (MachineInstruction){
+                                                   .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
+                                                                                 machine_x64_system_v_arguments[next_integer]),
+                                                                machine_ref_make(MACHINE_REF_STACK_SLOT, argument_slots[argument_index])},
+                                                   .payload = shape->part_offsets[part_index],
+                                                   .opcode = MACHINE_X64_LOAD_FRAME,
+                                               });
+                        next_integer += 1;
+                    }
                 }
+                continue;
+            }
+            if (shape->part_is_float[0])
+            {
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_registers[argument_index])},
+                                                     .payload = next_float,
+                                                     .opcode = MACHINE_X64_MOVQ_TO_XMM,
+                                                 });
                 continue;
             }
             machine_x64_select_row(selector, (MachineInstruction){
                                                  .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
-                                                                               machine_x64_system_v_arguments[first_register]),
+                                                                               machine_x64_system_v_arguments[next_integer]),
                                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_registers[argument_index])},
                                                  .opcode = MACHINE_X64_MOV_RR,
                                              });
@@ -1151,7 +1216,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         machine_x64_select_row(selector, (MachineInstruction){
                                              .payload = target_index,
                                              .opcode = MACHINE_X64_CALL_DIRECT,
-                                             .flags = (u16)(variadic_call ? 1 : 0),
+                                             .flags = (u16)(variadic_call ? (1u | (call_float_count << 1)) : 0),
                                          });
         if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
         {
@@ -1162,15 +1227,35 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                 {
                     return false;
                 }
+                u32 return_integer_index = 0;
+                u32 return_float_index = 0;
                 for (u32 part_index = 0; part_index < callee_return_shape.part_count; part_index += 1)
                 {
+                    if (callee_return_shape.part_is_float[part_index])
+                    {
+                        u32 bounce_register = machine_x64_synthesize_register(selector);
+                        machine_x64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                             .payload = return_float_index,
+                                                             .opcode = MACHINE_X64_MOVQ_FROM_XMM,
+                                                         });
+                        machine_x64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                             .payload = callee_return_shape.part_offsets[part_index],
+                                                             .opcode = MACHINE_X64_STORE_FRAME64,
+                                                         });
+                        return_float_index += 1;
+                        continue;
+                    }
                     machine_x64_select_row(selector, (MachineInstruction){
                                                          .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
                                                                       machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
-                                                                                       part_index ? MACHINE_X64_RDX : MACHINE_X64_RAX)},
+                                                                                       return_integer_index ? MACHINE_X64_RDX : MACHINE_X64_RAX)},
                                                          .payload = callee_return_shape.part_offsets[part_index],
                                                          .opcode = MACHINE_X64_STORE_FRAME64,
                                                      });
+                    return_integer_index += 1;
                 }
                 return true;
             }
@@ -1178,11 +1263,22 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             {
                 return false;
             }
-            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+            u32 row;
+            if (callee_return_shape.part_is_float[0])
+            {
+                row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                           .opcode = MACHINE_X64_MOVQ_FROM_XMM,
+                                                       });
+            }
+            else
+            {
+                row = machine_x64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                         machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX)},
                                                            .opcode = MACHINE_X64_MOV_RR,
                                                        });
+            }
             machine_x64_define(selector, result_register, row);
         }
         return true;
@@ -1268,16 +1364,48 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                 {
                     return false;
                 }
+                u32 return_integer_index = 0;
+                u32 return_float_index = 0;
                 for (u32 part_index = 0; part_index < selector->return_shape.part_count; part_index += 1)
                 {
+                    if (selector->return_shape.part_is_float[part_index])
+                    {
+                        u32 bounce_register = machine_x64_synthesize_register(selector);
+                        machine_x64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register),
+                                                                          machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                             .payload = selector->return_shape.part_offsets[part_index],
+                                                             .opcode = MACHINE_X64_LOAD_FRAME,
+                                                         });
+                        machine_x64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                             .payload = return_float_index,
+                                                             .opcode = MACHINE_X64_MOVQ_TO_XMM,
+                                                         });
+                        return_float_index += 1;
+                        continue;
+                    }
                     machine_x64_select_row(selector, (MachineInstruction){
                                                          .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
-                                                                                       part_index ? MACHINE_X64_RDX : MACHINE_X64_RAX),
+                                                                                       return_integer_index ? MACHINE_X64_RDX : MACHINE_X64_RAX),
                                                                       machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
                                                          .payload = selector->return_shape.part_offsets[part_index],
                                                          .opcode = MACHINE_X64_LOAD_FRAME,
                                                      });
+                    return_integer_index += 1;
                 }
+            }
+            else if (selector->return_shape.part_is_float[0])
+            {
+                u32 value_register;
+                if (!machine_x64_operand_register(selector, instruction->operands[0], &value_register))
+                {
+                    return false;
+                }
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                     .opcode = MACHINE_X64_MOVQ_TO_XMM,
+                                                 });
             }
             else
             {
@@ -1329,18 +1457,27 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
         return result;
     }
     MachineX64ValueShape signature_parameter_shapes[6] = {0};
-    u8 signature_first_registers[6] = {0};
-    u32 signature_register_count = 0;
+    u8 signature_first_integers[6] = {0};
+    u8 signature_first_floats[6] = {0};
+    u32 signature_integer_count = 0;
+    u32 signature_float_count = 0;
     for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
     {
         if (!machine_x64_value_shape(program, function_type->parameter_types[parameter_index], IR_ABI_USE_ARGUMENT,
-                                     signature_parameter_shapes + parameter_index) ||
-            signature_register_count + signature_parameter_shapes[parameter_index].part_count > BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments))
+                                     signature_parameter_shapes + parameter_index))
         {
             return result;
         }
-        signature_first_registers[parameter_index] = (u8)signature_register_count;
-        signature_register_count += signature_parameter_shapes[parameter_index].part_count;
+        u32 integer_parts = machine_x64_shape_class_parts(signature_parameter_shapes + parameter_index, false);
+        u32 float_parts = machine_x64_shape_class_parts(signature_parameter_shapes + parameter_index, true);
+        if (signature_integer_count + integer_parts > BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments) || signature_float_count + float_parts > 8)
+        {
+            return result;
+        }
+        signature_first_integers[parameter_index] = (u8)signature_integer_count;
+        signature_first_floats[parameter_index] = (u8)signature_float_count;
+        signature_integer_count += integer_parts;
+        signature_float_count += float_parts;
     }
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
@@ -1368,7 +1505,8 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
     for (u32 parameter_index = 0; parameter_index < BUSTER_ARRAY_LENGTH(selector.parameter_shapes); parameter_index += 1)
     {
         selector.parameter_shapes[parameter_index] = signature_parameter_shapes[parameter_index];
-        selector.parameter_first_registers[parameter_index] = signature_first_registers[parameter_index];
+        selector.parameter_first_integers[parameter_index] = signature_first_integers[parameter_index];
+        selector.parameter_first_floats[parameter_index] = signature_first_floats[parameter_index];
     }
     for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
     {
@@ -1461,51 +1599,100 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
         {
             // Capture every incoming argument register at entry, before any
             // body row can use an argument register as an operand scratch.
-            // Scalar parameters land in their vreg; aggregate parameters
-            // store each ABI part straight into the value's frame slot.
-            for (u32 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(selector.argument_values); argument_index += 1)
+            // Integer parts capture first because float captures scratch
+            // general registers; XMM state survives that pass untouched.
+            for (u32 capture_pass = 0; capture_pass < 2 && selector.supported; capture_pass += 1)
             {
-                u32 argument_value = selector.argument_values[argument_index];
-                if (argument_value == IR_ID_UNDERLYING_INVALID)
+                bool float_pass = capture_pass == 1;
+                for (u32 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(selector.argument_values); argument_index += 1)
                 {
-                    continue;
-                }
-                MachineX64ValueShape* shape = selector.parameter_shapes + argument_index;
-                u32 first_register = selector.parameter_first_registers[argument_index];
-                if (shape->aggregate)
-                {
-                    u32 slot = selector.value_stack_slots[argument_value];
-                    if (slot == UINT32_MAX)
+                    u32 argument_value = selector.argument_values[argument_index];
+                    if (argument_value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        continue;
+                    }
+                    MachineX64ValueShape* shape = selector.parameter_shapes + argument_index;
+                    u32 next_integer = selector.parameter_first_integers[argument_index];
+                    u32 next_float = selector.parameter_first_floats[argument_index];
+                    if (shape->aggregate)
+                    {
+                        u32 slot = selector.value_stack_slots[argument_value];
+                        if (slot == UINT32_MAX)
+                        {
+                            machine_x64_reject(&selector, IR_OPCODE_ARGUMENT);
+                            break;
+                        }
+                        for (u32 part_index = 0; part_index < shape->part_count; part_index += 1)
+                        {
+                            bool part_float = shape->part_is_float[part_index] != 0;
+                            u32 part_integer = next_integer;
+                            u32 part_float_register = next_float;
+                            next_integer += !part_float;
+                            next_float += part_float;
+                            if (part_float != float_pass)
+                            {
+                                continue;
+                            }
+                            if (part_float)
+                            {
+                                u32 bounce_register = machine_x64_synthesize_register(&selector);
+                                machine_x64_select_row(&selector, (MachineInstruction){
+                                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                                      .payload = part_float_register,
+                                                                      .opcode = MACHINE_X64_MOVQ_FROM_XMM,
+                                                                  });
+                                machine_x64_select_row(&selector, (MachineInstruction){
+                                                                      .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                                      .payload = shape->part_offsets[part_index],
+                                                                      .opcode = MACHINE_X64_STORE_FRAME64,
+                                                                  });
+                            }
+                            else
+                            {
+                                machine_x64_select_row(&selector,
+                                                       (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                                        machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
+                                                                                         machine_x64_system_v_arguments[part_integer])},
+                                                           .payload = shape->part_offsets[part_index],
+                                                           .opcode = MACHINE_X64_STORE_FRAME64,
+                                                       });
+                            }
+                        }
+                        continue;
+                    }
+                    bool scalar_float = shape->part_is_float[0] != 0;
+                    if (scalar_float != float_pass)
+                    {
+                        continue;
+                    }
+                    u32 argument_register = selector.value_virtual_registers[argument_value];
+                    if (argument_register == UINT32_MAX)
                     {
                         machine_x64_reject(&selector, IR_OPCODE_ARGUMENT);
                         break;
                     }
-                    for (u32 part_index = 0; part_index < shape->part_count; part_index += 1)
+                    u32 row;
+                    if (scalar_float)
                     {
-                        machine_x64_select_row(&selector,
-                                               (MachineInstruction){
-                                                   .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
-                                                                machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
-                                                                                 machine_x64_system_v_arguments[first_register + part_index])},
-                                                   .payload = shape->part_offsets[part_index],
-                                                   .opcode = MACHINE_X64_STORE_FRAME64,
-                                               });
+                        row = machine_x64_select_row(&selector, (MachineInstruction){
+                                                                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_register)},
+                                                                    .payload = next_float,
+                                                                    .opcode = MACHINE_X64_MOVQ_FROM_XMM,
+                                                                });
                     }
-                    continue;
+                    else
+                    {
+                        row = machine_x64_select_row(&selector, (MachineInstruction){
+                                                                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_register),
+                                                                                 machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
+                                                                                                  machine_x64_system_v_arguments[next_integer])},
+                                                                    .opcode = MACHINE_X64_MOV_RR,
+                                                                });
+                    }
+                    machine_x64_define(&selector, argument_register, row);
                 }
-                u32 argument_register = selector.value_virtual_registers[argument_value];
-                if (argument_register == UINT32_MAX)
-                {
-                    machine_x64_reject(&selector, IR_OPCODE_ARGUMENT);
-                    break;
-                }
-                u32 row = machine_x64_select_row(&selector, (MachineInstruction){
-                                                                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_register),
-                                                                             machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
-                                                                                              machine_x64_system_v_arguments[first_register])},
-                                                                .opcode = MACHINE_X64_MOV_RR,
-                                                            });
-                machine_x64_define(&selector, argument_register, row);
             }
         }
         for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID && selector.supported; id = function->instructions[id.value].next)
@@ -2175,10 +2362,10 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             {
                 if (instruction->flags & 1)
                 {
-                    // Variadic System V call: AL carries the vector-register
-                    // count, always zero in the integer-only subset.
+                    // Variadic System V call: AL carries the count of XMM
+                    // registers holding arguments.
                     machine_x64_emit8(&encoder, 0xb8);
-                    machine_x64_emit32(&encoder, 0);
+                    machine_x64_emit32(&encoder, (u32)(instruction->flags >> 1));
                 }
                 machine_x64_emit8(&encoder, 0xe8);
                 MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
@@ -2333,6 +2520,12 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 machine_x64_emit8(&encoder, machine_x64_modrm_register(operand_registers[0], 0));
             }
             break;
+            case MACHINE_X64_MOVQ_TO_XMM:
+                machine_x64_emit_movq_to_xmm(&encoder, instruction->payload, operand_registers[0]);
+                break;
+            case MACHINE_X64_MOVQ_FROM_XMM:
+                machine_x64_emit_movq_from_xmm(&encoder, instruction->payload, operand_registers[0]);
+                break;
             case MACHINE_X64_SWITCH:
             {
                 // The canonical compare chain: the condition sits in the

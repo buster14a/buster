@@ -85,6 +85,19 @@ BUSTER_GLOBAL_LOCAL MachineEncodeResult machine_test_encode(Arena* arena, IrProg
     return machine_encode_x86_64(arena, &selected.function, &placement);
 }
 
+BUSTER_GLOBAL_LOCAL u32 machine_test_module_offset(CodegenModule* module, IrModule* ir_module, String8 name)
+{
+    IrFunction* ir_function = machine_test_ir_function_find(ir_module, name);
+    for (u32 entry_index = 0; ir_function && entry_index < module->entry_count; entry_index += 1)
+    {
+        if (module->entries[entry_index].symbol.value == ir_function->symbol.value)
+        {
+            return module->entries[entry_index].offset;
+        }
+    }
+    return UINT32_MAX;
+}
+
 BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_function(Arena* arena)
 {
     MachineFunctionBuilder builder = machine_function_builder_begin(arena);
@@ -280,6 +293,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "unsigned shr(unsigned a, int b) { return a >> b; }\n"
                                   "int with_call(int a, int b) { return divide(a, 2) + srem(b, 3); }\n"
                                   "int fadd(float a, float b) { return a + b > 1.0f; }\n"
+                                  "int seven(int a, int b, int c, int d, int e, int f, int g) { return a + g; }\n"
                                   "int counter;\n"
                                   "int bump(int by) { counter = counter + by; return counter; }\n"
                                   "int table[8];\n"
@@ -308,7 +322,16 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "    return (x < y) + (x <= y) * 2 + (x == y) * 4 + (x != y) * 8 + (x > y) * 16 + (x >= y) * 32; }\n"
                                   "int fnegate(int a) { double x = a; return (int)-x; }\n"
                                   "int fnan(int a) { double n = a * 0.0; n = n / n; return (n == n) ? 1 : 0; }\n"
-                                  "unsigned fuconv(unsigned a) { double x = a; return (unsigned)(x + 1.5); }\n");
+                                  "unsigned fuconv(unsigned a) { double x = a; return (unsigned)(x + 1.5); }\n"
+                                  "double dadd(double a, double b) { return a + b; }\n"
+                                  "double dmix(int a, double b, long c, double d) { return (double)a + b * (double)c - d; }\n"
+                                  "float fhalf(float a, float b) { return (a - b) * 0.5f; }\n"
+                                  "typedef struct DPair { double x; double y; } DPair;\n"
+                                  "double dpair_sum(DPair p) { return p.x + p.y; }\n"
+                                  "DPair dpair_make(double x, double y) { DPair p; p.x = x; p.y = y; return p; }\n"
+                                  "typedef struct Tagged { long tag; double v; } Tagged;\n"
+                                  "double tagged_get(Tagged t) { return t.tag ? t.v : -t.v; }\n"
+                                  "double dcall(double a, double b) { DPair p = dpair_make(a, b); return dpair_sum(p) * dadd(a, b); }\n");
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
     BUSTER_TEST(arguments, machine_program != 0);
     if (machine_program && machine_program->module_count)
@@ -382,7 +405,16 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         if (float_function)
         {
             MachineSelectResult float_selected = machine_select_canonical_function(arguments->arena, machine_program, float_function, machine_target);
-            BUSTER_TEST(arguments, !float_selected.supported);
+            BUSTER_TEST(arguments, float_selected.supported);
+        }
+        // Seven integer arguments overflow the register sequence into stack
+        // parts and stay the explicit unsupported representative.
+        IrFunction* seven_function = machine_test_ir_function_find(machine_module, S8("seven"));
+        BUSTER_TEST(arguments, seven_function != 0);
+        if (seven_function)
+        {
+            MachineSelectResult seven_selected = machine_select_canonical_function(arguments->arena, machine_program, seven_function, machine_target);
+            BUSTER_TEST(arguments, !seven_selected.supported);
         }
         // Variadic direct calls select (AL zero, register-only integer
         // arguments); execution is proven by the linked soak because the
@@ -643,6 +675,89 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 }
             }
             BUSTER_TEST_RAW(arguments, module_equal, module_names[name_index]);
+        }
+        // Float-signature shapes need typed callers: XMM scalars, mixed
+        // integer/float argument sequences, all-float and mixed aggregates,
+        // aggregate float returns, and machine-to-machine float calls.
+        if (none_module_executable.address && mir_module_executable.address)
+        {
+            typedef double MachineTestCallD2(double, double);
+            typedef double MachineTestCallDMix(int, double, long, double);
+            typedef float MachineTestCallF2(float, float);
+            typedef struct MachineTestDPair
+            {
+                double x;
+                double y;
+            } MachineTestDPair;
+            typedef double MachineTestCallDPairSum(MachineTestDPair);
+            typedef MachineTestDPair MachineTestCallDPairMake(double, double);
+            typedef struct MachineTestTagged
+            {
+                s64 tag;
+                double v;
+            } MachineTestTagged;
+            typedef double MachineTestCallTagged(MachineTestTagged);
+            String8 float_names[] = {
+                S8_INITIALIZER("dadd"), S8_INITIALIZER("dmix"), S8_INITIALIZER("fhalf"), S8_INITIALIZER("dpair_sum"),
+                S8_INITIALIZER("dpair_make"), S8_INITIALIZER("tagged_get"), S8_INITIALIZER("dcall"),
+            };
+            void* none_addresses[BUSTER_ARRAY_LENGTH(float_names)];
+            void* mir_addresses[BUSTER_ARRAY_LENGTH(float_names)];
+            bool float_offsets_found = true;
+            for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(float_names); name_index += 1)
+            {
+                u32 none_offset = machine_test_module_offset(&none_module, machine_module, float_names[name_index]);
+                u32 mir_offset = machine_test_module_offset(&mir_module, machine_module, float_names[name_index]);
+                float_offsets_found &= none_offset != UINT32_MAX && mir_offset != UINT32_MAX;
+                none_addresses[name_index] = none_offset != UINT32_MAX ? (u8*)none_module_executable.address + none_offset : 0;
+                mir_addresses[name_index] = mir_offset != UINT32_MAX ? (u8*)mir_module_executable.address + mir_offset : 0;
+            }
+            BUSTER_TEST(arguments, float_offsets_found);
+            if (float_offsets_found)
+            {
+                MachineTestCallD2* none_dadd;
+                MachineTestCallD2* mir_dadd;
+                MachineTestCallDMix* none_dmix;
+                MachineTestCallDMix* mir_dmix;
+                MachineTestCallF2* none_fhalf;
+                MachineTestCallF2* mir_fhalf;
+                MachineTestCallDPairSum* none_dpair_sum;
+                MachineTestCallDPairSum* mir_dpair_sum;
+                MachineTestCallDPairMake* none_dpair_make;
+                MachineTestCallDPairMake* mir_dpair_make;
+                MachineTestCallTagged* none_tagged;
+                MachineTestCallTagged* mir_tagged;
+                MachineTestCallD2* none_dcall;
+                MachineTestCallD2* mir_dcall;
+                memcpy(&none_dadd, none_addresses + 0, sizeof(none_dadd));
+                memcpy(&mir_dadd, mir_addresses + 0, sizeof(mir_dadd));
+                memcpy(&none_dmix, none_addresses + 1, sizeof(none_dmix));
+                memcpy(&mir_dmix, mir_addresses + 1, sizeof(mir_dmix));
+                memcpy(&none_fhalf, none_addresses + 2, sizeof(none_fhalf));
+                memcpy(&mir_fhalf, mir_addresses + 2, sizeof(mir_fhalf));
+                memcpy(&none_dpair_sum, none_addresses + 3, sizeof(none_dpair_sum));
+                memcpy(&mir_dpair_sum, mir_addresses + 3, sizeof(mir_dpair_sum));
+                memcpy(&none_dpair_make, none_addresses + 4, sizeof(none_dpair_make));
+                memcpy(&mir_dpair_make, mir_addresses + 4, sizeof(mir_dpair_make));
+                memcpy(&none_tagged, none_addresses + 5, sizeof(none_tagged));
+                memcpy(&mir_tagged, mir_addresses + 5, sizeof(mir_tagged));
+                memcpy(&none_dcall, none_addresses + 6, sizeof(none_dcall));
+                memcpy(&mir_dcall, mir_addresses + 6, sizeof(mir_dcall));
+                BUSTER_TEST(arguments, none_dadd(1.5, 2.25) == mir_dadd(1.5, 2.25));
+                BUSTER_TEST(arguments, none_dadd(-0.125, 1e100) == mir_dadd(-0.125, 1e100));
+                BUSTER_TEST(arguments, none_dmix(3, 1.5, -2, 0.25) == mir_dmix(3, 1.5, -2, 0.25));
+                BUSTER_TEST(arguments, none_fhalf(7.5f, 2.5f) == mir_fhalf(7.5f, 2.5f));
+                MachineTestDPair pair_probe = {3.5, -4.25};
+                BUSTER_TEST(arguments, none_dpair_sum(pair_probe) == mir_dpair_sum(pair_probe));
+                MachineTestDPair none_made = none_dpair_make(1.25, -8.5);
+                MachineTestDPair mir_made = mir_dpair_make(1.25, -8.5);
+                BUSTER_TEST(arguments, none_made.x == mir_made.x && none_made.y == mir_made.y);
+                MachineTestTagged tagged_probe = {7, 9.5};
+                MachineTestTagged tagged_zero = {0, 2.5};
+                BUSTER_TEST(arguments, none_tagged(tagged_probe) == mir_tagged(tagged_probe));
+                BUSTER_TEST(arguments, none_tagged(tagged_zero) == mir_tagged(tagged_zero));
+                BUSTER_TEST(arguments, none_dcall(2.5, 4.0) == mir_dcall(2.5, 4.0));
+            }
         }
         codegen_release_executable(none_module_executable);
         codegen_release_executable(mir_module_executable);
