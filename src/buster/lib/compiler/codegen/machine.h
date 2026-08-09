@@ -253,6 +253,8 @@ typedef enum MachineOpcode
     // argument placement was lowered into explicit fixed-register copies
     // before this row. Clobbers the System V caller-saved set.
     MACHINE_X64_CALL_DIRECT,
+    MACHINE_X64_LEA_FRAME,    // def, stack-slot ref: address of a frame slot
+    MACHINE_X64_LEA_SYMBOL,   // def; payload indexes call_targets: rip-relative symbol address
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

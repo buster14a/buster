@@ -279,7 +279,17 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "long sar(long a, int b) { return a >> b; }\n"
                                   "unsigned shr(unsigned a, int b) { return a >> b; }\n"
                                   "int with_call(int a, int b) { return divide(a, 2) + srem(b, 3); }\n"
-                                  "int fadd(float a, float b) { return a + b > 1.0f; }\n");
+                                  "int fadd(float a, float b) { return a + b > 1.0f; }\n"
+                                  "int counter;\n"
+                                  "int bump(int by) { counter = counter + by; return counter; }\n"
+                                  "int table[8];\n"
+                                  "int table_get(int i) { return table[i]; }\n"
+                                  "void table_set(int i, int v) { table[i] = v; }\n"
+                                  "typedef struct Pair { int first; long second; } Pair;\n"
+                                  "Pair pair;\n"
+                                  "long pair_sum(void) { return pair.first + pair.second; }\n"
+                                  "int locals_array(int n) { int a[4]; a[0] = n; a[1] = n + 1; a[2] = a[0] * a[1]; a[3] = a[2] - n; return a[3]; }\n"
+                                  "int local_pair(int x) { Pair p; p.first = x; p.second = x * 2; return p.first + (int)p.second; }\n");
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
     BUSTER_TEST(arguments, machine_program != 0);
     if (machine_program && machine_program->module_count)
@@ -295,7 +305,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("negate"), S8_INITIALIZER("bitnot"), S8_INITIALIZER("lnot"), S8_INITIALIZER("less"),
             S8_INITIALIZER("uless"), S8_INITIALIZER("six"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("readp"),
             S8_INITIALIZER("writep"), S8_INITIALIZER("divide"), S8_INITIALIZER("srem"), S8_INITIALIZER("udiv"),
-            S8_INITIALIZER("shl"), S8_INITIALIZER("sar"), S8_INITIALIZER("shr"),
+            S8_INITIALIZER("shl"), S8_INITIALIZER("sar"), S8_INITIALIZER("shr"), S8_INITIALIZER("bump"),
+            S8_INITIALIZER("table_get"), S8_INITIALIZER("table_set"), S8_INITIALIZER("pair_sum"),
+            S8_INITIALIZER("locals_array"), S8_INITIALIZER("local_pair"),
         };
         MachineEncodeResult machine_encoded[BUSTER_ARRAY_LENGTH(supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(supported_names); name_index += 1)
@@ -360,6 +372,17 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(supported_names) && none_executable.address; name_index += 1)
         {
             if (!machine_encoded[name_index].valid)
+            {
+                continue;
+            }
+            // Functions touching global storage cannot execute from a raw
+            // code copy: their data relocations only resolve at link time.
+            // The full-unity soak is their execution proof.
+            bool touches_globals = string_equal(supported_names[name_index], S8("bump")) ||
+                                   string_equal(supported_names[name_index], S8("table_get")) ||
+                                   string_equal(supported_names[name_index], S8("table_set")) ||
+                                   string_equal(supported_names[name_index], S8("pair_sum"));
+            if (touches_globals)
             {
                 continue;
             }
@@ -525,6 +548,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("add"), S8_INITIALIZER("mul"), S8_INITIALIZER("widen"), S8_INITIALIZER("narrow"),
             S8_INITIALIZER("negate"), S8_INITIALIZER("bitnot"), S8_INITIALIZER("lnot"), S8_INITIALIZER("less"),
             S8_INITIALIZER("uless"), S8_INITIALIZER("sum_to"), S8_INITIALIZER("divide"), S8_INITIALIZER("with_call"),
+            S8_INITIALIZER("locals_array"), S8_INITIALIZER("local_pair"),
         };
         typedef s64 MachineTestModuleCall2(s64, s64);
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(module_names) && none_module_executable.address && mir_module_executable.address;

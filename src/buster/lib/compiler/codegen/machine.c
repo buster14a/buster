@@ -173,6 +173,18 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_SREM64] = MACHINE_INFO_READ_MODIFY("x64_srem64"),
     [MACHINE_X64_UREM32] = MACHINE_INFO_READ_MODIFY("x64_urem32"),
     [MACHINE_X64_UREM64] = MACHINE_INFO_READ_MODIFY("x64_urem64"),
+    [MACHINE_X64_LEA_FRAME] = {
+        .name = S8_INITIALIZER("x64_lea_frame"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, 0},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
+    },
+    [MACHINE_X64_LEA_SYMBOL] = {
+        .name = S8_INITIALIZER("x64_lea_symbol"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
+    },
     [MACHINE_X64_CALL_DIRECT] = {
         .name = S8_INITIALIZER("x64_call_direct"),
         .implicit_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX) | (1u << MACHINE_X64_RDX) | (1u << MACHINE_X64_RSI) | (1u << MACHINE_X64_RDI) |

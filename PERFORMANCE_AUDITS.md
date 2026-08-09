@@ -43,6 +43,18 @@ machine path.)
   fallback mass: float/aggregate signatures, GLOBAL/INDEX/FIELD places,
   SWITCH, variadics, >6 arguments, and inline assembly — the next
   stage-3 increments in fallback-frequency order.
+- **Same-day addendum — the address increment:** GLOBAL (non-TLS, via
+  `lea rip+rel32` symbol sites sharing the call-site relocation stream),
+  INDEX (base address plus sign-extended scaled index composed from
+  existing rows through selection-synthesized temporaries), FIELD (base
+  plus immediate offset), ADDRESS_OF, and the widened indirect place set
+  for loads/stores. Address-producing values hold an 8-byte address in
+  their vreg regardless of declared type, exactly like canonical slots.
+  `machine_tests` 317/317 (global-touching functions are
+  selection/encode-verified only — raw code copies cannot resolve data
+  relocations; the linked soak is their execution proof). Unity soak:
+  **608 of 2917 functions (20.8%)** machine-compiled, byte-identical;
+  fixed point `bytes=26957032`; stage-1 per token `3712.501`, flat.
 
 `2026-08-09j` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3, first
 increment — MIR_STACK wired into `codegen_generate_canonical_module` with
