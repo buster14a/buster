@@ -1093,6 +1093,16 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_instruction_shape_valid(IrExecutionFrame
         }
         return valid;
     }
+    case IR_OPCODE_SIMD:
+    {
+        // The interpreter never executes these — they only reach it through a
+        // malformed program — but the shape check still has to agree with the
+        // rest of the pipeline about what a well-formed one looks like.
+        IrSimdShape shape = ir_simd_operation_shape((IrSimdOperation)instruction->simd_operation);
+        return instruction->simd_operation < IR_SIMD_COUNT && instruction->operand_count == shape.operand_count && instruction->target_count == 0 &&
+               instruction->immediate_count == shape.immediate_count &&
+               (shape.has_result == (instruction->result.value != IR_ID_UNDERLYING_INVALID));
+    }
     case IR_OPCODE_LABEL_ADDRESS:
     {
         AnalysisType* type = analysis_type_from_id(frame->analysis, instruction->type);
@@ -2844,6 +2854,18 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                 produced.bits = count;
             }
             break;
+            case IR_UNARY_INTEGER_POPULATION_COUNT:
+            {
+                AnalysisType* type = analysis_type_from_id(frame->analysis, instruction->type);
+                u32 width = type->as.integer.bit_width;
+                u32 count = 0;
+                for (u32 bit_index = 0; bit_index < width; bit_index += 1)
+                {
+                    count += (operand >> bit_index) & 1;
+                }
+                produced.bits = count;
+            }
+            break;
             case IR_UNARY_VECTOR_INTEGER_NEGATE:
             case IR_UNARY_VECTOR_FLOAT_NEGATE:
             case IR_UNARY_VECTOR_INTEGER_BITWISE_NOT:
@@ -3204,6 +3226,15 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                 caller->values[caller_result.value] = returned;
             }
             advance = false;
+        }
+        break;
+        case IR_OPCODE_SIMD:
+        {
+            // The target-fixed 512-bit vocabulary is a native-codegen
+            // construct; the interpreter is an oracle for the Buster language
+            // and gains nothing from a second, differently rounded software
+            // model of it.
+            operation_trap = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
         }
         break;
         case IR_OPCODE_DEBUG_TRAP:

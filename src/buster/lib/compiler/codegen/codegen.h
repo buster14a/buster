@@ -170,6 +170,7 @@ struct CodegenFunction
     u32 split_vector_operation_count;
     u32 vzeroupper_count;
     u32 forwarded_wide_vector_load_count;
+    u32 simd_operation_count;
 };
 
 typedef struct CodegenModuleEntry CodegenModuleEntry;
@@ -243,6 +244,10 @@ struct CodegenStatistics
     u64 split_vector_operation_count;
     u64 vzeroupper_count;
     u64 forwarded_wide_vector_load_count;
+    // Instructions from the target-fixed 512-bit vocabulary. A kernel that
+    // silently fell back to the scalar path reports zero here, which is the
+    // only way a test can tell the two apart from the outside.
+    u64 simd_operation_count;
     u32 function_count;
     u32 maximum_stack_frame_bytes;
 };

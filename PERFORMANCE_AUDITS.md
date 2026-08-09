@@ -12,6 +12,78 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09i` (Linux x86_64, Zen 4 7940HS; the 512-bit SIMD builtin
+vocabulary and the tokenizer port onto it, measured against `2026-08-09g` on
+the same tree. **The self-hosted compiler now runs the AVX-512 tokenizer:
+stage-2 benchmark instructions `8.3788 G` to `6.7761 G` (`-19.1%`) and
+`BENCH_PARSE` median `1.999.827 ns` to `1.609.780 ns` (`-19.5%`). The stage-1
+gate moves `5.1203 G` to `5.1617 G` (`+0.81%`) while the unit being compiled
+grows `1.378.839` to `1.391.850` preprocessed tokens (`+0.94%`), so
+instructions per token goes `3713.476` to `3708.488` (`-0.13%`) — the
+compiler did not get slower per unit of work, there is simply more source in
+the tree. Stages byte-identical.**)
+
+- **What was built.** `<buster/lib/simd.h>` — fifteen target-fixed AVX-512
+  operations with three implementations behind one spelling (self-hosted
+  `__builtin_buster_simd_*`, host intrinsics, scalar fallback), plus
+  `IR_OPCODE_SIMD` and its EVEX lowering in the canonical backend, and
+  `__builtin_popcount`/`popcountll`. `parser.c`'s tokenizer moved off
+  `<immintrin.h>` onto it, which is what unblocked the self-hosted stages:
+  the compaction emitter was previously disabled under `__BUSTER__`.
+- **The clang-built tokenizer did not change.** `tokenize` disassembles to
+  the same 827 instructions with the same opcode histogram before and after
+  the port, and HEAD-plus-port-only benches at `52.7`–`55.6 µs` median
+  against HEAD's `53.9`–`54.1 µs` — inside the noise band. The vocabulary is
+  a rename of the intrinsics on that path, not a re-implementation.
+- **The `+0.81%` on stage 1 is tree growth, not throughput.** Read it with
+  the token denominator, as the `SELF_HOST throughput` line is there for; a
+  change that only adds source moves the absolute counter and leaves the
+  ratio alone, which is exactly what happened here.
+- **The 512-bit vector ABI is now wired**, so a vector can cross a call
+  boundary by value. SystemV passes and returns it in a vector register and
+  spills to the stack past the eighth, verified against clang for a plain
+  identity, for a ninth argument that has to go on the stack, and interleaved
+  with integers so both register files advance together
+  (`vector_identity`/`vector_ninth`/`vector_mixed` in `tests/basic_c_simd.c`,
+  which the driver runs in both the vector and the fallback build). Three
+  things were wrong and are worth naming because each produced *plausible*
+  code: the callee prologue let the "aggregates over two eightbytes are
+  MEMORY" size rule override a classification the IR ABI had already made, so
+  the parameter was read off the stack that the caller had put in `zmm0`; the
+  stack copy on both sides used the ABI's *register* part count, which is 1
+  for a vector, so eight eightbytes of argument were passed as one; and
+  `codegen_canonical_x64_float_memory` only knew sizes 4, 8 and 16. That last
+  one is now the single authority on which part sizes ride in a vector
+  register — the four call sites report `CODEGEN_ERROR_UNSUPPORTED_ABI` on a
+  false return instead of repeating the test — and it also refuses a part
+  wider than `target_vector_register_size`, so a baseline or AVX2 target still
+  gets a clean diagnostic rather than a `zmm` move it cannot execute. A
+  32-byte vector now travels in `ymm` where it used to go on the stack, which
+  is the psABI answer and a behaviour change for anything that passed one.
+  AArch64 gained the indirect path for free. Win64 remains broken for two or
+  more wide vector arguments — pre-existing, reproduces on `main`, filed
+  separately.
+- **Forwarding a SIMD result between adjacent instructions was implemented,
+  measured at zero, and removed.** The strict-adjacency rule the `rax` reload
+  peephole uses cannot fire here: the C frontend materializes every operand
+  expression, so even a fully nested `simd512_store(out,
+  simd512_compress_byte(simd512_equal_byte(a, b), a))` has pointer
+  loads and a `vzeroupper` between each pair of SIMD instructions. Measured
+  `simd_forwarded_operands=0` on a self-compile of the unity `ide.c` and on
+  that nested expression; two hits on the synthetic fixture. What *would* pay
+  is a mask-only rule that survives intervening scalar code — `k1` is written
+  by nothing in the backend except the SIMD lowering, so a mask stays live
+  across the `mov`/`vzeroupper` traffic between uses, and every masked
+  operation would save its reload `kmovq`. It would have to invalidate on
+  three things: a block start (a branch could arrive at a register it did not
+  fill), any emission that can reach a `call` (k registers are volatile in
+  both conventions), and the next SIMD instruction that writes `k1`. That was
+  judged not worth the wrong-code risk for a gain that only lands in
+  buster-compiled binaries, which are validation and not where performance is
+  quoted from. What was kept from the attempt is the register discipline it
+  needed: `vpcompressb` now leaves its result in the first vector register
+  like every other operation, instead of the second.
+
 `2026-08-09h` (Linux x86_64, Zen 4 7940HS; not a throughput audit — a
 robustness change costed against the gate. An external audit reported that the
 arena and emitter bounds checks are bypassable by integer wraparound
@@ -113,6 +185,7 @@ which is why stage 1 starts at `5.1203 G` rather than `5.0824 G`.)
   `BENCH_PARSE` `~48.8 us` minimum, byte-identical fixed point
   (`SELF_HOST deterministic bytes=26743800`), 19560 Release unit tests and
   29 module tests.
+
 
 `2026-08-09g` (Linux x86_64, Zen 4 7940HS; proposal 3 of `2026-08-08k` taken
 as its own session — `CToken` 48 to 16 bytes with offset-based spellings and

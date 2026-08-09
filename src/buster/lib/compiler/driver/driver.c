@@ -2025,6 +2025,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.codegen_statistics.split_vector_operation_count += unit.codegen_statistics.split_vector_operation_count;
         result.codegen_statistics.vzeroupper_count += unit.codegen_statistics.vzeroupper_count;
         result.codegen_statistics.forwarded_wide_vector_load_count += unit.codegen_statistics.forwarded_wide_vector_load_count;
+        result.codegen_statistics.simd_operation_count += unit.codegen_statistics.simd_operation_count;
         result.codegen_statistics.function_count += unit.codegen_statistics.function_count;
         result.codegen_statistics.maximum_stack_frame_bytes =
             BUSTER_MAX(result.codegen_statistics.maximum_stack_frame_bytes, unit.codegen_statistics.maximum_stack_frame_bytes);

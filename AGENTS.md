@@ -541,6 +541,38 @@ history.
   self-hosted `ide cc` stages compile the same tree without vendor headers —
   performance is only ever quoted from clang-built binaries, so fallback
   paths need correctness, not speed.
+- **Write 512-bit kernels in the vocabulary of `<buster/lib/simd.h>`, not in
+  `<immintrin.h>`.** That header is a target-fixed list of AVX-512 operations
+  — masked 512-bit loads and stores, byte comparisons producing a `Mask64`,
+  `vpermt2b`, `vpcompressb` and its compacting store, byte-to-word widening,
+  `vpternlogd`, lanewise arithmetic — with three implementations behind one
+  spelling: `__builtin_buster_simd_*` for the self-hosted stages, host
+  intrinsics for clang and gcc, and a scalar fallback for MSVC, AArch64 and
+  pre-AVX-512 x86. `BUSTER_SIMD_512` says which one is in play; guard on it
+  only where a *different algorithm* is worth writing, never merely to keep
+  the tree building. It is deliberately not a portability layer — every
+  operation names one instruction, and an abstraction wide enough to also
+  describe NEON would lose exactly the operations that make these kernels
+  fast. Adding to it means adding an `IrSimdOperation`, its arity in
+  `ir_simd_operation_shape`, its validation, its EVEX lowering in
+  `codegen_canonical_x64_simd_operation`, the builtin in `c_ir_simd_builtins`,
+  a fallback, and a case in `tests/basic_c_simd.c`; the shape table is the
+  single source of truth that keeps a new operation from being half-taught to
+  the pipeline. Two consequences are worth knowing before writing a kernel.
+  **Everything in the header is a macro**, because `ide cc` lowers directly
+  and runs no inliner — not even for `always_inline` — so a function wrapper
+  would be a real call per SIMD operation in the self-hosted stages;
+  arguments must therefore be free of side effects. A `Simd512` may still
+  cross a call boundary by value where that is what the code wants: SystemV
+  passes and returns it in a vector register and spills past the eighth, and
+  a target whose vector registers are narrower than the value says so with
+  `CODEGEN_ERROR_UNSUPPORTED_ABI` rather than encoding a register it does not
+  have. And **masks are `u64`, not an opaque k-register handle**: the
+  canonical backend allocates no registers, so a mask spills to its frame slot
+  either way, the vector instructions pick it back up with a single `kmovq`,
+  and mask shifts, Boolean combinations, `mask64_count` and `mask64_first_set`
+  stay on the general-purpose ALUs, which retire more of them per cycle on
+  Zen 4/5 than the k unit does.
 - **SIMD lexing/parsing method: the Validark lineage.** The buster-language
   parser began as a scalar port of Niles Salter's (Validark's) Accelerated
   Zig Parser — local checkout `~/dev/Accelerated-Zig-Parser`, upstream
@@ -879,7 +911,8 @@ Top level:
 | `system_headers.h` | Central OS/libc header includes. `tls.h` is an empty placeholder. |
 | `apple_runtime.h` | Objective-C runtime includes and ABI-compatible scalar/geometry types shared by Apple windowing and Metal. |
 | `os.{c,h}`, `entry_point.{c,h}` | OS abstraction (processes, virtual memory) and per-platform entry glue (`main`, NativeActivity, UIKit). |
-| `arena.{c,h}`, `string.{c,h}`, `integer.{c,h}`, `float.{c,h}`, `hash.{c,h}`, `simd.{c,h}`, `file.{c,h}`, `time.{c,h}` | Arena allocator; `String8` operations and `string_print` (`{S8}` placeholders); numeric parse/format; hashing; SIMD; file IO; clocks. |
+| `arena.{c,h}`, `string.{c,h}`, `integer.{c,h}`, `float.{c,h}`, `hash.{c,h}`, `file.{c,h}`, `time.{c,h}` | Arena allocator; `String8` operations and `string_print` (`{S8}` placeholders); numeric parse/format; hashing; file IO; clocks. |
+| `simd.{c,h}` | The target-fixed 512-bit AVX-512 vocabulary — `Simd512`, `Mask64`, and the macros over them — with three implementations: self-hosted builtins, host intrinsics, and a scalar fallback. Header-only in practice; `simd.c` exists to give the module a translation unit. |
 | `target.{c,h}`, `x86_64.{c,h}`, `aarch64.{c,h}` | Target/data-layout descriptions, CPU models/features, and per-architecture instruction encoders. |
 
 UI / graphics:

@@ -1978,6 +1978,21 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_float_binary(X64Builder* builder, IrInstructio
     return true;
 }
 
+// popcnt eax/rax, eax/rax. The C frontend only produces this operation when
+// the target has POPCNT and expands the SWAR form itself otherwise, so there
+// is no second sequence to keep in step here.
+BUSTER_GLOBAL_LOCAL void x64_emit_population_count(CodegenBuffer* buffer, u32 width)
+{
+    codegen_emit_u8(buffer, 0xf3);
+    if (width > 32)
+    {
+        codegen_emit_u8(buffer, 0x48);
+    }
+    codegen_emit_u8(buffer, 0x0f);
+    codegen_emit_u8(buffer, 0xb8);
+    codegen_emit_u8(buffer, 0xc0);
+}
+
 BUSTER_GLOBAL_LOCAL void x64_emit_vector_memory_operation(X64Builder* builder, u8 prefix, u8 opcode, u32 vector_register, X64Register base)
 {
     if (prefix)
@@ -2791,6 +2806,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(X64Builder* builder, IrBlockId blo
                 codegen_emit_u8(&builder->buffer, 0xf0);
                 codegen_emit_u8(&builder->buffer, (u8)(width - 1));
             }
+        }
+        else if (instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT)
+        {
+            x64_emit_population_count(&builder->buffer, unary_type->as.integer.bit_width);
         }
         else if (instruction->unary_operation == IR_UNARY_BOOLEAN_NOT)
         {
@@ -7370,6 +7389,7 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
             .abi = argument_abi,
             .type = type,
             .part_count = part_count,
+            .stack_part_count = (u32)((type->layout.size + 7) / 8),
             .float_register = UINT8_MAX,
             .aggregate = aggregate,
             .windows_indirect = windows_indirect,
@@ -7651,11 +7671,111 @@ void codegen_canonical_a64_base_address(CodegenBuffer* buffer, u32 register_numb
     codegen_emit_u32(buffer, 0x8b000000 | (offset_register << 16) | (base_register << 5) | register_number);
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_float_memory(CodegenBuffer* buffer, u32 vector_register, s32 displacement, u32 size, bool store)
+// EVEX encoding for the target-fixed 512-bit vocabulary. Everything here is
+// L'L=10 (512-bit), never broadcasts, and never reaches the extended register
+// halves, so the three prefix payload bytes reduce to a handful of fields.
+typedef struct X64Evex X64Evex;
+struct X64Evex
 {
-    if (vector_register >= 8 || (size != 4 && size != 8 && size != 16))
+    u8 map;     // 1 = 0F, 2 = 0F38, 3 = 0F3A
+    u8 prefix;  // 0 = none, 1 = 66, 2 = F3, 3 = F2
+    u8 opcode;
+    u8 reg;     // reg field: a zmm, a k register, or an opcode extension
+    u8 vvvv;    // the encoded non-destructive source, 0 when the form has none
+    u8 mask;    // k1..k7, or 0 for an unmasked operation
+    bool zeroing;
+    bool wide;  // EVEX.W — every operation in this vocabulary is W0 today
+};
+
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_evex_prefix(CodegenBuffer* buffer, X64Evex evex)
+{
+    codegen_emit_u8(buffer, 0x62);
+    codegen_emit_u8(buffer, (u8)(0xf0 | evex.map));
+    codegen_emit_u8(buffer, (u8)((evex.wide ? 0x80 : 0) | ((~evex.vvvv & 0xf) << 3) | 0x04 | evex.prefix));
+    codegen_emit_u8(buffer, (u8)((evex.zeroing ? 0x80 : 0) | 0x48 | evex.mask));
+    codegen_emit_u8(buffer, evex.opcode);
+}
+
+// A frame slot, always as mod=10/disp32: EVEX would otherwise read a disp8 as
+// a multiple of the operand size, and mod=00 with an RBP base means
+// RIP-relative rather than the frame.
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_evex_frame(CodegenBuffer* buffer, X64Evex evex, s32 displacement)
+{
+    codegen_canonical_x64_evex_prefix(buffer, evex);
+    codegen_emit_u8(buffer, (u8)(0x85 | ((evex.reg & 7) << 3)));
+    codegen_emit_u32(buffer, (u32)displacement);
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_evex_indirect(CodegenBuffer* buffer, X64Evex evex, X64Register base)
+{
+    codegen_canonical_x64_evex_prefix(buffer, evex);
+    codegen_emit_u8(buffer, (u8)((((u32)evex.reg & 7) << 3) | ((u32)base & 7)));
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_evex_register(CodegenBuffer* buffer, X64Evex evex, u8 rm)
+{
+    codegen_canonical_x64_evex_prefix(buffer, evex);
+    codegen_emit_u8(buffer, (u8)(0xc0 | ((evex.reg & 7) << 3) | (rm & 7)));
+}
+
+// KMOVQ moves a whole 64-lane mask between a k register and a frame slot in
+// one instruction, so a mask never needs a general-purpose register on the way
+// through memory. VEX.L0.W1 0F 90 loads, 91 stores.
+// mov reg, [rbp+disp32] — the address operand of a SIMD load or store lives in
+// a frame slot like every other canonical value.
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_load_frame_pointer(CodegenBuffer* buffer, X64Register target, s32 displacement)
+{
+    codegen_emit_u8(buffer, (u8)(target >= X64_REGISTER_R8 ? 0x4c : 0x48));
+    codegen_emit_u8(buffer, 0x8b);
+    codegen_emit_u8(buffer, (u8)(0x85 | ((target & 7) << 3)));
+    codegen_emit_u32(buffer, (u32)displacement);
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_kmov_frame(CodegenBuffer* buffer, u8 mask, bool store, s32 displacement)
+{
+    codegen_emit_u8(buffer, 0xc4);
+    codegen_emit_u8(buffer, 0xe1);
+    codegen_emit_u8(buffer, 0xf8);
+    codegen_emit_u8(buffer, store ? 0x91 : 0x90);
+    codegen_emit_u8(buffer, (u8)(0x85 | ((mask & 7) << 3)));
+    codegen_emit_u32(buffer, (u32)displacement);
+}
+
+// Moves one ABI part between an SSE/AVX register and a frame slot. This is the
+// only thing that decides which part sizes the canonical ABI can carry in a
+// vector register — every caller reports CODEGEN_ERROR_UNSUPPORTED_ABI on a
+// false return rather than repeating the size test, so the two cannot drift.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_float_memory(CodegenBuffer* buffer, Target target, u32 vector_register, s32 displacement, u32 size, bool store)
+{
+    if (vector_register >= 8 || (size != 4 && size != 8 && size != 16 && size != 32 && size != 64))
     {
         return false;
+    }
+    // A part only travels in a vector register if the target has one that
+    // wide. The IR ABI classifies a vector by the psABI rule alone, which is
+    // right for a target that can hold it and would otherwise have us encode
+    // a zmm move for a machine with no zmm.
+    if (size > 16 && size > target_vector_register_size(target))
+    {
+        return false;
+    }
+    if (size == 64)
+    {
+        // vmovdqu8 zmm, m512 — the same move every other 512-bit spill and
+        // reload in this file uses.
+        X64Evex move = {.map = 1, .prefix = 3, .opcode = store ? 0x7f : 0x6f, .reg = (u8)vector_register};
+        codegen_canonical_x64_evex_frame(buffer, move, displacement);
+        return true;
+    }
+    if (size == 32)
+    {
+        // vmovdqu ymm, m256 — VEX.256.F3.0F.WIG 6F/7F.
+        codegen_emit_u8(buffer, 0xc5);
+        codegen_emit_u8(buffer, 0xfe);
+        codegen_emit_u8(buffer, store ? 0x7f : 0x6f);
+        codegen_emit_u8(buffer, (u8)(0x85 | (vector_register << 3)));
+        codegen_emit_u32(buffer, (u32)displacement);
+        return true;
     }
     codegen_emit_u8(buffer, size == 4 || size == 16 ? 0xf3 : 0xf2);
     codegen_emit_u8(buffer, 0x0f);
@@ -8017,8 +8137,261 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_sign_extend(CodegenBuffer* buffer
     codegen_emit_u8(buffer, (u8)(64 - width));
 }
 
+enum
+{
+    // The canonical path allocates no registers: every operand is reloaded
+    // from its frame slot and every result is stored back. These are the fixed
+    // scratch names the vocabulary lowers through.
+    X64_SIMD_VECTOR_FIRST = 0,
+    X64_SIMD_VECTOR_SECOND = 1,
+    X64_SIMD_VECTOR_THIRD = 2,
+    X64_SIMD_MASK = 1,
+};
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_supported(Target target, IrSimdOperation operation)
+{
+    if (target.cpu_arch != CPU_ARCH_X86_64 || !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512F) ||
+        !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW))
+    {
+        return false;
+    }
+    if (operation == IR_SIMD_PERMUTE2_BYTE)
+    {
+        return target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI);
+    }
+    if (operation == IR_SIMD_COMPRESS_BYTE || operation == IR_SIMD_COMPRESS_STORE_BYTE)
+    {
+        return target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI2);
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL s32 codegen_canonical_x64_rebase_frame_displacement(CodegenBuffer* buffer, s64 displacement, u32 frame_base_offset);
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_operation(CodegenBuffer* buffer, IrInstruction* instruction, u32 const* value_offsets,
+                                                              u32 frame_base_offset, Target target)
+{
+    IrSimdOperation operation = (IrSimdOperation)instruction->simd_operation;
+    IrSimdShape shape = ir_simd_operation_shape(operation);
+    if (!codegen_canonical_x64_simd_supported(target, operation) || instruction->operand_count != shape.operand_count ||
+        instruction->immediate_count != shape.immediate_count)
+    {
+        return false;
+    }
+    s32 slots[4] = {0};
+    for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+    {
+        slots[operand_index] =
+            codegen_canonical_x64_rebase_frame_displacement(buffer, -(s64)value_offsets[instruction->operands[operand_index].value], frame_base_offset);
+    }
+    s32 result_slot = shape.has_result
+                          ? codegen_canonical_x64_rebase_frame_displacement(buffer, -(s64)value_offsets[instruction->result.value], frame_base_offset)
+                          : 0;
+    u8 immediate = instruction->immediate_count ? (u8)instruction->immediates[0] : 0;
+    // vmovdqu8, the one move this vocabulary uses in either direction.
+    X64Evex const move_load = {.map = 1, .prefix = 3, .opcode = 0x6f};
+    X64Evex const move_store = {.map = 1, .prefix = 3, .opcode = 0x7f};
+    switch (operation)
+    {
+    case IR_SIMD_LOAD:
+    case IR_SIMD_LOAD_MASKED:
+    {
+        bool masked = operation == IR_SIMD_LOAD_MASKED;
+        if (masked)
+        {
+            codegen_canonical_x64_kmov_frame(buffer, X64_SIMD_MASK, false, slots[1]);
+        }
+        codegen_canonical_x64_load_frame_pointer(buffer, X64_REGISTER_RAX, slots[0]);
+        X64Evex load = move_load;
+        load.reg = X64_SIMD_VECTOR_FIRST;
+        load.mask = masked ? X64_SIMD_MASK : 0;
+        load.zeroing = masked;
+        codegen_canonical_x64_evex_indirect(buffer, load, X64_REGISTER_RAX);
+        X64Evex spill = move_store;
+        spill.reg = X64_SIMD_VECTOR_FIRST;
+        codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
+        return true;
+    }
+    case IR_SIMD_STORE:
+    case IR_SIMD_STORE_MASKED:
+    case IR_SIMD_COMPRESS_STORE_BYTE:
+    {
+        bool masked = operation != IR_SIMD_STORE;
+        u32 vector_operand = masked ? 2 : 1;
+        if (masked)
+        {
+            codegen_canonical_x64_kmov_frame(buffer, X64_SIMD_MASK, false, slots[1]);
+        }
+        codegen_canonical_x64_load_frame_pointer(buffer, X64_REGISTER_RAX, slots[0]);
+        X64Evex load = move_load;
+        load.reg = X64_SIMD_VECTOR_FIRST;
+        codegen_canonical_x64_evex_frame(buffer, load, slots[vector_operand]);
+        // vpcompressb writes its destination through the rm operand, so the
+        // compressing store and the plain store share this shape exactly.
+        X64Evex store = operation == IR_SIMD_COMPRESS_STORE_BYTE ? (X64Evex){.map = 2, .prefix = 1, .opcode = 0x63} : move_store;
+        store.reg = X64_SIMD_VECTOR_FIRST;
+        store.mask = masked ? X64_SIMD_MASK : 0;
+        codegen_canonical_x64_evex_indirect(buffer, store, X64_REGISTER_RAX);
+        return true;
+    }
+    case IR_SIMD_SPLAT_BYTE:
+    {
+        // movzx eax, byte [rbp+slot]
+        codegen_emit_u8(buffer, 0x0f);
+        codegen_emit_u8(buffer, 0xb6);
+        codegen_emit_u8(buffer, 0x85);
+        codegen_emit_u32(buffer, (u32)slots[0]);
+        X64Evex broadcast = {.map = 2, .prefix = 1, .opcode = 0x7a, .reg = X64_SIMD_VECTOR_FIRST};
+        codegen_canonical_x64_evex_register(buffer, broadcast, X64_REGISTER_RAX);
+        X64Evex spill = move_store;
+        spill.reg = X64_SIMD_VECTOR_FIRST;
+        codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
+        return true;
+    }
+    case IR_SIMD_COMPARE_EQUAL_BYTE:
+    case IR_SIMD_COMPARE_LESS_BYTE:
+    case IR_SIMD_TEST_MASK_BYTE:
+    {
+        X64Evex load = move_load;
+        load.reg = X64_SIMD_VECTOR_FIRST;
+        codegen_canonical_x64_evex_frame(buffer, load, slots[0]);
+        // vpcmpeqb and vptestmb take the second source from memory directly;
+        // vpcmpub is the three-operand compare with an explicit predicate, 1
+        // being unsigned less-than.
+        X64Evex compare = operation == IR_SIMD_COMPARE_EQUAL_BYTE ? (X64Evex){.map = 1, .prefix = 1, .opcode = 0x74}
+                          : operation == IR_SIMD_COMPARE_LESS_BYTE ? (X64Evex){.map = 3, .prefix = 1, .opcode = 0x3e}
+                                                                   : (X64Evex){.map = 2, .prefix = 1, .opcode = 0x26};
+        compare.reg = X64_SIMD_MASK;
+        compare.vvvv = X64_SIMD_VECTOR_FIRST;
+        codegen_canonical_x64_evex_frame(buffer, compare, slots[1]);
+        if (operation == IR_SIMD_COMPARE_LESS_BYTE)
+        {
+            codegen_emit_u8(buffer, 1);
+        }
+        codegen_canonical_x64_kmov_frame(buffer, X64_SIMD_MASK, true, result_slot);
+        return true;
+    }
+    case IR_SIMD_SIGN_MASK_BYTE:
+    {
+        X64Evex load = move_load;
+        load.reg = X64_SIMD_VECTOR_FIRST;
+        codegen_canonical_x64_evex_frame(buffer, load, slots[0]);
+        // vpmovb2m has no memory form; the source has to be in a register.
+        X64Evex extract = {.map = 2, .prefix = 2, .opcode = 0x29, .reg = X64_SIMD_MASK};
+        codegen_canonical_x64_evex_register(buffer, extract, X64_SIMD_VECTOR_FIRST);
+        codegen_canonical_x64_kmov_frame(buffer, X64_SIMD_MASK, true, result_slot);
+        return true;
+    }
+    case IR_SIMD_PERMUTE2_BYTE:
+    {
+        codegen_canonical_x64_kmov_frame(buffer, X64_SIMD_MASK, false, slots[0]);
+        X64Evex load = move_load;
+        load.reg = X64_SIMD_VECTOR_FIRST;
+        codegen_canonical_x64_evex_frame(buffer, load, slots[1]);
+        load.reg = X64_SIMD_VECTOR_SECOND;
+        codegen_canonical_x64_evex_frame(buffer, load, slots[2]);
+        // vpermt2b reads the low table from its destination and the high table
+        // from rm, so the destination is loaded with the low table first and
+        // the masked write lands on top of it.
+        X64Evex permute = {
+            .map = 2,
+            .prefix = 1,
+            .opcode = 0x7d,
+            .reg = X64_SIMD_VECTOR_FIRST,
+            .vvvv = X64_SIMD_VECTOR_SECOND,
+            .mask = X64_SIMD_MASK,
+            .zeroing = true,
+        };
+        codegen_canonical_x64_evex_frame(buffer, permute, slots[3]);
+        X64Evex spill = move_store;
+        spill.reg = X64_SIMD_VECTOR_FIRST;
+        codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
+        return true;
+    }
+    case IR_SIMD_COMPRESS_BYTE:
+    {
+        codegen_canonical_x64_kmov_frame(buffer, X64_SIMD_MASK, false, slots[0]);
+        X64Evex load = move_load;
+        load.reg = X64_SIMD_VECTOR_SECOND;
+        codegen_canonical_x64_evex_frame(buffer, load, slots[1]);
+        // Register form: rm is the destination and reg is the source, so the
+        // source is the one that gets loaded and the result lands in the
+        // first register like every other operation's does.
+        X64Evex compress = {
+            .map = 2,
+            .prefix = 1,
+            .opcode = 0x63,
+            .reg = X64_SIMD_VECTOR_SECOND,
+            .mask = X64_SIMD_MASK,
+            .zeroing = true,
+        };
+        codegen_canonical_x64_evex_register(buffer, compress, X64_SIMD_VECTOR_FIRST);
+        X64Evex spill = move_store;
+        spill.reg = X64_SIMD_VECTOR_FIRST;
+        codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
+        return true;
+    }
+    case IR_SIMD_WIDEN_BYTE_TO_WORD:
+    {
+        // The source already lives in memory, so the quarter selection is an
+        // address offset and vpmovzxbd reads its 16 bytes straight from there
+        // — no vextracti32x4 in front of it.
+        X64Evex widen = {.map = 2, .prefix = 1, .opcode = 0x31, .reg = X64_SIMD_VECTOR_FIRST};
+        codegen_canonical_x64_evex_frame(buffer, widen, slots[0] + (s32)immediate * 16);
+        X64Evex spill = move_store;
+        spill.reg = X64_SIMD_VECTOR_FIRST;
+        codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
+        return true;
+    }
+    case IR_SIMD_SHIFT_LEFT_WORD:
+    {
+        // vpslld with an immediate names its destination in vvvv and takes the
+        // source through rm, with /6 in the reg field.
+        X64Evex shift = {.map = 1, .prefix = 1, .opcode = 0x72, .reg = 6, .vvvv = X64_SIMD_VECTOR_FIRST};
+        codegen_canonical_x64_evex_frame(buffer, shift, slots[0]);
+        codegen_emit_u8(buffer, immediate);
+        X64Evex spill = move_store;
+        spill.reg = X64_SIMD_VECTOR_FIRST;
+        codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
+        return true;
+    }
+    case IR_SIMD_TERNARY_WORD:
+    {
+        X64Evex load = move_load;
+        load.reg = X64_SIMD_VECTOR_FIRST;
+        codegen_canonical_x64_evex_frame(buffer, load, slots[0]);
+        load.reg = X64_SIMD_VECTOR_SECOND;
+        codegen_canonical_x64_evex_frame(buffer, load, slots[1]);
+        X64Evex ternary = {
+            .map = 3,
+            .prefix = 1,
+            .opcode = 0x25,
+            .reg = X64_SIMD_VECTOR_FIRST,
+            .vvvv = X64_SIMD_VECTOR_SECOND,
+        };
+        codegen_canonical_x64_evex_frame(buffer, ternary, slots[2]);
+        codegen_emit_u8(buffer, immediate);
+        X64Evex spill = move_store;
+        spill.reg = X64_SIMD_VECTOR_FIRST;
+        codegen_canonical_x64_evex_frame(buffer, spill, result_slot);
+        return true;
+    }
+    case IR_SIMD_COUNT:
+        break;
+    }
+    return false;
+}
+
+
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_instruction_uses_wide_vector(IrProgram* program, IrFunction* function, IrInstruction* instruction, Target target)
 {
+    if (instruction->opcode == IR_OPCODE_SIMD)
+    {
+        // A run of these is the whole point of the vocabulary; splitting it
+        // with a vzeroupper between every pair would cost more than the
+        // transition it avoids.
+        return codegen_canonical_x64_simd_supported(target, (IrSimdOperation)instruction->simd_operation);
+    }
     if (instruction->opcode != IR_OPCODE_BINARY || instruction->operand_count != 2 || instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_EQUAL)
     {
         return false;
@@ -9861,6 +10234,13 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                         bool aggregate = codegen_canonical_integer_aggregate_parts(program, instruction->canonical_type, &part_count);
                         CodegenCanonicalAbiValue argument_aggregate_abi =
                             codegen_canonical_aggregate_abi(program, instruction->canonical_type, result.abi, false, false);
+                        // How many eightbytes the argument occupies if it came
+                        // in on the stack, which is its size and not the number
+                        // of registers it would have taken: one zmm holds a
+                        // 64-byte vector, but its stack image is still eight.
+                        IrType* argument_stack_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                        u32 stack_part_count =
+                            argument_stack_type && argument_stack_type->layout.resolved ? (u32)((argument_stack_type->layout.size + 7) / 8) : part_count;
                         if (argument_aggregate_abi.part_count && !argument_aggregate_abi.memory && !argument_aggregate_abi.indirect)
                         {
                             aggregate = true;
@@ -9910,11 +10290,17 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             instruction_id = instruction->next;
                             continue;
                         }
-                        bool system_v_memory = aggregate && argument_type && argument_type->layout.size > 16 && result.abi == CODEGEN_ABI_X86_64_SYSTEM_V;
                         u32 system_v_integer_parts = 0;
                         u32 system_v_float_parts = 0;
                         bool system_v_register_aggregate =
                             result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && argument_aggregate_abi.part_count && !argument_aggregate_abi.memory;
+                        // "Aggregates over two eightbytes are MEMORY" is a rule
+                        // about aggregates; a 32- or 64-byte vector still
+                        // arrives in a vector register. The IR ABI has already
+                        // said which of the two this is, so the size heuristic
+                        // only speaks when it did not.
+                        bool system_v_memory = aggregate && argument_type && argument_type->layout.size > 16 &&
+                                               result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && !system_v_register_aggregate;
                         if (system_v_register_aggregate)
                         {
                             for (u32 part = 0; part < argument_aggregate_abi.part_count; part += 1)
@@ -9978,7 +10364,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 instruction_id = instruction->next;
                                 continue;
                             }
-                            for (u32 part_index = 0; part_index < part_count; part_index += 1)
+                            for (u32 part_index = 0; part_index < stack_part_count; part_index += 1)
                             {
                                 codegen_emit_u8(&buffer, 0x48);
                                 codegen_emit_u8(&buffer, 0x8b);
@@ -10029,12 +10415,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             {
                                 u32 part_offset = argument_aggregate_abi.parts[part_index].value_offset;
                                 u32 part_size = argument_aggregate_abi.parts[part_index].size;
-                                if (part_size != 4 && part_size != 8 && part_size != 16)
-                                {
-                                    result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
-                                    return result;
-                                }
-                                if (!codegen_canonical_x64_float_memory(&buffer, float_register_index, result_displacement + (s32)part_offset, part_size, true))
+                                if (!codegen_canonical_x64_float_memory(&buffer, target, float_register_index, result_displacement + (s32)part_offset, part_size, true))
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;
@@ -11429,7 +11810,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 continue;
                             }
                             IrValueId argument = instruction->operands[argument_reverse_index];
-                            for (u32 part_index = arguments[array_index].part_count; part_index > 0; part_index -= 1)
+                            for (u32 part_index = arguments[array_index].stack_part_count; part_index > 0; part_index -= 1)
                             {
                                 codegen_emit_u8(&buffer, 0xff);
                                 codegen_emit_u8(&buffer, 0xb5);
@@ -11522,12 +11903,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                     s32 displacement = C_X64_FRAME_DISPLACEMENT(value_offsets[argument.value]) + (s32)part->value_offset;
                                     if (codegen_canonical_abi_part_is_float(part->abi_class))
                                     {
-                                        if (float_register >= 8 || (part->size != 4 && part->size != 8 && part->size != 16))
-                                        {
-                                            result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
-                                            return result;
-                                        }
-                                        if (!codegen_canonical_x64_float_memory(&buffer, float_register, displacement, part->size, false))
+                                        if (!codegen_canonical_x64_float_memory(&buffer, target, float_register, displacement, part->size, false))
                                         {
                                             result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                             return result;
@@ -11672,13 +12048,13 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                     CodegenCanonicalAbiPart* part = call_return_abi.parts + part_index;
                                     if (codegen_canonical_abi_part_is_float(part->abi_class))
                                     {
-                                        if (float_index >= 2 || (part->size != 4 && part->size != 8 && part->size != 16))
+                                        if (float_index >= 2)
                                         {
                                             result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                             return result;
                                         }
-                                        if (!codegen_canonical_x64_float_memory(&buffer, float_index, result_displacement + (s32)part->value_offset, part->size,
-                                                                                true))
+                                        if (!codegen_canonical_x64_float_memory(&buffer, target, float_index, result_displacement + (s32)part->value_offset,
+                                                                                part->size, true))
                                         {
                                             result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                             return result;
@@ -11977,6 +12353,16 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                 codegen_emit_u8(&buffer, 0xf0);
                                 codegen_emit_u8(&buffer, (u8)(type->bit_width - 1));
                             }
+                        }
+                        else if (instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT)
+                        {
+                            IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                            if (!type || type->kind != IR_TYPE_INTEGER)
+                            {
+                                result.error = CODEGEN_ERROR_INVALID_IR;
+                                return result;
+                            }
+                            x64_emit_population_count(&buffer, type->bit_width);
                         }
                         else
                         {
@@ -12357,6 +12743,18 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                             .offset = (u32)buffer.count,
                         });
                         codegen_emit_u32(&buffer, 0);
+                    }
+                    else if (instruction->opcode == IR_OPCODE_SIMD)
+                    {
+                        if (!codegen_canonical_x64_simd_operation(&buffer, instruction, value_offsets, canonical_x64_frame_base_offset, target))
+                        {
+                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                            return result;
+                        }
+                        x64_upper_vector_dirty = true;
+                        x64_last_wide_vector_result = IR_VALUE_ID_INVALID;
+                        x64_last_wide_vector_size = 0;
+                        result.statistics.simd_operation_count += 1;
                     }
                     else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY)
                     {
@@ -12755,12 +13153,12 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                                     s32 displacement = C_X64_FRAME_DISPLACEMENT(value_offsets[return_value.value]) + (s32)part->value_offset;
                                     if (codegen_canonical_abi_part_is_float(part->abi_class))
                                     {
-                                        if (float_index >= 2 || (part->size != 4 && part->size != 8 && part->size != 16))
+                                        if (float_index >= 2)
                                         {
                                             result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                             return result;
                                         }
-                                        if (!codegen_canonical_x64_float_memory(&buffer, float_index, displacement, part->size, false))
+                                        if (!codegen_canonical_x64_float_memory(&buffer, target, float_index, displacement, part->size, false))
                                         {
                                             result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                             return result;

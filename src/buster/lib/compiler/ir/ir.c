@@ -152,6 +152,83 @@ BUSTER_GLOBAL_LOCAL u32 ir_canonical_inline_assembly_type_class(IrType* type)
     return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
 }
 
+IrSimdShape ir_simd_operation_shape(IrSimdOperation operation)
+{
+    switch (operation)
+    {
+    case IR_SIMD_LOAD:
+        return (IrSimdShape){.operand_count = 1, .has_result = true};
+    case IR_SIMD_LOAD_MASKED:
+        return (IrSimdShape){.operand_count = 2, .has_result = true};
+    case IR_SIMD_STORE:
+        return (IrSimdShape){.operand_count = 2};
+    case IR_SIMD_STORE_MASKED:
+        return (IrSimdShape){.operand_count = 3};
+    case IR_SIMD_SPLAT_BYTE:
+        return (IrSimdShape){.operand_count = 1, .has_result = true};
+    case IR_SIMD_COMPARE_EQUAL_BYTE:
+    case IR_SIMD_COMPARE_LESS_BYTE:
+    case IR_SIMD_TEST_MASK_BYTE:
+        return (IrSimdShape){.operand_count = 2, .has_result = true};
+    case IR_SIMD_SIGN_MASK_BYTE:
+        return (IrSimdShape){.operand_count = 1, .has_result = true};
+    case IR_SIMD_PERMUTE2_BYTE:
+        return (IrSimdShape){.operand_count = 4, .has_result = true};
+    case IR_SIMD_COMPRESS_BYTE:
+        return (IrSimdShape){.operand_count = 2, .has_result = true};
+    case IR_SIMD_COMPRESS_STORE_BYTE:
+        return (IrSimdShape){.operand_count = 3};
+    case IR_SIMD_WIDEN_BYTE_TO_WORD:
+    case IR_SIMD_SHIFT_LEFT_WORD:
+        return (IrSimdShape){.operand_count = 1, .immediate_count = 1, .has_result = true};
+    case IR_SIMD_TERNARY_WORD:
+        return (IrSimdShape){.operand_count = 3, .immediate_count = 1, .has_result = true};
+    case IR_SIMD_COUNT:
+        break;
+    }
+    return (IrSimdShape){0};
+}
+
+String8 ir_simd_operation_name(IrSimdOperation operation)
+{
+    switch (operation)
+    {
+    case IR_SIMD_LOAD:
+        return S8("simd.load");
+    case IR_SIMD_LOAD_MASKED:
+        return S8("simd.load_masked");
+    case IR_SIMD_STORE:
+        return S8("simd.store");
+    case IR_SIMD_STORE_MASKED:
+        return S8("simd.store_masked");
+    case IR_SIMD_SPLAT_BYTE:
+        return S8("simd.splat_byte");
+    case IR_SIMD_COMPARE_EQUAL_BYTE:
+        return S8("simd.compare_equal_byte");
+    case IR_SIMD_COMPARE_LESS_BYTE:
+        return S8("simd.compare_less_byte");
+    case IR_SIMD_SIGN_MASK_BYTE:
+        return S8("simd.sign_mask_byte");
+    case IR_SIMD_TEST_MASK_BYTE:
+        return S8("simd.test_mask_byte");
+    case IR_SIMD_PERMUTE2_BYTE:
+        return S8("simd.permute2_byte");
+    case IR_SIMD_COMPRESS_BYTE:
+        return S8("simd.compress_byte");
+    case IR_SIMD_COMPRESS_STORE_BYTE:
+        return S8("simd.compress_store_byte");
+    case IR_SIMD_WIDEN_BYTE_TO_WORD:
+        return S8("simd.widen_byte_to_word");
+    case IR_SIMD_SHIFT_LEFT_WORD:
+        return S8("simd.shift_left_word");
+    case IR_SIMD_TERNARY_WORD:
+        return S8("simd.ternary_word");
+    case IR_SIMD_COUNT:
+        break;
+    }
+    return S8("simd.invalid");
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_inline_assembly_constraint_shape_valid(u64 constraint, u32 operand_index, u32 operand_count, u32* match_index_out)
 {
     if ((constraint & ~IR_INLINE_ASSEMBLY_CONSTRAINT_KNOWN_MASK) || (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) >= IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
@@ -245,6 +322,104 @@ BUSTER_GLOBAL_LOCAL bool ir_analysis_inline_assembly_valid(AnalysisResult* analy
         }
     }
     return valid;
+}
+
+// The three operand shapes the 512-bit vocabulary speaks in. A vector is any
+// 64-byte IR vector — the element type carries the lane width the frontend
+// chose and never reaches the encoding — a mask is a u64, and an address is
+// any pointer.
+BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_vector(IrProgram* program, IrTypeId id)
+{
+    IrType* type = ir_type_from_id(&program->types, id);
+    return type && type->kind == IR_TYPE_VECTOR && type->layout.resolved && type->layout.size == 64;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_mask(IrProgram* program, IrTypeId id)
+{
+    IrType* type = ir_type_from_id(&program->types, id);
+    return type && type->kind == IR_TYPE_INTEGER && type->bit_width == 64;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_byte(IrProgram* program, IrTypeId id)
+{
+    IrType* type = ir_type_from_id(&program->types, id);
+    return type && type->kind == IR_TYPE_INTEGER && type->bit_width == 8;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_address(IrProgram* program, IrTypeId id)
+{
+    IrType* type = ir_type_from_id(&program->types, id);
+    return type && type->kind == IR_TYPE_POINTER;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_canonical_simd_valid(IrProgram* program, IrFunction* function, IrInstruction* instruction)
+{
+    IrSimdOperation operation = (IrSimdOperation)instruction->simd_operation;
+    IrSimdShape shape = ir_simd_operation_shape(operation);
+    if (operation >= IR_SIMD_COUNT || instruction->operand_count != shape.operand_count || instruction->target_count != 0 ||
+        instruction->immediate_count != shape.immediate_count || (shape.has_result != (instruction->result.value != IR_ID_UNDERLYING_INVALID)))
+    {
+        return false;
+    }
+    // Four is the widest shape in the table (vpermt2b's mask plus three
+    // vectors); a fifth would have to widen this and every switch arm below.
+    IrTypeId operands[4] = {0};
+    if (instruction->operand_count > BUSTER_ARRAY_LENGTH(operands))
+    {
+        return false;
+    }
+    for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+    {
+        IrValueId operand = instruction->operands[operand_index];
+        if (operand.value >= function->value_count || function->values[operand.value].category != IR_VALUE_VALUE)
+        {
+            return false;
+        }
+        operands[operand_index] = function->values[operand.value].canonical_type;
+    }
+    IrTypeId result_type = instruction->canonical_type;
+    IrType* result = ir_type_from_id(&program->types, result_type);
+    if (!result || (shape.has_result && function->values[instruction->result.value].canonical_type.value != result_type.value))
+    {
+        return false;
+    }
+    u64 immediate = instruction->immediate_count ? instruction->immediates[0] : 0;
+    switch (operation)
+    {
+    case IR_SIMD_LOAD:
+        return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+    case IR_SIMD_LOAD_MASKED:
+        return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_mask(program, operands[1]) && ir_simd_type_is_vector(program, result_type);
+    case IR_SIMD_STORE:
+        return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && result->kind == IR_TYPE_VOID;
+    case IR_SIMD_STORE_MASKED:
+    case IR_SIMD_COMPRESS_STORE_BYTE:
+        return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_mask(program, operands[1]) &&
+               ir_simd_type_is_vector(program, operands[2]) && result->kind == IR_TYPE_VOID;
+    case IR_SIMD_SPLAT_BYTE:
+        return ir_simd_type_is_byte(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+    case IR_SIMD_COMPARE_EQUAL_BYTE:
+    case IR_SIMD_COMPARE_LESS_BYTE:
+    case IR_SIMD_TEST_MASK_BYTE:
+        return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && ir_simd_type_is_mask(program, result_type);
+    case IR_SIMD_SIGN_MASK_BYTE:
+        return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_mask(program, result_type);
+    case IR_SIMD_PERMUTE2_BYTE:
+        return ir_simd_type_is_mask(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) &&
+               ir_simd_type_is_vector(program, operands[2]) && ir_simd_type_is_vector(program, operands[3]) && ir_simd_type_is_vector(program, result_type);
+    case IR_SIMD_COMPRESS_BYTE:
+        return ir_simd_type_is_mask(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && ir_simd_type_is_vector(program, result_type);
+    case IR_SIMD_WIDEN_BYTE_TO_WORD:
+        return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 4;
+    case IR_SIMD_SHIFT_LEFT_WORD:
+        return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 32;
+    case IR_SIMD_TERNARY_WORD:
+        return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) &&
+               ir_simd_type_is_vector(program, operands[2]) && ir_simd_type_is_vector(program, result_type) && immediate < 256;
+    case IR_SIMD_COUNT:
+        break;
+    }
+    return false;
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_canonical_inline_assembly_valid(IrProgram* program, IrFunction* function, IrInstruction* instruction)
@@ -5538,7 +5713,8 @@ BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(AnalysisResult* analysis
             (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE && kind == ANALYSIS_TYPE_INTEGER) ||
             (instruction->unary_operation == IR_UNARY_FLOAT_NEGATE && kind == ANALYSIS_TYPE_FLOAT) ||
             (instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT && kind == ANALYSIS_TYPE_INTEGER) ||
-            ((instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS || instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS) &&
+            ((instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS || instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ||
+              instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT) &&
              kind == ANALYSIS_TYPE_INTEGER) ||
             (instruction->unary_operation == IR_UNARY_BOOLEAN_NOT && kind == ANALYSIS_TYPE_BOOL) ||
             (instruction->unary_operation == IR_UNARY_VECTOR_INTEGER_NEGATE && kind == ANALYSIS_TYPE_VECTOR && vector_element_kind == ANALYSIS_TYPE_INTEGER) ||
@@ -6372,7 +6548,8 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                         (type && type->kind == IR_TYPE_INTEGER &&
                          (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE || instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT ||
                           instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
-                          instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS)) ||
+                          instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ||
+                          instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT)) ||
                         (type && type->kind == IR_TYPE_FLOAT && instruction->unary_operation == IR_UNARY_FLOAT_NEGATE) ||
                         (type && type->kind == IR_TYPE_BOOLEAN && instruction->unary_operation == IR_UNARY_BOOLEAN_NOT) ||
                         (vector_element && vector_element->kind == IR_TYPE_INTEGER &&
@@ -6580,6 +6757,13 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                         return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }
                 }
+                else if (instruction->opcode == IR_OPCODE_SIMD)
+                {
+                    if (!ir_canonical_simd_valid(program, function, instruction))
+                    {
+                        return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
+                    }
+                }
                 else if (instruction->opcode == IR_OPCODE_LABEL_ADDRESS)
                 {
                     IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
@@ -6782,6 +6966,8 @@ BUSTER_GLOBAL_LOCAL String8 ir_opcode_name(IrOpcode opcode)
         return S8("va_arg");
     case IR_OPCODE_INLINE_ASSEMBLY:
         return S8("inline_assembly");
+    case IR_OPCODE_SIMD:
+        return S8("simd");
     case IR_OPCODE_LABEL_ADDRESS:
         return S8("label_address");
     case IR_OPCODE_BRANCH:
@@ -6856,6 +7042,8 @@ BUSTER_GLOBAL_LOCAL String8 ir_unary_operation_name(IrUnaryOperation operation)
         return S8("integer_count_leading_zeros");
     case IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS:
         return S8("integer_count_trailing_zeros");
+    case IR_UNARY_INTEGER_POPULATION_COUNT:
+        return S8("integer_population_count");
     case IR_UNARY_BOOLEAN_NOT:
         return S8("boolean_not");
     case IR_UNARY_VECTOR_INTEGER_NEGATE:

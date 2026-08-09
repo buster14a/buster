@@ -84,6 +84,7 @@ typedef enum IrOpcode
     IR_OPCODE_VA_END,
     IR_OPCODE_VA_ARG,
     IR_OPCODE_INLINE_ASSEMBLY,
+    IR_OPCODE_SIMD,
     IR_OPCODE_LABEL_ADDRESS,
     IR_OPCODE_BRANCH,
     IR_OPCODE_BRANCH_IF,
@@ -169,6 +170,7 @@ typedef enum IrUnaryOperation
     IR_UNARY_INTEGER_BITWISE_NOT,
     IR_UNARY_INTEGER_COUNT_LEADING_ZEROS,
     IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS,
+    IR_UNARY_INTEGER_POPULATION_COUNT,
     IR_UNARY_BOOLEAN_NOT,
     IR_UNARY_VECTOR_INTEGER_NEGATE,
     IR_UNARY_VECTOR_FLOAT_NEGATE,
@@ -253,6 +255,45 @@ typedef enum IrBinaryOperation
     IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL,
     IR_BINARY_COUNT,
 } IrBinaryOperation;
+
+// The target-fixed 512-bit byte vocabulary.  These are not portable vector
+// operations and deliberately do not grow into one: each entry names a single
+// AVX-512 instruction that the canonical backend emits directly, and code that
+// wants them asks for them through `<buster/lib/simd.h>`, which keeps a scalar
+// fallback for every other target.  The operand shapes are fixed per
+// operation and checked by `ir_validate`.
+typedef enum IrSimdOperation
+{
+    IR_SIMD_LOAD,               // (pointer) -> vector
+    IR_SIMD_LOAD_MASKED,        // (pointer, mask) -> vector, lanes outside the mask zeroed
+    IR_SIMD_STORE,              // (pointer, vector)
+    IR_SIMD_STORE_MASKED,       // (pointer, mask, vector), lanes outside the mask untouched
+    IR_SIMD_SPLAT_BYTE,         // (byte) -> vector
+    IR_SIMD_COMPARE_EQUAL_BYTE, // (vector, vector) -> mask
+    IR_SIMD_COMPARE_LESS_BYTE,  // (vector, vector) -> mask, unsigned
+    IR_SIMD_SIGN_MASK_BYTE,     // (vector) -> mask of the per-byte high bits
+    IR_SIMD_TEST_MASK_BYTE,     // (vector, vector) -> mask where the byte-wise AND is non-zero
+    IR_SIMD_PERMUTE2_BYTE,      // (mask, low, indices, high) -> vector, zeroed outside the mask
+    IR_SIMD_COMPRESS_BYTE,      // (mask, vector) -> vector, selected bytes packed down
+    IR_SIMD_COMPRESS_STORE_BYTE,// (pointer, mask, vector), writes only the selected bytes
+    IR_SIMD_WIDEN_BYTE_TO_WORD, // (vector, quarter) -> vector of 16 zero-extended u32 lanes
+    IR_SIMD_SHIFT_LEFT_WORD,    // (vector, count) -> vector, per u32 lane
+    IR_SIMD_TERNARY_WORD,       // (vector, vector, vector, table) -> vector, per-bit truth table
+    IR_SIMD_COUNT,
+} IrSimdOperation;
+
+// The fixed operand/immediate arity of one SIMD operation. Every consumer —
+// the frontend that builds the instruction, the validator, the interpreter's
+// shape check, and the backend — reads the arity from here so a new operation
+// cannot be half-taught to the pipeline.
+typedef struct IrSimdShape IrSimdShape;
+struct IrSimdShape
+{
+    u8 operand_count;
+    u8 immediate_count;
+    bool has_result;
+    u8 reserved[1];
+};
 
 typedef struct IrValue IrValue;
 typedef struct IrLabelProvenancePath IrLabelProvenancePath;
@@ -372,8 +413,14 @@ struct IrInstruction
     u32 immediate_count;
     bool immediate_is_negative;
     bool atomic_signal_fence;
-    u8 reserved[2];
+    // An IrSimdOperation, narrowed into the padding the row already carried:
+    // the instruction array is the largest thing a compile allocates per
+    // function, so a bounded enum pays for itself in bytes, not in a field.
+    u8 simd_operation;
+    u8 reserved[1];
 };
+
+BUSTER_CT_CHECK(IR_SIMD_COUNT <= UINT8_MAX);
 
 typedef struct IrBlock IrBlock;
 struct IrBlock
@@ -621,6 +668,8 @@ BUSTER_F_DECL void ir_label_provenance_load(Arena* arena, IrFunction* function, 
 BUSTER_F_DECL bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrValueId value);
 BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFunction* function, IrValueId value);
 BUSTER_F_DECL bool ir_label_block_parameter_provenance_valid(IrFunction* function, IrBlockParameter* parameter);
+BUSTER_F_DECL IrSimdShape ir_simd_operation_shape(IrSimdOperation operation);
+BUSTER_F_DECL String8 ir_simd_operation_name(IrSimdOperation operation);
 BUSTER_F_DECL u32 ir_inline_assembly_label_operand_base(IrInstruction* instruction);
 BUSTER_F_DECL bool ir_inline_assembly_jump_target(IrFunction* function, IrInstruction* instruction, String8 literal, String8 prefix, u32* target_index_out);
 // Writes the owning block of every instruction into `owners`, which the

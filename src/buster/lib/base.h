@@ -236,6 +236,21 @@
 
 #define BUSTER_PACKED __attribute__((packed))
 
+// Over-alignment for a buffer. The self-hosted C frontend accepts `_Alignas`
+// only on a file-scope scalar today -- on an array, a local, or a struct
+// member the declarator stops being registered at all -- so it is dropped
+// there. That is safe wherever the buffer is reached through an unaligned load
+// or store, which is how every wide access in this tree is spelled: the
+// alignment buys throughput on the clang-built binaries, which are the only
+// ones performance is ever quoted from, and the self-hosted stages stay
+// correct without it. Do not use this for alignment a construct depends on for
+// correctness.
+#if defined(__BUSTER__)
+#define BUSTER_ALIGNAS(alignment)
+#else
+#define BUSTER_ALIGNAS(alignment) _Alignas(alignment)
+#endif
+
 #define BUSTER_GLOBAL_LOCAL static
 
 #define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))

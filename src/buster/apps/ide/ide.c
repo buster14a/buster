@@ -2669,13 +2669,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     {
         string_print(S8("CODEGEN cpu={S8} vector_bits={u32} functions={u32} instructions={u64} values={u64} stack_value_bytes={u64} stack_frame_bytes={u64} "
                         "max_stack_frame_bytes={u32} code_bytes={u64} forwarded_wide_vector_loads={u64} native_vector_operations={u64} "
-                        "split_vector_operations={u64} vzeroupper={u64}\n"),
+                        "split_vector_operations={u64} vzeroupper={u64} simd_operations={u64}\n"),
                      cpu_model_to_string_os(invocation.target.cpu_model), target_vector_register_size(invocation.target) * 8,
                      compile.codegen_statistics.function_count, compile.codegen_statistics.instruction_count, compile.codegen_statistics.value_count,
                      compile.codegen_statistics.stack_value_bytes, compile.codegen_statistics.stack_frame_bytes,
                      compile.codegen_statistics.maximum_stack_frame_bytes, compile.codegen_statistics.code_bytes,
                      compile.codegen_statistics.forwarded_wide_vector_load_count, compile.codegen_statistics.native_vector_operation_count,
-                     compile.codegen_statistics.split_vector_operation_count, compile.codegen_statistics.vzeroupper_count);
+                     compile.codegen_statistics.split_vector_operation_count, compile.codegen_statistics.vzeroupper_count,
+                     compile.codegen_statistics.simd_operation_count);
     }
     arena_destroy(arena, 1);
     return result;

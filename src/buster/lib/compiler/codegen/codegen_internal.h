@@ -82,7 +82,12 @@ struct CodegenCanonicalCallArgument
 {
     CodegenCanonicalAbiValue abi;
     IrType* type;
+    // How many registers the argument occupies when it is passed in them.
     u32 part_count;
+    // How many eightbytes it occupies when it is passed on the stack. The two
+    // differ for a wide vector: one register holds it, but the stack copy is
+    // still its whole size.
+    u32 stack_part_count;
     u32 copy_offset;
     u32 copy_size;
     u32 copy_alignment;

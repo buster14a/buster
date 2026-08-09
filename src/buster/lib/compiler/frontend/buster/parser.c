@@ -3,32 +3,24 @@
 #include <buster/lib/arena.h>
 #include <buster/lib/string.h>
 #include <buster/lib/file.h>
+#include <buster/lib/simd.h>
 #include <buster/lib/time.h>
 
 // Chunk-classified scan acceleration for the tokenizer's run loops (see the
 // AGENTS.md SIMD lexing/parsing method notes): each 64-byte chunk is
 // classified once into per-class bitmasks and every run scan in that chunk
 // becomes a shift plus count-trailing-ones, replacing the unpredictable
-// per-byte exit branches. Guarded per the tuning-target rules: the scalar
-// loops below stay as the fallback for MSVC, non-AVX-512 hosts, and the
-// self-hosted stages (which compile without vendor headers).
-#if BUSTER_CPU_ARCH_X86_64 && defined(__AVX512F__) && defined(__AVX512BW__) && !defined(__BUSTER__) && !BUSTER_COMPILER_MSVC
-#define BUSTER_TOKENIZER_AVX512 1
-#include <immintrin.h>
-#else
-#define BUSTER_TOKENIZER_AVX512 0
-#endif
-
-// The compaction emitter additionally needs vpcompressb (VBMI2) and vpermi2b
-// (VBMI); both are present on every AVX-512 part this project tunes for
-// (Zen 4/Zen 5), so on those hosts tokenize() runs the Deus-Lex-Machina
-// window pipeline below and the scalar loop remains as the byte-identical
-// fallback for every other host and for the self-hosted stages.
-#if BUSTER_TOKENIZER_AVX512 && defined(__AVX512VBMI__) && defined(__AVX512VBMI2__)
-#define BUSTER_TOKENIZER_COMPACT 1
-#else
-#define BUSTER_TOKENIZER_COMPACT 0
-#endif
+// per-byte exit branches.
+//
+// The whole pipeline below -- classifier, operator NFA, and the
+// Deus-Lex-Machina compaction emitter -- is written in the target-fixed
+// vocabulary of <buster/lib/simd.h>, so it compiles identically under clang,
+// gcc, and the self-hosted stages. BUSTER_SIMD_512 already requires VBMI and
+// VBMI2 for the vpermt2b lookup and the vpcompressb emitter, which is
+// everything this path needs; the scalar loops stay as the byte-identical
+// fallback for MSVC, AArch64, and pre-AVX-512 x86.
+#define BUSTER_TOKENIZER_AVX512 BUSTER_SIMD_512
+#define BUSTER_TOKENIZER_COMPACT BUSTER_SIMD_512
 
 #define first_keyword TOKEN_KEYWORD_RETURN
 #define last_keyword (TOKEN_COUNT - 1)
@@ -161,24 +153,24 @@ BUSTER_GLOBAL_LOCAL void tokenizer_classifier_load(TokenizerClassifier* restrict
     // zero classifies as none of the positive classes, and the two negated
     // classes are ANDed with the valid mask below so runs stop at the end
     // of the file exactly like the bounds-checked scalar loops.
-    __mmask64 valid = remaining >= 64 ? ~(__mmask64)0 : (((__mmask64)1 << remaining) - 1);
-    __m512i chunk = _mm512_maskz_loadu_epi8(valid, classifier->base + offset);
-    __m512i lower = _mm512_or_si512(chunk, _mm512_set1_epi8(0x20));
-    __mmask64 alpha = _mm512_cmplt_epu8_mask(_mm512_sub_epi8(lower, _mm512_set1_epi8('a')), _mm512_set1_epi8(26));
-    __mmask64 digit = _mm512_cmplt_epu8_mask(_mm512_sub_epi8(chunk, _mm512_set1_epi8('0')), _mm512_set1_epi8(10));
-    __mmask64 underscore = _mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('_'));
-    __mmask64 quote = _mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('"'));
-    __mmask64 backslash = _mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\\'));
-    __mmask64 newline = _mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\n'));
-    __mmask64 carriage = _mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\r'));
-    __mmask64 semicolon = _mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8(';'));
-    __mmask64 high = _mm512_movepi8_mask(chunk);
+    Mask64 valid = mask64_prefix(remaining);
+    Simd512 chunk = simd512_load_masked(classifier->base + offset, valid);
+    Simd512 lower = simd512_or(chunk, simd512_splat(0x20));
+    Mask64 alpha = simd512_less_byte(simd512_subtract_byte(lower, simd512_splat('a')), simd512_splat(26));
+    Mask64 digit = simd512_less_byte(simd512_subtract_byte(chunk, simd512_splat('0')), simd512_splat(10));
+    Mask64 underscore = simd512_equal_byte(chunk, simd512_splat('_'));
+    Mask64 quote = simd512_equal_byte(chunk, simd512_splat('"'));
+    Mask64 backslash = simd512_equal_byte(chunk, simd512_splat('\\'));
+    Mask64 newline = simd512_equal_byte(chunk, simd512_splat('\n'));
+    Mask64 carriage = simd512_equal_byte(chunk, simd512_splat('\r'));
+    Mask64 semicolon = simd512_equal_byte(chunk, simd512_splat(';'));
+    Mask64 high = simd512_sign_byte(chunk);
     classifier->chunk_index = chunk_index;
-    classifier->masks[TOKENIZER_CLASS_IDENTIFIER] = (u64)(alpha | digit | underscore);
-    classifier->masks[TOKENIZER_CLASS_SPACE] = (u64)_mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8(' '));
-    classifier->masks[TOKENIZER_CLASS_TAB] = (u64)_mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\t'));
-    classifier->masks[TOKENIZER_CLASS_STRING_PLAIN] = ~(u64)(quote | backslash | newline | carriage | semicolon | high) & (u64)valid;
-    classifier->masks[TOKENIZER_CLASS_COMMENT_BODY] = ~(u64)(newline | carriage) & (u64)valid;
+    classifier->masks[TOKENIZER_CLASS_IDENTIFIER] = alpha | digit | underscore;
+    classifier->masks[TOKENIZER_CLASS_SPACE] = simd512_equal_byte(chunk, simd512_splat(' '));
+    classifier->masks[TOKENIZER_CLASS_TAB] = simd512_equal_byte(chunk, simd512_splat('\t'));
+    classifier->masks[TOKENIZER_CLASS_STRING_PLAIN] = ~(quote | backslash | newline | carriage | semicolon | high) & valid;
+    classifier->masks[TOKENIZER_CLASS_COMMENT_BODY] = ~(newline | carriage) & valid;
 }
 
 BUSTER_GLOBAL_LOCAL const char8* tokenizer_class_run_end(TokenizerClassifier* restrict classifier, const char8* it, u32 class_index)
@@ -1151,11 +1143,11 @@ TokenizerResult tokenize_scalar(Arena* arena, const char8* restrict file_pointer
 
 BUSTER_CT_CHECK(TOKEN_ERROR == 0);
 
-BUSTER_GLOBAL_LOCAL _Alignas(64) u8 tokenizer_compact_base_kinds[128];
-BUSTER_GLOBAL_LOCAL _Alignas(64) u8 tokenizer_compact_nfa_first[128];
-BUSTER_GLOBAL_LOCAL _Alignas(64) u8 tokenizer_compact_nfa_second[128];
-BUSTER_GLOBAL_LOCAL _Alignas(64) u8 tokenizer_compact_nfa_third[128];
-BUSTER_GLOBAL_LOCAL _Alignas(64) u8 tokenizer_compact_iota[64];
+BUSTER_GLOBAL_LOCAL BUSTER_ALIGNAS(64) u8 tokenizer_compact_base_kinds[128];
+BUSTER_GLOBAL_LOCAL BUSTER_ALIGNAS(64) u8 tokenizer_compact_nfa_first[128];
+BUSTER_GLOBAL_LOCAL BUSTER_ALIGNAS(64) u8 tokenizer_compact_nfa_second[128];
+BUSTER_GLOBAL_LOCAL BUSTER_ALIGNAS(64) u8 tokenizer_compact_nfa_third[128];
+BUSTER_GLOBAL_LOCAL BUSTER_ALIGNAS(64) u8 tokenizer_compact_iota[64];
 BUSTER_GLOBAL_LOCAL u8 tokenizer_compact_equal_kinds[128];
 BUSTER_GLOBAL_LOCAL bool tokenizer_compact_tables_built;
 
@@ -1300,68 +1292,68 @@ BUSTER_GLOBAL_LOCAL TokenizerResult tokenize_compact(Arena* arena, const char8* 
         .chunk_index = UINT64_MAX,
     };
 
-    const __m512i kinds_low = _mm512_load_si512((const __m512i*)tokenizer_compact_base_kinds);
-    const __m512i kinds_high = _mm512_load_si512((const __m512i*)(tokenizer_compact_base_kinds + 64));
-    const __m512i nfa_first_low = _mm512_load_si512((const __m512i*)tokenizer_compact_nfa_first);
-    const __m512i nfa_first_high = _mm512_load_si512((const __m512i*)(tokenizer_compact_nfa_first + 64));
-    const __m512i nfa_second_low = _mm512_load_si512((const __m512i*)tokenizer_compact_nfa_second);
-    const __m512i nfa_second_high = _mm512_load_si512((const __m512i*)(tokenizer_compact_nfa_second + 64));
-    const __m512i nfa_third_low = _mm512_load_si512((const __m512i*)tokenizer_compact_nfa_third);
-    const __m512i nfa_third_high = _mm512_load_si512((const __m512i*)(tokenizer_compact_nfa_third + 64));
-    const __m512i iota = _mm512_load_si512((const __m512i*)tokenizer_compact_iota);
+    Simd512 kinds_low = simd512_load(tokenizer_compact_base_kinds);
+    Simd512 kinds_high = simd512_load(tokenizer_compact_base_kinds + 64);
+    Simd512 nfa_first_low = simd512_load(tokenizer_compact_nfa_first);
+    Simd512 nfa_first_high = simd512_load(tokenizer_compact_nfa_first + 64);
+    Simd512 nfa_second_low = simd512_load(tokenizer_compact_nfa_second);
+    Simd512 nfa_second_high = simd512_load(tokenizer_compact_nfa_second + 64);
+    Simd512 nfa_third_low = simd512_load(tokenizer_compact_nfa_third);
+    Simd512 nfa_third_high = simd512_load(tokenizer_compact_nfa_third + 64);
+    Simd512 iota = simd512_load(tokenizer_compact_iota);
 
     while (it < top)
     {
         u64 remaining = (u64)(top - it);
         u64 window_length = remaining < 64 ? remaining : 64;
         bool at_eof = window_length == remaining;
-        __mmask64 valid_k = window_length == 64 ? ~(__mmask64)0 : ((((__mmask64)1) << window_length) - 1);
-        u64 valid = (u64)valid_k;
+        Mask64 valid_k = mask64_prefix(window_length);
+        u64 valid = valid_k;
 
-        __m512i chunk0 = _mm512_maskz_loadu_epi8(valid_k, it);
-        __m512i chunk1 = _mm512_maskz_loadu_epi8(valid_k >> 1, it + 1);
-        __m512i chunk2 = _mm512_maskz_loadu_epi8(valid_k >> 2, it + 2);
+        Simd512 chunk0 = simd512_load_masked(it, valid_k);
+        Simd512 chunk1 = simd512_load_masked(it + 1, valid_k >> 1);
+        Simd512 chunk2 = simd512_load_masked(it + 2, valid_k >> 2);
 
-        __m512i lower = _mm512_or_si512(chunk0, _mm512_set1_epi8(0x20));
-        u64 alpha = (u64)_mm512_cmplt_epu8_mask(_mm512_sub_epi8(lower, _mm512_set1_epi8('a')), _mm512_set1_epi8(26));
-        u64 digit = (u64)_mm512_cmplt_epu8_mask(_mm512_sub_epi8(chunk0, _mm512_set1_epi8('0')), _mm512_set1_epi8(10));
-        u64 underscore = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('_'));
-        u64 space = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8(' '));
-        u64 tab = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\t'));
-        u64 line_feed = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\n'));
-        u64 carriage = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\r'));
-        u64 quote = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('"'));
-        u64 backslash = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\\'));
-        u64 apostrophe = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\''));
-        u64 semicolon = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8(';'));
-        u64 slash = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('/'));
-        u64 question = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('?'));
-        u64 high = (u64)_mm512_movepi8_mask(chunk0);
+        Simd512 lower = simd512_or(chunk0, simd512_splat(0x20));
+        u64 alpha = simd512_less_byte(simd512_subtract_byte(lower, simd512_splat('a')), simd512_splat(26));
+        u64 digit = simd512_less_byte(simd512_subtract_byte(chunk0, simd512_splat('0')), simd512_splat(10));
+        u64 underscore = simd512_equal_byte(chunk0, simd512_splat('_'));
+        u64 space = simd512_equal_byte(chunk0, simd512_splat(' '));
+        u64 tab = simd512_equal_byte(chunk0, simd512_splat('\t'));
+        u64 line_feed = simd512_equal_byte(chunk0, simd512_splat('\n'));
+        u64 carriage = simd512_equal_byte(chunk0, simd512_splat('\r'));
+        u64 quote = simd512_equal_byte(chunk0, simd512_splat('"'));
+        u64 backslash = simd512_equal_byte(chunk0, simd512_splat('\\'));
+        u64 apostrophe = simd512_equal_byte(chunk0, simd512_splat('\''));
+        u64 semicolon = simd512_equal_byte(chunk0, simd512_splat(';'));
+        u64 slash = simd512_equal_byte(chunk0, simd512_splat('/'));
+        u64 question = simd512_equal_byte(chunk0, simd512_splat('?'));
+        u64 high = simd512_sign_byte(chunk0);
         u64 ident_continue = alpha | digit | underscore;
         u64 ident_start_chars = alpha | underscore;
 
         // Operator NFA: per-position table lookups AND together; high bytes
         // zero their lanes so they can never masquerade as operator chars.
-        u64 high1 = (u64)_mm512_movepi8_mask(chunk1);
-        u64 high2 = (u64)_mm512_movepi8_mask(chunk2);
-        __m512i base_kind_vector = _mm512_maskz_permutex2var_epi8((__mmask64)~high, kinds_low, chunk0, kinds_high);
-        __m512i first_vector = _mm512_maskz_permutex2var_epi8((__mmask64)~high, nfa_first_low, chunk0, nfa_first_high);
-        __m512i second_vector = _mm512_maskz_permutex2var_epi8((__mmask64)~high1, nfa_second_low, chunk1, nfa_second_high);
-        __m512i third_vector = _mm512_maskz_permutex2var_epi8((__mmask64)~high2, nfa_third_low, chunk2, nfa_third_high);
-        __m512i pair_vector = _mm512_and_si512(first_vector, second_vector);
-        __m512i triple_vector = _mm512_and_si512(pair_vector, third_vector);
-        u64 op_chars = (u64)_mm512_test_epi8_mask(first_vector, first_vector);
-        u64 op2 = (u64)_mm512_test_epi8_mask(pair_vector, pair_vector);
-        u64 op3 = (u64)_mm512_test_epi8_mask(triple_vector, triple_vector);
-        u64 op2_fat_arrow = (u64)_mm512_test_epi8_mask(pair_vector, _mm512_set1_epi8(TOKENIZER_NFA_FAT_ARROW));
-        u64 op2_shift_left = (u64)_mm512_test_epi8_mask(pair_vector, _mm512_set1_epi8(TOKENIZER_NFA_SHIFT_LEFT));
-        u64 op2_shift_right = (u64)_mm512_test_epi8_mask(pair_vector, _mm512_set1_epi8(TOKENIZER_NFA_SHIFT_RIGHT));
-        u64 op2_dot = (u64)_mm512_test_epi8_mask(pair_vector, _mm512_set1_epi8(TOKENIZER_NFA_DOT));
-        u64 op3_shift_left = (u64)_mm512_test_epi8_mask(triple_vector, _mm512_set1_epi8(TOKENIZER_NFA_SHIFT_LEFT));
-        u64 op3_shift_right = (u64)_mm512_test_epi8_mask(triple_vector, _mm512_set1_epi8(TOKENIZER_NFA_SHIFT_RIGHT));
+        u64 high1 = simd512_sign_byte(chunk1);
+        u64 high2 = simd512_sign_byte(chunk2);
+        Simd512 base_kind_vector = simd512_permute2_byte(~high, kinds_low, chunk0, kinds_high);
+        Simd512 first_vector = simd512_permute2_byte(~high, nfa_first_low, chunk0, nfa_first_high);
+        Simd512 second_vector = simd512_permute2_byte(~high1, nfa_second_low, chunk1, nfa_second_high);
+        Simd512 third_vector = simd512_permute2_byte(~high2, nfa_third_low, chunk2, nfa_third_high);
+        Simd512 pair_vector = simd512_and(first_vector, second_vector);
+        Simd512 triple_vector = simd512_and(pair_vector, third_vector);
+        u64 op_chars = simd512_test_byte(first_vector, first_vector);
+        u64 op2 = simd512_test_byte(pair_vector, pair_vector);
+        u64 op3 = simd512_test_byte(triple_vector, triple_vector);
+        u64 op2_fat_arrow = simd512_test_byte(pair_vector, simd512_splat(TOKENIZER_NFA_FAT_ARROW));
+        u64 op2_shift_left = simd512_test_byte(pair_vector, simd512_splat(TOKENIZER_NFA_SHIFT_LEFT));
+        u64 op2_shift_right = simd512_test_byte(pair_vector, simd512_splat(TOKENIZER_NFA_SHIFT_RIGHT));
+        u64 op2_dot = simd512_test_byte(pair_vector, simd512_splat(TOKENIZER_NFA_DOT));
+        u64 op3_shift_left = simd512_test_byte(triple_vector, simd512_splat(TOKENIZER_NFA_SHIFT_LEFT));
+        u64 op3_shift_right = simd512_test_byte(triple_vector, simd512_splat(TOKENIZER_NFA_SHIFT_RIGHT));
 
-        _Alignas(64) u8 kinds[64];
-        _mm512_store_si512((__m512i*)kinds, base_kind_vector);
+        BUSTER_ALIGNAS(64) u8 kinds[64];
+        simd512_store(kinds, base_kind_vector);
 
         // Escaped positions: the simdjson backslash-parity algorithm. A
         // window always begins at a token boundary, so no escape state
@@ -1598,37 +1590,35 @@ BUSTER_GLOBAL_LOCAL TokenizerResult tokenize_compact(Arena* arena, const char8* 
             u64 emit_mask = starts_all & tokenizer_compact_mask_below(emit_bound);
             u64 ends_mask = (emit_mask >> 1) | ((u64)1 << (emit_bound - 1));
             u32 emit_count = (u32)__builtin_popcountll(emit_mask);
-            __m512i start_positions = _mm512_maskz_compress_epi8(emit_mask, iota);
-            __m512i end_positions = _mm512_maskz_compress_epi8(ends_mask, iota);
-            __m512i lengths = _mm512_add_epi8(_mm512_sub_epi8(end_positions, start_positions), _mm512_set1_epi8(1));
-            __m512i kind_vector = _mm512_load_si512((const __m512i*)kinds);
-            __m512i kinds_compressed = _mm512_maskz_compress_epi8(emit_mask, kind_vector);
+            Simd512 start_positions = simd512_compress_byte(emit_mask, iota);
+            Simd512 end_positions = simd512_compress_byte(ends_mask, iota);
+            Simd512 lengths = simd512_add_byte(simd512_subtract_byte(end_positions, start_positions), simd512_splat(1));
+            Simd512 kind_vector = simd512_load(kinds);
+            Simd512 kinds_compressed = simd512_compress_byte(emit_mask, kind_vector);
 
             u64 emitted_lanes = tokenizer_compact_mask_below(emit_count);
-            u64 error_lanes = (u64)_mm512_cmpeq_epi8_mask(kinds_compressed, _mm512_setzero_si512()) & emitted_lanes;
-            result.error_count += (u32)__builtin_popcountll(error_lanes);
+            u64 error_lanes = simd512_equal_byte(kinds_compressed, simd512_zero()) & emitted_lanes;
+            result.error_count += mask64_count(error_lanes);
 
+            // Each token is kind | (length << 8) in a u32 lane, so one quarter
+            // of the compacted bytes widens and merges into sixteen tokens per
+            // store. The quarters past emit_count are skipped rather than
+            // masked: the token array is over-allocated, so a wide store that
+            // runs past the last token is only wasted bandwidth, and no
+            // quarter is written at all once the count is below its base.
             Token* out = token_start + token_count;
-            __m512i lengths_16 = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(lengths));
-            __m512i kinds_16 = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(kinds_compressed));
-            _mm512_storeu_si512((__m512i*)(out + 0), _mm512_or_si512(kinds_16, _mm512_slli_epi32(lengths_16, 8)));
+            simd512_store(out + 0, simd512_or(simd512_widen_byte(kinds_compressed, 0), simd512_shift_left_word(simd512_widen_byte(lengths, 0), 8)));
             if (emit_count > 16)
             {
-                lengths_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(lengths, 1));
-                kinds_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(kinds_compressed, 1));
-                _mm512_storeu_si512((__m512i*)(out + 16), _mm512_or_si512(kinds_16, _mm512_slli_epi32(lengths_16, 8)));
+                simd512_store(out + 16, simd512_or(simd512_widen_byte(kinds_compressed, 1), simd512_shift_left_word(simd512_widen_byte(lengths, 1), 8)));
             }
             if (emit_count > 32)
             {
-                lengths_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(lengths, 2));
-                kinds_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(kinds_compressed, 2));
-                _mm512_storeu_si512((__m512i*)(out + 32), _mm512_or_si512(kinds_16, _mm512_slli_epi32(lengths_16, 8)));
+                simd512_store(out + 32, simd512_or(simd512_widen_byte(kinds_compressed, 2), simd512_shift_left_word(simd512_widen_byte(lengths, 2), 8)));
             }
             if (emit_count > 48)
             {
-                lengths_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(lengths, 3));
-                kinds_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(kinds_compressed, 3));
-                _mm512_storeu_si512((__m512i*)(out + 48), _mm512_or_si512(kinds_16, _mm512_slli_epi32(lengths_16, 8)));
+                simd512_store(out + 48, simd512_or(simd512_widen_byte(kinds_compressed, 3), simd512_shift_left_word(simd512_widen_byte(lengths, 3), 8)));
             }
             token_count += emit_count;
             it += emit_bound;

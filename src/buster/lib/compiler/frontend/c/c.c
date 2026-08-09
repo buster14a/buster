@@ -1290,6 +1290,10 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_MATH,
     C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS,
     C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS,
+    C_SYMBOL_BUILTIN_POPULATION_COUNT,
+    // One kind for the whole 512-bit vocabulary; the exact operation comes
+    // from the spelling, as it does for the atomic and math families.
+    C_SYMBOL_BUILTIN_SIMD,
     C_SYMBOL_BUILTIN_COUNT,
 } CSymbolBuiltin;
 
@@ -1357,6 +1361,27 @@ BUSTER_GLOBAL_LOCAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_clzll"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_ctz"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
     { S8_INITIALIZER("__builtin_ctzll"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
+    { S8_INITIALIZER("__builtin_popcount"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
+    { S8_INITIALIZER("__builtin_popcountll"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
+    // The target-fixed 512-bit vocabulary. These names are a buster extension
+    // and exist so `<buster/lib/simd.h>` can write one kernel that the host
+    // compilers and the self-hosted stages both compile; see the SIMD section
+    // of AGENTS.md before adding to the list.
+    { S8_INITIALIZER("__builtin_buster_simd_load"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_load_masked"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_store"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_store_masked"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_splat_byte"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_equal_byte"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_less_byte"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_sign_byte"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_test_byte"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_permute2_byte"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_compress_byte"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_compress_store_byte"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_widen_byte"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_shift_left_word"), C_SYMBOL_BUILTIN_SIMD },
+    { S8_INITIALIZER("__builtin_buster_simd_ternary_word"), C_SYMBOL_BUILTIN_SIMD },
 };
 
 #define C_SYMBOL_PREDEFINED_COUNT BUSTER_ARRAY_LENGTH(c_symbol_predefined)
@@ -2900,6 +2925,7 @@ BUSTER_GLOBAL_LOCAL bool c_conditional_builtin_supported(String8 name)
         "__builtin_clzll",         "__builtin_cos",
         "__builtin_cosf",          "__builtin_ctz",
         "__builtin_ctzll",         "__builtin_debugtrap",
+        "__builtin_popcount",      "__builtin_popcountll",
         "__builtin_assume_aligned", "__builtin_choose_expr",
         "__builtin_constant_p",    "__builtin_object_size",
         "__builtin_expect",        "__builtin_expect_with_probability",
@@ -4439,6 +4465,30 @@ BUSTER_GLOBAL_LOCAL void c_preprocess_respell_c23(CSpellingSpace* space, CSource
     }
 }
 
+typedef struct CTargetFeatureMacro CTargetFeatureMacro;
+struct CTargetFeatureMacro
+{
+    String8 name;
+    TargetCpuFeature feature;
+    CpuArch cpu_arch;
+};
+
+// Exactly the features `<buster/lib/simd.h>` tests, in the GNU spelling.  The
+// list is deliberately short: every entry is a promise that the frontend and
+// the canonical backend can compile code written behind it.
+BUSTER_GLOBAL_LOCAL CTargetFeatureMacro const c_target_feature_macros[] = {
+    { S8_INITIALIZER("__SSE2__"), TARGET_CPU_FEATURE_X86_SSE2, CPU_ARCH_X86_64 },
+    { S8_INITIALIZER("__AVX__"), TARGET_CPU_FEATURE_X86_AVX, CPU_ARCH_X86_64 },
+    { S8_INITIALIZER("__AVX2__"), TARGET_CPU_FEATURE_X86_AVX2, CPU_ARCH_X86_64 },
+    { S8_INITIALIZER("__AVX512F__"), TARGET_CPU_FEATURE_X86_AVX512F, CPU_ARCH_X86_64 },
+    { S8_INITIALIZER("__AVX512BW__"), TARGET_CPU_FEATURE_X86_AVX512BW, CPU_ARCH_X86_64 },
+    { S8_INITIALIZER("__AVX512VL__"), TARGET_CPU_FEATURE_X86_AVX512VL, CPU_ARCH_X86_64 },
+    { S8_INITIALIZER("__AVX512DQ__"), TARGET_CPU_FEATURE_X86_AVX512DQ, CPU_ARCH_X86_64 },
+    { S8_INITIALIZER("__AVX512VBMI__"), TARGET_CPU_FEATURE_X86_AVX512VBMI, CPU_ARCH_X86_64 },
+    { S8_INITIALIZER("__AVX512VBMI2__"), TARGET_CPU_FEATURE_X86_AVX512VBMI2, CPU_ARCH_X86_64 },
+    { S8_INITIALIZER("__ARM_NEON"), TARGET_CPU_FEATURE_AARCH64_NEON, CPU_ARCH_AARCH64 },
+};
+
 CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options)
 {
     if (options.dialect >= C_PREPROCESS_DIALECT_COUNT)
@@ -4758,6 +4808,19 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     if ((options.target.os == OPERATING_SYSTEM_MACOS || options.target.os == OPERATING_SYSTEM_IOS) && options.target.cpu_arch == CPU_ARCH_AARCH64)
     {
         c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__arm64__"), standard_replacement, 1, 0, 0, false, false);
+    }
+    // The vector-extension macros the GNU family predefines from -march, so a
+    // header guarding an explicit SIMD kernel writes one condition that holds
+    // for clang, gcc, and the self-hosted stages alike.  Only the features the
+    // buster SIMD vocabulary can actually lower are published; announcing more
+    // would invite a host header down a path this frontend cannot compile.
+    for (u32 feature_index = 0; feature_index < BUSTER_ARRAY_LENGTH(c_target_feature_macros); feature_index += 1)
+    {
+        CTargetFeatureMacro entry = c_target_feature_macros[feature_index];
+        if (entry.cpu_arch == options.target.cpu_arch && target_cpu_feature_has(options.target, entry.feature))
+        {
+            c_macro_define(arena, symbol_table, &first_macro, &last_macro, entry.name, standard_replacement, 1, 0, 0, false, false);
+        }
     }
     c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__STDC_HOSTED__"), standard_replacement, 1, 0, 0, false, false);
     c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__STDC_VERSION__"), standard_replacement + 1, 1, 0, 0, false, false);
@@ -16937,6 +17000,8 @@ struct CIrPreparedCall
     CTypeId indirect_function_type;
     IrUnaryOperation builtin_unary;
     CIrAtomicBuiltin builtin_atomic;
+    // An index into c_ir_simd_builtins, or C_IR_SIMD_BUILTIN_NONE.
+    u32 builtin_simd;
     bool emitted;
     bool builtin_identity;
     bool builtin_constant_p;
@@ -17024,6 +17089,95 @@ BUSTER_GLOBAL_LOCAL String8 c_ir_math_builtin_link_name(String8 name)
         }
     }
     return (String8){0};
+}
+
+// What each position of a SIMD builtin's argument list has to be. Anything but
+// IMMEDIATE is an ordinary expression that gets lowered and then checked (and
+// converted, where C's usual conversions would have done it anyway); IMMEDIATE
+// is constant-evaluated from its tokens and never becomes a value.
+typedef enum CIrSimdArgument
+{
+    C_IR_SIMD_ARGUMENT_ADDRESS,
+    C_IR_SIMD_ARGUMENT_MASK,
+    C_IR_SIMD_ARGUMENT_VECTOR,
+    C_IR_SIMD_ARGUMENT_BYTE,
+    C_IR_SIMD_ARGUMENT_IMMEDIATE,
+} CIrSimdArgument;
+
+typedef struct CIrSimdBuiltin CIrSimdBuiltin;
+struct CIrSimdBuiltin
+{
+    String8 name;
+    u8 operation;
+    u8 arguments[4];
+    u32 immediate_limit;
+};
+
+// The whole vocabulary, in one table. An immediate is always last, so lowering
+// walks the operands in order and evaluates the tail constant afterwards.
+BUSTER_GLOBAL_LOCAL CIrSimdBuiltin const c_ir_simd_builtins[] = {
+    { S8_INITIALIZER("__builtin_buster_simd_load"), IR_SIMD_LOAD, { C_IR_SIMD_ARGUMENT_ADDRESS }, 0 },
+    { S8_INITIALIZER("__builtin_buster_simd_load_masked"),
+      IR_SIMD_LOAD_MASKED,
+      { C_IR_SIMD_ARGUMENT_ADDRESS, C_IR_SIMD_ARGUMENT_MASK },
+      0 },
+    { S8_INITIALIZER("__builtin_buster_simd_store"), IR_SIMD_STORE, { C_IR_SIMD_ARGUMENT_ADDRESS, C_IR_SIMD_ARGUMENT_VECTOR }, 0 },
+    { S8_INITIALIZER("__builtin_buster_simd_store_masked"),
+      IR_SIMD_STORE_MASKED,
+      { C_IR_SIMD_ARGUMENT_ADDRESS, C_IR_SIMD_ARGUMENT_MASK, C_IR_SIMD_ARGUMENT_VECTOR },
+      0 },
+    { S8_INITIALIZER("__builtin_buster_simd_splat_byte"), IR_SIMD_SPLAT_BYTE, { C_IR_SIMD_ARGUMENT_BYTE }, 0 },
+    { S8_INITIALIZER("__builtin_buster_simd_equal_byte"),
+      IR_SIMD_COMPARE_EQUAL_BYTE,
+      { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR },
+      0 },
+    { S8_INITIALIZER("__builtin_buster_simd_less_byte"),
+      IR_SIMD_COMPARE_LESS_BYTE,
+      { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR },
+      0 },
+    { S8_INITIALIZER("__builtin_buster_simd_sign_byte"), IR_SIMD_SIGN_MASK_BYTE, { C_IR_SIMD_ARGUMENT_VECTOR }, 0 },
+    { S8_INITIALIZER("__builtin_buster_simd_test_byte"),
+      IR_SIMD_TEST_MASK_BYTE,
+      { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR },
+      0 },
+    { S8_INITIALIZER("__builtin_buster_simd_permute2_byte"),
+      IR_SIMD_PERMUTE2_BYTE,
+      { C_IR_SIMD_ARGUMENT_MASK, C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR },
+      0 },
+    { S8_INITIALIZER("__builtin_buster_simd_compress_byte"),
+      IR_SIMD_COMPRESS_BYTE,
+      { C_IR_SIMD_ARGUMENT_MASK, C_IR_SIMD_ARGUMENT_VECTOR },
+      0 },
+    { S8_INITIALIZER("__builtin_buster_simd_compress_store_byte"),
+      IR_SIMD_COMPRESS_STORE_BYTE,
+      { C_IR_SIMD_ARGUMENT_ADDRESS, C_IR_SIMD_ARGUMENT_MASK, C_IR_SIMD_ARGUMENT_VECTOR },
+      0 },
+    { S8_INITIALIZER("__builtin_buster_simd_widen_byte"),
+      IR_SIMD_WIDEN_BYTE_TO_WORD,
+      { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_IMMEDIATE },
+      4 },
+    { S8_INITIALIZER("__builtin_buster_simd_shift_left_word"),
+      IR_SIMD_SHIFT_LEFT_WORD,
+      { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_IMMEDIATE },
+      32 },
+    { S8_INITIALIZER("__builtin_buster_simd_ternary_word"),
+      IR_SIMD_TERNARY_WORD,
+      { C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_VECTOR, C_IR_SIMD_ARGUMENT_IMMEDIATE },
+      256 },
+};
+
+#define C_IR_SIMD_BUILTIN_NONE UINT32_MAX
+
+BUSTER_GLOBAL_LOCAL u32 c_ir_simd_builtin(String8 name)
+{
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ir_simd_builtins); index += 1)
+    {
+        if (string_equal(name, c_ir_simd_builtins[index].name))
+        {
+            return index;
+        }
+    }
+    return C_IR_SIMD_BUILTIN_NONE;
 }
 
 BUSTER_GLOBAL_LOCAL CIrAtomicBuiltin c_ir_atomic_builtin(String8 name)
@@ -21320,6 +21474,7 @@ typedef enum CIrPreparedCallContinuation
     C_IR_PREPARED_CALL_CONTINUATION_VA_ARG,
     C_IR_PREPARED_CALL_CONTINUATION_IDENTITY,
     C_IR_PREPARED_CALL_CONTINUATION_MATH_ARGUMENT,
+    C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT,
     C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE,
     C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT,
 } CIrPreparedCallContinuation;
@@ -23633,10 +23788,12 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder,
         bool builtin_va_end = builtin_kind == C_SYMBOL_BUILTIN_VA_END;
         bool builtin_generic = builtin_kind == C_SYMBOL_BUILTIN_GENERIC;
         CIrAtomicBuiltin builtin_atomic = builtin_kind == C_SYMBOL_BUILTIN_ATOMIC ? c_ir_atomic_builtin(c_token_spelling(builder->preprocess.spelling_base, token)) : C_IR_ATOMIC_BUILTIN_COUNT;
+        u32 builtin_simd = builtin_kind == C_SYMBOL_BUILTIN_SIMD ? c_ir_simd_builtin(c_token_spelling(builder->preprocess.spelling_base, token)) : C_IR_SIMD_BUILTIN_NONE;
         String8 builtin_math_link_name = builtin_kind == C_SYMBOL_BUILTIN_MATH ? c_ir_math_builtin_link_name(c_token_spelling(builder->preprocess.spelling_base, token)) : (String8){0};
-        IrUnaryOperation builtin_unary = builtin_kind == C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS    ? IR_UNARY_INTEGER_COUNT_LEADING_ZEROS
-                                         : builtin_kind == C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS ? IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS
-                                                                                                 : IR_UNARY_COUNT;
+        IrUnaryOperation builtin_unary = builtin_kind == C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS      ? IR_UNARY_INTEGER_COUNT_LEADING_ZEROS
+                                         : builtin_kind == C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS  ? IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS
+                                         : builtin_kind == C_SYMBOL_BUILTIN_POPULATION_COUNT       ? IR_UNARY_INTEGER_POPULATION_COUNT
+                                                                                                  : IR_UNARY_COUNT;
         CTypeId indirect_function_type = C_TYPE_ID_INVALID;
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
@@ -23757,7 +23914,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder,
             (!builtin_identity && !builtin_constant_p && !builtin_choose_expr && !builtin_types_compatible_p && !builtin_object_size &&
              !builtin_assume_aligned && !builtin_debugtrap && !builtin_unreachable && !builtin_strlen && !builtin_clear_cache && !builtin_prefetch &&
              !builtin_va_start && !builtin_va_copy && !builtin_va_end && !builtin_va_arg && !builtin_generic && builtin_atomic == C_IR_ATOMIC_BUILTIN_COUNT &&
-             !builtin_math_link_name.length && builtin_unary == IR_UNARY_COUNT && !indirect && !c_ir_function_name_resolution(builder, c_token_spelling(builder->preprocess.spelling_base, token))) ||
+             !builtin_math_link_name.length && builtin_unary == IR_UNARY_COUNT && builtin_simd == C_IR_SIMD_BUILTIN_NONE && !indirect &&
+             !c_ir_function_name_resolution(builder, c_token_spelling(builder->preprocess.spelling_base, token))) ||
             (!indirect && c_ir_prepared_control_expression_contains(builder, index)) || c_ir_prepared_call_find(builder, callee_start))
         {
             continue;
@@ -23797,6 +23955,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder,
             .builtin_atomic = builtin_atomic,
             .builtin_math_link_name = builtin_math_link_name,
             .builtin_unary = builtin_unary,
+            .builtin_simd = builtin_simd,
             .indirect_function_type = indirect_function_type,
             .indirect = indirect,
             .parenthesized_callee = parenthesized_callee,
@@ -23860,6 +24019,168 @@ BUSTER_GLOBAL_LOCAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder,
     *emission_order_out = emission_order;
     *emission_count_out = emission_count;
     return true;
+}
+
+// The one vector type the 512-bit vocabulary speaks in: 64 bytes of u8. Every
+// builtin that returns a vector returns this, and `Simd512` in
+// <buster/lib/simd.h> is declared to match, so no conversion ever appears at a
+// call site. The layout matches what the `vector_size` attribute produces for
+// the same spelling, so the two are the same IR type and not two that happen to
+// agree.
+// __builtin_popcount is one instruction where the target has POPCNT and the
+// classic SWAR sequence where it does not, decided here rather than in the
+// backends: an IR expansion is the same handful of ordinary instructions every
+// backend already emits, and it keeps AArch64 from needing a NEON round trip
+// for a scalar operation the compiler itself barely uses.
+BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_population_count(CIntegerIrBuilder* builder, IrValueId operand, IrTypeId type, CToken token, IrSourceRange source)
+{
+    IrType* integer = ir_type_from_id(&builder->program->types, type);
+    if (!integer || integer->kind != IR_TYPE_INTEGER)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    if (target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_X86_POPCNT))
+    {
+        IrValueId result = c_ir_add_result(builder, type);
+        IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_UNARY, type);
+        instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
+        instruction.operands[0] = operand;
+        instruction.operand_count = 1;
+        instruction.unary_operation = IR_UNARY_INTEGER_POPULATION_COUNT;
+        instruction.result = result;
+        builder->function->values[result.value].definition = c_ir_append_instruction(builder, instruction, source);
+        return result;
+    }
+    // The classic SWAR sequence: subtract the odd bits to make two-bit sums,
+    // add the pairs into four-bit sums, fold to bytes, then let one multiply
+    // gather every byte sum into the top byte.
+    u32 width = integer->bit_width;
+    u64 mask = width >= 64 ? UINT64_MAX : (((u64)1 << width) - 1);
+    IrValueId one = c_ir_emit_integer_value_typed(builder, 1, false, token, type);
+    IrValueId odd_bits = c_ir_emit_integer_value_typed(builder, UINT64_C(0x5555555555555555) & mask, false, token, type);
+    IrValueId shifted = c_ir_emit_binary_value(builder, operand, one, type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+    IrValueId high = c_ir_emit_binary_value(builder, shifted, odd_bits, type, IR_BINARY_INTEGER_BITWISE_AND, source);
+    IrValueId value = c_ir_emit_binary_value(builder, operand, high, type, IR_BINARY_INTEGER_SUBTRACT, source);
+    IrValueId two = c_ir_emit_integer_value_typed(builder, 2, false, token, type);
+    IrValueId pair_bits = c_ir_emit_integer_value_typed(builder, UINT64_C(0x3333333333333333) & mask, false, token, type);
+    shifted = c_ir_emit_binary_value(builder, value, two, type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+    high = c_ir_emit_binary_value(builder, shifted, pair_bits, type, IR_BINARY_INTEGER_BITWISE_AND, source);
+    IrValueId low = c_ir_emit_binary_value(builder, value, pair_bits, type, IR_BINARY_INTEGER_BITWISE_AND, source);
+    value = c_ir_emit_binary_value(builder, low, high, type, IR_BINARY_INTEGER_ADD, source);
+    IrValueId four = c_ir_emit_integer_value_typed(builder, 4, false, token, type);
+    IrValueId nibble_mask = c_ir_emit_integer_value_typed(builder, UINT64_C(0x0f0f0f0f0f0f0f0f) & mask, false, token, type);
+    shifted = c_ir_emit_binary_value(builder, value, four, type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+    IrValueId summed = c_ir_emit_binary_value(builder, value, shifted, type, IR_BINARY_INTEGER_ADD, source);
+    value = c_ir_emit_binary_value(builder, summed, nibble_mask, type, IR_BINARY_INTEGER_BITWISE_AND, source);
+    IrValueId ones = c_ir_emit_integer_value_typed(builder, UINT64_C(0x0101010101010101) & mask, false, token, type);
+    IrValueId gathered = c_ir_emit_binary_value(builder, value, ones, type, IR_BINARY_INTEGER_MULTIPLY, source);
+    IrValueId top = c_ir_emit_integer_value_typed(builder, width - 8, false, token, type);
+    return c_ir_emit_binary_value(builder, gathered, top, type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+}
+
+BUSTER_GLOBAL_LOCAL IrTypeId c_ir_simd_vector_type(CIntegerIrBuilder* builder)
+{
+    IrTypeId element = builder->scalar_types[C_TYPE_UNSIGNED_CHAR];
+    IrType* element_type = ir_type_from_id(&builder->program->types, element);
+    if (!element_type || element_type->kind != IR_TYPE_INTEGER || element_type->bit_width != 8)
+    {
+        return IR_TYPE_ID_INVALID;
+    }
+    for (u32 type_index = 0; type_index < builder->program->types.count; type_index += 1)
+    {
+        IrType* candidate = builder->program->types.types + type_index;
+        if (candidate->kind == IR_TYPE_VECTOR && candidate->element_type.value == element.value && candidate->element_count == 64 &&
+            candidate->layout.size == 64)
+        {
+            return candidate->id;
+        }
+    }
+    return ir_program_add_type(builder->program, (IrType){
+                                                     .name = S8("GNU vector"),
+                                                     .element_type = element,
+                                                     .return_type = IR_TYPE_ID_INVALID,
+                                                     .layout =
+                                                         {
+                                                             .size = 64,
+                                                             .alignment = 64,
+                                                             .resolved = true,
+                                                         },
+                                                     .kind = IR_TYPE_VECTOR,
+                                                     .element_count = 64,
+                                                     .bit_width = 512,
+                                                 });
+}
+
+BUSTER_GLOBAL_LOCAL IrTypeId c_ir_simd_result_type(CIntegerIrBuilder* builder, IrSimdOperation operation)
+{
+    switch (operation)
+    {
+    case IR_SIMD_STORE:
+    case IR_SIMD_STORE_MASKED:
+    case IR_SIMD_COMPRESS_STORE_BYTE:
+        return builder->void_type;
+    case IR_SIMD_COMPARE_EQUAL_BYTE:
+    case IR_SIMD_COMPARE_LESS_BYTE:
+    case IR_SIMD_SIGN_MASK_BYTE:
+    case IR_SIMD_TEST_MASK_BYTE:
+        return builder->scalar_types[C_TYPE_UNSIGNED_LONG_LONG];
+    case IR_SIMD_LOAD:
+    case IR_SIMD_LOAD_MASKED:
+    case IR_SIMD_SPLAT_BYTE:
+    case IR_SIMD_PERMUTE2_BYTE:
+    case IR_SIMD_COMPRESS_BYTE:
+    case IR_SIMD_WIDEN_BYTE_TO_WORD:
+    case IR_SIMD_SHIFT_LEFT_WORD:
+    case IR_SIMD_TERNARY_WORD:
+        return c_ir_simd_vector_type(builder);
+    case IR_SIMD_COUNT:
+        break;
+    }
+    return IR_TYPE_ID_INVALID;
+}
+
+// Arguments get exactly the conversions C would already have applied at a call
+// with this prototype: arrays decay, integers convert. A vector argument is
+// checked and never converted — a silent lane reinterpretation is the one
+// thing an explicit SIMD kernel must not get.
+BUSTER_GLOBAL_LOCAL IrValueId c_ir_simd_coerce_argument(CIntegerIrBuilder* builder, IrValueId value, CIrSimdArgument kind, IrSourceRange source)
+{
+    if (value.value >= builder->function->value_count)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    IrTypeId type_id = builder->function->values[value.value].canonical_type;
+    IrType* type = ir_type_from_id(&builder->program->types, type_id);
+    if (!type)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    switch (kind)
+    {
+    case C_IR_SIMD_ARGUMENT_ADDRESS:
+    {
+        if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
+        {
+            IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type->element_type);
+            value = c_ir_decay_array(builder, value, pointer_type, source);
+            type = value.value < builder->function->value_count ? ir_type_from_id(&builder->program->types, builder->function->values[value.value].canonical_type) : 0;
+        }
+        return type && type->kind == IR_TYPE_POINTER ? value : IR_VALUE_ID_INVALID;
+    }
+    case C_IR_SIMD_ARGUMENT_MASK:
+        return type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM
+                   ? c_ir_emit_cast(builder, value, builder->scalar_types[C_TYPE_UNSIGNED_LONG_LONG], source)
+                   : IR_VALUE_ID_INVALID;
+    case C_IR_SIMD_ARGUMENT_BYTE:
+        return type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM
+                   ? c_ir_emit_cast(builder, value, builder->scalar_types[C_TYPE_UNSIGNED_CHAR], source)
+                   : IR_VALUE_ID_INVALID;
+    case C_IR_SIMD_ARGUMENT_VECTOR:
+        return type->kind == IR_TYPE_VECTOR && type->layout.resolved && type->layout.size == 64 ? value : IR_VALUE_ID_INVALID;
+    case C_IR_SIMD_ARGUMENT_IMMEDIATE:
+        break;
+    }
+    return IR_VALUE_ID_INVALID;
 }
 
 BUSTER_GLOBAL_LOCAL CIrPreparedCallStepResult c_ir_prepared_call_request_expression(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
@@ -24381,6 +24702,101 @@ BUSTER_GLOBAL_LOCAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CInte
             remaining -= 1;
             continue;
         }
+        if (selected->builtin_simd != C_IR_SIMD_BUILTIN_NONE)
+        {
+            CIrSimdBuiltin entry = c_ir_simd_builtins[selected->builtin_simd];
+            IrSimdShape shape = ir_simd_operation_shape((IrSimdOperation)entry.operation);
+            u32 starts[4] = {0};
+            u32 ends[4] = {0};
+            u32 argument_count = 0;
+            builder->failure_token_index = selected->open_index;
+            if (!c_ir_call_arguments(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &argument_count) ||
+                argument_count != (u32)shape.operand_count + shape.immediate_count)
+            {
+                builder->failure_message = string_format(builder->arena, S8("{S8} takes {u32} arguments"), entry.name,
+                                                         (u32)shape.operand_count + shape.immediate_count);
+                return false;
+            }
+            if (continuation == C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT)
+            {
+                if (!child_success)
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                }
+                u32 argument_index = frame->as.prepared_call.state->argument_count;
+                IrSourceRange argument_source = c_ir_token_source_range(builder, builder->preprocess.tokens[starts[argument_index]]);
+                IrValueId value = c_ir_simd_coerce_argument(builder, child_value, (CIrSimdArgument)entry.arguments[argument_index], argument_source);
+                if (value.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    builder->failure_token_index = starts[argument_index];
+                    builder->failure_message = string_format(builder->arena, S8("argument {u32} of {S8} has the wrong type"), argument_index + 1, entry.name);
+                    return false;
+                }
+                selected->arguments[argument_index] = value;
+                frame->as.prepared_call.state->argument_count = argument_index + 1;
+            }
+            else
+            {
+                selected->arguments = arena_allocate(builder->arena, IrValueId, BUSTER_ARRAY_LENGTH(starts));
+                frame->as.prepared_call.state->argument_count = 0;
+            }
+            // The operands are ordinary expressions and are lowered one at a
+            // time through the machine; a trailing immediate never becomes a
+            // value and is folded straight out of its tokens below.
+            u32 next = frame->as.prepared_call.state->argument_count;
+            if (next < shape.operand_count)
+            {
+                return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT, starts[next], ends[next], false);
+            }
+            u64 immediate = 0;
+            if (shape.immediate_count &&
+                (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[shape.operand_count], ends[shape.operand_count], &immediate) ||
+                 immediate >= entry.immediate_limit))
+            {
+                builder->failure_token_index = starts[shape.operand_count];
+                builder->failure_message =
+                    string_format(builder->arena, S8("the last argument of {S8} must be a constant below {u32}"), entry.name, entry.immediate_limit);
+                return false;
+            }
+            IrTypeId result_type = c_ir_simd_result_type(builder, (IrSimdOperation)entry.operation);
+            if (result_type.value == IR_ID_UNDERLYING_INVALID)
+            {
+                builder->failure_message = S8("this target has no 512-bit SIMD type");
+                return false;
+            }
+            IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
+            IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_SIMD, result_type);
+            instruction.operands = selected->arguments;
+            instruction.operand_count = shape.operand_count;
+            instruction.simd_operation = entry.operation;
+            if (shape.immediate_count)
+            {
+                instruction.immediates = arena_allocate(builder->arena, u64, 1);
+                instruction.immediates[0] = immediate;
+                instruction.immediate_count = 1;
+            }
+            if (shape.has_result)
+            {
+                instruction.result = c_ir_add_result(builder, result_type);
+            }
+            IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+            if (shape.has_result)
+            {
+                builder->function->values[instruction.result.value].definition = id;
+                selected->result = instruction.result;
+            }
+            else
+            {
+                // A void builtin still has to hand a value back to whatever
+                // expression contained it, the same way the other statement-like
+                // builtins do.
+                selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+            }
+            selected->argument_count = argument_count;
+            selected->emitted = true;
+            remaining -= 1;
+            continue;
+        }
         if (selected->builtin_unary != IR_UNARY_COUNT)
         {
             u32 argument_start = selected->open_index + 1;
@@ -24412,16 +24828,28 @@ BUSTER_GLOBAL_LOCAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CInte
             {
                 return false;
             }
-            IrValueId result = c_ir_add_result(builder, type);
             IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
-            IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_UNARY, type);
-            instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
-            instruction.operands[0] = operand;
-            instruction.operand_count = 1;
-            instruction.unary_operation = selected->builtin_unary;
-            instruction.result = result;
-            IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-            builder->function->values[result.value].definition = id;
+            IrValueId result = IR_VALUE_ID_INVALID;
+            if (selected->builtin_unary == IR_UNARY_INTEGER_POPULATION_COUNT)
+            {
+                result = c_ir_emit_population_count(builder, operand, type, token, instruction_source);
+                if (result.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                result = c_ir_add_result(builder, type);
+                IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_UNARY, type);
+                instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
+                instruction.operands[0] = operand;
+                instruction.operand_count = 1;
+                instruction.unary_operation = selected->builtin_unary;
+                instruction.result = result;
+                IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+                builder->function->values[result.value].definition = id;
+            }
             selected->result = result;
             selected->argument_count = 1;
             selected->emitted = true;
