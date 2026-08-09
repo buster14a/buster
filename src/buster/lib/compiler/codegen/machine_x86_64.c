@@ -2280,11 +2280,6 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
         placement.stack_slot_offsets[slot_index] = running;
     }
     placement.frame_size = (running + 15u) & ~15u;
-    // Stage-2 restriction: frames requiring guard-page probes fall back.
-    if (placement.frame_size >= 4080)
-    {
-        return placement;
-    }
     MachineBuilderStream edits;
     machine_stream_initialize(&edits, sizeof(MachineEdit));
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
@@ -2620,12 +2615,29 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         machine_x64_emit8(&encoder, 0x41);
         machine_x64_emit8(&encoder, 0x57);
     }
-    if (placement->frame_size)
+    // The stack allocation mirrors the canonical chunked form: at most a
+    // page per subtract with a probe touch after each, so a frame larger
+    // than the guard page cannot skip it.
+    u32 frame_remaining = placement->frame_size;
+    while (frame_remaining)
     {
+        u32 frame_chunk = BUSTER_MIN(frame_remaining, 4096u);
         machine_x64_emit8(&encoder, 0x48);
-        machine_x64_emit8(&encoder, 0x81);
+        machine_x64_emit8(&encoder, frame_chunk <= INT8_MAX ? 0x83 : 0x81);
         machine_x64_emit8(&encoder, 0xec);
-        machine_x64_emit32(&encoder, placement->frame_size);
+        if (frame_chunk <= INT8_MAX)
+        {
+            machine_x64_emit8(&encoder, (u8)frame_chunk);
+        }
+        else
+        {
+            machine_x64_emit32(&encoder, frame_chunk);
+        }
+        machine_x64_emit8(&encoder, 0xf6);
+        machine_x64_emit8(&encoder, 0x04);
+        machine_x64_emit8(&encoder, 0x24);
+        machine_x64_emit8(&encoder, 0);
+        frame_remaining -= frame_chunk;
     }
     u32 edit_cursor = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)

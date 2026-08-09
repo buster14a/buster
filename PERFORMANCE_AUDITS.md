@@ -12,6 +12,35 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09x` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+guard-page probes lift the frame bail; coverage reaches ninety-five
+percent.)
+
+- **How the target was chosen.** The fallback census is a permanent
+  verbose statistic now (`CODEGEN_FALLBACK opcode= count=` lines plus a
+  `CODEGEN_FALLBACK_STAGES verify= placement= encode=` roll-up under
+  `cc -v`), replacing the throwaway env knob rebuilt three times. It
+  immediately showed the biggest bucket was not an opcode at all:
+  placement=151, every one the stage-2 guard-page frame bail (frames
+  >= 4080 fell back to canonical).
+- **What was built.** The machine prologue's stack allocation mirrors
+  the canonical chunked form byte-for-byte in structure: at most a page
+  per subtract (imm8 or imm32 by chunk), a `testb $0,(%rsp)` probe
+  touch after each, one ALLOCATE_STACK unwind action per chunk at its
+  exact subtract-end offset. Both placement builders drop their 4080
+  bail. Small frames switch from the fixed imm32 subtract to imm8 with
+  a probe (prolog sizes 4/12/15; the corpus assertion updated).
+- **Numbers** (buster-built stage comparison, compiling ide.c under
+  NONE): fallbacks 297 -> 146, coverage **2796 of 2942 (95.0%)**.
+  Fast-built compiler 55.74G instructions (canonical 70.05G,
+  **-20.4%**), text 21,441,846 (canonical 25,699,964, -16.6%) — the
+  151 recovered functions carry the biggest frames and the most spill
+  traffic, so this single lift bought 2.7G instructions.
+- **Gates:** test_all green, MIR and FAST soaks byte-identical on
+  fresh references, self-host fixed point holds.
+- **Remaining census:** CALL 68, AGGREGATE 31 (bit-field members),
+  LOAD 14, no-opcode 11, CAST 10, GLOBAL 4, UNARY 4, va 3, icache 1.
+
 `2026-08-09w` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 array literals: coverage reaches ninety percent.)
 

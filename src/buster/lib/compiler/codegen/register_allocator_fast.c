@@ -694,10 +694,6 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
         placement.stack_slot_offsets[slot_index] = running;
     }
     placement.frame_size = ((running - 8 * push_count + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u);
-    if (placement.frame_size >= 4080)
-    {
-        return placement;
-    }
     placement.valid = true;
     return placement;
 }

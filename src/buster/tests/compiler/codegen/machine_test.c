@@ -629,7 +629,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, mir_add_descriptor && mir_add_descriptor->code_size > 8);
             BUSTER_TEST(arguments, mir_add_descriptor && mir_add_descriptor->unwind_action_count >= 2 &&
                                        mir_add_descriptor->unwind_actions[0].kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER);
-            BUSTER_TEST(arguments, mir_add_descriptor && (mir_add_descriptor->prolog_size == 4 || mir_add_descriptor->prolog_size == 11));
+            // Frameless prologues stop after the frame-pointer setup; framed
+            // ones add a chunked subtract (imm8 or imm32) and a probe touch.
+            BUSTER_TEST(arguments, mir_add_descriptor &&
+                                       (mir_add_descriptor->prolog_size == 4 || mir_add_descriptor->prolog_size == 12 || mir_add_descriptor->prolog_size == 15));
         }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
         // Both modules resolve their internal direct-call relocations the

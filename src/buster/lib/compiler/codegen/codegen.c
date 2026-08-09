@@ -10420,14 +10420,31 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             {
                 selected = machine_select_canonical_function(machine_scratch.arena, program, function, target);
             }
+            if (!selected.supported)
+            {
+                u32 reason = selected.failed_opcode <= IR_OPCODE_COUNT ? (u32)selected.failed_opcode : (u32)IR_OPCODE_COUNT;
+                result.statistics.fallback_opcode_counts[reason] += 1;
+            }
+            if (selected.supported && machine_verify_function(&selected.function).error != MACHINE_VERIFY_NONE)
+            {
+                result.statistics.fallback_verify_count += 1;
+            }
             if (selected.supported && machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE)
             {
                 MachineStackPlacement placement = options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST
                                                       ? machine_fast_placement_build(machine_scratch.arena, &selected.function)
                                                       : machine_stack_placement_build(machine_scratch.arena, &selected.function);
+                if (!placement.valid)
+                {
+                    result.statistics.fallback_placement_count += 1;
+                }
                 if (placement.valid)
                 {
                     MachineEncodeResult encoded = machine_encode_x86_64(machine_scratch.arena, &selected.function, &placement);
+                    if (!encoded.valid || buffer.count + encoded.byte_count > buffer.capacity)
+                    {
+                        result.statistics.fallback_encode_count += 1;
+                    }
                     if (encoded.valid && buffer.count + encoded.byte_count <= buffer.capacity)
                     {
                         bool machine_unwind_valid =
@@ -10474,12 +10491,19 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                                 CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_R15, 0) &&
                                                    machine_unwind_valid;
                         }
-                        if (placement.frame_size)
+                        // One allocation action per emitted chunk, at the
+                        // exact end offset of its subtract; the probe bytes
+                        // follow each action.
+                        u32 machine_frame_remaining = placement.frame_size;
+                        while (machine_frame_remaining)
                         {
-                            machine_prologue_cursor += 7;
+                            u32 machine_frame_chunk = BUSTER_MIN(machine_frame_remaining, 4096u);
+                            machine_prologue_cursor += machine_frame_chunk <= INT8_MAX ? 4u : 7u;
                             machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
-                                                                                CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, placement.frame_size) &&
+                                                                                CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, machine_frame_chunk) &&
                                                    machine_unwind_valid;
+                            machine_prologue_cursor += 4;
+                            machine_frame_remaining -= machine_frame_chunk;
                         }
                         if (machine_unwind_valid)
                         {

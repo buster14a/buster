@@ -2708,6 +2708,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                      compile.codegen_statistics.simd_operation_count,
                      codegen_register_allocator_mode_string((CodegenRegisterAllocatorMode)invocation.register_allocator),
                      compile.codegen_statistics.fallback_function_count);
+        for (u32 reason = 0; reason <= IR_OPCODE_COUNT; reason += 1)
+        {
+            if (compile.codegen_statistics.fallback_opcode_counts[reason])
+            {
+                string_print(S8("CODEGEN_FALLBACK opcode={u32} count={u32}\n"), reason, compile.codegen_statistics.fallback_opcode_counts[reason]);
+            }
+        }
+        if (compile.codegen_statistics.fallback_verify_count || compile.codegen_statistics.fallback_placement_count ||
+            compile.codegen_statistics.fallback_encode_count)
+        {
+            string_print(S8("CODEGEN_FALLBACK_STAGES verify={u32} placement={u32} encode={u32}\n"), compile.codegen_statistics.fallback_verify_count,
+                         compile.codegen_statistics.fallback_placement_count, compile.codegen_statistics.fallback_encode_count);
+        }
     }
     arena_destroy(arena, 1);
     return result;

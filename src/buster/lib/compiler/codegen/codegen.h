@@ -256,6 +256,16 @@ struct CodegenStatistics
     // selector lands.
     u32 fallback_function_count;
     u32 reserved;
+    // Census of why machine selection rejected each fallback function,
+    // keyed by the first unsupported IR opcode; the final bucket counts
+    // rejections with no specific opcode (capacity, verifier, targets).
+    u32 fallback_opcode_counts[IR_OPCODE_COUNT + 1];
+    // Fallbacks past selection: rows that failed the structural verifier,
+    // placements over the guard-page-probe frame limit, and encodings that
+    // did not fit or could not describe their unwind.
+    u32 fallback_verify_count;
+    u32 fallback_placement_count;
+    u32 fallback_encode_count;
 };
 
 struct CodegenModule
