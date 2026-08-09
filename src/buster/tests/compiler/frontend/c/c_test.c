@@ -131,6 +131,59 @@ BUSTER_GLOBAL_LOCAL void c_test_append_source(char8* destination, u64 capacity, 
     *length += source.length;
 }
 
+BUSTER_GLOBAL_LOCAL u64 c_test_translate_source_scalar(String8 source, char8* translated)
+{
+    u64 input = 0;
+    u64 output = 0;
+    while (input < source.length)
+    {
+        char8 character = source.pointer[input];
+        if (character == '\\' && input + 1 < source.length)
+        {
+            u64 splice_length = 0;
+            if (source.pointer[input + 1] == '\n')
+            {
+                splice_length = 2;
+            }
+            else if (source.pointer[input + 1] == '\r')
+            {
+                splice_length = input + 2 < source.length && source.pointer[input + 2] == '\n' ? 3 : 2;
+            }
+            if (splice_length)
+            {
+                input += splice_length;
+                continue;
+            }
+        }
+        if (character == '\r')
+        {
+            translated[output++] = '\n';
+            input += input + 1 < source.length && source.pointer[input + 1] == '\n' ? 2 : 1;
+        }
+        else
+        {
+            translated[output++] = character;
+            input += 1;
+        }
+    }
+    return output;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_test_translate_source_paths_agree(Arena* arena, String8 source)
+{
+    u64 arena_position = arena->position;
+    char8* scalar = arena_allocate(arena, char8, source.length + 1);
+    u64 scalar_length = c_test_translate_source_scalar(source, scalar);
+    CLexResult dispatched = c_lex(arena, source);
+    bool result = c_test_translate_plain_run_paths_agree(source) && dispatched.translated_source.length == scalar_length;
+    if (result && scalar_length)
+    {
+        result = memcmp(dispatched.translated_source.pointer, scalar, scalar_length) == 0;
+    }
+    arena->position = arena_position;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void c_test_auto_type_diagnostic(UnitTestArguments* arguments, UnitTestResult* outer_result, String8 source,
                                                      CPreprocessDialect dialect, CDiagnosticKind kind, String8 message)
 {
@@ -1974,6 +2027,49 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
 {
     UnitTestResult result = {0};
     BUSTER_UNUSED(arguments);
+
+    {
+        u64 arena_position = arguments->arena->position;
+        u64 boundary_capacity = 192;
+        char8* boundary = arena_allocate(arguments->arena, char8, boundary_capacity);
+        memset(boundary, 'a', boundary_capacity);
+        u64 plain_lengths[] = {0, 1, 7, 8, 9, 63, 64, 65, 127, 128, 129};
+        for (u64 length_index = 0; length_index < BUSTER_ARRAY_LENGTH(plain_lengths); length_index += 1)
+        {
+            u64 length = plain_lengths[length_index];
+            BUSTER_TEST(arguments, c_test_translate_source_paths_agree(arguments->arena, (String8){.pointer = boundary, .length = length}));
+        }
+
+        char8 candidates[] = {'\r', '\n', '\\'};
+        for (u64 candidate_index = 0; candidate_index < BUSTER_ARRAY_LENGTH(candidates); candidate_index += 1)
+        {
+            for (u64 offset = 0; offset <= 130; offset += 1)
+            {
+                boundary[offset] = candidates[candidate_index];
+                BUSTER_TEST(arguments,
+                            c_test_translate_source_paths_agree(arguments->arena, (String8){.pointer = boundary, .length = boundary_capacity}));
+                boundary[offset] = 'a';
+            }
+        }
+
+        static const char8 fuzz_alphabet[] = {'a', 'b', ' ', '\t', '/', '*', '"', '\'', '\\', '\r', '\n', 0, (char8)0x80u, (char8)0xffu};
+        u64 fuzz_lengths[] = {255, 256, 511, 512, 1024};
+        u64 fuzz_capacity = fuzz_lengths[BUSTER_ARRAY_LENGTH(fuzz_lengths) - 1];
+        char8* fuzz = arena_allocate(arguments->arena, char8, fuzz_capacity);
+        u64 seed = UINT64_C(0x12345678);
+        for (u64 round = 0; round < BUSTER_ARRAY_LENGTH(fuzz_lengths); round += 1)
+        {
+            u64 fuzz_length = fuzz_lengths[round];
+            for (u64 index = 0; index < fuzz_length; index += 1)
+            {
+                seed = seed * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                fuzz[index] = fuzz_alphabet[(seed >> 33) % BUSTER_ARRAY_LENGTH(fuzz_alphabet)];
+            }
+            BUSTER_TEST(arguments, c_test_translate_source_paths_agree(arguments->arena, (String8){.pointer = fuzz, .length = fuzz_length}));
+        }
+        arguments->arena->position = arena_position;
+    }
+
     CLexResult basic = c_lex(arguments->arena, S8("int ma\\\r\nin(void) // comment\r\n"
                                                   "{ return 0; }\r\n"));
     BUSTER_TEST(arguments, basic.diagnostic_count == 0);

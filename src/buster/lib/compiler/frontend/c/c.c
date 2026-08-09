@@ -22,9 +22,22 @@
 // self-hosted stages, MSVC, AArch64 and pre-AVX-512 x86.
 #if BUSTER_SIMD_512 && !defined(__BUSTER__)
 #define BUSTER_C_LEX_COMPACT 1
-#include <immintrin.h>
 #else
 #define BUSTER_C_LEX_COMPACT 0
+#endif
+
+// Source translation needs only AVX-512F and AVX-512BW, so keep its less
+// restrictive guard separate from the compact lexer's VBMI/VBMI2 requirement.
+// MSVC, non-x86 hosts, and self-hosted stages retain the SWAR path without
+// needing vendor headers.
+#if BUSTER_CPU_ARCH_X86_64 && defined(__AVX512F__) && defined(__AVX512BW__) && !defined(__BUSTER__) && !BUSTER_COMPILER_MSVC
+#define BUSTER_C_TRANSLATE_AVX512 1
+#else
+#define BUSTER_C_TRANSLATE_AVX512 0
+#endif
+
+#if BUSTER_C_LEX_COMPACT || BUSTER_C_TRANSLATE_AVX512
+#include <immintrin.h>
 #endif
 
 // Locations are recorded as checkpoints instead of one entry per translated
@@ -339,6 +352,105 @@ BUSTER_GLOBAL_LOCAL bool c_horizontal_whitespace(char8 character)
     }
 }
 
+BUSTER_GLOBAL_LOCAL BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_swar(String8 source, u64 offset)
+{
+    while (offset + 8 <= source.length)
+    {
+        u64 word;
+        memcpy(&word, source.pointer + offset, sizeof(word));
+        u64 carriage = word ^ UINT64_C(0x0D0D0D0D0D0D0D0D);
+        u64 newline = word ^ UINT64_C(0x0A0A0A0A0A0A0A0A);
+        u64 backslash = word ^ UINT64_C(0x5C5C5C5C5C5C5C5C);
+        u64 low = UINT64_C(0x0101010101010101);
+        u64 high = UINT64_C(0x8080808080808080);
+        u64 found = (((carriage - low) & ~carriage) | ((newline - low) & ~newline) | ((backslash - low) & ~backslash)) & high;
+        if (found)
+        {
+            break;
+        }
+        offset += 8;
+    }
+    while (offset < source.length)
+    {
+        char8 probe = source.pointer[offset];
+        if (probe == '\r' || probe == '\n' || probe == '\\')
+        {
+            break;
+        }
+        offset += 1;
+    }
+    return offset;
+}
+
+#if BUSTER_C_TRANSLATE_AVX512
+BUSTER_GLOBAL_LOCAL BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_avx512(String8 source, u64 offset)
+{
+    if (source.length - offset >= 64)
+    {
+        __m512i carriage = _mm512_set1_epi8('\r');
+        __m512i newline = _mm512_set1_epi8('\n');
+        __m512i backslash = _mm512_set1_epi8('\\');
+        do
+        {
+            __m512i chunk = _mm512_loadu_si512((const void*)(source.pointer + offset));
+            __mmask64 found = _mm512_cmpeq_epi8_mask(chunk, carriage) | _mm512_cmpeq_epi8_mask(chunk, newline) |
+                               _mm512_cmpeq_epi8_mask(chunk, backslash);
+            if (found)
+            {
+                return offset + (u64)__builtin_ctzll((u64)found);
+            }
+            offset += 64;
+        } while (source.length - offset >= 64);
+    }
+    return c_translate_plain_run_end_swar(source, offset);
+}
+#endif
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL u64 c_translate_plain_run_end_scalar(String8 source, u64 offset)
+{
+    while (offset < source.length)
+    {
+        char8 probe = source.pointer[offset];
+        if (probe == '\r' || probe == '\n' || probe == '\\')
+        {
+            break;
+        }
+        offset += 1;
+    }
+    return offset;
+}
+
+BUSTER_F_DECL bool c_test_translate_plain_run_paths_agree(String8 source)
+{
+    if (source.length && !source.pointer)
+    {
+        return false;
+    }
+    u64 offset = 0;
+    for (;;)
+    {
+        u64 scalar_end = c_translate_plain_run_end_scalar(source, offset);
+        if (c_translate_plain_run_end_swar(source, offset) != scalar_end)
+        {
+            return false;
+        }
+#if BUSTER_C_TRANSLATE_AVX512
+        if (c_translate_plain_run_end_avx512(source, offset) != scalar_end)
+        {
+            return false;
+        }
+#endif
+        if (offset == source.length)
+        {
+            break;
+        }
+        offset += 1;
+    }
+    return true;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSpace* space, String8 source)
 {
     CTranslatedSource result = {0};
@@ -360,36 +472,15 @@ BUSTER_GLOBAL_LOCAL CTranslatedSource c_translate_source(Arena* arena, CSpelling
     bool run_broken = true;
     while (input < source.length)
     {
-        // Bulk path: a run of bytes containing no '\r', '\n', or '\\' keeps
-        // line/column linear, so it copies through whole and only the three
-        // special bytes fall into the scalar handling below. The probe is
-        // SWAR zero-in-word detection, eight bytes per step.
-        u64 plain_end = input;
-        while (plain_end + 8 <= source.length)
-        {
-            u64 word;
-            memcpy(&word, source.pointer + plain_end, sizeof(word));
-            u64 carriage = word ^ UINT64_C(0x0D0D0D0D0D0D0D0D);
-            u64 newline = word ^ UINT64_C(0x0A0A0A0A0A0A0A0A);
-            u64 backslash = word ^ UINT64_C(0x5C5C5C5C5C5C5C5C);
-            u64 low = UINT64_C(0x0101010101010101);
-            u64 high = UINT64_C(0x8080808080808080);
-            u64 found = (((carriage - low) & ~carriage) | ((newline - low) & ~newline) | ((backslash - low) & ~backslash)) & high;
-            if (found)
-            {
-                break;
-            }
-            plain_end += 8;
-        }
-        while (plain_end < source.length)
-        {
-            char8 probe = source.pointer[plain_end];
-            if (probe == '\r' || probe == '\n' || probe == '\\')
-            {
-                break;
-            }
-            plain_end += 1;
-        }
+        // A run containing no '\r', '\n', or '\\' keeps line/column linear,
+        // so it copies through whole and only those three bytes reach the exact
+        // scalar handling below. Native AVX-512 hosts classify 64 bytes at a
+        // time; every fallback retains the previous eight-byte SWAR scan.
+#if BUSTER_C_TRANSLATE_AVX512
+        u64 plain_end = c_translate_plain_run_end_avx512(source, input);
+#else
+        u64 plain_end = c_translate_plain_run_end_swar(source, input);
+#endif
         if (plain_end > input)
         {
             if (run_broken)
