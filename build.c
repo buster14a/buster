@@ -2263,10 +2263,13 @@ struct SelfHostSourceMetrics
     u64 bytes;
     // Lines carrying at least one preprocessing token, over every inclusion.
     u64 sloc;
-    // Tokens handed to the parser. The source counts differ between the two
-    // stages because they resolve different resource headers; this one does
-    // not, and it is what everything past preprocessing scales with.
+    // Tokens handed to the parser, and the sum of their spellings. The source
+    // counts differ between the two stages because they resolve different
+    // resource headers; these two do not, and everything past preprocessing is
+    // a function of exactly them. Both are needed to compare the stages: equal
+    // counts of differently spelled tokens are still different programs.
     u64 tokens;
+    u64 token_bytes;
 };
 
 typedef struct SelfHostCompare SelfHostCompare;
@@ -2278,8 +2281,8 @@ struct SelfHostCompare
     String8 pdb1;
     String8 pdb2;
 #endif
-    String8 stage1_metrics;
-    String8 stage2_metrics;
+    String8 stage1_metrics_path;
+    String8 stage2_metrics_path;
     // The compiles themselves, for the instruction delta
     // process_run_report_timing recorded on each.
     ProcessRun* stage1_run;
@@ -2448,9 +2451,31 @@ BUSTER_GLOBAL_LOCAL bool self_host_source_metrics_read(Arena* arena, String8 pat
         {
             text_parse_u64(value, &metrics->tokens);
         }
+        else if (string_equal(key, S8("preprocessed.bytes")))
+        {
+            text_parse_u64(value, &metrics->token_bytes);
+        }
     }
 
-    return metrics->bytes && metrics->sloc && metrics->tokens;
+    return metrics->bytes && metrics->sloc && metrics->tokens && metrics->token_bytes;
+}
+
+// The two stages read different source and are meant to: the bootstrap
+// resolves its host compiler's resource headers, the self-hosted stages the
+// builtin ones, so their bytes, sLOC, comments, #define directives and macro
+// expansions all legitimately differ. Where the two paths must converge is
+// here — the token stream handed to the parser, and what those tokens spell.
+// Everything downstream is a function of exactly that, which is why the
+// executables come out byte-identical.
+//
+// A legitimate divergence trips this too: change what the builtin resource
+// headers declare and the streams part company on purpose. That is the signal
+// rather than a false alarm — the two stages are no longer compiling the same
+// program, and the byte-identical executables that follow would be saying less
+// than they appear to.
+BUSTER_GLOBAL_LOCAL bool self_host_preprocessed_equal(SelfHostSourceMetrics stage1, SelfHostSourceMetrics stage2)
+{
+    return stage1.tokens == stage2.tokens && stage1.token_bytes == stage2.token_bytes;
 }
 
 // Instructions per unit to three decimals, without floating point. A compile
@@ -2466,18 +2491,12 @@ BUSTER_GLOBAL_LOCAL String8 self_host_throughput_ratio(Arena* arena, u64 instruc
 // STEP_INSTRUCTIONS says what a stage cost; this says what it cost per unit of
 // what it compiled, which is the series that stays comparable when the code
 // base grows. The two stages are reported separately and their source counts
-// are not compared: the bootstrap resolves its host compiler's resource
+// are never compared: the bootstrap resolves its host compiler's resource
 // headers and the self-hosted stages the builtin ones, so the bytes and sLOC
-// legitimately differ. Their token counts do match, which is why the
-// executables do.
-BUSTER_GLOBAL_LOCAL void self_host_report_throughput(Arena* arena, String8 stage, ProcessRun* run, String8 metrics_path)
+// legitimately differ. Only the token counts are held equal, by
+// self_host_preprocessed_equal below.
+BUSTER_GLOBAL_LOCAL void self_host_report_throughput(Arena* arena, String8 stage, ProcessRun* run, SelfHostSourceMetrics metrics)
 {
-    SelfHostSourceMetrics metrics = {0};
-    if (!self_host_source_metrics_read(arena, metrics_path, &metrics))
-    {
-        return;
-    }
-
     // No instruction counter on this host (see instruction_counter_open): the
     // units still belong in the log, the ratios have no numerator.
     if (!run || !run->instructions)
@@ -2496,6 +2515,12 @@ BUSTER_GLOBAL_LOCAL void self_host_report_throughput(Arena* arena, String8 stage
 BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* data)
 {
     SelfHostCompare* compare = data;
+    // Read before the executables are compared: when they differ, which half
+    // of the compiler to look at is the first thing worth printing.
+    SelfHostSourceMetrics stage1_metrics = {0};
+    SelfHostSourceMetrics stage2_metrics = {0};
+    bool measured = self_host_source_metrics_read(arena, compare->stage1_metrics_path, &stage1_metrics) &&
+                    self_host_source_metrics_read(arena, compare->stage2_metrics_path, &stage2_metrics);
     String8 stage1_path = compare->stage1;
     String8 stage2_path = compare->stage2;
 #if BUSTER_LINUX || BUSTER_MACOS
@@ -2556,11 +2581,39 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* d
     {
         string_print(S8("error: self-host stages differ: {S8} ({u64} bytes) != {S8} ({u64} bytes)\n"), compare->stage1, stage1.length, compare->stage2,
                      stage2.length);
+        // Halve the search before anyone opens a byte diff of two 26 MB
+        // executables: the parser and everything after it are a function of the
+        // preprocessed token stream, so an identical stream puts the fault
+        // past preprocessing and a differing one puts it at or before.
+        if (measured)
+        {
+            if (self_host_preprocessed_equal(stage1_metrics, stage2_metrics))
+            {
+                string_print(S8("note: both stages preprocessed to the same {u64} tokens / {u64} spelling bytes; the divergence is past preprocessing\n"),
+                             stage1_metrics.tokens, stage1_metrics.token_bytes);
+            }
+            else
+            {
+                string_print(S8("note: the stages preprocessed differently (stage1 {u64} tokens / {u64} spelling bytes, stage2 {u64} / {u64}); the "
+                                "divergence is at or before preprocessing\n"),
+                             stage1_metrics.tokens, stage1_metrics.token_bytes, stage2_metrics.tokens, stage2_metrics.token_bytes);
+            }
+        }
         return PROCESS_RESULT_FAILED;
     }
     string_print(S8("SELF_HOST deterministic bytes={u64} stage1={S8} stage2={S8}\n"), stage1.length, compare->stage1, compare->stage2);
-    self_host_report_throughput(arena, S8("1"), compare->stage1_run, compare->stage1_metrics);
-    self_host_report_throughput(arena, S8("2"), compare->stage2_run, compare->stage2_metrics);
+    self_host_report_throughput(arena, S8("1"), compare->stage1_run, stage1_metrics);
+    self_host_report_throughput(arena, S8("2"), compare->stage2_run, stage2_metrics);
+    // Checked after the throughput lines so the two token counts the error
+    // talks about are already on the page. Byte-identical executables are not
+    // enough on their own: they say the two stages agreed on an answer, not
+    // that they were asked the same question.
+    if (measured && !self_host_preprocessed_equal(stage1_metrics, stage2_metrics))
+    {
+        string_print(S8("error: self-host stages preprocessed to different token streams: stage1 {u64} tokens / {u64} spelling bytes, stage2 {u64} / {u64}\n"),
+                     stage1_metrics.tokens, stage1_metrics.token_bytes, stage2_metrics.tokens, stage2_metrics.token_bytes);
+        return PROCESS_RESULT_FAILED;
+    }
     return PROCESS_RESULT_SUCCESS;
 }
 
@@ -2979,8 +3032,8 @@ BUSTER_GLOBAL_LOCAL void self_host_compare_and_bench_add(Arena* arena, String8 s
         .pdb1 = stage1_pdb,
         .pdb2 = stage2_pdb,
 #endif
-        .stage1_metrics = self_host_metrics_path(arena, stage1),
-        .stage2_metrics = self_host_metrics_path(arena, stage2),
+        .stage1_metrics_path = self_host_metrics_path(arena, stage1),
+        .stage2_metrics_path = self_host_metrics_path(arena, stage2),
         .stage1_run = stage1_run,
         .stage2_run = stage2_run,
     };

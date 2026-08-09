@@ -318,6 +318,22 @@ enabled.
   counter the line still prints its units and omits the ratios. Only ever add
   keys to the metrics file: readers take the fields they know and must keep
   working against a newer compiler's file.
+- **The stages' preprocessed token streams are a fixed point too**, gated
+  beside the executable bytes. `test_self_host` fails when the two stages
+  disagree on `preprocessed.tokens` or `preprocessed.bytes`, and when the
+  executables differ it first says whether the token streams matched — which
+  halves the search, since the parser and everything after it are a function
+  of that stream alone. Nothing else is compared between the stages: bytes,
+  sLOC, comments, `#define` directives and macro expansions all legitimately
+  differ for the resource-header reason above (currently 6.088 vs 6.087
+  `#define`s and 56.429 vs 56.426 expansions converging on the same 1.378.839
+  tokens and 12.124.867 spelling bytes). Changing what the builtin resource
+  headers declare can part the streams on purpose; that is the signal and not
+  a false alarm, because the two stages are then no longer compiling the same
+  program and byte-identical executables would be saying less than they
+  appear to. Update the gate deliberately in that case — do not weaken it to
+  the token count alone, since equal counts of differently spelled tokens are
+  still different programs.
 - **`ninja_log_summary <build-dir> [--limit N]`** and **`time_trace_summary
   <json-path>... [--limit N]`** (both new `build/build` commands, same
   shape as `cmake_profile_summary` — see `build.c`) are diagnostics for
