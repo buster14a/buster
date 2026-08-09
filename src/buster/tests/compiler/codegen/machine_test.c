@@ -284,7 +284,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "int six(int a, int b, int c, int d, int e, int f) { return a + b + c + d + e + f; }\n"
                                   "long arr_lit(long a, long b) { long t[4] = {a, b, a + b, 5}; return t[0] * 1000 + t[1] * 100 + t[2] * 10 + t[3]; }\n"
                                   "struct KPair { long low; long high; };\n"
-                                  "static long kagg_take(struct KPair pair, long salt) { return pair.low * 3 + pair.high + salt; }\n"
+                                                                    "static long kagg_take(struct KPair pair, long salt) { return pair.low * 3 + pair.high + salt; }\n"
                                   "long kagg(long a, long b) { struct KPair pair = {.low = a + 1, .high = b}; return kagg_take(pair, a) + pair.high; }\n"
                                   "int sum_to(int n) { int s = 0; int i = 1; while (i <= n) { s = s + i; i = i + 1; } return s; }\n"
                                   "long readp(long* p) { return *p; }\n"

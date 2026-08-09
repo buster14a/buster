@@ -12,6 +12,29 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09y` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
+variadic aggregate arguments: coverage reaches ninety-seven percent.)
+
+- **How the target was chosen.** Reject-site instrumentation (local,
+  removed) put 67 of the 68 CALL-bucket fallbacks on one condition: the
+  call lowering refused aggregate arguments past the callee's named
+  parameter count. That is every `{S8}`-style format call — String8
+  passed through `...` — which this codebase does everywhere.
+- **What was built.** The exclusion is gone. Variadic aggregates
+  already worked structurally: the shape classifies from the value's
+  own type, register parts place by the same all-or-nothing rule, and
+  aggregate float parts already counted toward the variadic AL setup.
+  A corpus differential was attempted and dropped — the module harness
+  cannot host variadic definitions (the canonical module path errors
+  and the zero-fallback assertion forbids the fallback callee); the
+  soak exercises this path through every formatted diagnostic instead.
+- **Numbers** (buster-built stage comparison, compiling ide.c under
+  NONE): fallbacks 146 -> 83, coverage **2859 of 2942 (97.2%)**.
+  Fast-built compiler 54.78G instructions (canonical 70.05G, -21.8%),
+  text 21,164,686 (canonical 25,699,964, -17.6%).
+- **Gates:** test_all green, MIR and FAST soaks byte-identical on
+  fresh references, self-host fixed point holds.
+
 `2026-08-09x` (Linux x86_64, Zen 4 7940HS; register-allocator stage 3 —
 guard-page probes lift the frame bail; coverage reaches ninety-five
 percent.)

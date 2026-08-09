@@ -1410,8 +1410,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             IrTypeId argument_type_id = argument_index < callee_type->parameter_count
                                             ? callee_type->parameter_types[argument_index]
                                             : function->values[instruction->operands[argument_index + 1].value].canonical_type;
-            if (!machine_x64_value_shape(program, argument_type_id, IR_ABI_USE_ARGUMENT, argument_shapes + argument_index) ||
-                (argument_shapes[argument_index].aggregate && argument_index >= callee_type->parameter_count))
+            if (!machine_x64_value_shape(program, argument_type_id, IR_ABI_USE_ARGUMENT, argument_shapes + argument_index))
             {
                 return false;
             }
