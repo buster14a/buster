@@ -910,11 +910,84 @@ BUSTER_GLOBAL_LOCAL CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelli
     return C_SYMBOL_BUILTIN_NONE;
 }
 
+// One probe entry of the intern table. The identity of a name is its first
+// and last 8 bytes plus its length: for names up to 16 bytes the two
+// overlapped words cover every byte, so matching (low, high, length) is byte
+// equality with no further loads; longer names use the triple as a 17-byte
+// filter and verify only the middle bytes against the stored spelling.
+// length_and_id packs (length << 32) | id, and 0 marks an empty slot (id 0
+// is never assigned).
+typedef struct CSymbolSlot
+{
+    u64 low;
+    u64 high;
+    u64 length_and_id;
+} CSymbolSlot;
+
+typedef struct CSymbolKey
+{
+    u64 low;
+    u64 high;
+} CSymbolKey;
+
+BUSTER_GLOBAL_LOCAL CSymbolKey c_symbol_key(String8 name)
+{
+    CSymbolKey key = {0};
+    if (name.length >= 8)
+    {
+        memcpy(&key.low, name.pointer, sizeof(key.low));
+        memcpy(&key.high, name.pointer + name.length - 8, sizeof(key.high));
+    }
+    else
+    {
+        for (u64 index = 0; index < name.length; index += 1)
+        {
+            key.low |= (u64)(u8)name.pointer[index] << (8 * index);
+        }
+    }
+    return key;
+}
+
+// Differences in the top bytes of a key word only propagate upward through a
+// multiply, so the slot bits must come from a folded value: fold the first
+// product's high word down, remultiply, and take the high half.
+BUSTER_GLOBAL_LOCAL u32 c_symbol_slot_hash(CSymbolKey key, u64 length)
+{
+    u64 hash = key.low * UINT64_C(0x9E3779B97F4A7C15) ^ key.high * UINT64_C(0xC2B2AE3D27D4EB4F) ^ length;
+    hash ^= hash >> 32;
+    hash *= UINT64_C(0xD6E8FEB86659FD93);
+    return (u32)(hash >> 32);
+}
+
+// Both spellings already match on their first 8 bytes, last 8 bytes, and
+// length (> 16); confirm the middle [8, length - 8) in overlapped words.
+BUSTER_GLOBAL_LOCAL bool c_symbol_middle_equal(String8 stored, String8 name)
+{
+    u64 end = name.length - 8;
+    u64 offset = 8;
+    for (; offset + 8 <= end; offset += 8)
+    {
+        u64 stored_word;
+        u64 name_word;
+        memcpy(&stored_word, stored.pointer + offset, sizeof(stored_word));
+        memcpy(&name_word, name.pointer + offset, sizeof(name_word));
+        if (stored_word != name_word)
+        {
+            return false;
+        }
+    }
+    u64 stored_word;
+    u64 name_word;
+    memcpy(&stored_word, stored.pointer + end - 8, sizeof(stored_word));
+    memcpy(&name_word, name.pointer + end - 8, sizeof(name_word));
+    return stored_word == name_word;
+}
+
 struct CSymbolTable
 {
     Arena* arena;
     String8* names;
-    u32* slots;
+    CSymbolSlot* slots;
     // Dense classification for the predefined id range [1, predefined_limit]:
     // builtin_kinds holds the CSymbolBuiltin of the lowering ladder names and
     // class_bits the parser token-class bits. Arena resident on purpose — a
@@ -930,18 +1003,25 @@ struct CSymbolTable
 
 BUSTER_GLOBAL_LOCAL u32 c_symbol_intern(CSymbolTable* table, String8 name)
 {
+    CSymbolKey key = c_symbol_key(name);
+    u64 length_word = (u64)name.length << 32;
     u32 mask = table->slot_capacity - 1;
-    u32 slot = (u32)c_macro_name_hash(name) & mask;
+    u32 slot = c_symbol_slot_hash(key, name.length) & mask;
     for (;;)
     {
-        u32 id = table->slots[slot];
-        if (!id)
+        CSymbolSlot* entry = &table->slots[slot];
+        u64 length_and_id = entry->length_and_id;
+        if (!length_and_id)
         {
             break;
         }
-        if (string_equal(table->names[id], name))
+        if (entry->low == key.low && entry->high == key.high && (length_and_id & UINT64_C(0xFFFFFFFF00000000)) == length_word)
         {
-            return id;
+            u32 id = (u32)length_and_id;
+            if (name.length <= 16 || c_symbol_middle_equal(table->names[id], name))
+            {
+                return id;
+            }
         }
         slot = (slot + 1) & mask;
     }
@@ -954,25 +1034,31 @@ BUSTER_GLOBAL_LOCAL u32 c_symbol_intern(CSymbolTable* table, String8 name)
         table->name_capacity = name_capacity;
     }
     // Keep the probe table at most half full so lookups stay short; the
-    // rebuild recomputes every slot at the doubled capacity.
+    // rebuild re-places every entry at the doubled capacity from the key
+    // words the entries already carry.
     if (table->count + 1 > table->slot_capacity / 2)
     {
         u32 slot_capacity = table->slot_capacity * 2;
-        u32* slots = arena_allocate(table->arena, u32, slot_capacity);
+        CSymbolSlot* slots = arena_allocate(table->arena, CSymbolSlot, slot_capacity);
         memset(slots, 0, sizeof(*slots) * slot_capacity);
-        for (u32 id = 1; id <= table->count; id += 1)
+        for (u32 old_slot = 0; old_slot < table->slot_capacity; old_slot += 1)
         {
-            u32 rebuilt_slot = (u32)c_macro_name_hash(table->names[id]) & (slot_capacity - 1);
-            while (slots[rebuilt_slot])
+            CSymbolSlot entry = table->slots[old_slot];
+            if (!entry.length_and_id)
+            {
+                continue;
+            }
+            u32 rebuilt_slot = c_symbol_slot_hash((CSymbolKey){.low = entry.low, .high = entry.high}, entry.length_and_id >> 32) & (slot_capacity - 1);
+            while (slots[rebuilt_slot].length_and_id)
             {
                 rebuilt_slot = (rebuilt_slot + 1) & (slot_capacity - 1);
             }
-            slots[rebuilt_slot] = id;
+            slots[rebuilt_slot] = entry;
         }
         table->slots = slots;
         table->slot_capacity = slot_capacity;
-        slot = (u32)c_macro_name_hash(name) & (slot_capacity - 1);
-        while (table->slots[slot])
+        slot = c_symbol_slot_hash(key, name.length) & (slot_capacity - 1);
+        while (table->slots[slot].length_and_id)
         {
             slot = (slot + 1) & (slot_capacity - 1);
         }
@@ -980,7 +1066,11 @@ BUSTER_GLOBAL_LOCAL u32 c_symbol_intern(CSymbolTable* table, String8 name)
     u32 id = table->count + 1;
     table->count = id;
     table->names[id] = name;
-    table->slots[slot] = id;
+    table->slots[slot] = (CSymbolSlot){
+        .low = key.low,
+        .high = key.high,
+        .length_and_id = length_word | id,
+    };
     return id;
 }
 
@@ -1037,7 +1127,7 @@ BUSTER_GLOBAL_LOCAL CSymbolTable c_symbol_table_create(Arena* arena)
         .name_capacity = 1u << 12,
     };
     table.names = arena_allocate(arena, String8, table.name_capacity);
-    table.slots = arena_allocate(arena, u32, table.slot_capacity);
+    table.slots = arena_allocate(arena, CSymbolSlot, table.slot_capacity);
     memset(table.slots, 0, sizeof(*table.slots) * table.slot_capacity);
     table.builtin_kinds = arena_allocate(arena, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
     table.class_bits = arena_allocate(arena, u8, C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
