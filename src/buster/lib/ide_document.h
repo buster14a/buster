@@ -243,6 +243,34 @@ struct IdeDocument
     u8 reserved[4];
 };
 
+// Internal immutable syntax and semantic storage. These records are opaque to
+// callers; the public source and snapshot strings above borrow their storage.
+typedef struct IdeDocumentRevisionState IdeDocumentRevisionState;
+typedef struct IdeDocumentGraph IdeDocumentGraph;
+typedef struct IdeDocumentStorageOwner IdeDocumentStorageOwner;
+
+#if BUSTER_INCLUDE_TESTS
+typedef enum IdeDocumentAnalysisWorkFlag
+{
+    IDE_DOCUMENT_ANALYSIS_WORK_PARSED = 1 << 0,
+    IDE_DOCUMENT_ANALYSIS_WORK_INDEXED = 1 << 1,
+    IDE_DOCUMENT_ANALYSIS_WORK_ANALYZED = 1 << 2,
+    IDE_DOCUMENT_ANALYSIS_WORK_INVALIDATED = 1 << 3,
+} IdeDocumentAnalysisWorkFlag;
+
+typedef struct IdeDocumentAnalysisOperationStats IdeDocumentAnalysisOperationStats;
+struct IdeDocumentAnalysisOperationStats
+{
+    u32 parsed_count;
+    u32 indexed_count;
+    u32 analyzed_count;
+    u32 invalidated_count;
+    u32 allocated_snapshot_count;
+    bool full_fallback;
+    u8 reserved[3];
+};
+#endif
+
 typedef struct IdeDocumentWorkspace IdeDocumentWorkspace;
 struct IdeDocumentWorkspace
 {
@@ -257,6 +285,16 @@ struct IdeDocumentWorkspace
     u32 active_document_index;
     u32 open_document_count;
     u64 next_open_order;
+    IdeDocumentRevisionState* revision_states;
+    IdeDocumentGraph* graph;
+    u64 analysis_generation;
+    bool analysis_contains_generics;
+    bool analysis_has_cycles;
+    u8 reserved[6];
+#if BUSTER_INCLUDE_TESTS
+    IdeDocumentAnalysisOperationStats last_analysis_stats;
+    u8* last_analysis_work_flags;
+#endif
 };
 
 typedef struct IdeDocumentModel IdeDocumentModel;
@@ -269,6 +307,7 @@ struct IdeDocumentModel
     u32 max_discovered_files;
     u32 max_traversal_entries;
     u32 max_diagnostics;
+    IdeDocumentStorageOwner* staged_owners;
     bool initialized;
     bool owns_expression_arena;
     u8 reserved[2];
@@ -331,10 +370,16 @@ BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_replace_diagnostics(IdeDoc
 BUSTER_F_DECL bool ide_document_model_document_matches_filter(IdeDocumentModel* model, u32 index);
 BUSTER_F_DECL bool ide_document_model_entity_matches_filter(IdeDocumentModel* model, u32 index);
 BUSTER_F_DECL IdeDocumentWorkspaceStatus ide_document_model_status(IdeDocumentModel* model);
+BUSTER_F_DECL u64 ide_document_model_analysis_generation(const IdeDocumentModel* model);
+#if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL IdeDocumentAnalysisOperationStats ide_document_model_test_last_analysis_stats(const IdeDocumentModel* model);
+BUSTER_F_DECL u8 ide_document_model_test_document_work_flags(const IdeDocumentModel* model, u32 index);
+#endif
 
-// Returned document, import, and entity pointers belong to the current committed arena. Any successful model mutation or deinitialization
-// invalidates every previously returned pointer, including pointers reacquired from an earlier lookup; reacquire after the mutation.
-// Failed mutations preserve the current committed pointers.
+// Returned document, import, and entity pointers belong to the current committed projection. Source and saved-source bytes may live in
+// retained immutable revision storage, but callers receive no retained-reader handle in this slice. Any successful model mutation or
+// deinitialization invalidates every previously returned pointer, including pointers reacquired from an earlier lookup; reacquire after the
+// mutation. Failed mutations preserve the current committed pointers.
 BUSTER_F_DECL IdeDocument* ide_document_model_find(IdeDocumentModel* model, String8 path);
 BUSTER_F_DECL IdeDocument* ide_document_model_document_at(IdeDocumentModel* model, u32 index);
 BUSTER_F_DECL IdeDocument* ide_document_model_active_document(IdeDocumentModel* model);

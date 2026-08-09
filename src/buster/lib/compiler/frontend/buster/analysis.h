@@ -453,6 +453,13 @@ typedef enum AnalysisImportResolutionState
     ANALYSIS_IMPORT_COUNT,
 } AnalysisImportResolutionState;
 
+typedef struct AnalysisImportBinding AnalysisImportBinding;
+struct AnalysisImportBinding
+{
+    AnalysisResult* target;
+    AnalysisImportResolutionState state;
+};
+
 typedef struct AnalysisImport AnalysisImport;
 struct AnalysisImport
 {
@@ -775,6 +782,10 @@ struct AnalysisResult
 // sources are ordered by path and entities by source, offset, and kind.
 BUSTER_F_DECL AnalysisResult analysis_index_module(Arena* result_arena, AnalysisModuleId module_id, String8 module_name, AnalysisSourceInput* inputs,
                                                    u32 input_count);
+// Installs externally resolved imports and a private copy of the program
+// visibility table on one newly indexed module.
+BUSTER_F_DECL void analysis_bind_module_imports(Arena* result_arena, AnalysisResult* module, AnalysisResult** visible_modules, u32 visible_module_count,
+                                                const AnalysisImportBinding* bindings, u32 binding_count);
 BUSTER_F_DECL void analysis_resolve_imports(Arena* result_arena, AnalysisResult** modules, u32 module_count);
 BUSTER_F_DECL void analysis_resolve_program_interfaces(Arena* result_arena, AnalysisResult** modules, u32 module_count);
 BUSTER_F_DECL AnalysisEntity* analysis_find_qualified_entity(AnalysisResult* module, String8 import_name_space, String8 entity_name,

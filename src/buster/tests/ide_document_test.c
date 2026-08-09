@@ -56,6 +56,413 @@ BUSTER_GLOBAL_LOCAL String8 ide_document_test_temporary_root(Arena* arena, Strin
     return temporary;
 #endif
 }
+
+BUSTER_GLOBAL_LOCAL bool ide_document_test_analysis_stats_equal(IdeDocumentAnalysisOperationStats left,
+                                                                 IdeDocumentAnalysisOperationStats right)
+{
+    return left.parsed_count == right.parsed_count && left.indexed_count == right.indexed_count &&
+           left.analyzed_count == right.analyzed_count && left.invalidated_count == right.invalidated_count &&
+           left.allocated_snapshot_count == right.allocated_snapshot_count && left.full_fallback == right.full_fallback;
+}
+
+BUSTER_GLOBAL_LOCAL bool ide_document_test_range_equal(ParserSourceRange left, ParserSourceRange right)
+{
+    return left.offset == right.offset && left.length == right.length && left.line == right.line && left.column == right.column;
+}
+
+BUSTER_GLOBAL_LOCAL u32 ide_document_test_index(IdeDocumentModel* model, String8 path)
+{
+    IdeDocument* document = ide_document_model_find(model, path);
+    if (!document)
+    {
+        return IDE_DOCUMENT_INDEX_INVALID;
+    }
+    for (u32 index = 0; index < ide_document_model_document_count(model); index += 1)
+    {
+        if (ide_document_model_document_at(model, index) == document)
+        {
+            return index;
+        }
+    }
+    return IDE_DOCUMENT_INDEX_INVALID;
+}
+
+BUSTER_GLOBAL_LOCAL bool ide_document_test_analysis_outcome_equal(IdeDocumentModel* left, IdeDocumentModel* right)
+{
+    if (left->workspace.document_count != right->workspace.document_count ||
+        left->workspace.import_count != right->workspace.import_count || left->workspace.entity_count != right->workspace.entity_count)
+    {
+        return false;
+    }
+    for (u32 index = 0; index < left->workspace.document_count; index += 1)
+    {
+        IdeDocument* left_document = left->workspace.documents + index;
+        IdeDocument* right_document = right->workspace.documents + index;
+        if (!string_equal(left_document->path, right_document->path) ||
+            !string_equal(left_document->module_name, right_document->module_name) ||
+            !string_equal(left_document->source, right_document->source) ||
+            left_document->diagnostic_count != right_document->diagnostic_count)
+        {
+            return false;
+        }
+        for (u32 diagnostic_index = 0; diagnostic_index < left_document->diagnostic_count; diagnostic_index += 1)
+        {
+            IdeDocumentDiagnostic* left_diagnostic = left_document->diagnostics + diagnostic_index;
+            IdeDocumentDiagnostic* right_diagnostic = right_document->diagnostics + diagnostic_index;
+            if (!string_equal(left_diagnostic->file_path, right_diagnostic->file_path) ||
+                !string_equal(left_diagnostic->message, right_diagnostic->message) ||
+                !ide_document_test_range_equal(left_diagnostic->range, right_diagnostic->range) ||
+                left_diagnostic->identity != right_diagnostic->identity || left_diagnostic->severity != right_diagnostic->severity ||
+                left_diagnostic->source != right_diagnostic->source)
+            {
+                return false;
+            }
+        }
+    }
+    for (u32 index = 0; index < left->workspace.import_count; index += 1)
+    {
+        IdeDocumentImport* left_import = left->workspace.imports + index;
+        IdeDocumentImport* right_import = right->workspace.imports + index;
+        if (!string_equal(left_import->source_path, right_import->source_path) ||
+            !string_equal(left_import->name_space, right_import->name_space) ||
+            !string_equal(left_import->requested_path, right_import->requested_path) ||
+            !string_equal(left_import->target_path, right_import->target_path) ||
+            !ide_document_test_range_equal(left_import->range, right_import->range) ||
+            !ide_document_test_range_equal(left_import->path_range, right_import->path_range) || left_import->state != right_import->state)
+        {
+            return false;
+        }
+    }
+    for (u32 index = 0; index < left->workspace.entity_count; index += 1)
+    {
+        IdeDocumentEntitySnapshot* left_entity = left->workspace.entities + index;
+        IdeDocumentEntitySnapshot* right_entity = right->workspace.entities + index;
+        if (!string_equal(left_entity->module_name, right_entity->module_name) ||
+            !string_equal(left_entity->source_path, right_entity->source_path) || !string_equal(left_entity->name, right_entity->name) ||
+            !string_equal(left_entity->type_text, right_entity->type_text) ||
+            !ide_document_test_range_equal(left_entity->range, right_entity->range) || left_entity->kind != right_entity->kind)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ide_document_incremental_analysis_tests(UnitTestArguments* arguments, Arena* test_arena, Arena* arena,
+                                                                           Arena* staging_arena)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    u8 all_work = (u8)(IDE_DOCUMENT_ANALYSIS_WORK_PARSED | IDE_DOCUMENT_ANALYSIS_WORK_INDEXED |
+                       IDE_DOCUMENT_ANALYSIS_WORK_ANALYZED | IDE_DOCUMENT_ANALYSIS_WORK_INVALIDATED);
+    u8 dependent_work =
+        (u8)(IDE_DOCUMENT_ANALYSIS_WORK_INDEXED | IDE_DOCUMENT_ANALYSIS_WORK_ANALYZED | IDE_DOCUMENT_ANALYSIS_WORK_INVALIDATED);
+    String8 root = ide_document_test_temporary_root(test_arena, S8("buster-ide-document-incremental"));
+    String8 app_path = string_format_z(test_arena, S8("{S8}/app.bbb"), root);
+    String8 leaf_path = string_format_z(test_arena, S8("{S8}/leaf.bbb"), root);
+    String8 mid_path = string_format_z(test_arena, S8("{S8}/mid.bbb"), root);
+    String8 other_path = string_format_z(test_arena, S8("{S8}/other.bbb"), root);
+    String8 app_source = S8("import dep = \"./mid.bbb\";\ncode main : fn () s32 { return dep.mid(); }\n");
+    String8 leaf_source = S8("data $value: s32 = 1;\ncode leaf : fn () s32 { return 1; }\n");
+    String8 leaf_body_source = S8("data $value: s32 = 1;\ncode leaf : fn () s32 { return 2; }\n");
+    String8 leaf_public_source = S8("data $value: u64 = 1;\ncode leaf : fn () u64 { return 2; }\n");
+    String8 mid_source = S8("import dep = \"leaf\";\ncode mid : fn () s32 { return dep.leaf(); }\n");
+    String8 mid_retargeted_source = S8("import dep = \"other\";\ncode mid : fn () s32 { return dep.leaf(); }\n");
+    String8 other_source = S8("code leaf : fn () s32 { return 7; }\n");
+    String8 other_body_source = S8("code leaf : fn () s32 { return 8; }\n");
+    String8 diagnostic_source = S8("data $value: u64 = 1;\ncode leaf : fn () u64 { return missing; }\n");
+
+    os_directory_delete(root);
+    os_make_directory(root);
+    BUSTER_TEST(arguments, file_write(app_path, BUSTER_SLICE_TO_BYTE_SLICE(app_source)));
+    BUSTER_TEST(arguments, file_write(leaf_path, BUSTER_SLICE_TO_BYTE_SLICE(leaf_source)));
+    BUSTER_TEST(arguments, file_write(mid_path, BUSTER_SLICE_TO_BYTE_SLICE(mid_source)));
+    BUSTER_TEST(arguments, file_write(other_path, BUSTER_SLICE_TO_BYTE_SLICE(other_source)));
+
+    IdeDocumentModel model = {0};
+    IdeDocumentErrorKind error = ide_document_model_initialize(&model, arena, staging_arena,
+                                                               (IdeDocumentModelOptions){.workspace_root = root, .open_path = leaf_path});
+    BUSTER_TEST(arguments, error == IDE_DOCUMENT_ERROR_NONE);
+    if (model.initialized)
+    {
+        BUSTER_TEST(arguments, model.workspace.document_count == 4 && model.workspace.import_count == 2 &&
+                                  !model.workspace.analysis_contains_generics && !model.workspace.analysis_has_cycles);
+        u32 app_index = ide_document_test_index(&model, app_path);
+        u32 leaf_index = ide_document_test_index(&model, leaf_path);
+        u32 mid_index = ide_document_test_index(&model, mid_path);
+        u32 other_index = ide_document_test_index(&model, other_path);
+        BUSTER_TEST(arguments, app_index != IDE_DOCUMENT_INDEX_INVALID && leaf_index != IDE_DOCUMENT_INDEX_INVALID &&
+                                  mid_index != IDE_DOCUMENT_INDEX_INVALID && other_index != IDE_DOCUMENT_INDEX_INVALID);
+        IdeDocumentImport* app_import = 0;
+        for (u32 import_index = 0; import_index < model.workspace.import_count; import_index += 1)
+        {
+            IdeDocumentImport* candidate = ide_document_model_import_at(&model, import_index);
+            if (candidate && string_equal(candidate->source_path, app_path))
+            {
+                app_import = candidate;
+                break;
+            }
+        }
+        BUSTER_TEST(arguments, app_import && app_import->state == IDE_DOCUMENT_IMPORT_RESOLVED &&
+                                  string_equal(app_import->target_path, mid_path));
+        BUSTER_TEST(arguments, app_index == IDE_DOCUMENT_INDEX_INVALID || model.workspace.documents[app_index].diagnostic_count == 0);
+
+        IdeDocumentAnalysisOperationStats equal_stats = ide_document_model_test_last_analysis_stats(&model);
+        u8 equal_work_flags[4] = {0};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(equal_work_flags); index += 1)
+        {
+            equal_work_flags[index] = ide_document_model_test_document_work_flags(&model, index);
+        }
+        u64 equal_generation = ide_document_model_analysis_generation(&model);
+        IdeDocument* equal_leaf = ide_document_model_find(&model, leaf_path);
+        IdeDocument* equal_documents = model.workspace.documents;
+        IdeDocumentImport* equal_imports = model.workspace.imports;
+        IdeDocumentEntitySnapshot* equal_entities = model.workspace.entities;
+        char8* equal_source_pointer = equal_leaf ? equal_leaf->source.pointer : 0;
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, leaf_path, leaf_source) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_analysis_generation(&model) == equal_generation &&
+                                  model.workspace.documents == equal_documents && model.workspace.imports == equal_imports &&
+                                  model.workspace.entities == equal_entities && ide_document_model_find(&model, leaf_path) == equal_leaf &&
+                                  equal_leaf && equal_leaf->source.pointer == equal_source_pointer);
+        BUSTER_TEST(arguments,
+                    ide_document_test_analysis_stats_equal(ide_document_model_test_last_analysis_stats(&model), equal_stats));
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(equal_work_flags); index += 1)
+        {
+            BUSTER_TEST(arguments, ide_document_model_test_document_work_flags(&model, index) == equal_work_flags[index]);
+        }
+
+        char8* other_source_before_body_edit = ide_document_model_find(&model, other_path)->source.pointer;
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, leaf_path, leaf_body_source) == IDE_DOCUMENT_ERROR_NONE);
+        IdeDocumentAnalysisOperationStats body_stats = ide_document_model_test_last_analysis_stats(&model);
+        BUSTER_TEST(arguments, ide_document_model_analysis_generation(&model) == equal_generation + 1);
+        BUSTER_TEST(arguments, body_stats.parsed_count == 1 && body_stats.indexed_count == 1 && body_stats.analyzed_count == 1 &&
+                                  body_stats.invalidated_count == 1 && body_stats.allocated_snapshot_count == 1 && !body_stats.full_fallback);
+        BUSTER_TEST(arguments, ide_document_model_test_document_work_flags(&model, leaf_index) == all_work);
+        BUSTER_TEST(arguments, ide_document_model_test_document_work_flags(&model, app_index) == 0 &&
+                                  ide_document_model_test_document_work_flags(&model, mid_index) == 0 &&
+                                  ide_document_model_test_document_work_flags(&model, other_index) == 0);
+        BUSTER_TEST(arguments, ide_document_model_find(&model, other_path)->source.pointer == other_source_before_body_edit);
+
+        BUSTER_TEST(arguments, ide_document_model_open(&model, other_path) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, other_path, other_body_source) == IDE_DOCUMENT_ERROR_NONE);
+        IdeDocumentAnalysisOperationStats other_body_stats = ide_document_model_test_last_analysis_stats(&model);
+        BUSTER_TEST(arguments, other_body_stats.parsed_count == 1 && other_body_stats.indexed_count == 1 &&
+                                  other_body_stats.analyzed_count == 1 && other_body_stats.invalidated_count == 1 &&
+                                  other_body_stats.allocated_snapshot_count == 1 && !other_body_stats.full_fallback);
+
+        u64 public_generation = ide_document_model_analysis_generation(&model);
+        char8* other_source_before_public_edit = ide_document_model_find(&model, other_path)->source.pointer;
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, leaf_path, leaf_public_source) == IDE_DOCUMENT_ERROR_NONE);
+        IdeDocumentAnalysisOperationStats public_stats = ide_document_model_test_last_analysis_stats(&model);
+        BUSTER_TEST(arguments, ide_document_model_analysis_generation(&model) == public_generation + 1);
+        BUSTER_TEST(arguments, public_stats.parsed_count == 1 && public_stats.indexed_count == 3 && public_stats.analyzed_count == 3 &&
+                                  public_stats.invalidated_count == 3 && public_stats.allocated_snapshot_count == 3 && !public_stats.full_fallback);
+        BUSTER_TEST(arguments, ide_document_model_test_document_work_flags(&model, leaf_index) == all_work &&
+                                  ide_document_model_test_document_work_flags(&model, mid_index) == dependent_work &&
+                                  ide_document_model_test_document_work_flags(&model, app_index) == dependent_work &&
+                                  ide_document_model_test_document_work_flags(&model, other_index) == 0);
+        BUSTER_TEST(arguments, ide_document_model_find(&model, other_path)->source.pointer == other_source_before_public_edit);
+
+        BUSTER_TEST(arguments, ide_document_model_open(&model, mid_path) == IDE_DOCUMENT_ERROR_NONE);
+        u64 retarget_generation = ide_document_model_analysis_generation(&model);
+        char8* leaf_source_before_retarget = ide_document_model_find(&model, leaf_path)->source.pointer;
+        char8* other_source_before_retarget = ide_document_model_find(&model, other_path)->source.pointer;
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, mid_path, mid_retargeted_source) == IDE_DOCUMENT_ERROR_NONE);
+        IdeDocumentAnalysisOperationStats retarget_stats = ide_document_model_test_last_analysis_stats(&model);
+        BUSTER_TEST(arguments, ide_document_model_analysis_generation(&model) == retarget_generation + 1);
+        BUSTER_TEST(arguments, retarget_stats.parsed_count == 1 && retarget_stats.indexed_count == 2 && retarget_stats.analyzed_count == 2 &&
+                                  retarget_stats.invalidated_count == 2 && retarget_stats.allocated_snapshot_count == 2 &&
+                                  !retarget_stats.full_fallback);
+        BUSTER_TEST(arguments, ide_document_model_test_document_work_flags(&model, mid_index) == all_work &&
+                                  ide_document_model_test_document_work_flags(&model, app_index) == dependent_work &&
+                                  ide_document_model_test_document_work_flags(&model, leaf_index) == 0 &&
+                                  ide_document_model_test_document_work_flags(&model, other_index) == 0);
+        BUSTER_TEST(arguments, ide_document_model_find(&model, leaf_path)->source.pointer == leaf_source_before_retarget &&
+                                  ide_document_model_find(&model, other_path)->source.pointer == other_source_before_retarget);
+
+        u64 rollback_generation = ide_document_model_analysis_generation(&model);
+        IdeDocumentAnalysisOperationStats rollback_stats = ide_document_model_test_last_analysis_stats(&model);
+        u8 rollback_work_flags[4] = {0};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rollback_work_flags); index += 1)
+        {
+            rollback_work_flags[index] = ide_document_model_test_document_work_flags(&model, index);
+        }
+        IdeDocument* rollback_documents = model.workspace.documents;
+        IdeDocumentImport* rollback_imports = model.workspace.imports;
+        IdeDocumentEntitySnapshot* rollback_entities = model.workspace.entities;
+        String8 rollback_root = model.workspace.root_path;
+        IdeDocument* rollback_leaf = ide_document_model_find(&model, leaf_path);
+        String8 rollback_source = rollback_leaf ? rollback_leaf->source : (String8){0};
+        model.max_diagnostics = 0;
+        BUSTER_TEST(arguments,
+                    ide_document_model_set_text(&model, leaf_path, diagnostic_source) == IDE_DOCUMENT_ERROR_DIAGNOSTIC_LIMIT);
+        BUSTER_TEST(arguments, ide_document_model_analysis_generation(&model) == rollback_generation &&
+                                  model.workspace.documents == rollback_documents && model.workspace.imports == rollback_imports &&
+                                  model.workspace.entities == rollback_entities && model.workspace.root_path.pointer == rollback_root.pointer &&
+                                  ide_document_model_find(&model, leaf_path) == rollback_leaf && rollback_leaf &&
+                                  rollback_leaf->source.pointer == rollback_source.pointer && string_equal(rollback_leaf->source, rollback_source));
+        BUSTER_TEST(arguments,
+                    ide_document_test_analysis_stats_equal(ide_document_model_test_last_analysis_stats(&model), rollback_stats));
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rollback_work_flags); index += 1)
+        {
+            BUSTER_TEST(arguments, ide_document_model_test_document_work_flags(&model, index) == rollback_work_flags[index]);
+        }
+        model.max_diagnostics = IDE_DOCUMENT_DEFAULT_MAX_DIAGNOSTICS;
+
+        // Materialize the incrementally edited workspace and compare its public
+        // analysis snapshots with a fresh full rebuild of the same sources.
+        BUSTER_TEST(arguments, file_write(leaf_path, BUSTER_SLICE_TO_BYTE_SLICE(leaf_public_source)));
+        BUSTER_TEST(arguments, file_write(mid_path, BUSTER_SLICE_TO_BYTE_SLICE(mid_retargeted_source)));
+        BUSTER_TEST(arguments, file_write(other_path, BUSTER_SLICE_TO_BYTE_SLICE(other_body_source)));
+        Arena* clean_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(32)});
+        Arena* clean_staging_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(32)});
+        BUSTER_TEST(arguments, clean_arena != 0 && clean_staging_arena != 0);
+        if (clean_arena && clean_staging_arena)
+        {
+            IdeDocumentModel clean_model = {0};
+            BUSTER_TEST(arguments,
+                        ide_document_model_initialize(&clean_model, clean_arena, clean_staging_arena,
+                                                      (IdeDocumentModelOptions){.workspace_root = root}) == IDE_DOCUMENT_ERROR_NONE);
+            if (clean_model.initialized)
+            {
+                BUSTER_TEST(arguments, ide_document_test_analysis_outcome_equal(&model, &clean_model));
+                ide_document_model_deinitialize(&clean_model);
+            }
+        }
+        if (clean_arena)
+        {
+            BUSTER_TEST(arguments, arena_destroy(clean_arena, 1));
+        }
+        if (clean_staging_arena)
+        {
+            BUSTER_TEST(arguments, arena_destroy(clean_staging_arena, 1));
+        }
+        ide_document_model_deinitialize(&model);
+    }
+    BUSTER_TEST(arguments, os_directory_delete(root));
+
+    String8 generic_root = ide_document_test_temporary_root(test_arena, S8("buster-ide-document-incremental-generic"));
+    String8 generic_path = string_format_z(test_arena, S8("{S8}/generic.bbb"), generic_root);
+    String8 plain_path = string_format_z(test_arena, S8("{S8}/plain.bbb"), generic_root);
+    String8 generic_source = S8("code identity : fn ($value: $T) $T { return value; }\n");
+    String8 plain_source = S8("code plain : fn () s32 { return 1; }\n");
+    String8 plain_edited_source = S8("code plain : fn () s32 { return 2; }\n");
+    os_directory_delete(generic_root);
+    os_make_directory(generic_root);
+    BUSTER_TEST(arguments, file_write(generic_path, BUSTER_SLICE_TO_BYTE_SLICE(generic_source)));
+    BUSTER_TEST(arguments, file_write(plain_path, BUSTER_SLICE_TO_BYTE_SLICE(plain_source)));
+
+    error = ide_document_model_initialize(&model, arena, staging_arena,
+                                          (IdeDocumentModelOptions){.workspace_root = generic_root, .open_path = plain_path});
+    BUSTER_TEST(arguments, error == IDE_DOCUMENT_ERROR_NONE);
+    if (model.initialized)
+    {
+        BUSTER_TEST(arguments, model.workspace.document_count == 2 && model.workspace.analysis_contains_generics);
+        u32 generic_index = ide_document_test_index(&model, generic_path);
+        u32 plain_index = ide_document_test_index(&model, plain_path);
+        BUSTER_TEST(arguments, generic_index != IDE_DOCUMENT_INDEX_INVALID && plain_index != IDE_DOCUMENT_INDEX_INVALID);
+        u64 generation = ide_document_model_analysis_generation(&model);
+        char8* generic_source_pointer = ide_document_model_find(&model, generic_path)->source.pointer;
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, plain_path, plain_edited_source) == IDE_DOCUMENT_ERROR_NONE);
+        IdeDocumentAnalysisOperationStats stats = ide_document_model_test_last_analysis_stats(&model);
+        BUSTER_TEST(arguments, ide_document_model_analysis_generation(&model) == generation + 1);
+        BUSTER_TEST(arguments, stats.parsed_count == 1 && stats.indexed_count == 2 && stats.analyzed_count == 2 &&
+                                  stats.invalidated_count == 2 && stats.allocated_snapshot_count == 2 && stats.full_fallback);
+        BUSTER_TEST(arguments, ide_document_model_test_document_work_flags(&model, plain_index) == all_work &&
+                                  ide_document_model_test_document_work_flags(&model, generic_index) == dependent_work);
+        BUSTER_TEST(arguments, ide_document_model_find(&model, generic_path)->source.pointer == generic_source_pointer);
+        ide_document_model_deinitialize(&model);
+    }
+    BUSTER_TEST(arguments, os_directory_delete(generic_root));
+
+    String8 cyclic_root = ide_document_test_temporary_root(test_arena, S8("buster-ide-document-incremental-cycle"));
+    String8 cycle_a_path = string_format_z(test_arena, S8("{S8}/a.bbb"), cyclic_root);
+    String8 cycle_b_path = string_format_z(test_arena, S8("{S8}/b.bbb"), cyclic_root);
+    String8 cycle_a_source = S8("import b = \"b\";\ncode a : fn () s32 { return b.b(); }\n");
+    String8 cycle_b_source = S8("import a = \"a\";\ncode b : fn () s32 { return 1; }\n");
+    String8 cycle_b_edited_source = S8("import a = \"a\";\ncode b : fn () s32 { return 2; }\n");
+    os_directory_delete(cyclic_root);
+    os_make_directory(cyclic_root);
+    BUSTER_TEST(arguments, file_write(cycle_a_path, BUSTER_SLICE_TO_BYTE_SLICE(cycle_a_source)));
+    BUSTER_TEST(arguments, file_write(cycle_b_path, BUSTER_SLICE_TO_BYTE_SLICE(cycle_b_source)));
+
+    error = ide_document_model_initialize(&model, arena, staging_arena,
+                                          (IdeDocumentModelOptions){.workspace_root = cyclic_root, .open_path = cycle_b_path});
+    BUSTER_TEST(arguments, error == IDE_DOCUMENT_ERROR_NONE);
+    if (model.initialized)
+    {
+        BUSTER_TEST(arguments, model.workspace.document_count == 2 && model.workspace.analysis_has_cycles);
+        u32 cycle_a_index = ide_document_test_index(&model, cycle_a_path);
+        u32 cycle_b_index = ide_document_test_index(&model, cycle_b_path);
+        BUSTER_TEST(arguments, cycle_a_index != IDE_DOCUMENT_INDEX_INVALID && cycle_b_index != IDE_DOCUMENT_INDEX_INVALID);
+        u64 generation = ide_document_model_analysis_generation(&model);
+        IdeDocument* cycle_a = ide_document_model_find(&model, cycle_a_path);
+        char8* cycle_a_source_pointer = cycle_a ? cycle_a->source.pointer : 0;
+        BUSTER_TEST(arguments, ide_document_model_set_text(&model, cycle_b_path, cycle_b_edited_source) == IDE_DOCUMENT_ERROR_NONE);
+        IdeDocumentAnalysisOperationStats stats = ide_document_model_test_last_analysis_stats(&model);
+        BUSTER_TEST(arguments, ide_document_model_analysis_generation(&model) == generation + 1);
+        BUSTER_TEST(arguments, stats.parsed_count == 1 && stats.indexed_count == 2 && stats.analyzed_count == 2 &&
+                                  stats.invalidated_count == 2 && stats.allocated_snapshot_count == 2 && stats.full_fallback);
+        BUSTER_TEST(arguments, ide_document_model_test_document_work_flags(&model, cycle_b_index) == all_work &&
+                                  ide_document_model_test_document_work_flags(&model, cycle_a_index) == dependent_work);
+        cycle_a = ide_document_model_find(&model, cycle_a_path);
+        BUSTER_TEST(arguments, cycle_a && cycle_a->source.pointer == cycle_a_source_pointer);
+        ide_document_model_deinitialize(&model);
+    }
+    BUSTER_TEST(arguments, os_directory_delete(cyclic_root));
+
+    String8 recovered_root = ide_document_test_temporary_root(test_arena, S8("buster-ide-document-recovered-import"));
+    String8 recovered_invalid_path = string_format_z(test_arena, S8("{S8}/a.bbb"), recovered_root);
+    String8 recovered_valid_path = string_format_z(test_arena, S8("{S8}/b.bbb"), recovered_root);
+    String8 recovered_invalid_source = S8("import b = \"b\";\n@\n");
+    String8 recovered_valid_source = S8("import a = \"a\";\ncode b : fn () s32 { return 1; }\n");
+    String8 recovered_valid_edited_source = S8("import a = \"a\";\ncode b : fn () s32 { return 2; }\n");
+    os_directory_delete(recovered_root);
+    os_make_directory(recovered_root);
+    BUSTER_TEST(arguments, file_write(recovered_invalid_path, BUSTER_SLICE_TO_BYTE_SLICE(recovered_invalid_source)));
+    BUSTER_TEST(arguments, file_write(recovered_valid_path, BUSTER_SLICE_TO_BYTE_SLICE(recovered_valid_source)));
+
+    error = ide_document_model_initialize(&model, arena, staging_arena,
+                                          (IdeDocumentModelOptions){.workspace_root = recovered_root, .open_path = recovered_valid_path});
+    BUSTER_TEST(arguments, error == IDE_DOCUMENT_ERROR_NONE);
+    if (model.initialized)
+    {
+        BUSTER_TEST(arguments, model.workspace.document_count == 2 && model.workspace.import_count == 2 &&
+                                  !model.workspace.analysis_has_cycles);
+        IdeDocumentImport* recovered_invalid_import = 0;
+        IdeDocumentImport* recovered_valid_import = 0;
+        for (u32 import_index = 0; import_index < model.workspace.import_count; import_index += 1)
+        {
+            IdeDocumentImport* import = ide_document_model_import_at(&model, import_index);
+            if (import && string_equal(import->source_path, recovered_invalid_path))
+            {
+                recovered_invalid_import = import;
+            }
+            else if (import && string_equal(import->source_path, recovered_valid_path))
+            {
+                recovered_valid_import = import;
+            }
+        }
+        BUSTER_TEST(arguments, recovered_invalid_import && recovered_invalid_import->state == IDE_DOCUMENT_IMPORT_RESOLVED);
+        BUSTER_TEST(arguments, recovered_valid_import && recovered_valid_import->state == IDE_DOCUMENT_IMPORT_RESOLVED &&
+                                  string_equal(recovered_valid_import->target_path, recovered_invalid_path));
+        IdeDocument* recovered_invalid = ide_document_model_find(&model, recovered_invalid_path);
+        IdeDocument* recovered_valid = ide_document_model_find(&model, recovered_valid_path);
+        BUSTER_TEST(arguments, recovered_invalid && recovered_invalid->diagnostic_count != 0);
+        BUSTER_TEST(arguments, recovered_valid && recovered_valid->diagnostic_count == 0);
+
+        u64 generation = ide_document_model_analysis_generation(&model);
+        BUSTER_TEST(arguments,
+                    ide_document_model_set_text(&model, recovered_valid_path, recovered_valid_edited_source) == IDE_DOCUMENT_ERROR_NONE);
+        IdeDocumentAnalysisOperationStats stats = ide_document_model_test_last_analysis_stats(&model);
+        BUSTER_TEST(arguments, ide_document_model_analysis_generation(&model) == generation + 1 && !model.workspace.analysis_has_cycles);
+        BUSTER_TEST(arguments, stats.parsed_count == 1 && stats.indexed_count == 1 && stats.analyzed_count == 1 &&
+                                  stats.invalidated_count == 1 && stats.allocated_snapshot_count == 1 && !stats.full_fallback);
+        ide_document_model_deinitialize(&model);
+    }
+    BUSTER_TEST(arguments, os_directory_delete(recovered_root));
+    return result;
+}
 #endif
 
 UnitTestResult ide_document_tests(UnitTestArguments* arguments)
@@ -85,7 +492,7 @@ UnitTestResult ide_document_tests(UnitTestArguments* arguments)
     String8 b_path = string_format_z(test_arena, S8("{S8}/sub/b.bbb"), root);
     String8 z_path = string_format_z(test_arena, S8("{S8}/z.bbb"), root);
     String8 unsupported_open_path = string_format_z(test_arena, S8("{S8}/notes.txt"), root);
-    String8 a_source = S8("import b = \"sub/b\";\ncode main : fn () s32 { return 0; }\n");
+    String8 a_source = S8("import b = \"sub/b.bbb\";\ncode main : fn () s32 { return 0; }\n");
     String8 b_source = S8("import a = \"a\";\ncode helper : fn () s32 { return 0; }\n");
     String8 z_source = S8("code zed : fn () s32 { return 0; }\n");
 
@@ -729,6 +1136,9 @@ UnitTestResult ide_document_tests(UnitTestArguments* arguments)
     }
 
     ide_document_model_deinitialize(&model);
+    UnitTestResult incremental_analysis_result = ide_document_incremental_analysis_tests(arguments, test_arena, arena, staging_arena);
+    result.succeeded_test_count += incremental_analysis_result.succeeded_test_count;
+    result.test_count += incremental_analysis_result.test_count;
     {
         String8 second_root = ide_document_test_temporary_root(test_arena, S8("buster-ide-document-second-root"));
         String8 second_path = string_format_z(test_arena, S8("{S8}/second.bbb"), second_root);

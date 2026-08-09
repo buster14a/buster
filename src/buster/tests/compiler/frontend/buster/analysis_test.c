@@ -237,6 +237,131 @@ UnitTestResult analysis_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, b_module.diagnostic_count == 1);
     BUSTER_TEST(arguments, b_module.first_diagnostic != 0 && b_module.first_diagnostic->kind == ANALYSIS_DIAGNOSTIC_IMPORT_CYCLE);
 
+    AstImport incremental_cycle_import = {
+        .name_space = {.text = S8("cycle"), .range = analysis_test_range(30)},
+        .path = S8("incremental/cycle"),
+        .range = analysis_test_range(30),
+    };
+    AstImport incremental_ambiguous_import = {
+        .next = &incremental_cycle_import,
+        .name_space = {.text = S8("ambiguous"), .range = analysis_test_range(20)},
+        .path = S8("incremental/ambiguous"),
+        .range = analysis_test_range(20),
+    };
+    AstImport incremental_missing_import = {
+        .next = &incremental_ambiguous_import,
+        .name_space = {.text = S8("missing"), .range = analysis_test_range(10)},
+        .path = S8("incremental/missing"),
+        .range = analysis_test_range(10),
+    };
+    AstImport incremental_resolved_import = {
+        .next = &incremental_missing_import,
+        .name_space = {.text = S8("resolved"), .range = analysis_test_range(0)},
+        .path = S8("incremental/resolved"),
+        .range = analysis_test_range(0),
+    };
+    ParserResult incremental_parser = {
+        .first_import = &incremental_resolved_import,
+        .last_import = &incremental_cycle_import,
+        .import_count = 4,
+    };
+    AnalysisSourceInput incremental_input = {.path = S8("incremental.bbb"), .parser = &incremental_parser};
+    AnalysisResult incremental_module =
+        analysis_index_module(arguments->arena, (AnalysisModuleId){.value = 25}, S8("incremental"), &incremental_input, 1);
+
+    AnalysisSourceInput incremental_resolved_target_input = {.path = S8("incremental-resolved.bbb")};
+    AnalysisResult incremental_resolved_target = analysis_index_module(arguments->arena, (AnalysisModuleId){.value = 26}, S8("incremental/resolved"),
+                                                                       &incremental_resolved_target_input, 1);
+    AstImport incremental_cycle_target_import = {
+        .name_space = {.text = S8("legacy"), .range = analysis_test_range(0)},
+        .path = S8("legacy/target"),
+        .range = analysis_test_range(0),
+    };
+    ParserResult incremental_cycle_target_parser = {
+        .first_import = &incremental_cycle_target_import,
+        .last_import = &incremental_cycle_target_import,
+        .import_count = 1,
+    };
+    AnalysisSourceInput incremental_cycle_target_input = {
+        .path = S8("incremental-cycle.bbb"),
+        .parser = &incremental_cycle_target_parser,
+    };
+    AnalysisResult incremental_cycle_target = analysis_index_module(arguments->arena, (AnalysisModuleId){.value = 27}, S8("incremental/cycle"),
+                                                                    &incremental_cycle_target_input, 1);
+
+    AnalysisResult* resolved_target_program_sentinel[] = {&incremental_resolved_target};
+    incremental_resolved_target.program_modules = resolved_target_program_sentinel;
+    incremental_resolved_target.program_module_count = BUSTER_ARRAY_LENGTH(resolved_target_program_sentinel);
+    AnalysisResult* cycle_target_program_sentinel[] = {&incremental_cycle_target, &incremental_resolved_target};
+    incremental_cycle_target.program_modules = cycle_target_program_sentinel;
+    incremental_cycle_target.program_module_count = BUSTER_ARRAY_LENGTH(cycle_target_program_sentinel);
+    AnalysisImport* cycle_target_import_sentinel = incremental_cycle_target.module.imports;
+    cycle_target_import_sentinel->target = &math_module;
+    cycle_target_import_sentinel->target_id = math_module.module.id;
+    cycle_target_import_sentinel->state = ANALYSIS_IMPORT_RESOLVED;
+
+    AnalysisResult* incremental_visible_modules[] = {&incremental_module, &incremental_resolved_target, &incremental_cycle_target};
+    AnalysisImportBinding incremental_bindings[] = {
+        {.target = &incremental_resolved_target, .state = ANALYSIS_IMPORT_RESOLVED},
+        {.state = ANALYSIS_IMPORT_MISSING},
+        {.state = ANALYSIS_IMPORT_AMBIGUOUS},
+        {.target = &incremental_cycle_target, .state = ANALYSIS_IMPORT_CYCLE},
+    };
+    analysis_bind_module_imports(arguments->arena, &incremental_module, incremental_visible_modules,
+                                 BUSTER_ARRAY_LENGTH(incremental_visible_modules), incremental_bindings, BUSTER_ARRAY_LENGTH(incremental_bindings));
+
+    BUSTER_TEST(arguments, incremental_module.program_module_count == BUSTER_ARRAY_LENGTH(incremental_visible_modules));
+    BUSTER_TEST(arguments, incremental_module.program_modules != incremental_visible_modules);
+    BUSTER_TEST(arguments, incremental_module.program_modules[0] == &incremental_module);
+    BUSTER_TEST(arguments, incremental_module.program_modules[1] == &incremental_resolved_target);
+    BUSTER_TEST(arguments, incremental_module.program_modules[2] == &incremental_cycle_target);
+    incremental_visible_modules[1] = 0;
+    BUSTER_TEST(arguments, incremental_module.program_modules[1] == &incremental_resolved_target);
+    BUSTER_STRING_TEST(arguments, analysis_source_path(&incremental_module, incremental_resolved_target.module.id, (AnalysisSourceId){.value = 0}),
+                       S8("incremental-resolved.bbb"));
+
+    BUSTER_TEST(arguments, incremental_module.module.imports[0].target == &incremental_resolved_target);
+    BUSTER_TEST(arguments, incremental_module.module.imports[0].target_id.value == incremental_resolved_target.module.id.value);
+    BUSTER_TEST(arguments, incremental_module.module.imports[0].state == ANALYSIS_IMPORT_RESOLVED);
+    BUSTER_TEST(arguments, incremental_module.module.imports[1].target == 0);
+    BUSTER_TEST(arguments, incremental_module.module.imports[1].target_id.value == ANALYSIS_MODULE_ID_INVALID.value);
+    BUSTER_TEST(arguments, incremental_module.module.imports[1].state == ANALYSIS_IMPORT_MISSING);
+    BUSTER_TEST(arguments, incremental_module.module.imports[2].target == 0);
+    BUSTER_TEST(arguments, incremental_module.module.imports[2].target_id.value == ANALYSIS_MODULE_ID_INVALID.value);
+    BUSTER_TEST(arguments, incremental_module.module.imports[2].state == ANALYSIS_IMPORT_AMBIGUOUS);
+    BUSTER_TEST(arguments, incremental_module.module.imports[3].target == &incremental_cycle_target);
+    BUSTER_TEST(arguments, incremental_module.module.imports[3].target_id.value == incremental_cycle_target.module.id.value);
+    BUSTER_TEST(arguments, incremental_module.module.imports[3].state == ANALYSIS_IMPORT_CYCLE);
+
+    BUSTER_TEST(arguments, incremental_module.diagnostic_count == 3);
+    AnalysisDiagnostic* incremental_missing_diagnostic = incremental_module.first_diagnostic;
+    AnalysisDiagnostic* incremental_ambiguous_diagnostic = incremental_missing_diagnostic ? incremental_missing_diagnostic->next : 0;
+    AnalysisDiagnostic* incremental_cycle_diagnostic = incremental_ambiguous_diagnostic ? incremental_ambiguous_diagnostic->next : 0;
+    BUSTER_TEST(arguments, incremental_missing_diagnostic &&
+                               incremental_missing_diagnostic->kind == ANALYSIS_DIAGNOSTIC_MISSING_IMPORTED_MODULE);
+    BUSTER_TEST(arguments, incremental_ambiguous_diagnostic &&
+                               incremental_ambiguous_diagnostic->kind == ANALYSIS_DIAGNOSTIC_AMBIGUOUS_IMPORTED_MODULE);
+    BUSTER_TEST(arguments, incremental_cycle_diagnostic && incremental_cycle_diagnostic->kind == ANALYSIS_DIAGNOSTIC_IMPORT_CYCLE);
+    BUSTER_TEST(arguments, incremental_cycle_diagnostic && !incremental_cycle_diagnostic->next);
+    BUSTER_TEST(arguments, incremental_module.last_diagnostic == incremental_cycle_diagnostic);
+    if (incremental_missing_diagnostic && incremental_ambiguous_diagnostic && incremental_cycle_diagnostic)
+    {
+        BUSTER_STRING_TEST(arguments, incremental_missing_diagnostic->message, S8("imported module was not found"));
+        BUSTER_STRING_TEST(arguments, incremental_ambiguous_diagnostic->message, S8("imported module name is ambiguous"));
+        BUSTER_STRING_TEST(arguments, incremental_cycle_diagnostic->message, S8("module import cycle"));
+    }
+
+    BUSTER_TEST(arguments, incremental_resolved_target.program_modules == resolved_target_program_sentinel);
+    BUSTER_TEST(arguments, incremental_resolved_target.program_module_count == BUSTER_ARRAY_LENGTH(resolved_target_program_sentinel));
+    BUSTER_TEST(arguments, incremental_cycle_target.program_modules == cycle_target_program_sentinel);
+    BUSTER_TEST(arguments, incremental_cycle_target.program_module_count == BUSTER_ARRAY_LENGTH(cycle_target_program_sentinel));
+    BUSTER_TEST(arguments, incremental_cycle_target.module.imports == cycle_target_import_sentinel);
+    BUSTER_TEST(arguments, cycle_target_import_sentinel->target == &math_module);
+    BUSTER_TEST(arguments, cycle_target_import_sentinel->target_id.value == math_module.module.id.value);
+    BUSTER_TEST(arguments, cycle_target_import_sentinel->state == ANALYSIS_IMPORT_RESOLVED);
+    BUSTER_TEST(arguments, incremental_resolved_target.diagnostic_count == 0);
+    BUSTER_TEST(arguments, incremental_cycle_target.diagnostic_count == 0);
+
     AstImport duplicate_second = {
         .name_space = {.text = S8("same"), .range = analysis_test_range(10)},
         .path = S8("two"),

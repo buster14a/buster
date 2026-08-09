@@ -379,6 +379,46 @@ struct AnalysisImportTraversalFrame
     u32 next_import;
 };
 
+void analysis_bind_module_imports(Arena* result_arena, AnalysisResult* module, AnalysisResult** visible_modules, u32 visible_module_count,
+                                  const AnalysisImportBinding* bindings, u32 binding_count)
+{
+    BUSTER_CHECK(module);
+    BUSTER_CHECK(binding_count == module->module.import_count);
+    BUSTER_CHECK(!visible_module_count || visible_modules);
+    BUSTER_CHECK(!binding_count || bindings);
+    AnalysisResult** program_modules = arena_allocate(result_arena, AnalysisResult*, visible_module_count);
+    for (u32 module_index = 0; module_index < visible_module_count; module_index += 1)
+    {
+        program_modules[module_index] = visible_modules[module_index];
+    }
+    module->program_modules = program_modules;
+    module->program_module_count = visible_module_count;
+
+    for (u32 import_index = 0; import_index < binding_count; import_index += 1)
+    {
+        AnalysisImport* import = module->module.imports + import_index;
+        const AnalysisImportBinding* binding = bindings + import_index;
+        BUSTER_CHECK((u32)binding->state < ANALYSIS_IMPORT_COUNT);
+        import->target = binding->target;
+        import->target_id = binding->target ? binding->target->module.id : ANALYSIS_MODULE_ID_INVALID;
+        import->state = binding->state;
+        if (binding->state == ANALYSIS_IMPORT_MISSING)
+        {
+            analysis_import_diagnostic_push(result_arena, module, import, ANALYSIS_DIAGNOSTIC_MISSING_IMPORTED_MODULE, S8("imported module was not found"),
+                                            0);
+        }
+        else if (binding->state == ANALYSIS_IMPORT_AMBIGUOUS)
+        {
+            analysis_import_diagnostic_push(result_arena, module, import, ANALYSIS_DIAGNOSTIC_AMBIGUOUS_IMPORTED_MODULE,
+                                            S8("imported module name is ambiguous"), 0);
+        }
+        else if (binding->state == ANALYSIS_IMPORT_CYCLE)
+        {
+            analysis_import_diagnostic_push(result_arena, module, import, ANALYSIS_DIAGNOSTIC_IMPORT_CYCLE, S8("module import cycle"), 0);
+        }
+    }
+}
+
 void analysis_resolve_imports(Arena* result_arena, AnalysisResult** modules, u32 module_count)
 {
     AnalysisResult** program_modules = arena_allocate(result_arena, AnalysisResult*, module_count);

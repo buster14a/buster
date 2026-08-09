@@ -12,6 +12,62 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09j` (Linux x86_64, Zen 4 7940HS; incremental IDE workspace
+analysis. **Normal body edits now parse, index, analyze, and invalidate only
+the changed document; exported-interface or import changes reanalyze only the
+old/new reverse dependency cone.**)
+
+- **What was built.** IDE documents now publish immutable, reference-counted
+  syntax and module snapshots. Unchanged source/token/parser storage is shared
+  across revisions. A normalized import graph carries forward and reverse
+  edges plus deterministic dependency order, and exact tagged interface
+  fingerprints distinguish body-only edits from import/type/data/code-signature
+  changes. Publication is transactional: allocation or diagnostic-limit
+  failure leaves the committed workspace generation and pointers untouched.
+  Generic and cyclic workspaces retain a conservative full-semantic fallback,
+  but still parse only the changed source. Recovered imports from syntax-invalid
+  documents remain visible to the UI without participating in the semantic
+  dependency graph. Incremental analysis owners retain a dense
+  `affected_count` snapshot array; workspace-wide pointer/visibility scratch
+  stays in staging storage, and each syntax/analysis owner initially commits
+  one native OS page.
+  Rebase integration with main's allocator and lazy-global hardening widens
+  document-count arithmetic before allocation, uses a non-wrapping reverse
+  prefix walk, and prewarms tokenizer tables at the model's serial
+  initialization boundary.
+- **Measured work sets.** A body edit in a four-document workspace is exactly
+  `parsed=1 indexed=1 analyzed=1 invalidated=1`; an interface edit of the leaf
+  of a three-document chain is `1/3/3/3`, while an independent fourth document
+  keeps both its work flags and source-storage pointer. Import retargeting is
+  restricted to the importer and its dependent. Exact same-text updates are
+  true no-ops, and rollback, full-rebuild equivalence, generic fallback, cycle
+  fallback, normalized/canonical import paths, and invalid-module recovered
+  imports all have direct regressions. Two edits of independent documents each
+  prove that exactly one semantic snapshot is allocated, rather than one slot
+  per workspace document.
+- **Compiler-throughput cost.** Against current main `4530f074`, stage 1 moved
+  from `5,151,608,556` to `5,204,253,939` instructions (`+1.022%`) while
+  preprocessed tokens moved from `1,383,454` to `1,398,096` (`+1.058%`);
+  instructions per token therefore moved from `3723.730` to `3722.387`
+  (`-0.036%`, effectively neutral). The deterministic executable grew from
+  `26,787,912` to `26,990,352` bytes (`+0.756%`). Stage 2 moved from
+  `69,625,494,331` to `70,352,079,541` instructions (`+1.044%`). Five
+  alternating stage-2 benchmark pairs were neutral: minimum I/O was
+  `1.951 ms` on main versus `1.954 ms` here (`+0.1%`), and minimum parse was
+  `1.730 ms` versus `1.724 ms` (`-0.4%`).
+- **Gates.** The clean rebased branch reached a byte-identical self-host fixed
+  point at `26,990,352` bytes with identical `1,398,096`-token streams. Release
+  and Debug passed `19,696/19,696` assertions, ASan+UBSan Debug passed
+  `18,828/18,828`, and all three completed all 29 module tests. Tests-disabled
+  self-host compilation and independent rebase review passed.
+- **Known capacity limit.** Every live syntax or analysis owner still reserves
+  128 MiB of uncommitted virtual address space because repository arenas cannot
+  grow and shrinking the reservation would impose a new hard per-document
+  allocation cap. Native-page initial commit avoids the physical multiplier,
+  but a worst-case 4,096-document workspace in which every document has been
+  touched can reserve roughly 1 TiB of VA. Slab compaction or a proven dynamic
+  upper bound remains follow-up work for constrained mobile address spaces.
+
 `2026-08-09i` (Linux x86_64, Zen 4 7940HS; the 512-bit SIMD builtin
 vocabulary and the tokenizer port onto it, measured against `2026-08-09g` on
 the same tree. **The self-hosted compiler now runs the AVX-512 tokenizer:

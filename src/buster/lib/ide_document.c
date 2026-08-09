@@ -8,6 +8,16 @@
 #include <stdio.h>
 #endif
 
+#if !BUSTER_INCLUDE_TESTS
+enum
+{
+    IDE_DOCUMENT_ANALYSIS_WORK_PARSED = 1 << 0,
+    IDE_DOCUMENT_ANALYSIS_WORK_INDEXED = 1 << 1,
+    IDE_DOCUMENT_ANALYSIS_WORK_ANALYZED = 1 << 2,
+    IDE_DOCUMENT_ANALYSIS_WORK_INVALIDATED = 1 << 3,
+};
+#endif
+
 typedef enum IdePathKind
 {
     IDE_PATH_MISSING,
@@ -32,12 +42,84 @@ struct IdeLoadedFile
     u64 hash;
 };
 
-typedef struct IdeParsedDocument IdeParsedDocument;
-struct IdeParsedDocument
+typedef struct IdeSyntaxRevision IdeSyntaxRevision;
+typedef struct IdeModuleSnapshot IdeModuleSnapshot;
+
+struct IdeDocumentStorageOwner
 {
+    Arena* arena;
+    IdeDocumentStorageOwner** dependencies;
+    IdeDocumentStorageOwner* staging_next;
+    IdeDocumentStorageOwner* release_next;
+    u32 dependency_count;
+    u32 reference_count;
+};
+
+typedef struct IdeSyntaxBatch IdeSyntaxBatch;
+struct IdeSyntaxBatch
+{
+    IdeDocumentStorageOwner owner;
+};
+
+struct IdeSyntaxRevision
+{
+    IdeDocumentStorageOwner* owner;
+    String8 source;
+    String8 interface_bytes;
+    TokenizerResult tokenizer;
     ParserResult parser;
+    u64 interface_hash;
     u32 tokenizer_error_count;
+    bool has_syntax;
     bool analysis_eligible;
+    bool has_generic_syntax;
+    u8 reserved[1];
+};
+
+typedef struct IdeAnalysisBatch IdeAnalysisBatch;
+struct IdeAnalysisBatch
+{
+    IdeDocumentStorageOwner owner;
+    IdeModuleSnapshot* snapshots;
+    u32 snapshot_count;
+};
+
+struct IdeModuleSnapshot
+{
+    IdeDocumentStorageOwner* owner;
+    IdeSyntaxRevision* syntax;
+    AnalysisResult* analysis;
+    String8 interface_bytes;
+    IdeDocumentImport* imports;
+    IdeDocumentEntitySnapshot* entities;
+    IdeDocumentDiagnostic* diagnostics;
+    u64 interface_hash;
+    u32 import_count;
+    u32 entity_count;
+    u32 diagnostic_count;
+    bool has_generic_entities;
+    u8 reserved[3];
+};
+
+struct IdeDocumentRevisionState
+{
+    IdeSyntaxRevision* current;
+    IdeSyntaxRevision* saved;
+    IdeModuleSnapshot* module;
+};
+
+struct IdeDocumentGraph
+{
+    u32* import_offsets;
+    u32* binding_targets;
+    AnalysisImportResolutionState* binding_states;
+    u32* forward_offsets;
+    u32* forward_edges;
+    u32* reverse_offsets;
+    u32* reverse_edges;
+    u32* dependency_order;
+    u32 edge_count;
+    bool has_cycle;
     u8 reserved[3];
 };
 
@@ -63,6 +145,158 @@ BUSTER_GLOBAL_LOCAL bool ide_test_clobber_open_path_scratch;
 
 BUSTER_GLOBAL_LOCAL String8 ide_string_copy(Arena* arena, String8 string);
 
+BUSTER_GLOBAL_LOCAL void ide_owner_retain(IdeDocumentStorageOwner* owner)
+{
+    if (owner)
+    {
+        BUSTER_CHECK(owner->reference_count < UINT32_MAX);
+        owner->reference_count += 1;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ide_owner_release(IdeDocumentStorageOwner* owner)
+{
+    if (!owner)
+    {
+        return;
+    }
+    BUSTER_CHECK(owner->reference_count);
+    owner->reference_count -= 1;
+    IdeDocumentStorageOwner* pending = 0;
+    if (!owner->reference_count)
+    {
+        owner->release_next = pending;
+        pending = owner;
+    }
+    while (pending)
+    {
+        IdeDocumentStorageOwner* current = pending;
+        pending = current->release_next;
+        for (u32 index = 0; index < current->dependency_count; index += 1)
+        {
+            IdeDocumentStorageOwner* dependency = current->dependencies[index];
+            BUSTER_CHECK(dependency && dependency->reference_count);
+            dependency->reference_count -= 1;
+            if (!dependency->reference_count)
+            {
+                dependency->release_next = pending;
+                pending = dependency;
+            }
+        }
+        Arena* arena = current->arena;
+        BUSTER_CHECK(arena);
+        BUSTER_CHECK(arena_destroy(arena, 1));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ide_model_stage_owner(IdeDocumentModel* model, IdeDocumentStorageOwner* owner)
+{
+    BUSTER_CHECK(model && owner && owner->reference_count == 1);
+    owner->staging_next = model->staged_owners;
+    model->staged_owners = owner;
+}
+
+BUSTER_GLOBAL_LOCAL void ide_model_unstage_owner(IdeDocumentModel* model, IdeDocumentStorageOwner* owner)
+{
+    IdeDocumentStorageOwner** link = &model->staged_owners;
+    while (*link && *link != owner)
+    {
+        link = &(*link)->staging_next;
+    }
+    BUSTER_CHECK(*link == owner);
+    *link = owner->staging_next;
+    owner->staging_next = 0;
+    ide_owner_release(owner);
+}
+
+BUSTER_GLOBAL_LOCAL void ide_model_release_staged_owners(IdeDocumentModel* model)
+{
+    IdeDocumentStorageOwner* owner = model->staged_owners;
+    model->staged_owners = 0;
+    while (owner)
+    {
+        IdeDocumentStorageOwner* next = owner->staging_next;
+        owner->staging_next = 0;
+        ide_owner_release(owner);
+        owner = next;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ide_owner_dependencies_set(IdeDocumentStorageOwner* owner, IdeDocumentStorageOwner** dependencies, u32 dependency_count)
+{
+    BUSTER_CHECK(owner && !owner->dependencies && !owner->dependency_count);
+    if (!dependency_count)
+    {
+        return;
+    }
+    owner->dependencies = arena_allocate(owner->arena, IdeDocumentStorageOwner*, dependency_count);
+    for (u32 index = 0; index < dependency_count; index += 1)
+    {
+        IdeDocumentStorageOwner* dependency = dependencies[index];
+        if (!dependency || dependency == owner)
+        {
+            continue;
+        }
+        bool duplicate = false;
+        for (u32 previous = 0; previous < owner->dependency_count; previous += 1)
+        {
+            duplicate |= owner->dependencies[previous] == dependency;
+        }
+        if (!duplicate)
+        {
+            owner->dependencies[owner->dependency_count] = dependency;
+            owner->dependency_count += 1;
+            ide_owner_retain(dependency);
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL Arena* ide_storage_arena_create(void)
+{
+    // Owner arenas cannot grow their reservation. Preserve enough address-space
+    // capacity for large sources, but commit only one native page up front.
+    u64 page_size = os_get_page_size();
+    return arena_create((ArenaCreation){
+        .reserved_size = BUSTER_MB(128),
+        .granularity = page_size,
+        .initial_size = page_size,
+    });
+}
+
+BUSTER_GLOBAL_LOCAL IdeSyntaxBatch* ide_syntax_batch_create(IdeDocumentModel* model)
+{
+    Arena* arena = ide_storage_arena_create();
+    if (!arena)
+    {
+        return 0;
+    }
+    IdeSyntaxBatch* batch = arena_allocate(arena, IdeSyntaxBatch, 1);
+    *batch = (IdeSyntaxBatch){.owner = {.arena = arena, .reference_count = 1}};
+    ide_model_stage_owner(model, &batch->owner);
+    return batch;
+}
+
+BUSTER_GLOBAL_LOCAL IdeAnalysisBatch* ide_analysis_batch_create(IdeDocumentModel* model, u32 snapshot_count)
+{
+    Arena* arena = ide_storage_arena_create();
+    if (!arena)
+    {
+        return 0;
+    }
+    IdeAnalysisBatch* batch = arena_allocate(arena, IdeAnalysisBatch, 1);
+    *batch = (IdeAnalysisBatch){
+        .owner = {.arena = arena, .reference_count = 1},
+        .snapshot_count = snapshot_count,
+    };
+    if (snapshot_count)
+    {
+        batch->snapshots = arena_allocate(arena, IdeModuleSnapshot, snapshot_count);
+        memset(batch->snapshots, 0, sizeof(*batch->snapshots) * snapshot_count);
+    }
+    ide_model_stage_owner(model, &batch->owner);
+    return batch;
+}
+
 BUSTER_GLOBAL_LOCAL String8 ide_string_copy(Arena* arena, String8 string)
 {
     if (string.length == UINT64_MAX)
@@ -77,6 +311,247 @@ BUSTER_GLOBAL_LOCAL String8 ide_string_copy(Arena* arena, String8 string)
     }
     pointer[string.length] = 0;
     return (String8){.pointer = pointer, .length = string.length};
+}
+
+BUSTER_GLOBAL_LOCAL bool ide_source_range_is_valid(String8 source, ParserSourceRange range)
+{
+    return range.offset <= source.length && range.length <= source.length - range.offset;
+}
+
+BUSTER_GLOBAL_LOCAL bool ide_fingerprint_size_add(u64* size, u64 length)
+{
+    u64 overhead = sizeof(u64) + 1;
+    if (*size > UINT64_MAX - overhead || length > UINT64_MAX - overhead - *size)
+    {
+        return false;
+    }
+    *size += sizeof(u64) + 1 + length;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL void ide_fingerprint_part_write(char8** output, u8 tag, String8 value)
+{
+    *(*output)++ = (char8)tag;
+    memcpy(*output, &value.length, sizeof(value.length));
+    *output += sizeof(value.length);
+    if (value.length)
+    {
+        memcpy(*output, value.pointer, value.length);
+        *output += value.length;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL String8 ide_syntax_fingerprint(Arena* arena, String8 module_name, IdeSyntaxRevision* revision)
+{
+    BUSTER_CHECK(arena && revision);
+    ParserResult* parser = &revision->parser;
+    bool eligible = revision->analysis_eligible;
+    u64 size = 0;
+    bool valid = ide_fingerprint_size_add(&size, module_name.length);
+    char8 eligibility_byte = eligible ? 1 : 0;
+    valid &= ide_fingerprint_size_add(&size, 1);
+    if (!eligible)
+    {
+        valid &= ide_fingerprint_size_add(&size, revision->source.length);
+    }
+    else
+    {
+        for (AstImport* import = parser->first_import; import; import = import->next)
+        {
+            valid &= ide_source_range_is_valid(revision->source, import->range);
+            valid &= ide_fingerprint_size_add(&size, import->range.length);
+        }
+        for (AstTypeDeclaration* type = parser->first_type_declaration; type; type = type->next)
+        {
+            valid &= ide_source_range_is_valid(revision->source, type->range);
+            valid &= ide_fingerprint_size_add(&size, type->range.length);
+        }
+        for (AstDataDeclaration* data = parser->first_data_declaration; data; data = data->next)
+        {
+            valid &= ide_source_range_is_valid(revision->source, data->range);
+            valid &= ide_fingerprint_size_add(&size, data->range.length);
+        }
+        for (AstCode* code = parser->first_code; code; code = code->next)
+        {
+            u64 header_end = code->has_body ? code->body.range.offset : (u64)code->range.offset + code->range.length;
+            valid &= ide_source_range_is_valid(revision->source, code->range);
+            valid &= header_end >= code->range.offset && header_end <= (u64)code->range.offset + code->range.length;
+            valid &= ide_fingerprint_size_add(&size, header_end >= code->range.offset ? header_end - code->range.offset : 0);
+        }
+    }
+    if (!valid)
+    {
+        size = 0;
+        BUSTER_CHECK(ide_fingerprint_size_add(&size, module_name.length));
+        BUSTER_CHECK(ide_fingerprint_size_add(&size, 1));
+        BUSTER_CHECK(ide_fingerprint_size_add(&size, revision->source.length));
+        eligible = false;
+        eligibility_byte = 0;
+    }
+
+    String8 result = {.pointer = arena_allocate(arena, char8, size), .length = size};
+    char8* output = result.pointer;
+    ide_fingerprint_part_write(&output, 'M', module_name);
+    ide_fingerprint_part_write(&output, 'E', (String8){.pointer = &eligibility_byte, .length = 1});
+    if (!eligible)
+    {
+        ide_fingerprint_part_write(&output, 'S', revision->source);
+    }
+    else
+    {
+        for (AstImport* import = parser->first_import; import; import = import->next)
+        {
+            ide_fingerprint_part_write(&output, 'I', string_slice(revision->source, import->range.offset, import->range.offset + import->range.length));
+        }
+        AstTypeDeclaration* type = parser->first_type_declaration;
+        AstDataDeclaration* data = parser->first_data_declaration;
+        AstCode* code = parser->first_code;
+        while (type || data || code)
+        {
+            u32 type_offset = type ? type->range.offset : UINT32_MAX;
+            u32 code_offset = code ? code->range.offset : UINT32_MAX;
+            u32 data_offset = data ? data->range.offset : UINT32_MAX;
+            if (type && type_offset <= code_offset && type_offset <= data_offset)
+            {
+                ide_fingerprint_part_write(&output, 'T', string_slice(revision->source, type->range.offset, type->range.offset + type->range.length));
+                type = type->next;
+            }
+            else if (code && code_offset <= data_offset)
+            {
+                u64 header_end = code->has_body ? code->body.range.offset : (u64)code->range.offset + code->range.length;
+                ide_fingerprint_part_write(&output, 'C', string_slice(revision->source, code->range.offset, header_end));
+                code = code->next;
+            }
+            else
+            {
+                BUSTER_CHECK(data);
+                ide_fingerprint_part_write(&output, 'D', string_slice(revision->source, data->range.offset, data->range.offset + data->range.length));
+                data = data->next;
+            }
+        }
+    }
+    BUSTER_CHECK((u64)(output - result.pointer) == result.length);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ide_ast_type_has_compile_time(AstType* root)
+{
+    if (!root)
+    {
+        return false;
+    }
+    typedef struct IdeAstTypeWork IdeAstTypeWork;
+    struct IdeAstTypeWork
+    {
+        IdeAstTypeWork* previous;
+        AstType* type;
+    };
+    TemporalArena scratch = scratch_begin(0, 0);
+    IdeAstTypeWork* top = arena_allocate(scratch.arena, IdeAstTypeWork, 1);
+    *top = (IdeAstTypeWork){.type = root};
+    bool result = false;
+    while (top && !result)
+    {
+        AstType* type = top->type;
+        top = top->previous;
+        if (type->is_compile_time)
+        {
+            result = true;
+            break;
+        }
+        AstType* child = 0;
+        if (type->id == AST_TYPE_POINTER || type->id == AST_TYPE_SLICE || type->id == AST_TYPE_INFERRED_ARRAY)
+        {
+            child = type->element_type;
+        }
+        else if (type->id == AST_TYPE_ARRAY)
+        {
+            child = type->array.element_type;
+        }
+        else if (type->id == AST_TYPE_VECTOR)
+        {
+            child = type->vector.element_type;
+        }
+        if (child)
+        {
+            IdeAstTypeWork* work = arena_allocate(scratch.arena, IdeAstTypeWork, 1);
+            *work = (IdeAstTypeWork){.previous = top, .type = child};
+            top = work;
+        }
+        if (type->id == AST_TYPE_FUNCTION)
+        {
+            if (type->function.return_type)
+            {
+                IdeAstTypeWork* work = arena_allocate(scratch.arena, IdeAstTypeWork, 1);
+                *work = (IdeAstTypeWork){.previous = top, .type = type->function.return_type};
+                top = work;
+            }
+            for (AstTypeArgument* argument = type->function.first_argument; argument; argument = argument->next)
+            {
+                if (argument->is_compile_time)
+                {
+                    result = true;
+                    break;
+                }
+                if (argument->type)
+                {
+                    IdeAstTypeWork* work = arena_allocate(scratch.arena, IdeAstTypeWork, 1);
+                    *work = (IdeAstTypeWork){.previous = top, .type = argument->type};
+                    top = work;
+                }
+            }
+        }
+    }
+    scratch_end(scratch);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ide_parser_has_generic_syntax(ParserResult* parser)
+{
+    if (!parser)
+    {
+        return false;
+    }
+    for (AstCode* code = parser->first_code; code; code = code->next)
+    {
+        if (ide_ast_type_has_compile_time(code->type))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL IdeSyntaxRevision* ide_source_revision_create(IdeSyntaxBatch* batch, String8 source)
+{
+    if (!batch)
+    {
+        return 0;
+    }
+    IdeSyntaxRevision* revision = arena_allocate(batch->owner.arena, IdeSyntaxRevision, 1);
+    *revision = (IdeSyntaxRevision){
+        .owner = &batch->owner,
+        .source = ide_string_copy(batch->owner.arena, source),
+    };
+    return revision;
+}
+
+BUSTER_GLOBAL_LOCAL IdeSyntaxRevision* ide_syntax_revision_create(IdeSyntaxBatch* batch, Arena* expression_arena, String8 module_name, String8 source)
+{
+    IdeSyntaxRevision* revision = ide_source_revision_create(batch, source);
+    if (!revision)
+    {
+        return 0;
+    }
+    revision->has_syntax = true;
+    revision->tokenizer = tokenize(batch->owner.arena, revision->source.pointer, revision->source.length);
+    revision->parser = parser_parse(batch->owner.arena, expression_arena, revision->source, revision->tokenizer);
+    revision->tokenizer_error_count = revision->tokenizer.error_count;
+    revision->analysis_eligible = revision->tokenizer.error_count == 0 && revision->parser.diagnostic_count == 0;
+    revision->has_generic_syntax = revision->analysis_eligible && ide_parser_has_generic_syntax(&revision->parser);
+    revision->interface_bytes = ide_syntax_fingerprint(batch->owner.arena, module_name, revision);
+    revision->interface_hash = buster_hash_64((u8*)revision->interface_bytes.pointer, revision->interface_bytes.length);
+    return revision;
 }
 
 BUSTER_GLOBAL_LOCAL u8 ide_identity_byte(u8 byte)
@@ -1115,23 +1590,6 @@ BUSTER_GLOBAL_LOCAL String8 ide_module_name_from_path(Arena* arena, String8 root
     return ide_string_copy(arena, relative);
 }
 
-BUSTER_GLOBAL_LOCAL u32 ide_workspace_find_module(IdeDocumentWorkspace* workspace, String8 requested)
-{
-    String8 normalized = requested;
-    if (ide_document_path_is_bbb(normalized))
-    {
-        normalized = string_slice(normalized, 0, normalized.length - 4);
-    }
-    for (u32 index = 0; index < workspace->document_count; index += 1)
-    {
-        if (string_equal(workspace->documents[index].module_name, normalized))
-        {
-            return index;
-        }
-    }
-    return IDE_DOCUMENT_INDEX_INVALID;
-}
-
 typedef enum IdeWorkspaceCopyMode
 {
     IDE_WORKSPACE_COPY_PRESERVE_DERIVED,
@@ -1139,14 +1597,17 @@ typedef enum IdeWorkspaceCopyMode
 } IdeWorkspaceCopyMode;
 
 BUSTER_GLOBAL_LOCAL bool ide_document_copy_to_arena(Arena* arena, IdeDocument* destination, const IdeDocument* source,
-                                                   IdeWorkspaceCopyMode mode)
+                                                   IdeWorkspaceCopyMode mode, bool copy_sources)
 {
     *destination = *source;
     destination->path = ide_string_copy(arena, source->path);
     destination->identity = ide_string_copy(arena, source->identity);
     destination->module_name = ide_string_copy(arena, source->module_name);
-    destination->source = ide_string_copy(arena, source->source);
-    destination->saved_source = ide_string_copy(arena, source->saved_source);
+    if (copy_sources)
+    {
+        destination->source = ide_string_copy(arena, source->source);
+        destination->saved_source = ide_string_copy(arena, source->saved_source);
+    }
     destination->search.query = ide_string_copy(arena, source->search.query);
     destination->search.replacement = ide_string_copy(arena, source->search.replacement);
     destination->compile.artifact_path = ide_string_copy(arena, source->compile.artifact_path);
@@ -1170,6 +1631,45 @@ BUSTER_GLOBAL_LOCAL bool ide_document_copy_to_arena(Arena* arena, IdeDocument* d
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL IdeDocumentGraph* ide_graph_copy(Arena* arena, const IdeDocumentWorkspace* source)
+{
+    if (!source->graph)
+    {
+        return 0;
+    }
+    IdeDocumentGraph* graph = arena_allocate(arena, IdeDocumentGraph, 1);
+    *graph = *source->graph;
+    u32 document_count = source->document_count;
+    u64 offset_count = (u64)document_count + 1;
+    u32 import_count = source->import_count;
+    if (document_count)
+    {
+        graph->import_offsets = arena_allocate(arena, u32, offset_count);
+        graph->forward_offsets = arena_allocate(arena, u32, offset_count);
+        graph->reverse_offsets = arena_allocate(arena, u32, offset_count);
+        graph->dependency_order = arena_allocate(arena, u32, document_count);
+        memcpy(graph->import_offsets, source->graph->import_offsets, sizeof(u32) * offset_count);
+        memcpy(graph->forward_offsets, source->graph->forward_offsets, sizeof(u32) * offset_count);
+        memcpy(graph->reverse_offsets, source->graph->reverse_offsets, sizeof(u32) * offset_count);
+        memcpy(graph->dependency_order, source->graph->dependency_order, sizeof(u32) * document_count);
+    }
+    if (import_count)
+    {
+        graph->binding_targets = arena_allocate(arena, u32, import_count);
+        graph->binding_states = arena_allocate(arena, AnalysisImportResolutionState, import_count);
+        memcpy(graph->binding_targets, source->graph->binding_targets, sizeof(u32) * import_count);
+        memcpy(graph->binding_states, source->graph->binding_states, sizeof(AnalysisImportResolutionState) * import_count);
+    }
+    if (graph->edge_count)
+    {
+        graph->forward_edges = arena_allocate(arena, u32, graph->edge_count);
+        graph->reverse_edges = arena_allocate(arena, u32, graph->edge_count);
+        memcpy(graph->forward_edges, source->graph->forward_edges, sizeof(u32) * graph->edge_count);
+        memcpy(graph->reverse_edges, source->graph->reverse_edges, sizeof(u32) * graph->edge_count);
+    }
+    return graph;
+}
+
 BUSTER_GLOBAL_LOCAL bool ide_workspace_copy_to_arena_mode(Arena* arena, IdeDocumentWorkspace* destination,
                                                           const IdeDocumentWorkspace* source, IdeWorkspaceCopyMode mode)
 {
@@ -1179,11 +1679,36 @@ BUSTER_GLOBAL_LOCAL bool ide_workspace_copy_to_arena_mode(Arena* arena, IdeDocum
     if (source->document_count)
     {
         destination->documents = arena_allocate(arena, IdeDocument, source->document_count);
+        destination->revision_states = arena_allocate(arena, IdeDocumentRevisionState, source->document_count);
+        if (source->revision_states)
+        {
+            memcpy(destination->revision_states, source->revision_states, sizeof(*destination->revision_states) * source->document_count);
+        }
+        else
+        {
+            memset(destination->revision_states, 0, sizeof(*destination->revision_states) * source->document_count);
+        }
         for (u32 index = 0; index < source->document_count; index += 1)
         {
-            ide_document_copy_to_arena(arena, destination->documents + index, source->documents + index, mode);
+            bool copy_sources = !source->revision_states || !source->revision_states[index].current;
+            ide_document_copy_to_arena(arena, destination->documents + index, source->documents + index, mode, copy_sources);
+            if (!copy_sources)
+            {
+                destination->documents[index].source = destination->revision_states[index].current->source;
+                destination->documents[index].saved_source = destination->revision_states[index].saved
+                                                                 ? destination->revision_states[index].saved->source
+                                                                 : destination->revision_states[index].current->source;
+            }
         }
     }
+    destination->graph = ide_graph_copy(arena, source);
+#if BUSTER_INCLUDE_TESTS
+    if (source->document_count && source->last_analysis_work_flags)
+    {
+        destination->last_analysis_work_flags = arena_allocate(arena, u8, source->document_count);
+        memcpy(destination->last_analysis_work_flags, source->last_analysis_work_flags, source->document_count);
+    }
+#endif
     if (mode == IDE_WORKSPACE_COPY_REBUILD_DERIVED)
     {
         destination->imports = 0;
@@ -1366,63 +1891,293 @@ BUSTER_GLOBAL_LOCAL void ide_documents_sort(IdeDocument* documents, u32 count)
     }
 }
 
-BUSTER_GLOBAL_LOCAL void ide_imports_detect_cycles(Arena* arena, IdeDocumentWorkspace* workspace)
+BUSTER_GLOBAL_LOCAL bool ide_graph_module_has_semantic_imports(const IdeDocumentWorkspace* workspace, u32 module_index)
 {
-    if (!workspace->document_count || !workspace->import_count)
+    IdeSyntaxRevision* revision = workspace->revision_states[module_index].current;
+    return revision && revision->analysis_eligible;
+}
+
+BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_graph_build(Arena* arena, IdeDocumentWorkspace* workspace)
+{
+    u32 document_count = workspace->document_count;
+    u64 offset_count = (u64)document_count + 1;
+    if (document_count && !workspace->revision_states)
     {
-        return;
+        return IDE_DOCUMENT_ERROR_FILE_READ;
     }
-    u8* colors = arena_allocate(arena, u8, workspace->document_count);
-    IdeImportTraversalFrame* frames = arena_allocate(arena, IdeImportTraversalFrame, workspace->document_count);
-    memset(colors, 0, workspace->document_count);
-    for (u32 root = 0; root < workspace->document_count; root += 1)
+    u64 import_count64 = 0;
+    for (u32 index = 0; index < document_count; index += 1)
+    {
+        IdeSyntaxRevision* revision = workspace->revision_states[index].current;
+        import_count64 += revision && revision->has_syntax ? revision->parser.import_count : 0;
+    }
+    if (import_count64 > UINT32_MAX)
+    {
+        return IDE_DOCUMENT_ERROR_TRAVERSAL_LIMIT;
+    }
+    u32 import_count = (u32)import_count64;
+    IdeDocumentGraph* graph = arena_allocate(arena, IdeDocumentGraph, 1);
+    *graph = (IdeDocumentGraph){0};
+    workspace->graph = graph;
+    workspace->imports = import_count ? arena_allocate(arena, IdeDocumentImport, import_count) : 0;
+    workspace->import_count = import_count;
+    if (document_count)
+    {
+        graph->import_offsets = arena_allocate(arena, u32, offset_count);
+    }
+    if (import_count)
+    {
+        graph->binding_targets = arena_allocate(arena, u32, import_count);
+        graph->binding_states = arena_allocate(arena, AnalysisImportResolutionState, import_count);
+    }
+
+    u32 flat_import = 0;
+    for (u32 source_index = 0; source_index < document_count; source_index += 1)
+    {
+        graph->import_offsets[source_index] = flat_import;
+        IdeSyntaxRevision* revision = workspace->revision_states[source_index].current;
+        ParserResult* parser = revision && revision->has_syntax ? &revision->parser : 0;
+        for (AstImport* ast_import = parser ? parser->first_import : 0; ast_import; ast_import = ast_import->next)
+        {
+            u32 target_index = IDE_DOCUMENT_INDEX_INVALID;
+            u32 match_count = 0;
+            String8 normalized = ast_import->path;
+            if (ide_document_path_is_bbb(normalized))
+            {
+                normalized = string_slice(normalized, 0, normalized.length - 4);
+            }
+            for (u32 candidate = 0; candidate < document_count; candidate += 1)
+            {
+                if (string_equal(workspace->documents[candidate].module_name, normalized))
+                {
+                    target_index = candidate;
+                    match_count += 1;
+                }
+            }
+            String8 target_path = {0};
+            if (!match_count)
+            {
+                target_path = ide_import_target_path(arena, workspace->root_path, ast_import->path);
+                if (target_path.length)
+                {
+                    target_index = ide_workspace_find_exact_path(workspace, target_path);
+                    match_count = target_index != IDE_DOCUMENT_INDEX_INVALID;
+                }
+            }
+            AnalysisImportResolutionState state = ANALYSIS_IMPORT_MISSING;
+            if (match_count == 1)
+            {
+                state = ANALYSIS_IMPORT_RESOLVED;
+                target_path = workspace->documents[target_index].path;
+            }
+            else if (match_count > 1)
+            {
+                state = ANALYSIS_IMPORT_AMBIGUOUS;
+                target_index = IDE_DOCUMENT_INDEX_INVALID;
+                target_path = (String8){0};
+            }
+            workspace->imports[flat_import] = (IdeDocumentImport){
+                .source_path = workspace->documents[source_index].path,
+                .name_space = ide_string_copy(arena, ast_import->name_space.text),
+                .requested_path = ide_string_copy(arena, ast_import->path),
+                .target_path = target_path,
+                .range = ast_import->range,
+                .path_range = ast_import->path_range,
+                .state = ide_import_state_from_analysis(state),
+            };
+            graph->binding_targets[flat_import] = target_index;
+            graph->binding_states[flat_import] = state;
+            flat_import += 1;
+        }
+    }
+    if (document_count)
+    {
+        graph->import_offsets[document_count] = flat_import;
+    }
+    BUSTER_CHECK(flat_import == import_count);
+
+    u8* colors = document_count ? arena_allocate(arena, u8, document_count) : 0;
+    IdeImportTraversalFrame* frames = document_count ? arena_allocate(arena, IdeImportTraversalFrame, document_count) : 0;
+    if (document_count)
+    {
+        memset(colors, 0, document_count);
+    }
+    for (u32 root = 0; root < document_count; root += 1)
     {
         if (colors[root])
         {
             continue;
         }
         u32 frame_count = 1;
-        frames[0] = (IdeImportTraversalFrame){.document_index = root};
+        frames[0] = (IdeImportTraversalFrame){.document_index = root, .next_import_index = graph->import_offsets[root]};
         colors[root] = 1;
         while (frame_count)
         {
             IdeImportTraversalFrame* frame = frames + frame_count - 1;
-            u32 import_index = frame->next_import_index;
-            while (import_index < workspace->import_count &&
-                   !ide_identity_equal(workspace->imports[import_index].source_path, workspace->documents[frame->document_index].path))
-            {
-                import_index += 1;
-            }
-            if (import_index >= workspace->import_count)
+            u32 import_end = ide_graph_module_has_semantic_imports(workspace, frame->document_index)
+                                 ? graph->import_offsets[frame->document_index + 1]
+                                 : graph->import_offsets[frame->document_index];
+            if (frame->next_import_index >= import_end)
             {
                 colors[frame->document_index] = 2;
                 frame_count -= 1;
                 continue;
             }
-            frame->next_import_index = import_index + 1;
-            IdeDocumentImport* import = workspace->imports + import_index;
-            if (import->state != IDE_DOCUMENT_IMPORT_RESOLVED)
+            u32 import_index = frame->next_import_index;
+            frame->next_import_index += 1;
+            if (graph->binding_states[import_index] != ANALYSIS_IMPORT_RESOLVED)
             {
                 continue;
             }
-            u32 target = ide_workspace_find_exact_path(workspace, import->target_path);
+            u32 target = graph->binding_targets[import_index];
             if (target == IDE_DOCUMENT_INDEX_INVALID)
             {
                 continue;
             }
             if (colors[target] == 1)
             {
-                import->state = IDE_DOCUMENT_IMPORT_CYCLE;
+                graph->binding_states[import_index] = ANALYSIS_IMPORT_CYCLE;
+                workspace->imports[import_index].state = IDE_DOCUMENT_IMPORT_CYCLE;
+                graph->has_cycle = true;
             }
             else if (!colors[target])
             {
-                BUSTER_CHECK(frame_count < workspace->document_count);
-                frames[frame_count] = (IdeImportTraversalFrame){.document_index = target};
+                BUSTER_CHECK(frame_count < document_count);
+                frames[frame_count] = (IdeImportTraversalFrame){
+                    .document_index = target,
+                    .next_import_index = graph->import_offsets[target],
+                };
                 frame_count += 1;
                 colors[target] = 1;
             }
         }
     }
+
+    u32 edge_count = 0;
+    for (u32 source_index = 0; source_index < document_count; source_index += 1)
+    {
+        if (!ide_graph_module_has_semantic_imports(workspace, source_index))
+        {
+            continue;
+        }
+        for (u32 import_index = graph->import_offsets[source_index]; import_index < graph->import_offsets[source_index + 1]; import_index += 1)
+        {
+            edge_count += graph->binding_targets[import_index] != IDE_DOCUMENT_INDEX_INVALID &&
+                          (graph->binding_states[import_index] == ANALYSIS_IMPORT_RESOLVED ||
+                           graph->binding_states[import_index] == ANALYSIS_IMPORT_CYCLE);
+        }
+    }
+    graph->edge_count = edge_count;
+    if (document_count)
+    {
+        graph->forward_offsets = arena_allocate(arena, u32, offset_count);
+        graph->reverse_offsets = arena_allocate(arena, u32, offset_count);
+        memset(graph->reverse_offsets, 0, sizeof(u32) * offset_count);
+        graph->dependency_order = arena_allocate(arena, u32, document_count);
+    }
+    if (edge_count)
+    {
+        graph->forward_edges = arena_allocate(arena, u32, edge_count);
+        graph->reverse_edges = arena_allocate(arena, u32, edge_count);
+    }
+    u32 edge_index = 0;
+    for (u32 source_index = 0; source_index < document_count; source_index += 1)
+    {
+        graph->forward_offsets[source_index] = edge_index;
+        if (!ide_graph_module_has_semantic_imports(workspace, source_index))
+        {
+            continue;
+        }
+        for (u32 import_index = graph->import_offsets[source_index]; import_index < graph->import_offsets[source_index + 1]; import_index += 1)
+        {
+            u32 target = graph->binding_targets[import_index];
+            AnalysisImportResolutionState state = graph->binding_states[import_index];
+            if (target != IDE_DOCUMENT_INDEX_INVALID && (state == ANALYSIS_IMPORT_RESOLVED || state == ANALYSIS_IMPORT_CYCLE))
+            {
+                graph->forward_edges[edge_index] = target;
+                graph->reverse_offsets[target + 1] += 1;
+                edge_index += 1;
+            }
+        }
+    }
+    if (document_count)
+    {
+        graph->forward_offsets[document_count] = edge_index;
+    }
+    BUSTER_CHECK(edge_index == edge_count);
+    for (u32 index = 0; index < document_count; index += 1)
+    {
+        graph->reverse_offsets[index + 1] += graph->reverse_offsets[index];
+    }
+    u32* reverse_cursor = document_count ? arena_allocate(arena, u32, document_count) : 0;
+    if (document_count)
+    {
+        memcpy(reverse_cursor, graph->reverse_offsets, sizeof(u32) * document_count);
+    }
+    for (u32 source_index = 0; source_index < document_count; source_index += 1)
+    {
+        for (u32 edge = graph->forward_offsets[source_index]; edge < graph->forward_offsets[source_index + 1]; edge += 1)
+        {
+            u32 target = graph->forward_edges[edge];
+            graph->reverse_edges[reverse_cursor[target]] = source_index;
+            reverse_cursor[target] += 1;
+        }
+    }
+
+    if (document_count)
+    {
+        memset(colors, 0, document_count);
+    }
+    u32 order_count = 0;
+    for (u32 root = 0; root < document_count; root += 1)
+    {
+        if (colors[root])
+        {
+            continue;
+        }
+        u32 frame_count = 1;
+        frames[0] = (IdeImportTraversalFrame){.document_index = root, .next_import_index = graph->import_offsets[root]};
+        colors[root] = 1;
+        while (frame_count)
+        {
+            IdeImportTraversalFrame* frame = frames + frame_count - 1;
+            u32 import_end = ide_graph_module_has_semantic_imports(workspace, frame->document_index)
+                                 ? graph->import_offsets[frame->document_index + 1]
+                                 : graph->import_offsets[frame->document_index];
+            if (frame->next_import_index >= import_end)
+            {
+                colors[frame->document_index] = 2;
+                graph->dependency_order[order_count] = frame->document_index;
+                order_count += 1;
+                frame_count -= 1;
+                continue;
+            }
+            u32 import_index = frame->next_import_index;
+            frame->next_import_index += 1;
+            if (graph->binding_states[import_index] != ANALYSIS_IMPORT_RESOLVED)
+            {
+                continue;
+            }
+            u32 target = graph->binding_targets[import_index];
+            if (target == IDE_DOCUMENT_INDEX_INVALID)
+            {
+                continue;
+            }
+            if (!colors[target])
+            {
+                BUSTER_CHECK(frame_count < document_count);
+                frames[frame_count] = (IdeImportTraversalFrame){
+                    .document_index = target,
+                    .next_import_index = graph->import_offsets[target],
+                };
+                frame_count += 1;
+                colors[target] = 1;
+            }
+        }
+    }
+    BUSTER_CHECK(order_count == document_count);
+    workspace->analysis_has_cycles = graph->has_cycle;
+    return IDE_DOCUMENT_ERROR_NONE;
 }
 
 BUSTER_GLOBAL_LOCAL AstType* ide_ast_type_for_entity(AnalysisEntity* entity)
@@ -1527,254 +2282,373 @@ BUSTER_GLOBAL_LOCAL String8 ide_entity_type_text(Arena* arena, IdeDocument* docu
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_rebuild_workspace_analysis(Arena* arena, Arena* expression_arena, IdeDocumentWorkspace* result,
-                                                                         u32 max_diagnostics)
+BUSTER_GLOBAL_LOCAL void ide_analysis_stats_begin(Arena* arena, IdeDocumentWorkspace* workspace)
 {
-    u32 document_count = result->document_count;
-    IdeParsedDocument* parsed = 0;
-    if (document_count)
+#if BUSTER_INCLUDE_TESTS
+    workspace->last_analysis_stats = (IdeDocumentAnalysisOperationStats){0};
+    workspace->last_analysis_work_flags = workspace->document_count ? arena_allocate(arena, u8, workspace->document_count) : 0;
+    if (workspace->document_count)
     {
-        parsed = arena_allocate(arena, IdeParsedDocument, document_count);
-        if (!parsed)
-        {
-            return IDE_DOCUMENT_ERROR_FILE_READ;
-        }
-        memset(parsed, 0, sizeof(*parsed) * document_count);
+        memset(workspace->last_analysis_work_flags, 0, workspace->document_count);
     }
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(workspace);
+#endif
+}
 
-    u64 total_diagnostics = 0;
-    for (u32 index = 0; index < document_count; index += 1)
+BUSTER_GLOBAL_LOCAL void ide_analysis_stats_mark(IdeDocumentWorkspace* workspace, u32 index, u8 flag)
+{
+#if BUSTER_INCLUDE_TESTS
+    BUSTER_CHECK(index < workspace->document_count && workspace->last_analysis_work_flags);
+    u8 old = workspace->last_analysis_work_flags[index];
+    workspace->last_analysis_work_flags[index] |= flag;
+    if (!(old & flag))
     {
-        IdeDocument* document = result->documents + index;
-        TokenizerResult tokenizer = tokenize(arena, document->source.pointer, document->source.length);
-        ParserResult parser = parser_parse(arena, expression_arena, document->source, tokenizer);
-        parsed[index] = (IdeParsedDocument){
-            .parser = parser,
-            .tokenizer_error_count = tokenizer.error_count,
-            .analysis_eligible = tokenizer.error_count == 0 && parser.diagnostic_count == 0,
+        workspace->last_analysis_stats.parsed_count += !!(flag & IDE_DOCUMENT_ANALYSIS_WORK_PARSED);
+        workspace->last_analysis_stats.indexed_count += !!(flag & IDE_DOCUMENT_ANALYSIS_WORK_INDEXED);
+        workspace->last_analysis_stats.analyzed_count += !!(flag & IDE_DOCUMENT_ANALYSIS_WORK_ANALYZED);
+        workspace->last_analysis_stats.invalidated_count += !!(flag & IDE_DOCUMENT_ANALYSIS_WORK_INVALIDATED);
+    }
+#else
+    BUSTER_UNUSED(workspace);
+    BUSTER_UNUSED(index);
+    BUSTER_UNUSED(flag);
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL void ide_analysis_stats_set_snapshot_count(IdeDocumentWorkspace* workspace, u32 snapshot_count)
+{
+#if BUSTER_INCLUDE_TESTS
+    workspace->last_analysis_stats.allocated_snapshot_count = snapshot_count;
+#else
+    BUSTER_UNUSED(workspace);
+    BUSTER_UNUSED(snapshot_count);
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL bool ide_analysis_result_has_generic(AnalysisResult* analysis)
+{
+    if (!analysis)
+    {
+        return false;
+    }
+    TemporalArena scratch = scratch_begin(0, 0);
+    bool result = analysis->instantiation_count != 0;
+    for (u32 index = 0; index < analysis->module.entity_count && !result; index += 1)
+    {
+        result = analysis_entity_is_generic(scratch.arena, analysis, analysis->module.entities + index);
+    }
+    scratch_end(scratch);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void ide_snapshot_imports_build(Arena* arena, IdeDocumentWorkspace* workspace, u32 module_index, IdeModuleSnapshot* snapshot)
+{
+    u32 first = workspace->graph->import_offsets[module_index];
+    u32 last = workspace->graph->import_offsets[module_index + 1];
+    snapshot->import_count = last - first;
+    snapshot->imports = snapshot->import_count ? arena_allocate(arena, IdeDocumentImport, snapshot->import_count) : 0;
+    for (u32 index = 0; index < snapshot->import_count; index += 1)
+    {
+        IdeDocumentImport* source = workspace->imports + first + index;
+        IdeDocumentImport* destination = snapshot->imports + index;
+        *destination = *source;
+        destination->source_path = ide_string_copy(arena, source->source_path);
+        destination->name_space = ide_string_copy(arena, source->name_space);
+        destination->requested_path = ide_string_copy(arena, source->requested_path);
+        destination->target_path = ide_string_copy(arena, source->target_path);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_snapshot_build(Arena* arena, IdeDocumentWorkspace* workspace, u32 module_index,
+                                                             AnalysisResult* analysis, IdeModuleSnapshot* snapshot)
+{
+    IdeDocument* document = workspace->documents + module_index;
+    IdeSyntaxRevision* revision = workspace->revision_states[module_index].current;
+    IdeDocumentStorageOwner* owner = snapshot->owner;
+    *snapshot = (IdeModuleSnapshot){
+        .owner = owner,
+        .syntax = revision,
+        .analysis = analysis,
+        .interface_bytes = ide_string_copy(arena, revision->interface_bytes),
+        .interface_hash = revision->interface_hash,
+        .has_generic_entities = ide_analysis_result_has_generic(analysis),
+    };
+    ide_snapshot_imports_build(arena, workspace, module_index, snapshot);
+
+    snapshot->entity_count = analysis ? analysis->module.entity_count : 0;
+    snapshot->entities = snapshot->entity_count ? arena_allocate(arena, IdeDocumentEntitySnapshot, snapshot->entity_count) : 0;
+    for (u32 index = 0; index < snapshot->entity_count; index += 1)
+    {
+        AnalysisEntity* entity = analysis->module.entities + index;
+        snapshot->entities[index] = (IdeDocumentEntitySnapshot){
+            .module_name = ide_string_copy(arena, document->module_name),
+            .source_path = ide_string_copy(arena, document->path),
+            .name = ide_string_copy(arena, entity->name),
+            .type_text = ide_entity_type_text(arena, document, analysis, entity, index),
+            .range = entity->range,
+            .kind = entity->kind == ANALYSIS_ENTITY_TYPE   ? IDE_DOCUMENT_ENTITY_TYPE
+                    : entity->kind == ANALYSIS_ENTITY_CODE ? IDE_DOCUMENT_ENTITY_CODE
+                                                           : IDE_DOCUMENT_ENTITY_DATA,
         };
-        total_diagnostics += parser.diagnostic_count + (tokenizer.error_count != 0);
     }
 
-    AnalysisResult** analyses = 0;
-    if (document_count)
-    {
-        analyses = arena_allocate(arena, AnalysisResult*, document_count);
-        if (!analyses)
-        {
-            return IDE_DOCUMENT_ERROR_FILE_READ;
-        }
-        memset(analyses, 0, sizeof(*analyses) * document_count);
-    }
-    for (u32 index = 0; index < document_count; index += 1)
-    {
-        IdeDocument* document = result->documents + index;
-        AnalysisSourceInput input = {
-            .path = document->path,
-            .parser = parsed[index].analysis_eligible ? &parsed[index].parser : 0,
-        };
-        AnalysisResult* analysis = arena_allocate(arena, AnalysisResult, 1);
-        *analysis = analysis_index_module(arena, (AnalysisModuleId){.value = index}, document->module_name, &input, 1);
-        analyses[index] = analysis;
-    }
-    if (document_count)
-    {
-        analysis_resolve_program_interfaces(arena, analyses, document_count);
-        for (u32 index = 0; index < document_count; index += 1)
-        {
-            if (parsed[index].analysis_eligible)
-            {
-                analysis_analyze_bodies(arena, analyses[index]);
-            }
-            total_diagnostics += analyses[index]->diagnostic_count;
-        }
-    }
-    if (total_diagnostics > max_diagnostics)
-    {
-        return IDE_DOCUMENT_ERROR_DIAGNOSTIC_LIMIT;
-    }
-
-    u64 import_count = 0;
-    for (u32 index = 0; index < document_count; index += 1)
-    {
-        import_count += parsed[index].parser.import_count;
-    }
-    if (import_count > UINT32_MAX)
+    u64 diagnostic_count64 = (u64)revision->parser.diagnostic_count + (revision->tokenizer_error_count != 0);
+    diagnostic_count64 += analysis ? analysis->diagnostic_count : 0;
+    if (diagnostic_count64 > UINT32_MAX)
     {
         return IDE_DOCUMENT_ERROR_TRAVERSAL_LIMIT;
     }
-    result->imports = 0;
-    if (import_count)
+    snapshot->diagnostic_count = (u32)diagnostic_count64;
+    snapshot->diagnostics = snapshot->diagnostic_count ? arena_allocate(arena, IdeDocumentDiagnostic, snapshot->diagnostic_count) : 0;
+    u32 diagnostic_index = 0;
+    if (revision->tokenizer_error_count)
     {
-        result->imports = arena_allocate(arena, IdeDocumentImport, (u32)import_count);
-        if (!result->imports)
+        snapshot->diagnostics[diagnostic_index] = (IdeDocumentDiagnostic){
+            .file_path = ide_string_copy(arena, document->path),
+            .message = ide_string_copy(arena, S8("tokenization failed")),
+            .severity = IDE_DOCUMENT_DIAGNOSTIC_ERROR,
+            .source = IDE_DOCUMENT_DIAGNOSTIC_SOURCE_PARSER,
+        };
+        diagnostic_index += 1;
+    }
+    for (ParserDiagnostic* diagnostic = revision->parser.first_diagnostic; diagnostic; diagnostic = diagnostic->next)
+    {
+        snapshot->diagnostics[diagnostic_index] = (IdeDocumentDiagnostic){
+            .file_path = ide_string_copy(arena, document->path),
+            .range = diagnostic->range,
+            .message = ide_string_copy(arena, diagnostic->message),
+            .severity = IDE_DOCUMENT_DIAGNOSTIC_ERROR,
+            .source = IDE_DOCUMENT_DIAGNOSTIC_SOURCE_PARSER,
+        };
+        diagnostic_index += 1;
+    }
+    for (AnalysisDiagnostic* diagnostic = analysis ? analysis->first_diagnostic : 0; diagnostic; diagnostic = diagnostic->next)
+    {
+        snapshot->diagnostics[diagnostic_index] = (IdeDocumentDiagnostic){
+            .file_path = ide_string_copy(arena, document->path),
+            .range = diagnostic->range,
+            .message = ide_string_copy(arena, diagnostic->message),
+            .severity = IDE_DOCUMENT_DIAGNOSTIC_ERROR,
+            .source = IDE_DOCUMENT_DIAGNOSTIC_SOURCE_ANALYSIS,
+        };
+        diagnostic_index += 1;
+    }
+    BUSTER_CHECK(diagnostic_index == snapshot->diagnostic_count);
+    for (u32 index = 0; index < snapshot->diagnostic_count; index += 1)
+    {
+        IdeDocumentDiagnostic* diagnostic = snapshot->diagnostics + index;
+        diagnostic->identity = ide_diagnostic_identity(diagnostic->file_path, diagnostic->range, diagnostic->message,
+                                                       diagnostic->severity, diagnostic->source);
+    }
+    IdeDocument snapshot_document = {.diagnostics = snapshot->diagnostics, .diagnostic_count = snapshot->diagnostic_count};
+    ide_diagnostics_sort(&snapshot_document);
+    return IDE_DOCUMENT_ERROR_NONE;
+}
+
+BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_workspace_flatten_snapshots(Arena* arena, IdeDocumentWorkspace* workspace, u32 max_diagnostics)
+{
+    u64 entity_count64 = 0;
+    u64 diagnostic_count64 = 0;
+    for (u32 index = 0; index < workspace->document_count; index += 1)
+    {
+        IdeModuleSnapshot* snapshot = workspace->revision_states[index].module;
+        if (!snapshot)
         {
             return IDE_DOCUMENT_ERROR_FILE_READ;
         }
+        entity_count64 += snapshot->entity_count;
+        diagnostic_count64 += snapshot->diagnostic_count;
     }
-    result->import_count = (u32)import_count;
-    u32 import_index = 0;
-    if (import_count)
+    if (diagnostic_count64 > max_diagnostics)
     {
-        for (u32 index = 0; index < document_count; index += 1)
-        {
-            IdeDocument* document = result->documents + index;
-            u32 analysis_import_index = 0;
-            for (AstImport* ast_import = parsed[index].parser.first_import; ast_import; ast_import = ast_import->next)
-            {
-                IdeDocumentImport* import = result->imports + import_index;
-                *import = (IdeDocumentImport){
-                    .source_path = document->path,
-                    .name_space = ide_string_copy(arena, ast_import->name_space.text),
-                    .requested_path = ide_string_copy(arena, ast_import->path),
-                    .target_path = {0},
-                    .range = ast_import->range,
-                    .path_range = ast_import->path_range,
-                    .state = IDE_DOCUMENT_IMPORT_MISSING,
-                };
-                u32 target_index = ide_workspace_find_module(result, ast_import->path);
-                if (target_index == IDE_DOCUMENT_INDEX_INVALID)
-                {
-                    String8 target_path = ide_import_target_path(arena, result->root_path, ast_import->path);
-                    import->target_path = target_path;
-                    if (target_path.length)
-                    {
-                        target_index = ide_workspace_find_exact_path(result, target_path);
-                    }
-                }
-                else
-                {
-                    import->target_path = result->documents[target_index].path;
-                }
-                import->state = target_index == IDE_DOCUMENT_INDEX_INVALID ? IDE_DOCUMENT_IMPORT_MISSING : IDE_DOCUMENT_IMPORT_RESOLVED;
-                if (analyses[index] && parsed[index].analysis_eligible && analysis_import_index < analyses[index]->module.import_count)
-                {
-                    IdeDocumentImportState analysis_state =
-                        ide_import_state_from_analysis(analyses[index]->module.imports[analysis_import_index].state);
-                    if (analysis_state == IDE_DOCUMENT_IMPORT_AMBIGUOUS || analysis_state == IDE_DOCUMENT_IMPORT_CYCLE)
-                    {
-                        import->state = analysis_state;
-                    }
-                }
-                analysis_import_index += 1;
-                import_index += 1;
-            }
-        }
-    }
-    BUSTER_CHECK(import_index == result->import_count);
-    ide_imports_detect_cycles(arena, result);
-
-    u64 entity_count64 = 0;
-    for (u32 index = 0; index < document_count; index += 1)
-    {
-        entity_count64 += analyses[index] ? analyses[index]->module.entity_count : 0;
+        return IDE_DOCUMENT_ERROR_DIAGNOSTIC_LIMIT;
     }
     if (entity_count64 > UINT32_MAX)
     {
         return IDE_DOCUMENT_ERROR_TRAVERSAL_LIMIT;
     }
-    result->entity_count = (u32)entity_count64;
-    result->entities = result->entity_count ? arena_allocate(arena, IdeDocumentEntitySnapshot, result->entity_count) : 0;
-    if (result->entity_count && !result->entities)
+    workspace->entity_count = (u32)entity_count64;
+    workspace->entities = workspace->entity_count ? arena_allocate(arena, IdeDocumentEntitySnapshot, workspace->entity_count) : 0;
+    u32 flat_entity = 0;
+    for (u32 module_index = 0; module_index < workspace->document_count; module_index += 1)
     {
-        return IDE_DOCUMENT_ERROR_FILE_READ;
-    }
-    u32 entity_index = 0;
-    for (u32 index = 0; index < document_count; index += 1)
-    {
-        AnalysisResult* analysis = analyses[index];
-        if (!analysis)
+        IdeDocument* document = workspace->documents + module_index;
+        IdeModuleSnapshot* snapshot = workspace->revision_states[module_index].module;
+        for (u32 index = 0; index < snapshot->entity_count; index += 1)
         {
-            continue;
+            IdeDocumentEntitySnapshot* source = snapshot->entities + index;
+            IdeDocumentEntitySnapshot* destination = workspace->entities + flat_entity;
+            *destination = *source;
+            destination->module_name = ide_string_copy(arena, source->module_name);
+            destination->source_path = ide_string_copy(arena, source->source_path);
+            destination->name = ide_string_copy(arena, source->name);
+            destination->type_text = ide_string_copy(arena, source->type_text);
+            flat_entity += 1;
         }
-        IdeDocument* document = result->documents + index;
-        for (u32 analysis_entity_index = 0; analysis_entity_index < analysis->module.entity_count; analysis_entity_index += 1)
+        document->diagnostic_count = snapshot->diagnostic_count;
+        document->diagnostics = document->diagnostic_count ? arena_allocate(arena, IdeDocumentDiagnostic, document->diagnostic_count) : 0;
+        for (u32 index = 0; index < document->diagnostic_count; index += 1)
         {
-            AnalysisEntity* entity = analysis->module.entities + analysis_entity_index;
-            IdeDocumentEntitySnapshot* snapshot = result->entities + entity_index;
-            *snapshot = (IdeDocumentEntitySnapshot){
-                .module_name = ide_string_copy(arena, document->module_name),
-                .source_path = ide_string_copy(arena, document->path),
-                .name = ide_string_copy(arena, entity->name),
-                .type_text = ide_entity_type_text(arena, document, analysis, entity, analysis_entity_index),
-                .range = entity->range,
-                .kind = entity->kind == ANALYSIS_ENTITY_TYPE   ? IDE_DOCUMENT_ENTITY_TYPE
-                        : entity->kind == ANALYSIS_ENTITY_CODE ? IDE_DOCUMENT_ENTITY_CODE
-                                                               : IDE_DOCUMENT_ENTITY_DATA,
-            };
-            entity_index += 1;
+            document->diagnostics[index] = snapshot->diagnostics[index];
+            document->diagnostics[index].file_path = ide_string_copy(arena, snapshot->diagnostics[index].file_path);
+            document->diagnostics[index].message = ide_string_copy(arena, snapshot->diagnostics[index].message);
         }
     }
-    BUSTER_CHECK(entity_index == result->entity_count);
-
-    for (u32 index = 0; index < document_count; index += 1)
-    {
-        IdeDocument* document = result->documents + index;
-        IdeParsedDocument* parsed_document = parsed + index;
-        u64 count64 = parsed_document->parser.diagnostic_count + (parsed_document->tokenizer_error_count != 0);
-        count64 += analyses[index] ? analyses[index]->diagnostic_count : 0;
-        if (count64 > UINT32_MAX)
-        {
-            return IDE_DOCUMENT_ERROR_TRAVERSAL_LIMIT;
-        }
-        u32 count = (u32)count64;
-        document->diagnostics = 0;
-        document->diagnostic_count = count;
-        if (count)
-        {
-            document->diagnostics = arena_allocate(arena, IdeDocumentDiagnostic, count);
-            if (!document->diagnostics)
-            {
-                return IDE_DOCUMENT_ERROR_FILE_READ;
-            }
-            u32 diagnostic_index = 0;
-            if (parsed_document->tokenizer_error_count)
-            {
-                document->diagnostics[diagnostic_index] = (IdeDocumentDiagnostic){
-                    .file_path = document->path,
-                    .message = ide_string_copy(arena, S8("tokenization failed")),
-                    .severity = IDE_DOCUMENT_DIAGNOSTIC_ERROR,
-                    .source = IDE_DOCUMENT_DIAGNOSTIC_SOURCE_PARSER,
-                };
-                diagnostic_index += 1;
-            }
-            for (ParserDiagnostic* parser_diagnostic = parsed_document->parser.first_diagnostic; parser_diagnostic;
-                 parser_diagnostic = parser_diagnostic->next)
-            {
-                document->diagnostics[diagnostic_index] = (IdeDocumentDiagnostic){
-                    .file_path = document->path,
-                    .range = parser_diagnostic->range,
-                    .message = ide_string_copy(arena, parser_diagnostic->message),
-                    .severity = IDE_DOCUMENT_DIAGNOSTIC_ERROR,
-                    .source = IDE_DOCUMENT_DIAGNOSTIC_SOURCE_PARSER,
-                };
-                diagnostic_index += 1;
-            }
-            for (AnalysisDiagnostic* analysis_diagnostic = analyses[index] ? analyses[index]->first_diagnostic : 0;
-                 analysis_diagnostic; analysis_diagnostic = analysis_diagnostic->next)
-            {
-                document->diagnostics[diagnostic_index] = (IdeDocumentDiagnostic){
-                    .file_path = document->path,
-                    .range = analysis_diagnostic->range,
-                    .message = ide_string_copy(arena, analysis_diagnostic->message),
-                    .severity = IDE_DOCUMENT_DIAGNOSTIC_ERROR,
-                    .source = IDE_DOCUMENT_DIAGNOSTIC_SOURCE_ANALYSIS,
-                };
-                diagnostic_index += 1;
-            }
-            for (u32 index2 = 0; index2 < document->diagnostic_count; index2 += 1)
-            {
-                IdeDocumentDiagnostic* diagnostic = document->diagnostics + index2;
-                diagnostic->identity = ide_diagnostic_identity(diagnostic->file_path, diagnostic->range, diagnostic->message,
-                                                               diagnostic->severity, diagnostic->source);
-            }
-        }
-        ide_diagnostics_sort(document);
-    }
+    BUSTER_CHECK(flat_entity == workspace->entity_count);
     return IDE_DOCUMENT_ERROR_NONE;
 }
 
-BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_build_workspace(Arena* arena, Arena* expression_arena, String8 root_input, String8 open_input,
+BUSTER_GLOBAL_LOCAL void ide_analysis_bind_graph_imports(Arena* result_arena, Arena* temporary_arena,
+                                                          const IdeDocumentWorkspace* workspace, AnalysisResult** analyses, u32 module_index,
+                                                          AnalysisResult** visible_modules, u32 visible_module_count)
+{
+    AnalysisResult* analysis = analyses[module_index];
+    u32 binding_count = analysis->module.import_count;
+    AnalysisImportBinding* bindings = binding_count ? arena_allocate(temporary_arena, AnalysisImportBinding, binding_count) : 0;
+    u32 first_import = workspace->graph->import_offsets[module_index];
+    BUSTER_CHECK(!workspace->revision_states[module_index].current->analysis_eligible ||
+                 binding_count == workspace->graph->import_offsets[module_index + 1] - first_import);
+    for (u32 binding_index = 0; binding_index < binding_count; binding_index += 1)
+    {
+        u32 flat_import = first_import + binding_index;
+        u32 target = workspace->graph->binding_targets[flat_import];
+        bindings[binding_index] = (AnalysisImportBinding){
+            .target = target == IDE_DOCUMENT_INDEX_INVALID ? 0 : analyses[target],
+            .state = workspace->graph->binding_states[flat_import],
+        };
+    }
+    analysis_bind_module_imports(result_arena, analysis, visible_modules, visible_module_count, bindings, binding_count);
+}
+
+BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_analysis_full_from_cached(IdeDocumentModel* model, IdeDocumentWorkspace* workspace, bool full_fallback)
+{
+    u32 document_count = workspace->document_count;
+    IdeAnalysisBatch* batch = ide_analysis_batch_create(model, document_count);
+    if (!batch)
+    {
+        return IDE_DOCUMENT_ERROR_FILE_READ;
+    }
+    ide_analysis_stats_set_snapshot_count(workspace, batch->snapshot_count);
+    Arena* arena = batch->owner.arena;
+    AnalysisResult** analyses = document_count ? arena_allocate(model->staging_arena, AnalysisResult*, document_count) : 0;
+    IdeDocumentStorageOwner** dependencies = document_count ? arena_allocate(model->staging_arena, IdeDocumentStorageOwner*, document_count) : 0;
+    for (u32 index = 0; index < document_count; index += 1)
+    {
+        IdeSyntaxRevision* revision = workspace->revision_states[index].current;
+        AnalysisSourceInput input = {
+            .path = workspace->documents[index].path,
+            .parser = revision->analysis_eligible ? &revision->parser : 0,
+        };
+        analyses[index] = arena_allocate(arena, AnalysisResult, 1);
+        *analyses[index] = analysis_index_module(arena, (AnalysisModuleId){.value = index}, workspace->documents[index].module_name, &input, 1);
+        dependencies[index] = revision->owner;
+        ide_analysis_stats_mark(workspace, index, IDE_DOCUMENT_ANALYSIS_WORK_INDEXED);
+        ide_analysis_stats_mark(workspace, index, IDE_DOCUMENT_ANALYSIS_WORK_INVALIDATED);
+    }
+    ide_owner_dependencies_set(&batch->owner, dependencies, document_count);
+    for (u32 index = 0; index < document_count; index += 1)
+    {
+        ide_analysis_bind_graph_imports(arena, model->staging_arena, workspace, analyses, index, analyses, document_count);
+    }
+    for (u32 order_index = 0; order_index < document_count; order_index += 1)
+    {
+        analysis_resolve_module_interfaces(arena, analyses[workspace->graph->dependency_order[order_index]]);
+    }
+    bool contains_generics = false;
+    for (u32 index = 0; index < document_count; index += 1)
+    {
+        contains_generics |= ide_analysis_result_has_generic(analyses[index]);
+    }
+    for (u32 index = 0; index < document_count; index += 1)
+    {
+        if (workspace->revision_states[index].current->analysis_eligible)
+        {
+            analysis_analyze_bodies(arena, analyses[index]);
+        }
+        ide_analysis_stats_mark(workspace, index, IDE_DOCUMENT_ANALYSIS_WORK_ANALYZED);
+        IdeModuleSnapshot* snapshot = batch->snapshots + index;
+        snapshot->owner = &batch->owner;
+        IdeDocumentErrorKind error = ide_snapshot_build(arena, workspace, index, analyses[index], snapshot);
+        if (error != IDE_DOCUMENT_ERROR_NONE)
+        {
+            return error;
+        }
+        workspace->revision_states[index].module = snapshot;
+        contains_generics |= snapshot->has_generic_entities;
+    }
+    workspace->analysis_contains_generics = contains_generics;
+#if BUSTER_INCLUDE_TESTS
+    workspace->last_analysis_stats.full_fallback = full_fallback;
+#else
+    BUSTER_UNUSED(full_fallback);
+#endif
+    return IDE_DOCUMENT_ERROR_NONE;
+}
+
+BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_rebuild_workspace_analysis(IdeDocumentModel* model, IdeDocumentWorkspace* workspace,
+                                                                         u32 max_diagnostics)
+{
+    u32 document_count = workspace->document_count;
+    IdeDocumentRevisionState* previous_states = workspace->revision_states;
+    IdeDocumentRevisionState* revision_states = document_count ? arena_allocate(model->staging_arena, IdeDocumentRevisionState, document_count) : 0;
+    if (document_count)
+    {
+        memset(revision_states, 0, sizeof(*revision_states) * document_count);
+    }
+    workspace->revision_states = revision_states;
+    ide_analysis_stats_begin(model->staging_arena, workspace);
+    IdeSyntaxBatch* syntax_batch = 0;
+    for (u32 index = 0; index < document_count; index += 1)
+    {
+        IdeDocument* document = workspace->documents + index;
+        String8 source = document->source;
+        String8 saved_source = document->saved_source;
+        IdeSyntaxRevision* current = previous_states ? previous_states[index].current : 0;
+        if (!current || !current->has_syntax || !string_equal(current->source, source))
+        {
+            if (!syntax_batch)
+            {
+                syntax_batch = ide_syntax_batch_create(model);
+            }
+            current = ide_syntax_revision_create(syntax_batch, model->expression_arena, document->module_name, source);
+            ide_analysis_stats_mark(workspace, index, IDE_DOCUMENT_ANALYSIS_WORK_PARSED);
+        }
+        if (!current)
+        {
+            return IDE_DOCUMENT_ERROR_FILE_READ;
+        }
+        IdeSyntaxRevision* saved = string_equal(source, saved_source) ? current : (previous_states ? previous_states[index].saved : 0);
+        if (!saved || !string_equal(saved->source, saved_source))
+        {
+            if (!syntax_batch)
+            {
+                syntax_batch = ide_syntax_batch_create(model);
+            }
+            saved = ide_source_revision_create(syntax_batch, saved_source);
+        }
+        workspace->revision_states[index] = (IdeDocumentRevisionState){.current = current, .saved = saved};
+        document->source = current->source;
+        document->saved_source = saved->source;
+    }
+    IdeDocumentErrorKind error = ide_graph_build(model->staging_arena, workspace);
+    if (error == IDE_DOCUMENT_ERROR_NONE)
+    {
+        error = ide_analysis_full_from_cached(model, workspace, false);
+    }
+    if (error == IDE_DOCUMENT_ERROR_NONE)
+    {
+        error = ide_workspace_flatten_snapshots(model->staging_arena, workspace, max_diagnostics);
+    }
+    if (error == IDE_DOCUMENT_ERROR_NONE)
+    {
+        workspace->analysis_generation += 1;
+    }
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_build_workspace(IdeDocumentModel* model, Arena* arena, String8 root_input, String8 open_input,
                                                               const IdeDocumentWorkspace* old_workspace, bool preserve_old,
                                                               u32 max_discovered_files, u32 max_traversal_entries, u32 max_diagnostics,
                                                               IdeDocumentWorkspace* result)
@@ -1992,7 +2866,7 @@ BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_build_workspace(Arena* arena, Arena
                 continue;
             }
             IdeDocument* orphan = result->documents + document_index;
-            ide_document_copy_to_arena(arena, orphan, old_document, IDE_WORKSPACE_COPY_PRESERVE_DERIVED);
+            ide_document_copy_to_arena(arena, orphan, old_document, IDE_WORKSPACE_COPY_PRESERVE_DERIVED, true);
             orphan->external_exists = false;
             orphan->external_modified = true;
             document_index += 1;
@@ -2005,7 +2879,25 @@ BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_build_workspace(Arena* arena, Arena
     BUSTER_CHECK(document_index == document_count);
     ide_documents_sort(result->documents, document_count);
 
-    IdeDocumentErrorKind analysis_error = ide_rebuild_workspace_analysis(arena, expression_arena, result, max_diagnostics);
+    if (preserve_old)
+    {
+        result->analysis_generation = old_workspace->analysis_generation;
+        result->revision_states = document_count ? arena_allocate(arena, IdeDocumentRevisionState, document_count) : 0;
+        if (document_count)
+        {
+            memset(result->revision_states, 0, sizeof(*result->revision_states) * document_count);
+        }
+        for (u32 index = 0; index < document_count; index += 1)
+        {
+            u32 old_index = ide_workspace_find_identity((IdeDocumentWorkspace*)old_workspace, result->documents[index].identity);
+            if (old_index != IDE_DOCUMENT_INDEX_INVALID && old_workspace->revision_states)
+            {
+                result->revision_states[index] = old_workspace->revision_states[old_index];
+            }
+        }
+    }
+
+    IdeDocumentErrorKind analysis_error = ide_rebuild_workspace_analysis(model, result, max_diagnostics);
     if (analysis_error != IDE_DOCUMENT_ERROR_NONE)
     {
         return analysis_error;
@@ -2090,7 +2982,38 @@ BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_build_workspace(Arena* arena, Arena
 
 BUSTER_GLOBAL_LOCAL void ide_model_reset_staging(IdeDocumentModel* model)
 {
+    ide_model_release_staged_owners(model);
     arena_reset_to_start(model->staging_arena);
+}
+
+BUSTER_GLOBAL_LOCAL void ide_workspace_retain_owners(const IdeDocumentWorkspace* workspace)
+{
+    if (!workspace || !workspace->revision_states)
+    {
+        return;
+    }
+    for (u32 index = 0; index < workspace->document_count; index += 1)
+    {
+        const IdeDocumentRevisionState* state = workspace->revision_states + index;
+        ide_owner_retain(state->current ? state->current->owner : 0);
+        ide_owner_retain(state->saved ? state->saved->owner : 0);
+        ide_owner_retain(state->module ? state->module->owner : 0);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ide_workspace_release_owners(const IdeDocumentWorkspace* workspace)
+{
+    if (!workspace || !workspace->revision_states)
+    {
+        return;
+    }
+    for (u32 index = 0; index < workspace->document_count; index += 1)
+    {
+        const IdeDocumentRevisionState* state = workspace->revision_states + index;
+        ide_owner_release(state->current ? state->current->owner : 0);
+        ide_owner_release(state->saved ? state->saved->owner : 0);
+        ide_owner_release(state->module ? state->module->owner : 0);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL bool ide_workspace_has_dirty_documents(const IdeDocumentWorkspace* workspace)
@@ -2112,9 +3035,13 @@ BUSTER_GLOBAL_LOCAL bool ide_workspace_has_dirty_documents(const IdeDocumentWork
 BUSTER_GLOBAL_LOCAL void ide_model_commit(IdeDocumentModel* model, IdeDocumentWorkspace workspace)
 {
     Arena* old_active = model->active_arena;
+    IdeDocumentWorkspace old_workspace = model->workspace;
+    ide_workspace_retain_owners(&workspace);
     model->workspace = workspace;
     model->active_arena = model->staging_arena;
     model->staging_arena = old_active;
+    ide_workspace_release_owners(&old_workspace);
+    ide_model_release_staged_owners(model);
     arena_reset_to_start(model->staging_arena);
 }
 
@@ -2192,15 +3119,18 @@ IdeDocumentErrorKind ide_document_model_initialize(IdeDocumentModel* model, Aren
     {
         return IDE_DOCUMENT_ERROR_INVALID_ARGUMENT;
     }
+    if (options.expression_arena && (options.expression_arena == arena || options.expression_arena == staging_arena))
+    {
+        return IDE_DOCUMENT_ERROR_INVALID_ARGUMENT;
+    }
+    // Model construction is the required serial boundary before later edits
+    // may tokenize from worker-backed IDE paths.
+    tokenizer_prewarm();
     memset(model, 0, sizeof(*model));
     model->active_arena = arena;
     model->staging_arena = staging_arena;
     if (options.expression_arena)
     {
-        if (options.expression_arena == arena || options.expression_arena == staging_arena)
-        {
-            return IDE_DOCUMENT_ERROR_INVALID_ARGUMENT;
-        }
         model->expression_arena = options.expression_arena;
     }
     else
@@ -2223,11 +3153,11 @@ IdeDocumentErrorKind ide_document_model_initialize(IdeDocumentModel* model, Aren
         return IDE_DOCUMENT_ERROR_NONE;
     }
     IdeDocumentWorkspace workspace = {0};
-    IdeDocumentErrorKind error = ide_build_workspace(model->staging_arena, model->expression_arena, options.workspace_root, options.open_path, 0, false,
+    IdeDocumentErrorKind error = ide_build_workspace(model, model->staging_arena, options.workspace_root, options.open_path, 0, false,
                                                       model->max_discovered_files, model->max_traversal_entries, model->max_diagnostics, &workspace);
     if (error != IDE_DOCUMENT_ERROR_NONE)
     {
-        arena_reset_to_start(model->staging_arena);
+        ide_model_reset_staging(model);
         if (model->owns_expression_arena)
         {
             arena_destroy(model->expression_arena, 1);
@@ -2249,6 +3179,8 @@ void ide_document_model_deinitialize(IdeDocumentModel* model)
     }
     Arena* expression_arena = model->expression_arena;
     bool owns_expression_arena = model->owns_expression_arena;
+    ide_workspace_release_owners(&model->workspace);
+    ide_model_release_staged_owners(model);
     if (model->active_arena)
     {
         arena_reset_to_start(model->active_arena);
@@ -2272,7 +3204,7 @@ IdeDocumentErrorKind ide_document_model_refresh_workspace(IdeDocumentModel* mode
     }
     ide_model_reset_staging(model);
     IdeDocumentWorkspace workspace = {0};
-    IdeDocumentErrorKind error = ide_build_workspace(model->staging_arena, model->expression_arena, model->workspace.root_path, (String8){0},
+    IdeDocumentErrorKind error = ide_build_workspace(model, model->staging_arena, model->workspace.root_path, (String8){0},
                                                       &model->workspace, true,
                                                       model->max_discovered_files, model->max_traversal_entries, model->max_diagnostics, &workspace);
     if (error != IDE_DOCUMENT_ERROR_NONE)
@@ -2389,7 +3321,7 @@ BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_stage_open_path(IdeDocumentModel* m
     IdeDocumentWorkspace workspace = {0};
     String8 root_input = same_root ? model->workspace.root_path : (String8){0};
     const IdeDocumentWorkspace* old_workspace = same_root ? &model->workspace : 0;
-    IdeDocumentErrorKind error = ide_build_workspace(model->staging_arena, model->expression_arena, root_input, build_path, old_workspace, same_root,
+    IdeDocumentErrorKind error = ide_build_workspace(model, model->staging_arena, root_input, build_path, old_workspace, same_root,
                                                      model->max_discovered_files, model->max_traversal_entries, model->max_diagnostics, &workspace);
     if (error != IDE_DOCUMENT_ERROR_NONE)
     {
@@ -2494,7 +3426,7 @@ IdeDocumentErrorKind ide_document_model_open(IdeDocumentModel* model, String8 pa
     workspace.active_document_index = index;
     if (needs_analysis_rebuild)
     {
-        IdeDocumentErrorKind error = ide_rebuild_workspace_analysis(model->staging_arena, model->expression_arena, &workspace, model->max_diagnostics);
+        IdeDocumentErrorKind error = ide_rebuild_workspace_analysis(model, &workspace, model->max_diagnostics);
         if (error != IDE_DOCUMENT_ERROR_NONE)
         {
             ide_model_reset_staging(model);
@@ -2651,51 +3583,367 @@ IdeDocumentErrorKind ide_document_model_activate_entity(IdeDocumentModel* model,
     return ide_document_model_activate_source_range(model, source_path, snapshot_range);
 }
 
+BUSTER_GLOBAL_LOCAL bool ide_module_fingerprint_equal(IdeSyntaxRevision* revision, IdeModuleSnapshot* snapshot)
+{
+    return revision && snapshot && revision->interface_hash == snapshot->interface_hash &&
+           revision->interface_bytes.length == snapshot->interface_bytes.length &&
+           string_equal(revision->interface_bytes, snapshot->interface_bytes);
+}
+
+BUSTER_GLOBAL_LOCAL bool ide_module_bindings_equal(const IdeDocumentWorkspace* left, const IdeDocumentWorkspace* right, u32 module_index)
+{
+    if (!left->graph || !right->graph || module_index >= left->document_count || module_index >= right->document_count)
+    {
+        return false;
+    }
+    u32 left_first = left->graph->import_offsets[module_index];
+    u32 left_last = left->graph->import_offsets[module_index + 1];
+    u32 right_first = right->graph->import_offsets[module_index];
+    u32 right_last = right->graph->import_offsets[module_index + 1];
+    if (left_last - left_first != right_last - right_first)
+    {
+        return false;
+    }
+    for (u32 offset = 0; offset < left_last - left_first; offset += 1)
+    {
+        u32 left_index = left_first + offset;
+        u32 right_index = right_first + offset;
+        if (left->graph->binding_targets[left_index] != right->graph->binding_targets[right_index] ||
+            left->graph->binding_states[left_index] != right->graph->binding_states[right_index])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL void ide_graph_visible_set(IdeDocumentGraph* graph, u32 document_count, u32 root, bool* visible, u32* stack)
+{
+    memset(visible, 0, sizeof(bool) * document_count);
+    u32 stack_count = 1;
+    stack[0] = root;
+    visible[root] = true;
+    while (stack_count)
+    {
+        u32 module = stack[stack_count - 1];
+        stack_count -= 1;
+        for (u32 edge = graph->forward_offsets[module]; edge < graph->forward_offsets[module + 1]; edge += 1)
+        {
+            u32 target = graph->forward_edges[edge];
+            if (!visible[target])
+            {
+                visible[target] = true;
+                stack[stack_count] = target;
+                stack_count += 1;
+            }
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ide_reverse_cone_add(IdeDocumentGraph* graph, u32 document_count, u32 module, bool* affected, u32* queue, u32* queue_count)
+{
+    if (!graph)
+    {
+        return;
+    }
+    for (u32 edge = graph->reverse_offsets[module]; edge < graph->reverse_offsets[module + 1]; edge += 1)
+    {
+        u32 dependent = graph->reverse_edges[edge];
+        if (!affected[dependent])
+        {
+            affected[dependent] = true;
+            BUSTER_CHECK(*queue_count < document_count);
+            queue[*queue_count] = dependent;
+            *queue_count += 1;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool ide_workspace_has_generic_syntax(const IdeDocumentWorkspace* workspace)
+{
+    for (u32 index = 0; index < workspace->document_count; index += 1)
+    {
+        IdeSyntaxRevision* revision = workspace->revision_states[index].current;
+        if (revision && revision->has_generic_syntax)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL IdeDocumentErrorKind ide_analysis_incremental(IdeDocumentModel* model, IdeDocumentWorkspace* workspace,
+                                                                  const IdeDocumentWorkspace* old_workspace, const bool* affected,
+                                                                  bool* introduced_generic)
+{
+    u32 document_count = workspace->document_count;
+    *introduced_generic = false;
+    u32 affected_count = 0;
+    for (u32 index = 0; index < document_count; index += 1)
+    {
+        affected_count += affected[index];
+    }
+    BUSTER_CHECK(affected_count);
+    IdeAnalysisBatch* batch = ide_analysis_batch_create(model, affected_count);
+    if (!batch)
+    {
+        return IDE_DOCUMENT_ERROR_FILE_READ;
+    }
+    ide_analysis_stats_set_snapshot_count(workspace, batch->snapshot_count);
+    Arena* arena = batch->owner.arena;
+    AnalysisResult** analyses = document_count ? arena_allocate(model->staging_arena, AnalysisResult*, document_count) : 0;
+    bool* visible = document_count ? arena_allocate(model->staging_arena, bool, document_count) : 0;
+    bool* referenced_old = document_count ? arena_allocate(model->staging_arena, bool, document_count) : 0;
+    u32* stack = document_count ? arena_allocate(model->staging_arena, u32, document_count) : 0;
+    // A document contributes either its affected syntax owner or its retained
+    // module owner, never both, so the exact upper bound is document_count.
+    IdeDocumentStorageOwner** dependencies = document_count ? arena_allocate(model->staging_arena, IdeDocumentStorageOwner*, document_count) : 0;
+    u32 dependency_count = 0;
+    if (document_count)
+    {
+        memset(referenced_old, 0, sizeof(bool) * document_count);
+    }
+    for (u32 index = 0; index < document_count; index += 1)
+    {
+        if (!affected[index])
+        {
+            analyses[index] = old_workspace->revision_states[index].module->analysis;
+            continue;
+        }
+        IdeSyntaxRevision* revision = workspace->revision_states[index].current;
+        AnalysisSourceInput input = {
+            .path = workspace->documents[index].path,
+            .parser = revision->analysis_eligible ? &revision->parser : 0,
+        };
+        analyses[index] = arena_allocate(arena, AnalysisResult, 1);
+        *analyses[index] = analysis_index_module(arena, (AnalysisModuleId){.value = index}, workspace->documents[index].module_name, &input, 1);
+        BUSTER_CHECK(dependency_count < document_count);
+        dependencies[dependency_count] = revision->owner;
+        dependency_count += 1;
+        ide_analysis_stats_mark(workspace, index, IDE_DOCUMENT_ANALYSIS_WORK_INDEXED);
+
+        ide_graph_visible_set(workspace->graph, document_count, index, visible, stack);
+        for (u32 visible_index = 0; visible_index < document_count; visible_index += 1)
+        {
+            referenced_old[visible_index] |= visible[visible_index] && !affected[visible_index];
+        }
+    }
+    for (u32 index = 0; index < document_count; index += 1)
+    {
+        if (referenced_old[index])
+        {
+            BUSTER_CHECK(dependency_count < document_count);
+            dependencies[dependency_count] = old_workspace->revision_states[index].module->owner;
+            dependency_count += 1;
+        }
+    }
+    BUSTER_CHECK(dependency_count <= document_count);
+    ide_owner_dependencies_set(&batch->owner, dependencies, dependency_count);
+
+    for (u32 index = 0; index < document_count; index += 1)
+    {
+        if (!affected[index])
+        {
+            continue;
+        }
+        ide_graph_visible_set(workspace->graph, document_count, index, visible, stack);
+        u32 visible_count = 0;
+        for (u32 candidate = 0; candidate < document_count; candidate += 1)
+        {
+            visible_count += visible[candidate];
+        }
+        AnalysisResult** visible_modules = visible_count ? arena_allocate(model->staging_arena, AnalysisResult*, visible_count) : 0;
+        u32 visible_index = 0;
+        for (u32 candidate = 0; candidate < document_count; candidate += 1)
+        {
+            if (visible[candidate])
+            {
+                visible_modules[visible_index] = analyses[candidate];
+                visible_index += 1;
+            }
+        }
+        BUSTER_CHECK(visible_index == visible_count);
+
+        ide_analysis_bind_graph_imports(arena, model->staging_arena, workspace, analyses, index, visible_modules, visible_count);
+    }
+
+    u32 snapshot_cursor = 0;
+    for (u32 order_index = 0; order_index < document_count; order_index += 1)
+    {
+        u32 index = workspace->graph->dependency_order[order_index];
+        if (affected[index])
+        {
+            analysis_resolve_module_interfaces(arena, analyses[index]);
+        }
+    }
+    for (u32 index = 0; index < document_count; index += 1)
+    {
+        if (affected[index] && ide_analysis_result_has_generic(analyses[index]))
+        {
+            *introduced_generic = true;
+            ide_model_unstage_owner(model, &batch->owner);
+            return IDE_DOCUMENT_ERROR_NONE;
+        }
+    }
+    for (u32 order_index = 0; order_index < document_count; order_index += 1)
+    {
+        u32 index = workspace->graph->dependency_order[order_index];
+        if (!affected[index])
+        {
+            continue;
+        }
+        if (workspace->revision_states[index].current->analysis_eligible)
+        {
+            analysis_analyze_bodies(arena, analyses[index]);
+        }
+        ide_analysis_stats_mark(workspace, index, IDE_DOCUMENT_ANALYSIS_WORK_ANALYZED);
+        BUSTER_CHECK(snapshot_cursor < batch->snapshot_count);
+        IdeModuleSnapshot* snapshot = batch->snapshots + snapshot_cursor;
+        snapshot_cursor += 1;
+        snapshot->owner = &batch->owner;
+        IdeDocumentErrorKind error = ide_snapshot_build(arena, workspace, index, analyses[index], snapshot);
+        if (error != IDE_DOCUMENT_ERROR_NONE)
+        {
+            return error;
+        }
+        workspace->revision_states[index].module = snapshot;
+    }
+    BUSTER_CHECK(snapshot_cursor == batch->snapshot_count);
+    workspace->analysis_contains_generics = false;
+    return IDE_DOCUMENT_ERROR_NONE;
+}
+
 IdeDocumentErrorKind ide_document_model_set_text(IdeDocumentModel* model, String8 path, String8 source)
 {
     if (!model || !model->initialized || (!source.pointer && source.length))
     {
         return IDE_DOCUMENT_ERROR_INVALID_ARGUMENT;
     }
-    ide_model_reset_staging(model);
-    IdeDocumentErrorKind path_error = ide_model_path_error(model->staging_arena, model->workspace.root_path, path);
+    TemporalArena scratch = scratch_begin(0, 0);
+    IdeDocumentErrorKind path_error = ide_model_path_error(scratch.arena, model->workspace.root_path, path);
     if (path_error != IDE_DOCUMENT_ERROR_NONE)
     {
-        ide_model_reset_staging(model);
+        scratch_end(scratch);
         return path_error;
     }
-    u32 existing_index = ide_workspace_find_path(model->staging_arena, &model->workspace, path);
+    u32 existing_index = ide_workspace_find_path(scratch.arena, &model->workspace, path);
     if (existing_index == IDE_DOCUMENT_INDEX_INVALID)
     {
-        ide_model_reset_staging(model);
+        scratch_end(scratch);
         return IDE_DOCUMENT_ERROR_DOCUMENT_NOT_FOUND;
     }
-    bool source_changed = !string_equal(model->workspace.documents[existing_index].source, source);
-    IdeDocumentWorkspace workspace = {0};
-    ide_model_reset_staging(model);
-    ide_workspace_copy_to_arena_mode(model->staging_arena, &workspace, &model->workspace,
-                                     source_changed ? IDE_WORKSPACE_COPY_REBUILD_DERIVED : IDE_WORKSPACE_COPY_PRESERVE_DERIVED);
-    u32 index = ide_workspace_find_path(model->staging_arena, &workspace, path);
-    IdeDocument* document = workspace.documents + index;
-    if (!document->is_open)
+    IdeDocument* existing = model->workspace.documents + existing_index;
+    if (!existing->is_open)
     {
-        ide_model_reset_staging(model);
+        scratch_end(scratch);
         return IDE_DOCUMENT_ERROR_DOCUMENT_NOT_OPEN;
     }
-    if (!string_equal(document->source, source))
+    if (string_equal(existing->source, source))
     {
-        document->source = ide_string_copy(model->staging_arena, source);
-        ide_document_clamp_view(document);
-        document->revision += 1;
-        document->dirty = !string_equal(document->source, document->saved_source);
-        ide_document_compile_mark_stale(document);
-        IdeDocumentErrorKind error = ide_rebuild_workspace_analysis(model->staging_arena, model->expression_arena, &workspace, model->max_diagnostics);
-        if (error != IDE_DOCUMENT_ERROR_NONE)
+        scratch_end(scratch);
+        return IDE_DOCUMENT_ERROR_NONE;
+    }
+    scratch_end(scratch);
+
+    ide_model_reset_staging(model);
+    IdeDocumentWorkspace workspace = {0};
+    ide_workspace_copy_to_arena(model->staging_arena, &workspace, &model->workspace);
+    u32 index = ide_workspace_find_path(model->staging_arena, &workspace, path);
+    IdeDocument* document = workspace.documents + index;
+    IdeSyntaxBatch* syntax_batch = ide_syntax_batch_create(model);
+    if (!syntax_batch)
+    {
+        ide_model_reset_staging(model);
+        return IDE_DOCUMENT_ERROR_FILE_READ;
+    }
+    IdeSyntaxRevision* revision = ide_syntax_revision_create(syntax_batch, model->expression_arena, document->module_name, source);
+    if (!revision)
+    {
+        ide_model_reset_staging(model);
+        return IDE_DOCUMENT_ERROR_FILE_READ;
+    }
+    workspace.revision_states[index].current = revision;
+    document->source = revision->source;
+    document->revision += 1;
+    document->dirty = !string_equal(document->source, document->saved_source);
+    ide_document_clamp_view(document);
+    ide_analysis_stats_begin(model->staging_arena, &workspace);
+    ide_analysis_stats_mark(&workspace, index, IDE_DOCUMENT_ANALYSIS_WORK_PARSED);
+
+    IdeDocumentErrorKind error = ide_graph_build(model->staging_arena, &workspace);
+    if (error != IDE_DOCUMENT_ERROR_NONE)
+    {
+        ide_model_reset_staging(model);
+        return error;
+    }
+    bool* affected = workspace.document_count ? arena_allocate(model->staging_arena, bool, workspace.document_count) : 0;
+    u32* queue = workspace.document_count ? arena_allocate(model->staging_arena, u32, workspace.document_count) : 0;
+    if (workspace.document_count)
+    {
+        memset(affected, 0, sizeof(bool) * workspace.document_count);
+    }
+    affected[index] = true;
+    bool interface_equal = ide_module_fingerprint_equal(revision, model->workspace.revision_states[index].module);
+    bool bindings_equal = ide_module_bindings_equal(&model->workspace, &workspace, index);
+    u32 queue_count = 1;
+    u32 queue_cursor = 0;
+    queue[0] = index;
+    if (!interface_equal || !bindings_equal)
+    {
+        while (queue_cursor < queue_count)
         {
-            ide_model_reset_staging(model);
-            return error;
+            u32 module = queue[queue_cursor];
+            queue_cursor += 1;
+            ide_reverse_cone_add(model->workspace.graph, workspace.document_count, module, affected, queue, &queue_count);
+            ide_reverse_cone_add(workspace.graph, workspace.document_count, module, affected, queue, &queue_count);
         }
     }
+
+    bool full_fallback = model->workspace.analysis_contains_generics || model->workspace.analysis_has_cycles ||
+                         workspace.analysis_has_cycles || ide_workspace_has_generic_syntax(&workspace);
+    if (full_fallback)
+    {
+        ide_analysis_stats_begin(model->staging_arena, &workspace);
+        ide_analysis_stats_mark(&workspace, index, IDE_DOCUMENT_ANALYSIS_WORK_PARSED);
+        for (u32 module = 0; module < workspace.document_count; module += 1)
+        {
+            ide_document_compile_mark_stale(workspace.documents + module);
+        }
+        error = ide_analysis_full_from_cached(model, &workspace, true);
+    }
+    else
+    {
+        for (u32 module = 0; module < workspace.document_count; module += 1)
+        {
+            if (affected[module])
+            {
+                ide_analysis_stats_mark(&workspace, module, IDE_DOCUMENT_ANALYSIS_WORK_INVALIDATED);
+                ide_document_compile_mark_stale(workspace.documents + module);
+            }
+        }
+        bool introduced_generic = false;
+        error = ide_analysis_incremental(model, &workspace, &model->workspace, affected, &introduced_generic);
+        if (error == IDE_DOCUMENT_ERROR_NONE && introduced_generic)
+        {
+            ide_analysis_stats_begin(model->staging_arena, &workspace);
+            ide_analysis_stats_mark(&workspace, index, IDE_DOCUMENT_ANALYSIS_WORK_PARSED);
+            for (u32 module = 0; module < workspace.document_count; module += 1)
+            {
+                ide_document_compile_mark_stale(workspace.documents + module);
+            }
+            error = ide_analysis_full_from_cached(model, &workspace, true);
+        }
+    }
+    if (error == IDE_DOCUMENT_ERROR_NONE)
+    {
+        error = ide_workspace_flatten_snapshots(model->staging_arena, &workspace, model->max_diagnostics);
+    }
+    if (error != IDE_DOCUMENT_ERROR_NONE)
+    {
+        ide_model_reset_staging(model);
+        return error;
+    }
+    workspace.analysis_generation = model->workspace.analysis_generation + 1;
     ide_model_commit(model, workspace);
     return IDE_DOCUMENT_ERROR_NONE;
 }
@@ -2746,7 +3994,7 @@ IdeDocumentErrorKind ide_document_model_reload(IdeDocumentModel* model, String8 
     document->dirty = false;
     ide_document_clamp_view(document);
     ide_document_compile_mark_stale(document);
-    error = ide_rebuild_workspace_analysis(model->staging_arena, model->expression_arena, &workspace, model->max_diagnostics);
+    error = ide_rebuild_workspace_analysis(model, &workspace, model->max_diagnostics);
     if (error != IDE_DOCUMENT_ERROR_NONE)
     {
         ide_model_reset_staging(model);
@@ -2881,7 +4129,9 @@ IdeDocumentErrorKind ide_document_model_save(IdeDocumentModel* model, String8 pa
     document->external_hash = loaded.hash;
     document->external_exists = true;
     document->external_modified = false;
-    document->saved_source = ide_string_copy(model->staging_arena, document->source);
+    BUSTER_CHECK(workspace.revision_states && workspace.revision_states[index].current);
+    workspace.revision_states[index].saved = workspace.revision_states[index].current;
+    document->saved_source = workspace.revision_states[index].saved->source;
     document->saved_hash = source_hash;
     document->saved_revision = document->revision;
     document->dirty = false;
@@ -3202,6 +4452,27 @@ IdeDocumentWorkspaceStatus ide_document_model_status(IdeDocumentModel* model)
     }
     return result;
 }
+
+u64 ide_document_model_analysis_generation(const IdeDocumentModel* model)
+{
+    return model && model->initialized ? model->workspace.analysis_generation : 0;
+}
+
+#if BUSTER_INCLUDE_TESTS
+IdeDocumentAnalysisOperationStats ide_document_model_test_last_analysis_stats(const IdeDocumentModel* model)
+{
+    return model && model->initialized ? model->workspace.last_analysis_stats : (IdeDocumentAnalysisOperationStats){0};
+}
+
+u8 ide_document_model_test_document_work_flags(const IdeDocumentModel* model, u32 index)
+{
+    if (!model || !model->initialized || !model->workspace.last_analysis_work_flags || index >= model->workspace.document_count)
+    {
+        return 0;
+    }
+    return model->workspace.last_analysis_work_flags[index];
+}
+#endif
 
 IdeDocument* ide_document_model_find(IdeDocumentModel* model, String8 path)
 {
