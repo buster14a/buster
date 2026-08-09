@@ -601,6 +601,79 @@ old/new reverse dependency cone.**)
   but a worst-case 4,096-document workspace in which every document has been
   touched can reserve roughly 1 TiB of VA. Slab compaction or a proven dynamic
   upper bound remains follow-up work for constrained mobile address spaces.
+`2026-08-09j` (Linux x86_64, Zen 4 7940HS; broad subsystem-throughput pass,
+remeasured after rebasing onto `e1714308`. **The complete self-host stage-1
+gate falls from `5.195558804 G` to `5.142154274 G` instructions (`-1.028%`)
+while the source grows from `1.397.968` to `1.409.745` preprocessed tokens
+(`+0.842%`), so instructions per token improve from `3716.508` to `3647.578`
+(`-1.855%`). Stage 2 falls from `70.441133316 G` to `70.011880571 G`
+instructions (`-0.609%`) and from `50388.230` to `49662.798` instructions per
+token (`-1.440%`). The stage-2 benchmark is instruction-neutral at
+`6.887883141 G` to `6.891654008 G` (`+0.055%`). Both trees reach their
+byte-identical fixed points.**)
+
+- **Semantic analysis now indexes the scans that become nonlinear.** Large
+  module interfaces keep open-addressed maps for entity, import and module
+  names, and structural type interning switches from pairwise comparison to a
+  hash table at 128 entries. Small collections retain their straight-line
+  scans. Generated stress tests measured the name cases at `50x` to `160x`
+  fewer probes and the type case at `2.124.832` to `8.038` comparisons
+  (`~264x`); ordinary fixtures verify duplicate-name and first-match semantics.
+- **Interpreter lookup work is now paid once and overlapping stores are
+  indexed.** Each execution caches validated function resolution instead of
+  repeatedly validating and scanning the function table. Stored-value ranges
+  switch from the insertion-order list to a sorted interval index after eight
+  entries, rebuilding the list when zero-size metadata requires the fallback,
+  and turn the instrumented large clear case from `32.640` overlap probes into
+  `28`. Tests cover the per-execution cache lifetime, missing, not-lowered and
+  malformed targets, exact boundaries, partial overlaps and the
+  scalar-to-index transition.
+- **Parser, emitter, object and linker hot paths are batched or indexed.** The
+  parser stages expression nodes in batches and preallocates its common
+  128-node batch; a focused trusted-Clang A/B before the final rebase moved the
+  parser benchmark's median of minima from `48.994 us` to `45.457 us`
+  (`-7.22%`). Scalar instruction emission reserves and writes whole packets
+  rather than checking capacity byte by byte. Linker global symbols use an
+  open-addressed index. Object relocation and undefined-symbol lookups, plus
+  PE library/export lookups, switch after eight queries so setup cannot
+  dominate. Stress tests exercise the former `O(R*F)`, `O(G^2)` and
+  symbol-by-library-by-export shapes.
+- **UI and glyph work now iterate the live data.** UI state retains a dense
+  active-box list instead of rescanning all 4096 hash slots; its focused
+  benchmark moved from `7.146 ms` to `5.871 ms` median (`-17.85%`). TrueType
+  coverage uses an active-edge scanline rasterizer rather than testing every
+  edge for every pixel sample; the large focused raster test fell from
+  `415.813 G` to `2.164 G` instructions (`192.2x`) and from `20.77 s` to
+  `0.189 s`. Rendering regressions cover winding, clipping and fractional
+  coverage.
+- **C source translation scans linearized bytes 64 at a time.** On AVX-512F
+  plus AVX-512BW hosts, one mask identifies the next carriage return, newline
+  or splice backslash, with the existing scalar/SWAR path retained for tails
+  and other targets. The focused incremental gate on the pre-rebase tree saved
+  `66.984 M` stage-1 instructions (`-1.306%`); exhaustive boundary, tail,
+  high-byte, CR/LF and splice tests cover all three paths.
+- **Measured and reverted, do not retry as written.** A two-byte common
+  `Token` row plus rare wide-length side table increased parser-workload
+  instructions by `39.7 M` (`+11.9%`) and latency by `8%` to `10%`, despite
+  finding no corpus token longer than 255 bytes. Immutable offset-based x86
+  metadata removed `674.304 KiB` of BSS and `230.932 KiB` of text but added
+  `157.936 M` stage-1 instructions (`+3.092%`) and `0.87%` to metadata-test
+  runtime; directly viewing the encoded blob was worse (`+131.5%` runtime).
+  Both experiments were fully reverted before this branch was published.
+- **Deliberately deferred.** A compact parser syntax-event stream needs a
+  consumer and end-to-end memory evidence before duplicating or replacing the
+  AST. Generic binding/instantiation indexing did not have a demonstrated hot
+  workload distinct from the structural-type table. AVX-512BW blur, coverage,
+  downsampling and source-search kernels wait until those inputs are made
+  contiguous; vectorizing the current pointer-heavy loops would optimize the
+  wrong shape.
+- **Final verification.** The rebased tree passes the fixed-point workflow
+  (`SELF_HOST deterministic bytes=27099520`), all `23.335` Release assertions
+  and `22.438` ASan/UBSan assertions across 30 modules, and clang static
+  analysis of the Release unity translation unit with zero findings. The
+  direct benchmark readings were `BENCH_PARSE` minimum/median
+  `1.573861/1.701105 ms` to `1.550987/1.622263 ms`; the corresponding I/O
+  median was neutral (`1.917970` to `1.919913 ms`).
 
 `2026-08-09i` (Linux x86_64, Zen 4 7940HS; the 512-bit SIMD builtin
 vocabulary and the tokenizer port onto it, measured against `2026-08-09g` on
