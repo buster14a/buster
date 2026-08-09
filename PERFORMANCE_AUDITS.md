@@ -178,6 +178,89 @@ case-label parse fixes in.)
   `IrInstruction` 112 bytes, byte-identical fixed point (`SELF_HOST
   deterministic bytes=26054048`). Stage 2 `70.12 G`, validation only.
 
+`2026-08-09c` (Linux x86_64, Zen 4 7940HS; the full Deus-Lex-Machina
+compaction emitter for the buster tokenizer that `2026-08-08k` recorded as
+the endgame and `2026-08-09a` confirmed only pays complete — taken as its
+own session per that scoping; every number clang-built on a quiet machine.)
+
+- **What was built.** `tokenize()` now dispatches to a compaction emitter
+  (`tokenize_compact`, guarded `__AVX512VBMI__ && __AVX512VBMI2__` on top of
+  the existing AVX-512 guard, so `!__BUSTER__`/MSVC/aarch64 and the
+  self-hosted stages keep the scalar loop) that walks the file in
+  **token-aligned 64-byte windows**: per window one masked load classifies
+  every byte class in lockstep; escape parity runs the simdjson
+  backslash-parity algorithm; string/comment spans resolve with the
+  reference implementation's forward-seeking cursor arithmetic (all lines of
+  a window in parallel, borrow-subtraction seeks); multi-character operators
+  legalize through the bit-channel `vpshufb` NFA — three per-position
+  128-entry `vpermi2b` tables AND-ed, one channel per 2-/3-char family, with
+  a left-greedy ctz loop reconciling overlaps; number extents and kinds come
+  from mask-derived candidate starts fed through the scalar number scanner
+  (extracted, shared verbatim); keywords keep the `2026-08-08k` perfect
+  hash, patched per identifier start. Emission is the `vpcompressb` iota
+  compaction: start and end positions compress through the token-boundary
+  masks, one byte subtract yields every length in the window, the kinds
+  vector compresses by the same starts mask, and widening interleaved
+  stores write the existing 4-byte `Token` rows 16 at a time.
+- **The enabling simplification: windows are token-aligned, not
+  chunk-aligned.** Every window begins at a token boundary (the token
+  touching a window's last byte is deferred and rescanned by the next
+  window), so *no tokenizer state crosses windows at all* — no escape
+  carry, no in-string carry, no operator-split carry, none of the carry
+  enum the reference implementation maintains. The overlap tax is a few
+  re-classified bytes per window; the correctness payoff is that the rare
+  shapes the masks do not model (character literals, stray backslashes,
+  non-ASCII bytes, `and?`/`or?` candidates, unterminated strings holding a
+  recovery semicolon, tokens longer than a window) simply **escape to
+  `tokenizer_scan_one_token`** — the scalar loop's own switch, extracted —
+  so both paths agree on every hard case by construction. Corpus trigger
+  rates: apostrophes in 2 of 193 chunks, `?` twice, non-ASCII zero.
+- **Numbers (bench = the primary metric; the tokenizer is not on the
+  stage-1 cc path):** `ide bench` **`409.8 M` to `345.0 M` instructions
+  (`-15.8%`)**, `BENCH_PARSE` median `57.1 k` to `47.0 k` ns (`-17.7%`
+  same-session pairing; the baseline's day spread was `55-57 k`), min
+  `55.1 k` to `44.5 k`; `BENCH_IO` median `~226 k` to `~218 k` ns; branches
+  `68.10 M` to `59.18 M` (`-13.1%`), branch misses `~750 k` to `~440 k`
+  (`-41%`); L1d load misses `2.62 M` to `3.00 M` (`+0.4 M`, the kinds-array
+  round-trip and the 640 bytes of tables). Stage 1 `4.9984 G` — neutral as
+  required. Fixed point deterministic (`SELF_HOST deterministic
+  bytes=26044840`; the byte count moved because the self-hosted stages
+  compile the refactored fallback source). All 19372 Release unit tests and
+  all 29 sanitized modules pass.
+- **The differential gate that made this safe:** `tokenize_scalar` stays
+  exported and `parser_tokenizer_tests` now asserts the two streams are
+  byte-identical (`memcmp` over the token rows plus both counters) for 43
+  construct cases each slid across the window boundary by 0-66 pad bytes,
+  seven long-token shapes at 8 lengths spanning whole windows, the full
+  61-file parser corpus, and 9 deterministic LCG fuzz blobs over the
+  tokenizer's alphabet (quotes, backslashes, apostrophes, comment slashes,
+  newlines, high bytes) — ~3000 differential assertions, ASan/UBSan-clean.
+- **Trap paid for:** extracting the per-token switch out of the scalar loop
+  costs `+3.9 M` bench instructions on its own (clang stops inlining it into
+  the loop), and forcing `BUSTER_INLINE` on the extracted function measured
+  *worse* (`424.8 M`, `+15 M`) — do not force-inline the big switch; the
+  compact dispatch makes the outlined cost moot since bench no longer runs
+  that loop.
+- **Post-change bench shape** (whole process, `perf record -F 20000`):
+  `parser_parse` 47.3%, `tokenize` 11.1% (23.2% at the end of `2026-08-08k`),
+  `tokenizer_identifier_kind` 3.5%, `arena_allocate_bytes` 2.2%,
+  `tokenizer_scan_number` 1.4%. The next tokenizer increments recorded for
+  a future session, in expected-value order: the `Token` 4 B to 2 B
+  kind+length shrink with the 0-length wide-length escape (the emitter
+  already produces kind and length side by side; the parser side is the
+  work), a vectorized keyword hash over compressed first/last byte pairs
+  (the reference implementation's form) to fold the per-identifier 3.5%,
+  and number-mask extents to retire the scalar number scanner's 1.4%. The
+  parser itself (47.3%) is now decisively the bench lever — the
+  `2026-08-08k` node-allocation-batching lead stands.
+- Reference points for the next audit, all clang-built on this host:
+  stage 1 `4.998 G` instructions / `~242 k` minor faults / `~145.7 M` L1d
+  load misses (unchanged from `2026-08-09a`), `ide bench` **`345.0 M`**
+  instructions per run, `BENCH_PARSE` median `~47 k ns`, `BENCH_IO` median
+  `~218 k ns`, `IrInstruction` 112 bytes, byte-identical fixed point
+  (`SELF_HOST deterministic bytes=26044840`). Stage 2 `70.9 G`, validation
+  only.
+
 `2026-08-09b` (Linux x86_64, Zen 4 7940HS; the operand/target/immediate
 pools + build/consume SoA row split that `2026-08-09a` scoped as the top
 lever, taken as its own session — every number clang-built on a quiet
