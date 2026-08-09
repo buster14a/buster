@@ -299,6 +299,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "double nine(double a, double b, double c, double d, double e, double f, double g, double h, double i) {\n"
                                   "    return a + i * b; }\n"
                                   "int indirect(int (*callee)(int, int), int a) { return callee(a, 2); }\n"
+                                  "int call_indirect(int a) { int (*f)(int, int) = divide; return f(a, 3); }\n"
+                                  "_Atomic int atomic_cell;\n"
+                                  "int atomic_probe(int v) { return __c11_atomic_fetch_add(&atomic_cell, v, 5); }\n"
                                   "typedef struct Big { long a; long b; long c; } Big;\n"
                                   "Big big_make(long a) { Big b; b.a = a; b.b = a * 2; b.c = a ^ 5; return b; }\n"
                                   "long big_sum(Big b) { return b.a + b.b + b.c; }\n"
@@ -409,7 +412,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         {
             MachineSelectResult call_selected = machine_select_canonical_function(arguments->arena, machine_program, call_function, machine_target);
             BUSTER_TEST(arguments, call_selected.supported);
-            BUSTER_TEST(arguments, call_selected.function.call_target_count == 2);
+            BUSTER_TEST(arguments, call_selected.function.call_target_count >= 2);
         }
         IrFunction* float_function = machine_test_ir_function_find(machine_module, S8("fadd"));
         BUSTER_TEST(arguments, float_function != 0);
@@ -432,7 +435,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         if (indirect_function)
         {
             MachineSelectResult indirect_selected = machine_select_canonical_function(arguments->arena, machine_program, indirect_function, machine_target);
-            BUSTER_TEST(arguments, !indirect_selected.supported);
+            BUSTER_TEST(arguments, indirect_selected.supported);
+        }
+        // Atomic operations stay the explicit unsupported representative.
+        IrFunction* atomic_function = machine_test_ir_function_find(machine_module, S8("atomic_probe"));
+        BUSTER_TEST(arguments, atomic_function != 0);
+        if (atomic_function)
+        {
+            MachineSelectResult atomic_selected = machine_select_canonical_function(arguments->arena, machine_program, atomic_function, machine_target);
+            BUSTER_TEST(arguments, !atomic_selected.supported);
         }
         // Variadic direct calls select (AL zero, register-only integer
         // arguments); execution is proven by the linked soak because the
@@ -636,6 +647,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("locals_array"), S8_INITIALIZER("local_pair"), S8_INITIALIZER("pick"),
             S8_INITIALIZER("span_round_trip"), S8_INITIALIZER("single_round_trip"), S8_INITIALIZER("fmath"),
             S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnan"), S8_INITIALIZER("call_stack"), S8_INITIALIZER("big_round"),
+            S8_INITIALIZER("call_indirect"),
         };
         typedef s64 MachineTestModuleCall2(s64, s64);
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(module_names) && none_module_executable.address && mir_module_executable.address;

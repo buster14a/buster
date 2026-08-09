@@ -60,9 +60,6 @@ struct MachineX64Selector
     // Per IrValue: virtual register index, stack slot index, or UINT32_MAX.
     u32* value_virtual_registers;
     u32* value_stack_slots;
-    // FUNCTION-defined values are legal only as direct-call callees; any
-    // other use of one is an unsupported construct, never a stale vreg.
-    bool* value_is_function_reference;
     // Result value per argument index, captured at entry before any scratch
     // register can clobber the incoming fixed registers; IR_ID_UNDERLYING_INVALID
     // when the function has no such argument.
@@ -255,13 +252,12 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_scalar_bit_width(IrType* type)
 BUSTER_GLOBAL_LOCAL bool machine_x64_opcode_produces_address(IrOpcode opcode)
 {
     return opcode == IR_OPCODE_GLOBAL || opcode == IR_OPCODE_INDEX || opcode == IR_OPCODE_FIELD || opcode == IR_OPCODE_DEREFERENCE ||
-           opcode == IR_OPCODE_ADDRESS_OF;
+           opcode == IR_OPCODE_ADDRESS_OF || opcode == IR_OPCODE_FUNCTION;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_operand_register(MachineX64Selector* selector, IrValueId value, u32* register_out)
 {
-    if (value.value >= selector->function->value_count || selector->value_virtual_registers[value.value] == UINT32_MAX ||
-        selector->value_is_function_reference[value.value])
+    if (value.value >= selector->function->value_count || selector->value_virtual_registers[value.value] == UINT32_MAX)
     {
         return false;
     }
@@ -1140,22 +1136,40 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     break;
     case IR_OPCODE_FUNCTION:
     {
-        // No code: a FUNCTION value is consumed only as a direct-call
-        // callee, and the CALL row carries the symbol itself. Any other use
-        // is rejected by the operand helper.
-        return instruction->result.value != IR_ID_UNDERLYING_INVALID;
+        // A function reference is an ordinary rip-relative symbol address;
+        // direct calls carry the symbol on the CALL row itself, so this lea
+        // only matters when the value is used as data.
+        if (result_register == UINT32_MAX || instruction->symbol.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+        u32 target_index = selector->call_targets.total_count;
+        IrSymbolId* target_row = (IrSymbolId*)machine_stream_append(selector->arena, &selector->call_targets);
+        *target_row = instruction->symbol;
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                       .payload = target_index,
+                                                       .opcode = MACHINE_X64_LEA_SYMBOL,
+                                                   });
+        machine_x64_define(selector, result_register, row);
+        return true;
     }
     break;
     case IR_OPCODE_CALL:
     {
-        if (instruction->symbol.value == IR_ID_UNDERLYING_INVALID || !instruction->operand_count ||
-            instruction->operands[0].value >= function->value_count)
+        if (!instruction->operand_count || instruction->operands[0].value >= function->value_count)
         {
             return false;
         }
         IrValue* callee = function->values + instruction->operands[0].value;
-        if (callee->definition.value >= function->instruction_count ||
-            function->instructions[callee->definition.value].opcode != IR_OPCODE_FUNCTION)
+        if (callee->definition.value >= function->instruction_count)
+        {
+            return false;
+        }
+        bool direct_call = function->instructions[callee->definition.value].opcode == IR_OPCODE_FUNCTION &&
+                           instruction->symbol.value != IR_ID_UNDERLYING_INVALID;
+        u32 callee_register = UINT32_MAX;
+        if (!direct_call && !machine_x64_operand_register(selector, instruction->operands[0], &callee_register))
         {
             return false;
         }
@@ -1355,14 +1369,25 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                                  .opcode = MACHINE_X64_MOV_RR,
                                              });
         }
-        u32 target_index = selector->call_targets.total_count;
-        IrSymbolId* target_row = (IrSymbolId*)machine_stream_append(selector->arena, &selector->call_targets);
-        *target_row = instruction->symbol;
-        machine_x64_select_row(selector, (MachineInstruction){
-                                             .payload = target_index,
-                                             .opcode = MACHINE_X64_CALL_DIRECT,
-                                             .flags = (u16)(variadic_call ? (1u | (call_float_count << 1)) : 0),
-                                         });
+        if (direct_call)
+        {
+            u32 target_index = selector->call_targets.total_count;
+            IrSymbolId* target_row = (IrSymbolId*)machine_stream_append(selector->arena, &selector->call_targets);
+            *target_row = instruction->symbol;
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .payload = target_index,
+                                                 .opcode = MACHINE_X64_CALL_DIRECT,
+                                                 .flags = (u16)(variadic_call ? (1u | (call_float_count << 1)) : 0),
+                                             });
+        }
+        else
+        {
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, callee_register)},
+                                                 .opcode = MACHINE_X64_CALL_INDIRECT,
+                                                 .flags = (u16)(variadic_call ? (1u | (call_float_count << 1)) : 0),
+                                             });
+        }
         if (call_stack_part_count || call_stack_padding)
         {
             machine_x64_select_row(selector, (MachineInstruction){
@@ -1671,7 +1696,6 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
         .builder = machine_function_builder_begin(arena),
         .value_virtual_registers = arena_allocate(arena, u32, function->value_count),
         .value_stack_slots = arena_allocate(arena, u32, function->value_count),
-        .value_is_function_reference = arena_allocate(arena, bool, function->value_count),
         .supported = true,
         .failed_opcode = IR_OPCODE_COUNT,
     };
@@ -1696,7 +1720,6 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
     {
         selector.value_virtual_registers[value_index] = UINT32_MAX;
         selector.value_stack_slots[value_index] = UINT32_MAX;
-        selector.value_is_function_reference[value_index] = false;
     }
     for (u32 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(selector.argument_values); argument_index += 1)
     {
@@ -1719,11 +1742,6 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
                 instruction->immediates[0] < BUSTER_ARRAY_LENGTH(selector.argument_values))
             {
                 selector.argument_values[instruction->immediates[0]] = instruction->result.value;
-            }
-            if (instruction->opcode == IR_OPCODE_FUNCTION)
-            {
-                selector.value_is_function_reference[instruction->result.value] = true;
-                continue;
             }
             if (instruction->opcode == IR_OPCODE_LOCAL)
             {
@@ -2044,6 +2062,11 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
                 machine_ref_kind(instruction->operands[0]) == MACHINE_REF_PHYSICAL_REGISTER)
             {
                 *operand_register = (u8)machine_ref_payload(instruction->operands[0]);
+            }
+            if (instruction->opcode == MACHINE_X64_CALL_INDIRECT)
+            {
+                // R10 survives the argument registers and the AL setup.
+                *operand_register = MACHINE_X64_R10;
             }
             if (role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
             {
@@ -2616,6 +2639,18 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     .target = instruction->payload,
                 };
                 machine_x64_emit32(&encoder, 0);
+            }
+            break;
+            case MACHINE_X64_CALL_INDIRECT:
+            {
+                if (instruction->flags & 1)
+                {
+                    machine_x64_emit8(&encoder, 0xb8);
+                    machine_x64_emit32(&encoder, (u32)(instruction->flags >> 1));
+                }
+                machine_x64_emit8(&encoder, 0x41);
+                machine_x64_emit8(&encoder, 0xff);
+                machine_x64_emit8(&encoder, (u8)(0xd0 | (operand_registers[0] & 7)));
             }
             break;
             case MACHINE_X64_LEA_FRAME:

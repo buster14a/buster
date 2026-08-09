@@ -294,6 +294,10 @@ typedef enum MachineOpcode
     MACHINE_X64_PUSH_REGISTER, // use
     MACHINE_X64_SUB_RSP,       // payload bytes
     MACHINE_X64_ADD_RSP,       // payload bytes
+    // Indirect call through a pointer value; the callee rides in R10 so
+    // neither the argument registers nor the variadic AL setup can clobber
+    // it. Same flags as CALL_DIRECT.
+    MACHINE_X64_CALL_INDIRECT, // use callee pointer
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
