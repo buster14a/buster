@@ -345,15 +345,15 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         struct
         {
             String8 script;
-            u64 capture;
+            bool capture_output;
             u64 timeout_microseconds;
             bool expected_timeout;
             u64 expected_output_length;
         } deadline_cases[] = {
-            {S8("sleep 30"), 0, 100000, true, 0},
-            {S8("printf ok; sleep 30"), (u64)1 << STANDARD_STREAM_OUTPUT, 100000, true, 2},
-            {S8("printf ok"), (u64)1 << STANDARD_STREAM_OUTPUT, 30000000, false, 2},
-            {S8("printf ok"), 0, 0, false, 0},
+            {S8("sleep 30"), false, 100000, true, 0},
+            {S8("printf ok; sleep 30"), true, 100000, true, 2},
+            {S8("printf ok"), true, 30000000, false, 2},
+            {S8("printf ok"), false, 0, false, 0},
         };
 
         for (EACH_ARRAY_INDEX(i, deadline_cases))
@@ -363,10 +363,15 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 S8("-c"),
                 deadline_cases[i].script,
             };
+            // Set from a constant rather than a stored mask: `capture` is a
+            // three-bit field, and GCC rejects a runtime u64 narrowed into it.
             ProcessSpawnOptions options = {
-                .capture = deadline_cases[i].capture,
                 .use_process_environment = 1,
             };
+            if (deadline_cases[i].capture_output)
+            {
+                options.capture = (u64)1 << STANDARD_STREAM_OUTPUT;
+            }
             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments), (SliceString8){0}, (SliceString8){0}, options);
             BUSTER_TEST(arguments, spawn.handle != 0);
             if (spawn.handle)
