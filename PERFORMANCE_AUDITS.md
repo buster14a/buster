@@ -12,6 +12,23 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09ah` (Linux x86_64, Zen 4 7940HS; selection quality — member
+addresses become one instruction.)
+
+- **What was built.** The address-placement helper takes a constant byte
+  offset now: a direct local folds it into the frame displacement of its
+  `lea` (the same payload convention the sized frame stores already
+  use), and a pointer folds it into `lea dst, [base + disp]` through a
+  new LEA_OFFSET opcode. Only a zero offset on a pointer stays a plain
+  copy, which the allocator can then coalesce away. Field selection is
+  one row end to end, down from three before `2026-08-09ag`.
+- **Numbers** (buster-built stage comparison, compiling ide.c under
+  NONE): instructions **45.45G -> 45.09G (-0.8%)**, against canonical's
+  70.05G now **-35.6%**. Text 19,419,666 (canonical 25,699,964,
+  **-24.4%**).
+- **Gates:** test_all green, MIR and FAST soaks byte-identical on fresh
+  references, self-host fixed point holds.
+
 `2026-08-09ag` (Linux x86_64, Zen 4 7940HS; selection quality — folded
 address arithmetic.)
 

@@ -291,7 +291,11 @@ BUSTER_GLOBAL_LOCAL void machine_x64_reject(MachineX64Selector* selector, IrOpco
 // `destination_register` and defines it: a direct local's frame-slot
 // address, or a copy of any vreg-held value — mirroring the canonical
 // path's lea-or-slot-load base handling. Returns false outside the subset.
-BUSTER_GLOBAL_LOCAL bool machine_x64_select_place_address(MachineX64Selector* selector, IrValueId base, u32 destination_register)
+// Places the address of `base` plus a constant byte offset in one row:
+// a direct local folds the offset into its frame displacement, and a
+// pointer folds it into a lea. Only a zero offset on a pointer stays a
+// plain copy, which the allocator can then coalesce away.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_place_address_offset(MachineX64Selector* selector, IrValueId base, u32 destination_register, u32 byte_offset)
 {
     IrFunction* function = selector->function;
     if (base.value >= function->value_count)
@@ -310,6 +314,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_place_address(MachineX64Selector* se
         u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, destination_register),
                                                                     machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
+                                                       .payload = byte_offset,
                                                        .opcode = MACHINE_X64_LEA_FRAME,
                                                    });
         machine_x64_define(selector, destination_register, row);
@@ -323,10 +328,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_place_address(MachineX64Selector* se
     u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, destination_register),
                                                                 machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register)},
-                                                   .opcode = MACHINE_X64_MOV_RR,
+                                                   .payload = byte_offset,
+                                                   .opcode = (u16)(byte_offset ? MACHINE_X64_LEA_OFFSET : MACHINE_X64_MOV_RR),
                                                });
     machine_x64_define(selector, destination_register, row);
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_place_address(MachineX64Selector* selector, IrValueId base, u32 destination_register)
+{
+    return machine_x64_select_place_address_offset(selector, base, destination_register, 0);
 }
 
 // A selection-synthesized temporary vreg, defined at the next row to be
@@ -997,26 +1008,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         {
             return false;
         }
-        if (!machine_x64_select_place_address(selector, instruction->operands[0], result_register))
-        {
-            return false;
-        }
-        u64 field_offset = aggregate->fields[field_index].offset;
-        if (field_offset)
-        {
-            // The offset folds into the add: no scratch register and no
-            // constant materialization for the commonest address form in
-            // the whole language.
-            u32 immediate_index = selector->immediates.total_count;
-            u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
-            *immediate_row = field_offset;
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                              machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
-                                                 .opcode = MACHINE_X64_ADD64_IMM,
-                                             });
-        }
-        return true;
+        // The whole member address is one row: the offset rides in the
+        // frame displacement of a local, or in the lea of a pointer.
+        return machine_x64_select_place_address_offset(selector, instruction->operands[0], result_register,
+                                                       (u32)aggregate->fields[field_index].offset);
     }
     break;
     case IR_OPCODE_DEBUG_TRAP:
@@ -3257,10 +3252,21 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             break;
             case MACHINE_X64_LEA_FRAME:
             {
+                // The payload is a byte offset into the slot, so a member
+                // address needs no separate add.
                 machine_x64_emit8(&encoder, (u8)(0x48 | (operand_registers[0] >= 8 ? 0x04 : 0)));
                 machine_x64_emit8(&encoder, 0x8d);
                 machine_x64_emit_frame_modrm(&encoder, operand_registers[0],
-                                             placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])]);
+                                             placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])] - instruction->payload);
+            }
+            break;
+            case MACHINE_X64_LEA_OFFSET:
+            {
+                u32 destination = operand_registers[0];
+                u32 base = operand_registers[1];
+                machine_x64_emit8(&encoder, (u8)(0x48 | (destination >= 8 ? 0x04 : 0) | (base >= 8 ? 0x01 : 0)));
+                machine_x64_emit8(&encoder, 0x8d);
+                machine_x64_emit_memory_modrm(&encoder, destination, base, instruction->payload);
             }
             break;
             case MACHINE_X64_LEA_SYMBOL:
