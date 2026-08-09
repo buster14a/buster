@@ -1565,13 +1565,34 @@ BUSTER_GLOBAL_LOCAL ByteSlice pipe_capture_flatten(Arena* arena, PipeCapture* ca
     return (ByteSlice){pointer, capture->total_length};
 }
 
-ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
+// Milliseconds left until `deadline`, clamped into a poll/wait argument. Zero
+// when the deadline has passed, and `no_deadline` when there is none.
+BUSTER_GLOBAL_LOCAL u64 os_process_deadline_milliseconds(u64 deadline_microseconds, u64 no_deadline)
+{
+    if (!deadline_microseconds)
+    {
+        return no_deadline;
+    }
+    u64 now = os_now_microseconds();
+    if (now >= deadline_microseconds)
+    {
+        return 0;
+    }
+    u64 remaining = (deadline_microseconds - now + 999) / 1000;
+    // Wake up at least once a second regardless, so a deadline that expires
+    // while nothing is readable is still noticed promptly.
+    return remaining < 1000 ? remaining : 1000;
+}
+
+ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spawn, u64 timeout_microseconds)
 {
     ProcessWaitResult result = {0};
     result.result = PROCESS_RESULT_UNKNOWN;
 
     if (spawn.handle)
     {
+        u64 deadline = timeout_microseconds ? os_now_microseconds() + timeout_microseconds : 0;
+        bool timed_out = false;
         // The captured streams must be drained together: reading one pipe to
         // EOF while the child blocks writing a full second pipe deadlocks both
         // processes.
@@ -1638,6 +1659,11 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
 
             if (!made_progress)
             {
+                if (deadline && !os_process_deadline_milliseconds(deadline, 1))
+                {
+                    timed_out = true;
+                    break;
+                }
                 // Nothing readable right now: sleep briefly instead of
                 // spinning. The pipes report ERROR_BROKEN_PIPE once the child
                 // exits and the buffered data has been drained.
@@ -1651,6 +1677,27 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
             {
                 result.streams[stream] = pipe_capture_flatten(arena, &captures[stream]);
             }
+            if (read_pipes[stream])
+            {
+                CloseHandle(read_pipes[stream]);
+                read_pipes[stream] = 0;
+            }
+        }
+
+        // A child with no captured stream never entered the drain loop, so this
+        // is where its deadline is enforced. The helper clamps its answer, so
+        // one WAIT_TIMEOUT only means this slice elapsed; the deadline itself
+        // decides whether to give up.
+        while (!timed_out && WaitForSingleObject(spawn.handle, (DWORD)os_process_deadline_milliseconds(deadline, INFINITE)) == WAIT_TIMEOUT)
+        {
+            timed_out = !os_process_deadline_milliseconds(deadline, 1);
+        }
+        if (timed_out)
+        {
+            // The exit code below then describes this kill rather than the
+            // child's own progress, which is why `timed_out` is reported
+            // separately.
+            TerminateProcess((HANDLE)spawn.handle, 1);
         }
 
         DWORD wait_result = WaitForSingleObject(spawn.handle, INFINITE);
@@ -1711,7 +1758,7 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
                 }
             }
 
-            int poll_result = poll(poll_fds, poll_count, -1);
+            int poll_result = poll(poll_fds, poll_count, (int)os_process_deadline_milliseconds(deadline, (u64)-1));
             if (poll_result < 0)
             {
                 if (errno == EINTR)
@@ -1719,6 +1766,11 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
                     continue;
                 }
                 string_print(S8("Failed to poll process pipes: {EOs}\n"), os_get_last_error());
+                break;
+            }
+            if (!poll_result && deadline && !os_process_deadline_milliseconds(deadline, 1))
+            {
+                timed_out = true;
                 break;
             }
 
@@ -1760,12 +1812,45 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
             {
                 result.streams[stream] = pipe_capture_flatten(arena, &captures[stream]);
             }
+            if (read_pipes[stream] >= 0)
+            {
+                close(read_pipes[stream]);
+                read_pipes[stream] = -1;
+            }
         }
 
-        int status;
-        int options = 0;
-        struct rusage usage;
-        pid_t wait_result = wait4(pid, &status, options, &usage);
+        int status = 0;
+        struct rusage usage = {0};
+        pid_t wait_result = -1;
+        // A child with no captured stream never entered the drain loop, so this
+        // is where its deadline is enforced. Poll for the exit rather than
+        // blocking in wait4, then kill what is still running.
+        while (!timed_out && deadline)
+        {
+            wait_result = wait4(pid, &status, WNOHANG, &usage);
+            if (wait_result == pid || (wait_result < 0 && errno != EINTR))
+            {
+                break;
+            }
+            u64 remaining = os_process_deadline_milliseconds(deadline, 1);
+            if (!remaining)
+            {
+                timed_out = true;
+                break;
+            }
+            poll(0, 0, (int)(remaining < 10 ? remaining : 10));
+        }
+        if (timed_out)
+        {
+            // The status below then describes this kill rather than the child's
+            // own progress, which is why `timed_out` is reported separately.
+            kill(pid, SIGKILL);
+            wait_result = -1;
+        }
+        if (wait_result != pid)
+        {
+            wait_result = wait4(pid, &status, 0, &usage);
+        }
 
         if (program_flag_get(PROGRAM_FLAG_VERBOSE))
         {
@@ -1791,10 +1876,20 @@ ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
             result.result = PROCESS_RESULT_FAILED;
         }
 #endif
+        if (timed_out)
+        {
+            result.timed_out = 1;
+            result.result = PROCESS_RESULT_FAILED;
+        }
         scratch_end(scratch);
     }
 
     return result;
+}
+
+ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn)
+{
+    return os_process_wait_deadline(arena, spawn, 0);
 }
 
 OsError os_get_last_error(void)

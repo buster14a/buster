@@ -333,6 +333,54 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         arena->position = position;
     }
 
+    // A run that stops making progress is killed at its deadline rather than
+    // waited on forever, and whatever it had already written still comes back.
+    // Both shapes are covered because they take different paths: a child with
+    // no captured stream never enters the pipe drain loop at all, which is
+    // exactly the shape the self-host stages have.
+    {
+        Arena* arena = arguments->arena;
+        u64 position = arena->position;
+
+        struct
+        {
+            String8 script;
+            u64 capture;
+            u64 timeout_microseconds;
+            bool expected_timeout;
+            u64 expected_output_length;
+        } deadline_cases[] = {
+            {S8("sleep 30"), 0, 100000, true, 0},
+            {S8("printf ok; sleep 30"), (u64)1 << STANDARD_STREAM_OUTPUT, 100000, true, 2},
+            {S8("printf ok"), (u64)1 << STANDARD_STREAM_OUTPUT, 30000000, false, 2},
+            {S8("printf ok"), 0, 0, false, 0},
+        };
+
+        for (EACH_ARRAY_INDEX(i, deadline_cases))
+        {
+            String8 spawn_arguments[] = {
+                S8("/bin/sh"),
+                S8("-c"),
+                deadline_cases[i].script,
+            };
+            ProcessSpawnOptions options = {
+                .capture = deadline_cases[i].capture,
+                .use_process_environment = 1,
+            };
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments), (SliceString8){0}, (SliceString8){0}, options);
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait_result = os_process_wait_deadline(arena, spawn, deadline_cases[i].timeout_microseconds);
+                BUSTER_TEST(arguments, (wait_result.timed_out != 0) == deadline_cases[i].expected_timeout);
+                BUSTER_TEST(arguments, wait_result.result == (deadline_cases[i].expected_timeout ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS));
+                BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_OUTPUT].length == deadline_cases[i].expected_output_length);
+            }
+        }
+
+        arena->position = position;
+    }
+
     // Regression: executable_resolve_in_path must treat empty PATH components
     // as the current directory and must skip directories ("cmake" is a
     // directory in the repository root, which is the test working directory).

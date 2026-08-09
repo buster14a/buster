@@ -116,7 +116,11 @@ struct ProcessWaitResult
 {
     ByteSlice streams[(size_t)STANDARD_STREAM_COUNT];
     ProcessResult result;
-    u8 reserved[4];
+    // Set when the deadline passed and the child was killed rather than having
+    // exited on its own. `result` is a plain failure in that case: a killed
+    // child's exit status describes the kill, not what it was doing.
+    u8 timed_out;
+    u8 reserved[3];
 };
 
 typedef struct OsError OsError;
@@ -132,6 +136,10 @@ BUSTER_F_DECL String8 string8_from_os_error(Arena* arena, OsError error, bool nu
 BUSTER_F_DECL ProcessSpawnResult os_process_spawn(SliceString8 argv, SliceString8 environment_keys, SliceString8 environment_values,
                                                   ProcessSpawnOptions options);
 BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn);
+// The same wait, given up on after `timeout_microseconds`: the child is killed,
+// whatever it had already written is still returned, and `timed_out` says the
+// deadline is why. Zero waits forever, which is what os_process_wait_sync does.
+BUSTER_F_DECL ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spawn, u64 timeout_microseconds);
 BUSTER_F_DECL String8 os_get_environment_variable(String8 variable);
 
 BUSTER_F_DECL void os_make_directory(String8 path);

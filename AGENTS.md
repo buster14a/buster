@@ -126,6 +126,13 @@ consumes the producer's one-shot integrity-checked compiler/tool/cache/graph/
 environment provenance record before validating and snapshotting the artifact,
 runs the existing direct fixed-point workflow without starting an inner Ninja
 process, and remains disabled for the direct scheduler and unsupported platforms.
+Each self-host stage and the stage-2 benchmark are bounded at ten minutes
+(`SELF_HOST_TIMEOUT_SECONDS`): the work is fixed and costs seconds, so a stage
+that does not finish is a compiler that never will, and waiting on one wedges
+a serialized CI runner for hours while Ninja buffers the edge's output and the
+log says nothing. On expiry the child is killed and the run fails naming the
+stage and its command line. Every other run waits indefinitely, because their
+cost scales with what they are given.
 CI Release builds use `-O2`; local Release builds retain the toolchain default.
 Local builds make the optimized tree profilable, which CMake's defaults do not:
 `BUSTER_DEBUG_INFO` emits debug information in the configurations that carry no

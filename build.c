@@ -137,6 +137,11 @@ struct ProcessRun
     // step can divide it by what that run measured about its own work; see
     // self_host_compare_action. Zero when the counter is unavailable.
     u64 instructions;
+    // How long this run may take before it is killed and reported as a
+    // failure. Zero waits forever, which is what everything whose cost scales
+    // with the work it is given keeps -- a whole CMake build, a test suite.
+    // See SELF_HOST_TIMEOUT_SECONDS for what it is set on and why.
+    u64 timeout_seconds;
     u32 flags;
     BuildActionCallback* callback;
     void* callback_data;
@@ -2626,6 +2631,24 @@ BUSTER_GLOBAL_LOCAL String8 self_host_metrics_path(Arena* arena, String8 output)
     return string_format_z(arena, S8("{S8}.metrics"), output);
 }
 
+// The self-host chain is the one place in this build where a defect stops
+// looking like a failure and starts looking like nothing at all. Every run
+// here is a fixed amount of work -- one compiler compiling one known
+// translation unit, then the benchmark parsing the fixtures -- so a stage that
+// stops progressing is not a slow machine, it is a compiler that will never
+// finish. Waiting on it costs far more than the build: ninja buffers an edge's
+// output until it completes, so the log says nothing at all about where the
+// stage stopped, and a CI runner that serializes one job at a time stalls
+// every queued job behind it until a human notices hours later.
+//
+// The bound is deliberately far above the work. The slowest runner in the
+// matrix spends about 9 s in stage 1, 17 s in stage 2 and 1 s in the
+// benchmark, and that same machine has been observed running twice as slowly
+// machine-wide for hours; ten minutes is a factor of thirty over the worst
+// measured stage and still fails inside the job's own budget, which is where
+// the buffered output finally reaches the log.
+#define SELF_HOST_TIMEOUT_SECONDS 600
+
 BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
                                                       String8 timing_description)
 {
@@ -2704,6 +2727,7 @@ BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 comp
         .arguments = os_argument_builder_flush(&builder),
         .working_directory = S8("."),
         .timing_description = timing_description,
+        .timeout_seconds = SELF_HOST_TIMEOUT_SECONDS,
         .spawn_options =
             (ProcessSpawnOptions){
                 .use_process_environment = 1,
@@ -3055,6 +3079,7 @@ BUSTER_GLOBAL_LOCAL void self_host_compare_and_bench_add(Arena* arena, String8 s
                 .length = 2,
             },
         .timing_description = S8("Self-host stage 2 benchmark"),
+        .timeout_seconds = SELF_HOST_TIMEOUT_SECONDS,
         .spawn_options =
             (ProcessSpawnOptions){
                 .use_process_environment = 1,
@@ -20107,9 +20132,18 @@ BUSTER_GLOBAL_LOCAL ProcessSpawnResult process_run_spawn(Arena* arena, ProcessRu
 
 BUSTER_GLOBAL_LOCAL ProcessResult process_run_wait(Arena* arena, ProcessRun* run)
 {
-    ProcessWaitResult wait_result = os_process_wait_sync(arena, run->spawn);
+    ProcessWaitResult wait_result = os_process_wait_deadline(arena, run->spawn, run->timeout_seconds * 1000000);
     ProcessResult result = wait_result.result;
     bool has_warning = false;
+
+    if (wait_result.timed_out)
+    {
+        // Name the run: this is the only record of which stage stopped making
+        // progress, and the command line follows it for reproduction.
+        string_print(S8("error: {S8}{S8} did not finish within {u64} seconds and was terminated\n"),
+                     run->timing_description.pointer ? run->timing_description : S8("build step"), run->timing_configuration, run->timeout_seconds);
+        command_print(run->arguments);
+    }
 
     if (run->flags & (PROCESS_RUN_FLAG_PRINT_CAPTURED_ERROR | PROCESS_RUN_FLAG_STDERR_WARNING_IS_FAILURE | PROCESS_RUN_FLAG_CLANG_ANALYZE))
     {
