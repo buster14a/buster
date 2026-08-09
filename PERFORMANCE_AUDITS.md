@@ -12,6 +12,30 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09t` (Linux x86_64, Zen 4 7940HS; register-allocator stage 5 —
+straight-line edge contracts land structurally, and measure flat.)
+
+- **What was built.** Block boundaries write back instead of flushing:
+  dirty live values reach their slots at the terminator, but the
+  register mappings survive, and a block whose only predecessor is its
+  layout neighbor inherits the file instead of starting cold (switch
+  targets over-count predecessors conservatively; the entry block always
+  starts cold).
+- **Honest measure:** flat — 63.59G instructions and +5KB text against
+  `2026-08-09s`, both noise-level. The canonical C frontend does not
+  split blocks needlessly, so single-predecessor layout-neighbor edges
+  are rare: conditional joins and loop headers all have two
+  predecessors and start cold. The value is structural: the write-back
+  contract and predecessor census are the hooks a real trace/edge-
+  contract pass needs, and the change survives the full gate battery.
+- **Gates:** test_all green, FAST soak byte-identical on fresh
+  references.
+- **Where the next instruction win actually is:** loop headers and
+  join blocks need either edge parallel copies (full stage-5 contracts)
+  or the QRA path; within FRA, the remaining cheap lever is R12/R13
+  (ModRM base quirks in the pointer load/store encoders) widening the
+  callee-saved file.
+
 `2026-08-09s` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6 —
 callee-saved registers, and register-copy edits instead of memory moves.)
 

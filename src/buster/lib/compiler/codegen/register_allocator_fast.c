@@ -167,6 +167,32 @@ BUSTER_GLOBAL_LOCAL void machine_fast_flush(MachineFastState* state, u32 keep_ma
     }
 }
 
+// Block-boundary write-back: dirty live values reach their slots so every
+// successor sees consistent memory, but the register mappings survive for
+// a successor that inherits the state.
+BUSTER_GLOBAL_LOCAL void machine_fast_writeback(MachineFastState* state)
+{
+    for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
+    {
+        if (state->owner[physical_register] == UINT32_MAX)
+        {
+            continue;
+        }
+        if (state->dirty[physical_register] && !machine_fast_owner_is_dead(state, physical_register))
+        {
+            MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, state->edits);
+            *edit = (MachineEdit){
+                .point = state->current_point,
+                .kind = MACHINE_EDIT_SPILL,
+                .subject = state->owner[physical_register],
+                .location = physical_register,
+            };
+            state->placement->spill_count += 1;
+        }
+        state->dirty[physical_register] = false;
+    }
+}
+
 // True when the virtual register stays live past the next call in the
 // current block, making a callee-saved binding worth its push/pop pair.
 BUSTER_GLOBAL_LOCAL bool machine_fast_crosses_call(MachineFastState* state, u32 virtual_register)
@@ -324,6 +350,39 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
         .escapes = arena_allocate(arena, u8, function->virtual_register_count),
         .next_call = arena_allocate(arena, u32, function->instruction_count),
     };
+    // Edge contract, straight-line form: a block whose only predecessor is
+    // its layout neighbor sees exactly the scan state the neighbor's
+    // write-back left behind, so it inherits the register file; every
+    // other block starts cold. Switch targets over-count conservatively.
+    u32* predecessor_counts = arena_allocate(arena, u32, function->block_count);
+    u32* single_predecessors = arena_allocate(arena, u32, function->block_count);
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        predecessor_counts[block_index] = 0;
+        single_predecessors[block_index] = UINT32_MAX;
+    }
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        MachineBlock* block = function->blocks + block_index;
+        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
+        {
+            MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
+            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+            for (u32 slot = 0; slot < info->operand_count; slot += 1)
+            {
+                if (machine_ref_kind(instruction->operands[slot]) == MACHINE_REF_BLOCK)
+                {
+                    u32 successor = machine_ref_payload(instruction->operands[slot]);
+                    predecessor_counts[successor] += 1;
+                    single_predecessors[successor] = block_index;
+                }
+            }
+        }
+    }
+    for (u32 case_index = 0; case_index < function->switch_case_count; case_index += 1)
+    {
+        predecessor_counts[function->switch_cases[case_index].target_block] += 2;
+    }
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         MachineBlock* block = function->blocks + block_index;
@@ -420,6 +479,20 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         MachineBlock* block = function->blocks + block_index;
+        bool inherits = block_index > 0 && predecessor_counts[block_index] == 1 && single_predecessors[block_index] == block_index - 1;
+        if (!inherits)
+        {
+            for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
+            {
+                u32 owner = state.owner[physical_register];
+                if (owner != UINT32_MAX)
+                {
+                    state.virtual_register_locations[owner] = UINT32_MAX;
+                    state.owner[physical_register] = UINT32_MAX;
+                    state.dirty[physical_register] = false;
+                }
+            }
+        }
         for (u32 offset = 0; offset < block->instruction_count; offset += 1)
         {
             u32 instruction_index = block->first_instruction + offset;
@@ -569,12 +642,14 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
             }
             if (is_terminator)
             {
-                // Block-local allocation: everything returns to its slot at
-                // the boundary. The spill moves cannot disturb the flags a
-                // conditional terminator just consumed because they are
-                // plain stores, and the edits stay at this terminator's
-                // BEFORE point, which the encoder emits ahead of it.
-                machine_fast_flush(&state, 0);
+                // Dirty values return to their slots at the boundary so
+                // every successor sees consistent memory; the mappings
+                // stay for a straight-line successor to inherit. The
+                // stores cannot disturb the flags a conditional
+                // terminator just consumed, and the edits stay at this
+                // terminator's BEFORE point, which the encoder emits
+                // ahead of it.
+                machine_fast_writeback(&state);
             }
         }
     }
