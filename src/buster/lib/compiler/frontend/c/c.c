@@ -4942,6 +4942,27 @@ struct CTypeParseFrame
     u8 reserved[1];
 };
 
+// Persistent c_parse_type_layout results, indexed by type id. An entry may
+// exist only for a layout that can no longer change: builtin scalar kinds,
+// and enum/vector/array/aggregate layouts whose whole dependency closure
+// resolved without a provisional input (a guessed 4/4 incomplete-enum layout
+// or an initializer-inferred array bound stays per-query, because completion
+// rewrites those answers in place). Every in-place edit of an existing type
+// record passes through c_type_parse_record_mutation, which drops that id's
+// entry, so speculative completions and their rollbacks are never served;
+// entries are written only while the machine is idle (no frames, no
+// undoable mutations) and only for the parse's own token stream, never for
+// the synthetic streams c_parse_integer_constant_range builds.
+typedef struct CTypeLayoutCache CTypeLayoutCache;
+struct CTypeLayoutCache
+{
+    u64* sizes;
+    u32* alignments;
+    u8* states;
+    u32 capacity;
+    CToken const* tokens;
+};
+
 struct CTypeParseMachine
 {
     CTypeParseFrame* frames;
@@ -4950,6 +4971,7 @@ struct CTypeParseMachine
     CTypeId* incomplete_array_chain;
     u32 incomplete_array_chain_capacity;
     Arena* scratch_arena;
+    CTypeLayoutCache layout_cache;
     CParsePromotedMemberWork* promoted_member_work;
     // Visited marks are generation stamps, not bools: a query is a generation
     // bump instead of a memset over one slot per type in the unit.
@@ -5032,6 +5054,10 @@ BUSTER_GLOBAL_LOCAL bool c_type_parse_record_mutation(CTypeParseMachine* machine
         .id = id,
         .previous = result->types[id.value],
     };
+    if (id.value < machine->layout_cache.capacity)
+    {
+        machine->layout_cache.states[id.value] = 0;
+    }
     return true;
 }
 
@@ -5304,12 +5330,59 @@ BUSTER_GLOBAL_LOCAL bool c_parse_builtin_type_layout(Target target, CTypeKind ki
 BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                              CTypeId requested, u64* size_out, u32* alignment_out)
 {
-    u64* sizes = arena_allocate(arena, u64, result->type_count);
-    u32* alignments = arena_allocate(arena, u32, result->type_count);
-    bool* resolved = arena_allocate(arena, bool, result->type_count);
-    memset(resolved, 0, sizeof(*resolved) * result->type_count);
-    for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
+    if (requested.value >= result->type_count)
     {
+        return false;
+    }
+    // The seed pass below resolves builtin scalars and incomplete enums from
+    // the requested record alone and takes the early exit, so answer those
+    // without walking the table.
+    {
+        CType requested_type = result->types[requested.value];
+        u64 direct_size = 0;
+        u32 direct_alignment = 0;
+        if (c_parse_builtin_type_layout(preprocess.target, requested_type.kind, &direct_size, &direct_alignment))
+        {
+            if (direct_alignment)
+            {
+                *size_out = direct_size;
+                *alignment_out = direct_alignment;
+                return true;
+            }
+        }
+        else if (requested_type.kind == C_TYPE_ENUM && requested_type.element_type.value == C_ID_UNDERLYING_INVALID)
+        {
+            *size_out = 4;
+            *alignment_out = 4;
+            return true;
+        }
+    }
+    CTypeLayoutCache* cache = machine && preprocess.tokens && preprocess.tokens == machine->layout_cache.tokens ? &machine->layout_cache : 0;
+    if (cache && requested.value < cache->capacity && cache->states[requested.value])
+    {
+        *size_out = cache->sizes[requested.value];
+        *alignment_out = cache->alignments[requested.value];
+        return true;
+    }
+    // The type table can grow while the solve parses alignof/sizeof operand
+    // types; the scratch arrays cover the types that existed at entry and
+    // later additions stay unresolved for this query.
+    u32 type_count = result->type_count;
+    u64* sizes = arena_allocate(arena, u64, type_count);
+    u32* alignments = arena_allocate(arena, u32, type_count);
+    bool* resolved = arena_allocate(arena, bool, type_count);
+    bool* provisional = arena_allocate(arena, bool, type_count);
+    memset(resolved, 0, sizeof(*resolved) * type_count);
+    memset(provisional, 0, sizeof(*provisional) * type_count);
+    for (u32 type_index = 0; type_index < type_count; type_index += 1)
+    {
+        if (cache && type_index < cache->capacity && cache->states[type_index])
+        {
+            sizes[type_index] = cache->sizes[type_index];
+            alignments[type_index] = cache->alignments[type_index];
+            resolved[type_index] = true;
+            continue;
+        }
         CTypeKind kind = result->types[type_index].kind;
         u64 size = 0;
         u32 alignment = 0;
@@ -5318,6 +5391,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
         {
             size = 4;
             alignment = 4;
+            provisional[type_index] = true;
         }
         if (alignment)
         {
@@ -5326,24 +5400,25 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
             resolved[type_index] = true;
         }
     }
-    if (requested.value < result->type_count && resolved[requested.value])
+    if (resolved[requested.value])
     {
         goto requested_resolved;
     }
-    for (u32 pass = 0; pass < result->type_count; pass += 1)
+    for (u32 pass = 0; pass < type_count; pass += 1)
     {
         bool progress = false;
-        for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
+        for (u32 type_index = 0; type_index < type_count; type_index += 1)
         {
             if (resolved[type_index])
             {
                 continue;
             }
             CType type = result->types[type_index];
-            if (type.kind == C_TYPE_ENUM && type.element_type.value < result->type_count && resolved[type.element_type.value])
+            if (type.kind == C_TYPE_ENUM && type.element_type.value < type_count && resolved[type.element_type.value])
             {
                 sizes[type_index] = sizes[type.element_type.value];
                 alignments[type_index] = alignments[type.element_type.value];
+                provisional[type_index] = provisional[type.element_type.value];
                 resolved[type_index] = true;
                 if (type_index == requested.value)
                 {
@@ -5354,7 +5429,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
             }
             if (type.kind == C_TYPE_VECTOR)
             {
-                if (type.element_type.value >= result->type_count || !resolved[type.element_type.value] || !type.vector_byte_size ||
+                if (type.element_type.value >= type_count || !resolved[type.element_type.value] || !type.vector_byte_size ||
                     !sizes[type.element_type.value] || type.vector_byte_size % sizes[type.element_type.value])
                 {
                     continue;
@@ -5366,6 +5441,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
                 }
                 sizes[type_index] = type.vector_byte_size;
                 alignments[type_index] = type.vector_byte_size;
+                provisional[type_index] = provisional[type.element_type.value];
                 resolved[type_index] = true;
                 if (type_index == requested.value)
                 {
@@ -5376,10 +5452,11 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
             }
             if (type.kind == C_TYPE_ARRAY)
             {
-                if (type.element_type.value >= result->type_count || !resolved[type.element_type.value] || type.array_bound >= result->array_bound_count)
+                if (type.element_type.value >= type_count || !resolved[type.element_type.value] || type.array_bound >= result->array_bound_count)
                 {
                     continue;
                 }
+                bool array_provisional = provisional[type.element_type.value];
                 CArrayBound bound = result->array_bounds[type.array_bound];
                 u64 count = 0;
                 bool unresolved_identifier = false;
@@ -5446,21 +5523,23 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
                             operand_size = preprocess.data_layout.pointer.size;
                             operand_alignment = preprocess.data_layout.pointer.alignment;
                         }
-                        else if (operand_resolved && operand_type.value < result->type_count && resolved[operand_type.value])
+                        else if (operand_resolved && operand_type.value < type_count && resolved[operand_type.value])
                         {
                             operand_size = sizes[operand_type.value];
                             operand_alignment = alignments[operand_type.value];
+                            array_provisional |= provisional[operand_type.value];
                         }
                         else if (operand_resolved && operand_type.value < operand_parse.type_count)
                         {
                             CTypeKind operand_kind = operand_parse.types[operand_type.value].kind;
                             operand_resolved = false;
-                            for (u32 candidate_index = 0; candidate_index < result->type_count; candidate_index += 1)
+                            for (u32 candidate_index = 0; candidate_index < type_count; candidate_index += 1)
                             {
                                 if (result->types[candidate_index].kind == operand_kind && resolved[candidate_index])
                                 {
                                     operand_size = sizes[candidate_index];
                                     operand_alignment = alignments[candidate_index];
+                                    array_provisional |= provisional[candidate_index];
                                     operand_resolved = true;
                                     break;
                                 }
@@ -5556,7 +5635,10 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
                 };
                 if (bound.has_inferred_count)
                 {
+                    // Inference can rewrite the bound record in place, so an
+                    // inferred layout never outlives this query.
                     count = bound.inferred_count;
+                    array_provisional = true;
                 }
                 else if (bound.is_star || unresolved_identifier || !bound.token_count ||
                          !c_integer_expression_evaluate(arena, 0, bound_tokens, bound_token_count, 65536, &evaluation, &count) || evaluation.diagnostic_count ||
@@ -5566,6 +5648,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
                 }
                 sizes[type_index] = sizes[type.element_type.value] * count;
                 alignments[type_index] = alignments[type.element_type.value];
+                provisional[type_index] = array_provisional;
                 resolved[type_index] = true;
                 if (type_index == requested.value)
                 {
@@ -5582,12 +5665,13 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
             u32 alignment = 1;
             u32 pack_alignment = type.definition_start < preprocess.token_count ? preprocess.tokens[type.definition_start].pack_alignment : 0;
             bool fields_resolved = true;
+            bool aggregate_provisional = false;
             u64 bit_field_unit_bits = 0;
             u64 bit_field_used_bits = 0;
             for (u32 member_index = 0; member_index < type.member_count; member_index += 1)
             {
                 CMember member = result->members[type.member_start + member_index];
-                if (member.type.value >= result->type_count)
+                if (member.type.value >= type_count)
                 {
                     fields_resolved = false;
                     break;
@@ -5595,11 +5679,12 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
                 bool flexible = c_parse_type_is_flexible_array_member(result, &type, member_index);
                 CType* member_type = result->types + member.type.value;
                 CTypeId layout_type = flexible ? member_type->element_type : member.type;
-                if (layout_type.value >= result->type_count || !resolved[layout_type.value])
+                if (layout_type.value >= type_count || !resolved[layout_type.value])
                 {
                     fields_resolved = false;
                     break;
                 }
+                aggregate_provisional |= provisional[layout_type.value];
                 u64 member_size = flexible ? 0 : sizes[layout_type.value];
                 u32 member_alignment = alignments[layout_type.value];
                 if (pack_alignment)
@@ -5616,13 +5701,14 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
                     }
                     CAlignmentSpecifier specifier = result->alignments[member.alignment_start + specifier_index];
                     u64 requested_alignment = 0;
-                    if (specifier.type.value < result->type_count)
+                    if (specifier.type.value < type_count)
                     {
                         if (!resolved[specifier.type.value])
                         {
                             alignment_resolved = false;
                             break;
                         }
+                        aggregate_provisional |= provisional[specifier.type.value];
                         requested_alignment = alignments[specifier.type.value];
                     }
                     else
@@ -5643,11 +5729,12 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
                                 aligned_type = c_parse_pointer_chain(result, preprocess, aligned_type, &aligned_type_index, type_end);
                                 aligned_type = c_parse_array_suffixes(result, preprocess, aligned_type, &aligned_type_index, type_end);
                             }
-                            if (aligned_type.value >= result->type_count || aligned_type_index != type_end || !resolved[aligned_type.value])
+                            if (aligned_type.value >= type_count || aligned_type_index != type_end || !resolved[aligned_type.value])
                             {
                                 alignment_resolved = false;
                                 break;
                             }
+                            aggregate_provisional |= provisional[aligned_type.value];
                             requested_alignment = alignments[aligned_type.value];
                         }
                         else
@@ -5751,6 +5838,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
             }
             sizes[type_index] = size;
             alignments[type_index] = alignment;
+            provisional[type_index] = aggregate_provisional;
             resolved[type_index] = true;
             if (type_index == requested.value)
             {
@@ -5764,7 +5852,37 @@ BUSTER_GLOBAL_LOCAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* 
         }
     }
 requested_resolved:
-    if (requested.value >= result->type_count || !resolved[requested.value])
+    if (cache && !machine->frame_count && !machine->mutation_count)
+    {
+        if (cache->capacity < type_count)
+        {
+            u32 new_capacity = BUSTER_MAX(type_count, cache->capacity ? cache->capacity * 2 : 4096);
+            u64* new_sizes = arena_allocate(result->arena, u64, new_capacity);
+            u32* new_alignments = arena_allocate(result->arena, u32, new_capacity);
+            u8* new_states = arena_allocate(result->arena, u8, new_capacity);
+            memset(new_states, 0, new_capacity);
+            if (cache->capacity)
+            {
+                memcpy(new_sizes, cache->sizes, sizeof(*new_sizes) * cache->capacity);
+                memcpy(new_alignments, cache->alignments, sizeof(*new_alignments) * cache->capacity);
+                memcpy(new_states, cache->states, cache->capacity);
+            }
+            cache->sizes = new_sizes;
+            cache->alignments = new_alignments;
+            cache->states = new_states;
+            cache->capacity = new_capacity;
+        }
+        for (u32 type_index = 0; type_index < type_count; type_index += 1)
+        {
+            if (resolved[type_index] && !provisional[type_index] && !cache->states[type_index])
+            {
+                cache->sizes[type_index] = sizes[type_index];
+                cache->alignments[type_index] = alignments[type_index];
+                cache->states[type_index] = 1;
+            }
+        }
+    }
+    if (!resolved[requested.value])
     {
         return false;
     }
@@ -14610,6 +14728,7 @@ BUSTER_GLOBAL_LOCAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreproces
         .incomplete_array_chain = arena_allocate(machine_buffer_arena, CTypeId, incomplete_array_chain_capacity),
         .incomplete_array_chain_capacity = incomplete_array_chain_capacity,
         .scratch_arena = machine_temporary.arena,
+        .layout_cache = {.tokens = preprocess.tokens},
         .promoted_member_work = arena_allocate(machine_buffer_arena, CParsePromotedMemberWork, promoted_member_capacity),
         .promoted_member_visited = arena_allocate(machine_buffer_arena, u32, promoted_member_capacity),
         .promoted_member_capacity = promoted_member_capacity,
