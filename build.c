@@ -133,6 +133,10 @@ struct ProcessRun
     String8 timing_configuration;
     u64 start_us;
     u64 start_instructions;
+    // The reported delta, kept rather than only printed, so a later callback
+    // step can divide it by what that run measured about its own work; see
+    // self_host_compare_action. Zero when the counter is unavailable.
+    u64 instructions;
     u32 flags;
     BuildActionCallback* callback;
     void* callback_data;
@@ -2198,6 +2202,73 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_ready(BuildArtifactFanout fanout,
     return result;
 }
 
+// Line-oriented key=value text, shared by the readers of the two key=value
+// files build.c consumes: the self-host source measurement below and the test
+// timing baseline further down.
+BUSTER_GLOBAL_LOCAL bool text_next_line(String8* text, String8* line)
+{
+    if (!text->length)
+    {
+        return false;
+    }
+
+    u64 newline_index = string_first_code_unit(*text, '\n');
+    bool is_last_line = newline_index == BUSTER_STRING_NO_MATCH;
+    u64 line_end = is_last_line ? text->length : newline_index;
+    *line = string_slice(*text, 0, line_end);
+    *text = is_last_line ? (String8){0} : string_slice(*text, line_end + 1, text->length);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool text_split_field(String8 token, String8* key, String8* value)
+{
+    u64 equals_index = string_first_code_unit(token, '=');
+    if (equals_index == BUSTER_STRING_NO_MATCH)
+    {
+        return false;
+    }
+
+    *key = string_slice(token, 0, equals_index);
+    *value = string_slice(token, equals_index + 1, token.length);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool text_parse_u64(String8 value, u64* result)
+{
+    if (!value.length)
+    {
+        return false;
+    }
+
+    IntegerParsingU64 parsed = string8_parse_u64_decimal(value.pointer);
+    if (parsed.length != value.length)
+    {
+        return false;
+    }
+
+    *result = parsed.value;
+    return true;
+}
+
+// The denominators STEP_INSTRUCTIONS lacks, read back from the `-fsource-
+// metrics=` file each self-host stage writes. Only the three units worth
+// trending are kept; the file carries the whole SOURCE table and readers take
+// what they need.
+typedef struct SelfHostSourceMetrics SelfHostSourceMetrics;
+struct SelfHostSourceMetrics
+{
+    // What the lexer scanned, over every inclusion: bytes after carriage
+    // returns and line splices are folded out, so the same source measures the
+    // same on every platform.
+    u64 bytes;
+    // Lines carrying at least one preprocessing token, over every inclusion.
+    u64 sloc;
+    // Tokens handed to the parser. The source counts differ between the two
+    // stages because they resolve different resource headers; this one does
+    // not, and it is what everything past preprocessing scales with.
+    u64 tokens;
+};
+
 typedef struct SelfHostCompare SelfHostCompare;
 struct SelfHostCompare
 {
@@ -2207,6 +2278,12 @@ struct SelfHostCompare
     String8 pdb1;
     String8 pdb2;
 #endif
+    String8 stage1_metrics;
+    String8 stage2_metrics;
+    // The compiles themselves, for the instruction delta
+    // process_run_report_timing recorded on each.
+    ProcessRun* stage1_run;
+    ProcessRun* stage2_run;
 };
 
 BUSTER_GLOBAL_LOCAL String8 cmake_build_config(CmakeBuildOptions options)
@@ -2340,6 +2417,82 @@ BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceS
     build_run_add(arena, step, build_directory, targets, native_arguments, options);
 }
 
+BUSTER_GLOBAL_LOCAL bool self_host_source_metrics_read(Arena* arena, String8 path, SelfHostSourceMetrics* metrics)
+{
+    ByteSlice bytes = file_read(arena, path, (FileReadOptions){0});
+    if (!bytes.length)
+    {
+        return false;
+    }
+
+    String8 text = BYTE_SLICE_TO_STRING(8, bytes);
+    String8 line = {0};
+    while (text_next_line(&text, &line))
+    {
+        String8 key = {0};
+        String8 value = {0};
+        if (!text_split_field(line, &key, &value))
+        {
+            continue;
+        }
+
+        if (string_equal(key, S8("lexed.translated_bytes")))
+        {
+            text_parse_u64(value, &metrics->bytes);
+        }
+        else if (string_equal(key, S8("lexed.code_lines")))
+        {
+            text_parse_u64(value, &metrics->sloc);
+        }
+        else if (string_equal(key, S8("preprocessed.tokens")))
+        {
+            text_parse_u64(value, &metrics->tokens);
+        }
+    }
+
+    return metrics->bytes && metrics->sloc && metrics->tokens;
+}
+
+// Instructions per unit to three decimals, without floating point. A compile
+// costs a few hundred instructions per byte and a few thousand per token, so
+// whole units would quantize the series to ~0.3% and hide exactly the
+// regressions the counter exists to catch.
+BUSTER_GLOBAL_LOCAL String8 self_host_throughput_ratio(Arena* arena, u64 instructions, u64 units)
+{
+    u64 thousandths = (instructions * 1000 + units / 2) / units;
+    return string_format(arena, S8("{u64}.{u64:width=[0,3]}"), thousandths / 1000, thousandths % 1000);
+}
+
+// STEP_INSTRUCTIONS says what a stage cost; this says what it cost per unit of
+// what it compiled, which is the series that stays comparable when the code
+// base grows. The two stages are reported separately and their source counts
+// are not compared: the bootstrap resolves its host compiler's resource
+// headers and the self-hosted stages the builtin ones, so the bytes and sLOC
+// legitimately differ. Their token counts do match, which is why the
+// executables do.
+BUSTER_GLOBAL_LOCAL void self_host_report_throughput(Arena* arena, String8 stage, ProcessRun* run, String8 metrics_path)
+{
+    SelfHostSourceMetrics metrics = {0};
+    if (!self_host_source_metrics_read(arena, metrics_path, &metrics))
+    {
+        return;
+    }
+
+    // No instruction counter on this host (see instruction_counter_open): the
+    // units still belong in the log, the ratios have no numerator.
+    if (!run || !run->instructions)
+    {
+        string_print(S8("SELF_HOST throughput stage={S8} bytes={u64} sloc={u64} tokens={u64}\n"), stage, metrics.bytes, metrics.sloc, metrics.tokens);
+        return;
+    }
+
+    u64 instructions = run->instructions;
+    string_print(S8("SELF_HOST throughput stage={S8} instructions={u64} bytes={u64} sloc={u64} tokens={u64} instructions_per_byte={S8} "
+                    "instructions_per_sloc={S8} instructions_per_token={S8}\n"),
+                 stage, instructions, metrics.bytes, metrics.sloc, metrics.tokens, self_host_throughput_ratio(arena, instructions, metrics.bytes),
+                 self_host_throughput_ratio(arena, instructions, metrics.sloc), self_host_throughput_ratio(arena, instructions, metrics.tokens));
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* data)
 {
     SelfHostCompare* compare = data;
@@ -2406,7 +2559,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* d
         return PROCESS_RESULT_FAILED;
     }
     string_print(S8("SELF_HOST deterministic bytes={u64} stage1={S8} stage2={S8}\n"), stage1.length, compare->stage1, compare->stage2);
+    self_host_report_throughput(arena, S8("1"), compare->stage1_run, compare->stage1_metrics);
+    self_host_report_throughput(arena, S8("2"), compare->stage2_run, compare->stage2_metrics);
     return PROCESS_RESULT_SUCCESS;
+}
+
+// The measurement lands beside the executable it measured, so the stale one an
+// earlier run left is removed along with the stale executable and a stage that
+// dies before writing cannot be read as the current stage's numbers.
+// Zero-terminated: this is handed to file_read as well as to the compiler.
+BUSTER_GLOBAL_LOCAL String8 self_host_metrics_path(Arena* arena, String8 output)
+{
+    return string_format_z(arena, S8("{S8}.metrics"), output);
 }
 
 BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
@@ -2415,6 +2579,10 @@ BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 comp
     BuildStep* step = step_add(arena);
     ProcessRun* run = run_add(arena, step);
     String8 generated_include = string_format(arena, S8("-I{S8}/generated"), build_directory);
+    // Formatted before the builder starts: the builder owns a contiguous run
+    // of String8 in this same arena, and an interleaved allocation of anything
+    // else would break the run os_argument_builder_flush counts back.
+    String8 source_metrics = string_format(arena, S8("-fsource-metrics={S8}"), self_host_metrics_path(arena, output));
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, compiler);
     os_argument_builder_append(&builder, S8("cc"));
@@ -2451,6 +2619,12 @@ BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 comp
     // in c.c). Stage 2 compares against stage 3, not stage 1, for that. The
     // fixed point is the executable bytes, which do match.
     os_argument_builder_append(&builder, S8("-v"));
+    // -v is the human's copy; the file is the one self_host_compare_action
+    // reads back to divide this step's instruction count by. It is a file
+    // rather than another parsed stdout line because capturing this step's
+    // output would stop the compiler's diagnostics from streaming as it runs,
+    // and swallowing those on a failing self-host costs more than the file.
+    os_argument_builder_append(&builder, source_metrics);
 #if BUSTER_MACOS
     os_argument_builder_append(&builder, S8("-isysroot"));
     os_argument_builder_append(&builder, sysroot);
@@ -2791,7 +2965,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_cleanup_action(Arena* ar
     return PROCESS_RESULT_SUCCESS;
 }
 
-BUSTER_GLOBAL_LOCAL void self_host_compare_and_bench_add(Arena* arena, String8 stage1, String8 stage2
+BUSTER_GLOBAL_LOCAL void self_host_compare_and_bench_add(Arena* arena, String8 stage1, String8 stage2, ProcessRun* stage1_run, ProcessRun* stage2_run
 #if BUSTER_WINDOWS
                                                           , String8 stage1_pdb, String8 stage2_pdb
 #endif
@@ -2805,6 +2979,10 @@ BUSTER_GLOBAL_LOCAL void self_host_compare_and_bench_add(Arena* arena, String8 s
         .pdb1 = stage1_pdb,
         .pdb2 = stage2_pdb,
 #endif
+        .stage1_metrics = self_host_metrics_path(arena, stage1),
+        .stage2_metrics = self_host_metrics_path(arena, stage2),
+        .stage1_run = stage1_run,
+        .stage2_run = stage2_run,
     };
     BuildStep* compare_step = step_add(arena);
     ProcessRun* compare_run = run_add(arena, compare_step);
@@ -2875,6 +3053,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, Buil
     remove_path_recursive(arena, fanout->private_bootstrap_path);
     remove_path_recursive(arena, stage1);
     remove_path_recursive(arena, stage2);
+    remove_path_recursive(arena, self_host_metrics_path(arena, stage1));
+    remove_path_recursive(arena, self_host_metrics_path(arena, stage2));
 #if BUSTER_WINDOWS
     remove_path_recursive(arena, stage1_pdb);
     remove_path_recursive(arena, stage2_pdb);
@@ -2890,8 +3070,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, Buil
                                                    S8("Self-host stage 1"));
     stage1_run->cleanup_callback = build_artifact_fanout_cleanup_action;
     stage1_run->cleanup_data = fanout;
-    self_host_compile_add(arena, stage1, fanout->build_directory, sysroot, stage2, S8("Self-host stage 2"));
-    self_host_compare_and_bench_add(arena, stage1, stage2
+    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, fanout->build_directory, sysroot, stage2, S8("Self-host stage 2"));
+    self_host_compare_and_bench_add(arena, stage1, stage2, stage1_run, stage2_run
 #if BUSTER_WINDOWS
                                     , stage1_pdb, stage2_pdb
 #endif
@@ -3040,46 +3220,21 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
     // Unlink both outputs before either compiler recreates them.
     remove_path_recursive(arena, stage1);
     remove_path_recursive(arena, stage2);
+    remove_path_recursive(arena, self_host_metrics_path(arena, stage1));
+    remove_path_recursive(arena, self_host_metrics_path(arena, stage2));
 #if BUSTER_WINDOWS
     remove_path_recursive(arena, stage1_pdb);
     remove_path_recursive(arena, stage2_pdb);
 #endif
     String8 targets[] = {S8("ide")};
     build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
-    self_host_compile_add(arena, bootstrap, build_directory, sysroot, stage1, S8("Self-host stage 1"));
-    self_host_compile_add(arena, stage1, build_directory, sysroot, stage2, S8("Self-host stage 2"));
-    SelfHostCompare* compare = arena_allocate(arena, SelfHostCompare, 1);
-    *compare = (SelfHostCompare){
-        .stage1 = stage1,
-        .stage2 = stage2,
+    ProcessRun* stage1_run = self_host_compile_add(arena, bootstrap, build_directory, sysroot, stage1, S8("Self-host stage 1"));
+    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, build_directory, sysroot, stage2, S8("Self-host stage 2"));
+    self_host_compare_and_bench_add(arena, stage1, stage2, stage1_run, stage2_run
 #if BUSTER_WINDOWS
-        .pdb1 = stage1_pdb,
-        .pdb2 = stage2_pdb,
+                                    , stage1_pdb, stage2_pdb
 #endif
-    };
-    BuildStep* compare_step = step_add(arena);
-    ProcessRun* compare_run = run_add(arena, compare_step);
-    *compare_run = (ProcessRun){
-        .callback = self_host_compare_action,
-        .callback_data = compare,
-    };
-    BuildStep* bench_step = step_add(arena);
-    ProcessRun* bench_run = run_add(arena, bench_step);
-    String8* bench_arguments = arena_allocate(arena, String8, 2);
-    bench_arguments[0] = stage2;
-    bench_arguments[1] = S8("bench");
-    *bench_run = (ProcessRun){
-        .arguments =
-            {
-                .pointer = bench_arguments,
-                .length = 2,
-            },
-        .timing_description = S8("Self-host stage 2 benchmark"),
-        .spawn_options =
-            (ProcessSpawnOptions){
-                .use_process_environment = 1,
-            },
-    };
+    );
     return PROCESS_RESULT_SUCCESS;
 #endif
 }
@@ -6980,51 +7135,6 @@ BUSTER_GLOBAL_LOCAL bool test_timing_next_token(String8* text, String8* token)
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool test_timing_next_line(String8* text, String8* line)
-{
-    if (!text->length)
-    {
-        return false;
-    }
-
-    u64 newline_index = string_first_code_unit(*text, '\n');
-    bool is_last_line = newline_index == BUSTER_STRING_NO_MATCH;
-    u64 line_end = is_last_line ? text->length : newline_index;
-    *line = string_slice(*text, 0, line_end);
-    *text = is_last_line ? (String8){0} : string_slice(*text, line_end + 1, text->length);
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool test_timing_split_field(String8 token, String8* key, String8* value)
-{
-    u64 equals_index = string_first_code_unit(token, '=');
-    if (equals_index == BUSTER_STRING_NO_MATCH)
-    {
-        return false;
-    }
-
-    *key = string_slice(token, 0, equals_index);
-    *value = string_slice(token, equals_index + 1, token.length);
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool test_timing_parse_u64(String8 value, u64* result)
-{
-    if (!value.length)
-    {
-        return false;
-    }
-
-    IntegerParsingU64 parsed = string8_parse_u64_decimal(value.pointer);
-    if (parsed.length != value.length)
-    {
-        return false;
-    }
-
-    *result = parsed.value;
-    return true;
-}
-
 // `build/build-ci_on-cc_gcc-...-configs_shared` plus `Release` becomes
 // `ci_on-cc_gcc-...-configs_shared:Release`. The leading directory and the
 // `build-` prefix carry no identity and would only differ between checkouts.
@@ -7200,7 +7310,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_timing_summary_parse_log(Arena* arena, St
     u64 previous_index = 0;
     String8 line = {0};
 
-    while (test_timing_next_line(&text, &line))
+    while (text_next_line(&text, &line))
     {
         if (!string_starts_with_sequence(line, S8("TEST_MODULE_TIMING ")))
         {
@@ -7226,14 +7336,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_timing_summary_parse_log(Arena* arena, St
         {
             String8 key = {0};
             String8 value = {0};
-            if (!test_timing_split_field(token, &key, &value))
+            if (!text_split_field(token, &key, &value))
             {
                 continue;
             }
 
             if (string_equal(key, S8("index")))
             {
-                has_index = test_timing_parse_u64(value, &index);
+                has_index = text_parse_u64(value, &index);
             }
             else if (string_equal(key, S8("module")))
             {
@@ -7241,11 +7351,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_timing_summary_parse_log(Arena* arena, St
             }
             else if (string_equal(key, S8("duration_ns")))
             {
-                has_duration = test_timing_parse_u64(value, &duration_ns);
+                has_duration = text_parse_u64(value, &duration_ns);
             }
             else if (string_equal(key, S8("failed")))
             {
-                test_timing_parse_u64(value, &failed);
+                text_parse_u64(value, &failed);
             }
         }
 
@@ -7298,7 +7408,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_timing_baseline_read(Arena* arena, String
     String8 line = {0};
     bool version_seen = false;
 
-    while (test_timing_next_line(&text, &line))
+    while (text_next_line(&text, &line))
     {
         String8 rest = line;
         String8 token = {0};
@@ -7310,7 +7420,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_timing_baseline_read(Arena* arena, String
         if (string_equal(token, S8("TEST_TIMING_BASELINE_VERSION")))
         {
             u64 version = 0;
-            if (!test_timing_next_token(&rest, &token) || !test_timing_parse_u64(token, &version) || version != TEST_TIMING_BASELINE_VERSION)
+            if (!test_timing_next_token(&rest, &token) || !text_parse_u64(token, &version) || version != TEST_TIMING_BASELINE_VERSION)
             {
                 summary_output_print(output, S8("error: {S8} is not a version {u64} test timing baseline\n"), path,
                                      (u64)TEST_TIMING_BASELINE_VERSION);
@@ -7349,7 +7459,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_timing_baseline_read(Arena* arena, String
         {
             String8 key = {0};
             String8 value = {0};
-            if (!test_timing_split_field(token, &key, &value))
+            if (!text_split_field(token, &key, &value))
             {
                 continue;
             }
@@ -7364,11 +7474,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_timing_baseline_read(Arena* arena, String
             }
             else if (string_equal(key, S8("duration_ns")))
             {
-                has_duration = test_timing_parse_u64(value, &duration_ns);
+                has_duration = text_parse_u64(value, &duration_ns);
             }
             else if (string_equal(key, S8("samples")))
             {
-                test_timing_parse_u64(value, &samples);
+                text_parse_u64(value, &samples);
             }
         }
 
@@ -19989,6 +20099,36 @@ BUSTER_GLOBAL_LOCAL ProcessResult process_run_wait(Arena* arena, ProcessRun* run
     return result;
 }
 
+// Wall clock and instructions retired for one finished run, printed once the
+// run has been waited for. Both wait sites in the loop below report through
+// here so the instruction delta is recorded on the run itself exactly where it
+// is printed, and cannot drift from the STEP_INSTRUCTIONS line a later step
+// derives from.
+BUSTER_GLOBAL_LOCAL void process_run_report_timing(ProcessRun* run)
+{
+    if (!run->timing_description.pointer)
+    {
+        return;
+    }
+
+    u64 elapsed_us = os_now_microseconds() - run->start_us;
+    u64 elapsed_ns = elapsed_us * 1000;
+    u64 seconds_whole = elapsed_us / 1000000;
+    u64 seconds_fraction = elapsed_us % 1000000;
+    printf("%.*s%.*s took %llu.%06llu seconds (%llu nanoseconds)\n", string8_printf_length(run->timing_description, UINT64_MAX),
+           run->timing_description.pointer ? run->timing_description.pointer : "", string8_printf_length(run->timing_configuration, UINT64_MAX),
+           run->timing_configuration.pointer ? run->timing_configuration.pointer : "", (unsigned long long)seconds_whole,
+           (unsigned long long)seconds_fraction, (unsigned long long)elapsed_ns);
+    u64 instructions = instruction_counter_read();
+    if (instructions > run->start_instructions)
+    {
+        run->instructions = instructions - run->start_instructions;
+        printf("STEP_INSTRUCTIONS %.*s%.*s instructions=%llu\n", string8_printf_length(run->timing_description, UINT64_MAX),
+               run->timing_description.pointer ? run->timing_description.pointer : "", string8_printf_length(run->timing_configuration, UINT64_MAX),
+               run->timing_configuration.pointer ? run->timing_configuration.pointer : "", (unsigned long long)run->instructions);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void run_metaprogram(void)
 {
 }
@@ -20025,27 +20165,7 @@ ProcessResult entry_point(void)
                 for (ProcessRun* wait = first_pending; wait != run; wait = wait->next)
                 {
                     ProcessResult wait_result = process_run_wait(arena, wait);
-                    if (wait->timing_description.pointer)
-                    {
-                        u64 elapsed_us = os_now_microseconds() - wait->start_us;
-                        u64 elapsed_ns = elapsed_us * 1000;
-                        u64 seconds_whole = elapsed_us / 1000000;
-                        u64 seconds_fraction = elapsed_us % 1000000;
-                        printf("%.*s%.*s took %llu.%06llu seconds (%llu nanoseconds)\n", string8_printf_length(wait->timing_description, UINT64_MAX),
-                               wait->timing_description.pointer ? wait->timing_description.pointer : "",
-                               string8_printf_length(wait->timing_configuration, UINT64_MAX),
-                               wait->timing_configuration.pointer ? wait->timing_configuration.pointer : "", (unsigned long long)seconds_whole,
-                               (unsigned long long)seconds_fraction, (unsigned long long)elapsed_ns);
-                        u64 instructions = instruction_counter_read();
-                        if (instructions > wait->start_instructions)
-                        {
-                            printf("STEP_INSTRUCTIONS %.*s%.*s instructions=%llu\n", string8_printf_length(wait->timing_description, UINT64_MAX),
-                                   wait->timing_description.pointer ? wait->timing_description.pointer : "",
-                                   string8_printf_length(wait->timing_configuration, UINT64_MAX),
-                                   wait->timing_configuration.pointer ? wait->timing_configuration.pointer : "",
-                                   (unsigned long long)(instructions - wait->start_instructions));
-                        }
-                    }
+                    process_run_report_timing(wait);
 
                     if (result == PROCESS_RESULT_SUCCESS && wait_result != PROCESS_RESULT_SUCCESS)
                     {
@@ -20077,27 +20197,7 @@ ProcessResult entry_point(void)
                     for (ProcessRun* wait = first_pending; wait != run->next; wait = wait->next)
                     {
                         ProcessResult wait_result = process_run_wait(arena, wait);
-                        if (wait->timing_description.pointer)
-                        {
-                            u64 elapsed_us = os_now_microseconds() - wait->start_us;
-                            u64 elapsed_ns = elapsed_us * 1000;
-                            u64 seconds_whole = elapsed_us / 1000000;
-                            u64 seconds_fraction = elapsed_us % 1000000;
-                            printf("%.*s%.*s took %llu.%06llu seconds (%llu nanoseconds)\n", string8_printf_length(wait->timing_description, UINT64_MAX),
-                                   wait->timing_description.pointer ? wait->timing_description.pointer : "",
-                                   string8_printf_length(wait->timing_configuration, UINT64_MAX),
-                                   wait->timing_configuration.pointer ? wait->timing_configuration.pointer : "", (unsigned long long)seconds_whole,
-                                   (unsigned long long)seconds_fraction, (unsigned long long)elapsed_ns);
-                            u64 instructions = instruction_counter_read();
-                            if (instructions > wait->start_instructions)
-                            {
-                                printf("STEP_INSTRUCTIONS %.*s%.*s instructions=%llu\n", string8_printf_length(wait->timing_description, UINT64_MAX),
-                                       wait->timing_description.pointer ? wait->timing_description.pointer : "",
-                                       string8_printf_length(wait->timing_configuration, UINT64_MAX),
-                                       wait->timing_configuration.pointer ? wait->timing_configuration.pointer : "",
-                                       (unsigned long long)(instructions - wait->start_instructions));
-                            }
-                        }
+                        process_run_report_timing(wait);
 
                         if (result == PROCESS_RESULT_SUCCESS && wait_result != PROCESS_RESULT_SUCCESS)
                         {

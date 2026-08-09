@@ -405,6 +405,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.sysroot = value;
             continue;
         }
+        value = compiler_driver_option_value(argument, S8("-fsource-metrics="));
+        if (value.length)
+        {
+            invocation.source_metrics_path = value;
+            continue;
+        }
         value = compiler_driver_option_value(argument, S8("-march="));
         if (!value.length)
         {

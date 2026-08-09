@@ -71,6 +71,10 @@ struct CompilerDriverInvocation
     String8 output_path;
     String8 sysroot;
     String8 module_root;
+    // Where to write the source measurement as key=value text. `-v` prints the
+    // same numbers as a table for a human; this is the form another program
+    // reads, so a build driver can divide its own instruction count by them.
+    String8 source_metrics_path;
     String8 diagnostic;
     Target target;
     u32 input_count;

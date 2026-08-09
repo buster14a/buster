@@ -749,6 +749,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("-L/sdk/lib"),
         S8("-l:libandroid.so"),
         S8("-Wl,--gc-sections"),
+        S8("-fsource-metrics=metrics.txt"),
         S8("-o"),
         S8("output.o"),
         S8("source.c"),
@@ -784,6 +785,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, invocation.input_count == 1);
     BUSTER_STRING_TEST(arguments, invocation.output_path, S8("output.o"));
     BUSTER_STRING_TEST(arguments, invocation.sysroot, S8("/sdk"));
+    BUSTER_STRING_TEST(arguments, invocation.source_metrics_path, S8("metrics.txt"));
     String8 x86_cpu_command_line[] = {
         S8("-c"),
         S8("--target=x86_64-linux"),

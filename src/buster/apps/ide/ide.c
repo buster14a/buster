@@ -2533,6 +2533,78 @@ BUSTER_GLOBAL_LOCAL void report_source_metrics(Arena* arena, String8 unit, CSour
     report_preprocessed_row(arena, S8("  #define directives"), preprocessed.definitions, 0);
 }
 
+// The same measurement as the table above, in the form another program reads.
+// `-v` is for a human, `-fsource-metrics=<path>` is for a build driver: it
+// divides its own instruction count for the compile by these to get the
+// throughput series that STEP_INSTRUCTIONS alone cannot express (see
+// `self_host_compare_action` in build.c).
+//
+// A whole file rather than another stdout line, because capturing the
+// compiler's stdout would buffer the diagnostics that currently stream as the
+// compile runs, and losing those on a failing build costs more than this file.
+//
+// Keys are `<group>.<CSourceMetrics field name>`, so the format is the struct
+// and readers can key off exactly the fields they need. Only ever add keys:
+// build.c ignores those it does not know, and an older build.c must keep
+// reading a newer compiler's file.
+#define SOURCE_METRICS_FILE_VERSION 1
+
+// string_format appends one byte at a time at the arena's current position, so
+// consecutive calls land contiguously and a single String8 can be grown to
+// cover them all; string_format_z relies on the same property for its
+// terminator.
+BUSTER_GLOBAL_LOCAL void source_metrics_append_line(String8* text, String8 line)
+{
+    if (!text->pointer)
+    {
+        text->pointer = line.pointer;
+    }
+    text->length += line.length;
+}
+
+BUSTER_GLOBAL_LOCAL void source_metrics_append_field(Arena* arena, String8* text, String8 group, String8 key, u64 value)
+{
+    source_metrics_append_line(text, string_format(arena, S8("{S8}.{S8}={u64}\n"), group, key, value));
+}
+
+BUSTER_GLOBAL_LOCAL void source_metrics_append_group(Arena* arena, String8* text, String8 group, CSourceMetrics metrics)
+{
+    source_metrics_append_field(arena, text, group, S8("files"), metrics.files);
+    source_metrics_append_field(arena, text, group, S8("bytes"), metrics.bytes);
+    source_metrics_append_field(arena, text, group, S8("translated_bytes"), metrics.translated_bytes);
+    source_metrics_append_field(arena, text, group, S8("lines"), metrics.lines);
+    source_metrics_append_field(arena, text, group, S8("translated_lines"), metrics.translated_lines);
+    source_metrics_append_field(arena, text, group, S8("spliced_lines"), metrics.spliced_lines);
+    source_metrics_append_field(arena, text, group, S8("code_lines"), metrics.code_lines);
+    source_metrics_append_field(arena, text, group, S8("comment_lines"), metrics.comment_lines);
+    source_metrics_append_field(arena, text, group, S8("mixed_lines"), metrics.mixed_lines);
+    source_metrics_append_field(arena, text, group, S8("blank_lines"), metrics.blank_lines);
+    // Derived from the byte partition, and written out so a reader does not
+    // have to know the partition to use the one byte count that is code.
+    source_metrics_append_field(arena, text, group, S8("code_bytes"), c_source_metrics_code_bytes(metrics));
+    source_metrics_append_field(arena, text, group, S8("comment_bytes"), metrics.comment_bytes);
+    source_metrics_append_field(arena, text, group, S8("blank_bytes"), metrics.blank_bytes);
+    source_metrics_append_field(arena, text, group, S8("literal_bytes"), metrics.literal_bytes);
+    source_metrics_append_field(arena, text, group, S8("comments"), metrics.comments);
+    source_metrics_append_field(arena, text, group, S8("tokens"), metrics.tokens);
+}
+
+BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String8 unit, CSourceMetrics unique, CSourceMetrics lexed,
+                                              CPreprocessedMetrics preprocessed)
+{
+    String8 text = {0};
+    source_metrics_append_line(&text, string_format(arena, S8("version={u32}\n"), (u32)SOURCE_METRICS_FILE_VERSION));
+    source_metrics_append_line(&text, string_format(arena, S8("unit={S8}\n"), unit));
+    source_metrics_append_group(arena, &text, S8("unique"), unique);
+    source_metrics_append_group(arena, &text, S8("lexed"), lexed);
+    source_metrics_append_field(arena, &text, S8("preprocessed"), S8("tokens"), preprocessed.tokens);
+    source_metrics_append_field(arena, &text, S8("preprocessed"), S8("bytes"), preprocessed.bytes);
+    source_metrics_append_field(arena, &text, S8("preprocessed"), S8("spelling_bytes"), preprocessed.spelling_bytes);
+    source_metrics_append_field(arena, &text, S8("preprocessed"), S8("expansions"), preprocessed.expansions);
+    source_metrics_append_field(arena, &text, S8("preprocessed"), S8("definitions"), preprocessed.definitions);
+    return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
 {
     Arena* arena = arena_create((ArenaCreation){
@@ -2563,10 +2635,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         string_print(S8("TARGET cpu={S8} features={S8}\n"), cpu_model_to_string_os(invocation.target.cpu_model),
                      target_cpu_features_to_string(arena, invocation.target));
     }
-    if (invocation.verbose && compile.source_lexed.files)
+    if (compile.source_lexed.files && (invocation.verbose || invocation.source_metrics_path.length))
     {
         String8 unit = invocation.input_count == 1 ? invocation.input_paths[0] : string_format(arena, S8("{u32} inputs"), invocation.input_count);
-        report_source_metrics(arena, unit, compile.source_unique, compile.source_lexed, compile.preprocessed);
+        if (invocation.verbose)
+        {
+            report_source_metrics(arena, unit, compile.source_unique, compile.source_lexed, compile.preprocessed);
+        }
+        // A metrics file that was asked for and could not be written is an
+        // error like an unwritable -o: the caller asked for a measurement and
+        // would otherwise read a stale file, or none, without being told.
+        if (invocation.source_metrics_path.length &&
+            !write_source_metrics(arena, invocation.source_metrics_path, unit, compile.source_unique, compile.source_lexed, compile.preprocessed))
+        {
+            string_print(S8("cc: error: could not write {S8}\n"), invocation.source_metrics_path);
+            result = PROCESS_RESULT_FAILED;
+        }
     }
     if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verbose && compile.codegen_statistics.function_count)
     {
