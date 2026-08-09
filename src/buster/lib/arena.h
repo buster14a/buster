@@ -9,7 +9,11 @@ struct ArenaFlags
     // sizes. A reused arena hands out dirty bytes, so only creation sites
     // whose consumers never assume freshly zeroed pages may set this.
     u64 pool_reuse : 1;
-    u64 flags : 61;
+    // Force an otherwise-default-shaped arena to unmap on destruction. Use
+    // this for large transient peaks that must not accumulate in a thread's
+    // small-arena reuse pool.
+    u64 no_pool : 1;
+    u64 flags : 60;
 };
 
 typedef struct Arena Arena;
@@ -50,9 +54,15 @@ struct TemporalArena
 
 BUSTER_F_DECL Arena* arena_create(ArenaCreation initialization);
 BUSTER_F_DECL bool arena_destroy(Arena* arena, u64 count);
+// Unmaps every otherwise-reusable arena parked in the calling OS thread's
+// local pool. OS thread teardown must call this after releasing its context.
+BUSTER_F_DECL u64 arena_pool_release_thread(void);
 BUSTER_F_DECL u8* arena_get_byte_pointer_at_position(Arena* arena, u64 position);
 BUSTER_F_DECL u8* arena_get_byte_pointer_at_position_check_aligned(Arena* arena, u64 position, u64 alignment);
 BUSTER_F_DECL void arena_set_position(Arena* arena, u64 position);
+// Resets the logical position and releases only complete native pages beyond
+// it. This remains safe for legal arenas whose granularity is sub-page.
+BUSTER_F_DECL bool arena_set_position_and_decommit(Arena* arena, u64 position);
 BUSTER_F_DECL void arena_reset_to_start(Arena* arena);
 BUSTER_F_DECL void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment);
 BUSTER_F_DECL u8* arena_get_byte_pointer_align(Arena* arena, u64 position, u64 alignment);

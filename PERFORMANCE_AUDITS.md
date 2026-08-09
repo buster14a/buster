@@ -486,6 +486,65 @@ green in Release and in sanitized Debug.)
   short for the same reason anywhere an instruction moves an aggregate, so
   that flag would pay for more than this entry.
 
+`2026-08-09k` (Linux x86_64, Zen 4 7940HS; deterministic function-parallel
+code generation and persistent SPMD lanes. **Canonical C IR and legacy buster
+IR functions now emit independently behind an atomic take index, then merge
+exact fragments in stable source order; `lane_run` reuses a resident gang for
+the lifetime of its calling thread context.**)
+
+- **What was built.** Module-global layout, validation, ABI preparation, and
+  global emission remain serial. Workers own one-function transient arenas and
+  publish exact code, relocation, line, debug-location, unwind, descriptor, and
+  label-offset fragments. Lane 0 performs the stable merge, rebases offsets,
+  resolves label-address relocations, and emits global assembly. Both public
+  codegen entry points prewarm the first-use ABI table before a dispatch can
+  leave workers resident. Function arenas bypass the ordinary reuse pool;
+  resident worker scratch resets after every dispatch and decommits a peak more
+  than 16 MiB above its saved stable prefix.
+- **Bounded production parallelism.** `BUSTER_TEST_JOBS` caps compiler and test
+  lanes, zero selects the bounded host width, and
+  `BUSTER_SINGLE_THREADED=ON` retains the identical one-lane path. The build
+  driver migrates cached trees to the new threaded default while preserving an
+  explicit later `ON`, and its artifact-fanout worker runs in the same shared
+  one-job pool with an exact fail-closed quota and provenance check. Fresh OS
+  workers drain their TLS arena pool before exit. The combined app test gives
+  unit modules a temporary `ThreadContext`, so resident test workers and their
+  scratch are gone before graphical smoke and the bounded fuzz phase.
+- **Same-source lane comparison.** On the final isolated tree (`1,395,807`
+  preprocessed tokens), one lane measured stage 1 `0.668914 s` /
+  `5,384,053,826` instructions and stage 2 `7.566065 s` /
+  `70,372,665,061`; host width measured `0.616748 s` /
+  `5,384,185,647` and `7.069590 s` / `70,373,201,503`. Wall time moved
+  `-7.799%` and `-6.562%`; retired instructions moved only `+0.002448%` and
+  `+0.000762%`. The one-shot wall reductions are directional because this host
+  has documented roughly 10% run-to-run noise; the instruction totals are the
+  regression gate. Stage-2 parser benchmarks were neutral: I/O minima were
+  `1.930 ms` versus `1.944 ms` and parse minima were `1.717 ms` versus
+  `1.742 ms`.
+- **Determinism and gates.** Both widths reached the identical
+  `27,022,296`-byte fixed point with identical token streams. Complete
+  ELF/COFF serial-versus-parallel artifact regressions cover code, relocations,
+  DWARF/CodeView, unwind, symbols, static labels, global assembly, and large
+  alignment growth. Host-width Release passed `19,647/19,647`; quota-one Debug
+  and Release passed `19,644/19,644`; compile-time serial Release passed
+  `19,632/19,632`; ASan+UBSan passed `18,779/18,779` at host width and
+  `18,776/18,776` at quota one. The combined graphical smoke passed its one
+  external test, and Clang analysis reported no warning.
+- **Fuzz integration fix.** The first full matrix reached every row and then
+  exposed a pre-existing leak in the bounded fuzz harness: every C preprocess
+  input lost the separately owned 1 GiB spelling-space reservation when its
+  recovery record was discarded. The exact fuzz-enabled Release row failed on
+  current main in both threaded and compile-time-serial builds. Returning that
+  owner arena after each input made the feature row pass `19,646/19,646`, all
+  29 modules, and the bounded fuzz session under `BUSTER_TEST_JOBS=1`. The
+  complete final compiler/configuration matrix then passed both fuzz rows and
+  Clang analysis.
+- **Deliberate boundary.** C declaration/entity discovery and lowering remain
+  serial. Parallelizing them still requires function-local IDs, stable request
+  resolution, and deterministic ID remapping; this change supplies the lane
+  lifetime and stable-fragment merge infrastructure without pretending that
+  dependency exists yet.
+
 `2026-08-09j` (Linux x86_64, Zen 4 7940HS; incremental IDE workspace
 analysis. **Normal body edits now parse, index, analyze, and invalidate only
 the changed document; exported-interface or import changes reanalyze only the

@@ -296,9 +296,12 @@ struct CodegenExecutable
 typedef struct CodegenModuleOptions CodegenModuleOptions;
 struct CodegenModuleOptions
 {
+    // Zero selects the bounded host default. Tests and deterministic callers
+    // may request a maximum width; one keeps the identical serial path.
+    u32 lane_count;
     bool debug_info;
     bool assume_validated;
-    u8 reserved[6];
+    u8 reserved[2];
 };
 
 // Fills the per-abi target cache on the calling thread. Call before lane_run;

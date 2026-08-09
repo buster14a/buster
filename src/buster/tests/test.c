@@ -302,9 +302,33 @@ bool batch_test_report(UnitTestArguments* arguments, BatchTestResult test)
 }
 
 #if BUSTER_INCLUDE_TESTS
+u64 buster_test_worker_count(u64 requested)
+{
+#if BUSTER_SINGLE_THREADED
+    BUSTER_UNUSED(requested);
+    return 1;
+#else
+    u64 result = BUSTER_MAX(requested, (u64)1);
+    String8 jobs_text = os_get_environment_variable(S8("BUSTER_TEST_JOBS"));
+    if (jobs_text.length)
+    {
+        IntegerParsingU64 parsed = string8_parse_u64_decimal(jobs_text.pointer);
+        if (parsed.length == jobs_text.length && parsed.value)
+        {
+            result = BUSTER_MIN(result, parsed.value);
+        }
+    }
+    return result;
+#endif
+}
+
 BatchTestResult library_tests(UnitTestArguments* arguments)
 {
     BatchTestResult result = {0};
+    // Some test modules intentionally leave a resident lane gang available
+    // for later work on their selected context. Fill every compiler-global
+    // read-only table before the first module can create those workers.
+    compiler_prewarm();
     bool timing_enabled = program_state != 0 && program_flag_get(PROGRAM_FLAG_VERBOSE);
     if (timing_enabled)
     {

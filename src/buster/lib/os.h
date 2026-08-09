@@ -163,6 +163,10 @@ BUSTER_F_DECL bool os_thread_join(OsThreadHandle* handle);
 // True while every thread this process started through os_thread_create has
 // been joined, so the caller is the only one that can be touching a global.
 BUSTER_F_DECL bool os_is_only_live_thread(void);
+BUSTER_F_DECL OsMutexHandle* os_mutex_create(void);
+BUSTER_F_DECL void os_mutex_lock(OsMutexHandle* handle);
+BUSTER_F_DECL void os_mutex_unlock(OsMutexHandle* handle);
+BUSTER_F_DECL void os_mutex_destroy(OsMutexHandle* handle);
 
 // Single-threaded builds compile the barrier out entirely: nothing in them
 // can ever wait on one, and the tcc bootstrap's own Win32 headers and import
@@ -221,6 +225,7 @@ struct ProgramState
 };
 
 typedef struct LaneContext LaneContext;
+typedef struct LaneGang LaneGang;
 struct LaneContext
 {
     u64 lane_index;
@@ -241,6 +246,11 @@ struct ThreadContext
 {
     Arena* arenas[(u64)SCRATCH_ARENA_COUNT];
     LaneContext lane_context;
+    // Lazily-created resident workers owned by this caller context. Keeping
+    // the gang here lets unrelated OS threads dispatch independently while
+    // the normal compiler path reuses one process-lifetime gang.
+    Arena* lane_arena;
+    LaneGang* lane_gang;
 };
 
 BUSTER_V_DECL ProgramState* program_state;
@@ -288,6 +298,7 @@ BUSTER_NORETURN BUSTER_F_DECL void os_exit(u32 code);
 
 BUSTER_F_DECL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map);
 BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock);
+BUSTER_F_DECL bool os_decommit(void* address, u64 size);
 BUSTER_F_DECL bool os_unreserve(void* address, u64 size);
 BUSTER_F_DECL bool os_flush_instruction_cache(void* address, u64 size);
 
@@ -329,12 +340,12 @@ BUSTER_F_DECL void lane_broadcast(void* value_pointer, u64 value_size, u64 sourc
 // range in lane order reproduces [0, item_count) exactly; share sizes differ
 // by at most one item.
 BUSTER_F_DECL LaneRange lane_range(u64 item_count);
-// Runs callback(argument) once on every lane of a fresh gang and returns when
-// all lanes have finished. A requested count of zero asks for one lane per
-// logical processor. Single-threaded builds and one-lane requests run the
-// callback on the calling thread without spawning anything. The caller's own
-// lane context is saved and restored, so gangs may run from inside narrowed
-// sections of an outer gang.
+// Runs callback(argument) once on every lane and returns when all lanes have
+// finished. A requested count of zero asks for one lane per logical processor.
+// Resident workers are reused across calls made by the same caller context;
+// single-threaded builds and one-lane requests run directly. The caller's lane
+// context is saved and restored. Nested gangs retain the old independent-gang
+// behavior so an outer lane can safely narrow and invoke another lane region.
 BUSTER_F_DECL void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument);
 
 BUSTER_F_DECL void flag_set_ex(u64* flag_pointer, u64 flag_count, u64 flag_index, bool flag_value);

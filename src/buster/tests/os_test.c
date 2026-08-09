@@ -7,7 +7,26 @@ enum
 {
     OS_TEST_LANE_MAX_COUNT = 8,
     OS_TEST_LANE_ITEM_COUNT = 1003,
+    OS_TEST_LANE_INVOCATION_COUNT = 3,
+    OS_TEST_NESTED_INVOCATION_COUNT = 2,
 };
+
+#if !BUSTER_SINGLE_THREADED
+typedef struct OsTestThreadPoolState OsTestThreadPoolState;
+struct OsTestThreadPoolState
+{
+    Arena* pooled_arena;
+};
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_pool_entry(void* argument)
+{
+    OsTestThreadPoolState* state = (OsTestThreadPoolState*)argument;
+    Arena* pooled = arena_create((ArenaCreation){0});
+    BUSTER_CHECK(pooled != 0);
+    state->pooled_arena = pooled;
+    BUSTER_CHECK(arena_destroy(pooled, 1));
+}
+#endif
 
 typedef struct OsTestLaneState OsTestLaneState;
 struct OsTestLaneState
@@ -17,17 +36,35 @@ struct OsTestLaneState
     u64 observed_counts[OS_TEST_LANE_MAX_COUNT];
     u64 sums_after_sync[OS_TEST_LANE_MAX_COUNT];
     u64 broadcast_received[OS_TEST_LANE_MAX_COUNT];
+    u64 scratch_positions[OS_TEST_LANE_INVOCATION_COUNT][OS_TEST_LANE_MAX_COUNT];
+    u64 scratch_committed[OS_TEST_LANE_INVOCATION_COUNT][OS_TEST_LANE_MAX_COUNT];
+    ThreadContext* observed_contexts[OS_TEST_LANE_INVOCATION_COUNT][OS_TEST_LANE_MAX_COUNT];
     AtomicU64 sum;
     AtomicU64 take_index;
+    u64 invocation;
 };
 
 // Runs once on every lane. Test macros are not thread-safe, so lanes only
-// record what they observe; the caller checks after the gang has joined.
+// record what they observe; the caller checks after the gang has finished.
 BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_lane_gang(void* argument)
 {
     OsTestLaneState* state = (OsTestLaneState*)argument;
     u64 index = lane_index();
     state->observed_counts[index] = lane_count();
+    ThreadContext* thread_context = thread_context_selected();
+    state->observed_contexts[state->invocation][index] = thread_context;
+    state->scratch_positions[state->invocation][index] = thread_context->arenas[0]->position;
+    state->scratch_committed[state->invocation][index] = thread_context->arenas[0]->os_position;
+    if (index)
+    {
+        arena_allocate(thread_context->arenas[0], u8, 64 + index);
+    }
+    if (state->invocation == 0 && index == 1)
+    {
+        // The resident context remains, but an outlier scratch commitment must
+        // not remain resident across later dispatches.
+        arena_allocate(thread_context->arenas[0], u8, BUSTER_MB(17));
+    }
 
     LaneRange range = lane_range(OS_TEST_LANE_ITEM_COUNT);
     u64 local_sum = 0;
@@ -80,6 +117,46 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_liveness(void* argument)
 }
 #endif
 
+typedef struct OsTestNestedLaneState OsTestNestedLaneState;
+struct OsTestNestedLaneState
+{
+    u64 outer_counts[OS_TEST_LANE_MAX_COUNT];
+    u64 inner_counts[OS_TEST_LANE_MAX_COUNT];
+    Arena* inner_pooled_arenas[OS_TEST_NESTED_INVOCATION_COUNT][OS_TEST_LANE_MAX_COUNT];
+    u64 inner_lane_count;
+    u64 invocation;
+};
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_inner_lane_gang(void* argument)
+{
+    OsTestNestedLaneState* state = (OsTestNestedLaneState*)argument;
+    u64 index = lane_index();
+    state->inner_counts[index] = lane_count();
+    if (index)
+    {
+        // The fresh nested worker will park this arena beside its context
+        // arenas. Generic OS-thread teardown must drain all of them before
+        // the TLS pool root disappears.
+        Arena* pooled = arena_create((ArenaCreation){0});
+        BUSTER_CHECK(pooled != 0);
+        state->inner_pooled_arenas[state->invocation][index] = pooled;
+        BUSTER_CHECK(arena_destroy(pooled, 1));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_outer_lane_gang(void* argument)
+{
+    OsTestNestedLaneState* state = (OsTestNestedLaneState*)argument;
+    u64 outer_index = lane_index();
+    lane_sync();
+    if (outer_index == 0)
+    {
+        lane_run(state->inner_lane_count, &os_test_inner_lane_gang, state);
+    }
+    lane_sync();
+    state->outer_counts[outer_index] = lane_count();
+}
+
 UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -98,6 +175,33 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     thread_context_select(main_context);
     BUSTER_TEST(arguments, released_context_was_cleared);
     BUSTER_TEST(arguments, thread_context_selected() == main_context);
+
+    // Generic OS-thread teardown must unmap parked arenas before its TLS pool
+    // root disappears. Run twice so this remains a reclamation regression even
+    // when lane tests are intentionally clamped to one worker. A compile-time
+    // serial build has process-global context state and must not spawn workers.
+#if !BUSTER_SINGLE_THREADED
+    for (u64 invocation = 0; invocation < 2; invocation += 1)
+    {
+        OsTestThreadPoolState state = {0};
+        OsThreadHandle* thread = os_thread_create((ThreadCreateOptions){
+            .callback = &os_test_thread_pool_entry,
+            .argument = &state,
+        });
+        BUSTER_TEST(arguments, thread != 0);
+        if (thread)
+        {
+            bool joined = os_thread_join(thread);
+            BUSTER_TEST(arguments, joined);
+            if (joined)
+            {
+                bool still_reserved = state.pooled_arena &&
+                                      os_commit(state.pooled_arena, os_get_page_size(), (ProtectionFlags){.read = 1, .write = 1}, false);
+                BUSTER_TEST(arguments, state.pooled_arena != 0 && !still_reserved);
+            }
+        }
+    }
+#endif
 
     // flag_set_ex/flag_get_ex pack one flag per bit across u64 words.
     {
@@ -639,6 +743,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     {
         Arena* arena = arguments->arena;
         u64 position = arena->position;
+        // A resident gang belongs to its calling ThreadContext. Exercise its
+        // complete lifetime on a temporary owner so releasing the context
+        // joins the parked workers before later test modules initialize their
+        // guarded read-only globals.
+        ThreadContext* lane_owner_context = thread_context_allocate();
+        thread_context_select(lane_owner_context);
 
 #if BUSTER_SINGLE_THREADED
         u64 lanes = 1;
@@ -665,7 +775,18 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             expected_sum += i + 1;
         }
 
+        // The resident gang must not borrow storage from an enclosing scratch
+        // scope: that scope is deliberately ended before the final reuse.
+        TemporalArena enclosing_scratch = scratch_begin(0, 0);
         lane_run(lanes, &os_test_lane_gang, state);
+#if !BUSTER_SINGLE_THREADED
+        if (lanes > 1)
+        {
+            BUSTER_TEST(arguments, thread_context_selected()->lane_arena != 0 &&
+                                       thread_context_selected()->lane_arena != enclosing_scratch.arena);
+        }
+#endif
+        scratch_end(enclosing_scratch);
 
         BUSTER_TEST(arguments, state->sum == expected_sum);
         BUSTER_TEST(arguments, state->take_index >= OS_TEST_LANE_ITEM_COUNT);
@@ -684,10 +805,84 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, each_item_taken_once);
 
+        // Vary the active width and return to the original width. Resident
+        // worker contexts must survive both dispatches, while the active
+        // barrier and every per-invocation field are refreshed.
+        u64 narrower_lanes = lanes > 1 ? lanes - 1 : 1;
+        memset(state->taken, 0, sizeof(state->taken));
+        memset(state->observed_counts, 0, sizeof(state->observed_counts));
+        memset(state->sums_after_sync, 0, sizeof(state->sums_after_sync));
+        memset(state->broadcast_received, 0, sizeof(state->broadcast_received));
+        state->sum = 0;
+        state->take_index = 0;
+        state->invocation = 1;
+        lane_run(narrower_lanes, &os_test_lane_gang, state);
+        bool narrower_count_valid = true;
+        for (u64 lane = 0; lane < narrower_lanes; lane += 1)
+        {
+            narrower_count_valid = narrower_count_valid && state->observed_counts[lane] == narrower_lanes;
+        }
+        BUSTER_TEST(arguments, narrower_count_valid);
+
+        memset(state->taken, 0, sizeof(state->taken));
+        memset(state->observed_counts, 0, sizeof(state->observed_counts));
+        memset(state->sums_after_sync, 0, sizeof(state->sums_after_sync));
+        memset(state->broadcast_received, 0, sizeof(state->broadcast_received));
+        state->sum = 0;
+        state->take_index = 0;
+        state->invocation = 2;
+        lane_run(lanes, &os_test_lane_gang, state);
+        bool worker_contexts_reused = true;
+        bool worker_scratch_trimmed = lanes == 1 || state->scratch_committed[2][1] <= BUSTER_MB(1);
+        bool repeated_results_valid = state->sum == expected_sum;
+        for (u64 lane = 0; lane < lanes; lane += 1)
+        {
+            worker_contexts_reused = worker_contexts_reused && state->observed_contexts[0][lane] == state->observed_contexts[2][lane];
+            worker_contexts_reused = worker_contexts_reused && (!lane || state->scratch_positions[0][lane] == state->scratch_positions[2][lane]);
+            repeated_results_valid = repeated_results_valid && state->observed_counts[lane] == lanes &&
+                                     state->sums_after_sync[lane] == expected_sum &&
+                                     state->broadcast_received[lane] == 0x1234567890abcdefull;
+        }
+        BUSTER_TEST(arguments, worker_contexts_reused);
+        BUSTER_TEST(arguments, worker_scratch_trimmed);
+        BUSTER_TEST(arguments, repeated_results_valid);
+
         // The gang left the caller's lane context untouched.
         BUSTER_TEST(arguments, lane_index() == 0);
         BUSTER_TEST(arguments, lane_count() == 1);
 
+        // An inner region invoked by lane 0 uses an independent gang while
+        // the other outer lanes wait. Re-entering the resident gang here
+        // would deadlock on its dispatch barriers.
+        OsTestNestedLaneState nested = {.inner_lane_count = lanes > 1 ? 2 : 1};
+        for (u64 invocation = 0; invocation < OS_TEST_NESTED_INVOCATION_COUNT; invocation += 1)
+        {
+            memset(nested.outer_counts, 0, sizeof(nested.outer_counts));
+            memset(nested.inner_counts, 0, sizeof(nested.inner_counts));
+            nested.invocation = invocation;
+            lane_run(lanes, &os_test_outer_lane_gang, &nested);
+            bool nested_counts_valid = true;
+            for (u64 lane = 0; lane < lanes; lane += 1)
+            {
+                nested_counts_valid = nested_counts_valid && nested.outer_counts[lane] == lanes;
+            }
+            for (u64 lane = 0; lane < nested.inner_lane_count; lane += 1)
+            {
+                nested_counts_valid = nested_counts_valid && nested.inner_counts[lane] == nested.inner_lane_count;
+            }
+            BUSTER_TEST(arguments, nested_counts_valid);
+#if !BUSTER_SINGLE_THREADED
+            if (nested.inner_lane_count > 1)
+            {
+                Arena* released = nested.inner_pooled_arenas[invocation][1];
+                bool still_reserved = released && os_commit(released, os_get_page_size(), (ProtectionFlags){.read = 1, .write = 1}, false);
+                BUSTER_TEST(arguments, released != 0 && !still_reserved);
+            }
+#endif
+        }
+
+        thread_context_release(lane_owner_context);
+        thread_context_select(main_context);
         arena->position = position;
     }
 

@@ -105,7 +105,10 @@ at a time without nested oversubscription. Larger hosts retain the weighted
 allocator: split trees share at least two logical CPUs per admission slot while
 unity trees use one job. Tests then run concurrently in the same bounded pool,
 with each tree's quota passed through `BUSTER_TEST_JOBS`; future multithreaded test work
-must honor that limit. Trees are declared longest-first — sanitized Debug,
+must honor that limit. Application builds are multithreaded by default;
+`./build.sh generate -DBUSTER_SINGLE_THREADED=ON` is the explicit serial
+fallback. Compiler-internal lane widths honor `BUSTER_TEST_JOBS` when it is
+present. Trees are declared longest-first — sanitized Debug,
 sanitized Release, the unity Release tree that also runs `clang_analyze`, trees
 covering two configurations, then the rest — because Ninja admits ready edges
 from a shared pool in declaration order and a fresh CI checkout has no
@@ -481,7 +484,9 @@ history.
 - **Compiler control flow must not use callbacks or function-pointer dispatch.**
   Use direct calls, loops, switches, and explicit work structures. Function
   pointer values may model the program being compiled, but the compiler itself
-  must not execute through them.
+  must not execute through them. The one infrastructure exception is the
+  uniform SPMD entry passed to `lane_run`; work inside that entry still uses
+  direct control flow and an explicit index or range.
 - **Parallelism target: SPMD across threads, SIMD within each thread.**
   Implementation code is written multi-core-by-default in the lane model of
   Ryan Fleury's raddebugger (`lane_run`, `lane_index`/`lane_count`,
@@ -498,7 +503,11 @@ history.
   by batch passes, not pointer graphs walked element-at-a-time. Parallel
   stages must stay deterministic — write results into slots indexed by work
   item, never by completion order — so the self-hosting fixed point stays
-  byte-identical at any lane count.
+  byte-identical at any lane count. `lane_run` keeps a persistent worker gang
+  on the calling thread context and reuses it across phases; do not add phase-
+  local thread creation. Variable-duration work uses an atomic take-index,
+  writes function- or item-local fragments into stable source-indexed slots,
+  and merges them only after a lane barrier.
 - **A global built on first use is prewarmed, never raced.** Several hot
   tables are derived once and read forever after through plain loads — the
   tokenizer's character classes, keyword slots and operator NFA, the C
@@ -803,13 +812,17 @@ has hard design constraints:
   calling convention that is incompatible with the selected architecture and
   validate every part against the type layout, register limits, and outgoing
   stack area before emitting it.
-- Module code generation emits all lowered functions into one image and
-  resolves direct-call relocations by `(entity, instantiation)`. Aggregate
-  values use frame-owned backing storage while array/slice/range descriptors
-  remain ordinary typed IR values; aggregate assignment is a value copy, not
-  descriptor aliasing. The x86-64 and AArch64 baselines share this value
-  representation even though their stack addressing and instruction emission
-  are backend-specific.
+- Module code generation emits each lowered function into an independent
+  source-indexed fragment. A stable source-order prefix merge assigns final
+  code offsets and combines entries, relocations, line rows, debug-location
+  seeds, unwind descriptors, and statistics; completion order must never
+  affect output or error selection. Global layout and assembly remain serial,
+  and direct-call relocations resolve by `(entity, instantiation)` after the
+  merge. Aggregate values use frame-owned backing storage while
+  array/slice/range descriptors remain ordinary typed IR values; aggregate
+  assignment is a value copy, not descriptor aliasing. The x86-64 and AArch64
+  baselines share this value representation even though their stack addressing
+  and instruction emission are backend-specific.
 - Separate compilation merges format-neutral `ObjectFile` values before native
   serialization. Global definitions resolve by symbol name, private
   object symbols remain object-local, non-exported language definitions use

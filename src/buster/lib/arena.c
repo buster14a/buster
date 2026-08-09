@@ -7,6 +7,17 @@ BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(64);
 BUSTER_GLOBAL_LOCAL u64 initial_size_granularity_factor = 4;
 
+BUSTER_GLOBAL_LOCAL u64 arena_os_position_after_commit(u64 requested_end, u64 reserved_size)
+{
+    u64 page_size = os_get_page_size();
+    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
+    // Commit APIs round the end of a page-aligned request up to a native
+    // page. Track that usable boundary so a later incremental commit also
+    // starts page-aligned. A sub-page logical reservation ends at its exact
+    // bound and cannot grow again, so clamping it is both accurate and safe.
+    return BUSTER_MIN(align_forward(requested_end, page_size), reserved_size);
+}
+
 void arena_allocation_overflow(void)
 {
     os_fail_message(S8("arena allocation size overflowed"));
@@ -47,7 +58,7 @@ void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
 
         if (os_commit(commit_pointer, size_to_commit, (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute}, arena->flags.lock_pages))
         {
-            arena->os_position = target_committed_size;
+            arena->os_position = arena_os_position_after_commit(target_committed_size, arena->reserved_size);
         }
     }
 
@@ -85,6 +96,37 @@ void arena_reset_to_start(Arena* arena)
 void arena_set_position(Arena* arena, u64 position)
 {
     arena->position = position;
+}
+
+bool arena_set_position_and_decommit(Arena* arena, u64 position)
+{
+    BUSTER_CHECK(position >= arena_minimum_position && position <= arena->position);
+    u64 page_size = os_get_page_size();
+    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
+    // Arena granularities may legally be smaller than a native page. Start at
+    // the next boundary that satisfies both contracts, and stop before any
+    // partial native page at the old high-water mark. If no complete page is
+    // available, resetting the logical position is still useful and safe.
+    u64 decommit_alignment = BUSTER_MAX(arena->granularity, page_size);
+    u64 decommit_start = align_forward(position, decommit_alignment);
+    u64 decommit_end = arena->os_position & ~(page_size - 1);
+    bool result = true;
+    if (decommit_start < decommit_end)
+    {
+        result = os_decommit((u8*)arena + decommit_start, decommit_end - decommit_start);
+        if (result)
+        {
+            // A sub-page-granularity arena can have a committed partial page
+            // above decommit_end. Treating it as uncommitted is conservative:
+            // a later allocation recommits the full range from this boundary.
+            arena->os_position = decommit_start;
+        }
+    }
+    if (result)
+    {
+        arena->position = position;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL ArenaCreation arena_creation_parameters(ArenaCreation original)
@@ -136,9 +178,28 @@ BUSTER_GLOBAL_LOCAL bool arena_destroy_extended(Arena* arena, u64 count, u64 res
 BUSTER_THREAD_LOCAL_DECL Arena* arena_pool_head;
 BUSTER_THREAD_LOCAL_DECL u64 arena_pool_count;
 
+u64 arena_pool_release_thread(void)
+{
+    u64 result = 0;
+    Arena* pooled = arena_pool_head;
+    arena_pool_head = 0;
+    arena_pool_count = 0;
+    while (pooled)
+    {
+        Arena* next = *(Arena**)((u8*)pooled + arena_minimum_position);
+        u64 reserved_size = pooled->reserved_size;
+        // This runs after an OS worker has cleared its ThreadContext, so the
+        // raw reporter is the only failure path that does not need scratch.
+        BUSTER_CHECK_RAW(arena_destroy_extended(pooled, 1, reserved_size));
+        pooled = next;
+        result += 1;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool arena_pool_eligible(u64 reserved_size, u64 count, ArenaFlags flags)
 {
-    return count == 1 && !flags.execute && !flags.lock_pages && (reserved_size == default_reserve_size || flags.pool_reuse);
+    return count == 1 && !flags.execute && !flags.lock_pages && !flags.no_pool && (reserved_size == default_reserve_size || flags.pool_reuse);
 }
 
 bool arena_destroy(Arena* arena, u64 count)
@@ -195,7 +256,7 @@ Arena* arena_create(ArenaCreation original_creation)
             if (!committed_enough)
             {
                 committed_enough = os_commit(pooled, creation.initial_size, (ProtectionFlags){.read = 1, .write = 1}, false);
-                committed = creation.initial_size;
+                committed = arena_os_position_after_commit(creation.initial_size, individual_reserved_size);
             }
             if (committed_enough)
             {
@@ -229,7 +290,7 @@ Arena* arena_create(ArenaCreation original_creation)
                 *arena = (Arena){
                     .reserved_size = individual_reserved_size,
                     .position = arena_minimum_position,
-                    .os_position = creation.initial_size,
+                    .os_position = arena_os_position_after_commit(creation.initial_size, individual_reserved_size),
                     .granularity = creation.granularity,
                     .flags = creation.flags,
                 };

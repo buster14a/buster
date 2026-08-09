@@ -818,7 +818,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         u64 lanes = 1;
 #else
         u64 lanes = BUSTER_MIN((u64)COMPILER_PREWARM_MAX_LANE_COUNT, (u64)os_get_logical_thread_count());
-        lanes = BUSTER_MAX(lanes, (u64)1);
+        lanes = buster_test_worker_count(lanes);
 #endif
         lane_run(lanes, &compiler_prewarm_gang, state);
 

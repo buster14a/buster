@@ -63,6 +63,7 @@ struct OsEntity
     {
 #if defined(_WIN32)
         u8 foo;
+        CRITICAL_SECTION mutex;
         struct
         {
             HANDLE handle;
@@ -85,7 +86,6 @@ struct OsEntity
             u32 arrived;
         } barrier;
 #endif
-//         pthread_mutex_t mutex;
 //         struct
 //         {
 //             pthread_cond_t handle;

@@ -2379,9 +2379,24 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_app(void)
         });
         UnitTestArguments arguments = {arena, &default_show};
 
+        // Unit modules may leave a resident lane gang on their selected
+        // context. Give the complete suite its own context so its workers and
+        // scratch have a deterministic lifetime before graphical smoke or the
+        // bounded fuzz session performs any later process-global first use.
+        ThreadContext* app_context = thread_context_selected();
+        ThreadContext* test_context = thread_context_allocate();
+        BUSTER_CHECK(app_context != 0 && test_context != 0);
+        thread_context_select(test_context);
+
         u64 position = arena->position;
         BatchTestResult batch_test_result = library_tests(&arguments);
         arena->position = position;
+
+        thread_context_release(test_context);
+        // Releasing a context parks its calling-thread scratch for reuse. This
+        // phase boundary deliberately discards those touched pages as well.
+        (void)arena_pool_release_thread();
+        thread_context_select(app_context);
 
         if (program_flag_get(PROGRAM_FLAG_CI))
         {

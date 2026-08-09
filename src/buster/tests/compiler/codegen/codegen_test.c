@@ -1958,8 +1958,54 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         codegen_release_executable(aarch64_collection_executable);
     }
 #endif
-    CodegenModule generated_module = codegen_generate_module(arguments->arena, &analysis, &module, target, (CodegenModuleOptions){0});
+    CodegenModule generated_module = codegen_generate_module(arguments->arena, &analysis, &module, target,
+                                                              (CodegenModuleOptions){
+                                                                  .lane_count = 1,
+                                                                  .debug_info = true,
+                                                              });
+    CodegenModule parallel_generated_module = codegen_generate_module(arguments->arena, &analysis, &module, target,
+                                                                       (CodegenModuleOptions){
+                                                                           .lane_count = 3,
+                                                                           .debug_info = true,
+                                                                       });
+
+    // A worker inherits a caller's legal commit granularity. With a 96 KiB
+    // reservation, retaining the old fixed 64 KiB granularity would round the
+    // first growth above 64 KiB past the reservation and abort.
+    Arena* narrow_worker_arena = codegen_worker_arena_create(BUSTER_KB(96), BUSTER_KB(4));
+    BUSTER_TEST(arguments, narrow_worker_arena != 0);
+    if (narrow_worker_arena)
+    {
+        u8* worker_bytes = arena_allocate(narrow_worker_arena, u8, BUSTER_KB(80));
+        worker_bytes[0] = 0x2d;
+        worker_bytes[BUSTER_KB(80) - 1] = 0xd2;
+        BUSTER_TEST(arguments, narrow_worker_arena->position > BUSTER_KB(64));
+        BUSTER_TEST(arguments, narrow_worker_arena->os_position <= narrow_worker_arena->reserved_size);
+        BUSTER_TEST(arguments, worker_bytes[0] == 0x2d && worker_bytes[BUSTER_KB(80) - 1] == 0xd2);
+        BUSTER_TEST(arguments, arena_destroy(narrow_worker_arena, 1));
+    }
+
+    // Parallel scaffolding must preserve the public entry point's small-arena
+    // contract even when an empty module has no function work to distribute.
+    Arena* small_legacy_arena = arena_create((ArenaCreation){
+        .reserved_size = BUSTER_KB(4),
+        .initial_size = BUSTER_KB(4),
+        .flags.no_pool = true,
+    });
+    BUSTER_TEST(arguments, small_legacy_arena != 0);
+    if (small_legacy_arena)
+    {
+        IrModule empty_module = {0};
+        CodegenModule small_module = codegen_generate_module(small_legacy_arena, &analysis, &empty_module, target,
+                                                             (CodegenModuleOptions){
+                                                                 .lane_count = 1,
+                                                                 .assume_validated = true,
+                                                             });
+        BUSTER_TEST(arguments, small_module.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, arena_destroy(small_legacy_arena, 1));
+    }
     BUSTER_TEST(arguments, generated_module.error == CODEGEN_ERROR_NONE);
+    BUSTER_TEST(arguments, parallel_generated_module.error == CODEGEN_ERROR_NONE);
     BUSTER_TEST(arguments, generated_module.function_count == generated_module.entry_count);
     for (u32 function_index = 0; function_index < generated_module.function_count; function_index += 1)
     {
@@ -2000,6 +2046,18 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE);
     BUSTER_TEST(arguments, artifact.format == artifact_format);
     BUSTER_TEST(arguments, artifact.bytes.length > generated_module.code.length);
+    if (generated_module.error == CODEGEN_ERROR_NONE && parallel_generated_module.error == CODEGEN_ERROR_NONE)
+    {
+        ObjectFile parallel_generated_object = object_from_codegen_module(arguments->arena, &analysis, &parallel_generated_module, target);
+        ObjectArtifact parallel_artifact = object_write(arguments->arena, &parallel_generated_object, artifact_format);
+        BUSTER_TEST(arguments, parallel_generated_object.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, parallel_artifact.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, artifact.bytes.length == parallel_artifact.bytes.length);
+        if (artifact.bytes.length == parallel_artifact.bytes.length)
+        {
+            BUSTER_TEST(arguments, memcmp(artifact.bytes.pointer, parallel_artifact.bytes.pointer, artifact.bytes.length) == 0);
+        }
+    }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
     ObjectExecutable generated_object_executable = object_link_executable(&generated_object);
     BUSTER_TEST(arguments, generated_object_executable.error == OBJECT_ERROR_NONE);
@@ -2633,9 +2691,67 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         IrModule* canonical_module = canonical_program->modules;
         IrValidationResult canonical_validation = ir_validate_canonical_module(canonical_program, canonical_module);
         BUSTER_TEST(arguments, canonical_validation.error == IR_VALIDATION_NONE);
+
+        Arena* small_canonical_arena = arena_create((ArenaCreation){
+            .reserved_size = BUSTER_KB(4),
+            .initial_size = BUSTER_KB(4),
+            .flags.no_pool = true,
+        });
+        BUSTER_TEST(arguments, small_canonical_arena != 0);
+        if (small_canonical_arena)
+        {
+            IrModule empty_module = {0};
+            CodegenModule small_module = codegen_generate_canonical_module(
+                small_canonical_arena, canonical_program, &empty_module, canonical_windows_target,
+                (CodegenModuleOptions){
+                    .lane_count = 1,
+                    .assume_validated = true,
+                });
+            BUSTER_TEST(arguments, small_module.error == CODEGEN_ERROR_NONE);
+            BUSTER_TEST(arguments, arena_destroy(small_canonical_arena, 1));
+        }
         CodegenModule canonical_windows_module = codegen_generate_canonical_module(arguments->arena, canonical_program, canonical_module,
                                                                                     canonical_windows_target, (CodegenModuleOptions){0});
         BUSTER_TEST(arguments, canonical_windows_module.error == CODEGEN_ERROR_NONE);
+        // Function workers may complete in any order, but the stable merge
+        // must make the complete COFF/CodeView/unwind artifact independent of
+        // lane width. Debug output is the strongest aggregate oracle because
+        // it also consumes line rows, location seeds, descriptors, symbols,
+        // and relocation order.
+        CodegenModule canonical_windows_serial = codegen_generate_canonical_module(
+            arguments->arena, canonical_program, canonical_module, canonical_windows_target,
+            (CodegenModuleOptions){
+                .lane_count = 1,
+                .debug_info = true,
+                .assume_validated = true,
+            });
+        CodegenModule canonical_windows_parallel = codegen_generate_canonical_module(
+            arguments->arena, canonical_program, canonical_module, canonical_windows_target,
+            (CodegenModuleOptions){
+                .lane_count = 3,
+                .debug_info = true,
+                .assume_validated = true,
+            });
+        BUSTER_TEST(arguments, canonical_windows_serial.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, canonical_windows_parallel.error == CODEGEN_ERROR_NONE);
+        if (canonical_windows_serial.error == CODEGEN_ERROR_NONE && canonical_windows_parallel.error == CODEGEN_ERROR_NONE)
+        {
+            ObjectFile serial_object =
+                object_from_canonical_codegen_module(arguments->arena, canonical_program, &canonical_windows_serial, canonical_windows_target);
+            ObjectFile parallel_object =
+                object_from_canonical_codegen_module(arguments->arena, canonical_program, &canonical_windows_parallel, canonical_windows_target);
+            ObjectArtifact serial_artifact = object_write(arguments->arena, &serial_object, object_format_for_target(canonical_windows_target));
+            ObjectArtifact parallel_artifact = object_write(arguments->arena, &parallel_object, object_format_for_target(canonical_windows_target));
+            BUSTER_TEST(arguments, serial_artifact.error == OBJECT_ERROR_NONE);
+            BUSTER_TEST(arguments, parallel_artifact.error == OBJECT_ERROR_NONE);
+            BUSTER_TEST(arguments, serial_artifact.bytes.length == parallel_artifact.bytes.length);
+            if (serial_artifact.bytes.length == parallel_artifact.bytes.length)
+            {
+                BUSTER_TEST(arguments, memcmp(serial_artifact.bytes.pointer, parallel_artifact.bytes.pointer, serial_artifact.bytes.length) == 0);
+            }
+            BUSTER_TEST(arguments, canonical_windows_serial.statistics.function_count == canonical_windows_parallel.statistics.function_count);
+            BUSTER_TEST(arguments, canonical_windows_serial.statistics.code_bytes == canonical_windows_parallel.statistics.code_bytes);
+        }
         IrFunction* layout_mix_function = codegen_test_c_function_find(canonical_module, S8("layout_mix"));
         IrFunction* leaf_layout_function = codegen_test_c_function_find(canonical_module, S8("leaf_layout"));
         IrFunction* large_layout_function = codegen_test_c_function_find(canonical_module, S8("large_layout"));
@@ -3366,6 +3482,70 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, alignment_assembly_codegen.code.pointer[aligned_body_offset + 1] == 0x90);
                 BUSTER_TEST(arguments, alignment_assembly_codegen.code.pointer[aligned_body_offset + BUSTER_KB(4) - 1] == 0x90);
                 BUSTER_TEST(arguments, alignment_assembly_codegen.code.pointer[aligned_body_offset + BUSTER_KB(4)] == 0xc3);
+            }
+        }
+    }
+    String8 deterministic_merge_source = S8(
+        "extern int deterministic_asm_value(void);\n"
+        "#if defined(__x86_64__) || defined(_M_X64)\n"
+        "__asm__(\".text\\n.p2align 12\\n.globl deterministic_asm_value\\n.type deterministic_asm_value, @function\\n\""
+        "        \"deterministic_asm_value:\\nmovl $7, %eax\\nret\\n\");\n"
+        "#elif defined(__aarch64__) || defined(_M_ARM64)\n"
+        "__asm__(\".text\\n.p2align 12\\n.globl deterministic_asm_value\\n.type deterministic_asm_value, %function\\n\""
+        "        \"deterministic_asm_value:\\nmov w0, #7\\nret\\n\");\n"
+        "#endif\n"
+        "static int deterministic_dispatch(int selector) {\n"
+        "    static void *targets[] = {&&zero, &&one};\n"
+        "    goto *targets[selector & 1];\n"
+        "zero: return 11;\n"
+        "one: return 13;\n"
+        "}\n"
+        "static int deterministic_helper(int value) { return value + 3; }\n"
+        "int deterministic_merge(int selector) {\n"
+        "    return deterministic_helper(deterministic_dispatch(selector)) + deterministic_asm_value();\n"
+        "}\n");
+    CPreprocessResult deterministic_merge_tokens = c_preprocess(arguments->arena, deterministic_merge_source, (CPreprocessOptions){0});
+    CParseResult deterministic_merge_parse = c_parse(arguments->arena, deterministic_merge_tokens);
+    CIRLowerResult deterministic_merge_ir = c_lower_to_ir(arguments->arena, S8("deterministic-merge.c"), deterministic_merge_tokens,
+                                                           deterministic_merge_parse, target);
+    BUSTER_TEST(arguments, deterministic_merge_tokens.error_count == 0);
+    BUSTER_TEST(arguments, deterministic_merge_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, deterministic_merge_ir.diagnostic_count == 0);
+    if (deterministic_merge_ir.program)
+    {
+        IrProgram* deterministic_program = deterministic_merge_ir.program;
+        IrModule* deterministic_module = deterministic_program->modules;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(deterministic_program, deterministic_module).error == IR_VALIDATION_NONE);
+        CodegenModule deterministic_serial = codegen_generate_canonical_module(
+            arguments->arena, deterministic_program, deterministic_module, target,
+            (CodegenModuleOptions){
+                .lane_count = 1,
+                .debug_info = true,
+                .assume_validated = true,
+            });
+        CodegenModule deterministic_parallel = codegen_generate_canonical_module(
+            arguments->arena, deterministic_program, deterministic_module, target,
+            (CodegenModuleOptions){
+                .lane_count = 3,
+                .debug_info = true,
+                .assume_validated = true,
+            });
+        BUSTER_TEST(arguments, deterministic_serial.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, deterministic_parallel.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, deterministic_serial.code.length >= 4096);
+        if (deterministic_serial.error == CODEGEN_ERROR_NONE && deterministic_parallel.error == CODEGEN_ERROR_NONE)
+        {
+            ObjectFile serial_object = object_from_canonical_codegen_module(arguments->arena, deterministic_program, &deterministic_serial, target);
+            ObjectFile parallel_object = object_from_canonical_codegen_module(arguments->arena, deterministic_program, &deterministic_parallel, target);
+            ObjectFormat format = object_format_for_target(target);
+            ObjectArtifact serial_artifact = object_write(arguments->arena, &serial_object, format);
+            ObjectArtifact parallel_artifact = object_write(arguments->arena, &parallel_object, format);
+            BUSTER_TEST(arguments, serial_artifact.error == OBJECT_ERROR_NONE);
+            BUSTER_TEST(arguments, parallel_artifact.error == OBJECT_ERROR_NONE);
+            BUSTER_TEST(arguments, serial_artifact.bytes.length == parallel_artifact.bytes.length);
+            if (serial_artifact.bytes.length == parallel_artifact.bytes.length)
+            {
+                BUSTER_TEST(arguments, memcmp(serial_artifact.bytes.pointer, parallel_artifact.bytes.pointer, serial_artifact.bytes.length) == 0);
             }
         }
     }

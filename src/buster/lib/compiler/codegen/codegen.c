@@ -500,8 +500,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_win64_relayout_indirect_copies(AnalysisResult* 
     return true;
 }
 
-CodegenAbiSignature codegen_classify_signature_with_arguments(Arena* arena, AnalysisResult* analysis, AnalysisTypeId function_type_id,
-                                                                                  AnalysisTypeId* argument_types, u32 argument_count, Target target)
+BUSTER_GLOBAL_LOCAL CodegenAbiSignature codegen_classify_signature_with_arguments_prepared(Arena* arena, AnalysisResult* analysis,
+                                                                                            AnalysisTypeId function_type_id,
+                                                                                            AnalysisTypeId* argument_types, u32 argument_count,
+                                                                                            Target target, bool prepare_layouts)
 {
     CodegenAbiSignature result = {0};
     CodegenAbi abi = codegen_abi_for_target(target);
@@ -510,10 +512,13 @@ CodegenAbiSignature codegen_classify_signature_with_arguments(Arena* arena, Anal
     {
         return result;
     }
-    analysis_compute_layouts(analysis, (AnalysisLayoutOptions){
-                                           .pointer_size = 8,
-                                           .pointer_alignment = 8,
-                                       });
+    if (prepare_layouts)
+    {
+        analysis_compute_layouts(analysis, (AnalysisLayoutOptions){
+                                               .pointer_size = 8,
+                                               .pointer_alignment = 8,
+                                           });
+    }
     AnalysisFunctionAbi classified = argument_types ? analysis_classify_call_abi(arena, analysis, function_type_id, argument_types, argument_count, target)
                                                     : analysis_classify_function_abi(arena, analysis, function_type_id, target);
     AnalysisAbiConvention expected = abi == CODEGEN_ABI_X86_64_SYSTEM_V   ? ANALYSIS_ABI_CONVENTION_SYSTEMV_X86_64
@@ -602,6 +607,12 @@ CodegenAbiSignature codegen_classify_signature_with_arguments(Arena* arena, Anal
     return result;
 }
 
+CodegenAbiSignature codegen_classify_signature_with_arguments(Arena* arena, AnalysisResult* analysis, AnalysisTypeId function_type_id,
+                                                               AnalysisTypeId* argument_types, u32 argument_count, Target target)
+{
+    return codegen_classify_signature_with_arguments_prepared(arena, analysis, function_type_id, argument_types, argument_count, target, true);
+}
+
 BUSTER_GLOBAL_LOCAL Target codegen_abi_targets[CODEGEN_ABI_COUNT];
 BUSTER_GLOBAL_LOCAL bool codegen_abi_targets_built;
 
@@ -645,7 +656,7 @@ void codegen_prewarm(void)
 BUSTER_GLOBAL_LOCAL CodegenAbiSignature codegen_classify_signature_for_target(Arena* arena, AnalysisResult* analysis, AnalysisTypeId function_type_id,
                                                                               Target target)
 {
-    return codegen_classify_signature_with_arguments(arena, analysis, function_type_id, 0, 0, target);
+    return codegen_classify_signature_with_arguments_prepared(arena, analysis, function_type_id, 0, 0, target, false);
 }
 
 CodegenAbiSignature codegen_classify_signature(Arena* arena, AnalysisResult* analysis, AnalysisTypeId function_type_id, CodegenAbi abi)
@@ -1590,8 +1601,8 @@ BUSTER_GLOBAL_LOCAL void x64_emit_store_result(X64Builder* builder, IrInstructio
     }
 }
 
-CodegenError codegen_x64_maximum_call_stack_size(Arena* arena, AnalysisResult* analysis, IrFunction* function, Target target,
-                                                                    u32* stack_size)
+BUSTER_GLOBAL_LOCAL CodegenError codegen_x64_maximum_call_stack_size_prepared(Arena* arena, AnalysisResult* analysis, IrFunction* function,
+                                                                              Target target, u32* stack_size, bool prepare_layouts)
 {
     if (!stack_size)
     {
@@ -1601,6 +1612,13 @@ CodegenError codegen_x64_maximum_call_stack_size(Arena* arena, AnalysisResult* a
     if (!arena || !analysis || !function || !function->instructions || !function->values)
     {
         return CODEGEN_ERROR_INVALID_IR;
+    }
+    if (prepare_layouts)
+    {
+        analysis_compute_layouts(analysis, (AnalysisLayoutOptions){
+                                               .pointer_size = 8,
+                                               .pointer_alignment = 8,
+                                           });
     }
     u32 result = 0;
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
@@ -1664,8 +1682,8 @@ CodegenError codegen_x64_maximum_call_stack_size(Arena* arena, AnalysisResult* a
                 return CODEGEN_ERROR_INVALID_IR;
             }
         }
-        CodegenAbiSignature signature = codegen_classify_signature_with_arguments(arena, analysis, function_type_id,
-                                                                                    argument_types, argument_count, target);
+        CodegenAbiSignature signature = codegen_classify_signature_with_arguments_prepared(arena, analysis, function_type_id, argument_types,
+                                                                                            argument_count, target, false);
         if (!signature.valid)
         {
             return CODEGEN_ERROR_UNSUPPORTED_ABI;
@@ -1674,6 +1692,11 @@ CodegenError codegen_x64_maximum_call_stack_size(Arena* arena, AnalysisResult* a
     }
     *stack_size = result;
     return CODEGEN_ERROR_NONE;
+}
+
+CodegenError codegen_x64_maximum_call_stack_size(Arena* arena, AnalysisResult* analysis, IrFunction* function, Target target, u32* stack_size)
+{
+    return codegen_x64_maximum_call_stack_size_prepared(arena, analysis, function, target, stack_size, true);
 }
 
 BUSTER_GLOBAL_LOCAL void x64_relocation_add(X64Builder* builder, IrBlockId target)
@@ -2882,10 +2905,10 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(X64Builder* builder, IrBlockId blo
         {
             call_argument_types[index] = builder->function->values[instruction->operands[index + 1].value].type;
         }
-        CodegenAbiSignature signature =
-            codegen_classify_signature_with_arguments(builder->arena, builder->analysis, function_type_id,
-                                                      function_type->as.function.is_variadic || builder->abi == CODEGEN_ABI_X86_64_WINDOWS ? call_argument_types : 0,
-                                                      call_argument_count, builder->target);
+        CodegenAbiSignature signature = codegen_classify_signature_with_arguments_prepared(
+            builder->arena, builder->analysis, function_type_id,
+            function_type->as.function.is_variadic || builder->abi == CODEGEN_ABI_X86_64_WINDOWS ? call_argument_types : 0, call_argument_count,
+            builder->target, false);
         if (!signature.valid)
         {
             return false;
@@ -4348,7 +4371,7 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(Arena* arena, Analys
     u32 outgoing_stack_size = 0;
     if (abi == CODEGEN_ABI_X86_64_WINDOWS)
     {
-        CodegenError outgoing_error = codegen_x64_maximum_call_stack_size(arena, analysis, function, target, &outgoing_stack_size);
+        CodegenError outgoing_error = codegen_x64_maximum_call_stack_size_prepared(arena, analysis, function, target, &outgoing_stack_size, false);
         if (outgoing_error != CODEGEN_ERROR_NONE)
         {
             result.error = outgoing_error;
@@ -5958,8 +5981,8 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(Arena* arena, Analy
                 {
                     call_argument_types[index] = function->values[instruction->operands[index + 1].value].type;
                 }
-                CodegenAbiSignature signature = codegen_classify_signature_with_arguments(
-                    arena, analysis, function_type_id, function_type->as.function.is_variadic ? call_argument_types : 0, call_argument_count, target);
+                CodegenAbiSignature signature = codegen_classify_signature_with_arguments_prepared(
+                    arena, analysis, function_type_id, function_type->as.function.is_variadic ? call_argument_types : 0, call_argument_count, target, false);
                 if (!signature.valid)
                 {
                     buffer.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
@@ -6976,7 +6999,124 @@ CodegenFunction codegen_generate_function(Arena* arena, AnalysisResult* analysis
     return result;
 }
 
-CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, IrModule* module, Target target, CodegenModuleOptions options)
+BUSTER_GLOBAL_LOCAL void codegen_function_descriptor_copy(Arena* arena, CodegenFunctionDescriptor* destination,
+                                                           CodegenFunctionDescriptor const* source, u32 code_offset);
+BUSTER_GLOBAL_LOCAL u64 codegen_module_lane_count(CodegenModuleOptions options, u32 function_count);
+
+typedef struct CodegenModuleParallelState CodegenModuleParallelState;
+struct CodegenModuleParallelState
+{
+    Arena* arena;
+    Arena* fragment_arena;
+    OsMutexHandle* fragment_mutex;
+    AnalysisResult* analysis;
+    IrModule* module;
+    CodegenFunction* generated;
+    AtomicU64 take_index;
+    AtomicU64 worker_arena_failures;
+    CodegenModule result;
+    Target target;
+    CodegenModuleOptions options;
+    u64 worker_arena_reserve;
+    u64 worker_arena_granularity;
+};
+
+Arena* codegen_worker_arena_create(u64 reserved_size, u64 granularity)
+{
+    return arena_create((ArenaCreation){
+        .reserved_size = reserved_size,
+        .granularity = granularity,
+        // A caller may deliberately use a small arena to exercise an empty or
+        // capacity-limited module. Creating the parallel scaffolding must not
+        // reject a reservation the public serial entry point already accepts.
+        .initial_size = BUSTER_MIN(BUSTER_KB(64), reserved_size),
+        .flags.no_pool = true,
+    });
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_worker_arena_reset(Arena** arena, u64 reserved_size, u64 granularity)
+{
+    // Rewind ordinary functions without a syscall. An outlier that committed
+    // substantial transient storage is unmapped so all lanes do not retain
+    // their respective high-water marks until the module merge.
+    if ((*arena)->os_position <= BUSTER_MB(16))
+    {
+        arena_reset_to_start(*arena);
+        return true;
+    }
+    BUSTER_CHECK(arena_destroy(*arena, 1));
+    *arena = codegen_worker_arena_create(reserved_size, granularity);
+    return *arena != 0;
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_fragment_arena_align(Arena* arena)
+{
+    // Each exact fragment consumes a 64-byte-rounded extent. Consequently the
+    // shared arena's total footprint is independent of mutex acquisition order
+    // even though workers finish in an intentionally nondeterministic order.
+    arena_allocate_bytes(arena, 0, 64);
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice codegen_fragment_bytes_copy(Arena* arena, ByteSlice source)
+{
+    ByteSlice result = {.length = source.length};
+    if (source.length)
+    {
+        result.pointer = arena_allocate(arena, u8, source.length);
+        memcpy(result.pointer, source.pointer, source.length);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CodegenFunction codegen_function_fragment_compact(Arena* arena, CodegenFunction source)
+{
+    CodegenFunction result = source;
+    result.code = (ByteSlice){0};
+    result.read_only_data = (ByteSlice){0};
+    result.descriptor.unwind_actions = 0;
+    result.descriptor.epilog_offsets = 0;
+    result.first_call_relocation = 0;
+    result.first_data_relocation = 0;
+    result.line_entries = 0;
+    result.debug_locations = 0;
+    if (source.error != CODEGEN_ERROR_NONE)
+    {
+        return result;
+    }
+    result.code = codegen_fragment_bytes_copy(arena, source.code);
+    result.read_only_data = codegen_fragment_bytes_copy(arena, source.read_only_data);
+    codegen_function_descriptor_copy(arena, &result.descriptor, &source.descriptor, 0);
+    CodegenCallRelocation** call_relocation = &result.first_call_relocation;
+    for (CodegenCallRelocation* source_relocation = source.first_call_relocation; source_relocation; source_relocation = source_relocation->next)
+    {
+        *call_relocation = arena_allocate(arena, CodegenCallRelocation, 1);
+        **call_relocation = *source_relocation;
+        (*call_relocation)->next = 0;
+        call_relocation = &(*call_relocation)->next;
+    }
+    CodegenDataRelocation** data_relocation = &result.first_data_relocation;
+    for (CodegenDataRelocation* source_relocation = source.first_data_relocation; source_relocation; source_relocation = source_relocation->next)
+    {
+        *data_relocation = arena_allocate(arena, CodegenDataRelocation, 1);
+        **data_relocation = *source_relocation;
+        (*data_relocation)->next = 0;
+        data_relocation = &(*data_relocation)->next;
+    }
+    if (source.line_entry_count)
+    {
+        result.line_entries = arena_allocate(arena, CodegenLineEntry, source.line_entry_count);
+        memcpy(result.line_entries, source.line_entries, sizeof(*source.line_entries) * source.line_entry_count);
+    }
+    if (source.debug_location_count)
+    {
+        result.debug_locations = arena_allocate(arena, DebugLocationSeed, source.debug_location_count);
+        memcpy(result.debug_locations, source.debug_locations, sizeof(*source.debug_locations) * source.debug_location_count);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CodegenModule codegen_module_fragments_merge(Arena* arena, IrModule* module, CodegenFunction* generated, Target target,
+                                                                  CodegenModuleOptions options)
 {
     CodegenModule result = {
         .ir_module = module,
@@ -6985,22 +7125,6 @@ CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, Ir
         .failed_instruction = IR_INSTRUCTION_ID_INVALID,
         .failed_opcode = IR_OPCODE_COUNT,
     };
-    if (!analysis || !module || result.abi >= CODEGEN_ABI_COUNT)
-    {
-        result.error = CODEGEN_ERROR_INVALID_IR;
-        return result;
-    }
-    analysis_compute_layouts(analysis, (AnalysisLayoutOptions){
-                                           .pointer_size = 8,
-                                           .pointer_alignment = 8,
-                                       });
-    IrValidationResult validation = ir_validate_module(analysis, module);
-    if (validation.error != IR_VALIDATION_NONE)
-    {
-        result.error = CODEGEN_ERROR_INVALID_IR;
-        return result;
-    }
-    CodegenFunction* generated = arena_allocate(arena, CodegenFunction, module->function_count);
     result.entries = arena_allocate(arena, CodegenModuleEntry, module->function_count);
     result.functions = arena_allocate(arena, CodegenFunctionDescriptor, module->function_count);
     u64 total_size = 0;
@@ -7016,11 +7140,6 @@ CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, Ir
         {
             continue;
         }
-        generated[index] = target.cpu_arch == CPU_ARCH_X86_64    ? codegen_generate_x86_64(arena, analysis, function, target, options.debug_info)
-                           : target.cpu_arch == CPU_ARCH_AARCH64 ? codegen_generate_aarch64(arena, analysis, function, target, options.debug_info)
-                                                                 : (CodegenFunction){
-                                                                       .error = CODEGEN_ERROR_UNSUPPORTED_TARGET,
-                                                                   };
         if (generated[index].error != CODEGEN_ERROR_NONE)
         {
             result.error = generated[index].error;
@@ -7032,11 +7151,21 @@ CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, Ir
         }
         line_entry_capacity += generated[index].line_entry_count;
         debug_location_capacity += generated[index].debug_location_count;
+        if (total_read_only_data_size > UINT32_MAX)
+        {
+            result.error = CODEGEN_ERROR_CAPACITY;
+            return result;
+        }
         total_read_only_data_size = codegen_align_u32((u32)total_read_only_data_size, 16);
         total_read_only_data_size += generated[index].read_only_data.length;
         for (CodegenDataRelocation* relocation = generated[index].first_data_relocation; relocation; relocation = relocation->next)
         {
             data_relocation_capacity += 1;
+        }
+        if (total_size > UINT32_MAX)
+        {
+            result.error = CODEGEN_ERROR_CAPACITY;
+            return result;
         }
         total_size = codegen_align_u32((u32)total_size, 16);
         result.entries[result.entry_count++] = (CodegenModuleEntry){
@@ -7045,8 +7174,7 @@ CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, Ir
             .symbol = function->symbol,
             .offset = (u32)total_size,
         };
-        result.functions[result.function_count] = generated[index].descriptor;
-        result.functions[result.function_count].code_offset = (u32)total_size;
+        codegen_function_descriptor_copy(arena, result.functions + result.function_count, &generated[index].descriptor, (u32)total_size);
         result.function_count += 1;
         total_size += generated[index].code.length;
         if (total_size > UINT32_MAX)
@@ -7072,7 +7200,7 @@ CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, Ir
     for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
         CodegenFunction* function = generated + function_index;
-        if (!function->code.length)
+        if (module->functions[function_index].state != IR_FUNCTION_LOWERED)
         {
             continue;
         }
@@ -7179,6 +7307,129 @@ CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, Ir
     };
     result.error = buffer.error;
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType codegen_module_parallel_lane(void* argument)
+{
+    CodegenModuleParallelState* state = (CodegenModuleParallelState*)argument;
+    Arena* emission_arena = codegen_worker_arena_create(state->worker_arena_reserve, state->worker_arena_granularity);
+    if (!emission_arena)
+    {
+        atomic_u64_increment(&state->worker_arena_failures);
+    }
+    while (emission_arena)
+    {
+        u64 function_index = atomic_u64_increment(&state->take_index);
+        if (function_index >= state->module->function_count)
+        {
+            break;
+        }
+        IrFunction* function = state->module->functions + function_index;
+        if (function->state != IR_FUNCTION_LOWERED)
+        {
+            continue;
+        }
+        CodegenFunction emitted =
+            state->target.cpu_arch == CPU_ARCH_X86_64
+                ? codegen_generate_x86_64(emission_arena, state->analysis, function, state->target, state->options.debug_info)
+            : state->target.cpu_arch == CPU_ARCH_AARCH64
+                ? codegen_generate_aarch64(emission_arena, state->analysis, function, state->target, state->options.debug_info)
+                : (CodegenFunction){
+                      .error = CODEGEN_ERROR_UNSUPPORTED_TARGET,
+                  };
+        os_mutex_lock(state->fragment_mutex);
+        codegen_fragment_arena_align(state->fragment_arena);
+        state->generated[function_index] = codegen_function_fragment_compact(state->fragment_arena, emitted);
+        codegen_fragment_arena_align(state->fragment_arena);
+        os_mutex_unlock(state->fragment_mutex);
+        if (!codegen_worker_arena_reset(&emission_arena, state->worker_arena_reserve, state->worker_arena_granularity))
+        {
+            atomic_u64_increment(&state->worker_arena_failures);
+        }
+    }
+    if (emission_arena)
+    {
+        BUSTER_CHECK(arena_destroy(emission_arena, 1));
+    }
+    lane_sync();
+    if (lane_index() == 0)
+    {
+        if (state->worker_arena_failures)
+        {
+            state->result.error = CODEGEN_ERROR_CAPACITY;
+        }
+        else
+        {
+            state->result = codegen_module_fragments_merge(state->arena, state->module, state->generated, state->target, state->options);
+        }
+    }
+    lane_sync();
+}
+
+CodegenModule codegen_generate_module(Arena* arena, AnalysisResult* analysis, IrModule* module, Target target, CodegenModuleOptions options)
+{
+    CodegenModule result = {
+        .ir_module = module,
+        .abi = codegen_abi_for_target(target),
+        .failed_function = IR_FUNCTION_ID_INVALID,
+        .failed_instruction = IR_INSTRUCTION_ID_INVALID,
+        .failed_opcode = IR_OPCODE_COUNT,
+    };
+    if (!analysis || !module || result.abi >= CODEGEN_ABI_COUNT)
+    {
+        result.error = CODEGEN_ERROR_INVALID_IR;
+        return result;
+    }
+    // Freeze the first-use ABI target table before this call can leave a
+    // resident gang that would make a later public classification too late.
+    codegen_prewarm();
+    analysis_compute_layouts(analysis, (AnalysisLayoutOptions){
+                                           .pointer_size = 8,
+                                           .pointer_alignment = 8,
+                                       });
+    IrValidationResult validation = ir_validate_module(analysis, module);
+    if (validation.error != IR_VALIDATION_NONE)
+    {
+        result.error = CODEGEN_ERROR_INVALID_IR;
+        return result;
+    }
+    CodegenFunction* generated = arena_allocate(arena, CodegenFunction, module->function_count);
+    if (module->function_count)
+    {
+        memset(generated, 0, sizeof(*generated) * module->function_count);
+    }
+    Arena* fragment_arena = codegen_worker_arena_create(arena->reserved_size, arena->granularity);
+    OsMutexHandle* fragment_mutex = os_mutex_create();
+    if (!fragment_arena || !fragment_mutex)
+    {
+        if (fragment_mutex)
+        {
+            os_mutex_destroy(fragment_mutex);
+        }
+        if (fragment_arena)
+        {
+            BUSTER_CHECK(arena_destroy(fragment_arena, 1));
+        }
+        result.error = CODEGEN_ERROR_CAPACITY;
+        return result;
+    }
+    CodegenModuleParallelState state = {
+        .arena = arena,
+        .fragment_arena = fragment_arena,
+        .fragment_mutex = fragment_mutex,
+        .analysis = analysis,
+        .module = module,
+        .generated = generated,
+        .result = result,
+        .target = target,
+        .options = options,
+        .worker_arena_reserve = arena->reserved_size,
+        .worker_arena_granularity = arena->granularity,
+    };
+    lane_run(codegen_module_lane_count(options, module->function_count), &codegen_module_parallel_lane, &state);
+    os_mutex_destroy(fragment_mutex);
+    BUSTER_CHECK(arena_destroy(fragment_arena, 1));
+    return state.result;
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_register_is_64_bit(IrProgram* program, IrTypeId type_id)
@@ -9477,18 +9728,28 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_value_is_global_place(IrFunction* fun
     return definition.value < function->instruction_count && function->instructions[definition.value].opcode == IR_OPCODE_GLOBAL;
 }
 
+typedef struct CodegenCanonicalFragmentInfo CodegenCanonicalFragmentInfo;
+struct CodegenCanonicalFragmentInfo
+{
+    u32* block_offsets;
+    u32 block_count;
+};
+
 // One generation of the module into a code buffer reserved at `capacity_scale`
 // times the flat estimate below. Everything it produces comes out of `arena`,
 // so a caller that does not like the answer can rewind and ask again; the
 // target, the program ABI and the IR validation are its caller's business and
 // are not repeated per attempt.
 BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Arena* arena, IrProgram* program, IrModule* module, Target target,
-                                                                           CodegenModuleOptions options, u64 capacity_scale, bool* code_buffer_exhausted)
+                                                                           CodegenModuleOptions options, u64 capacity_scale,
+                                                                           bool* code_buffer_exhausted, bool allow_unresolved_label_addresses,
+                                                                           CodegenCanonicalFragmentInfo* fragment_info)
 {
     CodegenModule result = {
         .ir_module = module,
         .abi = codegen_abi_for_target(target),
     };
+    BUSTER_CHECK(!fragment_info || module->function_count <= 1);
     result.globals = arena_allocate(arena, CodegenModuleGlobal, module->global_count);
     u64 read_only_capacity = 0;
     u64 writable_capacity = 0;
@@ -10231,6 +10492,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         }
         u32 branch_patch_capacity = function->instruction_count * 2;
         u32* block_offsets = arena_allocate(arena, u32, function->block_count);
+        if (fragment_info)
+        {
+            fragment_info->block_offsets = block_offsets;
+            fragment_info->block_count = function->block_count;
+        }
         CCanonicalBranchPatch* branch_patches = arena_allocate(arena, CCanonicalBranchPatch, branch_patch_capacity);
         u32 branch_patch_count = 0;
 #define C_BRANCH_PATCH_PUSH(...)                                                                                                                               \
@@ -15962,7 +16228,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                (s32)canonical_x64_frame_base_offset, debug_location_capacity);
         }
     }
-    for (u32 relocation_index = 0; relocation_index < result.relocation_count; relocation_index += 1)
+    for (u32 relocation_index = 0; !allow_unresolved_label_addresses && relocation_index < result.relocation_count; relocation_index += 1)
     {
         if (result.relocations[relocation_index].label_address)
         {
@@ -15998,6 +16264,514 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL void codegen_function_descriptor_copy(Arena* arena, CodegenFunctionDescriptor* destination,
+                                                           CodegenFunctionDescriptor const* source, u32 code_offset)
+{
+    *destination = *source;
+    destination->code_offset += code_offset;
+    destination->unwind_actions = 0;
+    destination->epilog_offsets = 0;
+    if (source->unwind_action_count)
+    {
+        destination->unwind_actions = arena_allocate(arena, CodegenUnwindAction, source->unwind_action_count);
+        memcpy(destination->unwind_actions, source->unwind_actions, sizeof(*destination->unwind_actions) * source->unwind_action_count);
+    }
+    if (source->epilog_count)
+    {
+        destination->epilog_offsets = arena_allocate(arena, u32, source->epilog_count);
+        memcpy(destination->epilog_offsets, source->epilog_offsets, sizeof(*destination->epilog_offsets) * source->epilog_count);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_statistics_add(CodegenStatistics* destination, CodegenStatistics source)
+{
+    destination->instruction_count += source.instruction_count;
+    destination->value_count += source.value_count;
+    destination->stack_value_bytes += source.stack_value_bytes;
+    destination->stack_frame_bytes += source.stack_frame_bytes;
+    destination->code_bytes += source.code_bytes;
+    destination->native_vector_operation_count += source.native_vector_operation_count;
+    destination->split_vector_operation_count += source.split_vector_operation_count;
+    destination->vzeroupper_count += source.vzeroupper_count;
+    destination->forwarded_wide_vector_load_count += source.forwarded_wide_vector_load_count;
+    destination->simd_operation_count += source.simd_operation_count;
+    destination->function_count += source.function_count;
+    destination->maximum_stack_frame_bytes = BUSTER_MAX(destination->maximum_stack_frame_bytes, source.maximum_stack_frame_bytes);
+}
+
+BUSTER_GLOBAL_LOCAL u64 codegen_module_lane_count(CodegenModuleOptions options, u32 function_count)
+{
+#if BUSTER_SINGLE_THREADED
+    BUSTER_UNUSED(options);
+    BUSTER_UNUSED(function_count);
+    return 1;
+#else
+    u64 result = options.lane_count ? options.lane_count : os_get_logical_thread_count();
+    // Matrix test processes are already admitted under this CPU quota.
+    // Compiler-internal lanes share it instead of multiplying it, including
+    // tests that request an otherwise-exact comparison width.
+    String8 jobs_text = os_get_environment_variable(S8("BUSTER_TEST_JOBS"));
+    if (jobs_text.length)
+    {
+        IntegerParsingU64 parsed = string8_parse_u64_decimal(jobs_text.pointer);
+        if (parsed.length == jobs_text.length && parsed.value)
+        {
+            result = BUSTER_MIN(result, parsed.value);
+        }
+    }
+    result = BUSTER_MAX(result, (u64)1);
+    return BUSTER_MIN(result, (u64)BUSTER_MAX(function_count, 1u));
+#endif
+}
+
+typedef struct CodegenCanonicalFragment CodegenCanonicalFragment;
+struct CodegenCanonicalFragment
+{
+    CodegenModule module;
+    CodegenCanonicalFragmentInfo info;
+};
+
+typedef struct CodegenCanonicalParallelState CodegenCanonicalParallelState;
+struct CodegenCanonicalParallelState
+{
+    Arena* arena;
+    Arena* fragment_arena;
+    OsMutexHandle* fragment_mutex;
+    IrProgram* program;
+    IrModule* module;
+    CodegenCanonicalFragment* fragments;
+    AtomicU64 take_index;
+    AtomicU64 worker_arena_failures;
+    CodegenModule result;
+    Target target;
+    CodegenModuleOptions options;
+    u64 assembly_capacity;
+    u64 assembly_alignment_capacity;
+    u64 worker_arena_reserve;
+    u64 worker_arena_granularity;
+};
+
+BUSTER_GLOBAL_LOCAL void codegen_canonical_fragment_compact(Arena* arena, CodegenCanonicalFragment* destination, CodegenModule source,
+                                                             CodegenCanonicalFragmentInfo source_info)
+{
+    destination->module = source;
+    destination->module.ir_module = 0;
+    destination->module.code = (ByteSlice){0};
+    destination->module.read_only_data = (ByteSlice){0};
+    destination->module.writable_data = (ByteSlice){0};
+    destination->module.thread_local_data = (ByteSlice){0};
+    destination->module.entries = 0;
+    destination->module.functions = 0;
+    destination->module.globals = 0;
+    destination->module.relocations = 0;
+    destination->module.data_relocations = 0;
+    destination->module.line_entries = 0;
+    destination->module.debug_locations = 0;
+    destination->info = (CodegenCanonicalFragmentInfo){.block_count = source_info.block_count};
+    if (source.error != CODEGEN_ERROR_NONE)
+    {
+        return;
+    }
+
+    destination->module.code = codegen_fragment_bytes_copy(arena, source.code);
+    destination->module.read_only_data = codegen_fragment_bytes_copy(arena, source.read_only_data);
+    destination->module.writable_data = codegen_fragment_bytes_copy(arena, source.writable_data);
+    destination->module.thread_local_data = codegen_fragment_bytes_copy(arena, source.thread_local_data);
+    if (source.entry_count)
+    {
+        destination->module.entries = arena_allocate(arena, CodegenModuleEntry, source.entry_count);
+        memcpy(destination->module.entries, source.entries, sizeof(*source.entries) * source.entry_count);
+    }
+    if (source.function_count)
+    {
+        destination->module.functions = arena_allocate(arena, CodegenFunctionDescriptor, source.function_count);
+        for (u32 descriptor_index = 0; descriptor_index < source.function_count; descriptor_index += 1)
+        {
+            codegen_function_descriptor_copy(arena, destination->module.functions + descriptor_index, source.functions + descriptor_index, 0);
+        }
+    }
+    if (source.global_count)
+    {
+        destination->module.globals = arena_allocate(arena, CodegenModuleGlobal, source.global_count);
+        memcpy(destination->module.globals, source.globals, sizeof(*source.globals) * source.global_count);
+    }
+    if (source.relocation_count)
+    {
+        destination->module.relocations = arena_allocate(arena, CodegenModuleRelocation, source.relocation_count);
+        memcpy(destination->module.relocations, source.relocations, sizeof(*source.relocations) * source.relocation_count);
+    }
+    if (source.data_relocation_count)
+    {
+        destination->module.data_relocations = arena_allocate(arena, CodegenModuleDataRelocation, source.data_relocation_count);
+        memcpy(destination->module.data_relocations, source.data_relocations,
+               sizeof(*source.data_relocations) * source.data_relocation_count);
+    }
+    if (source.line_entry_count)
+    {
+        destination->module.line_entries = arena_allocate(arena, CodegenLineEntry, source.line_entry_count);
+        memcpy(destination->module.line_entries, source.line_entries, sizeof(*source.line_entries) * source.line_entry_count);
+    }
+    if (source.debug_location_count)
+    {
+        destination->module.debug_locations = arena_allocate(arena, DebugLocationSeed, source.debug_location_count);
+        memcpy(destination->module.debug_locations, source.debug_locations, sizeof(*source.debug_locations) * source.debug_location_count);
+    }
+    if (source_info.block_count)
+    {
+        destination->info.block_offsets = arena_allocate(arena, u32, source_info.block_count);
+        memcpy(destination->info.block_offsets, source_info.block_offsets, sizeof(*source_info.block_offsets) * source_info.block_count);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_merge_add_u32(u32 value, u32 addend, u32* result)
+{
+    if (value > UINT32_MAX - addend)
+    {
+        return false;
+    }
+    *result = value + addend;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_canonical_fragments_merge(CodegenCanonicalParallelState* state)
+{
+    CodegenModule result = state->result;
+    result.ir_module = state->module;
+    for (u32 function_index = 0; function_index < state->module->function_count; function_index += 1)
+    {
+        CodegenModule* fragment = &state->fragments[function_index].module;
+        if (fragment->error != CODEGEN_ERROR_NONE)
+        {
+            result.error = fragment->error;
+            result.failed_function = (IrFunctionId){.value = function_index};
+            result.failed_instruction = fragment->failed_instruction;
+            result.failed_opcode = fragment->failed_opcode;
+            state->result = result;
+            return;
+        }
+    }
+
+    u64 function_code_size = 0;
+    u64 relocation_capacity_64 = result.relocation_count;
+    u64 line_entry_capacity_64 = 0;
+    u64 debug_location_capacity_64 = 0;
+    for (u32 function_index = 0; function_index < state->module->function_count; function_index += 1)
+    {
+        if (state->module->functions[function_index].state != IR_FUNCTION_LOWERED)
+        {
+            continue;
+        }
+        CodegenModule* fragment = &state->fragments[function_index].module;
+        u64 alignment = state->target.cpu_arch == CPU_ARCH_AARCH64 ? 4 : 16;
+        if (function_code_size > UINT64_MAX - (alignment - 1))
+        {
+            result.error = CODEGEN_ERROR_CAPACITY;
+            state->result = result;
+            return;
+        }
+        function_code_size = (function_code_size + alignment - 1) & ~(alignment - 1);
+        if (fragment->code.length > UINT64_MAX - function_code_size)
+        {
+            result.error = CODEGEN_ERROR_CAPACITY;
+            state->result = result;
+            return;
+        }
+        function_code_size += fragment->code.length;
+        relocation_capacity_64 += fragment->relocation_count;
+        line_entry_capacity_64 += fragment->line_entry_count;
+        debug_location_capacity_64 += fragment->debug_location_count;
+    }
+    if (function_code_size > UINT32_MAX || relocation_capacity_64 > UINT32_MAX || line_entry_capacity_64 > UINT32_MAX ||
+        debug_location_capacity_64 > UINT32_MAX || state->assembly_capacity > (UINT64_MAX - function_code_size - 64) / 4 ||
+        state->assembly_alignment_capacity > UINT64_MAX - function_code_size - state->assembly_capacity * 4 - 64)
+    {
+        result.error = CODEGEN_ERROR_CAPACITY;
+        state->result = result;
+        return;
+    }
+
+    u32 global_relocation_count = result.relocation_count;
+    CodegenModuleRelocation* global_relocations = result.relocations;
+    u32 entry_capacity = state->module->function_count +
+                         (u32)BUSTER_MIN(state->assembly_capacity, (u64)UINT32_MAX - state->module->function_count);
+    result.entries = arena_allocate(state->arena, CodegenModuleEntry, entry_capacity);
+    result.functions = arena_allocate(state->arena, CodegenFunctionDescriptor, entry_capacity);
+    result.relocations = arena_allocate(state->arena, CodegenModuleRelocation, (u32)relocation_capacity_64);
+    result.line_entries = state->options.debug_info ? arena_allocate(state->arena, CodegenLineEntry, (u32)line_entry_capacity_64) : 0;
+    result.debug_locations = state->options.debug_info ? arena_allocate(state->arena, DebugLocationSeed, (u32)debug_location_capacity_64) : 0;
+    result.entry_count = 0;
+    result.function_count = 0;
+    result.relocation_count = global_relocation_count;
+    result.line_entry_count = 0;
+    result.debug_location_count = 0;
+    result.statistics = (CodegenStatistics){0};
+    if (global_relocation_count)
+    {
+        memcpy(result.relocations, global_relocations, sizeof(*result.relocations) * global_relocation_count);
+    }
+
+    u64 code_capacity = function_code_size + state->assembly_capacity * 4 + state->assembly_alignment_capacity + 64;
+    if (code_capacity > UINT32_MAX)
+    {
+        result.error = CODEGEN_ERROR_CAPACITY;
+        state->result = result;
+        return;
+    }
+    bool code_buffer_exhausted = false;
+    CodegenBuffer buffer = {
+        .bytes = arena_allocate(state->arena, u8, code_capacity),
+        .capacity = code_capacity,
+        .exhausted = &code_buffer_exhausted,
+    };
+    for (u32 function_index = 0; function_index < state->module->function_count; function_index += 1)
+    {
+        if (state->module->functions[function_index].state != IR_FUNCTION_LOWERED)
+        {
+            continue;
+        }
+        CodegenCanonicalFragment* canonical_fragment = state->fragments + function_index;
+        CodegenModule* fragment = &canonical_fragment->module;
+        result.failed_function = (IrFunctionId){.value = function_index};
+        result.failed_instruction = fragment->failed_instruction;
+        result.failed_opcode = fragment->failed_opcode;
+        u64 alignment = state->target.cpu_arch == CPU_ARCH_AARCH64 ? 4 : 16;
+        while (buffer.count % alignment && !buffer.error)
+        {
+            codegen_emit_u8(&buffer, state->target.cpu_arch == CPU_ARCH_X86_64 ? 0x90 : 0);
+        }
+        if (buffer.error || buffer.count > UINT32_MAX || fragment->code.length > buffer.capacity - buffer.count)
+        {
+            result.error = CODEGEN_ERROR_CAPACITY;
+            state->result = result;
+            return;
+        }
+        u32 function_offset = (u32)buffer.count;
+        if (fragment->code.length)
+        {
+            memcpy(buffer.bytes + buffer.count, fragment->code.pointer, fragment->code.length);
+            buffer.count += fragment->code.length;
+        }
+        for (u32 entry_index = 0; entry_index < fragment->entry_count; entry_index += 1)
+        {
+            CodegenModuleEntry entry = fragment->entries[entry_index];
+            if (!codegen_canonical_merge_add_u32(entry.offset, function_offset, &entry.offset))
+            {
+                result.error = CODEGEN_ERROR_CAPACITY;
+                state->result = result;
+                return;
+            }
+            result.entries[result.entry_count++] = entry;
+        }
+        for (u32 descriptor_index = 0; descriptor_index < fragment->function_count; descriptor_index += 1)
+        {
+            CodegenFunctionDescriptor* source = fragment->functions + descriptor_index;
+            if (source->code_offset > UINT32_MAX - function_offset)
+            {
+                result.error = CODEGEN_ERROR_CAPACITY;
+                state->result = result;
+                return;
+            }
+            codegen_function_descriptor_copy(state->arena, result.functions + result.function_count++, source, function_offset);
+        }
+        for (u32 relocation_index = 0; relocation_index < fragment->relocation_count; relocation_index += 1)
+        {
+            CodegenModuleRelocation relocation = fragment->relocations[relocation_index];
+            if (relocation.source == CODEGEN_MODULE_RELOCATION_CODE &&
+                !codegen_canonical_merge_add_u32(relocation.offset, function_offset, &relocation.offset))
+            {
+                result.error = CODEGEN_ERROR_CAPACITY;
+                state->result = result;
+                return;
+            }
+            result.relocations[result.relocation_count++] = relocation;
+        }
+        for (u32 line_index = 0; line_index < fragment->line_entry_count; line_index += 1)
+        {
+            CodegenLineEntry line = fragment->line_entries[line_index];
+            if (!codegen_canonical_merge_add_u32(line.code_offset, function_offset, &line.code_offset))
+            {
+                result.error = CODEGEN_ERROR_CAPACITY;
+                state->result = result;
+                return;
+            }
+            codegen_record_line(result.line_entries, &result.line_entry_count, (u32)line_entry_capacity_64, line.code_offset, line.source, line.line,
+                                line.column);
+        }
+        for (u32 location_index = 0; location_index < fragment->debug_location_count; location_index += 1)
+        {
+            DebugLocationSeed location = fragment->debug_locations[location_index];
+            if (!codegen_canonical_merge_add_u32(location.start, function_offset, &location.start) ||
+                !codegen_canonical_merge_add_u32(location.end, function_offset, &location.end))
+            {
+                result.error = CODEGEN_ERROR_CAPACITY;
+                state->result = result;
+                return;
+            }
+            result.debug_locations[result.debug_location_count++] = location;
+        }
+        codegen_statistics_add(&result.statistics, fragment->statistics);
+    }
+
+    // Static locals may contain addresses of labels in their owning function.
+    // Resolve those global contributions only after every fragment has exposed
+    // its local block offsets; no worker mutates the shared relocation array.
+    for (u32 relocation_index = 0; relocation_index < global_relocation_count; relocation_index += 1)
+    {
+        CodegenModuleRelocation* relocation = result.relocations + relocation_index;
+        if (!relocation->label_address)
+        {
+            continue;
+        }
+        bool found = false;
+        for (u32 function_index = 0; function_index < state->module->function_count; function_index += 1)
+        {
+            IrFunction* function = state->module->functions + function_index;
+            CodegenCanonicalFragmentInfo* info = &state->fragments[function_index].info;
+            if (function->symbol.value != relocation->symbol.value)
+            {
+                continue;
+            }
+            if (!info->block_offsets || relocation->label_block.value >= info->block_count)
+            {
+                result.error = CODEGEN_ERROR_INVALID_IR;
+                state->result = result;
+                return;
+            }
+            s64 block_addend = info->block_offsets[relocation->label_block.value];
+            if (block_addend > 0 && relocation->addend > INT64_MAX - block_addend)
+            {
+                result.error = CODEGEN_ERROR_CAPACITY;
+                state->result = result;
+                return;
+            }
+            relocation->addend += block_addend;
+            relocation->label_address = false;
+            found = true;
+            break;
+        }
+        if (!found)
+        {
+            result.error = CODEGEN_ERROR_INVALID_IR;
+            state->result = result;
+            return;
+        }
+    }
+
+    for (u32 assembly_index = 0; assembly_index < state->module->assembly_count; assembly_index += 1)
+    {
+        if (!codegen_emit_global_assembly(state->arena, state->program, state->module->assemblies[assembly_index], state->target, &buffer, &result))
+        {
+            result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+            state->result = result;
+            return;
+        }
+    }
+    if (buffer.count > UINT32_MAX)
+    {
+        result.error = CODEGEN_ERROR_CAPACITY;
+        state->result = result;
+        return;
+    }
+    while (result.function_count < result.entry_count)
+    {
+        u32 function_index = result.function_count;
+        CodegenModuleEntry* entry = result.entries + function_index;
+        u32 end = function_index + 1 < result.entry_count ? result.entries[function_index + 1].offset : (u32)buffer.count;
+        result.functions[result.function_count++] = (CodegenFunctionDescriptor){
+            .symbol = entry->symbol,
+            .code_offset = entry->offset,
+            .code_size = end - entry->offset,
+        };
+    }
+    result.code = (ByteSlice){
+        .pointer = buffer.bytes,
+        .length = buffer.count,
+    };
+    result.statistics.code_bytes = result.code.length;
+    result.error = buffer.error;
+    state->result = result;
+}
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType codegen_canonical_parallel_lane(void* argument)
+{
+    CodegenCanonicalParallelState* state = (CodegenCanonicalParallelState*)argument;
+    // A large generated function can require more transient codegen state
+    // than the general-purpose 64 MiB thread scratch arena. The worker arena
+    // is reset after each function; only an exact compact copy survives.
+    Arena* emission_arena = codegen_worker_arena_create(state->worker_arena_reserve, state->worker_arena_granularity);
+    if (!emission_arena)
+    {
+        atomic_u64_increment(&state->worker_arena_failures);
+    }
+    while (emission_arena)
+    {
+        u64 function_index = atomic_u64_increment(&state->take_index);
+        if (function_index >= state->module->function_count)
+        {
+            break;
+        }
+        if (state->module->functions[function_index].state != IR_FUNCTION_LOWERED)
+        {
+            continue;
+        }
+        IrModule fragment_module = *state->module;
+        fragment_module.functions = state->module->functions + function_index;
+        fragment_module.function_count = 1;
+        fragment_module.function_capacity = 1;
+        fragment_module.globals = 0;
+        fragment_module.global_count = 0;
+        fragment_module.global_capacity = 0;
+        fragment_module.assemblies = 0;
+        fragment_module.assembly_count = 0;
+        fragment_module.assembly_capacity = 0;
+        CodegenModuleOptions fragment_options = state->options;
+        fragment_options.assume_validated = true;
+        fragment_options.lane_count = 1;
+        CodegenCanonicalFragment* fragment = state->fragments + function_index;
+        CodegenCanonicalFragmentInfo emitted_info = {0};
+        CodegenModule emitted = {0};
+        TemporalArena attempt_scope = arena_begin_temporal(emission_arena);
+        for (u64 capacity_scale = 1;; capacity_scale *= 2)
+        {
+            bool code_buffer_exhausted = false;
+            emitted_info = (CodegenCanonicalFragmentInfo){0};
+            emitted = codegen_generate_canonical_module_attempt(emission_arena, state->program, &fragment_module, state->target, fragment_options,
+                                                                 capacity_scale, &code_buffer_exhausted, false, &emitted_info);
+            if (!code_buffer_exhausted)
+            {
+                break;
+            }
+            scratch_end(attempt_scope);
+        }
+        os_mutex_lock(state->fragment_mutex);
+        codegen_fragment_arena_align(state->fragment_arena);
+        codegen_canonical_fragment_compact(state->fragment_arena, fragment, emitted, emitted_info);
+        codegen_fragment_arena_align(state->fragment_arena);
+        os_mutex_unlock(state->fragment_mutex);
+        if (!codegen_worker_arena_reset(&emission_arena, state->worker_arena_reserve, state->worker_arena_granularity))
+        {
+            atomic_u64_increment(&state->worker_arena_failures);
+        }
+    }
+    if (emission_arena)
+    {
+        BUSTER_CHECK(arena_destroy(emission_arena, 1));
+    }
+    lane_sync();
+    if (lane_index() == 0)
+    {
+        if (state->worker_arena_failures)
+        {
+            state->result.error = CODEGEN_ERROR_CAPACITY;
+        }
+        else
+        {
+            codegen_canonical_fragments_merge(state);
+        }
+    }
+    lane_sync();
+}
+
 CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options)
 {
     CodegenModule result = {
@@ -16009,9 +16783,9 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         result.error = CODEGEN_ERROR_UNSUPPORTED_TARGET;
         return result;
     }
-    // Resolved type ABI is cached in the program's own arena, so it survives
-    // the rewind below; it is prepared here anyway, once, because an attempt
-    // must not be the thing that fills a cache the next attempt reads.
+    codegen_prewarm();
+    // ABI records and the target-for-ABI cache are mutable on first use. Freeze
+    // both on the caller before any worker reads them.
     ir_prepare_program_abi(program, codegen_canonical_ir_abi_convention(result.abi));
     if (!options.assume_validated)
     {
@@ -16022,30 +16796,76 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             return result;
         }
     }
-    // The code buffer is reserved at a flat rate per IR instruction, which is
-    // an estimate rather than a bound: an instruction that moves an aggregate
-    // encodes a load and a store per eightbyte, so its size grows with the type
-    // and a module holding a few wide values by value outgrows the rate.
-    // Measuring the excess up front costs a walk of every function's operands
-    // on every module, wide values or not, and that walk is a percent of
-    // compile throughput. Generating the module again with twice the room costs
-    // nothing until it is needed. The attempt owns nothing outside this arena,
-    // so rewinding it is the whole undo, and the reserve's own `UINT32_MAX`
-    // ceiling ends the doubling.
-    TemporalArena attempt_scope = arena_begin_temporal(arena);
-    for (u64 capacity_scale = 1;; capacity_scale *= 2)
+    IrModule globals_module = *module;
+    globals_module.functions = 0;
+    globals_module.function_count = 0;
+    globals_module.function_capacity = 0;
+    globals_module.assemblies = 0;
+    globals_module.assembly_count = 0;
+    globals_module.assembly_capacity = 0;
+    CodegenModuleOptions serial_options = options;
+    serial_options.assume_validated = true;
+    serial_options.lane_count = 1;
+    bool globals_buffer_exhausted = false;
+    result = codegen_generate_canonical_module_attempt(arena, program, &globals_module, target, serial_options, 1, &globals_buffer_exhausted, true, 0);
+    BUSTER_CHECK(!globals_buffer_exhausted);
+    result.ir_module = module;
+    if (result.error != CODEGEN_ERROR_NONE)
     {
-        bool code_buffer_exhausted = false;
-        result = codegen_generate_canonical_module_attempt(arena, program, module, target, options, capacity_scale, &code_buffer_exhausted);
-        // Every other capacity failure -- a frame displacement out of range, a
-        // frame past `UINT32_MAX`, a reserve that cannot be addressed -- is one
-        // more room cannot fix, and is reported as it stands.
-        if (!code_buffer_exhausted)
+        return result;
+    }
+
+    u64 assembly_capacity = 0;
+    u64 assembly_alignment_capacity = 0;
+    for (u32 assembly_index = 0; assembly_index < module->assembly_count; assembly_index += 1)
+    {
+        if (module->assemblies[assembly_index].source.length > UINT64_MAX - assembly_capacity)
         {
+            result.error = CODEGEN_ERROR_CAPACITY;
             return result;
         }
-        scratch_end(attempt_scope);
+        assembly_capacity += module->assemblies[assembly_index].source.length;
+        assembly_alignment_capacity += codegen_global_assembly_alignment_padding(module->assemblies[assembly_index].source);
     }
+    CodegenCanonicalFragment* fragments = arena_allocate(arena, CodegenCanonicalFragment, module->function_count);
+    if (module->function_count)
+    {
+        memset(fragments, 0, sizeof(*fragments) * module->function_count);
+    }
+    Arena* fragment_arena = codegen_worker_arena_create(arena->reserved_size, arena->granularity);
+    OsMutexHandle* fragment_mutex = os_mutex_create();
+    if (!fragment_arena || !fragment_mutex)
+    {
+        if (fragment_mutex)
+        {
+            os_mutex_destroy(fragment_mutex);
+        }
+        if (fragment_arena)
+        {
+            BUSTER_CHECK(arena_destroy(fragment_arena, 1));
+        }
+        result.error = CODEGEN_ERROR_CAPACITY;
+        return result;
+    }
+    CodegenCanonicalParallelState state = {
+        .arena = arena,
+        .fragment_arena = fragment_arena,
+        .fragment_mutex = fragment_mutex,
+        .program = program,
+        .module = module,
+        .fragments = fragments,
+        .result = result,
+        .target = target,
+        .options = options,
+        .assembly_capacity = assembly_capacity,
+        .assembly_alignment_capacity = assembly_alignment_capacity,
+        .worker_arena_reserve = arena->reserved_size,
+        .worker_arena_granularity = arena->granularity,
+    };
+    lane_run(codegen_module_lane_count(options, module->function_count), &codegen_canonical_parallel_lane, &state);
+    os_mutex_destroy(fragment_mutex);
+    BUSTER_CHECK(arena_destroy(fragment_arena, 1));
+    return state.result;
 }
 
 CodegenExecutable codegen_make_executable(CodegenFunction function)

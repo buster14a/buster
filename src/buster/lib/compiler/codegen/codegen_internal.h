@@ -142,6 +142,7 @@ BUSTER_F_DECL CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrPro
                                                                     CodegenAbi abi, Target target, CodegenCanonicalCallLayout* layout);
 BUSTER_F_DECL u32 codegen_canonical_x64_stack_argument_alignment(IrType* type);
 BUSTER_F_DECL Target codegen_target_for_abi(CodegenAbi abi);
+BUSTER_F_DECL Arena* codegen_worker_arena_create(u64 reserved_size, u64 granularity);
 BUSTER_F_DECL void codegen_record_line(CodegenLineEntry* entries, u32* count, u32 capacity, u32 code_offset, u32 source, u32 line, u32 column);
 BUSTER_F_DECL s32 codegen_debug_frame_offset(u32 offset, Target target, bool negative_offsets, u32 frame_size);
 BUSTER_F_DECL bool x64_target_supports_native_vector(Target target, u64 size, u32 element_width, bool integer_operation);

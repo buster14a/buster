@@ -1,6 +1,7 @@
 #include <buster/lib/os.h>
 #include <buster/lib/system_headers.h>
 #include <buster/lib/arena.h>
+#include <buster/lib/integer.h>
 #include <buster/lib/string.h>
 
 #if BUSTER_LINK_LIBC && !BUSTER_SINGLE_THREADED && defined(__TINYC__) && defined(__APPLE__) && BUSTER_CPU_ARCH_AARCH64
@@ -32,6 +33,10 @@ BUSTER_GLOBAL_LOCAL void thread_context_tls_key_ensure_initialized(void)
 }
 #else
 BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
+#endif
+
+#if !BUSTER_SINGLE_THREADED
+BUSTER_GLOBAL_LOCAL void lane_gang_release(ThreadContext* thread_context);
 #endif
 
 #if defined(_MSC_VER)
@@ -424,6 +429,29 @@ bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock)
     return result;
 }
 
+bool os_decommit(void* address, u64 size)
+{
+    u64 page_size = os_get_page_size();
+    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
+    BUSTER_CHECK(size && is_aligned((u64)address, page_size) && is_aligned(size, page_size));
+    bool result = true;
+#if defined(__linux__) || defined(__APPLE__)
+    // The reservation is already mapped for its lifetime. One syscall keeps
+    // failure atomic with respect to arena accounting: a successful discard
+    // releases the pages, while failure leaves both the protection and the
+    // logical high-water mark unchanged. Retain the old fault guard as a
+    // best-effort success-side step; os_commit restores access before reuse.
+    result = madvise(address, size, MADV_DONTNEED) == 0;
+    if (result)
+    {
+        (void)mprotect(address, size, PROT_NONE);
+    }
+#elif defined(_WIN32)
+    result = VirtualFree(address, size, MEM_DECOMMIT) != 0;
+#endif
+    return result;
+}
+
 void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map)
 {
     void* address = 0;
@@ -516,6 +544,10 @@ BUSTER_GLOBAL_LOCAL void thread_entry_point(ThreadCallback* user_entry_point, vo
     thread_context_select(thread_context);
     user_entry_point(user_argument);
     thread_context_release(thread_context);
+    // thread_context_release parks its default scratch arenas for reuse. An
+    // OS worker is about to lose this TLS pool, so unmap it instead of
+    // stranding the reservations and touched pages until process exit.
+    arena_pool_release_thread();
     // Last, so the count covers every instant this thread could still have
     // touched a shared global. os_thread_join returns after this store.
     atomic_u64_decrement(&os_live_thread_count);
@@ -587,6 +619,52 @@ bool os_thread_join(OsThreadHandle* handle)
 #endif
     os_entity_release(entity);
     return result;
+}
+
+OsMutexHandle* os_mutex_create(void)
+{
+    OsEntity* result = os_entity_allocate(OS_ENTITY_KIND_MUTEX);
+#if defined(__linux__) || defined(__APPLE__)
+    if (pthread_mutex_init(&result->mutex, 0) != 0)
+    {
+        os_entity_release(result);
+        return 0;
+    }
+#elif defined(_WIN32)
+    InitializeCriticalSection(&result->mutex);
+#endif
+    return (OsMutexHandle*)result;
+}
+
+void os_mutex_lock(OsMutexHandle* handle)
+{
+    OsEntity* entity = (OsEntity*)handle;
+#if defined(__linux__) || defined(__APPLE__)
+    pthread_mutex_lock(&entity->mutex);
+#elif defined(_WIN32)
+    EnterCriticalSection(&entity->mutex);
+#endif
+}
+
+void os_mutex_unlock(OsMutexHandle* handle)
+{
+    OsEntity* entity = (OsEntity*)handle;
+#if defined(__linux__) || defined(__APPLE__)
+    pthread_mutex_unlock(&entity->mutex);
+#elif defined(_WIN32)
+    LeaveCriticalSection(&entity->mutex);
+#endif
+}
+
+void os_mutex_destroy(OsMutexHandle* handle)
+{
+    OsEntity* entity = (OsEntity*)handle;
+#if defined(__linux__) || defined(__APPLE__)
+    pthread_mutex_destroy(&entity->mutex);
+#elif defined(_WIN32)
+    DeleteCriticalSection(&entity->mutex);
+#endif
+    os_entity_release(entity);
 }
 
 #if !BUSTER_SINGLE_THREADED
@@ -2298,6 +2376,11 @@ void thread_context_release(ThreadContext* thread_context)
     {
         return;
     }
+#if !BUSTER_SINGLE_THREADED
+    // Resident lane workers own OS entities and their own thread contexts.
+    // Join them while the entity mutex and arenas are still alive.
+    lane_gang_release(thread_context);
+#endif
     ThreadContext* selected = thread_context_selected();
     if (selected == thread_context)
     {
@@ -2431,19 +2514,240 @@ LaneRange lane_range(u64 item_count)
 }
 
 #if !BUSTER_SINGLE_THREADED
-typedef struct LaneWorkerStart LaneWorkerStart;
-struct LaneWorkerStart
+typedef struct LanePersistentWorkerStart LanePersistentWorkerStart;
+struct LanePersistentWorkerStart
+{
+    LaneGang* gang;
+    u64 lane_index;
+};
+
+struct LaneGang
+{
+    OsBarrierHandle* dispatch_barrier;
+    OsBarrierHandle* active_barrier;
+    LanePersistentWorkerStart* starts;
+    OsThreadHandle** handles;
+    ThreadCallback* callback;
+    void* argument;
+    u64 broadcast_memory;
+    u64 capacity;
+    u64 active_count;
+    bool shutdown;
+    bool running;
+    u8 reserved[6];
+};
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType lane_persistent_worker_entry_point(void* argument)
+{
+    LanePersistentWorkerStart* start = (LanePersistentWorkerStart*)argument;
+    LaneGang* gang = start->gang;
+    ThreadContext* thread_context = thread_context_selected();
+    os_thread_set_name(S8("lane_worker"));
+    for (;;)
+    {
+        os_barrier_wait(gang->dispatch_barrier);
+        if (gang->shutdown)
+        {
+            break;
+        }
+        if (start->lane_index < gang->active_count)
+        {
+            LaneContext saved_lane = thread_context->lane_context;
+            u64 saved_arena_positions[SCRATCH_ARENA_COUNT];
+            for (u64 arena_index = 0; arena_index < SCRATCH_ARENA_COUNT; arena_index += 1)
+            {
+                saved_arena_positions[arena_index] = thread_context->arenas[arena_index]->position;
+            }
+            thread_context->lane_context = (LaneContext){
+                .lane_index = start->lane_index,
+                .lane_count = gang->active_count,
+                .barrier = gang->active_barrier,
+                .broadcast_memory = &gang->broadcast_memory,
+            };
+            gang->callback(gang->argument);
+            thread_context->lane_context = saved_lane;
+            // A fresh worker context used to disappear after every lane_run.
+            // Reset resident worker scratch so callbacks retain that lifetime
+            // contract and cannot accumulate allocation across dispatches. A
+            // large high-water mark is unmapped as well; otherwise a long-lived
+            // IDE would retain one peak scratch commitment per resident lane.
+            for (u64 arena_index = 0; arena_index < SCRATCH_ARENA_COUNT; arena_index += 1)
+            {
+                Arena* scratch = thread_context->arenas[arena_index];
+                if (scratch->os_position - saved_arena_positions[arena_index] > BUSTER_MB(16))
+                {
+                    // arenas[0] owns ThreadContext itself, so preserve its
+                    // stable prefix and decommit only the unused tail.
+                    BUSTER_CHECK(arena_set_position_and_decommit(scratch, saved_arena_positions[arena_index]));
+                }
+                else
+                {
+                    arena_set_position(scratch, saved_arena_positions[arena_index]);
+                }
+            }
+        }
+        os_barrier_wait(gang->dispatch_barrier);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL LaneGang* lane_gang_create(ThreadContext* owner, u64 count)
+{
+    BUSTER_CHECK(owner != 0);
+    BUSTER_CHECK(count > 1 && count <= UINT32_MAX);
+    BUSTER_CHECK(owner->lane_gang == 0 && owner->lane_arena == 0);
+    owner->lane_arena = arena_create((ArenaCreation){0});
+    BUSTER_CHECK(owner->lane_arena != 0);
+    Arena* arena = owner->lane_arena;
+    LaneGang* result = arena_allocate(arena, LaneGang, 1);
+    memset(result, 0, sizeof(*result));
+    result->capacity = count;
+    result->dispatch_barrier = os_barrier_create((u32)count);
+    BUSTER_CHECK(result->dispatch_barrier != 0);
+    result->starts = arena_allocate(arena, LanePersistentWorkerStart, count);
+    result->handles = arena_allocate(arena, OsThreadHandle*, count);
+    memset(result->handles, 0, sizeof(*result->handles) * count);
+    for (u64 lane = 1; lane < count; lane += 1)
+    {
+        result->starts[lane] = (LanePersistentWorkerStart){
+            .gang = result,
+            .lane_index = lane,
+        };
+        result->handles[lane] = os_thread_create((ThreadCreateOptions){
+            .callback = &lane_persistent_worker_entry_point,
+            .argument = &result->starts[lane],
+        });
+        BUSTER_CHECK(result->handles[lane] != 0);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void lane_gang_destroy(LaneGang* gang)
+{
+    if (!gang)
+    {
+        return;
+    }
+    BUSTER_CHECK(!gang->running);
+    gang->shutdown = true;
+    os_barrier_wait(gang->dispatch_barrier);
+    for (u64 lane = 1; lane < gang->capacity; lane += 1)
+    {
+        BUSTER_CHECK(os_thread_join(gang->handles[lane]));
+    }
+    if (gang->active_barrier)
+    {
+        os_barrier_destroy(gang->active_barrier);
+    }
+    os_barrier_destroy(gang->dispatch_barrier);
+}
+
+void lane_gang_release(ThreadContext* thread_context)
+{
+    if (thread_context && thread_context->lane_gang)
+    {
+        lane_gang_destroy(thread_context->lane_gang);
+        thread_context->lane_gang = 0;
+        Arena* lane_arena = thread_context->lane_arena;
+        thread_context->lane_arena = 0;
+        BUSTER_CHECK(arena_destroy(lane_arena, 1));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void lane_gang_dispatch(ThreadContext* thread_context, LaneGang* gang, u64 count, ThreadCallback* callback, void* argument)
+{
+    BUSTER_CHECK(thread_context != 0 && gang != 0 && !gang->running);
+    BUSTER_CHECK(count > 1 && count <= gang->capacity);
+    if (!gang->active_barrier || gang->active_count != count)
+    {
+        if (gang->active_barrier)
+        {
+            os_barrier_destroy(gang->active_barrier);
+        }
+        gang->active_barrier = os_barrier_create((u32)count);
+        BUSTER_CHECK(gang->active_barrier != 0);
+    }
+    gang->active_count = count;
+    gang->broadcast_memory = 0;
+    gang->callback = callback;
+    gang->argument = argument;
+    gang->running = true;
+
+    LaneContext saved = thread_context->lane_context;
+    thread_context->lane_context = (LaneContext){
+        .lane_index = 0,
+        .lane_count = count,
+        .barrier = gang->active_barrier,
+        .broadcast_memory = &gang->broadcast_memory,
+    };
+    // The first generation publishes this dispatch; the second replaces the
+    // old per-call joins as its completion and visibility edge.
+    os_barrier_wait(gang->dispatch_barrier);
+    callback(argument);
+    os_barrier_wait(gang->dispatch_barrier);
+    thread_context->lane_context = saved;
+
+    gang->running = false;
+    gang->callback = 0;
+    gang->argument = 0;
+}
+
+typedef struct LaneFreshWorkerStart LaneFreshWorkerStart;
+struct LaneFreshWorkerStart
 {
     LaneContext lane_context;
     ThreadCallback* callback;
     void* argument;
 };
 
-BUSTER_GLOBAL_LOCAL ThreadReturnType lane_worker_entry_point(void* argument)
+BUSTER_GLOBAL_LOCAL ThreadReturnType lane_fresh_worker_entry_point(void* argument)
 {
-    LaneWorkerStart* start = (LaneWorkerStart*)argument;
+    LaneFreshWorkerStart* start = (LaneFreshWorkerStart*)argument;
     thread_context_selected()->lane_context = start->lane_context;
     start->callback(start->argument);
+}
+
+BUSTER_GLOBAL_LOCAL void lane_run_fresh(ThreadContext* thread_context, u64 count, ThreadCallback* callback, void* argument)
+{
+    TemporalArena temporary = scratch_begin(0, 0);
+    u64 broadcast_memory = 0;
+    OsBarrierHandle* barrier = os_barrier_create((u32)count);
+    BUSTER_CHECK(barrier != 0);
+    LaneFreshWorkerStart* starts = arena_allocate(temporary.arena, LaneFreshWorkerStart, count);
+    OsThreadHandle** handles = arena_allocate(temporary.arena, OsThreadHandle*, count);
+    for (u64 lane = 1; lane < count; lane += 1)
+    {
+        starts[lane] = (LaneFreshWorkerStart){
+            .lane_context =
+                {
+                    .lane_index = lane,
+                    .lane_count = count,
+                    .barrier = barrier,
+                    .broadcast_memory = &broadcast_memory,
+                },
+            .callback = callback,
+            .argument = argument,
+        };
+        handles[lane] = os_thread_create((ThreadCreateOptions){
+            .callback = &lane_fresh_worker_entry_point,
+            .argument = &starts[lane],
+        });
+        BUSTER_CHECK(handles[lane] != 0);
+    }
+    LaneContext saved = thread_context->lane_context;
+    thread_context->lane_context = (LaneContext){
+        .lane_index = 0,
+        .lane_count = count,
+        .barrier = barrier,
+        .broadcast_memory = &broadcast_memory,
+    };
+    callback(argument);
+    for (u64 lane = 1; lane < count; lane += 1)
+    {
+        BUSTER_CHECK(os_thread_join(handles[lane]));
+    }
+    thread_context->lane_context = saved;
+    os_barrier_destroy(barrier);
+    scratch_end(temporary);
 }
 #endif
 
@@ -2458,6 +2762,7 @@ void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument
     u64 count = 1;
 #else
     u64 count = lane_count_requested ? lane_count_requested : os_get_logical_thread_count();
+    BUSTER_CHECK(count <= UINT32_MAX);
 #endif
 
     LaneContext saved = thread_context->lane_context;
@@ -2467,51 +2772,25 @@ void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument
             .lane_count = 1,
         };
         callback(argument);
+        thread_context->lane_context = saved;
+        return;
     }
 #if !BUSTER_SINGLE_THREADED
-    else
+    // A lane inside an active region gets an independent short-lived gang.
+    // Re-entering the resident dispatch barriers would deadlock the outer
+    // region and would break the documented nested-gang behavior.
+    if (saved.lane_count > 1 || (thread_context->lane_gang && thread_context->lane_gang->running))
     {
-        TemporalArena temporary = scratch_begin(0, 0);
-        u64 broadcast_memory = 0;
-        OsBarrierHandle* barrier = os_barrier_create((u32)count);
-        BUSTER_CHECK(barrier != 0);
-        LaneWorkerStart* starts = arena_allocate(temporary.arena, LaneWorkerStart, count);
-        OsThreadHandle** handles = arena_allocate(temporary.arena, OsThreadHandle*, count);
-        for (u64 lane = 1; lane < count; lane += 1)
-        {
-            starts[lane] = (LaneWorkerStart){
-                .lane_context =
-                    {
-                        .lane_index = lane,
-                        .lane_count = count,
-                        .barrier = barrier,
-                        .broadcast_memory = &broadcast_memory,
-                    },
-                .callback = callback,
-                .argument = argument,
-            };
-            handles[lane] = os_thread_create((ThreadCreateOptions){
-                .callback = &lane_worker_entry_point,
-                .argument = &starts[lane],
-            });
-            BUSTER_CHECK(handles[lane] != 0);
-        }
-        thread_context->lane_context = (LaneContext){
-            .lane_index = 0,
-            .lane_count = count,
-            .barrier = barrier,
-            .broadcast_memory = &broadcast_memory,
-        };
-        callback(argument);
-        for (u64 lane = 1; lane < count; lane += 1)
-        {
-            BUSTER_CHECK(os_thread_join(handles[lane]));
-        }
-        os_barrier_destroy(barrier);
-        scratch_end(temporary);
+        lane_run_fresh(thread_context, count, callback, argument);
+        return;
     }
+    if (!thread_context->lane_gang || thread_context->lane_gang->capacity < count)
+    {
+        lane_gang_release(thread_context);
+        thread_context->lane_gang = lane_gang_create(thread_context, count);
+    }
+    lane_gang_dispatch(thread_context, thread_context->lane_gang, count, callback, argument);
 #endif
-    thread_context->lane_context = saved;
 }
 
 u64 os_now_microseconds(void)

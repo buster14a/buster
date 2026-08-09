@@ -404,6 +404,11 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataResolveResult x86_64_metadata_test_resolve_
 }
 
 #if !BUSTER_SINGLE_THREADED
+enum
+{
+    X86_64_METADATA_TEST_MAX_THREAD_COUNT = 8,
+};
+
 typedef struct X86_64MetadataConcurrentLookupState X86_64MetadataConcurrentLookupState;
 struct X86_64MetadataConcurrentLookupState
 {
@@ -429,7 +434,7 @@ BUSTER_GLOBAL_LOCAL void x86_64_metadata_test_concurrent_lookup(void* argument)
     }
 }
 
-BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_lookup_stress(void)
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_lookup_stress(u32 requested_thread_count)
 {
     // The contract the threads below depend on: every table and demand-filled
     // cache this module answers from is written while the process is still
@@ -440,10 +445,11 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_lookup_stress(void)
     X86_64MetadataConcurrentLookupState state = {0};
     atomic_init(&state.start, false);
     atomic_init(&state.failed, false);
-    OsThreadHandle* threads[8] = {0};
+    OsThreadHandle* threads[X86_64_METADATA_TEST_MAX_THREAD_COUNT] = {0};
     u32 thread_count = 0;
     bool created = true;
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(threads); index += 1)
+    BUSTER_CHECK(requested_thread_count && requested_thread_count <= BUSTER_ARRAY_LENGTH(threads));
+    for (u32 index = 0; index < requested_thread_count; index += 1)
     {
         threads[index] = os_thread_create((ThreadCreateOptions){
             .callback = &x86_64_metadata_test_concurrent_lookup,
@@ -458,7 +464,7 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_lookup_stress(void)
     }
     atomic_store_explicit(&state.start, true, memory_order_release);
     for (u32 index = 0; index < thread_count; index += 1) created &= os_thread_join(threads[index]);
-    return created && !atomic_load_explicit(&state.failed, memory_order_acquire);
+    return created && thread_count == requested_thread_count && !atomic_load_explicit(&state.failed, memory_order_acquire);
 }
 #endif
 
@@ -937,7 +943,8 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                validation.error == BUSTER_X86_METADATA_VALIDATION_ENUM);
 
 #if !BUSTER_SINGLE_THREADED
-    BUSTER_TEST(arguments, x86_64_metadata_test_concurrent_lookup_stress());
+    u64 metadata_worker_count = buster_test_worker_count(X86_64_METADATA_TEST_MAX_THREAD_COUNT);
+    BUSTER_TEST(arguments, x86_64_metadata_test_concurrent_lookup_stress((u32)metadata_worker_count));
 #endif
 
     BusterX86MetadataCandidateRange mov = buster_x86_metadata_lookup_mnemonic(S8("MOV"));

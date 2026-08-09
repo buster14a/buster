@@ -917,6 +917,10 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     String8 link_libc = cmake_flag(arena, S8("BUSTER_LINK_LIBC"), generate.link_libc);
     String8 check_optional_warnings = cmake_flag(arena, S8("BUSTER_CHECK_OPTIONAL_WARNINGS"), generate.check_optional_warnings);
     String8 developer_targets = cmake_flag(arena, S8("BUSTER_DEVELOPER_TARGETS"), generate.developer_targets);
+    // State the production default on every generation so a prior cached ON
+    // cannot survive the policy change. User passthrough arguments remain
+    // later and therefore retain their explicit override semantics.
+    String8 single_threaded = cmake_flag(arena, S8("BUSTER_SINGLE_THREADED"), false);
     String8 linker_argument = cmake_string(arena, S8("CMAKE_LINKER_TYPE"), linker);
     String8 default_build_type_argument = cmake_string(arena, S8("CMAKE_DEFAULT_BUILD_TYPE"), build_config);
     String8 configuration_types_argument = string_format(arena, S8("-DCMAKE_CONFIGURATION_TYPES={S8}"),
@@ -979,6 +983,7 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
         os_argument_builder_append(b, profiling_output_argument);
     }
 
+    os_argument_builder_append(b, single_threaded);
     for (u64 i = 0; i < generate.cmake_arguments.length; i += 1)
     {
         os_argument_builder_append(b, generate.cmake_arguments.pointer[i]);
@@ -1620,10 +1625,18 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_config_matches(Generate generate,
     String8 expected_linker = generate_linker(generate, expected_cc);
     bool result = ci == (bool)generate.ci && link_libc == (bool)generate.link_libc && unity_build && include_tests == (bool)generate.include_tests &&
                   sanitize == (bool)generate.sanitize && time_trace == (bool)generate.time_trace && instrument == (bool)generate.instrument &&
-                  fuzz_available == (bool)generate.fuzz_available && lto == (bool)generate.lto && single_threaded &&
+                  fuzz_available == (bool)generate.fuzz_available && lto == (bool)generate.lto && !single_threaded &&
                   use_vulkan == (BUSTER_LINUX != 0) && check_optional_warnings == (bool)generate.check_optional_warnings &&
                   developer_targets == (bool)generate.developer_targets && string_equal(linker, expected_linker);
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_worker_quota_valid(String8 value)
+{
+    // The pooled worker consumes exactly one outer CPU slot. Requiring the
+    // matching inherited quota makes an omitted superbuild env wrapper fail
+    // closed instead of silently starting a host-width compiler gang.
+    return string_equal(value, S8("1"));
 }
 
 BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_is_canonical(Generate generate, CmakeBuildOptions options)
@@ -3170,6 +3183,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_command_add(Arena* are
     string_print(S8("error: artifact fan-out self-host consumer is unsupported on this target\n"));
     return PROCESS_RESULT_FAILED;
 #else
+    if (!build_artifact_fanout_worker_quota_valid(os_get_environment_variable(S8("BUSTER_TEST_JOBS"))))
+    {
+        string_print(S8("error: self_host_from_existing requires BUSTER_TEST_JOBS=1 from the superbuild pool\n"));
+        return PROCESS_RESULT_FAILED;
+    }
     if (!string_equal(cmake_build_config(options), S8("Release")) || !provenance_record_path.length)
     {
         string_print(S8("error: self_host_from_existing requires the canonical Release configuration and provenance record\n"));
@@ -8077,6 +8095,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
         string_print(S8("error: artifact fan-out canonical-combination test failed\n"));
         return PROCESS_RESULT_FAILED;
     }
+    if (!build_artifact_fanout_worker_quota_valid(S8("1")) || build_artifact_fanout_worker_quota_valid((String8){0}) ||
+        build_artifact_fanout_worker_quota_valid(S8("0")) || build_artifact_fanout_worker_quota_valid(S8("2")) ||
+        build_artifact_fanout_worker_quota_valid(S8("jobs")))
+    {
+        string_print(S8("error: artifact fan-out worker quota validation test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
     if (build_artifact_fanout_requested_for_platform(false, false, true, false, false, true) ||
         !build_artifact_fanout_requested_for_platform(true, false, false, true, false, false) ||
         !build_artifact_fanout_requested_for_platform(true, false, false, false, true, true) ||
@@ -8173,7 +8198,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
     }
 
     String8 expected_linker = generate_linker(canonical, S8("clang"));
-    bool config_matches = build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, false, false, false, true,
+    bool config_matches = build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, false, false, false, false,
                                                                 BUSTER_LINUX != 0, false, false, expected_linker);
     if (!config_matches)
     {
@@ -8299,22 +8324,28 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
             return PROCESS_RESULT_FAILED;
         }
     }
-    if (build_artifact_fanout_config_matches(canonical, false, true, true, true, false, false, false, false, false, true, BUSTER_LINUX != 0, false,
+    if (build_artifact_fanout_config_matches(canonical, false, true, true, true, false, false, false, false, false, false, BUSTER_LINUX != 0, false,
                                              false, expected_linker))
     {
         string_print(S8("error: artifact fan-out accepted a configuration mismatch\n"));
         return PROCESS_RESULT_FAILED;
     }
-    if (build_artifact_fanout_config_matches(canonical, true, true, true, true, true, false, false, false, false, true, BUSTER_LINUX != 0, false,
+    if (build_artifact_fanout_config_matches(canonical, true, true, true, true, true, false, false, false, false, false, BUSTER_LINUX != 0, false,
                                              false, expected_linker) ||
-        build_artifact_fanout_config_matches(canonical, true, true, true, true, false, true, false, false, false, true, BUSTER_LINUX != 0, false,
+        build_artifact_fanout_config_matches(canonical, true, true, true, true, false, true, false, false, false, false, BUSTER_LINUX != 0, false,
                                              false, expected_linker) ||
-        build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, true, false, false, true, BUSTER_LINUX != 0, false,
+        build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, true, false, false, false, BUSTER_LINUX != 0, false,
                                              false, expected_linker) ||
-        build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, false, false, true, true, BUSTER_LINUX != 0, false,
+        build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, false, false, true, false, BUSTER_LINUX != 0, false,
                                              false, expected_linker))
     {
         string_print(S8("error: artifact fan-out accepted a sanitizer/instrument/time-trace/LTO mismatch\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    if (build_artifact_fanout_config_matches(canonical, true, true, true, true, false, false, false, false, false, true, BUSTER_LINUX != 0, false,
+                                             false, expected_linker))
+    {
+        string_print(S8("error: artifact fan-out accepted a single-threaded producer\n"));
         return PROCESS_RESULT_FAILED;
     }
 
@@ -8929,17 +8960,17 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_self_host_enabled(bool direct_matrix,
     return !direct_matrix && fanout_requested;
 }
 
-BUSTER_GLOBAL_LOCAL bool matrix_superbuild_self_host_cpu_budget_valid(MatrixTestTree* trees, u32 tree_count, u32 thread_count)
+BUSTER_GLOBAL_LOCAL bool matrix_superbuild_self_host_cpu_budget_valid(MatrixTestTree* trees, u32 tree_count, u32 thread_count, u32 self_host_jobs)
 {
     u32 outer_jobs = matrix_superbuild_outer_jobs(thread_count, tree_count);
-    if (!outer_jobs || tree_count > BUILD_COMPILER_COUNT * 2)
+    if (!outer_jobs || !self_host_jobs || tree_count > BUILD_COMPILER_COUNT * 2)
     {
         return false;
     }
 
     bool selected[BUILD_COMPILER_COUNT * 2] = {0};
     u32 selected_count = 0;
-    u32 cpu_budget = 1;
+    u32 cpu_budget = self_host_jobs;
     while (selected_count + 1 < outer_jobs)
     {
         u32 best_tree = tree_count;
@@ -8970,7 +9001,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_self_host_plan_valid(MatrixSuperbuild
         result = plan.tree_index < tree_count && string_equal(plan.build_directory, trees[plan.tree_index].build_directory) &&
                  string_equal(plan.config, S8("Release")) && plan.build_driver.length && plan.provenance_record_path.length && plan.pool_jobs == 1 &&
                  plan.depends_on_compile && !plan.uses_inner_ninja && plan.producer_clean_required &&
-                 matrix_superbuild_self_host_cpu_budget_valid(trees, tree_count, thread_count);
+                 matrix_superbuild_self_host_cpu_budget_valid(trees, tree_count, thread_count, plan.pool_jobs);
     }
     return result;
 }
@@ -9113,6 +9144,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
     missing_provenance.provenance_record_path = (String8){0};
     MatrixSuperbuildSelfHostPlan missing_producer_clean = windows_self_host;
     missing_producer_clean.producer_clean_required = 0;
+    MatrixSuperbuildSelfHostPlan oversized_self_host = windows_self_host;
+    oversized_self_host.pool_jobs = 2;
     String8 manifest_path = string_format_z(arena, S8("build/superbuild-manifest-{u64}.cmake"), os_get_current_process_id());
     remove_path_recursive(arena, manifest_path);
     MatrixTestCombination manifest_combination = {
@@ -9148,6 +9181,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
                                      BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("BUSTER_SUPERBUILD_SELF_HOST_PROVENANCE_RECORD")) != BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("BUSTER_SUPERBUILD_SELF_HOST_PRODUCER_CLEAN_REQUIRED")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_SELF_HOST_POOL_JOBS 1)")) != BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("BUSTER_SUPERBUILD_SELF_HOST_BUILD_DRIVER")) == BUSTER_STRING_NO_MATCH;
     remove_path_recursive(arena, manifest_path);
     if (matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(windows_trees)) != 4 || matrix_superbuild_outer_jobs(16, 6) != 6 ||
@@ -9159,7 +9193,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
         matrix_superbuild_self_host_plan_valid(malformed_manifest, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
         matrix_superbuild_self_host_plan_valid(missing_provenance, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
         matrix_superbuild_self_host_plan_valid(missing_producer_clean, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) || !manifest_fields_valid ||
-        path_exists(arena, manifest_path))
+        matrix_superbuild_self_host_plan_valid(oversized_self_host, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
+        matrix_superbuild_self_host_cpu_budget_valid(windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4, 2) || path_exists(arena, manifest_path))
     {
         string_print(S8("error: superbuild self-host resource/dependency allocation test failed\n"));
         return PROCESS_RESULT_FAILED;

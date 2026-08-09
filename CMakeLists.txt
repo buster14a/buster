@@ -677,7 +677,7 @@ function(buster_filter_supported_c_flags out_var)
     set(${out_var} "${supported_flags}" PARENT_SCOPE)
 endfunction()
 
-option(BUSTER_SINGLE_THREADED "Enable single-threaded mode" ON)
+option(BUSTER_SINGLE_THREADED "Enable single-threaded mode" OFF)
 
 if (C_COMPILER_MSVC)
     foreach(linker_flags IN ITEMS
