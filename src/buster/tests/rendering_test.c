@@ -1,5 +1,16 @@
 #include <buster/tests/rendering_test.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/lib/truetype.h>
+
+BUSTER_GLOBAL_LOCAL u32 rendering_truetype_random_next(u32* state)
+{
+    u32 result = *state;
+    result ^= result << 13u;
+    result ^= result >> 17u;
+    result ^= result << 5u;
+    *state = result;
+    return result;
+}
 
 UnitTestResult rendering_tests(UnitTestArguments* arguments)
 {
@@ -569,6 +580,74 @@ UnitTestResult rendering_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !rendering_blur_rgba8(blur_boundary_scratch, one_pixel, UINT32_MAX, 1, UINT32_MAX, 1) &&
                                   blur_boundary_scratch->position == 112);
     arena_destroy(blur_boundary_scratch, 1);
+
+    Arena* truetype_raster_scratch = arena_create((ArenaCreation){0});
+    TTF_RasterTestPoint raster_box[] = {
+        {.x = 0.125f, .y = 0.125f},
+        {.x = 7.875f, .y = 0.125f},
+        {.x = 7.875f, .y = 7.875f},
+        {.x = 0.125f, .y = 7.875f},
+    };
+    u32 raster_box_ends[] = {BUSTER_ARRAY_LENGTH(raster_box)};
+    BUSTER_TEST(arguments, truetype_rasterizers_match_for_test(truetype_raster_scratch, raster_box, BUSTER_ARRAY_LENGTH(raster_box), raster_box_ends,
+                                                                BUSTER_ARRAY_LENGTH(raster_box_ends), 8, 8));
+    arena_reset_to_start(truetype_raster_scratch);
+
+    TTF_RasterTestPoint raster_winding[] = {
+        {.x = -2.0f, .y = -1.0f},
+        {.x = 13.0f, .y = 1.375f},
+        {.x = 10.125f, .y = 12.0f},
+        {.x = 1.5f, .y = 10.75f},
+        {.x = 2.125f, .y = 2.125f},
+        {.x = 2.125f, .y = 8.875f},
+        {.x = 8.875f, .y = 8.875f},
+        {.x = 8.875f, .y = 2.125f},
+        {.x = 0.125f, .y = 5.375f},
+        {.x = 11.875f, .y = 5.375f},
+        {.x = 5.625f, .y = 0.125f},
+    };
+    u32 raster_winding_ends[] = {4, 8, 11};
+    BUSTER_TEST(arguments,
+                truetype_rasterizers_match_for_test(truetype_raster_scratch, raster_winding, BUSTER_ARRAY_LENGTH(raster_winding), raster_winding_ends,
+                                                     BUSTER_ARRAY_LENGTH(raster_winding_ends), 12, 12));
+    arena_reset_to_start(truetype_raster_scratch);
+
+    bool randomized_rasters_match = true;
+    u32 raster_random = 0x6d2b79f5u;
+    for (u32 raster_case = 0; raster_case < 128 && randomized_rasters_match; raster_case += 1)
+    {
+        TTF_RasterTestPoint points[40] = {0};
+        u32 contour_ends[4] = {0};
+        raster_random = rendering_truetype_random_next(&raster_random);
+        u32 width = 1u + raster_random % 19u;
+        raster_random = rendering_truetype_random_next(&raster_random);
+        u32 height = 1u + raster_random % 19u;
+        raster_random = rendering_truetype_random_next(&raster_random);
+        u32 contour_count = 1u + raster_random % BUSTER_ARRAY_LENGTH(contour_ends);
+        u32 point_count = 0;
+        for (u32 contour = 0; contour < contour_count; contour += 1)
+        {
+            raster_random = rendering_truetype_random_next(&raster_random);
+            u32 contour_point_count = 2u + raster_random % 9u;
+            for (u32 point = 0; point < contour_point_count; point += 1)
+            {
+                raster_random = rendering_truetype_random_next(&raster_random);
+                s32 x_sixteenths = (s32)(raster_random % ((width + 8u) * 16u)) - 64;
+                raster_random = rendering_truetype_random_next(&raster_random);
+                s32 y_sixteenths = (s32)(raster_random % ((height + 8u) * 16u)) - 64;
+                points[point_count] = (TTF_RasterTestPoint){
+                    .x = (f32)x_sixteenths / 16.0f,
+                    .y = (f32)y_sixteenths / 16.0f,
+                };
+                point_count += 1;
+            }
+            contour_ends[contour] = point_count;
+        }
+        randomized_rasters_match = truetype_rasterizers_match_for_test(truetype_raster_scratch, points, point_count, contour_ends, contour_count, width, height);
+        arena_reset_to_start(truetype_raster_scratch);
+    }
+    BUSTER_TEST(arguments, randomized_rasters_match);
+    arena_destroy(truetype_raster_scratch, 1);
 
 #if !BUSTER_USE_VULKAN && !(defined(_WIN32) && BUSTER_USE_D3D12) && !defined(__APPLE__) && !BUSTER_ANDROID
     RenderingHandle* public_rendering = rendering_initialize(arguments->arena);

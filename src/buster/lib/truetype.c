@@ -49,6 +49,16 @@ struct TTF_RasterPath
     u8 reserved[3];
 };
 
+typedef struct TTF_RasterEdge TTF_RasterEdge;
+struct TTF_RasterEdge
+{
+    u64 end_sample;
+    u32 point_a;
+    u32 point_b;
+    u32 next;
+    s32 winding;
+};
+
 typedef struct TTF_Transform TTF_Transform;
 struct TTF_Transform
 {
@@ -926,6 +936,7 @@ BUSTER_GLOBAL_LOCAL f32 ttf_edge_left(TTF_RasterPoint a, TTF_RasterPoint b, f32 
     return result;
 }
 
+#if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL bool ttf_path_contains_point(const TTF_RasterPath* path, f32 x, f32 y)
 {
     s32 winding = 0;
@@ -957,6 +968,243 @@ BUSTER_GLOBAL_LOCAL bool ttf_path_contains_point(const TTF_RasterPath* path, f32
     bool result = winding != 0;
     return result;
 }
+
+BUSTER_GLOBAL_LOCAL void ttf_rasterize_path_reference(const TTF_RasterPath* path, u8* pixels, u32 width, u32 height)
+{
+    u32 sample_count = TTF_RASTER_SUBSAMPLES * TTF_RASTER_SUBSAMPLES;
+    for (u32 py = 0; py < height; py += 1)
+    {
+        for (u32 px = 0; px < width; px += 1)
+        {
+            u32 covered = 0;
+            for (u32 sy = 0; sy < TTF_RASTER_SUBSAMPLES; sy += 1)
+            {
+                for (u32 sx = 0; sx < TTF_RASTER_SUBSAMPLES; sx += 1)
+                {
+                    f32 sample_x = (f32)px + ((f32)sx + 0.5f) / (f32)TTF_RASTER_SUBSAMPLES;
+                    f32 sample_y = (f32)py + ((f32)sy + 0.5f) / (f32)TTF_RASTER_SUBSAMPLES;
+                    covered += ttf_path_contains_point(path, sample_x, sample_y);
+                }
+            }
+            pixels[(u64)py * width + px] = (u8)((covered * 255u + sample_count / 2u) / sample_count);
+        }
+    }
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL f32 ttf_raster_sample_coordinate(u64 sample)
+{
+    u64 pixel = sample / TTF_RASTER_SUBSAMPLES;
+    u32 subpixel = (u32)(sample % TTF_RASTER_SUBSAMPLES);
+    f32 result = (f32)pixel + ((f32)subpixel + 0.5f) / (f32)TTF_RASTER_SUBSAMPLES;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 ttf_raster_sample_lower_bound(f32 coordinate, u64 sample_count)
+{
+    u64 first = 0;
+    u64 last = sample_count;
+    while (first < last)
+    {
+        u64 middle = first + (last - first) / 2u;
+        if (ttf_raster_sample_coordinate(middle) < coordinate)
+        {
+            first = middle + 1u;
+        }
+        else
+        {
+            last = middle;
+        }
+    }
+    return first;
+}
+
+BUSTER_GLOBAL_LOCAL u64 ttf_raster_edge_x_end(const TTF_RasterPath* path, TTF_RasterEdge edge, f32 sample_y, u64 sample_width)
+{
+    TTF_RasterPoint a = path->points[edge.point_a];
+    TTF_RasterPoint b = path->points[edge.point_b];
+    u64 first = 0;
+    u64 last = sample_width;
+    while (first < last)
+    {
+        u64 middle = first + (last - first) / 2u;
+        f32 sample_x = ttf_raster_sample_coordinate(middle);
+        f32 left = ttf_edge_left(a, b, sample_x, sample_y);
+        bool crosses = edge.winding > 0 ? left > 0.0f : left < 0.0f;
+        if (crosses)
+        {
+            first = middle + 1u;
+        }
+        else
+        {
+            last = middle;
+        }
+    }
+    return first;
+}
+
+BUSTER_GLOBAL_LOCAL void ttf_rasterize_path(Arena* arena, const TTF_RasterPath* path, u8* pixels, u32 width, u32 height)
+{
+    u64 scratch_position = arena->position;
+    u64 sample_width = (u64)width * TTF_RASTER_SUBSAMPLES;
+    u64 sample_height = (u64)height * TTF_RASTER_SUBSAMPLES;
+    TTF_RasterEdge* edges = arena_allocate(arena, TTF_RasterEdge, path->point_count);
+    u32* edge_heads = arena_allocate(arena, u32, sample_height);
+    u32* active_edges = arena_allocate(arena, u32, path->point_count);
+    s32* winding_deltas = arena_allocate(arena, s32, sample_width + 1u);
+    u8* covered_samples = arena_allocate(arena, u8, width);
+    memset(edge_heads, 0xff, (size_t)(sample_height * sizeof(*edge_heads)));
+
+    u32 edge_count = 0;
+    u32 contour_start = 0;
+    for (u32 contour = 0; contour < path->contour_count; contour += 1)
+    {
+        u32 contour_end = path->contour_ends[contour];
+        if (contour_end > contour_start + 1u)
+        {
+            for (u32 point = contour_start; point < contour_end; point += 1)
+            {
+                u32 next_point = point + 1u < contour_end ? point + 1u : contour_start;
+                TTF_RasterPoint a = path->points[point];
+                TTF_RasterPoint b = path->points[next_point];
+                f32 lower_y = 0.0f;
+                f32 upper_y = 0.0f;
+                s32 winding = 0;
+                if (a.y < b.y)
+                {
+                    lower_y = a.y;
+                    upper_y = b.y;
+                    winding = 1;
+                }
+                else if (a.y > b.y)
+                {
+                    lower_y = b.y;
+                    upper_y = a.y;
+                    winding = -1;
+                }
+                if (winding != 0)
+                {
+                    u64 start_sample = ttf_raster_sample_lower_bound(lower_y, sample_height);
+                    u64 end_sample = ttf_raster_sample_lower_bound(upper_y, sample_height);
+                    if (start_sample < end_sample)
+                    {
+                        edges[edge_count] = (TTF_RasterEdge){
+                            .end_sample = end_sample,
+                            .point_a = point,
+                            .point_b = next_point,
+                            .next = edge_heads[start_sample],
+                            .winding = winding,
+                        };
+                        edge_heads[start_sample] = edge_count;
+                        edge_count += 1;
+                    }
+                }
+            }
+        }
+        contour_start = contour_end;
+    }
+
+    u32 active_count = 0;
+    for (u64 sample_y_index = 0; sample_y_index < sample_height; sample_y_index += 1)
+    {
+        for (u32 edge = edge_heads[sample_y_index]; edge != UINT32_MAX; edge = edges[edge].next)
+        {
+            active_edges[active_count] = edge;
+            active_count += 1;
+        }
+
+        u32 live_count = 0;
+        for (u32 active_index = 0; active_index < active_count; active_index += 1)
+        {
+            u32 edge = active_edges[active_index];
+            if (sample_y_index < edges[edge].end_sample)
+            {
+                active_edges[live_count] = edge;
+                live_count += 1;
+            }
+        }
+        active_count = live_count;
+
+        memset(winding_deltas, 0, (size_t)((sample_width + 1u) * sizeof(*winding_deltas)));
+        f32 sample_y = ttf_raster_sample_coordinate(sample_y_index);
+        for (u32 active_index = 0; active_index < active_count; active_index += 1)
+        {
+            TTF_RasterEdge edge = edges[active_edges[active_index]];
+            u64 end_sample = ttf_raster_edge_x_end(path, edge, sample_y, sample_width);
+            winding_deltas[0] += edge.winding;
+            winding_deltas[end_sample] -= edge.winding;
+        }
+
+        u32 subpixel_y = (u32)(sample_y_index % TTF_RASTER_SUBSAMPLES);
+        if (subpixel_y == 0)
+        {
+            memset(covered_samples, 0, width);
+        }
+        s32 winding = 0;
+        for (u64 sample_x_index = 0; sample_x_index < sample_width; sample_x_index += 1)
+        {
+            winding += winding_deltas[sample_x_index];
+            covered_samples[sample_x_index / TTF_RASTER_SUBSAMPLES] += winding != 0;
+        }
+        if (subpixel_y + 1u == TTF_RASTER_SUBSAMPLES)
+        {
+            u64 pixel_y = sample_y_index / TTF_RASTER_SUBSAMPLES;
+            u32 sample_count = TTF_RASTER_SUBSAMPLES * TTF_RASTER_SUBSAMPLES;
+            for (u32 pixel_x = 0; pixel_x < width; pixel_x += 1)
+            {
+                u32 covered = covered_samples[pixel_x];
+                pixels[pixel_y * width + pixel_x] = (u8)((covered * 255u + sample_count / 2u) / sample_count);
+            }
+        }
+    }
+    arena_set_position(arena, scratch_position);
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool truetype_rasterizers_match_for_test(Arena* arena, const TTF_RasterTestPoint* points, u32 point_count, const u32* contour_ends, u32 contour_count,
+                                         u32 width, u32 height)
+{
+    if (!arena || (!points && point_count != 0) || (!contour_ends && contour_count != 0) || width == 0 || height == 0)
+    {
+        return false;
+    }
+    u32 previous_end = 0;
+    for (u32 contour = 0; contour < contour_count; contour += 1)
+    {
+        if (contour_ends[contour] < previous_end || contour_ends[contour] > point_count)
+        {
+            return false;
+        }
+        previous_end = contour_ends[contour];
+    }
+
+    TTF_RasterPath path = {
+        .points = arena_allocate(arena, TTF_RasterPoint, point_count),
+        .contour_ends = arena_allocate(arena, u32, contour_count),
+        .point_count = point_count,
+        .contour_count = contour_count,
+        .point_capacity = point_count,
+        .contour_capacity = contour_count,
+    };
+    for (u32 point = 0; point < point_count; point += 1)
+    {
+        path.points[point] = (TTF_RasterPoint){.x = points[point].x, .y = points[point].y};
+    }
+    if (contour_count != 0)
+    {
+        memcpy(path.contour_ends, contour_ends, (size_t)contour_count * sizeof(*contour_ends));
+    }
+
+    u64 pixel_count = (u64)width * height;
+    u8* reference = arena_allocate(arena, u8, pixel_count);
+    u8* active = arena_allocate(arena, u8, pixel_count);
+    ttf_rasterize_path_reference(&path, reference, width, height);
+    u64 scratch_position = arena->position;
+    ttf_rasterize_path(arena, &path, active, width, height);
+    bool result = arena->position == scratch_position && memcmp(reference, active, (size_t)pixel_count) == 0;
+    return result;
+}
+#endif
 
 TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation* information, f32 scale_x, f32 scale_y, u32 codepoint)
 {
@@ -1015,28 +1263,7 @@ TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation
 
     u64 pixel_count = (u64)(u32)result.width * (u64)(u32)result.height;
     result.pixels = arena_allocate(arena, u8, pixel_count);
-    u32 sample_count = TTF_RASTER_SUBSAMPLES * TTF_RASTER_SUBSAMPLES;
-    for (s32 py = 0; py < result.height; py += 1)
-    {
-        for (s32 px = 0; px < result.width; px += 1)
-        {
-            u32 covered = 0;
-            for (u32 sy = 0; sy < TTF_RASTER_SUBSAMPLES; sy += 1)
-            {
-                for (u32 sx = 0; sx < TTF_RASTER_SUBSAMPLES; sx += 1)
-                {
-                    f32 sample_x = (f32)px + ((f32)sx + 0.5f) / (f32)TTF_RASTER_SUBSAMPLES;
-                    f32 sample_y = (f32)py + ((f32)sy + 0.5f) / (f32)TTF_RASTER_SUBSAMPLES;
-                    if (ttf_path_contains_point(&path, sample_x, sample_y))
-                    {
-                        covered += 1;
-                    }
-                }
-            }
-            u64 index = (u64)(u32)py * (u64)(u32)result.width + (u64)(u32)px;
-            result.pixels[index] = (u8)((covered * 255u + sample_count / 2u) / sample_count);
-        }
-    }
+    ttf_rasterize_path(arena, &path, result.pixels, (u32)result.width, (u32)result.height);
 
     return result;
 }

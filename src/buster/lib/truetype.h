@@ -73,3 +73,15 @@ BUSTER_F_DECL TTF_VerticalMetrics truetype_get_font_vertical_metrics(const TTF_F
 BUSTER_F_DECL TTF_HorizontalMetrics truetype_get_codepoint_horizontal_metrics(const TTF_FontInformation* information, u32 codepoint);
 BUSTER_F_DECL s32 truetype_get_codepoint_kern_advance(const TTF_FontInformation* information, u32 codepoint_left, u32 codepoint_right);
 BUSTER_F_DECL TTF_Bitmap truetype_get_codepoint_bitmap(Arena* arena, const TTF_FontInformation* information, f32 scale_x, f32 scale_y, u32 codepoint);
+
+#if BUSTER_INCLUDE_TESTS
+typedef struct TTF_RasterTestPoint TTF_RasterTestPoint;
+struct TTF_RasterTestPoint
+{
+    f32 x;
+    f32 y;
+};
+
+BUSTER_F_DECL bool truetype_rasterizers_match_for_test(Arena* arena, const TTF_RasterTestPoint* points, u32 point_count, const u32* contour_ends,
+                                                       u32 contour_count, u32 width, u32 height);
+#endif
