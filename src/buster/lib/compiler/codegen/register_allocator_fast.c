@@ -12,12 +12,14 @@
 // edit stream.
 
 // Registers the local allocator may own between instructions. RSP and RBP
-// are reserved, RBX and R12-R15 wait for callee-save activation in the
-// global stage, and every member here is caller-saved, so calls simply
-// flush the file.
+// are reserved, and R12/R13 wait for the encoder to learn their ModRM
+// base quirks. The callee-saved members survive calls, cost one push/pop
+// pair per function that binds them, and their pushes carry unwind
+// actions.
+#define MACHINE_FAST_CALLEE_SAVED_MASK ((1u << MACHINE_X64_RBX) | (1u << MACHINE_X64_R14) | (1u << MACHINE_X64_R15))
 #define MACHINE_FAST_ALLOCATABLE_MASK                                                                                                                          \
     ((1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX) | (1u << MACHINE_X64_RDX) | (1u << MACHINE_X64_RSI) | (1u << MACHINE_X64_RDI) |                         \
-     (1u << MACHINE_X64_R8) | (1u << MACHINE_X64_R9) | (1u << MACHINE_X64_R10) | (1u << MACHINE_X64_R11))
+     (1u << MACHINE_X64_R8) | (1u << MACHINE_X64_R9) | (1u << MACHINE_X64_R10) | (1u << MACHINE_X64_R11) | MACHINE_FAST_CALLEE_SAVED_MASK)
 
 typedef struct MachineFastState MachineFastState;
 struct MachineFastState
@@ -40,6 +42,10 @@ struct MachineFastState
     // its last use is dead and its spill store is dropped.
     u32* last_use;
     u8* escapes;
+    // Index of the next call at or after each instruction within its own
+    // block, or UINT32_MAX: a value whose last use lies past it crosses
+    // the call and is worth a callee-saved binding.
+    u32* next_call;
     u32 clock;
     u32 current_point;
 };
@@ -149,22 +155,42 @@ BUSTER_GLOBAL_LOCAL void machine_fast_spill(MachineFastState* state, u32 physica
     state->virtual_register_locations[owner] = UINT32_MAX;
 }
 
-BUSTER_GLOBAL_LOCAL void machine_fast_flush(MachineFastState* state)
+BUSTER_GLOBAL_LOCAL void machine_fast_flush(MachineFastState* state, u32 keep_mask)
 {
     for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
     {
+        if ((keep_mask >> physical_register) & 1u)
+        {
+            continue;
+        }
         machine_fast_spill(state, physical_register);
     }
 }
 
+// True when the virtual register stays live past the next call in the
+// current block, making a callee-saved binding worth its push/pop pair.
+BUSTER_GLOBAL_LOCAL bool machine_fast_crosses_call(MachineFastState* state, u32 virtual_register)
+{
+    u32 upcoming_call = state->next_call[state->current_point >> 2];
+    return upcoming_call != UINT32_MAX && state->last_use[virtual_register] > upcoming_call;
+}
+
 // Picks a free allocatable register, else evicts the least recently used
-// owner — a probe bounded by the register-file size.
-BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u32 forbidden_mask)
+// owner — a probe bounded by the register-file size. Call-crossing values
+// reach for the callee-saved members; everything else only touches them
+// once another binding has already paid their push.
+BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u32 forbidden_mask, bool prefers_callee_saved)
 {
     u32 candidates = MACHINE_FAST_ALLOCATABLE_MASK & ~forbidden_mask;
+    if (!prefers_callee_saved)
+    {
+        candidates &= ~(MACHINE_FAST_CALLEE_SAVED_MASK & ~state->placement->callee_saved_mask);
+    }
     u32 best = UINT32_MAX;
     u32 best_age = UINT32_MAX;
     u32 dead = UINT32_MAX;
+    u32 free_other = UINT32_MAX;
+    u32 preferred_class = prefers_callee_saved ? MACHINE_FAST_CALLEE_SAVED_MASK : ~MACHINE_FAST_CALLEE_SAVED_MASK;
     for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
     {
         if (!(candidates & (1u << physical_register)))
@@ -173,6 +199,14 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u32 forbidden
         }
         if (state->owner[physical_register] == UINT32_MAX)
         {
+            if (!((preferred_class >> physical_register) & 1u))
+            {
+                if (free_other == UINT32_MAX)
+                {
+                    free_other = physical_register;
+                }
+                continue;
+            }
             return physical_register;
         }
         // A dead owner costs nothing to displace: its spill is dropped.
@@ -185,6 +219,10 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u32 forbidden
             best_age = state->age[physical_register];
             best = physical_register;
         }
+    }
+    if (free_other != UINT32_MAX)
+    {
+        return free_other;
     }
     if (dead != UINT32_MAX)
     {
@@ -206,32 +244,46 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_ensure(MachineFastState* state, u32 virtual
             state->age[current] = ++state->clock;
             return current;
         }
-        target = machine_fast_pick(state, forbidden_mask);
+        target = machine_fast_pick(state, forbidden_mask, machine_fast_crosses_call(state, virtual_register));
     }
     if (current == target)
     {
         state->age[target] = ++state->clock;
         return target;
     }
-    // The value moves through its slot: park it if it lives elsewhere,
-    // spill the stale owner of the target, then reload.
-    if (current != UINT32_MAX)
-    {
-        machine_fast_spill(state, current);
-    }
+    // Evict the target's stale owner first; then the value either copies
+    // register-to-register when it already lives in one, carrying its
+    // dirtiness, or reloads from its slot.
     machine_fast_spill(state, target);
     MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, state->edits);
-    *edit = (MachineEdit){
-        .point = state->current_point,
-        .kind = MACHINE_EDIT_RELOAD,
-        .subject = virtual_register,
-        .location = target,
-    };
-    state->placement->reload_count += 1;
+    if (current != UINT32_MAX)
+    {
+        *edit = (MachineEdit){
+            .point = state->current_point,
+            .kind = MACHINE_EDIT_COPY,
+            .subject = current,
+            .location = target,
+        };
+        state->placement->copy_count += 1;
+        state->dirty[target] = state->dirty[current];
+        state->owner[current] = UINT32_MAX;
+        state->dirty[current] = false;
+    }
+    else
+    {
+        *edit = (MachineEdit){
+            .point = state->current_point,
+            .kind = MACHINE_EDIT_RELOAD,
+            .subject = virtual_register,
+            .location = target,
+        };
+        state->placement->reload_count += 1;
+        state->dirty[target] = false;
+    }
     state->owner[target] = virtual_register;
-    state->dirty[target] = false;
     state->virtual_register_locations[virtual_register] = target;
     state->age[target] = ++state->clock;
+    state->placement->callee_saved_mask |= (1u << target) & MACHINE_FAST_CALLEE_SAVED_MASK;
     return target;
 }
 
@@ -248,6 +300,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_bind(MachineFastState* state, u32 virtual_
     state->dirty[target] = true;
     state->virtual_register_locations[virtual_register] = target;
     state->age[target] = ++state->clock;
+    state->placement->callee_saved_mask |= (1u << target) & MACHINE_FAST_CALLEE_SAVED_MASK;
 }
 
 MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function)
@@ -269,7 +322,23 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
         .virtual_register_locations = arena_allocate(arena, u32, function->virtual_register_count),
         .last_use = arena_allocate(arena, u32, function->virtual_register_count),
         .escapes = arena_allocate(arena, u8, function->virtual_register_count),
+        .next_call = arena_allocate(arena, u32, function->instruction_count),
     };
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        MachineBlock* block = function->blocks + block_index;
+        u32 upcoming_call = UINT32_MAX;
+        for (u32 offset = block->instruction_count; offset > 0; offset -= 1)
+        {
+            u32 instruction_index = block->first_instruction + offset - 1;
+            MachineOpcodeInfo const* call_info = machine_opcode_info(function->instructions[instruction_index].opcode);
+            if (call_info && (call_info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL))
+            {
+                upcoming_call = instruction_index;
+            }
+            state.next_call[instruction_index] = upcoming_call;
+        }
+    }
     for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
     {
         state.virtual_register_locations[register_index] = UINT32_MAX;
@@ -487,15 +556,16 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
                 }
                 else
                 {
-                    target = machine_fast_pick(&state, reserved_mask);
+                    target = machine_fast_pick(&state, reserved_mask, machine_fast_crosses_call(&state, machine_ref_payload(ref)));
                 }
                 machine_fast_bind(&state, machine_ref_payload(ref), target);
                 operand_registers[slot] = (u8)target;
             }
             if (is_call)
             {
-                // Every allocatable register is caller-saved.
-                machine_fast_flush(&state);
+                // Callee-saved members survive the call by definition;
+                // everything else is caller-saved and flushes.
+                machine_fast_flush(&state, MACHINE_FAST_CALLEE_SAVED_MASK);
             }
             if (is_terminator)
             {
@@ -504,7 +574,7 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
                 // conditional terminator just consumed because they are
                 // plain stores, and the edits stay at this terminator's
                 // BEFORE point, which the encoder emits ahead of it.
-                machine_fast_flush(&state);
+                machine_fast_flush(&state, 0);
             }
         }
     }
@@ -524,7 +594,15 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
     {
         slot_needed[placement.edits[edit_index].subject] = 1;
     }
-    u32 running = 0;
+    // The pushed callee-saved registers sit between the frame base and the
+    // slots, so every offset starts past them, and the stack allocation
+    // keeps sixteen-alignment across an odd push count.
+    u32 push_count = 0;
+    for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
+    {
+        push_count += (placement.callee_saved_mask >> physical_register) & 1u;
+    }
+    u32 running = 8 * push_count;
     for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
     {
         placement.virtual_register_offsets[register_index] = 0;
@@ -540,7 +618,7 @@ MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction
         running = (running + function->stack_slot_sizes[slot_index] + slot_alignment - 1) & ~(slot_alignment - 1);
         placement.stack_slot_offsets[slot_index] = running;
     }
-    placement.frame_size = (running + 15u) & ~15u;
+    placement.frame_size = ((running - 8 * push_count + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u);
     if (placement.frame_size >= 4080)
     {
         return placement;

@@ -10383,7 +10383,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                      ? result.abi == CODEGEN_ABI_X86_64_WINDOWS ? (frame_size != 0) : frame_size / 4096 + (frame_size % 4096 != 0)
                                      : frame_size / 4080 + (frame_size % 4080 != 0);
         u32 stack_action_capacity = windows_aarch64 ? (frame_size > 4080 ? 14u : stack_action_count * 2) : stack_action_count;
-        u32 unwind_action_capacity = (target.cpu_arch == CPU_ARCH_X86_64 ? 3u : windows_aarch64 ? 6u : 5u) + stack_action_capacity;
+        // x86_64 holds the frame-pointer pair, up to three machine-path
+        // callee-saved pushes, and the stack allocation.
+        u32 unwind_action_capacity = (target.cpu_arch == CPU_ARCH_X86_64 ? 6u : windows_aarch64 ? 6u : 5u) + stack_action_capacity;
         CodegenFunctionDescriptor* descriptor = result.functions + result.function_count;
         result.function_count += 1;
         *descriptor = (CodegenFunctionDescriptor){
@@ -10433,10 +10435,36 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         machine_unwind_valid =
                             codegen_unwind_action_append(descriptor, unwind_action_capacity, 4, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, X64_REGISTER_RBP, 0) &&
                             machine_unwind_valid;
+                        // Callee-saved pushes follow the frame-pointer setup
+                        // in the encoder's fixed RBX, R14, R15 order; RBX
+                        // pushes in one byte, the extended pair in two.
+                        u32 machine_prologue_cursor = 4;
+                        if (placement.callee_saved_mask & (1u << X64_REGISTER_RBX))
+                        {
+                            machine_prologue_cursor += 1;
+                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_RBX, 0) &&
+                                                   machine_unwind_valid;
+                        }
+                        if (placement.callee_saved_mask & (1u << X64_REGISTER_R14))
+                        {
+                            machine_prologue_cursor += 2;
+                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_R14, 0) &&
+                                                   machine_unwind_valid;
+                        }
+                        if (placement.callee_saved_mask & (1u << X64_REGISTER_R15))
+                        {
+                            machine_prologue_cursor += 2;
+                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_R15, 0) &&
+                                                   machine_unwind_valid;
+                        }
                         if (placement.frame_size)
                         {
-                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, 11, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0,
-                                                                                placement.frame_size) &&
+                            machine_prologue_cursor += 7;
+                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, placement.frame_size) &&
                                                    machine_unwind_valid;
                         }
                         if (machine_unwind_valid)
@@ -10452,7 +10480,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 };
                             }
                             buffer.count += encoded.byte_count;
-                            descriptor->prolog_size = placement.frame_size ? 11 : 4;
+                            descriptor->prolog_size = machine_prologue_cursor;
                             descriptor->code_size = (u32)buffer.count - descriptor->code_offset;
                             machine_function_emitted = true;
                         }

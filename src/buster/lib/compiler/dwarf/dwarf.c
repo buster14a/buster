@@ -256,7 +256,7 @@ BUSTER_GLOBAL_LOCAL u32 dwarf_cfi_register(Target target, u8 codegen_register, b
     else if (target.cpu_arch == CPU_ARCH_X86_64)
     {
         static u8 const dwarf_registers[] = {
-            0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11,
+            0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15,
         };
         if (codegen_register < BUSTER_ARRAY_LENGTH(dwarf_registers))
         {

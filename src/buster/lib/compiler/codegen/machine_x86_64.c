@@ -2441,11 +2441,27 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     MachineBuilderStream call_sites;
     machine_stream_initialize(&call_sites, sizeof(MachineCallSite));
     result.block_offsets = arena_allocate(arena, u32, function->block_count);
-    // Prologue: the frame base is RBP, matching the canonical path.
+    // Prologue: the frame base is RBP, matching the canonical path, and
+    // the placement's callee-saved registers push right after it in fixed
+    // RBX, R14, R15 order so the unwind actions can name exact offsets.
     machine_x64_emit8(&encoder, 0x55);
     machine_x64_emit8(&encoder, 0x48);
     machine_x64_emit8(&encoder, 0x89);
     machine_x64_emit8(&encoder, 0xe5);
+    if (placement->callee_saved_mask & (1u << MACHINE_X64_RBX))
+    {
+        machine_x64_emit8(&encoder, 0x53);
+    }
+    if (placement->callee_saved_mask & (1u << MACHINE_X64_R14))
+    {
+        machine_x64_emit8(&encoder, 0x41);
+        machine_x64_emit8(&encoder, 0x56);
+    }
+    if (placement->callee_saved_mask & (1u << MACHINE_X64_R15))
+    {
+        machine_x64_emit8(&encoder, 0x41);
+        machine_x64_emit8(&encoder, 0x57);
+    }
     if (placement->frame_size)
     {
         machine_x64_emit8(&encoder, 0x48);
@@ -2470,6 +2486,10 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 if (edit->kind == MACHINE_EDIT_SPILL)
                 {
                     machine_x64_emit_frame_store(&encoder, edit->location, placement->virtual_register_offsets[edit->subject]);
+                }
+                else if (edit->kind == MACHINE_EDIT_COPY)
+                {
+                    machine_x64_emit_rr(&encoder, true, false, 0x89, edit->subject, edit->location);
                 }
                 else
                 {
@@ -2759,9 +2779,40 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             break;
             case MACHINE_X64_RET:
             {
-                machine_x64_emit8(&encoder, 0x48);
-                machine_x64_emit8(&encoder, 0x89);
-                machine_x64_emit8(&encoder, 0xec);
+                if (placement->callee_saved_mask)
+                {
+                    // Point RSP at the pushed registers, restore them in
+                    // reverse push order, then unwind the frame base.
+                    u32 push_count = 0;
+                    for (u32 push_register = 0; push_register < MACHINE_X64_REGISTER_COUNT; push_register += 1)
+                    {
+                        push_count += (placement->callee_saved_mask >> push_register) & 1u;
+                    }
+                    machine_x64_emit8(&encoder, 0x48);
+                    machine_x64_emit8(&encoder, 0x8d);
+                    machine_x64_emit8(&encoder, 0x65);
+                    machine_x64_emit8(&encoder, (u8)(0x100u - 8u * push_count));
+                    if (placement->callee_saved_mask & (1u << MACHINE_X64_R15))
+                    {
+                        machine_x64_emit8(&encoder, 0x41);
+                        machine_x64_emit8(&encoder, 0x5f);
+                    }
+                    if (placement->callee_saved_mask & (1u << MACHINE_X64_R14))
+                    {
+                        machine_x64_emit8(&encoder, 0x41);
+                        machine_x64_emit8(&encoder, 0x5e);
+                    }
+                    if (placement->callee_saved_mask & (1u << MACHINE_X64_RBX))
+                    {
+                        machine_x64_emit8(&encoder, 0x5b);
+                    }
+                }
+                else
+                {
+                    machine_x64_emit8(&encoder, 0x48);
+                    machine_x64_emit8(&encoder, 0x89);
+                    machine_x64_emit8(&encoder, 0xec);
+                }
                 machine_x64_emit8(&encoder, 0x5d);
                 machine_x64_emit8(&encoder, 0xc3);
             }
@@ -3155,6 +3206,10 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 if (edit->kind == MACHINE_EDIT_RELOAD)
                 {
                     machine_x64_emit_frame_load(&encoder, edit->location, placement->virtual_register_offsets[edit->subject]);
+                }
+                else if (edit->kind == MACHINE_EDIT_COPY)
+                {
+                    machine_x64_emit_rr(&encoder, true, false, 0x89, edit->subject, edit->location);
                 }
                 else
                 {

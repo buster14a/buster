@@ -42,6 +42,10 @@ typedef enum X64Register
     X64_REGISTER_R9,
     X64_REGISTER_R10,
     X64_REGISTER_R11,
+    X64_REGISTER_R12,
+    X64_REGISTER_R13,
+    X64_REGISTER_R14,
+    X64_REGISTER_R15,
 } X64Register;
 
 typedef struct X64Builder X64Builder;

@@ -429,6 +429,7 @@ typedef enum MachineEditKind
     MACHINE_EDIT_NONE,
     MACHINE_EDIT_RELOAD, // subject vreg loads into location preg at point
     MACHINE_EDIT_SPILL,  // subject vreg stores from location preg at point
+    MACHINE_EDIT_COPY,   // subject preg copies into location preg at point
     MACHINE_EDIT_KIND_COUNT,
 } MachineEditKind;
 
@@ -467,6 +468,10 @@ struct MachineStackPlacement
     u8* operand_registers;
     u32 reload_count;
     u32 spill_count;
+    u32 copy_count;
+    // Callee-saved registers the placement assigned; the encoder pushes and
+    // pops them around the frame and the unwind actions record the pushes.
+    u32 callee_saved_mask;
     bool valid;
     u8 reserved[3];
 };

@@ -12,6 +12,33 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-09s` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6 —
+callee-saved registers, and register-copy edits instead of memory moves.)
+
+- **What was built.** Three coupled pieces. (1) RBX/R14/R15 join the
+  allocatable file (R12/R13 wait on their ModRM base quirks): the
+  encoder pushes the placement's callee-saved mask after the frame
+  pointer in fixed order and restores through `lea rsp,[rbp-8N]` plus
+  reversed pops; unwind actions cover each push (X64Register and the
+  DWARF CFI map gained R12-R15; the machine-path unwind capacity rose to
+  six). Call flushes keep the callee-saved members. (2) A per-block
+  next-call pre-pass: only values that stay live past the next call bind
+  callee-saved registers — the first, indiscriminate version *lost* 1.8%
+  instructions and 38KB of text to push/pop pairs on values that never
+  crossed a call. (3) `MACHINE_EDIT_COPY`: when a value must move to a
+  fixed register (argument staging, encoder scratches) and already lives
+  in a register, the placement emits one register copy carrying its
+  dirtiness instead of a park store plus reload through its slot.
+- **Numbers** (buster-built stage comparison, compiling ide.c under
+  NONE): fast-built compiler 63.58G instructions (canonical 70.05G,
+  **-9.2%**; the previous entry stood at 63.62G), text 24,739,532
+  (canonical 25,699,964, -3.7%). Callee-saved alone was net negative
+  even with the crossing heuristic (63.67G) — the copy edits are what
+  turn retention into profit, because a retained value's next use
+  usually stages into a fixed argument register.
+- **Gates:** test_all green, FAST soak byte-identical on fresh
+  references, self-host fixed point holds.
+
 `2026-08-09r` (Linux x86_64, Zen 4 7940HS; register-allocator stage 6,
 first slice — spill slots only for values that touch memory.)
 
