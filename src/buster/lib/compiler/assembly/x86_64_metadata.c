@@ -1,5 +1,6 @@
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/hash.h>
+#include <buster/lib/os.h>
 
 #if BUSTER_COMPILER_CLANG
 #pragma clang diagnostic push
@@ -25,6 +26,14 @@
 // The caches live here rather than in the generated header, which keeps the
 // generated source exactly as pointer-free and initialization-free as before.
 // Filling is lazy, so a run that never touches x86 metadata pays nothing.
+//
+// Lazy also means unsynchronized: the fills below and the demand-filled caches
+// further down are written once and read forever after through plain loads,
+// which holds only while a writer cannot overlap a reader.
+// buster_x86_metadata_prewarm() does all of it serially for a caller that is
+// about to run a gang, and every fill site states
+// BUSTER_CHECK_SERIAL_INITIALIZATION so a caller that forgot is told rather
+// than left to race.
 //
 // One decode covers every table. Per-table laziness was measured and bought
 // nothing: the lookup indexes yield string-pool offsets and form ids, so a
@@ -63,14 +72,23 @@ BUSTER_GLOBAL_LOCAL BusterX86GeneratedHashRange buster_x86_metadata_form_hash_ra
 BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_form_hash_candidates[BUSTER_X86_GENERATED_FORM_HASH_CANDIDATE_COUNT];
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedHashRange buster_x86_metadata_coverage_hash_ranges[BUSTER_X86_GENERATED_COVERAGE_HASH_RANGE_COUNT];
 BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_coverage_hash_candidates[BUSTER_X86_GENERATED_COVERAGE_HASH_CANDIDATE_COUNT];
+// Two flags, not one. `decoding` guards re-entry: validation below reads
+// records and strings back through the self-initializing accessors, which call
+// this function again, and those calls must return instead of decoding a
+// second time. `decoded` is the one every accessor tests, and it is published
+// only once the very last table is written -- so no reader, on this thread or
+// any other, can ever see it set over half-filled state.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_tables_decoding;
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_tables_decoded;
 
 BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
 {
-    if (buster_x86_metadata_tables_decoded)
+    if (buster_x86_metadata_tables_decoding)
     {
         return;
     }
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    buster_x86_metadata_tables_decoding = true;
     for (u64 index = 0; index < BUSTER_X86_GENERATED_STRING_POOL_SIZE; index += 1)
     {
         buster_x86_metadata_pool_bytes[index] = buster_x86_generated_string_byte(index);
@@ -144,11 +162,9 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
     {
         buster_x86_metadata_coverage_records[index] = buster_x86_generated_coverage_at(index);
     }
-    // Set before validating, not after: validation reads records and strings
-    // back through the accessors above, which call this function again. The
-    // tables are complete at this point, so the re-entrant calls must return
-    // immediately instead of decoding a second time.
-    buster_x86_metadata_tables_decoded = true;
+    // The re-entrant reads validation is about to make are already served by
+    // the `decoding` flag set on entry, so the tables it needs are complete
+    // without publishing `decoded` yet.
     for (u32 index = 0; index < BUSTER_X86_GENERATED_FORM_COUNT; index += 1)
     {
         buster_x86_metadata_form_records_valid[index] = buster_x86_metadata_validate_form_record(&buster_x86_metadata_form_records[index], index, 0);
@@ -158,6 +174,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
         buster_x86_metadata_coverage_records_valid[index] =
             buster_x86_metadata_validate_coverage_record(&buster_x86_metadata_coverage_records[index], index, 0);
     }
+    buster_x86_metadata_tables_decoded = true;
 }
 
 // Every accessor below self-initializes, and the string accessors run one call
@@ -1630,6 +1647,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
     *result = pattern;
     if (cacheable)
     {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
         buster_x86_metadata_pattern_semantics_cache[form.id] = pattern;
         buster_x86_metadata_pattern_semantics_results[form.id] = !pattern.has_unsupported_token;
         buster_x86_metadata_pattern_semantics_cached[form.id] = true;
@@ -5344,6 +5362,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_normalized_form(u32 form_id, Buster
     }
     if (!buster_x86_metadata_normalized_forms_cached[form_id])
     {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
         buster_x86_metadata_copy_form(buster_x86_metadata_form_record(form_id), form_id, &buster_x86_metadata_normalized_forms[form_id]);
         buster_x86_metadata_normalized_forms_cached[form_id] = true;
     }
@@ -5533,6 +5552,35 @@ bool buster_x86_metadata_operand(u32 form_id, u32 operand_index, BusterX86Metada
         .physical_class = physical_class, .physical_width_flags = physical_width_flags,
     };
     return true;
+}
+
+// Decodes the tables and fills every demand-filled cache above them, on the
+// calling thread. The three caches are keyed by form id and by operand
+// atom/width, so walking the forms and their operands reaches every key a
+// later query can ask for: normalized forms and pattern semantics per form,
+// physical register views per distinct operand pair. Nothing here is required
+// for correctness on one thread -- the lazy paths do the same work on first
+// use -- and everything here is required before a gang may query the module,
+// because those paths write shared state that later reads see through plain
+// loads.
+void buster_x86_metadata_prewarm(void)
+{
+    buster_x86_metadata_decode_tables();
+    for (u32 form_id = 0; form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
+    {
+        BusterX86MetadataForm form = {0};
+        if (!buster_x86_metadata_form(form_id, &form))
+        {
+            continue;
+        }
+        BusterX86MetadataPatternSemantics pattern;
+        (void)buster_x86_metadata_emit_parse_pattern(form, &pattern);
+        for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+        {
+            BusterX86MetadataOperand operand = {0};
+            (void)buster_x86_metadata_operand(form_id, operand_index, &operand);
+        }
+    }
 }
 
 bool buster_x86_metadata_coverage(u32 coverage_id, BusterX86MetadataCoverage* result)
@@ -6272,6 +6320,9 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_physical_register_view(BusterX86Gen
     buster_x86_metadata_physical_register_view_resolve(operand, physical_class, physical_width_flags);
     if (buster_x86_metadata_physical_view_fill < BUSTER_X86_METADATA_PHYSICAL_VIEW_SLOT_COUNT / 2)
     {
+        // Only the insert needs the process to be serial: a miss that does not
+        // store resolves into the caller's own outputs and races with nothing.
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
         buster_x86_metadata_physical_view_fill += 1;
         slot->used = 1;
         slot->atom_offset = atom_offset;

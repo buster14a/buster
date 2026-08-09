@@ -58,6 +58,28 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_lane_gang(void* argument)
     }
 }
 
+#if !BUSTER_SINGLE_THREADED
+typedef struct OsTestThreadLivenessState OsTestThreadLivenessState;
+struct OsTestThreadLivenessState
+{
+    AtomicU64 started;
+    AtomicU64 release;
+    u64 worker_saw_only_live_thread;
+};
+
+// Parks until released so the caller can observe the process while this thread
+// is provably still running.
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_liveness(void* argument)
+{
+    OsTestThreadLivenessState* state = (OsTestThreadLivenessState*)argument;
+    state->worker_saw_only_live_thread = os_is_only_live_thread() ? 1 : 0;
+    atomic_u64_increment(&state->started);
+    while (!state->release)
+    {
+    }
+}
+#endif
+
 UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -426,6 +448,36 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, atomic_u64_increment(&counter) == 7);
         BUSTER_TEST(arguments, atomic_u64_add(&counter, 5) == 8);
         BUSTER_TEST(arguments, counter == 13);
+        BUSTER_TEST(arguments, atomic_u64_decrement(&counter) == 13);
+        BUSTER_TEST(arguments, counter == 12);
+    }
+
+    // os_is_only_live_thread() is what BUSTER_CHECK_SERIAL_INITIALIZATION
+    // rests on, so it has to be exact at both edges: false for as long as a
+    // created thread could still touch a global, true again once it is joined.
+    // The worker reports its own view too, because a thread that thought it
+    // was alone would defeat the guard from the inside.
+    {
+        BUSTER_TEST(arguments, os_is_only_live_thread());
+#if !BUSTER_SINGLE_THREADED
+        OsTestThreadLivenessState liveness = {0};
+        OsThreadHandle* thread = os_thread_create((ThreadCreateOptions){
+            .callback = &os_test_thread_liveness,
+            .argument = &liveness,
+        });
+        BUSTER_TEST(arguments, thread != 0);
+        if (thread)
+        {
+            while (!liveness.started)
+            {
+            }
+            BUSTER_TEST(arguments, !os_is_only_live_thread());
+            atomic_u64_increment(&liveness.release);
+            BUSTER_TEST(arguments, os_thread_join(thread));
+            BUSTER_TEST(arguments, os_is_only_live_thread());
+            BUSTER_TEST(arguments, liveness.worker_saw_only_live_thread == 0);
+        }
+#endif
     }
 
     // lane_range must hand out contiguous shares that cover the input exactly,

@@ -296,6 +296,11 @@ struct CodegenModuleOptions
     u8 reserved[6];
 };
 
+// Fills the per-abi target cache on the calling thread. Call before lane_run;
+// the cache is read without synchronization, so a gang that reaches it
+// unwarmed reports through BUSTER_CHECK_SERIAL_INITIALIZATION instead of
+// racing. compiler_prewarm() covers this along with the rest of the compiler.
+BUSTER_F_DECL void codegen_prewarm(void);
 BUSTER_F_DECL CodegenAbi codegen_abi_for_target(Target target);
 BUSTER_F_DECL CodegenAbiSignature codegen_classify_signature(Arena* arena, AnalysisResult* analysis, AnalysisTypeId function_type, CodegenAbi abi);
 BUSTER_F_DECL CodegenFunction codegen_generate_function(Arena* arena, AnalysisResult* analysis, IrFunction* function, Target target);

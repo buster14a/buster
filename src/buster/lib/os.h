@@ -152,6 +152,9 @@ BUSTER_F_DECL OsFileDescriptor* os_get_stdout(void);
 BUSTER_F_DECL OsFileDescriptor* os_get_standard_stream(StandardStream stream);
 BUSTER_F_DECL OsThreadHandle* os_thread_create(ThreadCreateOptions options);
 BUSTER_F_DECL bool os_thread_join(OsThreadHandle* handle);
+// True while every thread this process started through os_thread_create has
+// been joined, so the caller is the only one that can be touching a global.
+BUSTER_F_DECL bool os_is_only_live_thread(void);
 
 // Single-threaded builds compile the barrier out entirely: nothing in them
 // can ever wait on one, and the tcc bootstrap's own Win32 headers and import
@@ -173,9 +176,10 @@ typedef u64 AtomicU64;
 typedef _Atomic u64 AtomicU64;
 #endif
 
-// Both return the value the address held before the addition. In
+// All three return the value the address held before the addition. In
 // single-threaded builds they compile to plain arithmetic.
 BUSTER_F_DECL u64 atomic_u64_increment(AtomicU64* address);
+BUSTER_F_DECL u64 atomic_u64_decrement(AtomicU64* address);
 BUSTER_F_DECL u64 atomic_u64_add(AtomicU64* address, u64 addend);
 
 typedef enum ProgramFlag
@@ -248,6 +252,19 @@ BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_raw(u32 line, String8 fun
 #define os_fail() os_fail_message(S8("internal error"))
 #define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("assertion failed")), 0) : 0))
 #define BUSTER_CHECK_RAW(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message_raw(S8("assertion failed")), 0) : 0))
+// Stated by every global table that is still built on first use. Those builds
+// are unsynchronized on purpose: they run once and every later read is a plain
+// load, which is only sound while no other thread can be reading. A caller
+// that reaches one with threads running skipped the module's prewarm entry
+// point, so say that instead of racing. Always compiled in -- the whole point
+// is the build that nobody profiled going parallel.
+//
+// A prewarm is sufficient and not merely likely to work: thread creation is a
+// happens-before edge in both C11 and POSIX, so a table completed before
+// os_thread_create is fully visible to the thread it starts, with no fence of
+// the table's own.
+#define BUSTER_CHECK_SERIAL_INITIALIZATION()                                                                                                                   \
+    ((void)(BUSTER_UNLIKELY(!os_is_only_live_thread()) ? (os_fail_message(S8("global table built while other threads run; prewarm it first")), 0) : 0))
 #define BUSTER_TODO_MESSAGE(message, ...)                                                                                                                      \
     do                                                                                                                                                         \
     {                                                                                                                                                          \

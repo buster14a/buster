@@ -72,12 +72,14 @@ BUSTER_GLOBAL_LOCAL bool tokenizer_is_identifier_continue(u8 ch)
 
 // One byte per character value, built from tokenizer_is_identifier_continue at
 // first use so the two cannot drift. The identifier scan ANDs eight entries
-// per step instead of branching per byte.
+// per step instead of branching per byte. tokenizer_prewarm() fills it ahead
+// of any gang; see the note there on why it is not a constant initializer.
 BUSTER_GLOBAL_LOCAL u8 tokenizer_identifier_continue_table[256];
 BUSTER_GLOBAL_LOCAL bool tokenizer_identifier_continue_table_built;
 
 BUSTER_GLOBAL_LOCAL void tokenizer_identifier_continue_table_build(void)
 {
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
     for (u32 ch = 0; ch < 256; ch += 1)
     {
         tokenizer_identifier_continue_table[ch] = tokenizer_is_identifier_continue((u8)ch) ? 1 : 0;
@@ -120,6 +122,7 @@ BUSTER_GLOBAL_LOCAL bool tokenizer_string_plain_table_built;
 
 BUSTER_GLOBAL_LOCAL void tokenizer_string_plain_table_build(void)
 {
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
     for (u32 ch = 0; ch < 256; ch += 1)
     {
         bool special = ch >= 0x80u || ch == '"' || ch == '\\' || ch == '\n' || ch == '\r' || ch == ';';
@@ -446,6 +449,7 @@ BUSTER_GLOBAL_LOCAL u32 tokenizer_keyword_hash(const char8* pointer, u64 length)
 
 BUSTER_GLOBAL_LOCAL void tokenizer_keyword_slots_build(void)
 {
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
     for (u32 keyword_index = 0; keyword_index < KEYWORD_COUNT; keyword_index += 1)
     {
         String8 keyword = tokenizer_keyword_names[keyword_index];
@@ -1171,6 +1175,7 @@ enum
 
 BUSTER_GLOBAL_LOCAL void tokenizer_compact_tables_build(void)
 {
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
     for (u32 ch = 0; ch < 64; ch += 1)
     {
         tokenizer_compact_iota[ch] = (u8)ch;
@@ -1661,6 +1666,35 @@ TokenizerResult tokenize(Arena* arena, const char8* restrict file_pointer, u64 f
     return tokenize_compact(arena, file_pointer, file_length);
 #else
     return tokenize_scalar(arena, file_pointer, file_length);
+#endif
+}
+
+// Every tokenizer table that is built on first use, filled here on the calling
+// thread instead. Constant initializers would need none of this, but the
+// character-class tables are the ones that could be written that way and doing
+// it through the preprocessor was measured at +178.8 M stage-1 instructions
+// (+3.5%) for 112 k extra preprocessed tokens -- one predicate expansion per
+// byte value per table. Derivation at first use stays; what changes is that it
+// can be forced to happen while the process is serial.
+void tokenizer_prewarm(void)
+{
+    if (!tokenizer_identifier_continue_table_built)
+    {
+        tokenizer_identifier_continue_table_build();
+    }
+    if (!tokenizer_string_plain_table_built)
+    {
+        tokenizer_string_plain_table_build();
+    }
+    if (!tokenizer_keyword_slots_built)
+    {
+        tokenizer_keyword_slots_build();
+    }
+#if BUSTER_TOKENIZER_COMPACT
+    if (!tokenizer_compact_tables_built)
+    {
+        tokenizer_compact_tables_build();
+    }
 #endif
 }
 

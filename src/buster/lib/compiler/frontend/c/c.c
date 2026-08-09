@@ -188,12 +188,13 @@ BUSTER_GLOBAL_LOCAL bool c_identifier_continue(char8 character)
 // One byte per character value: nonzero when the character continues an
 // identifier. Built from c_identifier_continue at first use so the two can
 // never drift; the lexer's identifier run scan ANDs eight entries per step
-// instead of branching per byte.
+// instead of branching per byte. c_prewarm() fills it ahead of any gang.
 BUSTER_GLOBAL_LOCAL u8 c_identifier_continue_table[256];
 BUSTER_GLOBAL_LOCAL bool c_identifier_continue_table_built;
 
 BUSTER_GLOBAL_LOCAL void c_identifier_continue_table_build(void)
 {
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
     for (u32 character = 0; character < 256; character += 1)
     {
         c_identifier_continue_table[character] = c_identifier_continue((char8)character) ? 1 : 0;
@@ -235,6 +236,7 @@ BUSTER_GLOBAL_LOCAL bool c_literal_plain_table_built;
 
 BUSTER_GLOBAL_LOCAL void c_literal_plain_table_build(void)
 {
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
     for (u32 character = 0; character < 256; character += 1)
     {
         bool special = character == '"' || character == '\'' || character == '\\' || character == '\n';
@@ -845,6 +847,7 @@ BUSTER_GLOBAL_LOCAL bool c_punctuator_dispatch_built;
 
 BUSTER_GLOBAL_LOCAL void c_punctuator_dispatch_build(void)
 {
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
     u32 cursor = 0;
     for (u32 first = 0; first < 256; first += 1)
     {
@@ -5378,6 +5381,7 @@ BUSTER_GLOBAL_LOCAL bool c_declaration_keyword_slots_built;
 
 BUSTER_GLOBAL_LOCAL void c_declaration_keyword_slots_build(void)
 {
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
     for (u32 keyword_index = 0; keyword_index < BUSTER_ARRAY_LENGTH(c_declaration_keyword_spellings); keyword_index += 1)
     {
         u32 slot = (u32)(c_macro_name_hash(c_declaration_keyword_spellings[keyword_index]) & (C_DECLARATION_KEYWORD_SLOT_COUNT - 1));
@@ -5388,6 +5392,30 @@ BUSTER_GLOBAL_LOCAL void c_declaration_keyword_slots_build(void)
         c_declaration_keyword_slots[slot] = (u8)(keyword_index + 1);
     }
     c_declaration_keyword_slots_built = true;
+}
+
+// Every C frontend table that is built on first use, filled here on the
+// calling thread instead. See tokenizer_prewarm() for why the character-class
+// tables are still derived at runtime rather than spelled as constant
+// initializers.
+void c_prewarm(void)
+{
+    if (!c_identifier_continue_table_built)
+    {
+        c_identifier_continue_table_build();
+    }
+    if (!c_literal_plain_table_built)
+    {
+        c_literal_plain_table_build();
+    }
+    if (!c_punctuator_dispatch_built)
+    {
+        c_punctuator_dispatch_build();
+    }
+    if (!c_declaration_keyword_slots_built)
+    {
+        c_declaration_keyword_slots_build();
+    }
 }
 
 BUSTER_GLOBAL_LOCAL bool c_declaration_keyword(String8 spelling)

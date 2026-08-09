@@ -9,6 +9,13 @@
 #include <buster/lib/file.h>
 #include <buster/lib/string.h>
 
+void compiler_prewarm(void)
+{
+    tokenizer_prewarm();
+    c_prewarm();
+    codegen_prewarm();
+}
+
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_option_value(String8 argument, String8 prefix)
 {
     if (!string_starts_with_sequence(argument, prefix))

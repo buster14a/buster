@@ -151,6 +151,10 @@ String8 font_file_get_path(FontIndex index)
 
     if (!font_config_initialized)
     {
+        // Discovery runs once and every later call reads the resolved table
+        // with a plain load, so it has to happen while the process is still
+        // serial -- font_provider_prewarm() is the way to force that.
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
         font_config_initialized = true;
         TemporalArena temp = scratch_begin(0, 0);
         String8 candidates[BUSTER_FONT_CANDIDATE_CAPACITY] = {0};
@@ -278,6 +282,13 @@ String8 font_file_get_path(FontIndex index)
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(table) == (u64)FONT_INDEX_COUNT);
 
     return table[(u64)index];
+}
+
+// Resolves the system font paths on the calling thread, so a later query from
+// a gang reads a table nobody is still writing.
+void font_provider_prewarm(void)
+{
+    (void)font_file_get_path(FONT_INDEX_MONO);
 }
 
 #define USE_STB_TRUETYPE 0

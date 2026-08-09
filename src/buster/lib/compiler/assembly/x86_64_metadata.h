@@ -843,6 +843,14 @@ struct BusterX86MetadataCoverageAuditResult
     u32 family_blocked_counts[BUSTER_X86_METADATA_ENCODER_COUNT];
 };
 
+// Decodes the generated tables and fills every demand-filled cache over them,
+// on the calling thread. Call before lane_run: the module's queries otherwise
+// write those caches on first use and read them back with plain loads, which
+// is only sound while nothing else can be reading. A gang that reaches one
+// unwarmed reports through BUSTER_CHECK_SERIAL_INITIALIZATION instead of
+// racing. Costs a full decode plus one normalization and pattern parse per
+// form, so a program that never queries x86 metadata should not call it.
+BUSTER_F_DECL void buster_x86_metadata_prewarm(void);
 BUSTER_F_DECL u32 buster_x86_metadata_schema_version(void);
 BUSTER_F_DECL u32 buster_x86_metadata_form_count(void);
 BUSTER_F_DECL u32 buster_x86_metadata_normalized_form_count(void);

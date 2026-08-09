@@ -492,6 +492,30 @@ history.
   stages must stay deterministic — write results into slots indexed by work
   item, never by completion order — so the self-hosting fixed point stays
   byte-identical at any lane count.
+- **A global built on first use is prewarmed, never raced.** Several hot
+  tables are derived once and read forever after through plain loads — the
+  tokenizer's character classes, keyword slots and operator NFA, the C
+  frontend's punctuator dispatch and declaration keywords, the codegen ABI
+  target cache, the font provider's resolved paths, and the x86 metadata
+  decode plus the three caches over it. That shape is sound only while no
+  other thread can be reading, so every such build states
+  `BUSTER_CHECK_SERIAL_INITIALIZATION()` (`<buster/lib/os.h>`, always
+  compiled in, over `os_is_only_live_thread()`), and every owning module
+  publishes a prewarm entry point that fills it on the calling thread:
+  `tokenizer_prewarm`, `c_prewarm`, `codegen_prewarm`,
+  `font_provider_prewarm`, `buster_x86_metadata_prewarm`, and
+  `compiler_prewarm` for the compile pipeline as a whole. **Call the prewarm
+  before `lane_run`** — x86 metadata separately, since no part of the compile
+  path queries it and its prewarm costs a full table decode. A new lazily
+  built global adds both the check and a line in its module's prewarm.
+  Publish the flag *after* the state, never before: the x86 metadata decode
+  needs two flags for this, one guarding re-entry from the validation it runs
+  and one, set last, that every accessor tests. Spelling the character-class
+  tables as constant initializers over a predicate macro would remove four of
+  these outright, and was measured at **+178.8 M stage-1 instructions
+  (+3.5%)** for 112 k extra preprocessed tokens — one predicate expansion per
+  byte value per table. A real generator writing the bytes into source would
+  not cost that; the preprocessor doing it at every compile does.
 - **Microarchitecture tuning target: design for Zen 5's native 512-bit
   width; Zen 4 must break even, Zen 5 collects the upside.** The main
   development machine is a Ryzen 9 7940HS (Zen 4) and the CI x86-64 runners

@@ -775,6 +775,12 @@ BUSTER_F_DECL TokenizerResult tokenize(Arena* arena, const char8* restrict file_
 // compare the two streams byte for byte.
 BUSTER_F_DECL TokenizerResult tokenize_scalar(Arena* arena, const char8* restrict file_pointer, u64 file_length);
 BUSTER_F_DECL ParserResult parser_parse(Arena* result_arena, Arena* expression_arena, String8 source, TokenizerResult tokenizer);
+// Fills the tokenizer's remaining first-use tables on the calling thread.
+// Call before lane_run; the tables are read without synchronization, so a
+// gang that reaches one unwarmed reports through
+// BUSTER_CHECK_SERIAL_INITIALIZATION instead of racing. compiler_prewarm()
+// covers this along with the rest of the compiler.
+BUSTER_F_DECL void tokenizer_prewarm(void);
 
 #if BUSTER_INSTRUMENT
 typedef struct ParserBenchFileResult ParserBenchFileResult;

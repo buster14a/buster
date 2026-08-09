@@ -431,6 +431,12 @@ BUSTER_GLOBAL_LOCAL void x86_64_metadata_test_concurrent_lookup(void* argument)
 
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_lookup_stress(void)
 {
+    // The contract the threads below depend on: every table and demand-filled
+    // cache this module answers from is written while the process is still
+    // serial, so the lookups are pure reads. Without it the first lookup in
+    // each thread would race the decode, and the module says so through
+    // BUSTER_CHECK_SERIAL_INITIALIZATION rather than producing torn answers.
+    buster_x86_metadata_prewarm();
     X86_64MetadataConcurrentLookupState state = {0};
     atomic_init(&state.start, false);
     atomic_init(&state.failed, false);

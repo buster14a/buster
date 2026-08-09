@@ -889,6 +889,12 @@ struct CIRLowerResult
     u32 diagnostic_count;
 };
 
+// Fills the C frontend's remaining first-use tables on the calling thread.
+// Call before lane_run; the tables are read without synchronization, so a
+// gang that reaches one unwarmed reports through
+// BUSTER_CHECK_SERIAL_INITIALIZATION instead of racing. compiler_prewarm()
+// covers this along with the rest of the compiler.
+BUSTER_F_DECL void c_prewarm(void);
 BUSTER_F_DECL CLexResult c_lex(Arena* arena, String8 source);
 BUSTER_F_DECL CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options);
 BUSTER_F_DECL void c_source_metrics_add(CSourceMetrics* total, CSourceMetrics const* part);

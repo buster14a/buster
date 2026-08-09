@@ -496,12 +496,29 @@ OsFileDescriptor* os_get_stdout(void)
     return result;
 }
 
+// Threads this process started through os_thread_create and has not yet seen
+// return. A global built on first use and read afterwards through plain loads
+// is only sound to build while this is zero, which is what
+// os_is_only_live_thread() reports and BUSTER_CHECK_SERIAL_INITIALIZATION
+// states. Counted rather than derived from the lane context because a raw
+// os_thread_create thread is a lane of one and would look serial.
+BUSTER_GLOBAL_LOCAL AtomicU64 os_live_thread_count;
+
+bool os_is_only_live_thread(void)
+{
+    bool result = os_live_thread_count == 0;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void thread_entry_point(ThreadCallback* user_entry_point, void* user_argument)
 {
     ThreadContext* thread_context = thread_context_allocate();
     thread_context_select(thread_context);
     user_entry_point(user_argument);
     thread_context_release(thread_context);
+    // Last, so the count covers every instant this thread could still have
+    // touched a shared global. os_thread_join returns after this store.
+    atomic_u64_decrement(&os_live_thread_count);
 }
 
 #if defined(__linux__) || defined(__APPLE__)
@@ -526,11 +543,15 @@ OsThreadHandle* os_thread_create(ThreadCreateOptions options)
     OsEntity* result = os_entity_allocate(OS_ENTITY_KIND_THREAD);
     result->thread.callback = options.callback;
     result->thread.argument = options.argument;
+    // Counted before the thread exists rather than from inside it, so no
+    // window has the new thread running while the process still looks serial.
+    atomic_u64_increment(&os_live_thread_count);
 #if defined(__linux__) || defined(__APPLE__)
     int create_result = pthread_create(&result->thread.handle, 0, &pthread_entry_point, result);
     bool os_result = create_result == 0;
     if (!os_result)
     {
+        atomic_u64_decrement(&os_live_thread_count);
         os_entity_release(result);
         result = 0;
     }
@@ -542,6 +563,7 @@ OsThreadHandle* os_thread_create(ThreadCreateOptions options)
     }
     else
     {
+        atomic_u64_decrement(&os_live_thread_count);
         os_entity_release(result);
         result = 0;
     }
@@ -673,6 +695,14 @@ u64 atomic_u64_add(AtomicU64* address, u64 addend)
 u64 atomic_u64_increment(AtomicU64* address)
 {
     u64 result = atomic_u64_add(address, 1);
+    return result;
+}
+
+u64 atomic_u64_decrement(AtomicU64* address)
+{
+    // Two's complement wrap, which is what every fetch_add lowers a subtract
+    // to anyway; there is no separate fetch_sub to reach for on MSVC.
+    u64 result = atomic_u64_add(address, ~(u64)0);
     return result;
 }
 

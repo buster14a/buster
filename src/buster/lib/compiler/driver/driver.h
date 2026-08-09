@@ -134,6 +134,16 @@ struct CompilerDriverResult
     u8 reserved[3];
 };
 
+// Fills every table the compile pipeline builds on first use -- tokenizer, C
+// frontend, codegen -- on the calling thread. Call this before lane_run:
+// those tables are written once and read afterwards through plain loads, so
+// they must be complete before a second lane can reach them, and a gang that
+// finds one unwarmed reports through BUSTER_CHECK_SERIAL_INITIALIZATION
+// rather than racing. x86 assembly metadata is deliberately not included: no
+// part of the compile path queries it, and its prewarm costs a full table
+// decode, so a caller that runs the assembler in a gang asks
+// buster_x86_metadata_prewarm() for it directly.
+BUSTER_F_DECL void compiler_prewarm(void);
 BUSTER_F_DECL CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions options);
 BUSTER_F_DECL CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments);
 BUSTER_F_DECL CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation);

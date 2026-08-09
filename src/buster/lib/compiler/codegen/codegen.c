@@ -611,6 +611,7 @@ Target codegen_target_for_abi(CodegenAbi abi)
 {
     if (!codegen_abi_targets_built)
     {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
         for (u32 abi_index = 0; abi_index < CODEGEN_ABI_COUNT; abi_index += 1)
         {
             bool x86 = abi_index == CODEGEN_ABI_X86_64_SYSTEM_V || abi_index == CODEGEN_ABI_X86_64_WINDOWS;
@@ -633,6 +634,12 @@ Target codegen_target_for_abi(CodegenAbi abi)
     // An out-of-range abi used to fall through every x86/Windows/Darwin test,
     // which is exactly the AAPCS64 row.
     return codegen_abi_targets[(u32)abi < CODEGEN_ABI_COUNT ? (u32)abi : CODEGEN_ABI_AARCH64_AAPCS64];
+}
+
+// The one codegen table built on first use; asking for any abi fills them all.
+void codegen_prewarm(void)
+{
+    (void)codegen_target_for_abi(CODEGEN_ABI_X86_64_SYSTEM_V);
 }
 
 BUSTER_GLOBAL_LOCAL CodegenAbiSignature codegen_classify_signature_for_target(Arena* arena, AnalysisResult* analysis, AnalysisTypeId function_type_id,

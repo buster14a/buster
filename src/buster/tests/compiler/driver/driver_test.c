@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/driver/driver_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/tests/compiler/codegen/codegen_test.h>
+#include <buster/lib/compiler/frontend/buster/parser.h>
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_elf_section_find(ByteSlice image, String8 name, u64* offset, u64* size, u64* address)
 {
@@ -725,9 +726,116 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ByteSlice compiler_driver_test_archive(Ar
     return result;
 }
 
+// One lane's share of the prewarm gang test. Both frontends are driven end to
+// end so every table compiler_prewarm() is responsible for is queried, and
+// nothing is asserted here: test macros are not thread-safe, so each lane only
+// records what it saw and the caller compares the lanes afterwards.
+enum
+{
+    COMPILER_PREWARM_MAX_LANE_COUNT = 8,
+};
+
+typedef struct CompilerPrewarmLaneObservation CompilerPrewarmLaneObservation;
+struct CompilerPrewarmLaneObservation
+{
+    u64 buster_token_count;
+    u64 buster_diagnostic_count;
+    u64 c_token_count;
+    u64 c_error_count;
+    u64 c_declaration_count;
+    u32 abi_cpu_arch;
+    u8 ran;
+    u8 reserved[3];
+};
+
+typedef struct CompilerPrewarmGangState CompilerPrewarmGangState;
+struct CompilerPrewarmGangState
+{
+    String8 buster_source;
+    String8 c_source;
+    CompilerPrewarmLaneObservation observations[COMPILER_PREWARM_MAX_LANE_COUNT];
+};
+
+BUSTER_GLOBAL_LOCAL void compiler_prewarm_observe(CompilerPrewarmGangState* state, CompilerPrewarmLaneObservation* observation)
+{
+    // Lane-owned arenas rather than the caller's or the thread's scratch: the
+    // caller's is shared across lanes, and parser_parse() needs a result and a
+    // staging arena that both differ from the two scratch arenas it borrows.
+    Arena* result_arena = arena_create((ArenaCreation){0});
+    Arena* staging_arena = arena_create((ArenaCreation){0});
+
+    TokenizerResult tokens = tokenize(result_arena, state->buster_source.pointer, state->buster_source.length);
+    observation->buster_token_count = tokens.token_count;
+    ParserResult syntax = parser_parse(result_arena, staging_arena, state->buster_source, tokens);
+    observation->buster_diagnostic_count = syntax.diagnostic_count;
+
+    CPreprocessResult preprocess = c_preprocess(result_arena, state->c_source, (CPreprocessOptions){0});
+    observation->c_token_count = preprocess.token_count;
+    observation->c_error_count = preprocess.error_count;
+    CParserResult parsed = c_parse_ast(result_arena, preprocess);
+    observation->c_declaration_count = parsed.declaration_count;
+
+    observation->abi_cpu_arch = (u32)codegen_target_for_abi(CODEGEN_ABI_X86_64_SYSTEM_V).cpu_arch;
+    observation->ran = 1;
+
+    arena_destroy(staging_arena, 1);
+    arena_destroy(result_arena, 1);
+}
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_prewarm_gang(void* argument)
+{
+    CompilerPrewarmGangState* state = (CompilerPrewarmGangState*)argument;
+    compiler_prewarm_observe(state, &state->observations[lane_index()]);
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+
+    // compiler_prewarm() is the contract that lets a gang compile at all: the
+    // frontends' remaining first-use tables are written once and read
+    // afterwards through plain loads, so they must already be complete when
+    // the second lane starts. Prewarm, run the same work on every lane, and
+    // require every lane to reproduce the serial answer exactly -- a table
+    // left out of the prewarm shows up either as this mismatch or as the
+    // BUSTER_CHECK_SERIAL_INITIALIZATION the build hits from inside the gang.
+    {
+        Arena* arena = arguments->arena;
+        u64 position = arena->position;
+
+        CompilerPrewarmGangState* state = arena_allocate(arena, CompilerPrewarmGangState, 1);
+        memset(state, 0, sizeof(*state));
+        state->buster_source = S8("code main : fn () s32\n{\n    data total: s32 = 1 + 2;\n    return total;\n}\n");
+        state->c_source = S8("static int compiler_prewarm_probe(int value)\n{\n    return value ? value + 1 : 0;\n}\n");
+
+        compiler_prewarm();
+
+        CompilerPrewarmLaneObservation serial = {0};
+        compiler_prewarm_observe(state, &serial);
+        BUSTER_TEST(arguments, serial.ran && serial.buster_token_count && serial.c_token_count && !serial.c_error_count);
+
+#if BUSTER_SINGLE_THREADED
+        u64 lanes = 1;
+#else
+        u64 lanes = BUSTER_MIN((u64)COMPILER_PREWARM_MAX_LANE_COUNT, (u64)os_get_logical_thread_count());
+        lanes = BUSTER_MAX(lanes, (u64)1);
+#endif
+        lane_run(lanes, &compiler_prewarm_gang, state);
+
+        bool lanes_agree = true;
+        for (u64 lane = 0; lane < lanes; lane += 1)
+        {
+            CompilerPrewarmLaneObservation* observation = &state->observations[lane];
+            lanes_agree = lanes_agree && observation->ran && observation->buster_token_count == serial.buster_token_count &&
+                          observation->buster_diagnostic_count == serial.buster_diagnostic_count &&
+                          observation->c_token_count == serial.c_token_count && observation->c_error_count == serial.c_error_count &&
+                          observation->c_declaration_count == serial.c_declaration_count && observation->abi_cpu_arch == serial.abi_cpu_arch;
+        }
+        BUSTER_TEST(arguments, lanes_agree);
+
+        arena->position = position;
+    }
+
     String8 command_line[] = {
         S8("-c"),
         S8("-std=gnu23"),
