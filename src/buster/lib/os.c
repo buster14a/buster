@@ -1096,22 +1096,38 @@ OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions pe
     return result;
 }
 
+// Neither platform's transfer primitive takes a u64 count: WriteFile/ReadFile
+// take a DWORD, and write(2)/read(2) are only defined up to SSIZE_MAX. The
+// partial helpers below clamp to that limit and let their callers' loops
+// resume, because narrowing the count instead silently corrupted every request
+// of 4 GiB or more — an exactly 4 GiB one became a zero-byte request, which
+// os_file_write then retried forever without making progress.
+#if defined(_WIN32)
+#define OS_FILE_TRANSFER_MAX ((u64)UINT32_MAX)
+#else
+#define OS_FILE_TRANSFER_MAX ((u64)(SIZE_MAX >> 1))
+#endif
+
 BUSTER_GLOBAL_LOCAL u64 os_file_write_partially(OsFileDescriptor* file_descriptor, void* pointer, u64 length)
 {
+    u64 request_byte_count = BUSTER_CLAMP_TOP(length, OS_FILE_TRANSFER_MAX);
 #if defined(__linux__) || defined(__APPLE__)
     int fd = generic_fd_to_posix(file_descriptor);
     ssize_t result;
     do
     {
-        result = write(fd, pointer, length);
+        result = write(fd, pointer, (size_t)request_byte_count);
     } while (result < 0 && errno == EINTR);
     BUSTER_CHECK(result > 0);
     return (u64)result;
 #elif defined(_WIN32)
     HANDLE fd = generic_fd_to_windows(file_descriptor);
     DWORD written_byte_count = 0;
-    BOOL result = WriteFile(fd, pointer, (u32)length, &written_byte_count, 0);
+    BOOL result = WriteFile(fd, pointer, (DWORD)request_byte_count, &written_byte_count, 0);
     BUSTER_CHECK(result);
+    // Matches the POSIX branch: a success that moved nothing is a failure to
+    // the caller's loop, not a step it can be asked to repeat.
+    BUSTER_CHECK(written_byte_count > 0);
     return written_byte_count;
 #endif
 }
@@ -1131,9 +1147,14 @@ BUSTER_GLOBAL_LOCAL u64 os_file_read_partially(OsFileDescriptor* file_descriptor
 {
     u64 result = 0;
     bool success = true;
+    u64 request_byte_count = BUSTER_CLAMP_TOP(byte_count, OS_FILE_TRANSFER_MAX);
 #if defined(__linux__) || defined(__APPLE__)
     int fd = generic_fd_to_posix(file_descriptor);
-    ssize_t read_byte_count = read(fd, buffer, byte_count);
+    ssize_t read_byte_count;
+    do
+    {
+        read_byte_count = read(fd, buffer, (size_t)request_byte_count);
+    } while (read_byte_count < 0 && errno == EINTR);
     success = read_byte_count >= 0;
     if (success)
     {
@@ -1142,7 +1163,7 @@ BUSTER_GLOBAL_LOCAL u64 os_file_read_partially(OsFileDescriptor* file_descriptor
 #elif defined(_WIN32)
     HANDLE fd = generic_fd_to_windows(file_descriptor);
     DWORD read_byte_count = 0;
-    success = ReadFile(fd, buffer, (u32)byte_count, &read_byte_count, 0) != 0;
+    success = ReadFile(fd, buffer, (DWORD)request_byte_count, &read_byte_count, 0) != 0;
     if (success)
     {
         result = read_byte_count;
