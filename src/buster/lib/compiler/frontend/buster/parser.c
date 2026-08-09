@@ -1606,24 +1606,24 @@ BUSTER_GLOBAL_LOCAL TokenizerResult tokenize_compact(Arena* arena, const char8* 
             Token* out = token_start + token_count;
             __m512i lengths_16 = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(lengths));
             __m512i kinds_16 = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(kinds_compressed));
-            _mm512_storeu_si512((__m512i*)(out + 0), _mm512_or_si512(lengths_16, _mm512_slli_epi32(kinds_16, 24)));
+            _mm512_storeu_si512((__m512i*)(out + 0), _mm512_or_si512(kinds_16, _mm512_slli_epi32(lengths_16, 8)));
             if (emit_count > 16)
             {
                 lengths_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(lengths, 1));
                 kinds_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(kinds_compressed, 1));
-                _mm512_storeu_si512((__m512i*)(out + 16), _mm512_or_si512(lengths_16, _mm512_slli_epi32(kinds_16, 24)));
+                _mm512_storeu_si512((__m512i*)(out + 16), _mm512_or_si512(kinds_16, _mm512_slli_epi32(lengths_16, 8)));
             }
             if (emit_count > 32)
             {
                 lengths_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(lengths, 2));
                 kinds_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(kinds_compressed, 2));
-                _mm512_storeu_si512((__m512i*)(out + 32), _mm512_or_si512(lengths_16, _mm512_slli_epi32(kinds_16, 24)));
+                _mm512_storeu_si512((__m512i*)(out + 32), _mm512_or_si512(kinds_16, _mm512_slli_epi32(lengths_16, 8)));
             }
             if (emit_count > 48)
             {
                 lengths_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(lengths, 3));
                 kinds_16 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(kinds_compressed, 3));
-                _mm512_storeu_si512((__m512i*)(out + 48), _mm512_or_si512(lengths_16, _mm512_slli_epi32(kinds_16, 24)));
+                _mm512_storeu_si512((__m512i*)(out + 48), _mm512_or_si512(kinds_16, _mm512_slli_epi32(lengths_16, 8)));
             }
             token_count += emit_count;
             it += emit_bound;

@@ -216,17 +216,37 @@ own session per that scoping; every number clang-built on a quiet machine.)
   so both paths agree on every hard case by construction. Corpus trigger
   rates: apostrophes in 2 of 193 chunks, `?` twice, non-ASCII zero.
 - **Numbers (bench = the primary metric; the tokenizer is not on the
-  stage-1 cc path):** `ide bench` **`409.8 M` to `345.0 M` instructions
-  (`-15.8%`)**, `BENCH_PARSE` median `57.1 k` to `47.0 k` ns (`-17.7%`
-  same-session pairing; the baseline's day spread was `55-57 k`), min
-  `55.1 k` to `44.5 k`; `BENCH_IO` median `~226 k` to `~218 k` ns; branches
-  `68.10 M` to `59.18 M` (`-13.1%`), branch misses `~750 k` to `~440 k`
-  (`-41%`); L1d load misses `2.62 M` to `3.00 M` (`+0.4 M`, the kinds-array
-  round-trip and the 640 bytes of tables). Stage 1 `4.9984 G` — neutral as
-  required. Fixed point deterministic (`SELF_HOST deterministic
-  bytes=26044840`; the byte count moved because the self-hosted stages
-  compile the refactored fallback source). All 19372 Release unit tests and
-  all 29 sanitized modules pass.
+  stage-1 cc path):** `ide bench` **`409.8 M` to `343.2 M` instructions
+  (`-16.2%`; `345.0 M` as first landed, then `-1.8 M` more from the Token
+  layout fix below)**, `BENCH_PARSE` median `57.1 k` to `~47 k` ns
+  (`-17.7%` same-session pairing; the baseline's day spread was `55-57 k`),
+  min `55.1 k` to `44.5 k`; `BENCH_IO` median `~226 k` to `~218 k` ns;
+  branches `68.10 M` to `59.18 M` (`-13.1%`), branch misses `~750 k` to
+  `~440 k` (`-41%`); L1d load misses `2.62 M` to `3.00 M` (`+0.4 M`, the
+  kinds-array round-trip and the 640 bytes of tables). Stage 1 `4.9984 G`
+  — neutral as required. Fixed point deterministic. All 19372 Release unit
+  tests and all 29 sanitized modules pass.
+- **Trap paid for on the Windows runner (the fix landed as its own commit
+  in this series): a bitfield row is not one layout across ABIs.** `Token`
+  was `u32 length : 24;` followed by a plain `u8 id` — 4 bytes under the
+  Itanium ABI, but **8 bytes under the MSVC bitfield rules** (clang and
+  GCC on Windows both follow them: a non-bitfield member is placed after
+  the bitfield's full allocation unit), so the emitter's packed u32 stores
+  wrote garbage rows on `x86_64-windows-znver5` (CI task 16409:
+  `ide_document_tests` lost every import; only that runner compiles AND
+  executes the compact path — the shared Linux runner, the Android
+  emulator job, and macOS all run the scalar fallback or skip). Local
+  triage that did NOT reproduce it: znver5 tuning, GCC, clang 21.1.8, and
+  the runner's exact clang 22.1.0 — all on Linux; a freestanding
+  differential harness cross-compiled `--target=x86_64-pc-windows-msvc`
+  and run under Wine reproduced it exactly (pre-fix struct fails on the
+  first `import` source, fixed struct clean). The fix makes both fields
+  share one u32 allocation unit (`u32 id : 8; u32 length : 24;`) with
+  `BUSTER_CT_CHECK(sizeof(Token) == 4)` so any ABI drift fails the build;
+  putting **id in the low byte** turned the parser's per-token kind checks
+  into single byte loads and measured `-1.8 M` under the original
+  length-low layout (the interim length-low/id-high bitfield variant had
+  measured `+10.6 M` — do not put the kind byte behind a 24-bit field).
 - **The differential gate that made this safe:** `tokenize_scalar` stays
   exported and `parser_tokenizer_tests` now asserts the two streams are
   byte-identical (`memcmp` over the token rows plus both counters) for 43
@@ -253,13 +273,16 @@ own session per that scoping; every number clang-built on a quiet machine.)
   and number-mask extents to retire the scalar number scanner's 1.4%. The
   parser itself (47.3%) is now decisively the bench lever — the
   `2026-08-08k` node-allocation-batching lead stands.
-- Reference points for the next audit, all clang-built on this host:
-  stage 1 `4.998 G` instructions / `~242 k` minor faults / `~145.7 M` L1d
-  load misses (unchanged from `2026-08-09a`), `ide bench` **`345.0 M`**
-  instructions per run, `BENCH_PARSE` median `~47 k ns`, `BENCH_IO` median
-  `~218 k ns`, `IrInstruction` 112 bytes, byte-identical fixed point
-  (`SELF_HOST deterministic bytes=26044840`). Stage 2 `70.9 G`, validation
-  only.
+- Reference points for the next audit, all clang-built on this host and
+  re-measured on the tree merged with `2026-08-09d`: stage 1 `4.9792 G`
+  instructions (`+1.75 M` over merged main's `4.9774 G` measured
+  back-to-back on this host — source-volume cost, the same class as the
+  `2026-08-08k` `+2.8 M`; the `09d` entry's `4.9615 G` was a different
+  tree state), `ide bench` **`343.2 M`** instructions per run,
+  `BENCH_PARSE` median `~47 k ns` on a quiet machine, `BENCH_IO` median
+  `~218 k ns`, `Token` 4 bytes on every ABI, `IrInstruction` 112 bytes,
+  byte-identical fixed point (`SELF_HOST deterministic bytes=26111672`).
+  Stage 2 `70.4 G`, validation only.
 
 `2026-08-09b` (Linux x86_64, Zen 4 7940HS; the operand/target/immediate
 pools + build/consume SoA row split that `2026-08-09a` scoped as the top

@@ -99,9 +99,19 @@ typedef u8 TokenId;
 typedef struct Token Token;
 struct Token
 {
+    // Both fields share one u32 allocation unit so the row is 4 bytes under
+    // every ABI: with a plain u8 id the MSVC bitfield rules (clang and GCC
+    // on Windows follow them) place id after the full u32 unit and the row
+    // grows to 8 bytes, which breaks the compaction emitter's packed
+    // id-low/length-high word stores. id sits in the low byte so the
+    // parser's per-token kind checks compile to a single byte load. The
+    // check below fails the build on any ABI where the packing does not
+    // hold.
+    u32 id : 8;
     u32 length : 24;
-    TokenId id;
 };
+
+BUSTER_CT_CHECK(sizeof(Token) == 4);
 
 enum
 {
