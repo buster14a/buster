@@ -1595,6 +1595,257 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_repeated_incomplete_arrays(UnitTestArg
     return result;
 }
 
+// The dispatched lexer (the compaction emitter on hosts that have one) must
+// produce a byte-identical result to the scalar reference loop for every
+// input. Token rows carry no pointers, so one memcmp covers the stream; the
+// measurement struct and the diagnostic kinds and locations are compared
+// field by field, because those are what the window pipeline reconstructs
+// from masks rather than from the branches it replaced.
+BUSTER_GLOBAL_LOCAL bool c_test_lex_paths_agree(Arena* arena, String8 source)
+{
+    u64 position = arena->position;
+    CLexResult dispatched = c_lex(arena, source);
+    CLexResult reference = c_lex_reference(arena, source);
+    bool result = dispatched.token_count == reference.token_count && dispatched.diagnostic_count == reference.diagnostic_count &&
+                  memcmp(&dispatched.metrics, &reference.metrics, sizeof(dispatched.metrics)) == 0 &&
+                  dispatched.translated_source.length == reference.translated_source.length;
+    if (result && dispatched.token_count)
+    {
+        result = memcmp(dispatched.tokens, reference.tokens, dispatched.token_count * sizeof(CToken)) == 0;
+    }
+    for (u64 index = 0; result && index < dispatched.diagnostic_count; index += 1)
+    {
+        CDiagnostic left = dispatched.diagnostics[index];
+        CDiagnostic right = reference.diagnostics[index];
+        result = left.kind == right.kind && left.severity == right.severity && string_equal(left.message, right.message) &&
+                 left.location.offset == right.location.offset && left.location.line == right.location.line && left.location.column == right.location.column;
+    }
+    arena->position = position;
+    return result;
+}
+
+// Every construct the compaction emitter models with masks and every shape it
+// escapes on, each slid across the 64-byte window boundary by a growing space
+// prefix so no construct is only ever seen window-aligned.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+
+    String8 differential_cases[] = {
+        S8("int main(void) { return 0; }"),
+        S8("a b c d e f g h i j k l m n o p q r s t u v w x y z"),
+        S8("\"simple\""),
+        S8("\"unterminated"),
+        S8("\"unterminated\nafter\""),
+        S8("\"esc\\\"aped\" x"),
+        S8("\"bs at end\\"),
+        S8("\"\\\\\" \"\\\\\\\"\" y"),
+        S8("\"\""),
+        S8("\"\"\"\""),
+        S8("\"a\" \"b\" \"c\" // \"not a string\"\n\"d\""),
+        S8("u8\"x\" u\"x\" U\"x\" L\"x\" u8'a' u'a' U'a' L'a'"),
+        S8("au8\"x\" xu'a' Lx\"y\" u8x'z' _L'q'"),
+        S8("'a' '' '\\'' '\\\\' 'ab' '\\n'"),
+        S8("'unterminated; x"),
+        S8("'\"' \"'\""),
+        S8("s['a'] = '\\''"),
+        S8("1'000 0x1'f 1'000'000u 12'34.5'6"),
+        S8("1e5L'a' 0x1p'q' 9'"),
+        S8("// comment with ' and \" inside\ncode"),
+        S8("///\n////=\n//=\n"),
+        S8("/* block */ x /*two*/ y"),
+        S8("/**/ /***/ /* * / */ /*/ still open */ z"),
+        S8("a/* first\nsecond */b\n"),
+        S8("/* unterminated"),
+        S8("/*\n\n\n*/"),
+        S8("x /* mixed */ // trailing\ny"),
+        S8("123 0x1f 017 0b101 1'000 0x 0b12 1..2 9.5.3"),
+        S8("1.5e+3 1.5e3 1.e+5 1.e5 0x1.8p-3 0x1p3 1e+5 5.x 1.foo"),
+        S8("0xZ 123abc 0b1cd 0x1fgh 0 00x1 9.5.3.7 1.5p3 0x1.8e+3 1___ 0b_1"),
+        S8(".5 .5e-2 a.5 a.b x..5 ...5 1.e+ 3e+ 3e"),
+        S8("<<= >>= ... -> ++ -- << >> <= >= == != && || *= /= %= += -= &= ^= |= ##"),
+        S8("<: :> <% %> %: %:%: %:%:%: %::% <:> <%>"),
+        S8("=== <<< >>>> .... ..= =>> <<== >>== ..."),
+        S8("[](){}.&*+-~!/%<>^|?:;=,#@\\"),
+        S8("a+=b-=c*=d/=e%=f&=g|=h^=i<<=j>>=k"),
+        S8("/=/ //= x"),
+        S8("p->q p ->q p-> q p - >q"),
+        S8("a---b a+++b a<<<b a>>>b"),
+        S8("`~ \x01\x02 \x7f\x1f"),
+        S8("\x00 embedded"),
+        S8("caf\xC3\xA9 x \xE2\x82\xAC \xF0\x9F\x98\x80 \x80 \xFF"),
+        S8("\"utf8 caf\xC3\xA9 in string\" x"),
+        S8("'\xC3\xA9'"),
+        S8("$dollar a$b $ $$"),
+        S8("a\\\nb"),
+        S8("line\r\nnext\rlast\n"),
+        S8("\r\n \n\r \r \n"),
+        S8("  \t\v\f  \t\t\v\v\f\f  "),
+        S8("\n\n\n\n"),
+        S8("#include <stdio.h>\n#define M(x) ((x) + 1)\n#if defined(A) && !defined(B)\n#endif\n"),
+        S8("struct S { int a : 3; unsigned b : 29; } s = { .a = -1, .b = 2u };"),
+    };
+    for (u64 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(differential_cases); case_index += 1)
+    {
+        String8 differential_case = differential_cases[case_index];
+        for (u64 pad = 0; pad < 67; pad += 1)
+        {
+            u64 padded_length = pad + differential_case.length;
+            char8* padded = arena_allocate(arena, char8, padded_length);
+            memset(padded, ' ', pad);
+            memcpy(padded + pad, differential_case.pointer, differential_case.length);
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){padded, padded_length}));
+            arena->position = position;
+        }
+    }
+
+    // Single items that cross or fill whole windows, which is the shape that
+    // sends the emitter to the scalar whole-token fallback.
+    {
+        u64 run_lengths[] = {1, 61, 62, 63, 64, 65, 66, 127, 128, 200};
+        for (u64 length_index = 0; length_index < BUSTER_ARRAY_LENGTH(run_lengths); length_index += 1)
+        {
+            u64 run_length = run_lengths[length_index];
+            u64 buffer_length = run_length + 8;
+            char8* buffer = arena_allocate(arena, char8, buffer_length);
+
+            memset(buffer, 'a', run_length);
+            buffer[run_length] = ';';
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){buffer, run_length + 1}));
+
+            memset(buffer, ' ', run_length);
+            buffer[run_length] = 'x';
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){buffer, run_length + 1}));
+
+            memset(buffer, '\n', run_length);
+            buffer[run_length] = 'x';
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){buffer, run_length + 1}));
+
+            buffer[0] = '/';
+            buffer[1] = '/';
+            memset(buffer + 2, 'c', run_length);
+            buffer[run_length + 2] = '\n';
+            buffer[run_length + 3] = 'x';
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){buffer, run_length + 4}));
+
+            buffer[0] = '/';
+            buffer[1] = '*';
+            memset(buffer + 2, 'c', run_length);
+            buffer[run_length + 2] = '*';
+            buffer[run_length + 3] = '/';
+            buffer[run_length + 4] = 'x';
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){buffer, run_length + 5}));
+
+            buffer[0] = '/';
+            buffer[1] = '*';
+            memset(buffer + 2, 'c', run_length);
+            buffer[2 + run_length / 2] = '\n';
+            buffer[run_length + 2] = '*';
+            buffer[run_length + 3] = '/';
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){buffer, run_length + 4}));
+
+            buffer[0] = '"';
+            memset(buffer + 1, 'b', run_length);
+            buffer[run_length + 1] = '"';
+            buffer[run_length + 2] = ' ';
+            buffer[run_length + 3] = 'y';
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){buffer, run_length + 4}));
+
+            buffer[0] = '"';
+            memset(buffer + 1, '\\', run_length);
+            buffer[run_length + 1] = '"';
+            buffer[run_length + 2] = 'y';
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){buffer, run_length + 3}));
+
+            buffer[0] = '1';
+            memset(buffer + 1, '0', run_length);
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){buffer, run_length + 1}));
+
+            memset(buffer, '.', run_length);
+            buffer[run_length] = '5';
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){buffer, run_length + 1}));
+
+            memset(buffer, '<', run_length);
+            buffer[run_length] = '=';
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){buffer, run_length + 1}));
+
+            arena->position = position;
+        }
+    }
+
+    // The real corpus: every C fixture the driver tests compile, plus the C
+    // frontend's own translation unit, which is the largest and most varied C
+    // file in the tree.
+    {
+        String8 corpus[] = {
+            S8("src/buster/lib/compiler/frontend/c/c.c"),
+            S8("src/buster/lib/compiler/frontend/c/c.h"),
+            S8("src/buster/lib/base.h"),
+            S8("src/buster/apps/ide/ide.c"),
+            S8("tests/basic_c_compile.c"),
+            S8("tests/basic_c_operations.c"),
+            S8("tests/basic_c_stdatomic.c"),
+            S8("tests/basic_c_generic.c"),
+            S8("tests/basic_c_vector.c"),
+            S8("tests/basic_c_asm.c"),
+            S8("tests/basic_c_preprocessor_error.c"),
+            S8("tests/basic_c_include.h"),
+        };
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(corpus); index += 1)
+        {
+            FileMapRead source_file = file_map_read(arena, corpus[index], (FileReadOptions){0});
+            String8 source = BYTE_SLICE_TO_STRING(8, source_file.bytes);
+            BUSTER_TEST(arguments, source.pointer != 0);
+            if (source.pointer)
+            {
+                BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, source));
+                // Then the head of the file at every offset modulo the window
+                // width, so no construct is only ever seen window-aligned.
+                for (u64 skip = 1; skip < 67 && skip < source.length; skip += 1)
+                {
+                    u64 slice = BUSTER_MIN(source.length - skip, BUSTER_KB(32));
+                    BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){source.pointer + skip, slice}));
+                }
+            }
+            file_map_unmap(source_file);
+            arena->position = position;
+        }
+    }
+
+    // Deterministic fuzz over the lexer's whole alphabet, which reaches the
+    // adjacency cases no hand-written fixture thinks of.
+    {
+        static const char8 fuzz_alphabet[] = " \t\v\f\n\r\"'\\/*;?._$abcxyzeELpu8ABZ0189=<>!+-%&|^~@(){}[]:,#`";
+        static const char8 fuzz_high_bytes[] = {(char8)0xC3u, (char8)0xA9u, (char8)0xF0u, (char8)0x80u, (char8)0x00u, (char8)0x7Fu};
+        u64 fuzz_alphabet_length = BUSTER_ARRAY_LENGTH(fuzz_alphabet) - 1;
+        u64 fuzz_lengths[] = {64, 256, 1024, 4096};
+        u64 seed = 0x12345678u;
+        for (u64 round = 0; round < 48; round += 1)
+        {
+            u64 fuzz_length = fuzz_lengths[round % BUSTER_ARRAY_LENGTH(fuzz_lengths)];
+            char8* blob = arena_allocate(arena, char8, fuzz_length);
+            for (u64 index = 0; index < fuzz_length; index += 1)
+            {
+                seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+                u64 pick = (seed >> 33) % (fuzz_alphabet_length + BUSTER_ARRAY_LENGTH(fuzz_high_bytes));
+                blob[index] = pick < fuzz_alphabet_length ? fuzz_alphabet[pick] : fuzz_high_bytes[pick - fuzz_alphabet_length];
+            }
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){blob, fuzz_length}));
+            arena->position = position;
+        }
+    }
+
+    // The punctuator NFA's channels are hand-assigned while every spelling
+    // table is derived from c_punctuator_spellings, so the two are reconciled
+    // exhaustively inside the frontend: over every byte sequence the emitter
+    // can classify, the maximal munch its channels take must be the one
+    // c_punctuator_length takes. One assertion, half a million comparisons.
+    BUSTER_TEST(arguments, c_test_lex_punctuator_nfa_mismatches() == 0);
+    return result;
+}
+
 // Source measurement, checked against counts done by hand on the fixtures
 // below. The two partitions are asserted on every fixture: they are what makes
 // the numbers add up rather than merely look plausible.
@@ -6763,6 +7014,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
+    c_test_result_add(&result, c_test_frontend_lex_differential(arguments));
     c_test_result_add(&result, c_test_frontend_source_metrics(arguments));
     c_test_result_add(&result, c_test_frontend_semantic_basics(arguments));
     c_test_result_add(&result, c_test_frontend_global_types(arguments));

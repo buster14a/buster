@@ -896,6 +896,10 @@ struct CIRLowerResult
 // covers this along with the rest of the compiler.
 BUSTER_F_DECL void c_prewarm(void);
 BUSTER_F_DECL CLexResult c_lex(Arena* arena, String8 source);
+// c_lex through the scalar reference loop, whatever the host supports. Only
+// the differential gate in the tests calls it; production always goes through
+// c_lex, which dispatches to the compaction emitter where it is available.
+BUSTER_F_DECL CLexResult c_lex_reference(Arena* arena, String8 source);
 BUSTER_F_DECL CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options);
 BUSTER_F_DECL void c_source_metrics_add(CSourceMetrics* total, CSourceMetrics const* part);
 // translated_bytes minus comments and whitespace: the bytes that became

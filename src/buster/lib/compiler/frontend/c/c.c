@@ -3,7 +3,29 @@
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
+#include <buster/lib/simd.h>
 #include <buster/lib/string.h>
+
+// The lexer's compaction emitter wants exactly the feature set BUSTER_SIMD_512
+// already decides -- AVX-512 plus VBMI for vpermi2b and VBMI2 for vpcompressb
+// -- so it reuses that one condition rather than restating it and letting the
+// two drift.
+//
+// Unlike the buster tokenizer, this emitter is still written in raw
+// intrinsics rather than the target-fixed <buster/lib/simd.h> vocabulary, so
+// it additionally excludes the self-hosted stages, which have no vendor
+// headers. Moving it over is worth doing and is not mechanical: a 16-byte
+// CToken row carries an offset, so building rows needs a 32-bit lane add and
+// a masked byte broadcast that the vocabulary does not expose yet (a 4-byte
+// Token, which is all the buster tokenizer stores, needs neither). Until then
+// the scalar loop remains the byte-identical fallback here for the
+// self-hosted stages, MSVC, AArch64 and pre-AVX-512 x86.
+#if BUSTER_SIMD_512 && !defined(__BUSTER__)
+#define BUSTER_C_LEX_COMPACT 1
+#include <immintrin.h>
+#else
+#define BUSTER_C_LEX_COMPACT 0
+#endif
 
 // Locations are recorded as checkpoints instead of one entry per translated
 // byte: within a run the original offset and the column both advance one per
@@ -936,7 +958,929 @@ BUSTER_GLOBAL_LOCAL bool c_literal_prefix(String8 source, u64 offset, u64* prefi
     return false;
 }
 
-BUSTER_GLOBAL_LOCAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, String8 source)
+// Everything one lex mutates, so the scalar reference loop and the compaction
+// emitter below drive tokens, diagnostics and measurement through exactly the
+// same code.  The three line fields are the only state that crosses a
+// compaction window: they describe the line under construction, never the
+// tokenizer, so the window pipeline still starts every window from scratch.
+typedef struct CLexState CLexState;
+struct CLexState
+{
+    CLexResult* result;
+    CTranslatedSource translated;
+    Arena* diagnostic_arena;
+    u64 diagnostic_capacity;
+    u64 maximum_diagnostic_count;
+    // Offset just past the newline that ended the last line, so a file whose
+    // last line has no terminating newline still ends a line.
+    u64 line_start;
+    u64 newline_tokens;
+    u32 line_has_code;
+    u32 line_has_comment;
+};
+
+// One item of the scalar lexer: a whitespace byte, a newline, a comment, or a
+// token, starting at `offset` and returning the offset just past it.  The
+// compaction emitter escapes to this for every shape its masks do not model,
+// so the two paths agree on the hard cases by construction rather than by
+// duplicated reasoning.
+BUSTER_GLOBAL_LOCAL u64 c_lex_scan_one(CLexState* state, u64 offset)
+{
+    CLexResult* result = state->result;
+    CTranslatedSource translated = state->translated;
+    char8 character = translated.source.pointer[offset];
+    if (c_horizontal_whitespace(character))
+    {
+        result->metrics.blank_bytes += 1;
+        return offset + 1;
+    }
+    if (character == '\n')
+    {
+        c_token_push(result, translated, offset, offset + 1, C_TOKEN_NEWLINE, C_PUNCTUATOR_NONE);
+        c_source_metrics_line(&result->metrics, state->line_has_code, state->line_has_comment);
+        result->metrics.blank_bytes += 1;
+        state->newline_tokens += 1;
+        state->line_has_code = 0;
+        state->line_has_comment = 0;
+        state->line_start = offset + 1;
+        return offset + 1;
+    }
+    if (character == '/' && offset + 1 < translated.source.length && translated.source.pointer[offset + 1] == '/')
+    {
+        u64 comment_start = offset;
+        offset += 2;
+        while (offset < translated.source.length && translated.source.pointer[offset] != '\n')
+        {
+            offset += 1;
+        }
+        result->metrics.comment_bytes += offset - comment_start;
+        result->metrics.comments += 1;
+        state->line_has_comment = 1;
+        return offset;
+    }
+    if (character == '/' && offset + 1 < translated.source.length && translated.source.pointer[offset + 1] == '*')
+    {
+        u64 comment_start = offset;
+        offset += 2;
+        bool terminated = false;
+        // Set before the scan so the lines a multi-line comment crosses are
+        // all attributed to it as they end.
+        state->line_has_comment = 1;
+        while (offset < translated.source.length)
+        {
+            if (translated.source.pointer[offset] == '*' && offset + 1 < translated.source.length && translated.source.pointer[offset + 1] == '/')
+            {
+                offset += 2;
+                terminated = true;
+                break;
+            }
+            if (translated.source.pointer[offset] == '\n')
+            {
+                c_token_push(result, translated, offset, offset + 1, C_TOKEN_NEWLINE, C_PUNCTUATOR_NONE);
+                c_source_metrics_line(&result->metrics, state->line_has_code, 1);
+                state->newline_tokens += 1;
+                state->line_has_code = 0;
+                state->line_start = offset + 1;
+            }
+            offset += 1;
+        }
+        result->metrics.comment_bytes += offset - comment_start;
+        result->metrics.comments += 1;
+        if (!terminated)
+        {
+            c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, comment_start,
+                              C_DIAGNOSTIC_UNTERMINATED_BLOCK_COMMENT, S8("unterminated block comment"));
+        }
+        return offset;
+    }
+    // Everything past this point produces a token, so one store here covers
+    // every kind instead of one per lexing branch.
+    state->line_has_code = 1;
+    u64 literal_prefix_length = 0;
+    char8 literal_delimiter = 0;
+    if (c_literal_prefix(translated.source, offset, &literal_prefix_length, &literal_delimiter))
+    {
+        u64 start = offset;
+        offset += literal_prefix_length + 1;
+        bool terminated = false;
+        while (offset < translated.source.length)
+        {
+            offset = c_literal_plain_run_end(translated.source, offset);
+            if (offset >= translated.source.length)
+            {
+                break;
+            }
+            character = translated.source.pointer[offset];
+            if (character == literal_delimiter)
+            {
+                offset += 1;
+                terminated = true;
+                break;
+            }
+            if (character == '\n')
+            {
+                break;
+            }
+            if (character == '\\' && offset + 1 < translated.source.length)
+            {
+                offset += 2;
+            }
+            else
+            {
+                offset += 1;
+            }
+        }
+        CTokenKind kind = literal_delimiter == '\'' ? C_TOKEN_CHARACTER_LITERAL : C_TOKEN_STRING_LITERAL;
+        c_token_push(result, translated, start, offset, kind, C_PUNCTUATOR_NONE);
+        result->metrics.literal_bytes += offset - start;
+        if (!terminated)
+        {
+            c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, start,
+                              literal_delimiter == '\'' ? C_DIAGNOSTIC_UNTERMINATED_CHARACTER_LITERAL : C_DIAGNOSTIC_UNTERMINATED_STRING_LITERAL,
+                              literal_delimiter == '\'' ? S8("unterminated character literal") : S8("unterminated string literal"));
+        }
+        return offset;
+    }
+    if (c_identifier_start(character))
+    {
+        u64 start = offset;
+        offset = c_identifier_run_end(translated.source, offset + 1);
+        c_token_push(result, translated, start, offset, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
+        return offset;
+    }
+    if (c_ascii_digit(character) || (character == '.' && offset + 1 < translated.source.length && c_ascii_digit(translated.source.pointer[offset + 1])))
+    {
+        u64 start = offset++;
+        while (offset < translated.source.length)
+        {
+            character = translated.source.pointer[offset];
+            bool exponent_sign = (character == '+' || character == '-') && offset > start &&
+                                 (translated.source.pointer[offset - 1] == 'e' || translated.source.pointer[offset - 1] == 'E' ||
+                                  translated.source.pointer[offset - 1] == 'p' || translated.source.pointer[offset - 1] == 'P');
+            if (!c_identifier_continue(character) && character != '.' && character != '\'' && !exponent_sign)
+            {
+                break;
+            }
+            offset += 1;
+        }
+        c_token_push(result, translated, start, offset, C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+        return offset;
+    }
+    CPunctuator punctuator = C_PUNCTUATOR_NONE;
+    u64 punctuator_length = c_punctuator_length(translated.source, offset, &punctuator);
+    if (punctuator_length)
+    {
+        c_token_push(result, translated, offset, offset + punctuator_length, C_TOKEN_PUNCTUATOR, punctuator);
+        return offset + punctuator_length;
+    }
+    c_token_push(result, translated, offset, offset + 1, C_TOKEN_INVALID, C_PUNCTUATOR_NONE);
+    c_diagnostic_push(result, state->diagnostic_arena, &state->diagnostic_capacity, state->maximum_diagnostic_count, offset, C_DIAGNOSTIC_INVALID_CHARACTER,
+                      string_format(state->diagnostic_arena, S8("invalid character byte {u32} in C source"), (u32)character));
+    return offset + 1;
+}
+
+BUSTER_GLOBAL_LOCAL void c_lex_scalar(CLexState* state)
+{
+    u64 length = state->translated.source.length;
+    u64 offset = 0;
+    while (offset < length)
+    {
+        offset = c_lex_scan_one(state, offset);
+    }
+}
+
+#if BUSTER_C_LEX_COMPACT
+
+// Deus-Lex-Machina compaction emitter for the C lexer (see the AGENTS.md SIMD
+// lexing/parsing method notes and validark.dev/posts/deus-lex-machina), the
+// same architecture the buster tokenizer runs: the translated source is walked
+// in token-aligned 64-byte windows; each window classifies once into per-class
+// bitmasks; quote, comment and escape spans resolve by mask arithmetic with a
+// forward-seeking cursor (escape parity per the simdjson backslash algorithm);
+// multi-character punctuators legalize through a bit-channel vpermi2b NFA
+// (three per-position tables AND-ed, one channel per punctuator family);
+// preprocessing-number extents fall out of one count-trailing-ones over a
+// continuation mask; and every complete token then materializes at once —
+// vpcompressb pulls start and end positions of an iota vector through the
+// token-boundary masks, a byte subtract yields all lengths, and the kind and
+// punctuator vectors compress by the same starts mask before widening
+// interleaved stores write the 16-byte CToken rows eight at a time.
+//
+// Windows always begin at an item boundary, so no lexer state crosses a
+// window: the item touching a window's last byte is deferred and rescanned by
+// the next window.  The shapes the masks do not model — invalid bytes,
+// unterminated literals, unterminated block comments, and any single item
+// longer than a window (long comments, long identifiers, long literals) —
+// escape to c_lex_scan_one, which is the code the scalar loop runs, so both
+// paths agree on every hard case by construction.
+
+BUSTER_CT_CHECK(C_PUNCTUATOR_NONE == 0);
+BUSTER_CT_CHECK(C_TOKEN_INVALID == 0);
+
+// Bit channels of the punctuator NFA.  A byte pair (or triple) spells a
+// punctuator when the AND of the per-position table lookups is nonzero in some
+// channel; the two channels marked "equal-byte" additionally require the first
+// two bytes to be identical, which one vpcmpeqb supplies and which is what
+// keeps the seven doubled spellings from needing a channel each.
+enum
+{
+    C_LEX_NFA_ASSIGN = 1 << 0,
+    C_LEX_NFA_DOUBLE = 1 << 1,
+    C_LEX_NFA_ARROW = 1 << 2,
+    C_LEX_NFA_LESS_PAIR = 1 << 3,
+    C_LEX_NFA_PERCENT_PAIR = 1 << 4,
+    C_LEX_NFA_SHIFT_ASSIGN = 1 << 5,
+    C_LEX_NFA_ELLIPSIS = 1 << 6,
+    C_LEX_NFA_PAIR_CHANNELS = C_LEX_NFA_ASSIGN | C_LEX_NFA_ARROW | C_LEX_NFA_LESS_PAIR | C_LEX_NFA_PERCENT_PAIR,
+};
+
+enum
+{
+    C_LEX_PAIR_TABLE_SIZE = 16,
+};
+
+BUSTER_GLOBAL_LOCAL _Alignas(64) u8 c_lex_single_punctuators[128];
+BUSTER_GLOBAL_LOCAL _Alignas(64) u8 c_lex_nfa_first[128];
+BUSTER_GLOBAL_LOCAL _Alignas(64) u8 c_lex_nfa_second[128];
+BUSTER_GLOBAL_LOCAL _Alignas(64) u8 c_lex_nfa_third[128];
+BUSTER_GLOBAL_LOCAL _Alignas(64) u8 c_lex_iota[64];
+BUSTER_GLOBAL_LOCAL _Alignas(64) u8 c_lex_rotate_eight[64];
+// Two-character spellings, keyed by densely numbered first and second bytes so
+// the whole cross product fits one cache line instead of a 64 KB table.
+BUSTER_GLOBAL_LOCAL u8 c_lex_pair_row[128];
+BUSTER_GLOBAL_LOCAL u8 c_lex_pair_column[128];
+BUSTER_GLOBAL_LOCAL u8 c_lex_pair_punctuators[C_LEX_PAIR_TABLE_SIZE][C_LEX_PAIR_TABLE_SIZE];
+BUSTER_GLOBAL_LOCAL u8 c_lex_triple_punctuators[128];
+BUSTER_GLOBAL_LOCAL bool c_lex_compact_tables_built;
+
+// Every spelling table below is derived from c_punctuator_spellings, so a new
+// punctuator cannot drift out of the emitter's tables.  The NFA channels
+// themselves are hand-assigned; c_test_frontend_lex_punctuator_nfa validates
+// them exhaustively against c_punctuator_length.
+BUSTER_GLOBAL_LOCAL void c_lex_compact_tables_build(void)
+{
+    for (u32 index = 0; index < 64; index += 1)
+    {
+        c_lex_iota[index] = (u8)index;
+        c_lex_rotate_eight[index] = (u8)((index + 8) & 63);
+    }
+    memset(c_lex_pair_row, 0xFF, sizeof(c_lex_pair_row));
+    memset(c_lex_pair_column, 0xFF, sizeof(c_lex_pair_column));
+    u32 row_count = 0;
+    u32 column_count = 0;
+    for (u32 index = C_PUNCTUATOR_NONE + 1; index < C_PUNCTUATOR_COUNT; index += 1)
+    {
+        String8 spelling = c_punctuator_spellings[index];
+        BUSTER_CHECK(spelling.length && (u8)spelling.pointer[0] < 128);
+        u8 first = (u8)spelling.pointer[0];
+        if (spelling.length == 1)
+        {
+            c_lex_single_punctuators[first] = (u8)index;
+        }
+        else if (spelling.length == 2)
+        {
+            u8 second = (u8)spelling.pointer[1];
+            BUSTER_CHECK(second < 128);
+            if (c_lex_pair_row[first] == 0xFF)
+            {
+                c_lex_pair_row[first] = (u8)row_count++;
+            }
+            if (c_lex_pair_column[second] == 0xFF)
+            {
+                c_lex_pair_column[second] = (u8)column_count++;
+            }
+            BUSTER_CHECK(row_count <= C_LEX_PAIR_TABLE_SIZE && column_count <= C_LEX_PAIR_TABLE_SIZE);
+            c_lex_pair_punctuators[c_lex_pair_row[first]][c_lex_pair_column[second]] = (u8)index;
+        }
+        else if (spelling.length == 3)
+        {
+            BUSTER_CHECK(!c_lex_triple_punctuators[first]);
+            c_lex_triple_punctuators[first] = (u8)index;
+        }
+        else
+        {
+            // The one four-character spelling, %:%:, which the emitter finds
+            // as two adjacent %: pairs rather than through a fourth table.
+            BUSTER_CHECK(spelling.length == 4 && index == C_PUNCTUATOR_HASH_HASH_DIGRAPH);
+        }
+    }
+
+    for (const char8* it = "!%&*+-/<=>^|"; *it; it += 1)
+    {
+        c_lex_nfa_first[(u8)*it] |= C_LEX_NFA_ASSIGN;
+    }
+    c_lex_nfa_second['='] |= C_LEX_NFA_ASSIGN;
+
+    for (const char8* it = "#&+-<>|"; *it; it += 1)
+    {
+        c_lex_nfa_first[(u8)*it] |= C_LEX_NFA_DOUBLE;
+        c_lex_nfa_second[(u8)*it] |= C_LEX_NFA_DOUBLE;
+    }
+
+    c_lex_nfa_first['-'] |= C_LEX_NFA_ARROW;
+    c_lex_nfa_first[':'] |= C_LEX_NFA_ARROW;
+    c_lex_nfa_second['>'] |= C_LEX_NFA_ARROW;
+
+    c_lex_nfa_first['<'] |= C_LEX_NFA_LESS_PAIR;
+    c_lex_nfa_second[':'] |= C_LEX_NFA_LESS_PAIR;
+    c_lex_nfa_second['%'] |= C_LEX_NFA_LESS_PAIR;
+
+    c_lex_nfa_first['%'] |= C_LEX_NFA_PERCENT_PAIR;
+    c_lex_nfa_second[':'] |= C_LEX_NFA_PERCENT_PAIR;
+    c_lex_nfa_second['>'] |= C_LEX_NFA_PERCENT_PAIR;
+
+    c_lex_nfa_first['<'] |= C_LEX_NFA_SHIFT_ASSIGN;
+    c_lex_nfa_first['>'] |= C_LEX_NFA_SHIFT_ASSIGN;
+    c_lex_nfa_second['<'] |= C_LEX_NFA_SHIFT_ASSIGN;
+    c_lex_nfa_second['>'] |= C_LEX_NFA_SHIFT_ASSIGN;
+    c_lex_nfa_third['='] |= C_LEX_NFA_SHIFT_ASSIGN;
+
+    c_lex_nfa_first['.'] |= C_LEX_NFA_ELLIPSIS;
+    c_lex_nfa_second['.'] |= C_LEX_NFA_ELLIPSIS;
+    c_lex_nfa_third['.'] |= C_LEX_NFA_ELLIPSIS;
+
+    c_lex_compact_tables_built = true;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE u64 c_lex_mask_below(u64 bit_index)
+{
+    return bit_index >= 64 ? ~(u64)0 : (((u64)1 << bit_index) - 1);
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE u64 c_lex_mask_range(u64 low, u64 high)
+{
+    return c_lex_mask_below(high) & ~c_lex_mask_below(low);
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE __mmask64 c_lex_lane_mask(u64 count)
+{
+    return count >= 64 ? ~(__mmask64)0 : (__mmask64)((((u64)1) << count) - 1);
+}
+
+// Lanes of a lookahead load that hold a real byte.  The window bounds do not
+// serve: a punctuator or comment delimiter near the window's end is classified
+// from bytes the next window owns, and reading them as zero would mis-spell it.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE __mmask64 c_lex_lookahead_mask(u64 remaining, u64 ahead)
+{
+    return c_lex_lane_mask(remaining > ahead ? remaining - ahead : 0);
+}
+
+// Eight finished rows: the compressed start, length, kind and punctuator bytes
+// widen to 64-bit halves, OR together into the two quadwords of a CToken, and
+// two vpermi2q interleave them into 128 contiguous bytes.  symbol and
+// pack_alignment are zero at lex time and fall out of the shift pattern.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_lex_store_rows(CToken* out, __m512i starts, __m512i lengths, __m512i kinds, __m512i punctuators, __m512i base,
+                                                        __m512i index_low, __m512i index_high)
+{
+    __m512i start_wide = _mm512_cvtepu8_epi64(_mm512_castsi512_si128(starts));
+    __m512i length_wide = _mm512_cvtepu8_epi64(_mm512_castsi512_si128(lengths));
+    __m512i kind_wide = _mm512_cvtepu8_epi64(_mm512_castsi512_si128(kinds));
+    __m512i punctuator_wide = _mm512_cvtepu8_epi64(_mm512_castsi512_si128(punctuators));
+    __m512i low = _mm512_or_si512(_mm512_add_epi64(start_wide, base), _mm512_slli_epi64(length_wide, 32));
+    __m512i high = _mm512_or_si512(_mm512_slli_epi64(kind_wide, 48), _mm512_slli_epi64(punctuator_wide, 56));
+    _mm512_storeu_si512((__m512i*)(out + 0), _mm512_permutex2var_epi64(low, index_low, high));
+    _mm512_storeu_si512((__m512i*)(out + 4), _mm512_permutex2var_epi64(low, index_high, high));
+}
+
+BUSTER_GLOBAL_LOCAL void c_lex_compact(CLexState* state)
+{
+    CLexResult* result = state->result;
+    String8 source = state->translated.source;
+    u32 translated_offset = state->translated.translated_offset;
+
+    if (!c_lex_compact_tables_built)
+    {
+        c_lex_compact_tables_build();
+    }
+
+    const __m512i single_low = _mm512_load_si512((const __m512i*)c_lex_single_punctuators);
+    const __m512i single_high = _mm512_load_si512((const __m512i*)(c_lex_single_punctuators + 64));
+    const __m512i nfa_first_low = _mm512_load_si512((const __m512i*)c_lex_nfa_first);
+    const __m512i nfa_first_high = _mm512_load_si512((const __m512i*)(c_lex_nfa_first + 64));
+    const __m512i nfa_second_low = _mm512_load_si512((const __m512i*)c_lex_nfa_second);
+    const __m512i nfa_second_high = _mm512_load_si512((const __m512i*)(c_lex_nfa_second + 64));
+    const __m512i nfa_third_low = _mm512_load_si512((const __m512i*)c_lex_nfa_third);
+    const __m512i nfa_third_high = _mm512_load_si512((const __m512i*)(c_lex_nfa_third + 64));
+    const __m512i iota = _mm512_load_si512((const __m512i*)c_lex_iota);
+    const __m512i rotate_eight = _mm512_load_si512((const __m512i*)c_lex_rotate_eight);
+    const __m512i row_index_low = _mm512_setr_epi64(0, 8, 1, 9, 2, 10, 3, 11);
+    const __m512i row_index_high = _mm512_setr_epi64(4, 12, 5, 13, 6, 14, 7, 15);
+
+    u64 offset = 0;
+    while (offset < source.length)
+    {
+        const char8* it = source.pointer + offset;
+        u64 remaining = source.length - offset;
+        u64 window_length = remaining < 64 ? remaining : 64;
+        bool at_end_of_file = window_length == remaining;
+        __mmask64 valid_lanes = c_lex_lane_mask(window_length);
+        u64 valid = (u64)valid_lanes;
+
+        __m512i chunk0 = _mm512_maskz_loadu_epi8(valid_lanes, it);
+        __m512i chunk1 = _mm512_maskz_loadu_epi8(c_lex_lookahead_mask(remaining, 1), it + 1);
+        __m512i chunk2 = _mm512_maskz_loadu_epi8(c_lex_lookahead_mask(remaining, 2), it + 2);
+
+        // One masked load, every byte class in lockstep.
+        __m512i lowered = _mm512_or_si512(chunk0, _mm512_set1_epi8(0x20));
+        u64 alpha = (u64)_mm512_cmplt_epu8_mask(_mm512_sub_epi8(lowered, _mm512_set1_epi8('a')), _mm512_set1_epi8(26));
+        u64 digit = (u64)_mm512_cmplt_epu8_mask(_mm512_sub_epi8(chunk0, _mm512_set1_epi8('0')), _mm512_set1_epi8(10));
+        u64 high_byte = (u64)_mm512_movepi8_mask(chunk0);
+        u64 underscore = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('_'));
+        u64 dollar = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('$'));
+        u64 space = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8(' '));
+        u64 tab = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\t'));
+        u64 vertical_tab = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\v'));
+        u64 form_feed = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\f'));
+        u64 line_feed = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\n'));
+        u64 quote = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('"'));
+        u64 apostrophe = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\''));
+        u64 backslash = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\\'));
+        u64 slash = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('/'));
+        u64 star = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('*'));
+        u64 dot = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('.'));
+        u64 plus = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('+'));
+        u64 minus = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('-'));
+        u64 percent = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('%'));
+        u64 exponent_letter = (u64)_mm512_cmpeq_epi8_mask(lowered, _mm512_set1_epi8('e')) | (u64)_mm512_cmpeq_epi8_mask(lowered, _mm512_set1_epi8('p'));
+        u64 slash_next = (u64)_mm512_cmpeq_epi8_mask(chunk1, _mm512_set1_epi8('/'));
+        u64 star_next = (u64)_mm512_cmpeq_epi8_mask(chunk1, _mm512_set1_epi8('*'));
+        u64 colon_next = (u64)_mm512_cmpeq_epi8_mask(chunk1, _mm512_set1_epi8(':'));
+        u64 repeated = (u64)_mm512_cmpeq_epi8_mask(chunk0, chunk1);
+        // c_identifier_start admits `$` and every byte above ASCII, so those
+        // join the identifier class rather than the invalid one.
+        u64 word = alpha | digit | underscore | dollar | high_byte;
+        u64 white = space | tab | vertical_tab | form_feed;
+
+        // Single-character punctuator ids double as the "byte can start a
+        // punctuator" class, since C_PUNCTUATOR_NONE is zero.
+        __m512i single_vector = _mm512_maskz_permutex2var_epi8((__mmask64)~high_byte, single_low, chunk0, single_high);
+        u64 punctuator_byte = (u64)_mm512_test_epi8_mask(single_vector, single_vector);
+
+        // Bit-channel NFA: three per-position lookups AND together, one
+        // channel per punctuator family, plus the equal-byte refinement.
+        u64 high_next = (u64)_mm512_movepi8_mask(chunk1);
+        u64 high_third = (u64)_mm512_movepi8_mask(chunk2);
+        __m512i first_vector = _mm512_maskz_permutex2var_epi8((__mmask64)~high_byte, nfa_first_low, chunk0, nfa_first_high);
+        __m512i second_vector = _mm512_maskz_permutex2var_epi8((__mmask64)~high_next, nfa_second_low, chunk1, nfa_second_high);
+        __m512i third_vector = _mm512_maskz_permutex2var_epi8((__mmask64)~high_third, nfa_third_low, chunk2, nfa_third_high);
+        __m512i pair_vector = _mm512_and_si512(first_vector, second_vector);
+        __m512i triple_vector = _mm512_and_si512(pair_vector, third_vector);
+        u64 punctuator2 = (u64)_mm512_test_epi8_mask(pair_vector, _mm512_set1_epi8((char)C_LEX_NFA_PAIR_CHANNELS)) |
+                          ((u64)_mm512_test_epi8_mask(pair_vector, _mm512_set1_epi8((char)C_LEX_NFA_DOUBLE)) & repeated);
+        u64 ellipsis = (u64)_mm512_test_epi8_mask(triple_vector, _mm512_set1_epi8((char)C_LEX_NFA_ELLIPSIS));
+        u64 punctuator3 = ellipsis | ((u64)_mm512_test_epi8_mask(triple_vector, _mm512_set1_epi8((char)C_LEX_NFA_SHIFT_ASSIGN)) & repeated);
+        u64 percent_colon = percent & colon_next;
+        u64 punctuator4 = percent_colon & (percent_colon >> 2);
+
+        // A preprocessing number swallows identifier bytes, dots, digit
+        // separators, and the sign of an exponent — the one context-sensitive
+        // rule, and one mask shift models it exactly.
+        u64 exponent_sign = (plus | minus) & (exponent_letter << 1);
+        u64 number_continue = word | dot | apostrophe | exponent_sign;
+        u64 number_seed = (digit & ~(word << 1)) | (dot & (digit >> 1));
+        u64 line_comment_open = slash & slash_next;
+        u64 block_comment_open = slash & star_next;
+        u64 block_comment_close = star & slash_next;
+        // `...` is the one punctuator that can swallow another item's start:
+        // its last dot would otherwise seed the number in `...5`.  Every other
+        // spelling is built from bytes no item can begin with, so the cursor
+        // below needs no other punctuator.
+        u64 extent_candidates = (number_seed | line_comment_open | block_comment_open | quote | apostrophe | ellipsis) & valid;
+
+        // Numbers, comments, literals and ellipses are the only items that can
+        // swallow another item's bytes, so one left-to-right cursor over their
+        // candidate starts resolves all four; identifiers, punctuators and
+        // whitespace then fall out of pure mask arithmetic below.
+        u64 comment_span = 0;
+        u64 comment_starts = 0;
+        u64 literal_span = 0;
+        u64 number_span = 0;
+        u64 number_starts = 0;
+        u64 string_starts = 0;
+        u64 character_starts = 0;
+        u64 defer_at = 64;
+        u64 trigger_at = 64;
+        u64 cursor = 0;
+        for (u64 rest = extent_candidates; rest; rest = extent_candidates & ~c_lex_mask_below(cursor))
+        {
+            u64 start = (u64)__builtin_ctzll(rest);
+            u64 end;
+            if ((number_seed >> start) & 1)
+            {
+                u64 tail = ~(number_continue >> start);
+                end = tail ? start + (u64)__builtin_ctzll(tail) : 64;
+                if (end >= window_length)
+                {
+                    if (!at_end_of_file)
+                    {
+                        defer_at = start;
+                        break;
+                    }
+                    end = window_length;
+                }
+                number_span |= c_lex_mask_range(start, end);
+                number_starts |= (u64)1 << start;
+            }
+            else if (((line_comment_open | block_comment_open) >> start) & 1)
+            {
+                if ((line_comment_open >> start) & 1)
+                {
+                    u64 stop = line_feed & ~c_lex_mask_below(start);
+                    if (stop)
+                    {
+                        // The newline that ends a line comment is its own
+                        // token and is not part of the comment.
+                        end = (u64)__builtin_ctzll(stop);
+                    }
+                    else if (at_end_of_file)
+                    {
+                        end = window_length;
+                    }
+                    else
+                    {
+                        defer_at = start;
+                        break;
+                    }
+                }
+                else
+                {
+                    u64 stop = block_comment_close & ~c_lex_mask_below(start + 2);
+                    if (!stop)
+                    {
+                        // Unterminated at the end of the file is a diagnostic;
+                        // otherwise the comment continues past this window.
+                        if (at_end_of_file)
+                        {
+                            trigger_at = start;
+                        }
+                        else
+                        {
+                            defer_at = start;
+                        }
+                        break;
+                    }
+                    end = (u64)__builtin_ctzll(stop) + 2;
+                    if (end >= window_length && !at_end_of_file)
+                    {
+                        defer_at = start;
+                        break;
+                    }
+                }
+                comment_span |= c_lex_mask_range(start, end);
+                comment_starts |= (u64)1 << start;
+            }
+            else if ((ellipsis >> start) & 1)
+            {
+                // Nothing to record: the punctuator scan below finds it in
+                // `available` like any other operator.  The cursor is the
+                // whole point, so its third dot cannot also seed a number.
+                end = start + 3;
+            }
+            else
+            {
+                // c_literal_prefix reads u8/u/U/L only at an item start, so a
+                // quote preceded by word bytes is prefixed exactly when those
+                // bytes are a one- or two-byte run of their own.
+                u64 opener = start;
+                if (start > cursor && ((word >> (start - 1)) & 1))
+                {
+                    u64 gaps = ~word & c_lex_mask_range(cursor, start);
+                    u64 run_start = gaps ? (u64)(63 - __builtin_clzll(gaps)) + 1 : cursor;
+                    u64 run_length = start - run_start;
+                    u8 run_first = (u8)it[run_start];
+                    if ((run_length == 1 && (run_first == 'u' || run_first == 'U' || run_first == 'L')) ||
+                        (run_length == 2 && run_first == 'u' && (u8)it[run_start + 1] == '8'))
+                    {
+                        opener = run_start;
+                    }
+                }
+                bool is_string = ((quote >> start) & 1) != 0;
+                // The body begins after the delimiter, wherever the token did.
+                u64 content = start + 1;
+                // Escape-run parity, simdjson's backslash algorithm, scoped to
+                // the literal body so a backslash before the opener cannot
+                // escape the opening delimiter.
+                u64 escaped = 0;
+                u64 run = backslash & ~c_lex_mask_below(content);
+                if (run)
+                {
+                    u64 run_starts = run & ~(run << 1);
+                    u64 even_starts = run_starts & UINT64_C(0x5555555555555555);
+                    u64 odd_starts = run_starts & UINT64_C(0xAAAAAAAAAAAAAAAA);
+                    u64 even_ends = (run + even_starts) & ~run;
+                    u64 odd_ends = (run + odd_starts) & ~run;
+                    escaped = (even_ends & UINT64_C(0xAAAAAAAAAAAAAAAA)) | (odd_ends & UINT64_C(0x5555555555555555));
+                }
+                u64 terminator = (is_string ? quote : apostrophe) & ~escaped;
+                u64 stop = (terminator | line_feed) & ~c_lex_mask_below(content);
+                if (!stop)
+                {
+                    if (at_end_of_file)
+                    {
+                        trigger_at = opener;
+                    }
+                    else
+                    {
+                        defer_at = opener;
+                    }
+                    break;
+                }
+                u64 stop_at = (u64)__builtin_ctzll(stop);
+                if (!((terminator >> stop_at) & 1))
+                {
+                    // A newline before the closing delimiter: unterminated,
+                    // which the scalar path reports.
+                    trigger_at = opener;
+                    break;
+                }
+                end = stop_at + 1;
+                if (end >= window_length && !at_end_of_file)
+                {
+                    defer_at = opener;
+                    break;
+                }
+                literal_span |= c_lex_mask_range(opener, end);
+                if (is_string)
+                {
+                    string_starts |= (u64)1 << opener;
+                }
+                else
+                {
+                    character_starts |= (u64)1 << opener;
+                }
+            }
+            cursor = end;
+        }
+
+        u64 available = valid & ~comment_span & ~literal_span & ~number_span;
+        u64 word_available = word & available;
+        u64 identifier_starts = word_available & ~(word_available << 1);
+        // Newlines are tokens wherever they appear, block comments included.
+        u64 newline_starts = line_feed & valid;
+
+        // Maximal munch over the punctuator runs.  A punctuator byte with no
+        // punctuator neighbour cannot be part of a longer spelling, so only
+        // the clustered ones need the left-greedy walk.
+        _Alignas(64) u8 punctuators[64];
+        _mm512_store_si512((__m512i*)punctuators, single_vector);
+        u64 operators = punctuator_byte & available;
+        u64 operator_starts = operators & ~(operators << 1) & ~(operators >> 1);
+        for (u64 clustered = operators & ~operator_starts; clustered;)
+        {
+            u64 start = (u64)__builtin_ctzll(clustered);
+            u64 bit = (u64)1 << start;
+            u64 spelling_length = 1;
+            operator_starts |= bit;
+            if (punctuator4 & bit)
+            {
+                spelling_length = 4;
+                punctuators[start] = (u8)C_PUNCTUATOR_HASH_HASH_DIGRAPH;
+            }
+            else if (punctuator3 & bit)
+            {
+                spelling_length = 3;
+                punctuators[start] = c_lex_triple_punctuators[(u8)it[start]];
+            }
+            else if (punctuator2 & bit)
+            {
+                spelling_length = 2;
+                punctuators[start] = c_lex_pair_punctuators[c_lex_pair_row[(u8)it[start]]][c_lex_pair_column[(u8)it[start + 1]]];
+            }
+            clustered &= ~c_lex_mask_below(start + spelling_length);
+        }
+
+        // Nothing left over may reach the emitter: a byte that is neither a
+        // resolved span, an identifier byte, whitespace, a newline nor a
+        // punctuator byte is C_TOKEN_INVALID, whose diagnostic the scalar path
+        // formats.
+        u64 unclassified = available & ~word & ~white & ~line_feed & ~punctuator_byte;
+        if (unclassified)
+        {
+            u64 candidate = (u64)__builtin_ctzll(unclassified);
+            if (candidate < trigger_at)
+            {
+                trigger_at = candidate;
+            }
+        }
+
+        u64 token_starts = identifier_starts | number_starts | string_starts | character_starts | operator_starts | newline_starts;
+        // Bytes owned by no token: whitespace outside a literal, and comment
+        // text other than the newlines a block comment contains.
+        u64 comment_body = comment_span & ~line_feed;
+        u64 non_token = (white & valid & ~literal_span) | comment_body;
+        u64 token_span = valid & ~non_token;
+        // Every position that begins something, so the byte before each one
+        // ends the item in front of it.  Whitespace contributes per byte, as
+        // the scalar loop consumes it, so a window of pure whitespace still
+        // advances a whole window instead of one byte.
+        u64 boundary = token_starts | (non_token & ~(non_token << 1)) | (white & valid & ~literal_span);
+
+        u64 bound;
+        bool escape_after = false;
+        if (trigger_at < 64 && trigger_at <= defer_at)
+        {
+            bound = trigger_at;
+            escape_after = true;
+        }
+        else if (defer_at < 64)
+        {
+            bound = defer_at;
+        }
+        else if (at_end_of_file)
+        {
+            bound = window_length;
+        }
+        else
+        {
+            BUSTER_CHECK(boundary);
+            bound = (u64)(63 - __builtin_clzll(boundary));
+        }
+
+        u64 emitted = c_lex_mask_below(bound);
+        // No span ever straddles the bound: a span's start is an item start,
+        // and an incomplete one sets defer_at, so these popcounts are exact.
+        result->metrics.blank_bytes += (u64)__builtin_popcountll((white | line_feed) & emitted & ~comment_span & ~literal_span);
+        result->metrics.comment_bytes += (u64)__builtin_popcountll(comment_span & emitted);
+        result->metrics.literal_bytes += (u64)__builtin_popcountll(literal_span & emitted);
+        result->metrics.comments += (u64)__builtin_popcountll(comment_starts & emitted);
+
+        // One finished line per newline in the window, classified by whether
+        // any code or comment byte falls in the range since the last one.
+        u64 code_bytes = token_span & ~line_feed & emitted;
+        u64 comment_bytes = comment_span & emitted;
+        u64 newlines = newline_starts & emitted;
+        u64 line_base = 0;
+        for (u64 rest = newlines; rest; rest &= rest - 1)
+        {
+            u64 position = (u64)__builtin_ctzll(rest);
+            u64 range = c_lex_mask_range(line_base, position);
+            c_source_metrics_line(&result->metrics, state->line_has_code | ((code_bytes & range) != 0),
+                                  state->line_has_comment | ((comment_bytes & range) != 0));
+            state->line_has_code = 0;
+            // A newline inside a block comment leaves the comment open, so the
+            // next line is a comment line too; a plain newline clears it.
+            state->line_has_comment = (u32)((comment_span >> position) & 1);
+            line_base = position + 1;
+        }
+        u64 tail = c_lex_mask_range(line_base, bound);
+        state->line_has_code |= (code_bytes & tail) != 0;
+        state->line_has_comment |= (comment_bytes & tail) != 0;
+        if (newlines)
+        {
+            state->line_start = offset + (u64)(63 - __builtin_clzll(newlines)) + 1;
+        }
+        state->newline_tokens += (u64)__builtin_popcountll(newlines);
+
+        if (bound)
+        {
+            // Starts and ends compress through the token-boundary masks, one
+            // byte subtract yields every length in the window, and the kind
+            // and punctuator vectors ride the same starts mask.
+            u64 start_mask = token_starts & emitted;
+            u64 end_mask = ((boundary >> 1) | ((u64)1 << (bound - 1))) & token_span & emitted;
+            u32 count = (u32)__builtin_popcountll(start_mask);
+            BUSTER_CHECK(count == (u32)__builtin_popcountll(end_mask));
+
+            __m512i kind_vector = _mm512_maskz_set1_epi8((__mmask64)newline_starts, (char)C_TOKEN_NEWLINE);
+            kind_vector = _mm512_mask_set1_epi8(kind_vector, (__mmask64)identifier_starts, (char)C_TOKEN_IDENTIFIER);
+            kind_vector = _mm512_mask_set1_epi8(kind_vector, (__mmask64)number_starts, (char)C_TOKEN_PREPROCESSING_NUMBER);
+            kind_vector = _mm512_mask_set1_epi8(kind_vector, (__mmask64)operator_starts, (char)C_TOKEN_PUNCTUATOR);
+            kind_vector = _mm512_mask_set1_epi8(kind_vector, (__mmask64)string_starts, (char)C_TOKEN_STRING_LITERAL);
+            kind_vector = _mm512_mask_set1_epi8(kind_vector, (__mmask64)character_starts, (char)C_TOKEN_CHARACTER_LITERAL);
+
+            __m512i start_positions = _mm512_maskz_compress_epi8((__mmask64)start_mask, iota);
+            __m512i end_positions = _mm512_maskz_compress_epi8((__mmask64)end_mask, iota);
+            __m512i lengths = _mm512_add_epi8(_mm512_sub_epi8(end_positions, start_positions), _mm512_set1_epi8(1));
+            __m512i kinds = _mm512_maskz_compress_epi8((__mmask64)start_mask, kind_vector);
+            // A non-punctuator start keeps whatever its first byte spells —
+            // `.` opening a number, say — so the field is cleared first.
+            __m512i punctuator_vector = _mm512_maskz_mov_epi8((__mmask64)operator_starts, _mm512_load_si512((const __m512i*)punctuators));
+            __m512i punctuator_ids = _mm512_maskz_compress_epi8((__mmask64)start_mask, punctuator_vector);
+
+            CToken* out = result->tokens + result->token_count;
+            __m512i base = _mm512_set1_epi64((s64)(u64)((u64)translated_offset + offset));
+            // Eight rows per pass, tail rows included: the token array carries
+            // eight slots of slack and the next window overwrites them.  The
+            // first pass is unconditional on purpose — guarding it on a
+            // non-empty window measured +2.0 M stage-1 instructions, because a
+            // window with no token at all needs 64 bytes of whitespace or
+            // comment, which escapes to the scalar scanner long before it
+            // reaches here.
+            for (u32 written = 0;;)
+            {
+                c_lex_store_rows(out + written, start_positions, lengths, kinds, punctuator_ids, base, row_index_low, row_index_high);
+                written += 8;
+                if (written >= count)
+                {
+                    break;
+                }
+                start_positions = _mm512_permutexvar_epi8(rotate_eight, start_positions);
+                lengths = _mm512_permutexvar_epi8(rotate_eight, lengths);
+                kinds = _mm512_permutexvar_epi8(rotate_eight, kinds);
+                punctuator_ids = _mm512_permutexvar_epi8(rotate_eight, punctuator_ids);
+            }
+            result->token_count += count;
+            offset += bound;
+            if (!escape_after)
+            {
+                continue;
+            }
+        }
+
+        // Either the window holds one unfinished item or a scalar-escape
+        // trigger sits at the emission bound: scan exactly that item with the
+        // reference scanner and re-enter the window loop after it.
+        offset = c_lex_scan_one(state, offset);
+    }
+}
+
+#endif
+
+#if BUSTER_INCLUDE_TESTS
+// Test seam: reconcile the emitter's hand-assigned NFA channels with the
+// spelling table the scalar path scans. For every byte sequence the window
+// pipeline can classify, the channels must legalize exactly the spellings
+// c_punctuator_length finds, at exactly its length. Counting mismatches keeps
+// the exhaustive sweep to one test assertion.
+u64 c_test_lex_punctuator_nfa_mismatches(void)
+{
+#if BUSTER_C_LEX_COMPACT
+    if (!c_lex_compact_tables_built)
+    {
+        c_lex_compact_tables_build();
+    }
+    if (!c_punctuator_dispatch_built)
+    {
+        c_punctuator_dispatch_build();
+    }
+    u64 mismatches = 0;
+    char8 probe[4];
+    for (u32 first = 0; first < 128; first += 1)
+    {
+        if (!c_lex_single_punctuators[first])
+        {
+            continue;
+        }
+        for (u32 second = 0; second < 256; second += 1)
+        {
+            for (u32 third = 0; third < 256; third += 1)
+            {
+                // The fourth byte only ever matters to %:%:, so it sweeps just
+                // that prefix instead of multiplying the whole cross product.
+                u32 fourth_low = 0;
+                u32 fourth_high = 1;
+                if (first == '%' && second == ':' && third == '%')
+                {
+                    fourth_high = 256;
+                }
+                for (u32 fourth = fourth_low; fourth < fourth_high; fourth += 1)
+                {
+                    probe[0] = (char8)first;
+                    probe[1] = (char8)second;
+                    probe[2] = (char8)third;
+                    probe[3] = (char8)fourth;
+                    // What the emitter's channels decide. Bytes above ASCII
+                    // zero their lookups, exactly as the maskz permutes do.
+                    u8 first_bits = c_lex_nfa_first[first];
+                    u8 second_bits = second < 128 ? c_lex_nfa_second[second] : 0;
+                    u8 third_bits = third < 128 ? c_lex_nfa_third[third] : 0;
+                    u8 pair = first_bits & second_bits;
+                    u8 triple = pair & third_bits;
+                    bool repeated = first == second;
+                    bool is_four = first == '%' && second == ':' && third == '%' && fourth == ':';
+                    bool is_three = (triple & C_LEX_NFA_ELLIPSIS) != 0 || ((triple & C_LEX_NFA_SHIFT_ASSIGN) != 0 && repeated);
+                    bool is_two = (pair & C_LEX_NFA_PAIR_CHANNELS) != 0 || ((pair & C_LEX_NFA_DOUBLE) != 0 && repeated);
+                    u64 emitted_length = is_four ? 4 : is_three ? 3 : is_two ? 2 : 1;
+                    u8 emitted_punctuator = (u8)C_PUNCTUATOR_HASH_HASH_DIGRAPH;
+                    if (emitted_length == 3)
+                    {
+                        emitted_punctuator = c_lex_triple_punctuators[first];
+                    }
+                    else if (emitted_length == 2)
+                    {
+                        u8 row = c_lex_pair_row[first];
+                        u8 column = second < 128 ? c_lex_pair_column[second] : 0xFF;
+                        emitted_punctuator = row == 0xFF || column == 0xFF ? 0 : c_lex_pair_punctuators[row][column];
+                    }
+                    else if (emitted_length == 1)
+                    {
+                        emitted_punctuator = c_lex_single_punctuators[first];
+                    }
+                    CPunctuator reference = C_PUNCTUATOR_NONE;
+                    u64 reference_length = c_punctuator_length((String8){probe, BUSTER_ARRAY_LENGTH(probe)}, 0, &reference);
+                    mismatches += emitted_length != reference_length || emitted_punctuator != (u8)reference;
+                }
+            }
+        }
+    }
+    return mismatches;
+#else
+    return 0;
+#endif
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space, String8 source, bool force_scalar)
 {
     CLexResult result = {0};
     if (!arena || (source.length && !source.pointer))
@@ -950,7 +1894,10 @@ BUSTER_GLOBAL_LOCAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, 
     result.checkpoint_offsets = translated.checkpoint_offsets;
     result.checkpoint_count = translated.checkpoint_count;
     result.translated_offset = translated.translated_offset;
-    result.tokens = arena_allocate(arena, CToken, translated.source.length + 1);
+    // One token per byte bounds the stream including the end marker exactly as
+    // the scalar loop needs; eight more absorb the tail rows of the emitter's
+    // full-width interleaved stores, which the next window overwrites.
+    result.tokens = arena_allocate(arena, CToken, translated.source.length + 1 + 8);
     if (translated.source.length > UINT64_MAX / sizeof(CDiagnostic) - 1)
     {
         return result;
@@ -978,181 +1925,40 @@ BUSTER_GLOBAL_LOCAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, 
     {
         return result;
     }
-    u64 maximum_diagnostic_count = translated.source.length + 1;
-    u64 diagnostic_capacity = BUSTER_MIN(maximum_diagnostic_count, UINT64_C(64));
-    result.diagnostics = arena_allocate(diagnostic_arena, CDiagnostic, diagnostic_capacity);
-    // Source measurement rides the branches below; see CSourceMetrics.
+    CLexState state = {
+        .result = &result,
+        .translated = translated,
+        .diagnostic_arena = diagnostic_arena,
+        .maximum_diagnostic_count = translated.source.length + 1,
+    };
+    state.diagnostic_capacity = BUSTER_MIN(state.maximum_diagnostic_count, UINT64_C(64));
+    result.diagnostics = arena_allocate(diagnostic_arena, CDiagnostic, state.diagnostic_capacity);
+    // Source measurement rides the branches the lexer already takes; see
+    // CSourceMetrics.
     result.metrics.files = 1;
     result.metrics.bytes = source.length;
     result.metrics.translated_bytes = translated.source.length;
     result.metrics.lines = translated.raw_lines;
-    u64 line_start = 0;
-    u64 newline_tokens = 0;
-    u32 line_has_code = 0;
-    u32 line_has_comment = 0;
-    u64 offset = 0;
-    while (offset < translated.source.length)
+#if BUSTER_C_LEX_COMPACT
+    if (force_scalar)
     {
-        char8 character = translated.source.pointer[offset];
-        if (c_horizontal_whitespace(character))
-        {
-            result.metrics.blank_bytes += 1;
-            offset += 1;
-            continue;
-        }
-        if (character == '\n')
-        {
-            c_token_push(&result, translated, offset, offset + 1, C_TOKEN_NEWLINE, C_PUNCTUATOR_NONE);
-            c_source_metrics_line(&result.metrics, line_has_code, line_has_comment);
-            result.metrics.blank_bytes += 1;
-            newline_tokens += 1;
-            line_has_code = 0;
-            line_has_comment = 0;
-            offset += 1;
-            line_start = offset;
-            continue;
-        }
-        if (character == '/' && offset + 1 < translated.source.length && translated.source.pointer[offset + 1] == '/')
-        {
-            u64 comment_start = offset;
-            offset += 2;
-            while (offset < translated.source.length && translated.source.pointer[offset] != '\n')
-            {
-                offset += 1;
-            }
-            result.metrics.comment_bytes += offset - comment_start;
-            result.metrics.comments += 1;
-            line_has_comment = 1;
-            continue;
-        }
-        if (character == '/' && offset + 1 < translated.source.length && translated.source.pointer[offset + 1] == '*')
-        {
-            u64 comment_start = offset;
-            offset += 2;
-            bool terminated = false;
-            // Set before the scan so the lines a multi-line comment crosses
-            // are all attributed to it as they end.
-            line_has_comment = 1;
-            while (offset < translated.source.length)
-            {
-                if (translated.source.pointer[offset] == '*' && offset + 1 < translated.source.length && translated.source.pointer[offset + 1] == '/')
-                {
-                    offset += 2;
-                    terminated = true;
-                    break;
-                }
-                if (translated.source.pointer[offset] == '\n')
-                {
-                    c_token_push(&result, translated, offset, offset + 1, C_TOKEN_NEWLINE, C_PUNCTUATOR_NONE);
-                    c_source_metrics_line(&result.metrics, line_has_code, 1);
-                    newline_tokens += 1;
-                    line_has_code = 0;
-                    line_start = offset + 1;
-                }
-                offset += 1;
-            }
-            result.metrics.comment_bytes += offset - comment_start;
-            result.metrics.comments += 1;
-            if (!terminated)
-            {
-                c_diagnostic_push(&result, diagnostic_arena, &diagnostic_capacity, maximum_diagnostic_count, comment_start,
-                                  C_DIAGNOSTIC_UNTERMINATED_BLOCK_COMMENT, S8("unterminated block comment"));
-            }
-            continue;
-        }
-        // Everything past this point produces a token, so one store here
-        // covers every kind instead of one per lexing branch.
-        line_has_code = 1;
-        u64 literal_prefix_length = 0;
-        char8 literal_delimiter = 0;
-        if (c_literal_prefix(translated.source, offset, &literal_prefix_length, &literal_delimiter))
-        {
-            u64 start = offset;
-            offset += literal_prefix_length + 1;
-            bool terminated = false;
-            while (offset < translated.source.length)
-            {
-                offset = c_literal_plain_run_end(translated.source, offset);
-                if (offset >= translated.source.length)
-                {
-                    break;
-                }
-                character = translated.source.pointer[offset];
-                if (character == literal_delimiter)
-                {
-                    offset += 1;
-                    terminated = true;
-                    break;
-                }
-                if (character == '\n')
-                {
-                    break;
-                }
-                if (character == '\\' && offset + 1 < translated.source.length)
-                {
-                    offset += 2;
-                }
-                else
-                {
-                    offset += 1;
-                }
-            }
-            CTokenKind kind = literal_delimiter == '\'' ? C_TOKEN_CHARACTER_LITERAL : C_TOKEN_STRING_LITERAL;
-            c_token_push(&result, translated, start, offset, kind, C_PUNCTUATOR_NONE);
-            result.metrics.literal_bytes += offset - start;
-            if (!terminated)
-            {
-                c_diagnostic_push(&result, diagnostic_arena, &diagnostic_capacity, maximum_diagnostic_count, start,
-                                  literal_delimiter == '\'' ? C_DIAGNOSTIC_UNTERMINATED_CHARACTER_LITERAL : C_DIAGNOSTIC_UNTERMINATED_STRING_LITERAL,
-                                  literal_delimiter == '\'' ? S8("unterminated character literal") : S8("unterminated string literal"));
-            }
-            continue;
-        }
-        if (c_identifier_start(character))
-        {
-            u64 start = offset;
-            offset = c_identifier_run_end(translated.source, offset + 1);
-            c_token_push(&result, translated, start, offset, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
-            continue;
-        }
-        if (c_ascii_digit(character) || (character == '.' && offset + 1 < translated.source.length && c_ascii_digit(translated.source.pointer[offset + 1])))
-        {
-            u64 start = offset++;
-            while (offset < translated.source.length)
-            {
-                character = translated.source.pointer[offset];
-                bool exponent_sign = (character == '+' || character == '-') && offset > start &&
-                                     (translated.source.pointer[offset - 1] == 'e' || translated.source.pointer[offset - 1] == 'E' ||
-                                      translated.source.pointer[offset - 1] == 'p' || translated.source.pointer[offset - 1] == 'P');
-                if (!c_identifier_continue(character) && character != '.' && character != '\'' && !exponent_sign)
-                {
-                    break;
-                }
-                offset += 1;
-            }
-            c_token_push(&result, translated, start, offset, C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
-            continue;
-        }
-        CPunctuator punctuator = C_PUNCTUATOR_NONE;
-        u64 punctuator_length = c_punctuator_length(translated.source, offset, &punctuator);
-        if (punctuator_length)
-        {
-            c_token_push(&result, translated, offset, offset + punctuator_length, C_TOKEN_PUNCTUATOR, punctuator);
-            offset += punctuator_length;
-            continue;
-        }
-        c_token_push(&result, translated, offset, offset + 1, C_TOKEN_INVALID, C_PUNCTUATOR_NONE);
-        c_diagnostic_push(&result, diagnostic_arena, &diagnostic_capacity, maximum_diagnostic_count, offset, C_DIAGNOSTIC_INVALID_CHARACTER,
-                          string_format(diagnostic_arena, S8("invalid character byte {u32} in C source"), (u32)character));
-        offset += 1;
+        c_lex_scalar(&state);
     }
-    // A file whose last line has no terminating newline still ends a line.
-    if (translated.source.length > line_start)
+    else
     {
-        c_source_metrics_line(&result.metrics, line_has_code, line_has_comment);
+        c_lex_compact(&state);
+    }
+#else
+    BUSTER_UNUSED(force_scalar);
+    c_lex_scalar(&state);
+#endif
+    // A file whose last line has no terminating newline still ends a line.
+    if (translated.source.length > state.line_start)
+    {
+        c_source_metrics_line(&result.metrics, state.line_has_code, state.line_has_comment);
     }
     result.metrics.spliced_lines = result.metrics.lines - result.metrics.translated_lines;
-    result.metrics.tokens = result.token_count - newline_tokens;
+    result.metrics.tokens = result.token_count - state.newline_tokens;
     c_token_push(&result, translated, translated.source.length, translated.source.length, C_TOKEN_END_OF_FILE, C_PUNCTUATOR_NONE);
     CDiagnostic* diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_count);
     if (result.diagnostic_count)
@@ -1171,9 +1977,21 @@ BUSTER_GLOBAL_LOCAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, 
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL CLexResult c_lex_space(Arena* arena, CSpellingSpace* space, String8 source)
+{
+    return c_lex_dispatch(arena, space, source, false);
+}
+
 CLexResult c_lex(Arena* arena, String8 source)
 {
-    return c_lex_space(arena, 0, source);
+    return c_lex_dispatch(arena, 0, source, false);
+}
+
+// The scalar reference loop, whatever the host: the differential gate asserts
+// the dispatched lexer agrees with it byte for byte.
+CLexResult c_lex_reference(Arena* arena, String8 source)
+{
+    return c_lex_dispatch(arena, 0, source, true);
 }
 
 typedef struct CMacro CMacro;
