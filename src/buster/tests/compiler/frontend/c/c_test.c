@@ -4482,6 +4482,48 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
         BUSTER_TEST(arguments, switch_count == 1);
         BUSTER_TEST(arguments, ir_validate_canonical_module(switch_ir.program, module).error == IR_VALIDATION_NONE);
     }
+    CPreprocessResult ternary_case_tokens = c_preprocess(control_flow_temporary.arena,
+                                                         S8("int ternary_case(int value) {\n"
+                                                            "    int result = 0;\n"
+                                                            "    switch (value) {\n"
+                                                            "    case 1 ? 2 : 3:\n"
+                                                            "        result = 7;\n"
+                                                            "        break;\n"
+                                                            "    default:\n"
+                                                            "        result = 1;\n"
+                                                            "        break;\n"
+                                                            "    }\n"
+                                                            "    return result;\n"
+                                                            "}\n"),
+                                                         (CPreprocessOptions){0});
+    CParseResult ternary_case_parse = c_parse(control_flow_temporary.arena, ternary_case_tokens);
+    BUSTER_TEST(arguments, ternary_case_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ternary_case_parse.diagnostic_count == 0);
+    CIRLowerResult ternary_case_ir =
+        c_lower_to_ir(control_flow_temporary.arena, S8("ternary-case.c"), ternary_case_tokens, ternary_case_parse, target_native);
+    BUSTER_TEST(arguments, ternary_case_ir.diagnostic_count == 0);
+    if (ternary_case_ir.program)
+    {
+        IrModule* module = &ternary_case_ir.program->modules[0];
+        IrFunction* function = module->functions;
+        IrInstruction* switch_instruction = 0;
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            if (function->instructions[instruction_index].opcode == IR_OPCODE_SWITCH)
+            {
+                switch_instruction = &function->instructions[instruction_index];
+            }
+        }
+        BUSTER_TEST(arguments, switch_instruction != 0);
+        if (switch_instruction)
+        {
+            // The label constant is the ternary's selected arm, not its
+            // condition or the colon-truncated prefix.
+            BUSTER_TEST(arguments, switch_instruction->immediate_count == 1);
+            BUSTER_TEST(arguments, switch_instruction->immediates[0] == 2);
+        }
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ternary_case_ir.program, module).error == IR_VALIDATION_NONE);
+    }
     CPreprocessResult case_range_tokens = c_preprocess(control_flow_temporary.arena,
                                                        S8("int range_dispatch(int value) {\n"
                                                           "    int result = 0;\n"

@@ -34193,7 +34193,10 @@ BUSTER_GLOBAL_LOCAL String8 c_ir_unsupported_gnu_construct(CPreprocessResult pre
                 *token_index_out = index;
                 return c_preprocess_dialect_is_gnu(preprocess.dialect) ? (String8){0} : S8("GNU case ranges are only available in GNU dialects");
             }
-            else if (!parentheses && !brackets && c_token_is_punctuator(&case_token, C_PUNCTUATOR_COLON))
+            // The label constant may itself be a conditional expression, so a
+            // ':' claimed by an unmatched '?' does not end the label.
+            else if (!parentheses && !brackets && c_token_is_punctuator(&case_token, C_PUNCTUATOR_COLON) &&
+                     c_ir_label_colon_at(preprocess.tokens, index, scan))
             {
                 break;
             }
@@ -34950,7 +34953,11 @@ BUSTER_GLOBAL_LOCAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIr
                             }
                             nested -= 1;
                         }
-                        else if (!nested && c_token_is_punctuator(&colon_token, C_PUNCTUATOR_COLON))
+                        // The label constant may itself be a conditional
+                        // expression, so a ':' claimed by an unmatched '?'
+                        // does not end the label.
+                        else if (!nested && c_token_is_punctuator(&colon_token, C_PUNCTUATOR_COLON) &&
+                                 c_ir_label_colon_at(builder->preprocess.tokens, scan, colon))
                         {
                             break;
                         }
