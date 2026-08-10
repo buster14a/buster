@@ -470,6 +470,22 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_USE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
     },
+    [MACHINE_A64_CALL_DIRECT] = {
+        .name = S8_INITIALIZER("a64_call_direct"),
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
+    [MACHINE_A64_CALL_INDIRECT] = {
+        .name = S8_INITIALIZER("a64_call_indirect"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
+    [MACHINE_A64_LEA_SYMBOL] = {
+        .name = S8_INITIALIZER("a64_lea_symbol"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
+    },
 };
 
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode)

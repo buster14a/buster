@@ -44,9 +44,9 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_aarch64_description =
     .slot_scratch = {MACHINE_A64_X9, MACHINE_A64_X10, MACHINE_A64_X11, MACHINE_A64_X12},
     .copy_opcode = MACHINE_A64_MOV_RR,
     .constant_opcode = MACHINE_A64_MOV_RI,
-    .indirect_call_opcode = MACHINE_OPCODE_INVALID,
+    .indirect_call_opcode = MACHINE_A64_CALL_INDIRECT,
     .float_bridge_opcode = MACHINE_A64_FMOV_TO_VEC,
-    .indirect_call_register = MACHINE_A64_X17,
+    .indirect_call_register = MACHINE_A64_X16,
     .float_bridge_register = MACHINE_A64_X9,
     .quality_pin_registers = {MACHINE_A64_X26, MACHINE_A64_X27},
 };
@@ -63,12 +63,19 @@ struct MachineA64Selector
     IrProgram* program;
     IrFunction* function;
     MachineFunctionBuilder builder;
+    Target target;
     MachineBuilderStream immediates;
     MachineBuilderStream stack_slots;
     MachineBuilderStream stack_slot_alignments;
+    MachineBuilderStream call_targets;
     // Per IrValue: virtual register index, stack slot index, or UINT32_MAX.
     u32* value_virtual_registers;
     u32* value_stack_slots;
+    // 1 when every use of the value is a direct-call callee; such FUNCTION
+    // values materialize zero instead of a symbol address, exactly like the
+    // canonical path, so a single-use reference to an undefined symbol
+    // never becomes an absolute relocation the static link cannot satisfy.
+    u8* direct_call_uses;
     // Result value per argument index, captured at entry before any scratch
     // register can clobber the incoming fixed registers.
     u32 argument_values[MACHINE_A64_MAX_ARGUMENTS];
@@ -127,7 +134,8 @@ BUSTER_GLOBAL_LOCAL u32 machine_a64_scalar_bit_width(IrType* type)
 // address regardless of the value's declared canonical type.
 BUSTER_GLOBAL_LOCAL bool machine_a64_opcode_produces_address(IrOpcode opcode)
 {
-    return opcode == IR_OPCODE_FIELD || opcode == IR_OPCODE_DEREFERENCE || opcode == IR_OPCODE_ADDRESS_OF;
+    return opcode == IR_OPCODE_GLOBAL || opcode == IR_OPCODE_INDEX || opcode == IR_OPCODE_FIELD || opcode == IR_OPCODE_DEREFERENCE ||
+           opcode == IR_OPCODE_ADDRESS_OF || opcode == IR_OPCODE_FUNCTION;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_operand_register(MachineA64Selector* selector, IrValueId value, u32* register_out)
@@ -159,6 +167,18 @@ BUSTER_GLOBAL_LOCAL void machine_a64_reject(MachineA64Selector* selector, IrOpco
 {
     selector->supported = false;
     selector->failed_opcode = opcode;
+}
+
+// A selection-synthesized temporary vreg, defined at the next row to be
+// emitted so no post-pass definition patching is needed.
+BUSTER_GLOBAL_LOCAL u32 machine_a64_synthesize_register(MachineA64Selector* selector)
+{
+    return machine_builder_virtual_register(&selector->builder, (MachineVirtualRegister){
+                                                                    .definition_point =
+                                                                        machine_point_make(selector->builder.instructions.total_count, MACHINE_POINT_AFTER),
+                                                                    .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                                    .typed_origin = IR_ID_UNDERLYING_INVALID,
+                                                                });
 }
 
 BUSTER_GLOBAL_LOCAL u32 machine_a64_append_slot(MachineA64Selector* selector, u32 size, u32 alignment)
@@ -576,6 +596,199 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
                                                        (u32)aggregate->fields[field_index].offset);
     }
     break;
+    case IR_OPCODE_GLOBAL:
+    case IR_OPCODE_FUNCTION:
+    {
+        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
+        if (result_register == UINT32_MAX || !symbol || (instruction->opcode == IR_OPCODE_GLOBAL && symbol->is_thread_local))
+        {
+            return false;
+        }
+        if (instruction->opcode == IR_OPCODE_FUNCTION && selector->direct_call_uses[instruction->result.value] == 1)
+        {
+            u32 zero_index = selector->immediates.total_count;
+            u64* zero_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+            *zero_row = 0;
+            u32 zero_machine_row = machine_a64_select_row(selector, (MachineInstruction){
+                                                              .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                           machine_ref_make(MACHINE_REF_IMMEDIATE, zero_index)},
+                                                              .opcode = MACHINE_A64_MOV_RI,
+                                                          });
+            machine_a64_define(selector, result_register, zero_machine_row);
+            return true;
+        }
+        u32 target_index = selector->call_targets.total_count;
+        IrSymbolId* target_row = (IrSymbolId*)machine_stream_append(selector->arena, &selector->call_targets);
+        *target_row = instruction->symbol;
+        u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                       .payload = target_index,
+                                                       .opcode = MACHINE_A64_LEA_SYMBOL,
+                                                   });
+        machine_a64_define(selector, result_register, row);
+        return true;
+    }
+    break;
+    case IR_OPCODE_INDEX:
+    {
+        u32 index_register;
+        if (result_register == UINT32_MAX || instruction->operand_count < 2 ||
+            !machine_a64_operand_register(selector, instruction->operands[1], &index_register))
+        {
+            return false;
+        }
+        IrType* index_type = ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type);
+        IrType* element = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (!index_type || index_type->kind != IR_TYPE_INTEGER || !element || !element->layout.resolved || element->layout.size > INT32_MAX)
+        {
+            return false;
+        }
+        if (!machine_a64_select_place_address_offset(selector, instruction->operands[0], result_register, 0))
+        {
+            return false;
+        }
+        // The scaled index is computed in a synthesized temporary; signed
+        // narrow indexes sign-extend before scaling.
+        u32 scaled_register = machine_a64_synthesize_register(selector);
+        u16 extend_opcode = MACHINE_A64_MOV_RR;
+        if (index_type->is_signed && index_type->bit_width < 64)
+        {
+            extend_opcode = (u16)(index_type->bit_width == 8    ? MACHINE_A64_SXTB
+                                  : index_type->bit_width == 16 ? MACHINE_A64_SXTH
+                                  : index_type->bit_width == 32 ? MACHINE_A64_SXTW
+                                                                : 0);
+            if (!extend_opcode)
+            {
+                return false;
+            }
+        }
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, index_register)},
+                                             .opcode = extend_opcode,
+                                         });
+        if (element->layout.size != 1)
+        {
+            u32 immediate_index = selector->immediates.total_count;
+            u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+            *immediate_row = element->layout.size;
+            u32 size_register = machine_a64_synthesize_register(selector);
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, size_register),
+                                                              machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
+                                                 .opcode = MACHINE_A64_MOV_RI,
+                                             });
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, size_register)},
+                                                 .opcode = MACHINE_A64_MUL64,
+                                             });
+        }
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register)},
+                                             .opcode = MACHINE_A64_ADD64,
+                                         });
+        return true;
+    }
+    break;
+    case IR_OPCODE_CALL:
+    {
+        if (!instruction->operand_count || instruction->operands[0].value >= function->value_count)
+        {
+            return false;
+        }
+        IrValue* callee = function->values + instruction->operands[0].value;
+        if (callee->definition.value >= function->instruction_count)
+        {
+            return false;
+        }
+        bool direct_call = function->instructions[callee->definition.value].opcode == IR_OPCODE_FUNCTION &&
+                           instruction->symbol.value != IR_ID_UNDERLYING_INVALID;
+        u32 callee_register = UINT32_MAX;
+        if (!direct_call && !machine_a64_operand_register(selector, instruction->operands[0], &callee_register))
+        {
+            return false;
+        }
+        IrType* callee_type = ir_type_from_id(&program->types, callee->canonical_type);
+        if (callee_type && callee_type->kind == IR_TYPE_POINTER)
+        {
+            callee_type = ir_type_from_id(&program->types, callee_type->element_type);
+        }
+        u32 call_argument_count = instruction->operand_count - 1;
+        bool variadic_call = callee_type && callee_type->kind == IR_TYPE_FUNCTION && callee_type->is_variadic;
+        // Darwin passes every anonymous argument on the stack, which the
+        // subset does not stage yet; AAPCS64 variadic scalars travel in
+        // the same registers as named ones.
+        bool darwin = selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS;
+        if (variadic_call && darwin)
+        {
+            return false;
+        }
+        if (!callee_type || callee_type->kind != IR_TYPE_FUNCTION ||
+            (variadic_call ? call_argument_count < callee_type->parameter_count : callee_type->parameter_count != call_argument_count) ||
+            call_argument_count > MACHINE_A64_MAX_ARGUMENTS)
+        {
+            return false;
+        }
+        IrType* callee_return_type = ir_type_from_id(&program->types, callee_type->return_type);
+        bool callee_returns_value = callee_return_type && callee_return_type->kind != IR_TYPE_VOID;
+        if (callee_returns_value && !machine_a64_type_is_scalar_register(callee_return_type))
+        {
+            return false;
+        }
+        u32 argument_registers[MACHINE_A64_MAX_ARGUMENTS];
+        for (u32 argument_index = 0; argument_index < call_argument_count; argument_index += 1)
+        {
+            IrTypeId argument_type_id = argument_index < callee_type->parameter_count
+                                            ? callee_type->parameter_types[argument_index]
+                                            : function->values[instruction->operands[argument_index + 1].value].canonical_type;
+            IrType* argument_type = ir_type_from_id(&program->types, argument_type_id);
+            if (!machine_a64_type_is_scalar_register(argument_type) ||
+                !machine_a64_operand_register(selector, instruction->operands[argument_index + 1], argument_registers + argument_index))
+            {
+                return false;
+            }
+        }
+        for (u32 argument_index = 0; argument_index < call_argument_count; argument_index += 1)
+        {
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, argument_index),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_registers[argument_index])},
+                                                 .opcode = MACHINE_A64_MOV_RR,
+                                             });
+        }
+        if (direct_call)
+        {
+            u32 target_index = selector->call_targets.total_count;
+            IrSymbolId* target_row = (IrSymbolId*)machine_stream_append(selector->arena, &selector->call_targets);
+            *target_row = instruction->symbol;
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .payload = target_index,
+                                                 .opcode = MACHINE_A64_CALL_DIRECT,
+                                             });
+        }
+        else
+        {
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, callee_register)},
+                                                 .opcode = MACHINE_A64_CALL_INDIRECT,
+                                             });
+        }
+        if (callee_returns_value && instruction->result.value != IR_ID_UNDERLYING_INVALID && result_register != UINT32_MAX)
+        {
+            u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X0)},
+                                                           .opcode = MACHINE_A64_MOV_RR,
+                                                       });
+            machine_a64_define(selector, result_register, row);
+        }
+        return true;
+    }
+    break;
     case IR_OPCODE_DEBUG_TRAP:
     {
         machine_a64_select_row(selector, (MachineInstruction){.opcode = MACHINE_A64_BRK});
@@ -609,7 +822,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
             machine_a64_define(selector, result_register, row);
             return true;
         }
-        if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_FIELD)
+        if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
+            definition->opcode == IR_OPCODE_FIELD)
         {
             u32 address_register;
             if (!machine_a64_operand_register(selector, instruction->operands[0], &address_register))
@@ -676,7 +890,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
                                              });
             return true;
         }
-        if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_FIELD)
+        if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
+            definition->opcode == IR_OPCODE_FIELD)
         {
             u32 address_register;
             if (!machine_a64_operand_register(selector, instruction->operands[0], &address_register))
@@ -809,9 +1024,33 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         .supported = true,
         .failed_opcode = IR_OPCODE_COUNT,
     };
+    selector.target = target;
+    selector.direct_call_uses = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
+    memset(selector.direct_call_uses, 0, function->value_count);
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        IrInstruction* walk = function->instructions + instruction_index;
+        for (u32 operand_index = 0; operand_index < walk->operand_count; operand_index += 1)
+        {
+            IrValueId operand = walk->operands[operand_index];
+            if (operand.value >= function->value_count || selector.direct_call_uses[operand.value] == 2)
+            {
+                continue;
+            }
+            bool direct = walk->opcode == IR_OPCODE_CALL && operand_index == 0;
+            if (direct)
+            {
+                IrInstructionId definition = function->values[operand.value].definition;
+                IrInstruction* reference = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
+                direct = reference && reference->opcode == IR_OPCODE_FUNCTION && reference->symbol.value == walk->symbol.value;
+            }
+            selector.direct_call_uses[operand.value] = direct ? 1 : 2;
+        }
+    }
     machine_stream_initialize(&selector.immediates, sizeof(u64));
     machine_stream_initialize(&selector.stack_slots, sizeof(u32));
     machine_stream_initialize(&selector.stack_slot_alignments, sizeof(u32));
+    machine_stream_initialize(&selector.call_targets, sizeof(IrSymbolId));
     MachineBuilderStream line_marks;
     machine_stream_initialize(&line_marks, sizeof(MachineLineMark));
     for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
@@ -940,6 +1179,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
     machine_stream_flatten(&selector.stack_slots, result.function.stack_slot_sizes);
     result.function.stack_slot_alignments = arena_allocate(arena, u32, selector.stack_slot_alignments.total_count);
     machine_stream_flatten(&selector.stack_slot_alignments, result.function.stack_slot_alignments);
+    result.function.call_targets = arena_allocate(arena, IrSymbolId, selector.call_targets.total_count);
+    result.function.call_target_count = selector.call_targets.total_count;
+    machine_stream_flatten(&selector.call_targets, result.function.call_targets);
     result.function.line_marks = arena_allocate(arena, MachineLineMark, line_marks.total_count);
     result.function.line_mark_count = line_marks.total_count;
     machine_stream_flatten(&line_marks, result.function.line_marks);
@@ -1084,6 +1326,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
         {
             break;
         case MACHINE_A64_MOV_RI:
+        case MACHINE_A64_LEA_SYMBOL:
             capacity64 += 16;
             break;
         case MACHINE_A64_RET:
@@ -1104,6 +1347,8 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
     };
     MachineBuilderStream fixups;
     machine_stream_initialize(&fixups, sizeof(MachineA64BranchFixup));
+    MachineBuilderStream call_sites;
+    machine_stream_initialize(&call_sites, sizeof(MachineCallSite));
     MachineBuilderStream epilogs;
     machine_stream_initialize(&epilogs, sizeof(u32));
     result.block_offsets = arena_allocate(arena, u32, function->block_count);
@@ -1426,6 +1671,36 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             case MACHINE_A64_WRITE_SP:
                 machine_a64_emit(&encoder, 0x9100001f | ((u32)operand_registers[0] << 5));
                 break;
+            case MACHINE_A64_CALL_DIRECT:
+            {
+                MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                *site = (MachineCallSite){
+                    .code_offset = encoder.count,
+                    .target = instruction->payload,
+                };
+                machine_a64_emit(&encoder, 0x94000000);
+            }
+            break;
+            case MACHINE_A64_CALL_INDIRECT:
+                machine_a64_emit(&encoder, 0xd63f0000 | ((u32)operand_registers[0] << 5));
+                break;
+            case MACHINE_A64_LEA_SYMBOL:
+            {
+                // The canonical inline-literal form: load the eight-byte
+                // literal two words ahead, branch over it, and let the
+                // absolute relocation fill it.
+                machine_a64_emit(&encoder, 0x58000040 | operand_registers[0]);
+                machine_a64_emit(&encoder, 0x14000003);
+                MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                *site = (MachineCallSite){
+                    .code_offset = encoder.count,
+                    .target = instruction->payload,
+                    .absolute = 1,
+                };
+                machine_a64_emit(&encoder, 0);
+                machine_a64_emit(&encoder, 0);
+            }
+            break;
             default:
                 return result;
             }
@@ -1477,6 +1752,9 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             memcpy(encoder.bytes + fixup->patch_offset, &patched, sizeof(patched));
         }
     }
+    result.call_sites = arena_allocate(arena, MachineCallSite, call_sites.total_count);
+    result.call_site_count = call_sites.total_count;
+    machine_stream_flatten(&call_sites, result.call_sites);
     result.epilog_offsets = arena_allocate(arena, u32, epilogs.total_count ? epilogs.total_count : 1);
     result.epilog_count = epilogs.total_count;
     machine_stream_flatten(&epilogs, result.epilog_offsets);

@@ -10515,6 +10515,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                         (u32)buffer.count + encoded.row_offsets[mark->row], mark->source, position.line, position.column);
                                 }
                             }
+                            for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)
+                            {
+                                result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
+                                    .entity = ANALYSIS_ENTITY_ID_INVALID,
+                                    .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
+                                    .symbol = selected.function.call_targets[encoded.call_sites[site_index].target],
+                                    .offset = (u32)buffer.count + encoded.call_sites[site_index].code_offset,
+                                    .aarch64 = true,
+                                    .absolute = encoded.call_sites[site_index].absolute != 0,
+                                };
+                            }
                             buffer.count += encoded.byte_count;
                             descriptor->prolog_size = machine_prologue_cursor;
                             descriptor->code_size = (u32)buffer.count - descriptor->code_offset;

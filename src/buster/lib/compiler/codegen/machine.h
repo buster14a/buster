@@ -396,6 +396,18 @@ typedef enum MachineOpcode
     // stack save/restore pairs reduce to exact SP copies.
     MACHINE_A64_READ_SP,  // def = current stack pointer
     MACHINE_A64_WRITE_SP, // use; stack pointer = use
+    // Direct call: payload indexes the call-target side table; argument
+    // placement was lowered into explicit fixed-register copies before
+    // this row. Clobbers the AAPCS64 caller-saved set.
+    MACHINE_A64_CALL_DIRECT,
+    // Indirect call through a pointer value; the callee rides in X16 so
+    // neither the argument registers nor any allocatable register can
+    // clobber it, mirroring the canonical blr form.
+    MACHINE_A64_CALL_INDIRECT, // use callee pointer
+    // Symbol address through the canonical inline-literal form: an
+    // ldr-literal over a branch over an absolute eight-byte relocation.
+    // The payload indexes call_targets.
+    MACHINE_A64_LEA_SYMBOL, // def
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -697,13 +709,17 @@ struct MachineStackPlacement
     u8 reserved[3];
 };
 
-// A direct-call relocation site: the function-relative offset of the rel32
-// field and the call-target index it must resolve to.
+// A relocation site: the function-relative offset of the field to patch
+// and the call-target index it must resolve to. x86-64 sites are rel32
+// fields; AArch64 sites are branch words, or eight-byte inline literals
+// when `absolute` is set.
 typedef struct MachineCallSite MachineCallSite;
 struct MachineCallSite
 {
     u32 code_offset;
     u32 target;
+    u32 absolute;
+    u32 reserved;
 };
 
 typedef struct MachineEncodeResult MachineEncodeResult;

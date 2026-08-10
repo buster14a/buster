@@ -1091,15 +1091,17 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, a64_add_placement.reload_count > 0 && a64_add_placement.spill_count > 0);
             BUSTER_TEST(arguments, a64_add_placement.frame_size % 16 == 0);
         }
-        // Calls and float signatures are the current explicit unsupported
-        // representatives of the AArch64 subset.
+        // Direct calls select into fixed-register argument copies plus a
+        // relocated call row; float signatures are the current explicit
+        // unsupported representative.
         IrFunction* a64_call_function = machine_test_ir_function_find(machine_a64_module, S8("with_call"));
         BUSTER_TEST(arguments, a64_call_function != 0);
         if (a64_call_function)
         {
             MachineSelectResult a64_call_selected =
                 machine_select_canonical_function(arguments->arena, machine_a64_program, a64_call_function, machine_a64_target);
-            BUSTER_TEST(arguments, !a64_call_selected.supported);
+            BUSTER_TEST(arguments, a64_call_selected.supported);
+            BUSTER_TEST(arguments, a64_call_selected.function.call_target_count >= 2);
         }
         IrFunction* a64_float_function = machine_test_ir_function_find(machine_a64_module, S8("fadd"));
         BUSTER_TEST(arguments, a64_float_function != 0);
