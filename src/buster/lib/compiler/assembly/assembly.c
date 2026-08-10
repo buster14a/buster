@@ -7324,7 +7324,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
     builder->result.relocation_count = relocation_count;
     builder->result.diagnostic_count = diagnostic_count;
     builder->output_count = output_count;
-    bool metadata_precise = !handwritten_succeeded &&
+    bool metadata_precise = handwritten_requires_metadata || (!handwritten_succeeded &&
                             (handwritten_kind != ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS ||
                              (status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
                               assembly_x86_statement_has_extended_gpr(statement) &&
@@ -7334,7 +7334,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
                                status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH))) &&
                             status != BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC &&
                             status != BUSTER_X86_METADATA_ENCODE_INVALID_INPUT &&
-                            handwritten_kind != ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE;
+                            handwritten_kind != ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     if (metadata_precise)
     {
         u32 length = statement.length > UINT32_MAX ? UINT32_MAX : (u32)statement.length;

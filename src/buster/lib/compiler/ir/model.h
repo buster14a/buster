@@ -324,6 +324,7 @@ struct IrType
     bool is_variadic;
     bool is_atomic;
     bool is_nullptr;
+    bool is_volatile;
 };
 
 typedef struct IrTypeTable IrTypeTable;

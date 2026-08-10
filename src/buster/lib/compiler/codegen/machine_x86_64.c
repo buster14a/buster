@@ -2349,13 +2349,15 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 if (operand_index == 0 && instruction->opcode == IR_OPCODE_LOAD)
                 {
                     IrType* access_type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    place_use = machine_x64_type_is_scalar_register(access_type) && access_type->layout.size == promotable_locals[used];
+                    place_use = !instruction->volatile_access && machine_x64_type_is_scalar_register(access_type) &&
+                                access_type->layout.size == promotable_locals[used];
                 }
                 else if (operand_index == 0 && instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 2 &&
                          instruction->operands[1].value < function->value_count)
                 {
                     IrType* access_type = ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type);
-                    place_use = machine_x64_type_is_scalar_register(access_type) && access_type->layout.size == promotable_locals[used];
+                    place_use = !instruction->volatile_access && machine_x64_type_is_scalar_register(access_type) &&
+                                access_type->layout.size == promotable_locals[used];
                     local_store_counts[used] += 1;
                 }
                 if (!place_use)

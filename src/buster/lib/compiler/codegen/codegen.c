@@ -191,6 +191,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_function_saves_rbx(IrFunction* fu
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
     {
         IrInstruction* instruction = function->instructions + instruction_index;
+        if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_ATOMIC_STORE ||
+            instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE || instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE)
+        {
+            return true;
+        }
         if (instruction->opcode != IR_OPCODE_INLINE_ASSEMBLY)
         {
             continue;
@@ -10956,6 +10961,40 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             x64_forwarded_store_displacement = result_displacement;                                                                                             \
         }                                                                                                                                                      \
     } while (0)
+#define C_X64_LOAD_HIGH(register_opcode, value_id)                                                                                                             \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        codegen_emit_u8(&buffer, 0x48);                                                                                                                        \
+        codegen_emit_u8(&buffer, 0x8b);                                                                                                                        \
+        codegen_emit_u8(&buffer, (u8)(register_opcode));                                                                                                       \
+        codegen_emit_u32(&buffer, (u32)(C_X64_FRAME_DISPLACEMENT(value_offsets[(value_id).value]) + 8));                                                      \
+    } while (0)
+#define C_X64_STORE_HIGH_RDX()                                                                                                                                 \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        codegen_emit_u8(&buffer, 0x48);                                                                                                                        \
+        codegen_emit_u8(&buffer, 0x89);                                                                                                                        \
+        codegen_emit_u8(&buffer, 0x95);                                                                                                                        \
+        codegen_emit_u32(&buffer, (u32)(result_displacement + 8));                                                                                            \
+    } while (0)
+#define C_X64_ATOMIC_ADDRESS(place_id, indirect_place)                                                                                                         \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        if (indirect_place)                                                                                                                                    \
+        {                                                                                                                                                      \
+            C_X64_LOAD(0x85, place_id);                                                                                                                        \
+            codegen_emit_u8(&buffer, 0x49);                                                                                                                    \
+            codegen_emit_u8(&buffer, 0x89);                                                                                                                    \
+            codegen_emit_u8(&buffer, 0xc2);                                                                                                                    \
+        }                                                                                                                                                      \
+        else                                                                                                                                                   \
+        {                                                                                                                                                      \
+            codegen_emit_u8(&buffer, 0x4c);                                                                                                                    \
+            codegen_emit_u8(&buffer, 0x8d);                                                                                                                    \
+            codegen_emit_u8(&buffer, 0x95);                                                                                                                    \
+            codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[(place_id).value]));                                                        \
+        }                                                                                                                                                      \
+    } while (0)
 #define C_X64_LOAD_FLOAT(register_index, value_id, width)                                                                                                      \
     do                                                                                                                                                         \
     {                                                                                                                                                          \
@@ -11498,8 +11537,37 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
                         if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD && aggregate)
                         {
-                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-                            return result;
+                            if (!aggregate_type || aggregate_type->kind != IR_TYPE_INTEGER || aggregate_type->layout.size != 16 ||
+                                !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_CX16))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            C_X64_ATOMIC_ADDRESS(instruction->operands[0], indirect);
+                            codegen_emit_u8(&buffer, 0x31);
+                            codegen_emit_u8(&buffer, 0xc0);
+                            codegen_emit_u8(&buffer, 0x31);
+                            codegen_emit_u8(&buffer, 0xd2);
+                            u32 retry = (u32)buffer.count;
+                            codegen_emit_u8(&buffer, 0x48);
+                            codegen_emit_u8(&buffer, 0x89);
+                            codegen_emit_u8(&buffer, 0xc3);
+                            codegen_emit_u8(&buffer, 0x48);
+                            codegen_emit_u8(&buffer, 0x89);
+                            codegen_emit_u8(&buffer, 0xd1);
+                            codegen_emit_u8(&buffer, 0xf0);
+                            codegen_emit_u8(&buffer, 0x49);
+                            codegen_emit_u8(&buffer, 0x0f);
+                            codegen_emit_u8(&buffer, 0xc7);
+                            codegen_emit_u8(&buffer, 0x0a);
+                            codegen_emit_u8(&buffer, 0x0f);
+                            codegen_emit_u8(&buffer, 0x85);
+                            s32 retry_delta = (s32)((s64)retry - ((s64)buffer.count + 4));
+                            codegen_emit_u32(&buffer, (u32)retry_delta);
+                            C_X64_STORE_RESULT();
+                            C_X64_STORE_HIGH_RDX();
+                            instruction_id = instruction->next;
+                            continue;
                         }
                         if (aggregate)
                         {
@@ -11752,13 +11820,78 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     {
                         IrType* source_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
                         IrType* target_type = ir_type_from_id(&program->types, instruction->canonical_type);
-                        C_X64_LOAD(0x85, instruction->operands[0]);
                         IrConversionOperation conversion = instruction->conversion_operation;
                         if (!target_type || !source_type)
                         {
                             result.error = CODEGEN_ERROR_INVALID_IR;
                             return result;
                         }
+                        bool source_integer128 = source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128;
+                        bool target_integer128 = target_type->kind == IR_TYPE_INTEGER && target_type->bit_width == 128;
+                        if (source_integer128 || target_integer128)
+                        {
+                            if (source_type->kind != IR_TYPE_INTEGER || target_type->kind != IR_TYPE_INTEGER)
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            C_X64_LOAD(0x85, instruction->operands[0]);
+                            if (target_integer128)
+                            {
+                                if (source_integer128)
+                                {
+                                    C_X64_LOAD_HIGH(0x95, instruction->operands[0]);
+                                }
+                                else if (conversion == IR_CONVERSION_INTEGER_SIGN_EXTEND)
+                                {
+                                    if (source_type->bit_width == 8 || source_type->bit_width == 16)
+                                    {
+                                        codegen_emit_u8(&buffer, 0x48);
+                                        codegen_emit_u8(&buffer, 0x0f);
+                                        codegen_emit_u8(&buffer, source_type->bit_width == 8 ? 0xbe : 0xbf);
+                                        codegen_emit_u8(&buffer, 0xc0);
+                                    }
+                                    else if (source_type->bit_width == 32)
+                                    {
+                                        codegen_emit_u8(&buffer, 0x48);
+                                        codegen_emit_u8(&buffer, 0x63);
+                                        codegen_emit_u8(&buffer, 0xc0);
+                                    }
+                                    codegen_emit_u8(&buffer, 0x48);
+                                    codegen_emit_u8(&buffer, 0x99);
+                                }
+                                else
+                                {
+                                    if (source_type->bit_width <= 32)
+                                    {
+                                        codegen_emit_u8(&buffer, 0x89);
+                                        codegen_emit_u8(&buffer, 0xc0);
+                                    }
+                                    codegen_emit_u8(&buffer, 0x31);
+                                    codegen_emit_u8(&buffer, 0xd2);
+                                }
+                                C_X64_STORE_RESULT();
+                                C_X64_STORE_HIGH_RDX();
+                            }
+                            else
+                            {
+                                if (target_type->bit_width == 8 || target_type->bit_width == 16)
+                                {
+                                    codegen_emit_u8(&buffer, 0x0f);
+                                    codegen_emit_u8(&buffer, target_type->bit_width == 8 ? 0xb6 : 0xb7);
+                                    codegen_emit_u8(&buffer, 0xc0);
+                                }
+                                else if (target_type->bit_width == 32)
+                                {
+                                    codegen_emit_u8(&buffer, 0x89);
+                                    codegen_emit_u8(&buffer, 0xc0);
+                                }
+                                C_X64_STORE_RESULT();
+                            }
+                            instruction_id = instruction->next;
+                            continue;
+                        }
+                        C_X64_LOAD(0x85, instruction->operands[0]);
                         if (conversion == IR_CONVERSION_INTEGER_SIGN_EXTEND && source_type->kind == IR_TYPE_INTEGER)
                         {
                             codegen_emit_u8(&buffer, 0x48);
@@ -11989,8 +12122,31 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
                         if (instruction->opcode == IR_OPCODE_ATOMIC_STORE && aggregate)
                         {
-                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-                            return result;
+                            if (!stored_type || stored_type->kind != IR_TYPE_INTEGER || stored_type->layout.size != 16 ||
+                                !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_CX16))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            C_X64_ATOMIC_ADDRESS(instruction->operands[0], indirect);
+                            C_X64_LOAD(0x9d, instruction->operands[1]);
+                            C_X64_LOAD_HIGH(0x8d, instruction->operands[1]);
+                            codegen_emit_u8(&buffer, 0x31);
+                            codegen_emit_u8(&buffer, 0xc0);
+                            codegen_emit_u8(&buffer, 0x31);
+                            codegen_emit_u8(&buffer, 0xd2);
+                            u32 retry = (u32)buffer.count;
+                            codegen_emit_u8(&buffer, 0xf0);
+                            codegen_emit_u8(&buffer, 0x49);
+                            codegen_emit_u8(&buffer, 0x0f);
+                            codegen_emit_u8(&buffer, 0xc7);
+                            codegen_emit_u8(&buffer, 0x0a);
+                            codegen_emit_u8(&buffer, 0x0f);
+                            codegen_emit_u8(&buffer, 0x85);
+                            s32 retry_delta = (s32)((s64)retry - ((s64)buffer.count + 4));
+                            codegen_emit_u32(&buffer, (u32)retry_delta);
+                            instruction_id = instruction->next;
+                            continue;
                         }
                         if (aggregate)
                         {
@@ -12140,6 +12296,90 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
                         bool pointer_arithmetic = value_type && value_type->kind == IR_TYPE_POINTER &&
                                                   (instruction->atomic_operation == IR_ATOMIC_ADD || instruction->atomic_operation == IR_ATOMIC_SUBTRACT);
+                        if (value_type && value_type->kind == IR_TYPE_INTEGER && value_type->layout.resolved && value_type->layout.size == 16 &&
+                            instruction->atomic_operation < IR_ATOMIC_OPERATION_COUNT)
+                        {
+                            if (!target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_CX16))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            C_X64_ATOMIC_ADDRESS(instruction->operands[0], indirect);
+                            codegen_emit_u8(&buffer, 0x4c);
+                            codegen_emit_u8(&buffer, 0x8b);
+                            codegen_emit_u8(&buffer, 0x85);
+                            codegen_emit_u32(&buffer, (u32)C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[1].value]));
+                            codegen_emit_u8(&buffer, 0x4c);
+                            codegen_emit_u8(&buffer, 0x8b);
+                            codegen_emit_u8(&buffer, 0x8d);
+                            codegen_emit_u32(&buffer, (u32)(C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[1].value]) + 8));
+                            codegen_emit_u8(&buffer, 0x31);
+                            codegen_emit_u8(&buffer, 0xc0);
+                            codegen_emit_u8(&buffer, 0x31);
+                            codegen_emit_u8(&buffer, 0xd2);
+                            u32 retry = (u32)buffer.count;
+                            codegen_emit_u8(&buffer, 0x48);
+                            codegen_emit_u8(&buffer, 0x89);
+                            codegen_emit_u8(&buffer, 0xc3);
+                            codegen_emit_u8(&buffer, 0x48);
+                            codegen_emit_u8(&buffer, 0x89);
+                            codegen_emit_u8(&buffer, 0xd1);
+                            u8 low_opcode = 0;
+                            u8 high_opcode = 0;
+                            switch (instruction->atomic_operation)
+                            {
+                            case IR_ATOMIC_ADD:
+                                low_opcode = 0x01;
+                                high_opcode = 0x11;
+                                break;
+                            case IR_ATOMIC_SUBTRACT:
+                                low_opcode = 0x29;
+                                high_opcode = 0x19;
+                                break;
+                            case IR_ATOMIC_BITWISE_AND:
+                                low_opcode = 0x21;
+                                high_opcode = 0x21;
+                                break;
+                            case IR_ATOMIC_BITWISE_OR:
+                                low_opcode = 0x09;
+                                high_opcode = 0x09;
+                                break;
+                            case IR_ATOMIC_BITWISE_XOR:
+                                low_opcode = 0x31;
+                                high_opcode = 0x31;
+                                break;
+                            case IR_ATOMIC_EXCHANGE:
+                                low_opcode = 0x89;
+                                high_opcode = 0x89;
+                                break;
+                            case IR_ATOMIC_OPERATION_COUNT:
+                                break;
+                            }
+                            codegen_emit_u8(&buffer, 0x4c);
+                            codegen_emit_u8(&buffer, low_opcode);
+                            codegen_emit_u8(&buffer, 0xc3);
+                            codegen_emit_u8(&buffer, 0x4c);
+                            codegen_emit_u8(&buffer, high_opcode);
+                            codegen_emit_u8(&buffer, 0xc9);
+                            codegen_emit_u8(&buffer, 0xf0);
+                            codegen_emit_u8(&buffer, 0x49);
+                            codegen_emit_u8(&buffer, 0x0f);
+                            codegen_emit_u8(&buffer, 0xc7);
+                            codegen_emit_u8(&buffer, 0x0a);
+                            codegen_emit_u8(&buffer, 0x0f);
+                            codegen_emit_u8(&buffer, 0x85);
+                            s64 retry_displacement = (s64)retry - ((s64)buffer.count + 4);
+                            if (retry_displacement < INT32_MIN || retry_displacement > INT32_MAX)
+                            {
+                                result.error = CODEGEN_ERROR_CAPACITY;
+                                return result;
+                            }
+                            codegen_emit_u32(&buffer, (u32)(s32)retry_displacement);
+                            C_X64_STORE_RESULT();
+                            C_X64_STORE_HIGH_RDX();
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         if (!value_type ||
                             (!pointer_arithmetic && value_type->kind != IR_TYPE_INTEGER &&
                              (instruction->atomic_operation != IR_ATOMIC_EXCHANGE ||
@@ -12250,6 +12490,28 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         bool indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                         definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE ||
                                         (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
+                        if (value_type && value_type->kind == IR_TYPE_INTEGER && value_type->layout.resolved && value_type->layout.size == 16)
+                        {
+                            if (!target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_CX16))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            C_X64_ATOMIC_ADDRESS(instruction->operands[0], indirect);
+                            C_X64_LOAD(0x85, instruction->operands[1]);
+                            C_X64_LOAD_HIGH(0x95, instruction->operands[1]);
+                            C_X64_LOAD(0x9d, instruction->operands[2]);
+                            C_X64_LOAD_HIGH(0x8d, instruction->operands[2]);
+                            codegen_emit_u8(&buffer, 0xf0);
+                            codegen_emit_u8(&buffer, 0x49);
+                            codegen_emit_u8(&buffer, 0x0f);
+                            codegen_emit_u8(&buffer, 0xc7);
+                            codegen_emit_u8(&buffer, 0x0a);
+                            C_X64_STORE_RESULT();
+                            C_X64_STORE_HIGH_RDX();
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         if (!value_type || (value_type->kind != IR_TYPE_INTEGER && value_type->kind != IR_TYPE_POINTER) || !value_type->layout.resolved ||
                             (value_type->layout.size != 1 && value_type->layout.size != 2 && value_type->layout.size != 4 && value_type->layout.size != 8))
                         {
@@ -12320,6 +12582,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             codegen_emit_u32(&buffer, (u32)immediate);
                         }
                         C_X64_STORE_RESULT();
+                        IrType* constant_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                        if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER && constant_type && constant_type->kind == IR_TYPE_INTEGER &&
+                            constant_type->bit_width == 128)
+                        {
+                            codegen_emit_u8(&buffer, 0x48);
+                            codegen_emit_u8(&buffer, 0xba);
+                            codegen_emit_u64(&buffer, instruction->immediate_count > 1 ? instruction->immediates[1]
+                                                                                     : instruction->immediate_is_negative ? UINT64_MAX : 0);
+                            C_X64_STORE_HIGH_RDX();
+                        }
                     }
                     else if (instruction->opcode == IR_OPCODE_VA_START)
                     {
@@ -13316,6 +13588,46 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             instruction_id = instruction->next;
                             continue;
                         }
+                        IrType* canonical_unary_operand_type =
+                            ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+                        if (canonical_unary_operand_type && canonical_unary_operand_type->kind == IR_TYPE_INTEGER &&
+                            canonical_unary_operand_type->bit_width == 128)
+                        {
+                            if (instruction->unary_operation != IR_UNARY_INTEGER_NEGATE &&
+                                instruction->unary_operation != IR_UNARY_INTEGER_BITWISE_NOT)
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            C_X64_LOAD(0x85, instruction->operands[0]);
+                            C_X64_LOAD_HIGH(0x95, instruction->operands[0]);
+                            if (instruction->unary_operation == IR_UNARY_INTEGER_NEGATE)
+                            {
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0xf7);
+                                codegen_emit_u8(&buffer, 0xd8);
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0x83);
+                                codegen_emit_u8(&buffer, 0xd2);
+                                codegen_emit_u8(&buffer, 0);
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0xf7);
+                                codegen_emit_u8(&buffer, 0xda);
+                            }
+                            else
+                            {
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0xf7);
+                                codegen_emit_u8(&buffer, 0xd0);
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0xf7);
+                                codegen_emit_u8(&buffer, 0xd2);
+                            }
+                            C_X64_STORE_RESULT();
+                            C_X64_STORE_HIGH_RDX();
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         C_X64_LOAD(0x85, instruction->operands[0]);
                         if (instruction->unary_operation == IR_UNARY_BOOLEAN_NOT)
                         {
@@ -13494,6 +13806,394 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 codegen_emit_u8(&buffer, 0xc0);
                                 C_X64_STORE_RESULT();
                             }
+                            instruction_id = instruction->next;
+                            continue;
+                        }
+                        bool integer128 = operand_type_value && operand_type_value->kind == IR_TYPE_INTEGER && operand_type_value->bit_width == 128;
+                        if (integer128)
+                        {
+                            C_X64_LOAD(0x85, instruction->operands[0]);
+                            C_X64_LOAD_HIGH(0x95, instruction->operands[0]);
+                            C_X64_LOAD(0x8d, instruction->operands[1]);
+                            C_X64_LOAD_HIGH(0xb5, instruction->operands[1]);
+                            IrBinaryOperation operation = instruction->binary_operation;
+                            if (operation == IR_BINARY_INTEGER_ADD || operation == IR_BINARY_INTEGER_SUBTRACT)
+                            {
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, operation == IR_BINARY_INTEGER_ADD ? 0x01 : 0x29);
+                                codegen_emit_u8(&buffer, 0xc8);
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, operation == IR_BINARY_INTEGER_ADD ? 0x11 : 0x19);
+                                codegen_emit_u8(&buffer, 0xf2);
+                            }
+                            else if (operation == IR_BINARY_INTEGER_BITWISE_AND || operation == IR_BINARY_INTEGER_BITWISE_OR ||
+                                     operation == IR_BINARY_INTEGER_BITWISE_XOR)
+                            {
+                                u8 opcode = operation == IR_BINARY_INTEGER_BITWISE_AND ? 0x21
+                                            : operation == IR_BINARY_INTEGER_BITWISE_OR ? 0x09
+                                                                                       : 0x31;
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, opcode);
+                                codegen_emit_u8(&buffer, 0xc8);
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, opcode);
+                                codegen_emit_u8(&buffer, 0xf2);
+                            }
+                            else if (operation == IR_BINARY_INTEGER_MULTIPLY)
+                            {
+                                codegen_emit_u8(&buffer, 0x49);
+                                codegen_emit_u8(&buffer, 0x89);
+                                codegen_emit_u8(&buffer, 0xc3);
+                                codegen_emit_u8(&buffer, 0x49);
+                                codegen_emit_u8(&buffer, 0x89);
+                                codegen_emit_u8(&buffer, 0xd1);
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0xf7);
+                                codegen_emit_u8(&buffer, 0xe1);
+                                codegen_emit_u8(&buffer, 0x4c);
+                                codegen_emit_u8(&buffer, 0x0f);
+                                codegen_emit_u8(&buffer, 0xaf);
+                                codegen_emit_u8(&buffer, 0xc9);
+                                codegen_emit_u8(&buffer, 0x4c);
+                                codegen_emit_u8(&buffer, 0x01);
+                                codegen_emit_u8(&buffer, 0xca);
+                                codegen_emit_u8(&buffer, 0x4c);
+                                codegen_emit_u8(&buffer, 0x0f);
+                                codegen_emit_u8(&buffer, 0xaf);
+                                codegen_emit_u8(&buffer, 0xde);
+                                codegen_emit_u8(&buffer, 0x4c);
+                                codegen_emit_u8(&buffer, 0x01);
+                                codegen_emit_u8(&buffer, 0xda);
+                            }
+                            else if (operation == IR_BINARY_UNSIGNED_DIVIDE || operation == IR_BINARY_UNSIGNED_REMAINDER ||
+                                     operation == IR_BINARY_SIGNED_DIVIDE || operation == IR_BINARY_SIGNED_REMAINDER)
+                            {
+                                bool signed_division = operation == IR_BINARY_SIGNED_DIVIDE || operation == IR_BINARY_SIGNED_REMAINDER;
+                                bool remainder_result = operation == IR_BINARY_UNSIGNED_REMAINDER || operation == IR_BINARY_SIGNED_REMAINDER;
+                                if (signed_division)
+                                {
+                                    codegen_emit_u8(&buffer, 0x49);
+                                    codegen_emit_u8(&buffer, 0x89);
+                                    codegen_emit_u8(&buffer, 0xd0);
+                                    codegen_emit_u8(&buffer, 0x49);
+                                    codegen_emit_u8(&buffer, 0xc1);
+                                    codegen_emit_u8(&buffer, 0xf8);
+                                    codegen_emit_u8(&buffer, 63);
+                                    codegen_emit_u8(&buffer, 0x49);
+                                    codegen_emit_u8(&buffer, 0x89);
+                                    codegen_emit_u8(&buffer, 0xf1);
+                                    codegen_emit_u8(&buffer, 0x49);
+                                    codegen_emit_u8(&buffer, 0xc1);
+                                    codegen_emit_u8(&buffer, 0xf9);
+                                    codegen_emit_u8(&buffer, 63);
+                                    codegen_emit_u8(&buffer, 0x4c);
+                                    codegen_emit_u8(&buffer, 0x89);
+                                    codegen_emit_u8(&buffer, 0x85);
+                                    codegen_emit_u32(&buffer, (u32)(result_displacement + 8));
+                                    codegen_emit_u8(&buffer, 0x4d);
+                                    codegen_emit_u8(&buffer, 0x31);
+                                    codegen_emit_u8(&buffer, 0xc1);
+                                    codegen_emit_u8(&buffer, 0x44);
+                                    codegen_emit_u8(&buffer, 0x89);
+                                    codegen_emit_u8(&buffer, 0x8d);
+                                    codegen_emit_u32(&buffer, (u32)(result_displacement + 4));
+                                    codegen_emit_u8(&buffer, 0x4c);
+                                    codegen_emit_u8(&buffer, 0x31);
+                                    codegen_emit_u8(&buffer, 0xc0);
+                                    codegen_emit_u8(&buffer, 0x4c);
+                                    codegen_emit_u8(&buffer, 0x31);
+                                    codegen_emit_u8(&buffer, 0xc2);
+                                    codegen_emit_u8(&buffer, 0x4c);
+                                    codegen_emit_u8(&buffer, 0x29);
+                                    codegen_emit_u8(&buffer, 0xc0);
+                                    codegen_emit_u8(&buffer, 0x4c);
+                                    codegen_emit_u8(&buffer, 0x19);
+                                    codegen_emit_u8(&buffer, 0xc2);
+                                    codegen_emit_u8(&buffer, 0x4c);
+                                    codegen_emit_u8(&buffer, 0x31);
+                                    codegen_emit_u8(&buffer, 0xc9);
+                                    codegen_emit_u8(&buffer, 0x4c);
+                                    codegen_emit_u8(&buffer, 0x31);
+                                    codegen_emit_u8(&buffer, 0xce);
+                                    codegen_emit_u8(&buffer, 0x4c);
+                                    codegen_emit_u8(&buffer, 0x29);
+                                    codegen_emit_u8(&buffer, 0xc9);
+                                    codegen_emit_u8(&buffer, 0x4c);
+                                    codegen_emit_u8(&buffer, 0x19);
+                                    codegen_emit_u8(&buffer, 0xce);
+                                }
+                                codegen_emit_u8(&buffer, 0xc7);
+                                codegen_emit_u8(&buffer, 0x85);
+                                codegen_emit_u32(&buffer, (u32)result_displacement);
+                                codegen_emit_u32(&buffer, 128);
+                                codegen_emit_u8(&buffer, 0x45);
+                                codegen_emit_u8(&buffer, 0x31);
+                                codegen_emit_u8(&buffer, 0xc0);
+                                codegen_emit_u8(&buffer, 0x45);
+                                codegen_emit_u8(&buffer, 0x31);
+                                codegen_emit_u8(&buffer, 0xc9);
+                                codegen_emit_u8(&buffer, 0x45);
+                                codegen_emit_u8(&buffer, 0x31);
+                                codegen_emit_u8(&buffer, 0xd2);
+                                codegen_emit_u8(&buffer, 0x45);
+                                codegen_emit_u8(&buffer, 0x31);
+                                codegen_emit_u8(&buffer, 0xdb);
+                                u32 divide_loop = (u32)buffer.count;
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0xd1);
+                                codegen_emit_u8(&buffer, 0xe0);
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0xd1);
+                                codegen_emit_u8(&buffer, 0xd2);
+                                codegen_emit_u8(&buffer, 0x49);
+                                codegen_emit_u8(&buffer, 0xd1);
+                                codegen_emit_u8(&buffer, 0xd2);
+                                codegen_emit_u8(&buffer, 0x49);
+                                codegen_emit_u8(&buffer, 0xd1);
+                                codegen_emit_u8(&buffer, 0xd3);
+                                codegen_emit_u8(&buffer, 0x49);
+                                codegen_emit_u8(&buffer, 0xd1);
+                                codegen_emit_u8(&buffer, 0xe0);
+                                codegen_emit_u8(&buffer, 0x49);
+                                codegen_emit_u8(&buffer, 0xd1);
+                                codegen_emit_u8(&buffer, 0xd1);
+                                codegen_emit_u8(&buffer, 0x49);
+                                codegen_emit_u8(&buffer, 0x39);
+                                codegen_emit_u8(&buffer, 0xf3);
+                                codegen_emit_u8(&buffer, 0x0f);
+                                codegen_emit_u8(&buffer, 0x82);
+                                u32 high_less_patch = (u32)buffer.count;
+                                codegen_emit_u32(&buffer, 0);
+                                codegen_emit_u8(&buffer, 0x0f);
+                                codegen_emit_u8(&buffer, 0x87);
+                                u32 high_greater_patch = (u32)buffer.count;
+                                codegen_emit_u32(&buffer, 0);
+                                codegen_emit_u8(&buffer, 0x49);
+                                codegen_emit_u8(&buffer, 0x39);
+                                codegen_emit_u8(&buffer, 0xca);
+                                codegen_emit_u8(&buffer, 0x0f);
+                                codegen_emit_u8(&buffer, 0x82);
+                                u32 low_less_patch = (u32)buffer.count;
+                                codegen_emit_u32(&buffer, 0);
+                                u32 subtract_offset = (u32)buffer.count;
+                                codegen_emit_u8(&buffer, 0x49);
+                                codegen_emit_u8(&buffer, 0x29);
+                                codegen_emit_u8(&buffer, 0xca);
+                                codegen_emit_u8(&buffer, 0x49);
+                                codegen_emit_u8(&buffer, 0x19);
+                                codegen_emit_u8(&buffer, 0xf3);
+                                codegen_emit_u8(&buffer, 0x41);
+                                codegen_emit_u8(&buffer, 0x80);
+                                codegen_emit_u8(&buffer, 0xc8);
+                                codegen_emit_u8(&buffer, 1);
+                                u32 divide_skip = (u32)buffer.count;
+                                codegen_emit_u8(&buffer, 0x83);
+                                codegen_emit_u8(&buffer, 0xad);
+                                codegen_emit_u32(&buffer, (u32)result_displacement);
+                                codegen_emit_u8(&buffer, 1);
+                                codegen_emit_u8(&buffer, 0x0f);
+                                codegen_emit_u8(&buffer, 0x85);
+                                u32 divide_loop_patch = (u32)buffer.count;
+                                codegen_emit_u32(&buffer, 0);
+                                s32 high_less_delta = (s32)((s64)divide_skip - ((s64)high_less_patch + 4));
+                                s32 high_greater_delta = (s32)((s64)subtract_offset - ((s64)high_greater_patch + 4));
+                                s32 low_less_delta = (s32)((s64)divide_skip - ((s64)low_less_patch + 4));
+                                s32 divide_loop_delta = (s32)((s64)divide_loop - ((s64)divide_loop_patch + 4));
+                                memcpy(buffer.bytes + high_less_patch, &high_less_delta, 4);
+                                memcpy(buffer.bytes + high_greater_patch, &high_greater_delta, 4);
+                                memcpy(buffer.bytes + low_less_patch, &low_less_delta, 4);
+                                memcpy(buffer.bytes + divide_loop_patch, &divide_loop_delta, 4);
+                                codegen_emit_u8(&buffer, 0x4c);
+                                codegen_emit_u8(&buffer, 0x89);
+                                codegen_emit_u8(&buffer, remainder_result ? 0xd0 : 0xc0);
+                                codegen_emit_u8(&buffer, 0x4c);
+                                codegen_emit_u8(&buffer, 0x89);
+                                codegen_emit_u8(&buffer, remainder_result ? 0xda : 0xca);
+                                if (signed_division)
+                                {
+                                    if (remainder_result)
+                                    {
+                                        codegen_emit_u8(&buffer, 0x4c);
+                                        codegen_emit_u8(&buffer, 0x8b);
+                                        codegen_emit_u8(&buffer, 0x85);
+                                        codegen_emit_u32(&buffer, (u32)(result_displacement + 8));
+                                    }
+                                    else
+                                    {
+                                        codegen_emit_u8(&buffer, 0x44);
+                                        codegen_emit_u8(&buffer, 0x8b);
+                                        codegen_emit_u8(&buffer, 0x85);
+                                        codegen_emit_u32(&buffer, (u32)(result_displacement + 4));
+                                        codegen_emit_u8(&buffer, 0x49);
+                                        codegen_emit_u8(&buffer, 0xf7);
+                                        codegen_emit_u8(&buffer, 0xd8);
+                                    }
+                                    codegen_emit_u8(&buffer, 0x4c);
+                                    codegen_emit_u8(&buffer, 0x31);
+                                    codegen_emit_u8(&buffer, 0xc0);
+                                    codegen_emit_u8(&buffer, 0x4c);
+                                    codegen_emit_u8(&buffer, 0x31);
+                                    codegen_emit_u8(&buffer, 0xc2);
+                                    codegen_emit_u8(&buffer, 0x4c);
+                                    codegen_emit_u8(&buffer, 0x29);
+                                    codegen_emit_u8(&buffer, 0xc0);
+                                    codegen_emit_u8(&buffer, 0x4c);
+                                    codegen_emit_u8(&buffer, 0x19);
+                                    codegen_emit_u8(&buffer, 0xc2);
+                                }
+                            }
+                            else if (operation == IR_BINARY_SHIFT_LEFT || operation == IR_BINARY_SIGNED_SHIFT_RIGHT ||
+                                     operation == IR_BINARY_UNSIGNED_SHIFT_RIGHT)
+                            {
+                                if (operation == IR_BINARY_SHIFT_LEFT)
+                                {
+                                    codegen_emit_u8(&buffer, 0x49);
+                                    codegen_emit_u8(&buffer, 0x89);
+                                    codegen_emit_u8(&buffer, 0xc1);
+                                    codegen_emit_u8(&buffer, 0x48);
+                                    codegen_emit_u8(&buffer, 0x0f);
+                                    codegen_emit_u8(&buffer, 0xa5);
+                                    codegen_emit_u8(&buffer, 0xc2);
+                                    codegen_emit_u8(&buffer, 0x48);
+                                    codegen_emit_u8(&buffer, 0xd3);
+                                    codegen_emit_u8(&buffer, 0xe0);
+                                    codegen_emit_u8(&buffer, 0x49);
+                                    codegen_emit_u8(&buffer, 0xd3);
+                                    codegen_emit_u8(&buffer, 0xe1);
+                                    codegen_emit_u8(&buffer, 0x45);
+                                    codegen_emit_u8(&buffer, 0x31);
+                                    codegen_emit_u8(&buffer, 0xd2);
+                                    codegen_emit_u8(&buffer, 0xf6);
+                                    codegen_emit_u8(&buffer, 0xc1);
+                                    codegen_emit_u8(&buffer, 64);
+                                    codegen_emit_u8(&buffer, 0x49);
+                                    codegen_emit_u8(&buffer, 0x0f);
+                                    codegen_emit_u8(&buffer, 0x45);
+                                    codegen_emit_u8(&buffer, 0xc2);
+                                    codegen_emit_u8(&buffer, 0x49);
+                                    codegen_emit_u8(&buffer, 0x0f);
+                                    codegen_emit_u8(&buffer, 0x45);
+                                    codegen_emit_u8(&buffer, 0xd1);
+                                }
+                                else
+                                {
+                                    codegen_emit_u8(&buffer, 0x49);
+                                    codegen_emit_u8(&buffer, 0x89);
+                                    codegen_emit_u8(&buffer, 0xd1);
+                                    codegen_emit_u8(&buffer, 0x49);
+                                    codegen_emit_u8(&buffer, 0x89);
+                                    codegen_emit_u8(&buffer, 0xd2);
+                                    codegen_emit_u8(&buffer, 0x48);
+                                    codegen_emit_u8(&buffer, 0x0f);
+                                    codegen_emit_u8(&buffer, 0xad);
+                                    codegen_emit_u8(&buffer, 0xd0);
+                                    codegen_emit_u8(&buffer, 0x48);
+                                    codegen_emit_u8(&buffer, 0xd3);
+                                    codegen_emit_u8(&buffer, operation == IR_BINARY_SIGNED_SHIFT_RIGHT ? 0xfa : 0xea);
+                                    codegen_emit_u8(&buffer, 0x49);
+                                    codegen_emit_u8(&buffer, 0xd3);
+                                    codegen_emit_u8(&buffer, operation == IR_BINARY_SIGNED_SHIFT_RIGHT ? 0xfa : 0xea);
+                                    if (operation == IR_BINARY_SIGNED_SHIFT_RIGHT)
+                                    {
+                                        codegen_emit_u8(&buffer, 0x49);
+                                        codegen_emit_u8(&buffer, 0xc1);
+                                        codegen_emit_u8(&buffer, 0xf9);
+                                        codegen_emit_u8(&buffer, 63);
+                                    }
+                                    else
+                                    {
+                                        codegen_emit_u8(&buffer, 0x45);
+                                        codegen_emit_u8(&buffer, 0x31);
+                                        codegen_emit_u8(&buffer, 0xc9);
+                                    }
+                                    codegen_emit_u8(&buffer, 0xf6);
+                                    codegen_emit_u8(&buffer, 0xc1);
+                                    codegen_emit_u8(&buffer, 64);
+                                    codegen_emit_u8(&buffer, 0x49);
+                                    codegen_emit_u8(&buffer, 0x0f);
+                                    codegen_emit_u8(&buffer, 0x45);
+                                    codegen_emit_u8(&buffer, 0xc2);
+                                    codegen_emit_u8(&buffer, 0x49);
+                                    codegen_emit_u8(&buffer, 0x0f);
+                                    codegen_emit_u8(&buffer, 0x45);
+                                    codegen_emit_u8(&buffer, 0xd1);
+                                }
+                            }
+                            else if (operation == IR_BINARY_INTEGER_EQUAL || operation == IR_BINARY_INTEGER_NOT_EQUAL)
+                            {
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0x31);
+                                codegen_emit_u8(&buffer, 0xc8);
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0x31);
+                                codegen_emit_u8(&buffer, 0xf2);
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0x09);
+                                codegen_emit_u8(&buffer, 0xd0);
+                                codegen_emit_u8(&buffer, 0x0f);
+                                codegen_emit_u8(&buffer, operation == IR_BINARY_INTEGER_EQUAL ? 0x94 : 0x95);
+                                codegen_emit_u8(&buffer, 0xc0);
+                                codegen_emit_u8(&buffer, 0x0f);
+                                codegen_emit_u8(&buffer, 0xb6);
+                                codegen_emit_u8(&buffer, 0xc0);
+                                C_X64_STORE_RESULT();
+                                instruction_id = instruction->next;
+                                continue;
+                            }
+                            else if (operation >= IR_BINARY_SIGNED_LESS && operation <= IR_BINARY_UNSIGNED_GREATER_EQUAL)
+                            {
+                                bool less = operation == IR_BINARY_SIGNED_LESS || operation == IR_BINARY_SIGNED_LESS_EQUAL ||
+                                            operation == IR_BINARY_UNSIGNED_LESS || operation == IR_BINARY_UNSIGNED_LESS_EQUAL;
+                                bool inclusive = operation == IR_BINARY_SIGNED_LESS_EQUAL || operation == IR_BINARY_SIGNED_GREATER_EQUAL ||
+                                                 operation == IR_BINARY_UNSIGNED_LESS_EQUAL || operation == IR_BINARY_UNSIGNED_GREATER_EQUAL;
+                                bool signed_compare = operation >= IR_BINARY_SIGNED_LESS && operation <= IR_BINARY_SIGNED_GREATER_EQUAL;
+                                u8 high_condition = less ? (signed_compare ? 0x9c : 0x92) : (signed_compare ? 0x9f : 0x97);
+                                u8 low_condition = less ? (inclusive ? 0x96 : 0x92) : (inclusive ? 0x93 : 0x97);
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0x39);
+                                codegen_emit_u8(&buffer, 0xf2);
+                                codegen_emit_u8(&buffer, 0x41);
+                                codegen_emit_u8(&buffer, 0x0f);
+                                codegen_emit_u8(&buffer, high_condition);
+                                codegen_emit_u8(&buffer, 0xc1);
+                                codegen_emit_u8(&buffer, 0x41);
+                                codegen_emit_u8(&buffer, 0x0f);
+                                codegen_emit_u8(&buffer, 0x94);
+                                codegen_emit_u8(&buffer, 0xc2);
+                                codegen_emit_u8(&buffer, 0x48);
+                                codegen_emit_u8(&buffer, 0x39);
+                                codegen_emit_u8(&buffer, 0xc8);
+                                codegen_emit_u8(&buffer, 0x0f);
+                                codegen_emit_u8(&buffer, low_condition);
+                                codegen_emit_u8(&buffer, 0xc0);
+                                codegen_emit_u8(&buffer, 0x45);
+                                codegen_emit_u8(&buffer, 0x0f);
+                                codegen_emit_u8(&buffer, 0xb6);
+                                codegen_emit_u8(&buffer, 0xc9);
+                                codegen_emit_u8(&buffer, 0x45);
+                                codegen_emit_u8(&buffer, 0x0f);
+                                codegen_emit_u8(&buffer, 0xb6);
+                                codegen_emit_u8(&buffer, 0xd2);
+                                codegen_emit_u8(&buffer, 0x0f);
+                                codegen_emit_u8(&buffer, 0xb6);
+                                codegen_emit_u8(&buffer, 0xc0);
+                                codegen_emit_u8(&buffer, 0x44);
+                                codegen_emit_u8(&buffer, 0x21);
+                                codegen_emit_u8(&buffer, 0xd0);
+                                codegen_emit_u8(&buffer, 0x44);
+                                codegen_emit_u8(&buffer, 0x09);
+                                codegen_emit_u8(&buffer, 0xc8);
+                                C_X64_STORE_RESULT();
+                                instruction_id = instruction->next;
+                                continue;
+                            }
+                            else
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            C_X64_STORE_RESULT();
+                            C_X64_STORE_HIGH_RDX();
                             instruction_id = instruction->next;
                             continue;
                         }
@@ -14303,6 +15003,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     }
 #undef C_X64_STORE_RESULT
 #undef C_X64_LOAD
+#undef C_X64_LOAD_HIGH
+#undef C_X64_STORE_HIGH_RDX
+#undef C_X64_ATOMIC_ADDRESS
 #undef C_X64_RECORD_FLOAT_STORE
 #undef C_X64_LOAD_FLOAT
 #undef C_X64_RESTORE_RBX

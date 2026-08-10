@@ -1886,6 +1886,33 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_wide_argument_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    if (target_native.cpu_arch == CPU_ARCH_X86_64)
+    {
+        String8 c_int128_path = buster_test_temporary_path(arguments->arena, S8("buster-c-int128"),
+#if BUSTER_WINDOWS
+                                                            S8(".exe"));
+#else
+                                                            S8(""));
+#endif
+        String8 c_int128_command_line[] = {
+            S8("-o"), c_int128_path, S8("tests/basic_c_int128.c"),
+        };
+        CompilerDriverResult c_int128 = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_int128_command_line)));
+        BUSTER_TEST(arguments, c_int128.error == COMPILER_DRIVER_ERROR_NONE);
+        if (c_int128.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 run_arguments[] = {c_int128_path};
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                        (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_sync(arguments->arena, spawn);
+                BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
     // And the same for the vector shapes, whose x86-64 answer is registers
     // rather than a reference: the host model decides how many of them one
     // vector takes, and running it is what says the caller and the callee

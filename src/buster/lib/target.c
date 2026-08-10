@@ -180,8 +180,9 @@ TargetDataLayout target_data_layout(Target target)
     bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
     bool arm_plain_char_unsigned = target.cpu_arch == CPU_ARCH_AARCH64 && !apple && !windows;
     u32 long_size = windows ? 4 : 8;
-    u32 long_double_size = windows || apple ? 8 : 16;
-    u32 long_double_bits = windows || apple ? 64 : target.cpu_arch == CPU_ARCH_X86_64 ? 80 : 128;
+    bool double_long_double = windows || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
+    u32 long_double_size = double_long_double ? 8 : 16;
+    u32 long_double_bits = double_long_double ? 64 : target.cpu_arch == CPU_ARCH_X86_64 ? 80 : 128;
     u32 va_list_size = windows ? 8 : target.cpu_arch == CPU_ARCH_X86_64 ? 32 : 32;
 
     TargetDataLayout layout = {

@@ -3025,11 +3025,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_iform_requires_dfv(BusterX86Me
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_element_size(BusterX86MetadataForm form)
 {
-    if (buster_x86_metadata_emit_string_has(form.element_size, S8("8_BITS"))) return 1;
-    if (buster_x86_metadata_emit_string_has(form.element_size, S8("16_BITS"))) return 2;
-    if (buster_x86_metadata_emit_string_has(form.element_size, S8("32_BITS"))) return 4;
-    if (buster_x86_metadata_emit_string_has(form.element_size, S8("64_BITS"))) return 8;
     if (buster_x86_metadata_emit_string_has(form.element_size, S8("128_BITS"))) return 16;
+    if (buster_x86_metadata_emit_string_has(form.element_size, S8("64_BITS"))) return 8;
+    if (buster_x86_metadata_emit_string_has(form.element_size, S8("32_BITS"))) return 4;
+    if (buster_x86_metadata_emit_string_has(form.element_size, S8("16_BITS"))) return 2;
+    if (buster_x86_metadata_emit_string_has(form.element_size, S8("8_BITS"))) return 1;
     return 1;
 }
 
@@ -5995,6 +5995,14 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_canonical_feature_matches(u32 offse
         return buster_x86_metadata_feature_input_contains_all(input, S8("xsave"), S8(""), S8(""), S8(""));
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("XSAVES")))
         return buster_x86_metadata_feature_input_contains_all(input, S8("xsaves"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("CMPXCHG16B")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("cx16"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SSE3X87")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("sse3"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("X87")) ||
+        buster_x86_metadata_pool_string_equal_literal(offset, S8("PENTIUMMMX")) ||
+        buster_x86_metadata_pool_string_equal_literal(offset, S8("SSE2MMX")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("sse2"), S8(""), S8(""), S8(""));
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("LONGMODE"))) return true;
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("APX_F_CET")))
         return buster_x86_metadata_feature_input_contains_all(input, S8("apx"), S8("shstk"), S8(""), S8(""));
@@ -6117,14 +6125,21 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_canonical_feature_matches(u32 offse
     else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512DQ_"))) avx512_feature = S8("avx512dq");
     else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512ER_"))) avx512_feature = S8("avx512er");
     else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512PF_"))) avx512_feature = S8("avx512pf");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512IFMA_"))) avx512_feature = S8("avx512ifma");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512VBMI_"))) avx512_feature = S8("avx512vbmi");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512VBMI2_"))) avx512_feature = S8("avx512vbmi2");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512VNNI_"))) avx512_feature = S8("avx512vnni");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512BITALG_"))) avx512_feature = S8("avx512bitalg");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512VPOPCNTDQ_"))) avx512_feature = S8("avx512vpopcntdq");
-    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512VP2INTERSECT_")))
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_IFMA_"))) avx512_feature = S8("avx512ifma");
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VBMI_"))) avx512_feature = S8("avx512vbmi");
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VBMI2_"))) avx512_feature = S8("avx512vbmi2");
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VNNI_"))) avx512_feature = S8("avx512vnni");
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VNNI_INT8_"))) avx512_feature = S8("avx-vnni-int8");
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VNNI_INT16_"))) avx512_feature = S8("avx-vnni-int16");
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_BITALG_"))) avx512_feature = S8("avx512bitalg");
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VPOPCNTDQ_"))) avx512_feature = S8("avx512vpopcntdq");
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VP2INTERSECT_")))
         avx512_feature = S8("avx512vp2intersect");
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_4FMAPS_"))) avx512_feature = S8("avx5124fmaps");
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_4VNNIW_"))) avx512_feature = S8("avx5124vnniw");
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_GFNI_"))) avx512_feature = S8("gfni");
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VAES_"))) avx512_feature = S8("vaes");
+    else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_VPCLMULQDQ_"))) avx512_feature = S8("vpclmulqdq");
     else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_BF16_"))) avx512_feature = S8("avx512bf16");
     else if (buster_x86_metadata_pool_string_has_prefix(offset, S8("AVX512_FP16_"))) avx512_feature = S8("avx512fp16");
     if (avx512_feature.length)

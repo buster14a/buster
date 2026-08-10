@@ -307,6 +307,21 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     };
     String8 accumulator_extend_assembly = object_print_assembly(arguments->arena, &accumulator_extend_object);
     BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(accumulator_extend_assembly), S8("\tcbw\n\tcwde\n\tcdqe\n")));
+    u8 x86_mmx[] = {0x0f, 0x6f, 0xc1, 0x0f, 0xef, 0xc2, 0x0f, 0xfc, 0xc3, 0x0f, 0xfe, 0xc4};
+    ObjectSection mmx_section = {
+        .name = S8(".text"),
+        .data = BUSTER_ARRAY_TO_SLICE(x86_mmx),
+        .kind = OBJECT_SECTION_TEXT,
+        .alignment = 1,
+    };
+    ObjectFile mmx_object = {
+        .sections = &mmx_section,
+        .target = object.target,
+        .section_count = 1,
+    };
+    String8 mmx_assembly = object_print_assembly(arguments->arena, &mmx_object);
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(mmx_assembly),
+                                                S8("\tmovq mm0, mm1\n\tpxor mm0, mm2\n\tpaddb mm0, mm3\n\tpaddd mm0, mm4\n")));
     ObjectFormat formats[] = {
         OBJECT_FORMAT_ELF64,
         OBJECT_FORMAT_COFF,

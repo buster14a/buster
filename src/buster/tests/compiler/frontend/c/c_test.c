@@ -4455,6 +4455,40 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
         BUSTER_TEST(arguments, store_count == 2);
         BUSTER_TEST(arguments, ir_validate_canonical_module(local_ir.program, &local_ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
+    {
+        TemporalArena volatile_temporary = scratch_begin(0, 0);
+        CPreprocessResult volatile_tokens = {0};
+        CParseResult volatile_parse = {0};
+        CIRLowerResult volatile_ir = c_test_lower_source(
+            volatile_temporary.arena,
+            S8("volatile int global_value;"
+               " struct Pair { int member; };"
+               " int read_volatile(volatile int *pointer, volatile struct Pair *pair) {"
+               "   volatile int local = *pointer;"
+               "   global_value = local;"
+               "   pair->member = global_value;"
+               "   return *pointer + pair->member;"
+               " }"),
+            S8("volatile-accesses.c"), target_native, &volatile_tokens, &volatile_parse);
+        BUSTER_TEST(arguments, volatile_tokens.diagnostic_count == 0 && volatile_parse.diagnostic_count == 0 &&
+                                   volatile_ir.diagnostic_count == 0 && volatile_ir.program);
+        if (volatile_ir.program)
+        {
+            IrFunction* function = volatile_ir.program->modules[0].functions;
+            u32 memory_access_count = 0;
+            u32 volatile_access_count = 0;
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = function->instructions + instruction_index;
+                bool memory_access = instruction->opcode == IR_OPCODE_LOAD || instruction->opcode == IR_OPCODE_STORE;
+                memory_access_count += memory_access;
+                volatile_access_count += memory_access && instruction->volatile_access;
+            }
+            BUSTER_TEST(arguments, memory_access_count > volatile_access_count && volatile_access_count == 8);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(volatile_ir.program, &volatile_ir.program->modules[0]).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(volatile_temporary);
+    }
     CPreprocessResult shadow_tokens = c_preprocess(arguments->arena,
                                                    S8("int main(int value) {\n"
                                                       "    int result = value;\n"

@@ -316,7 +316,8 @@ struct IrValue
     u32 alignment;
     bool is_read_only;
     bool points_to_read_only;
-    u8 reserved[2];
+    bool is_volatile;
+    u8 reserved[1];
 };
 
 // Label metadata is populated only for values involved in address-of-label
@@ -414,11 +415,11 @@ struct IrInstruction
     u32 immediate_count;
     bool immediate_is_negative;
     bool atomic_signal_fence;
+    bool volatile_access;
     // An IrSimdOperation, narrowed into the padding the row already carried:
     // the instruction array is the largest thing a compile allocates per
     // function, so a bounded enum pays for itself in bytes, not in a field.
     u8 simd_operation;
-    u8 reserved[1];
 };
 
 BUSTER_CT_CHECK(IR_SIMD_COUNT <= UINT8_MAX);

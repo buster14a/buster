@@ -1015,7 +1015,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_x86_register(ObjectAssemblyBuffe
 
 BUSTER_GLOBAL_LOCAL void object_assembly_append_x86_vector_register(ObjectAssemblyBuffer* buffer, u32 index, u32 width)
 {
-    object_assembly_append_string(buffer, width == 32 ? S8("ymm") : width == 64 ? S8("zmm") : S8("xmm"));
+    object_assembly_append_string(buffer, width == 8 ? S8("mm") : width == 32 ? S8("ymm") : width == 64 ? S8("zmm") : S8("xmm"));
     object_assembly_append_u64_decimal(buffer, index & 31);
 }
 
@@ -1797,7 +1797,9 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
             {
                 return 0;
             }
-            u32 vector_width = 16;
+            bool mmx = !prefix.operand16 && !prefix.rep && !prefix.repne &&
+                       (extended == 0x6f || extended == 0x7f || extended == 0xef || extended == 0xfc || extended == 0xfe);
+            u32 vector_width = mmx ? 8 : 16;
             String8 name = (String8){0};
             if (extended == 0x6f || extended == 0x7f)
             {

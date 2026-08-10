@@ -990,6 +990,18 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     });
     BUSTER_TEST(arguments, windows_x86_layout.long_integer.bit_width == 32);
     BUSTER_TEST(arguments, windows_x86_layout.long_double_type.bit_width == 64);
+    TargetDataLayout macos_x86_layout = target_data_layout((Target){
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_MACOS,
+    });
+    BUSTER_TEST(arguments, macos_x86_layout.long_double_type.size == 16 && macos_x86_layout.long_double_type.bit_width == 80);
+    TargetDataLayout macos_arm_layout = target_data_layout((Target){
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_MACOS,
+    });
+    BUSTER_TEST(arguments, macos_arm_layout.long_double_type.size == 8 && macos_arm_layout.long_double_type.bit_width == 64);
     TargetDataLayout linux_arm_layout = target_data_layout((Target){
         .cpu_arch = CPU_ARCH_AARCH64,
         .cpu_model = CPU_MODEL_BASELINE,

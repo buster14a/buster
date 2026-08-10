@@ -17512,27 +17512,29 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_array_type(IrProgram* program, CIrPointerT
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_atomic_type(IrProgram* program, IrTypeId unqualified)
+BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_qualified_type(IrProgram* program, IrTypeId unqualified, bool is_atomic, bool is_volatile)
 {
     IrType* base = ir_type_from_id(&program->types, unqualified);
-    if (!base || base->is_atomic || base->kind == IR_TYPE_VOID || base->kind == IR_TYPE_ARRAY || base->kind == IR_TYPE_FUNCTION)
+    if (!base || base->is_atomic || base->is_volatile || base->kind == IR_TYPE_VOID || base->kind == IR_TYPE_FUNCTION ||
+        (is_atomic && base->kind == IR_TYPE_ARRAY))
     {
         return IR_TYPE_ID_INVALID;
     }
     for (u32 type_index = 0; type_index < program->types.count; type_index += 1)
     {
         IrType* type = program->types.types + type_index;
-        if (type->is_atomic && type->unqualified_type.value == unqualified.value)
+        if (type->is_atomic == is_atomic && type->is_volatile == is_volatile && type->unqualified_type.value == unqualified.value)
         {
             return type->id;
         }
     }
-    IrType atomic = *base;
-    atomic.name = S8("_Atomic");
-    atomic.id = IR_TYPE_ID_INVALID;
-    atomic.unqualified_type = unqualified;
-    atomic.is_atomic = true;
-    return ir_program_add_type(program, atomic);
+    IrType qualified = *base;
+    qualified.name = is_atomic ? is_volatile ? S8("volatile _Atomic") : S8("_Atomic") : S8("volatile");
+    qualified.id = IR_TYPE_ID_INVALID;
+    qualified.unqualified_type = unqualified;
+    qualified.is_atomic = is_atomic;
+    qualified.is_volatile = is_volatile;
+    return ir_program_add_type(program, qualified);
 }
 
 typedef struct CIrSignature CIrSignature;
@@ -17718,6 +17720,7 @@ struct CIrConstantValue
     IrSymbolId symbol;
     s64 addend;
     u64 integer;
+    u64 integer_high;
     f64 floating;
     CIrConstantValueKind kind;
 };
@@ -19723,6 +19726,8 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken
                                                 .definition = IR_INSTRUCTION_ID_INVALID,
                                                 .category = IR_VALUE_PLACE,
                                                 .alignment = alignment,
+                                                .is_volatile = entity.value < builder->parse.entity_count &&
+                                                               builder->parse.types[builder->parse.entities[entity.value].type.value].is_volatile,
                                                 .points_to_read_only = entity.value < builder->parse.entity_count &&
                                                                        c_ir_c_type_points_to_read_only(builder, builder->parse.entities[entity.value].type),
                                             });
@@ -19838,6 +19843,8 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_global_place(CIntegerIrBuilder* builder,
                                                 .definition = IR_INSTRUCTION_ID_INVALID,
                                                 .category = IR_VALUE_PLACE,
                                                 .is_read_only = c_ir_entity_is_read_only(builder, entity),
+                                                .is_volatile = entity_value->type.value < builder->parse.type_count &&
+                                                               builder->parse.types[entity_value->type.value].is_volatile,
                                                 .points_to_read_only = c_ir_c_type_points_to_read_only(builder, builder->parse.entities[entity.value].type),
                                             });
     IrSourceRange instruction_source = source;
@@ -19916,6 +19923,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntege
     instruction.canonical_local = local->id;
     instruction.result = result;
     instruction.memory_order = atomic ? IR_MEMORY_ORDER_SEQUENTIAL : IR_MEMORY_ORDER_COUNT;
+    instruction.volatile_access = local->place.value < builder->function->value_count && builder->function->values[local->place.value].is_volatile;
     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
     builder->function->values[result.value].definition = id;
     return result;
@@ -19990,6 +19998,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builde
     instruction.operand_count = 1;
     instruction.result = result;
     instruction.memory_order = atomic ? IR_MEMORY_ORDER_SEQUENTIAL : IR_MEMORY_ORDER_COUNT;
+    instruction.volatile_access = place.value < builder->function->value_count && builder->function->values[place.value].is_volatile;
     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
     builder->function->values[result.value].definition = id;
     return result;
@@ -20279,6 +20288,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrVal
     instruction.operands = operands;
     instruction.operand_count = 2;
     instruction.memory_order = atomic ? IR_MEMORY_ORDER_SEQUENTIAL : IR_MEMORY_ORDER_COUNT;
+    instruction.volatile_access = builder->function->values[place.value].is_volatile;
     c_ir_append_instruction(builder, instruction, instruction_source);
     return true;
 }
@@ -20316,6 +20326,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder
                                          .definition = IR_INSTRUCTION_ID_INVALID,
                                          .category = IR_VALUE_PLACE,
                                          .is_read_only = builder->function->values[operand.value].points_to_read_only,
+                                         .is_volatile = ir_type_from_id(&builder->program->types, aggregate_type_id)->is_volatile,
                                      });
         IrSourceRange dereference_source = c_ir_token_source_range(builder, access);
         IrInstruction dereference = c_ir_instruction_initialize(IR_OPCODE_DEREFERENCE, aggregate_type_id);
@@ -20478,6 +20489,8 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder
                                                    .definition = IR_INSTRUCTION_ID_INVALID,
                                                    .category = IR_VALUE_PLACE,
                                                    .is_read_only = builder->function->values[place.value].is_read_only,
+                                                   .is_volatile = builder->function->values[place.value].is_volatile ||
+                                                                  (field_value_type && field_value_type->is_volatile),
                                                });
         IrSourceRange field_source = c_ir_token_source_range(builder, member);
         IrInstruction field = c_ir_instruction_initialize(IR_OPCODE_FIELD, field_type);
@@ -20551,6 +20564,9 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_index_place(CIntegerIrBuilder* builder, 
                                                 .category = IR_VALUE_PLACE,
                                                 .is_read_only = base_type->kind == IR_TYPE_POINTER ? builder->function->values[base.value].points_to_read_only
                                                                                                    : builder->function->values[base.value].is_read_only,
+                                                .is_volatile = (ir_type_from_id(&builder->program->types, element_type) &&
+                                                                ir_type_from_id(&builder->program->types, element_type)->is_volatile) ||
+                                                               (base_type->kind != IR_TYPE_POINTER && builder->function->values[base.value].is_volatile),
                                             });
     IrSourceRange instruction_source = source;
     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_INDEX, element_type);
@@ -20666,6 +20682,7 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_dereference_place(CIntegerIrBuilder* bui
                                                 .definition = IR_INSTRUCTION_ID_INVALID,
                                                 .category = IR_VALUE_PLACE,
                                                 .is_read_only = builder->function->values[pointer.value].points_to_read_only,
+                                                .is_volatile = ir_type_from_id(&builder->program->types, element)->is_volatile,
                                             });
     IrSourceRange instruction_source = source;
     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_DEREFERENCE, element);
@@ -41922,6 +41939,77 @@ BUSTER_GLOBAL_LOCAL CIrConstantValue c_ir_constant_integer(IrTypeId type, u64 va
     };
 }
 
+typedef struct CIrWideInteger CIrWideInteger;
+struct CIrWideInteger
+{
+    u64 low;
+    u64 high;
+};
+
+BUSTER_GLOBAL_LOCAL CIrWideInteger c_ir_wide_negate(CIrWideInteger value)
+{
+    CIrWideInteger result = {.low = 0 - value.low, .high = ~value.high + (value.low == 0)};
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_wide_less(CIrWideInteger left, CIrWideInteger right)
+{
+    return left.high < right.high || (left.high == right.high && left.low < right.low);
+}
+
+BUSTER_GLOBAL_LOCAL CIrWideInteger c_ir_wide_subtract(CIrWideInteger left, CIrWideInteger right)
+{
+    CIrWideInteger result = {.low = left.low - right.low, .high = left.high - right.high - (left.low < right.low)};
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CIrWideInteger c_ir_wide_shift_left_one(CIrWideInteger value)
+{
+    CIrWideInteger result = {.low = value.low << 1, .high = (value.high << 1) | (value.low >> 63)};
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_wide_divide(CIrWideInteger dividend, CIrWideInteger divisor, CIrWideInteger* quotient_out,
+                                           CIrWideInteger* remainder_out)
+{
+    CIrWideInteger quotient = {0};
+    CIrWideInteger remainder = {0};
+    for (u32 bit = 128; bit > 0; bit -= 1)
+    {
+        u32 index = bit - 1;
+        remainder = c_ir_wide_shift_left_one(remainder);
+        remainder.low |= index >= 64 ? (dividend.high >> (index - 64)) & 1 : (dividend.low >> index) & 1;
+        if (!c_ir_wide_less(remainder, divisor))
+        {
+            remainder = c_ir_wide_subtract(remainder, divisor);
+            if (index >= 64)
+                quotient.high |= (u64)1 << (index - 64);
+            else
+                quotient.low |= (u64)1 << index;
+        }
+    }
+    *quotient_out = quotient;
+    *remainder_out = remainder;
+}
+
+BUSTER_GLOBAL_LOCAL CIrWideInteger c_ir_wide_multiply(CIrWideInteger left, CIrWideInteger right)
+{
+    u64 left_low = (u32)left.low;
+    u64 left_high = left.low >> 32;
+    u64 right_low = (u32)right.low;
+    u64 right_high = right.low >> 32;
+    u64 low_low = left_low * right_low;
+    u64 low_high = left_low * right_high;
+    u64 high_low = left_high * right_low;
+    u64 high_high = left_high * right_high;
+    u64 middle = (low_low >> 32) + (u32)low_high + (u32)high_low;
+    CIrWideInteger result = {
+        .low = (low_low & UINT64_C(0xffffffff)) | (middle << 32),
+        .high = high_high + (low_high >> 32) + (high_low >> 32) + (middle >> 32) + left.low * right.high + left.high * right.low,
+    };
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_ir_constant_truth(CIntegerIrBuilder* builder, CIrConstantValue value)
 {
     IrType* type = ir_type_from_id(&builder->program->types, value.type);
@@ -41941,7 +42029,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_truth(CIntegerIrBuilder* builder, CIrCons
     {
         return value.floating != 0.0;
     }
-    return c_ir_constant_type_is_integer(type) && (value.integer & c_ir_integer_type_mask(type)) != 0;
+    return c_ir_constant_type_is_integer(type) && ((value.integer & c_ir_integer_type_mask(type)) != 0 || value.integer_high != 0);
 }
 
 BUSTER_GLOBAL_LOCAL CEntityId c_ir_constant_entity_at(CIntegerIrBuilder* builder, u32 token_index)
@@ -42010,6 +42098,22 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_from_global(CIntegerIrBuilder* builder, I
                 value = 0 - value;
             }
             *result = c_ir_constant_integer(global->type, value);
+            return true;
+        }
+        if (global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && c_ir_constant_type_is_integer(type) && type->layout.size == 16 &&
+            global->bytes.pointer && global->bytes.length == 16)
+        {
+            *result = c_ir_constant_integer(global->type, 0);
+            if (builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE)
+            {
+                memcpy(&result->integer, global->bytes.pointer, 8);
+                memcpy(&result->integer_high, global->bytes.pointer + 8, 8);
+            }
+            else
+            {
+                memcpy(&result->integer_high, global->bytes.pointer, 8);
+                memcpy(&result->integer, global->bytes.pointer + 8, 8);
+            }
             return true;
         }
         if (global->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && type && type->kind == IR_TYPE_FLOAT && type->bit_width <= 64)
@@ -42213,7 +42317,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, CIrConst
                 return true;
             }
         }
-        if (source.kind == C_IR_CONSTANT_INTEGER && source.integer == 0)
+        if (source.kind == C_IR_CONSTANT_INTEGER && source.integer == 0 && source.integer_high == 0)
         {
             *result = (CIrConstantValue){.type = target_type, .symbol = IR_SYMBOL_ID_INVALID, .kind = C_IR_CONSTANT_POINTER};
             return true;
@@ -42254,6 +42358,16 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, CIrConst
             }
         }
         *result = c_ir_constant_integer(target_type, integer & c_ir_integer_type_mask(target));
+        if (target->kind == IR_TYPE_INTEGER && target->bit_width == 128 && source.kind == C_IR_CONSTANT_INTEGER)
+        {
+            IrType* source_type = ir_type_from_id(&builder->program->types, source.type);
+            result->integer_high = source.integer_high;
+            if (source_type && source_type->kind == IR_TYPE_INTEGER && source_type->bit_width < 128 && source_type->is_signed &&
+                source_type->bit_width && (source.integer & ((u64)1 << (source_type->bit_width - 1))))
+            {
+                result->integer_high = UINT64_MAX;
+            }
+        }
         return true;
     }
     return false;
@@ -42345,7 +42459,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, C
         }
         if (operation == C_CONDITIONAL_UNARY_MINUS)
         {
-            value->integer = 0 - value->integer;
+            if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+            {
+                CIrWideInteger negated = c_ir_wide_negate((CIrWideInteger){.low = value->integer, .high = value->integer_high});
+                value->integer = negated.low;
+                value->integer_high = negated.high;
+            }
+            else
+                value->integer = 0 - value->integer;
         }
         value->integer &= c_ir_integer_type_mask(type);
         return true;
@@ -42353,6 +42474,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, C
     if (operation == C_CONDITIONAL_BITWISE_NOT && c_ir_constant_type_is_integer(type))
     {
         value->integer = ~value->integer & c_ir_integer_type_mask(type);
+        if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+        {
+            value->integer_high = ~value->integer_high;
+        }
         return true;
     }
     return false;
@@ -42425,14 +42550,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, 
     }
     if ((left_pointer || (left_type && left_type->kind == IR_TYPE_POINTER)) || (right_pointer || (right_type && right_type->kind == IR_TYPE_POINTER)))
     {
-        if (!left_pointer && left.kind == C_IR_CONSTANT_INTEGER && left.integer == 0)
+        if (!left_pointer && left.kind == C_IR_CONSTANT_INTEGER && left.integer == 0 && left.integer_high == 0)
         {
             left_pointer = true;
             left.type = right.type;
             left.symbol = IR_SYMBOL_ID_INVALID;
             left.addend = 0;
         }
-        if (!right_pointer && right.kind == C_IR_CONSTANT_INTEGER && right.integer == 0)
+        if (!right_pointer && right.kind == C_IR_CONSTANT_INTEGER && right.integer == 0 && right.integer_high == 0)
         {
             right_pointer = true;
             right.type = left.type;
@@ -42482,7 +42607,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, 
             {
                 return false;
             }
-            bool equal = pointer.symbol.value == IR_ID_UNDERLYING_INVALID && pointer.addend == 0 && integer.integer == 0;
+            bool equal = pointer.symbol.value == IR_ID_UNDERLYING_INVALID && pointer.addend == 0 && integer.integer == 0 && integer.integer_high == 0;
             *result = c_ir_constant_integer(builder->s32_type, operation == C_CONDITIONAL_EQUAL ? equal : !equal);
             return true;
         }
@@ -42572,6 +42697,134 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, 
     if (!type || !c_ir_constant_type_is_integer(type))
     {
         return false;
+    }
+    if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+    {
+        CIrWideInteger left_wide = {.low = left.integer, .high = left.integer_high};
+        CIrWideInteger right_wide = {.low = right.integer, .high = right.integer_high};
+        CIrWideInteger value = {0};
+        bool comparison = false;
+        bool is_comparison = false;
+        switch (operation)
+        {
+        case C_CONDITIONAL_MULTIPLY: value = c_ir_wide_multiply(left_wide, right_wide); break;
+        case C_CONDITIONAL_DIVIDE:
+        case C_CONDITIONAL_REMAINDER:
+        {
+            if (!right_wide.low && !right_wide.high)
+            {
+                *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
+                return true;
+            }
+            bool left_negative = type->is_signed && (left_wide.high >> 63);
+            bool right_negative = type->is_signed && (right_wide.high >> 63);
+            if (type->is_signed && left_wide.low == 0 && left_wide.high == ((u64)1 << 63) && right_wide.low == UINT64_MAX &&
+                right_wide.high == UINT64_MAX)
+            {
+                *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
+                return true;
+            }
+            CIrWideInteger dividend = left_negative ? c_ir_wide_negate(left_wide) : left_wide;
+            CIrWideInteger divisor = right_negative ? c_ir_wide_negate(right_wide) : right_wide;
+            CIrWideInteger quotient = {0};
+            CIrWideInteger remainder = {0};
+            c_ir_wide_divide(dividend, divisor, &quotient, &remainder);
+            if (left_negative != right_negative) quotient = c_ir_wide_negate(quotient);
+            if (left_negative) remainder = c_ir_wide_negate(remainder);
+            value = operation == C_CONDITIONAL_DIVIDE ? quotient : remainder;
+        }
+        break;
+        case C_CONDITIONAL_ADD:
+            value.low = left_wide.low + right_wide.low;
+            value.high = left_wide.high + right_wide.high + (value.low < left_wide.low);
+            break;
+        case C_CONDITIONAL_SUBTRACT: value = c_ir_wide_subtract(left_wide, right_wide); break;
+        case C_CONDITIONAL_SHIFT_LEFT:
+            if (right_wide.high || right_wide.low >= 128)
+            {
+                *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
+                return true;
+            }
+            if (right_wide.low >= 64)
+            {
+                value.high = left_wide.low << (u32)(right_wide.low - 64);
+                value.low = 0;
+            }
+            else if (right_wide.low)
+            {
+                value.high = (left_wide.high << (u32)right_wide.low) | (left_wide.low >> (u32)(64 - right_wide.low));
+                value.low = left_wide.low << (u32)right_wide.low;
+            }
+            else
+                value = left_wide;
+            break;
+        case C_CONDITIONAL_SHIFT_RIGHT:
+            if (right_wide.high || right_wide.low >= 128)
+            {
+                *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
+                return true;
+            }
+            if (right_wide.low >= 64)
+            {
+                value.low = type->is_signed ? (u64)((s64)left_wide.high >> (u32)(right_wide.low - 64))
+                                             : left_wide.high >> (u32)(right_wide.low - 64);
+                value.high = type->is_signed && (left_wide.high >> 63) ? UINT64_MAX : 0;
+            }
+            else if (right_wide.low)
+            {
+                value.low = (left_wide.low >> (u32)right_wide.low) | (left_wide.high << (u32)(64 - right_wide.low));
+                value.high = type->is_signed ? (u64)((s64)left_wide.high >> (u32)right_wide.low)
+                                             : left_wide.high >> (u32)right_wide.low;
+            }
+            else
+                value = left_wide;
+            break;
+        case C_CONDITIONAL_BITWISE_AND:
+            value.low = left_wide.low & right_wide.low;
+            value.high = left_wide.high & right_wide.high;
+            break;
+        case C_CONDITIONAL_BITWISE_XOR:
+            value.low = left_wide.low ^ right_wide.low;
+            value.high = left_wide.high ^ right_wide.high;
+            break;
+        case C_CONDITIONAL_BITWISE_OR:
+            value.low = left_wide.low | right_wide.low;
+            value.high = left_wide.high | right_wide.high;
+            break;
+        case C_CONDITIONAL_EQUAL:
+            comparison = left_wide.low == right_wide.low && left_wide.high == right_wide.high;
+            is_comparison = true;
+            break;
+        case C_CONDITIONAL_NOT_EQUAL:
+            comparison = left_wide.low != right_wide.low || left_wide.high != right_wide.high;
+            is_comparison = true;
+            break;
+        case C_CONDITIONAL_LESS:
+        case C_CONDITIONAL_LESS_EQUAL:
+        case C_CONDITIONAL_GREATER:
+        case C_CONDITIONAL_GREATER_EQUAL:
+        {
+            bool less = type->is_signed && (s64)left_wide.high != (s64)right_wide.high
+                            ? (s64)left_wide.high < (s64)right_wide.high
+                            : c_ir_wide_less(left_wide, right_wide);
+            bool equal = left_wide.low == right_wide.low && left_wide.high == right_wide.high;
+            comparison = operation == C_CONDITIONAL_LESS          ? less
+                         : operation == C_CONDITIONAL_LESS_EQUAL    ? less || equal
+                         : operation == C_CONDITIONAL_GREATER       ? !less && !equal
+                                                                    : !less;
+            is_comparison = true;
+        }
+        break;
+        default: return false;
+        }
+        if (is_comparison)
+        {
+            *result = c_ir_constant_integer(builder->s32_type, comparison);
+            return true;
+        }
+        *result = c_ir_constant_integer(common, value.low);
+        result->integer_high = value.high;
+        return true;
     }
     u64 mask = c_ir_integer_type_mask(type);
     u64 value = 0;
@@ -43190,6 +43443,27 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, 
     }
     if (c_ir_constant_type_is_integer(type))
     {
+        if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128 && type->layout.size == 16)
+        {
+            u8* bytes = arena_allocate(builder->arena, u8, 16);
+            if (builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE)
+            {
+                memcpy(bytes, &converted.integer, 8);
+                memcpy(bytes + 8, &converted.integer_high, 8);
+            }
+            else
+            {
+                memcpy(bytes, &converted.integer_high, 8);
+                memcpy(bytes + 8, &converted.integer, 8);
+            }
+            global->bytes = (ByteSlice){.pointer = bytes, .length = 16};
+            global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
+            if (!global->is_read_only && converted.integer == 0 && converted.integer_high == 0)
+            {
+                global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
+            }
+            return true;
+        }
         s64 signed_value = c_ir_integer_signed_value(converted.integer, type);
         global->initializer_is_negative = type->is_signed && signed_value < 0;
         global->initializer_bits = global->initializer_is_negative ? (u64)(-(signed_value + 1)) + 1 : converted.integer;
@@ -44289,8 +44563,12 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
     {
         IrTypeId scalar = c_ir_scalar_type(&type_context, parse.types[type_index].kind);
-        c_type_ir_map[type_index] =
-            parse.types[type_index].is_atomic && scalar.value != IR_ID_UNDERLYING_INVALID ? c_ir_add_atomic_type(program, scalar) : scalar;
+        c_type_ir_map[type_index] = scalar;
+        if (scalar.value != IR_ID_UNDERLYING_INVALID && (parse.types[type_index].is_atomic || parse.types[type_index].is_volatile))
+        {
+            c_type_ir_map[type_index] = c_ir_add_qualified_type(program, scalar, parse.types[type_index].is_atomic,
+                                                                parse.types[type_index].is_volatile);
+        }
     }
     CEntityId* token_entities = arena_allocate(arena, CEntityId, preprocess.token_count);
     memset(token_entities, 0xff, sizeof(*token_entities) * preprocess.token_count);
@@ -44459,7 +44737,9 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                     {
                         continue;
                     }
-                    IrTypeId qualified = c_type->is_atomic ? c_ir_add_atomic_type(program, unqualified) : unqualified;
+                    IrTypeId qualified = (c_type->is_atomic || c_type->is_volatile)
+                                             ? c_ir_add_qualified_type(program, unqualified, c_type->is_atomic, c_type->is_volatile)
+                                             : unqualified;
                     if (qualified.value == IR_ID_UNDERLYING_INVALID)
                     {
                         continue;

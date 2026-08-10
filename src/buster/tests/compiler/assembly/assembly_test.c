@@ -620,6 +620,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         arguments->arena, x86_intel_mmx_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
     BUSTER_TEST(arguments, x86_intel_mmx.diagnostic_count == 0 && x86_intel_mmx.bytes.length == sizeof(expected_x86_mmx) &&
                                memcmp(x86_intel_mmx.bytes.pointer, expected_x86_mmx, sizeof(expected_x86_mmx)) == 0);
+    u8 expected_x86_address32_mmx[] = {0x67, 0x0f, 0x6f, 0x00};
+    AssemblyEncodeResult x86_address32_mmx = assembly_encode(
+        arguments->arena, S8("movq mm0, qword ptr [eax]\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_address32_mmx.diagnostic_count == 0 && x86_address32_mmx.bytes.length == sizeof(expected_x86_address32_mmx) &&
+                               memcmp(x86_address32_mmx.bytes.pointer, expected_x86_address32_mmx, sizeof(expected_x86_address32_mmx)) == 0);
     String8 x86_att_mmx_source =
         S8("movq %mm1, %mm0\n"
            "movq %mm7, 8(%r12)\n"
@@ -1029,6 +1035,14 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                x86_intel_x87_compare_integer.bytes.length == sizeof(expected_x86_x87_compare_integer) &&
                                memcmp(x86_intel_x87_compare_integer.bytes.pointer, expected_x86_x87_compare_integer,
                                       sizeof(expected_x86_x87_compare_integer)) == 0);
+    u8 expected_x86_address32_fisttp[] = {0x67, 0xdb, 0x08};
+    AssemblyEncodeResult x86_address32_fisttp = assembly_encode(
+        arguments->arena, S8("fisttp dword ptr [eax]\n"),
+        (AssemblyEncodeOptions){.target = x86_sse3_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_address32_fisttp.diagnostic_count == 0 &&
+                               x86_address32_fisttp.bytes.length == sizeof(expected_x86_address32_fisttp) &&
+                               memcmp(x86_address32_fisttp.bytes.pointer, expected_x86_address32_fisttp,
+                                      sizeof(expected_x86_address32_fisttp)) == 0);
     String8 x86_att_x87_compare_integer_source =
         S8("fcom %st(3)\n"
            "fcomp %st(4)\n"
@@ -1413,6 +1427,14 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                x86_intel_bit_atomic.bytes.length == sizeof(expected_x86_bit_atomic) &&
                                memcmp(x86_intel_bit_atomic.bytes.pointer, expected_x86_bit_atomic,
                                       sizeof(expected_x86_bit_atomic)) == 0);
+    u8 expected_x86_address32_cmpxchg16b[] = {0x67, 0x48, 0x0f, 0xc7, 0x08};
+    AssemblyEncodeResult x86_address32_cmpxchg16b = assembly_encode(
+        arguments->arena, S8("cmpxchg16b xmmword ptr [eax]\n"),
+        (AssemblyEncodeOptions){.target = x86_bit_atomic_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_address32_cmpxchg16b.diagnostic_count == 0 &&
+                               x86_address32_cmpxchg16b.bytes.length == sizeof(expected_x86_address32_cmpxchg16b) &&
+                               memcmp(x86_address32_cmpxchg16b.bytes.pointer, expected_x86_address32_cmpxchg16b,
+                                      sizeof(expected_x86_address32_cmpxchg16b)) == 0);
     BUSTER_TEST(arguments, x86_intel_bit_atomic.relocation_count == 2 && x86_intel_bit_atomic.relocations[0].offset == 36 &&
                                x86_intel_bit_atomic.relocations[1].offset == 72 && x86_intel_bit_atomic.relocations[0].addend == -4 &&
                                x86_intel_bit_atomic.relocations[1].addend == -4 &&
