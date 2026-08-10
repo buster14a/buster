@@ -2517,13 +2517,13 @@ BUSTER_GLOBAL_LOCAL String8 self_host_throughput_ratio(Arena* arena, u64 instruc
     return string_format(arena, S8("{u64}.{u64:width=[0,3]}"), thousandths / 1000, thousandths % 1000);
 }
 
-// Units per second to three decimals. elapsed_us is used directly so the
-// timing printed for the build step and the bandwidth reported here have one
-// source of truth.
+// Whole units per second, rounded and digit-grouped for the human-facing log.
+// elapsed_us is used directly so the timing printed for the build step and the
+// bandwidth reported here have one source of truth.
 BUSTER_GLOBAL_LOCAL String8 self_host_units_per_second(Arena* arena, u64 units, u64 elapsed_us)
 {
-    u64 thousandths = (units * 1000000000 + elapsed_us / 2) / elapsed_us;
-    return string_format(arena, S8("{u64}.{u64:width=[0,3]}"), thousandths / 1000, thousandths % 1000);
+    u64 per_second = (units * 1000000 + elapsed_us / 2) / elapsed_us;
+    return string_format(arena, S8("{u64:digit_group}"), per_second);
 }
 
 // Decimal MB/s (1 MB = 1,000,000 bytes). With elapsed time in microseconds,
@@ -2545,39 +2545,23 @@ BUSTER_GLOBAL_LOCAL void self_host_report_throughput(Arena* arena, String8 stage
 {
     bool has_instructions = run && run->instructions;
     bool has_bandwidth = run && run->elapsed_us;
-    if (!has_instructions && !has_bandwidth)
+    string_print(S8("SELF_HOST stage {S8} throughput\n"), stage);
+    string_print(S8("  workload:      {u64:digit_group} bytes | {u64:digit_group} LOC | {u64:digit_group} SLOC | {u64:digit_group} tokens\n"),
+                 metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens);
+
+    if (has_bandwidth)
     {
-        string_print(S8("SELF_HOST throughput stage={S8} bytes={u64} loc={u64} sloc={u64} tokens={u64}\n"), stage, metrics.bytes, metrics.loc,
-                     metrics.sloc, metrics.tokens);
-        return;
+        string_print(S8("  bandwidth:     {S8} MB/s | {S8} LOC/s | {S8} SLOC/s\n"), self_host_mb_per_second(arena, metrics.bytes, run->elapsed_us),
+                     self_host_units_per_second(arena, metrics.loc, run->elapsed_us), self_host_units_per_second(arena, metrics.sloc, run->elapsed_us));
     }
 
-    if (!has_instructions)
+    if (has_instructions)
     {
-        string_print(S8("SELF_HOST throughput stage={S8} bytes={u64} loc={u64} sloc={u64} tokens={u64} loc_per_second={S8} sloc_per_second={S8} "
-                        "mb_per_second={S8}\n"),
-                     stage, metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens, self_host_units_per_second(arena, metrics.loc, run->elapsed_us),
-                     self_host_units_per_second(arena, metrics.sloc, run->elapsed_us), self_host_mb_per_second(arena, metrics.bytes, run->elapsed_us));
-        return;
-    }
-
-    u64 instructions = run->instructions;
-    if (!has_bandwidth)
-    {
-        string_print(S8("SELF_HOST throughput stage={S8} instructions={u64} bytes={u64} loc={u64} sloc={u64} tokens={u64} instructions_per_byte={S8} "
-                        "instructions_per_sloc={S8} instructions_per_token={S8}\n"),
-                     stage, instructions, metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens,
+        u64 instructions = run->instructions;
+        string_print(S8("  instructions:  {u64:digit_group} total | {S8}/byte | {S8}/SLOC | {S8}/token\n"), instructions,
                      self_host_throughput_ratio(arena, instructions, metrics.bytes), self_host_throughput_ratio(arena, instructions, metrics.sloc),
                      self_host_throughput_ratio(arena, instructions, metrics.tokens));
-        return;
     }
-
-    string_print(S8("SELF_HOST throughput stage={S8} instructions={u64} bytes={u64} loc={u64} sloc={u64} tokens={u64} instructions_per_byte={S8} "
-                    "instructions_per_sloc={S8} instructions_per_token={S8} loc_per_second={S8} sloc_per_second={S8} mb_per_second={S8}\n"),
-                 stage, instructions, metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens,
-                 self_host_throughput_ratio(arena, instructions, metrics.bytes), self_host_throughput_ratio(arena, instructions, metrics.sloc),
-                 self_host_throughput_ratio(arena, instructions, metrics.tokens), self_host_units_per_second(arena, metrics.loc, run->elapsed_us),
-                 self_host_units_per_second(arena, metrics.sloc, run->elapsed_us), self_host_mb_per_second(arena, metrics.bytes, run->elapsed_us));
 }
 
 BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* data)

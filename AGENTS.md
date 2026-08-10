@@ -311,12 +311,13 @@ enabled.
   to: the bootstrap finds its host compiler's resource headers and the
   self-hosted stages fall back to the builtin ones, which is why the file
   table is populated lazily (see `map_entry` in `c.c`).
-- **`SELF_HOST throughput stage=<1|2> instructions=… bytes=… loc=… sloc=…
-  tokens=… instructions_per_byte=… instructions_per_sloc=…
-  instructions_per_token=… loc_per_second=… sloc_per_second=…
-  mb_per_second=…`** is the division done: the numbers to trend
-  across commits, printed by `self_host_compare_action` beside the
-  `SELF_HOST deterministic` line. `-v` prints the `SOURCE` table for a human;
+- **The `SELF_HOST stage <1|2> throughput` block** is the division done: its
+  `workload` row reports bytes, LOC, SLOC and tokens; its `bandwidth` row
+  reports MB/s, LOC/s and SLOC/s; and, where the platform exposes a hardware
+  counter, its `instructions` row reports the total and the per-byte, per-SLOC
+  and per-token ratios. These are the numbers to trend across commits, printed
+  by `self_host_compare_action` beside the `SELF_HOST deterministic` line. `-v`
+  prints the `SOURCE` table for a human;
   `ide cc -fsource-metrics=<path>` writes the same measurement as
   `<group>.<field>=<value>` lines for a program, each self-host stage writes
   one beside its executable, and build.c combines the relevant fields with
@@ -325,8 +326,8 @@ enabled.
   diagnostics from streaming as it runs. `bytes` is `lexed.translated_bytes`,
   `loc` is `lexed.translated_lines`, and `sloc` is `lexed.code_lines`; all
   three legitimately differ between the two stages for the resource-header
-  reason above. `loc_per_second` and `sloc_per_second` divide those line counts
-  by the stage's recorded wall time; `mb_per_second` uses decimal megabytes
+  reason above. The LOC/s and SLOC/s values divide those line counts by the
+  stage's recorded wall time; MB/s uses decimal megabytes
   (1,000,000 bytes). `tokens` is `preprocessed.tokens`, which does not differ,
   and is the denominator to reach for when comparing the stages to each other.
   The ratios carry three
