@@ -41,6 +41,8 @@ struct CTranslatedSource
     String8 source;
     IrSourceCheckpoint* checkpoints;
     u32* checkpoint_offsets;
+    u32* checkpoint_pages;
+    u32 checkpoint_page_count;
     u32 checkpoint_count;
     // Spelling-space offset of source.pointer (0 without a space).
     u32 translated_offset;
@@ -485,6 +487,21 @@ BUSTER_GLOBAL_LOCAL CTranslatedSource c_translate_source(Arena* arena, CSpelling
     result.checkpoints = checkpoints;
     result.checkpoint_offsets = checkpoint_offsets;
     result.checkpoint_count = checkpoint_count;
+    // The page bracket for the checkpoints, built in the one linear pass the
+    // finished offsets allow. It is what keeps a line-table consumer's
+    // per-line lookup from binary-searching the whole file.
+    result.checkpoint_page_count = (u32)(output >> IR_SOURCE_CHECKPOINT_PAGE_SHIFT) + 1;
+    result.checkpoint_pages = arena_allocate(arena, u32, result.checkpoint_page_count);
+    u32 fill_checkpoint = 0;
+    for (u32 page = 0; page < result.checkpoint_page_count; page += 1)
+    {
+        u32 page_start = page << IR_SOURCE_CHECKPOINT_PAGE_SHIFT;
+        while (fill_checkpoint + 1 < checkpoint_count && checkpoint_offsets[fill_checkpoint + 1] <= page_start)
+        {
+            fill_checkpoint += 1;
+        }
+        result.checkpoint_pages[page] = fill_checkpoint;
+    }
     // `line` counts breaks, so it is one past the lines that ended; a column
     // past the first means bytes followed the last break and opened one more.
     result.raw_lines = line - 1 + (column > 1);
@@ -1793,6 +1810,8 @@ BUSTER_GLOBAL_LOCAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* spac
     result.spelling_base = space ? space->base : translated.source.pointer;
     result.checkpoints = translated.checkpoints;
     result.checkpoint_offsets = translated.checkpoint_offsets;
+    result.checkpoint_pages = translated.checkpoint_pages;
+    result.checkpoint_page_count = translated.checkpoint_page_count;
     result.checkpoint_count = translated.checkpoint_count;
     result.translated_offset = translated.translated_offset;
     // One token per byte bounds the stream including the end marker exactly as
@@ -5565,6 +5584,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                   .source = c_preprocess_file_index(arena, &file_table, root_frame.logical_path),
                                   .checkpoints = root_lex.checkpoints,
                                   .checkpoint_offsets = root_lex.checkpoint_offsets,
+                                  .checkpoint_pages = root_lex.checkpoint_pages,
+                                  .checkpoint_page_count = root_lex.checkpoint_page_count,
                                   .checkpoint_count = root_lex.checkpoint_count,
                                   .base = root_lex.translated_offset,
                                   .kind = IR_SOURCE_REGION_TEXT,
@@ -5806,6 +5827,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                                       .source = UINT32_MAX,
                                                       .checkpoints = source_frame->lex.checkpoints,
                                                       .checkpoint_offsets = source_frame->lex.checkpoint_offsets,
+                                                      .checkpoint_pages = source_frame->lex.checkpoint_pages,
+                                                      .checkpoint_page_count = source_frame->lex.checkpoint_page_count,
                                                       .checkpoint_count = source_frame->lex.checkpoint_count,
                                                       .base = source_frame->lex.translated_offset,
                                                       .line_delta = source_frame->line_delta,
@@ -5932,6 +5955,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                                               .source = UINT32_MAX,
                                                               .checkpoints = include_lex.checkpoints,
                                                               .checkpoint_offsets = include_lex.checkpoint_offsets,
+                                                              .checkpoint_pages = include_lex.checkpoint_pages,
+                                                              .checkpoint_page_count = include_lex.checkpoint_page_count,
                                                               .checkpoint_count = include_lex.checkpoint_count,
                                                               .base = include_lex.translated_offset,
                                                               .kind = IR_SOURCE_REGION_TEXT,
@@ -45438,6 +45463,12 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         function->blocks = arena_allocate(arena, IrBlock, function->block_capacity);
         function->instruction_capacity = (u32)lowering_capacity;
         function->instructions = arena_allocate(arena, IrInstruction, function->instruction_capacity);
+        // Sized with the instructions, because ir_function_add_instruction
+        // stores a canonical source only into an array that already exists:
+        // preallocating the instructions without this one silently dropped
+        // every range lowering built, and with it every line row below the
+        // function's own.
+        function->instruction_canonical_sources = arena_allocate(arena, IrSourceRange, function->instruction_capacity);
         function->value_capacity = (u32)lowering_capacity;
         function->values = arena_allocate(arena, IrValue, function->value_capacity);
         IrBlock* block = ir_function_add_block(arena, function,

@@ -10088,7 +10088,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                 // from one token — so the repeat is rejected on the offset the
                 // range already holds, and a position is recovered only for an
                 // offset that can still produce a row.
-                if (canonical_source.source.value != IR_ID_UNDERLYING_INVALID &&
+                if (result.line_entries && canonical_source.source.value != IR_ID_UNDERLYING_INVALID &&
                     (canonical_source.offset != recorded_source.offset || canonical_source.source.value != recorded_source.source.value))
                 {
                     recorded_source = canonical_source;

@@ -118,8 +118,28 @@ BUSTER_GLOBAL_LOCAL IrSourcePosition ir_source_region_position(IrSourceRegion co
     u32 cursor = checkpoint_cursor ? *checkpoint_cursor : 0;
     if (cursor >= count || offsets[cursor] > local || (cursor + 1 < count && offsets[cursor + 1] <= local))
     {
+        // Searched, not stepped. A consumer emitting a line table asks about
+        // one statement after another, which reads like a forward walk, but
+        // the distance is a whole statement's worth of lines: advancing the
+        // cursor up to 16 checkpoints before falling back to the search cost
+        // 4 M steps to skip 88 k searches, `+44 M` on the self-host stage
+        // (`+26 M` at a limit of 4). The search is already the right shape.
         u32 low = 0;
         u32 high = count;
+        if (region->checkpoint_page_count)
+        {
+            u32 page = local >> IR_SOURCE_CHECKPOINT_PAGE_SHIFT;
+            if (page >= region->checkpoint_page_count)
+            {
+                page = region->checkpoint_page_count - 1;
+            }
+            low = region->checkpoint_pages[page];
+            if (page + 1 < region->checkpoint_page_count)
+            {
+                u32 bracket = region->checkpoint_pages[page + 1] + 1;
+                high = bracket < high ? bracket : high;
+            }
+        }
         while (low + 1 < high)
         {
             u32 middle = low + (high - low) / 2;

@@ -753,6 +753,12 @@ has hard design constraints:
   range's own offset before resolving: consecutive instructions overwhelmingly
   come from one token, and resolving first puts the search back on the hot
   path it was moved off (measured at `+99 M` stage-1 instructions when it was).
+- **A frontend that preallocates `IrFunction.instructions` must preallocate
+  `instruction_canonical_sources` beside it.** `ir_function_add_instruction`
+  stores a canonical source only into an array that already exists, so sizing
+  the instructions alone silently drops every range the lowering built and
+  leaves the line table with nothing below one row per function — a gap that
+  costs nothing anywhere the compiler checks and shows up only in a debugger.
 - The typed IR must not retain parser/AST operation identifiers.
   Unary and binary instructions use IR-native operations that encode the
   semantic domain (integer, float, boolean, or pointer) and signed behavior;

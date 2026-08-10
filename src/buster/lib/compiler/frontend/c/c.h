@@ -264,6 +264,9 @@ struct CLexResult
     // break (see c_translate_source in c.c).
     IrSourceCheckpoint* checkpoints;
     u32* checkpoint_offsets;
+    // Page bracket over the checkpoints (see IrSourceRegion).
+    u32* checkpoint_pages;
+    u32 checkpoint_page_count;
     u32 checkpoint_count;
     // Spelling-space offset of translated_source.pointer (0 standalone).
     u32 translated_offset;

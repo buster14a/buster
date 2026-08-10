@@ -106,6 +106,13 @@ struct IrSourceRegion
     IrSourceCheckpoint* checkpoints;
     // Mapped-space offsets of the checkpoints, relative to `base`.
     u32* checkpoint_offsets;
+    // Checkpoint covering the first byte of each page of the region's text,
+    // the same bracket the region search gets from IrSourceMap.pages: a line
+    // table walks lines, so a query lands on a different checkpoint than the
+    // last about half the time and the search that follows is the cost that
+    // matters.
+    u32* checkpoint_pages;
+    u32 checkpoint_page_count;
     u32 checkpoint_count;
     u32 base;
     // What `#line` (or any other renumbering directive) moved this region's
@@ -149,6 +156,9 @@ struct IrSourceMap
 enum
 {
     IR_SOURCE_MAP_PAGE_SHIFT = 10,
+    // Source lines average tens of bytes, so a page this size brackets the
+    // checkpoint search to a handful of candidates.
+    IR_SOURCE_CHECKPOINT_PAGE_SHIFT = 7,
 };
 
 // Amortizes the two searches a lookup would otherwise run. Consumers query
