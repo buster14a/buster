@@ -510,26 +510,27 @@ the lifetime of its calling thread context.**)
   workers drain their TLS arena pool before exit. The combined app test gives
   unit modules a temporary `ThreadContext`, so resident test workers and their
   scratch are gone before graphical smoke and the bounded fuzz phase.
-- **Same-source lane comparison.** On the final isolated tree (`1,395,807`
-  preprocessed tokens), one lane measured stage 1 `0.668914 s` /
-  `5,384,053,826` instructions and stage 2 `7.566065 s` /
-  `70,372,665,061`; host width measured `0.616748 s` /
-  `5,384,185,647` and `7.069590 s` / `70,373,201,503`. Wall time moved
-  `-7.799%` and `-6.562%`; retired instructions moved only `+0.002448%` and
-  `+0.000762%`. The one-shot wall reductions are directional because this host
+- **Same-source lane comparison.** On the final rebased tree (`1,429,015`
+  preprocessed tokens), one lane measured stage 1 `1.017716 s` /
+  `5,473,956,285` instructions and stage 2 `7.518226 s` /
+  `74,781,336,109`; a quota of three lanes measured `0.866670 s` /
+  `5,474,040,420` and `7.038352 s` / `74,781,464,547`. Wall time moved
+  `-14.842%` and `-6.383%`; retired instructions moved only `+0.001537%` and
+  `+0.000172%`. The one-shot wall reductions are directional because this host
   has documented roughly 10% run-to-run noise; the instruction totals are the
   regression gate. Stage-2 parser benchmarks were neutral: I/O minima were
-  `1.930 ms` versus `1.944 ms` and parse minima were `1.717 ms` versus
-  `1.742 ms`.
+  `1.699 ms` versus `1.680 ms`, I/O medians were `1.762 ms` versus `1.705 ms`,
+  parse minima were `1.502 ms` versus `1.484 ms`, and parse medians were
+  `1.521 ms` versus `1.494 ms`.
 - **Determinism and gates.** Both widths reached the identical
-  `27,022,296`-byte fixed point with identical token streams. Complete
+  `29,689,288`-byte fixed point with identical token streams. Complete
   ELF/COFF serial-versus-parallel artifact regressions cover code, relocations,
   DWARF/CodeView, unwind, symbols, static labels, global assembly, and large
-  alignment growth. Host-width Release passed `19,647/19,647`; quota-one Debug
-  and Release passed `19,644/19,644`; compile-time serial Release passed
-  `19,632/19,632`; ASan+UBSan passed `18,779/18,779` at host width and
-  `18,776/18,776` at quota one. The combined graphical smoke passed its one
-  external test, and Clang analysis reported no warning.
+  alignment growth. On the rebased tree, threaded Release and split Debug each
+  passed `24,452/24,452`; compile-time serial Release passed `24,437/24,437`;
+  ASan+UBSan passed `23,549/23,549`. The original combined graphical smoke,
+  full configuration matrix, and Clang-analysis evidence below remains the
+  feature-branch integration record.
 - **Fuzz integration fix.** The first full matrix reached every row and then
   exposed a pre-existing leak in the bounded fuzz harness: every C preprocess
   input lost the separately owned 1 GiB spelling-space reservation when its
