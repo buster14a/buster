@@ -89,7 +89,15 @@ BUSTER_GLOBAL_LOCAL MachineEncodeResult machine_test_encode(Arena* arena, IrProg
 // the definition carries their guard: configurations that compile those
 // out (non-x86-64, or the sanitized and fuzzing builds) do not pass
 // -Wno-unused-function and would reject an unreferenced helper.
-#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
+//
+// Those sections call the emitted bytes through a native function pointer,
+// and the bytes are generated for the System V ABI regardless of host,
+// because the corpus fixes a Linux target so the machine path runs
+// everywhere. A Microsoft-ABI host therefore passes arguments in the wrong
+// registers and both paths read whatever the callee-side registers happen
+// to hold, so Windows is excluded from executing — it still selects,
+// verifies, places, encodes and checks fallback accounting above.
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
 BUSTER_GLOBAL_LOCAL u32 machine_test_module_offset(CodegenModule* module, IrModule* ir_module, String8 name)
 {
     IrFunction* ir_function = machine_test_ir_function_find(ir_module, name);
@@ -484,7 +492,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             MachineSelectResult variadic_selected = machine_select_canonical_function(arguments->arena, machine_program, variadic_function, machine_target);
             BUSTER_TEST(arguments, variadic_selected.supported);
         }
-#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
         CodegenExecutable none_executable = codegen_make_executable((CodegenFunction){
             .code = none_module.code,
         });
@@ -643,7 +651,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, mir_add_descriptor &&
                                        (mir_add_descriptor->prolog_size == 4 || mir_add_descriptor->prolog_size == 12 || mir_add_descriptor->prolog_size == 15));
         }
-#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
         // Both modules resolve their internal direct-call relocations the
         // way the linker would, so machine-to-machine calls execute; this
         // must happen before the executable copies are taken.
