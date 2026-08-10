@@ -131,6 +131,91 @@ the stages.**)
   12,544,794 / QUALITY 12,328,170. Pressure corpus: **FAST `91.32M`**,
   **QUALITY `82.12M`**, clang `47.54M`, allocator traffic reloads 34 /
   spills 53 / pins 20.
+`2026-08-10l` (Linux x86_64, Zen 4 7940HS; stage-8 pin economics — the
+three leads `2026-08-10j` left untaken, each built and measured on both
+corpora. Developed concurrently with `2026-08-10k` (shortest-form
+immediates, PR 254) and `2026-08-10m` (compare/branch fusion, PR 257)
+against the same `bbb319d` main and rebased onto their merge
+afterwards; the measurements are as taken on the pre-merge base and
+include neither sibling's effect. **All three are negatives or no-ops;
+no code change lands.** The useful output is the causal picture: every
+static refinement of the pin economics is now measured, and the
+residual QUALITY gap is execution-frequency blindness, which no static
+count fixes.)
+
+- **Harness, reproduced before anything moved.** The `2026-08-10j`
+  pressure references reproduce exactly on this tree: FAST `98,528,653`,
+  QUALITY `87,729,054`, clang -O2 `47,542,697`, traffic reloads 35 /
+  spills 51 / pins 20, repeat band ~10 instructions. The frozen-tree
+  comparison was re-frozen on today's main `bbb319d` (one merge past
+  `10j`'s freeze), so its absolutes shift a hair and these are the pair
+  every experiment below is read against: QUALITY stage `48.312G`
+  (pins 7,912, quality-mode compile cost `8.626G`), FAST stage
+  `48.992G`, stage repeat band ~25M.
+- **Experiment 1, candidate threshold 3 -> 2: wins pressure, loses the
+  self-host stage, both ways it was built.** The hypothesis was sound —
+  the threshold predates prologue-free pins, and a call-free 2-edit
+  value can sit in a caller-saved register for free. Plain `>= 2`:
+  pressure `87.33M` (`-0.46%`, pins 20 -> 26), but stage `48.385G`
+  (**`+73M`**, pins 7,912 -> 13,899, compile cost `+0.8%`). Gating the
+  2-edit candidates on crossing no call (an O(1) call-prefix probe over
+  the loop-extended interval) keeps the same pressure win with half the
+  damage — stage `48.355G` (**`+43M`**, pins 11,186) — still a loss.
+  Static traffic drops in every accepted function (reloads 58,246 ->
+  55,541, spills 83,266 -> 80,198), executed instructions rise anyway:
+  the marginal pins' saved edits sit in code that rarely runs, and what
+  they displace does not. The `MACHINE_QUALITY_MAXIMUM_CANDIDATES`
+  cap never saturated even at threshold 2 (probed per function over the
+  whole unity build), so the cap is not the story and stays at 4096.
+- **Experiment 2, loop-weighted priorities: negative, and insensitive to
+  the weight.** `MachineBlock.frequency_class` exists but nothing writes
+  it, so the proxy is whether an edit's instruction lies inside one of
+  the merged loop regions the extension pass already computes (binary
+  search per edit, regions are disjoint and sorted). Weighting in-loop
+  edits by 2, 4, 8, and 16 produces byte-identical placements — pressure
+  `88.53M` (**`+0.91%`**) at every weight — because the corpus's
+  contended decisions flip the same way at any weight above one: the
+  reorder demotes the pre-loop feeders whose early packing the current
+  order gets right, and the weight magnitude never gets a vote. Applying
+  the weighted count to the threshold as well (one in-loop edit earns
+  candidacy) lands between: `88.13M`, still a loss. Stage flat (`-7M`,
+  inside the band) in the priority-only form. Static edit order is
+  already the right order on this corpus; do not retry loop weighting
+  as a pure reorder.
+- **Experiment 3, copies and rematerializations in the acceptance
+  metric: a measured no-op, which is itself the finding.** Adding
+  `copy_count + rematerialize_count` to both totals moves pins by ten
+  in 7,912, the stage by `-0.8M` (band ~25M), and the pressure corpus
+  not at all. The latch permutation that motivated the lead was
+  invisible to the old metric, but stage 8's span pins already removed
+  it; in what remains, copy and remat counts track reload+spill closely
+  enough that the extra terms never flip an accept. Kept out of the
+  tree to keep the metric the simple thing `2026-08-09an` specified. It
+  also acquits the metric of the remat-inflation suspicion: experiment
+  1's extra pins trade counted reloads for uncounted remats (9,266 ->
+  9,836), yet counting them changes nothing — the static win is real.
+- **The combination does not rescue experiment 1.** Call-free threshold
+  2 plus the copy-aware acceptance: pressure `87.33M` (same win), stage
+  `48.360G` (`+48M`, pins 11,250). The copy term vetoes almost none of
+  the marginal pins because their placements are statically better in
+  every counted dimension; the loss is dynamic. **The conclusion across
+  all three: the acceptance model's blind spot is not what it counts
+  but where — static edit counts weigh a cold-path edit equal to a hot
+  one, and the profitable next lever is execution frequency (populate
+  `frequency_class` from real block structure in the selector, or
+  stage-9/10 splitting with frequency-aware spill placement), not
+  another static term.**
+- **Gates:** test_all green (28,809 unit, 31 module), self-host fixed
+  point deterministic (`SELF_HOST deterministic bytes=31289552`), all
+  three soaks — MIR_STACK, FAST, QUALITY — byte-identical against the
+  freshly rebuilt stage-2 reference, `test_all_combinations_ci` green
+  before the push. The tree ships no allocator change, so FAST and
+  QUALITY behavior are untouched by construction.
+- Reference points for the next audit, re-frozen on main `bbb319d` as
+  the workload: FAST stage `48.992G`, **QUALITY stage `48.312G`
+  (`-1.39%`)**, pins 7,912, quality-mode compile cost `8.626G` against
+  FAST-mode `7.238G`. Pressure corpus unchanged: FAST `98.53M`,
+  **QUALITY `87.73M`**, clang `47.54M`, pins 20.
 `2026-08-10k` (Linux x86_64, Zen 4 7940HS; the second `2026-08-10j`
 selection lead taken — every integer immediate spent the ten-byte
 movabs, and the machine encoders now pick the shortest form that
