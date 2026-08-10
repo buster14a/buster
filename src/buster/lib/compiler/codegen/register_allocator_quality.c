@@ -20,6 +20,15 @@
 // Bounds keep the pass linear-ish and its worst case reportable.
 #define MACHINE_QUALITY_MAXIMUM_CANDIDATES 4096
 
+// Free registers an instruction keeps above its own register operands,
+// so the local scan's LRU picks always have a candidate that is not one
+// of the same row's operands. Rows whose operands are all forced into
+// fixed registers — constrained layouts, the staging forms, calls — pick
+// nothing and need no spare at all, which is what lets the callee-saved
+// pins keep spanning call rows that foreclose the whole caller-saved
+// file.
+#define MACHINE_QUALITY_PIN_OPERAND_MARGIN 2u
+
 typedef struct MachineQualityInterval MachineQualityInterval;
 struct MachineQualityInterval
 {
@@ -275,142 +284,316 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     {
         machine_quality_heap_sift(heap, heap_count, root - 1);
     }
-    u32 pin_file_count = BUSTER_MIN(description->quality_pin_register_count, MACHINE_TARGET_QUALITY_PIN_LIMIT);
-    u32 assigned_starts[MACHINE_TARGET_QUALITY_PIN_LIMIT][8];
-    u32 assigned_ends[MACHINE_TARGET_QUALITY_PIN_LIMIT][8];
-    u32 assigned_counts[MACHINE_TARGET_QUALITY_PIN_LIMIT];
-    for (u32 file_index = 0; file_index < pin_file_count; file_index += 1)
-    {
-        assigned_counts[file_index] = 0;
-    }
-    u32 pinned_mask = 0;
-    while (heap_count)
-    {
-        MachineQualityInterval candidate = heap[0];
-        heap_count -= 1;
-        heap[0] = heap[heap_count];
-        machine_quality_heap_sift(heap, heap_count, 0);
-        for (u32 file_index = 0; file_index < pin_file_count; file_index += 1)
-        {
-            if (assigned_counts[file_index] == BUSTER_ARRAY_LENGTH(assigned_starts[0]))
-            {
-                continue;
-            }
-            bool overlaps = false;
-            for (u32 span = 0; span < assigned_counts[file_index]; span += 1)
-            {
-                overlaps |= candidate.start <= assigned_ends[file_index][span] && assigned_starts[file_index][span] <= candidate.end;
-            }
-            if (overlaps)
-            {
-                continue;
-            }
-            assigned_starts[file_index][assigned_counts[file_index]] = candidate.start;
-            assigned_ends[file_index][assigned_counts[file_index]] = candidate.end;
-            assigned_counts[file_index] += 1;
-            pinned_registers[candidate.virtual_register] = description->quality_pin_registers[file_index];
-            pinned_mask |= 1u << description->quality_pin_registers[file_index];
-            break;
-        }
-    }
     u32 baseline_traffic_total = baseline.reload_count + baseline.spill_count;
-    if (!pinned_mask || !function->instruction_count)
+    if (!heap_count || !function->instruction_count)
     {
         scratch_end(scratch);
         return baseline;
     }
-    // Span scoping. One register mask per instruction paints where each
-    // pin actually holds; the local scan owns the register everywhere
-    // outside. The entry masks mark each span's first instruction, the
-    // one point where a spill naming the register is legitimate — the
-    // eviction that hands it over.
-    u32* pin_active_masks = arena_allocate(scratch.arena, u32, function->instruction_count);
-    u32* pin_entry_masks = arena_allocate(scratch.arena, u32, function->instruction_count);
+    // The pin file: the target's callee-saved preference list first — the
+    // heaviest values take the registers that survive everything, and the
+    // local scan's caller-saved working pool is eaten last — then the
+    // caller-saved members, descending, which only a span that crosses no
+    // call may take and whose reservation costs no prologue save. The
+    // second, degraded attempt below keeps only the callee-saved prefix.
+    u32 pin_file[MACHINE_TARGET_REGISTER_LIMIT];
+    u32 pin_file_count = 0;
+    u32 caller_saved_allocatable = description->allocatable_mask & ~description->callee_saved_mask;
+    u32 quality_pin_count = BUSTER_MIN(description->quality_pin_register_count, MACHINE_TARGET_QUALITY_PIN_LIMIT);
+    for (u32 file_index = 0; file_index < quality_pin_count; file_index += 1)
+    {
+        pin_file[pin_file_count] = description->quality_pin_registers[file_index];
+        pin_file_count += 1;
+    }
+    for (u32 physical_register = description->register_count; physical_register > 0; physical_register -= 1)
+    {
+        if ((caller_saved_allocatable >> (physical_register - 1)) & 1u)
+        {
+            pin_file[pin_file_count] = physical_register - 1;
+            pin_file_count += 1;
+        }
+    }
+    // Per-instruction foreclosures: the registers a span may not hold at
+    // that instruction. A call forecloses every caller-saved register, a
+    // constrained row the scratch of each populated register slot — the
+    // slots the local scan actually forces there — a physical operand or
+    // a declared clobber its named register, and the fixed-register
+    // staging forms — the float bridge, the indirect callee — their stage
+    // register. Per-register prefix counts make each candidate's
+    // span-legality probe O(1), and the budget keeps each row's free-pick
+    // need above its pins and foreclosures so the local scan always has
+    // room to work.
+    u32 allocatable_count = 0;
+    for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
+    {
+        allocatable_count += (description->allocatable_mask >> physical_register) & 1u;
+    }
+    u32* foreclosure_prefix = arena_allocate(scratch.arena, u32, (u64)(function->instruction_count + 1) * description->register_count);
+    u8* pin_budgets = arena_allocate(scratch.arena, u8, function->instruction_count);
+    u8* pin_depths = arena_allocate(scratch.arena, u8, function->instruction_count);
+    u32* foreclosed_masks = arena_allocate(scratch.arena, u32, function->instruction_count);
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
     {
-        pin_active_masks[instruction_index] = 0;
-        pin_entry_masks[instruction_index] = 0;
-    }
-    for (u32 register_index = 0; register_index < register_count; register_index += 1)
-    {
-        if (pinned_registers[register_index] == UINT32_MAX)
-        {
-            continue;
-        }
-        u32 pin_bit = 1u << pinned_registers[register_index];
-        pin_entry_masks[interval_starts[register_index]] |= pin_bit;
-        for (u32 instruction_index = interval_starts[register_index]; instruction_index <= interval_ends[register_index]; instruction_index += 1)
-        {
-            pin_active_masks[instruction_index] |= pin_bit;
-        }
-    }
-    MachineStackPlacement placement = machine_fast_placement_build_pinned(arena, function, pinned_registers, pinned_mask, pin_active_masks);
-    // Accept only on modeled improvement: the traffic removed has to beat
-    // the push and pop each newly reserved register costs at entry, and a
-    // pin also raises local pressure, which can add traffic elsewhere.
-    u32 baseline_saved_registers = 0;
-    for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
-    {
-        baseline_saved_registers += (baseline.callee_saved_mask >> physical_register) & 1u;
-    }
-    u32 placement_saved_registers = 0;
-    for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
-    {
-        placement_saved_registers += (placement.callee_saved_mask >> physical_register) & 1u;
-    }
-    u32 added_prologue_cost = 2 * (placement_saved_registers - BUSTER_MIN(placement_saved_registers, baseline_saved_registers));
-    u32 placement_traffic_total = placement.reload_count + placement.spill_count;
-    if (!placement.valid || placement_traffic_total + added_prologue_cost >= baseline_traffic_total)
-    {
-        scratch_end(scratch);
-        return baseline;
-    }
-    // Pin verification. Within its span a pinned register belongs to its
-    // value: no other value's operand may sit in it there, no edit may
-    // name it as a target — except the spill that vacates it where the
-    // span opens — and no copy may read it as a source. The local scan
-    // has several paths that bypass its own register pool — copy
-    // coalescing was one — and a wrong pin is a silent miscompile, so the
-    // placement is checked rather than trusted, and a violation falls
-    // back to the local allocator alone.
-    bool pins_hold = true;
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count && pins_hold; instruction_index += 1)
-    {
-        u32 active = pin_active_masks[instruction_index];
-        if (!active)
-        {
-            continue;
-        }
         MachineInstruction* instruction = function->instructions + instruction_index;
         MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-        u8 const* operand_registers = placement.operand_registers + (u64)instruction_index * 4;
+        u32 foreclosed = info->clobber_mask;
+        if (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL)
+        {
+            foreclosed |= caller_saved_allocatable;
+        }
+        bool constrained = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) != 0;
+        u32 register_operand_slots = 0;
         for (u32 slot = 0; slot < info->operand_count; slot += 1)
         {
-            if (operand_registers[slot] == UINT8_MAX || !((active >> operand_registers[slot]) & 1u))
+            MachineRefKind kind = machine_ref_kind(instruction->operands[slot]);
+            if (kind == MACHINE_REF_PHYSICAL_REGISTER)
+            {
+                foreclosed |= 1u << machine_ref_payload(instruction->operands[slot]);
+            }
+            else if (kind == MACHINE_REF_VIRTUAL_REGISTER)
+            {
+                register_operand_slots += 1;
+                if (constrained)
+                {
+                    foreclosed |= 1u << description->slot_scratch[slot];
+                }
+            }
+        }
+        if (instruction->opcode == description->float_bridge_opcode)
+        {
+            foreclosed |= 1u << description->float_bridge_register;
+        }
+        if (instruction->opcode == description->indirect_call_opcode)
+        {
+            foreclosed |= 1u << description->indirect_call_register;
+        }
+        foreclosed_masks[instruction_index] = foreclosed;
+        u32 foreclosed_count = 0;
+        for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
+        {
+            foreclosed_count += ((foreclosed & description->allocatable_mask) >> physical_register) & 1u;
+        }
+        // A row whose register operands are all forced into fixed
+        // registers picks nothing; every other row needs room for its
+        // own operands plus the margin.
+        bool operands_forced =
+            constrained || instruction->opcode == description->float_bridge_opcode || instruction->opcode == description->indirect_call_opcode;
+        u32 spare = !operands_forced && register_operand_slots ? register_operand_slots + MACHINE_QUALITY_PIN_OPERAND_MARGIN : 0;
+        u32 headroom = allocatable_count - foreclosed_count;
+        pin_budgets[instruction_index] = (u8)(headroom > spare ? headroom - spare : 0);
+    }
+    for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
+    {
+        u32* prefix = foreclosure_prefix + (u64)physical_register * (function->instruction_count + 1);
+        prefix[0] = 0;
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            prefix[instruction_index + 1] = prefix[instruction_index] + ((foreclosed_masks[instruction_index] >> physical_register) & 1u);
+        }
+    }
+    MachineQualityInterval* heap_backup = arena_allocate(scratch.arena, MachineQualityInterval, heap_count);
+    for (u32 backup_index = 0; backup_index < heap_count; backup_index += 1)
+    {
+        heap_backup[backup_index] = heap[backup_index];
+    }
+    u32 heap_backup_count = heap_count;
+    u32* pin_active_masks = arena_allocate(scratch.arena, u32, function->instruction_count);
+    u32* pin_entry_masks = arena_allocate(scratch.arena, u32, function->instruction_count);
+    u32 assigned_starts[MACHINE_TARGET_REGISTER_LIMIT][8];
+    u32 assigned_ends[MACHINE_TARGET_REGISTER_LIMIT][8];
+    u32 assigned_counts[MACHINE_TARGET_REGISTER_LIMIT];
+    // Attempt 0 packs over the full file; if its placement is rejected or
+    // a pin fails verification, attempt 1 degrades to the callee-saved
+    // file alone before giving the function back to the local allocator —
+    // over-pinning a hot loop must not cost the pins that were winning.
+    for (u32 attempt = 0; attempt < 2; attempt += 1)
+    {
+        u32 const* attempt_file = pin_file;
+        u32 attempt_file_count = attempt ? quality_pin_count : pin_file_count;
+        if (!attempt_file_count)
+        {
+            continue;
+        }
+        for (u32 register_index = 0; register_index < register_count; register_index += 1)
+        {
+            pinned_registers[register_index] = UINT32_MAX;
+        }
+        for (u32 file_index = 0; file_index < attempt_file_count; file_index += 1)
+        {
+            assigned_counts[file_index] = 0;
+        }
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            pin_depths[instruction_index] = 0;
+        }
+        heap_count = heap_backup_count;
+        for (u32 backup_index = 0; backup_index < heap_backup_count; backup_index += 1)
+        {
+            heap[backup_index] = heap_backup[backup_index];
+        }
+        u32 pinned_mask = 0;
+        while (heap_count)
+        {
+            MachineQualityInterval candidate = heap[0];
+            heap_count -= 1;
+            heap[0] = heap[heap_count];
+            machine_quality_heap_sift(heap, heap_count, 0);
+            // The budget is register-independent, so a candidate that
+            // would leave any covered instruction without its spare is
+            // dropped before any register is probed.
+            bool over_budget = false;
+            for (u32 instruction_index = candidate.start; instruction_index <= candidate.end && !over_budget; instruction_index += 1)
+            {
+                over_budget = pin_depths[instruction_index] >= pin_budgets[instruction_index];
+            }
+            if (over_budget)
             {
                 continue;
             }
-            MachineRef ref = instruction->operands[slot];
-            pins_hold &= machine_ref_kind(ref) == MACHINE_REF_VIRTUAL_REGISTER && pinned_registers[machine_ref_payload(ref)] == operand_registers[slot];
+            for (u32 file_index = 0; file_index < attempt_file_count; file_index += 1)
+            {
+                u32 pin_register = attempt_file[file_index];
+                if (assigned_counts[file_index] == BUSTER_ARRAY_LENGTH(assigned_starts[0]))
+                {
+                    continue;
+                }
+                u32 const* prefix = foreclosure_prefix + (u64)pin_register * (function->instruction_count + 1);
+                if (prefix[candidate.end + 1] != prefix[candidate.start])
+                {
+                    continue;
+                }
+                bool overlaps = false;
+                for (u32 span = 0; span < assigned_counts[file_index]; span += 1)
+                {
+                    overlaps |= candidate.start <= assigned_ends[file_index][span] && assigned_starts[file_index][span] <= candidate.end;
+                }
+                if (overlaps)
+                {
+                    continue;
+                }
+                assigned_starts[file_index][assigned_counts[file_index]] = candidate.start;
+                assigned_ends[file_index][assigned_counts[file_index]] = candidate.end;
+                assigned_counts[file_index] += 1;
+                pinned_registers[candidate.virtual_register] = pin_register;
+                pinned_mask |= 1u << pin_register;
+                for (u32 instruction_index = candidate.start; instruction_index <= candidate.end; instruction_index += 1)
+                {
+                    pin_depths[instruction_index] += 1;
+                }
+                break;
+            }
         }
-    }
-    for (u32 edit_index = 0; edit_index < placement.edit_count && pins_hold; edit_index += 1)
-    {
-        MachineEdit* edit = placement.edits + edit_index;
-        u32 active = pin_active_masks[machine_point_instruction(edit->point)];
-        bool vacating = edit->kind == MACHINE_EDIT_SPILL && ((pin_entry_masks[machine_point_instruction(edit->point)] >> edit->location) & 1u);
-        pins_hold &= !((active >> edit->location) & 1u) || vacating;
-        pins_hold &= edit->kind != MACHINE_EDIT_COPY || !((active >> edit->subject) & 1u);
+        if (!pinned_mask)
+        {
+            break;
+        }
+        // A first attempt that never assigned a caller-saved register
+        // would degrade into an identical repack, so its rejection is
+        // final.
+        bool degradable = (pinned_mask & caller_saved_allocatable) != 0;
+        // Span scoping. One register mask per instruction paints where
+        // each pin actually holds; the local scan owns the register
+        // everywhere outside. The entry masks mark each span's first
+        // instruction, the one point where a spill naming the register is
+        // legitimate — the eviction that hands it over.
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            pin_active_masks[instruction_index] = 0;
+            pin_entry_masks[instruction_index] = 0;
+        }
+        for (u32 register_index = 0; register_index < register_count; register_index += 1)
+        {
+            if (pinned_registers[register_index] == UINT32_MAX)
+            {
+                continue;
+            }
+            u32 pin_bit = 1u << pinned_registers[register_index];
+            pin_entry_masks[interval_starts[register_index]] |= pin_bit;
+            for (u32 instruction_index = interval_starts[register_index]; instruction_index <= interval_ends[register_index]; instruction_index += 1)
+            {
+                pin_active_masks[instruction_index] |= pin_bit;
+            }
+        }
+        MachineStackPlacement placement = machine_fast_placement_build_pinned(arena, function, pinned_registers, pinned_mask, pin_active_masks);
+        // Accept only on modeled improvement: the traffic removed has to
+        // beat the push and pop each newly reserved callee-saved register
+        // costs at entry — a caller-saved pin costs no prologue — and a
+        // pin also raises local pressure, which can add traffic
+        // elsewhere.
+        u32 baseline_saved_registers = 0;
+        for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
+        {
+            baseline_saved_registers += (baseline.callee_saved_mask >> physical_register) & 1u;
+        }
+        u32 placement_saved_registers = 0;
+        for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
+        {
+            placement_saved_registers += (placement.callee_saved_mask >> physical_register) & 1u;
+        }
+        u32 added_prologue_cost = 2 * (placement_saved_registers - BUSTER_MIN(placement_saved_registers, baseline_saved_registers));
+        u32 placement_traffic_total = placement.reload_count + placement.spill_count;
+        if (!placement.valid || placement_traffic_total + added_prologue_cost >= baseline_traffic_total)
+        {
+            if (!degradable)
+            {
+                break;
+            }
+            continue;
+        }
+        // Pin verification. Within its span a pinned register belongs to
+        // its value: no other value's operand may sit in it there, no
+        // edit may name it as a target — except the spill that vacates it
+        // where the span opens — and no copy may read it as a source. The
+        // local scan has several paths that bypass its own register pool
+        // — copy coalescing was one — and a wrong pin is a silent
+        // miscompile, so the placement is checked rather than trusted,
+        // and a violation degrades like a rejection.
+        bool pins_hold = true;
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count && pins_hold; instruction_index += 1)
+        {
+            u32 active = pin_active_masks[instruction_index];
+            if (!active)
+            {
+                continue;
+            }
+            MachineInstruction* instruction = function->instructions + instruction_index;
+            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+            u8 const* operand_registers = placement.operand_registers + (u64)instruction_index * 4;
+            for (u32 slot = 0; slot < info->operand_count; slot += 1)
+            {
+                if (operand_registers[slot] == UINT8_MAX || !((active >> operand_registers[slot]) & 1u))
+                {
+                    continue;
+                }
+                MachineRef ref = instruction->operands[slot];
+                pins_hold &=
+                    machine_ref_kind(ref) == MACHINE_REF_VIRTUAL_REGISTER && pinned_registers[machine_ref_payload(ref)] == operand_registers[slot];
+            }
+        }
+        for (u32 edit_index = 0; edit_index < placement.edit_count && pins_hold; edit_index += 1)
+        {
+            MachineEdit* edit = placement.edits + edit_index;
+            u32 active = pin_active_masks[machine_point_instruction(edit->point)];
+            bool vacating = edit->kind == MACHINE_EDIT_SPILL && ((pin_entry_masks[machine_point_instruction(edit->point)] >> edit->location) & 1u);
+            pins_hold &= !((active >> edit->location) & 1u) || vacating;
+            pins_hold &= edit->kind != MACHINE_EDIT_COPY || !((active >> edit->subject) & 1u);
+        }
+        if (!pins_hold)
+        {
+            if (!degradable)
+            {
+                break;
+            }
+            continue;
+        }
+        placement.pinned_register_count = 0;
+        for (u32 register_index = 0; register_index < register_count; register_index += 1)
+        {
+            placement.pinned_register_count += pinned_registers[register_index] != UINT32_MAX;
+        }
+        scratch_end(scratch);
+        return placement;
     }
     scratch_end(scratch);
-    if (!pins_hold)
-    {
-        return baseline;
-    }
-    placement.pinned_register_count = 0;
-    for (u32 register_index = 0; register_index < register_count; register_index += 1)
-    {
-        placement.pinned_register_count += pinned_registers[register_index] != UINT32_MAX;
-    }
-    return placement;
+    return baseline;
 }

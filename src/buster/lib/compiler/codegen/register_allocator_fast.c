@@ -380,7 +380,11 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u32 forbidden
     u32 candidates = state->description->allocatable_mask & ~forbidden_mask & ~machine_fast_pin_active(state, state->current_point >> 2);
     if (!prefers_callee_saved)
     {
-        candidates &= ~(state->description->callee_saved_mask & ~state->placement->callee_saved_mask);
+        // Avoid paying a new callee-saved push for a value that does not
+        // cross a call — unless the unpaid members are all that remain,
+        // which caller-saved span pins can arrange.
+        u32 without_unpaid = candidates & ~(state->description->callee_saved_mask & ~state->placement->callee_saved_mask);
+        candidates = without_unpaid ? without_unpaid : candidates;
     }
     u32 best = UINT32_MAX;
     u32 best_age = UINT32_MAX;
@@ -534,7 +538,9 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
     }
     MachineBuilderStream edits;
     machine_stream_initialize(&edits, sizeof(MachineEdit));
-    placement.callee_saved_mask |= pinned_mask;
+    // Only the callee-saved pins cost a prologue save; a caller-saved pin
+    // is exactly why QUALITY hands them out where a span crosses no call.
+    placement.callee_saved_mask |= pinned_mask & description->callee_saved_mask;
     MachineFastState state = {
         .arena = arena,
         .function = function,
