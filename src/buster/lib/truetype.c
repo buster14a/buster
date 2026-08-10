@@ -1144,7 +1144,9 @@ BUSTER_GLOBAL_LOCAL void ttf_rasterize_path(Arena* arena, const TTF_RasterPath* 
         for (u64 sample_x_index = 0; sample_x_index < sample_width; sample_x_index += 1)
         {
             winding += winding_deltas[sample_x_index];
-            covered_samples[sample_x_index / TTF_RASTER_SUBSAMPLES] += winding != 0;
+            u64 pixel_x = sample_x_index / TTF_RASTER_SUBSAMPLES;
+            u32 covered = (u32)covered_samples[pixel_x] + (u32)(winding != 0);
+            covered_samples[pixel_x] = (u8)covered;
         }
         if (subpixel_y + 1u == TTF_RASTER_SUBSAMPLES)
         {

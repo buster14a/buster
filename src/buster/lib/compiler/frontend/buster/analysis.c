@@ -2091,7 +2091,7 @@ BUSTER_GLOBAL_LOCAL u64 analysis_type_hash(AnalysisType* type)
         break;
     case ANALYSIS_TYPE_FUNCTION:
         hash = analysis_type_hash_mix(hash, type->as.function.return_type.value);
-        hash = analysis_type_hash_mix(hash, type->as.function.calling_convention);
+        hash = analysis_type_hash_mix(hash, (u64)type->as.function.calling_convention);
         hash = analysis_type_hash_mix(hash, type->as.function.argument_count);
         hash = analysis_type_hash_mix(hash, type->as.function.is_variadic);
         for (u32 index = 0; index < type->as.function.argument_count; index += 1)
