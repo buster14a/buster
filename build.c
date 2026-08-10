@@ -2698,7 +2698,7 @@ BUSTER_GLOBAL_LOCAL String8 self_host_metrics_path(Arena* arena, String8 output)
 #define SELF_HOST_TIMEOUT_SECONDS 600
 
 BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
-                                                      String8 timing_description)
+                                                      String8 timing_description, String8 register_allocator_flag)
 {
     BuildStep* step = step_add(arena);
     ProcessRun* run = run_add(arena, step);
@@ -2733,6 +2733,10 @@ BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 comp
     os_argument_builder_append(&builder, S8("-DBUSTER_UNITY_BUILD=1"));
     os_argument_builder_append(&builder, S8("-DBUSTER_INCLUDE_TESTS=0"));
     os_argument_builder_append(&builder, S8("-g"));
+    if (register_allocator_flag.length)
+    {
+        os_argument_builder_append(&builder, register_allocator_flag);
+    }
     // Both stages report their target, code generation, and source measurement
     // beside this step's wall clock and STEP_INSTRUCTIONS line, so throughput
     // can be read per byte, per line, or per token instead of per compile.
@@ -3135,6 +3139,42 @@ BUSTER_GLOBAL_LOCAL void self_host_compare_and_bench_add(Arena* arena, String8 s
     };
 }
 
+#if !BUSTER_WINDOWS
+// One stage built through the machine register allocators must also execute:
+// the byte-identity stages above only prove that the canonical path
+// reproduces itself, so machine-encoded functions otherwise reach users
+// without ever having run (the aggregate zero-fill miscompile lived exactly
+// there). Windows is excluded because its x86-64 ABI keeps every function on
+// the canonical fallback, which the stages above already cover.
+BUSTER_GLOBAL_LOCAL void self_host_machine_bench_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot,
+                                                     String8 output_directory)
+{
+    String8 machine_stage = path_join(arena, output_directory, S8("ide-stage2-machine"));
+    remove_path_recursive(arena, machine_stage);
+    remove_path_recursive(arena, self_host_metrics_path(arena, machine_stage));
+    self_host_compile_add(arena, compiler, build_directory, sysroot, machine_stage, S8("Self-host machine stage"),
+                          S8("-fregister-allocator=mir-stack"));
+    BuildStep* bench_step = step_add(arena);
+    ProcessRun* bench_run = run_add(arena, bench_step);
+    String8* bench_arguments = arena_allocate(arena, String8, 2);
+    bench_arguments[0] = machine_stage;
+    bench_arguments[1] = S8("bench");
+    *bench_run = (ProcessRun){
+        .arguments =
+            {
+                .pointer = bench_arguments,
+                .length = 2,
+            },
+        .timing_description = S8("Self-host machine stage benchmark"),
+        .timeout_seconds = SELF_HOST_TIMEOUT_SECONDS,
+        .spawn_options =
+            (ProcessSpawnOptions){
+                .use_process_environment = 1,
+            },
+    };
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, BuildArtifactFanout* fanout)
 {
 #if (!(BUSTER_LINUX || BUSTER_WINDOWS) || !BUSTER_CPU_ARCH_X86_64) && !BUSTER_MACOS
@@ -3193,15 +3233,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, Buil
         .callback_data = fanout,
     };
     ProcessRun* stage1_run = self_host_compile_add(arena, fanout->private_bootstrap_path, fanout->build_directory, sysroot, stage1,
-                                                   S8("Self-host stage 1"));
+                                                   S8("Self-host stage 1"), (String8){0});
     stage1_run->cleanup_callback = build_artifact_fanout_cleanup_action;
     stage1_run->cleanup_data = fanout;
-    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, fanout->build_directory, sysroot, stage2, S8("Self-host stage 2"));
+    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, fanout->build_directory, sysroot, stage2, S8("Self-host stage 2"), (String8){0});
     self_host_compare_and_bench_add(arena, stage1, stage2, stage1_run, stage2_run
 #if BUSTER_WINDOWS
                                     , stage1_pdb, stage2_pdb
 #endif
     );
+#if !BUSTER_WINDOWS
+    self_host_machine_bench_add(arena, stage2, fanout->build_directory, sysroot, output_directory);
+#endif
     return PROCESS_RESULT_SUCCESS;
 #endif
 }
@@ -3359,13 +3402,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
 #endif
     String8 targets[] = {S8("ide")};
     build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
-    ProcessRun* stage1_run = self_host_compile_add(arena, bootstrap, build_directory, sysroot, stage1, S8("Self-host stage 1"));
-    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, build_directory, sysroot, stage2, S8("Self-host stage 2"));
+    ProcessRun* stage1_run = self_host_compile_add(arena, bootstrap, build_directory, sysroot, stage1, S8("Self-host stage 1"), (String8){0});
+    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, build_directory, sysroot, stage2, S8("Self-host stage 2"), (String8){0});
     self_host_compare_and_bench_add(arena, stage1, stage2, stage1_run, stage2_run
 #if BUSTER_WINDOWS
                                     , stage1_pdb, stage2_pdb
 #endif
     );
+#if !BUSTER_WINDOWS
+    self_host_machine_bench_add(arena, stage2, build_directory, sysroot, output_directory);
+#endif
     return PROCESS_RESULT_SUCCESS;
 #endif
 }
