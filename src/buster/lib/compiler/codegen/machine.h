@@ -549,11 +549,13 @@ struct MachineOpcodeInfo
     u16 attributes;
     // Extra registers the opcode's encoder sequence scribbles on beyond its
     // declared operands; owners must vacate before the instruction runs.
-    u32 clobber_mask;
+    u64 clobber_mask;
 };
 
-// Upper bound on any target's general register file; masks stay u32.
-#define MACHINE_TARGET_REGISTER_LIMIT 32u
+// Upper bound on any target's unified register file — the general file plus
+// the vector file behind it; every allocator mask is one u64 over this
+// numbering, so the limit may not pass sixty-four.
+#define MACHINE_TARGET_REGISTER_LIMIT 48u
 // Upper bound on the callee-saved registers the QUALITY pass may pin;
 // each target lists its own file in preference order and reports how much
 // of it is real through `quality_pin_register_count`.
@@ -570,8 +572,8 @@ struct MachineTargetDescription
     // stack/frame registers stay out. The callee-saved subset survives
     // calls, costs one prologue save per function that binds it, and its
     // saves carry unwind actions.
-    u32 allocatable_mask;
-    u32 callee_saved_mask;
+    u64 allocatable_mask;
+    u64 callee_saved_mask;
     u32 register_count;
     // The fixed scratch register per inline operand slot, used by MIR_STACK
     // for every operand and by the allocators for constrained opcodes.
@@ -601,7 +603,7 @@ struct MachineTargetDescription
     // target whose selector never produces vector virtual registers. The
     // callee-saved subset is the intersection with `callee_saved_mask`;
     // System V x86-64 has none, so every vector value dies at a call.
-    u32 vector_allocatable_mask;
+    u64 vector_allocatable_mask;
     // Full-width vector register copy, coalescible like `copy_opcode`.
     u16 vector_copy_opcode;
     u8 reserved[2];
@@ -685,10 +687,13 @@ typedef enum MachineA64Register
 } MachineA64Register;
 
 // x86-64 physical registers: the general file in encoding order, then the
-// vector file as ZMM0-15 at indices 16-31. One unified numbering keeps every
-// allocator mask a u32 and lets the shared scan, contracts, and edit stream
-// carry both classes without a second file of state; the encoder recovers
-// the ZMM number by subtracting MACHINE_X64_ZMM0.
+// vector file as ZMM0-31 at indices 16-47. One unified numbering keeps every
+// allocator mask a single u64 and lets the shared scan, contracts, and edit
+// stream carry both classes without a second file of state; the encoder
+// recovers the ZMM number by subtracting MACHINE_X64_ZMM0. ZMM16-31 exist
+// wherever EVEX itself does (AVX512F in 64-bit mode), which the vector
+// vocabulary's feature gate already requires before any vector virtual
+// register is selected.
 typedef enum MachineX64Register
 {
     MACHINE_X64_RAX,
@@ -723,6 +728,22 @@ typedef enum MachineX64Register
     MACHINE_X64_ZMM13,
     MACHINE_X64_ZMM14,
     MACHINE_X64_ZMM15,
+    MACHINE_X64_ZMM16,
+    MACHINE_X64_ZMM17,
+    MACHINE_X64_ZMM18,
+    MACHINE_X64_ZMM19,
+    MACHINE_X64_ZMM20,
+    MACHINE_X64_ZMM21,
+    MACHINE_X64_ZMM22,
+    MACHINE_X64_ZMM23,
+    MACHINE_X64_ZMM24,
+    MACHINE_X64_ZMM25,
+    MACHINE_X64_ZMM26,
+    MACHINE_X64_ZMM27,
+    MACHINE_X64_ZMM28,
+    MACHINE_X64_ZMM29,
+    MACHINE_X64_ZMM30,
+    MACHINE_X64_ZMM31,
     MACHINE_X64_REGISTER_COUNT,
 } MachineX64Register;
 
@@ -801,7 +822,7 @@ struct MachineStackPlacement
     u32 boundary_copy_count;
     // Callee-saved registers the placement assigned; the encoder pushes and
     // pops them around the frame and the unwind actions record the pushes.
-    u32 callee_saved_mask;
+    u64 callee_saved_mask;
     bool valid;
     u8 reserved[3];
 };
@@ -943,7 +964,7 @@ BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, M
 // register everywhere outside; null reserves `pinned_mask` for the whole
 // function. QUALITY derives its pins through this.
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineFunction* function, u32 const* pinned_registers,
-                                                                        u32 pinned_mask, u32 const* pin_active_masks);
+                                                                        u64 pinned_mask, u64 const* pin_active_masks);
 // QUALITY: a global pass pins the highest-weight non-overlapping live
 // intervals to callee-saved registers for their whole lifetime, then the
 // same local scan places everything else around them.

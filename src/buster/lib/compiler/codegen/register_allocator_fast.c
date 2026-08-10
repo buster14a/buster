@@ -48,8 +48,8 @@ struct MachineFastState
     // instruction scoping each reservation to its value's live span; null
     // means `pinned_mask` holds everywhere.
     u32 const* pinned_registers;
-    u32 pinned_mask;
-    u32 const* pin_active_masks;
+    u64 pinned_mask;
+    u64 const* pin_active_masks;
     // The register indices the scan's loops walk. The unified file puts
     // the vector registers past the general ones, and a function with no
     // vector virtual registers can never own one, so its loops stop at
@@ -68,7 +68,7 @@ struct MachineFastState
 // The registers pinned values own at this instruction, which the local
 // scan must stand clear of. Outside every pinned span the register is an
 // ordinary member of the pool.
-BUSTER_GLOBAL_LOCAL u32 machine_fast_pin_active(MachineFastState* state, u32 instruction_index)
+BUSTER_GLOBAL_LOCAL u64 machine_fast_pin_active(MachineFastState* state, u32 instruction_index)
 {
     return state->pin_active_masks ? state->pin_active_masks[instruction_index] : state->pinned_mask;
 }
@@ -111,7 +111,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_spill(MachineFastState* state, u32 physica
     state->virtual_register_locations[owner] = UINT32_MAX;
 }
 
-BUSTER_GLOBAL_LOCAL void machine_fast_flush(MachineFastState* state, u32 keep_mask)
+BUSTER_GLOBAL_LOCAL void machine_fast_flush(MachineFastState* state, u64 keep_mask)
 {
     for (u32 physical_register = 0; physical_register < state->active_register_count; physical_register += 1)
     {
@@ -131,6 +131,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_flush(MachineFastState* state, u32 keep_ma
 // value stays in its register across the boundary instead of round-tripping
 // through its slot the way the old unconditional write-back forced.
 BUSTER_GLOBAL_LOCAL u32 const machine_fast_empty_contract_owner[MACHINE_TARGET_REGISTER_LIMIT] = {
+    UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+    UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
     UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
     UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
     UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
@@ -201,12 +203,12 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
         dirty[physical_register] = false;
     }
     // Pass 2: place every contract value not already in its register.
-    u32 pending = 0;
+    u64 pending = 0;
     for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
     {
         if (contract_owner[contract_register] != UINT32_MAX && owner[contract_register] != contract_owner[contract_register])
         {
-            pending |= 1u << contract_register;
+            pending |= 1ull << contract_register;
         }
     }
     while (pending)
@@ -285,7 +287,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
             {
                 locations[value] = contract_register;
             }
-            pending &= ~(1u << contract_register);
+            pending &= ~(1ull << contract_register);
             progressed = true;
         }
         if (!progressed)
@@ -381,7 +383,7 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_crosses_call(MachineFastState* state, u32 
 // The register file a virtual register may draw from: its class's
 // allocatable mask. The vector file shares the scan, the contracts, and
 // the edit stream with the general one — only the candidate set differs.
-BUSTER_GLOBAL_LOCAL u32 machine_fast_class_mask(MachineFastState* state, u32 virtual_register)
+BUSTER_GLOBAL_LOCAL u64 machine_fast_class_mask(MachineFastState* state, u32 virtual_register)
 {
     return state->function->virtual_registers[virtual_register].register_class == MACHINE_REGISTER_CLASS_VECTOR
                ? state->description->vector_allocatable_mask
@@ -392,25 +394,25 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_class_mask(MachineFastState* state, u32 vir
 // owner — a probe bounded by the register-file size. Call-crossing values
 // reach for the callee-saved members; everything else only touches them
 // once another binding has already paid their push.
-BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u32 class_mask, u32 forbidden_mask, bool prefers_callee_saved)
+BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u64 class_mask, u64 forbidden_mask, bool prefers_callee_saved)
 {
-    u32 candidates = class_mask & ~forbidden_mask & ~machine_fast_pin_active(state, state->current_point >> 2);
+    u64 candidates = class_mask & ~forbidden_mask & ~machine_fast_pin_active(state, state->current_point >> 2);
     if (!prefers_callee_saved)
     {
         // Avoid paying a new callee-saved push for a value that does not
         // cross a call — unless the unpaid members are all that remain,
         // which caller-saved span pins can arrange.
-        u32 without_unpaid = candidates & ~(state->description->callee_saved_mask & ~state->placement->callee_saved_mask);
+        u64 without_unpaid = candidates & ~(state->description->callee_saved_mask & ~state->placement->callee_saved_mask);
         candidates = without_unpaid ? without_unpaid : candidates;
     }
     u32 best = UINT32_MAX;
     u32 best_age = UINT32_MAX;
     u32 dead = UINT32_MAX;
     u32 free_other = UINT32_MAX;
-    u32 preferred_class = prefers_callee_saved ? state->description->callee_saved_mask : ~state->description->callee_saved_mask;
+    u64 preferred_class = prefers_callee_saved ? state->description->callee_saved_mask : ~state->description->callee_saved_mask;
     for (u32 physical_register = 0; physical_register < state->active_register_count; physical_register += 1)
     {
-        if (!(candidates & (1u << physical_register)))
+        if (!(candidates & (1ull << physical_register)))
         {
             continue;
         }
@@ -451,7 +453,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u32 class_mas
 
 // Materializes `virtual_register` in `target` (UINT32_MAX picks freely) and
 // returns the register used.
-BUSTER_GLOBAL_LOCAL u32 machine_fast_ensure(MachineFastState* state, u32 virtual_register, u32 target, u32 forbidden_mask)
+BUSTER_GLOBAL_LOCAL u32 machine_fast_ensure(MachineFastState* state, u32 virtual_register, u32 target, u64 forbidden_mask)
 {
     u32 current = state->virtual_register_locations[virtual_register];
     if (target == UINT32_MAX)
@@ -512,7 +514,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_ensure(MachineFastState* state, u32 virtual
     state->owner[target] = virtual_register;
     state->virtual_register_locations[virtual_register] = target;
     state->age[target] = ++state->clock;
-    state->placement->callee_saved_mask |= (1u << target) & state->description->callee_saved_mask;
+    state->placement->callee_saved_mask |= (1ull << target) & state->description->callee_saved_mask;
     return target;
 }
 
@@ -529,7 +531,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_bind(MachineFastState* state, u32 virtual_
     state->dirty[target] = true;
     state->virtual_register_locations[virtual_register] = target;
     state->age[target] = ++state->clock;
-    state->placement->callee_saved_mask |= (1u << target) & state->description->callee_saved_mask;
+    state->placement->callee_saved_mask |= (1ull << target) & state->description->callee_saved_mask;
 }
 
 // `pinned_registers` holds a physical register per virtual register that
@@ -539,8 +541,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_bind(MachineFastState* state, u32 virtual_
 // reloads a pinned value: its operands simply name the register, and the
 // register rejoins the pool wherever no span covers the instruction. FAST
 // passes none of the three.
-MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineFunction* function, u32 const* pinned_registers, u32 pinned_mask,
-                                                          u32 const* pin_active_masks)
+MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineFunction* function, u32 const* pinned_registers, u64 pinned_mask,
+                                                          u64 const* pin_active_masks)
 {
     // Frame layout is shared with the stack placement for now; slot
     // elimination is the stage-6 optimization.
@@ -588,7 +590,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
         }
         if (!scan_has_vector)
         {
-            u32 general_mask = description->allocatable_mask | description->callee_saved_mask;
+            u64 general_mask = description->allocatable_mask | description->callee_saved_mask;
             u32 general_top = 0;
             for (u32 bit_index = 0; bit_index < MACHINE_TARGET_REGISTER_LIMIT; bit_index += 1)
             {
@@ -860,7 +862,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
                 // A register a pinned span holds at this block's entry
                 // belongs to the pinned value here, whatever any edge
                 // delivers, so the contract cannot promise it.
-                u32 entry_pin_active = block->instruction_count ? machine_fast_pin_active(&state, block->first_instruction) : 0;
+                u64 entry_pin_active = block->instruction_count ? machine_fast_pin_active(&state, block->first_instruction) : 0;
                 for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
                 {
                     u32 value = donor_owner[contract_register];
@@ -903,7 +905,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
                     bool const* edge_dirty = out_dirty + (u64)predecessor * register_count;
                     MachineBlock* predecessor_block = function->blocks + predecessor;
                     bool repairs_fully = false;
-                    u32 repair_pin_active = 0;
+                    u64 repair_pin_active = 0;
                     if (predecessor_block->instruction_count)
                     {
                         u32 terminator_index = predecessor_block->first_instruction + predecessor_block->instruction_count - 1;
@@ -1024,12 +1026,12 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
             // the eviction only fires where a span opens mid-block — at a
             // pinned value's definition — which is a point that cannot
             // re-execute without passing the block head again.
-            u32 pins_opening = machine_fast_pin_active(&state, instruction_index);
+            u64 pins_opening = machine_fast_pin_active(&state, instruction_index);
             for (u32 physical_register = 0; pins_opening; physical_register += 1)
             {
-                if (pins_opening & (1u << physical_register))
+                if (pins_opening & (1ull << physical_register))
                 {
-                    pins_opening &= ~(1u << physical_register);
+                    pins_opening &= ~(1ull << physical_register);
                     if (state.owner[physical_register] != UINT32_MAX)
                     {
                         machine_fast_spill(&state, physical_register);
@@ -1042,17 +1044,17 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
             bool is_terminator = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) != 0;
             // Fixed physical operands and the constrained layout vacate
             // their registers first so uses cannot land on them.
-            u32 reserved_mask = info->clobber_mask;
+            u64 reserved_mask = info->clobber_mask;
             for (u32 slot = 0; slot < info->operand_count; slot += 1)
             {
                 MachineRef ref = instruction->operands[slot];
                 if (machine_ref_kind(ref) == MACHINE_REF_PHYSICAL_REGISTER)
                 {
-                    reserved_mask |= 1u << machine_ref_payload(ref);
+                    reserved_mask |= 1ull << machine_ref_payload(ref);
                 }
                 else if (constrained && machine_ref_kind(ref) == MACHINE_REF_VIRTUAL_REGISTER)
                 {
-                    reserved_mask |= 1u << description->slot_scratch[slot];
+                    reserved_mask |= 1ull << description->slot_scratch[slot];
                 }
             }
             // Uses first: constrained slots force their scratch register,
@@ -1128,12 +1130,12 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
                     }
                 }
             }
-            u32 clobber_mask = info->clobber_mask;
+            u64 clobber_mask = info->clobber_mask;
             for (u32 physical_register = 0; clobber_mask; physical_register += 1)
             {
-                if (clobber_mask & (1u << physical_register))
+                if (clobber_mask & (1ull << physical_register))
                 {
-                    clobber_mask &= ~(1u << physical_register);
+                    clobber_mask &= ~(1ull << physical_register);
                     machine_fast_spill(&state, physical_register);
                 }
             }

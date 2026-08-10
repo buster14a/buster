@@ -1303,15 +1303,37 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             MachineEncodeResult fast_encoded = machine_encode_x86_64(arguments->arena, &selected.function, &vector_fast);
             MachineEncodeResult quality_encoded = machine_encode_x86_64(arguments->arena, &selected.function, &vector_quality);
             BUSTER_TEST(arguments, stack_encoded.valid && fast_encoded.valid && quality_encoded.valid);
-            // Eighteen live vectors against a sixteen-register file: the
-            // scan must spill some of them, and only some — a placement
-            // that spilled everything would be MIR_STACK wearing a FAST
-            // badge.
+            // Eighteen live vectors against the thirty-two-register file:
+            // every accumulator fits, so the scan must keep the vector
+            // working set fully register-resident — any vector-class edit
+            // here means the widened file is not actually being allocated.
+            // The scalar traffic stays: the loop-carried counters conform
+            // at the loop head and the frontend's stack save/restore
+            // bracket round-trips through RSP exactly as before.
             if (string_equal(vector_names[name_index], S8("vspill")))
             {
-                BUSTER_TEST_RAW(arguments, vector_fast.spill_count > 0 && vector_fast.spill_count < vector_stack.spill_count,
-                                string_format(arguments->arena, S8("vector spills fast {u32} stack {u32}"), vector_fast.spill_count,
-                                              vector_stack.spill_count));
+                u32 fast_vector_edits = 0;
+                for (u32 edit_index = 0; edit_index < vector_fast.edit_count; edit_index += 1)
+                {
+                    MachineEdit* edit = vector_fast.edits + edit_index;
+                    fast_vector_edits += (edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD) &&
+                                         selected.function.virtual_registers[edit->subject].register_class == MACHINE_REGISTER_CLASS_VECTOR;
+                }
+                BUSTER_TEST_RAW(arguments, fast_vector_edits == 0,
+                                string_format(arguments->arena, S8("vector-class edits fast {u32} (spills {u32} reloads {u32} stack {u32})"),
+                                              fast_vector_edits, vector_fast.spill_count, vector_fast.reload_count, vector_stack.spill_count));
+                // Eighteen accumulators cannot fit in ZMM0-15 alone, so a
+                // fully resident placement is proof the scan handed out the
+                // high file; the executing differential below is what then
+                // proves the encoder's EVEX extension bits reproduce the
+                // canonical results on an AVX-512 host.
+                bool fast_reaches_high_file = false;
+                for (u64 register_scan = 0; register_scan < (u64)selected.function.instruction_count * 4; register_scan += 1)
+                {
+                    fast_reaches_high_file |=
+                        vector_fast.operand_registers[register_scan] != UINT8_MAX && vector_fast.operand_registers[register_scan] >= MACHINE_X64_ZMM16;
+                }
+                BUSTER_TEST(arguments, fast_reaches_high_file);
             }
         }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE

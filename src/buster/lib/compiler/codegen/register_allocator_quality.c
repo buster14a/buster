@@ -304,7 +304,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     // second, degraded attempt below keeps only the callee-saved prefix.
     u32 pin_file[MACHINE_TARGET_REGISTER_LIMIT];
     u32 pin_file_count = 0;
-    u32 caller_saved_allocatable = description->allocatable_mask & ~description->callee_saved_mask;
+    u64 caller_saved_allocatable = description->allocatable_mask & ~description->callee_saved_mask;
     u32 quality_pin_count = BUSTER_MIN(description->quality_pin_register_count, MACHINE_TARGET_QUALITY_PIN_LIMIT);
     for (u32 file_index = 0; file_index < quality_pin_count; file_index += 1)
     {
@@ -334,15 +334,23 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     {
         allocatable_count += (description->allocatable_mask >> physical_register) & 1u;
     }
-    u32* foreclosure_prefix = arena_allocate(scratch.arena, u32, (u64)(function->instruction_count + 1) * description->register_count);
+    // Only allocatable registers are ever probed through the pin file, so
+    // the prefix table stops at the highest allocatable index instead of
+    // paying the unified file's vector tail for every instruction.
+    u32 prefix_register_limit = 0;
+    for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
+    {
+        prefix_register_limit = ((description->allocatable_mask >> physical_register) & 1u) ? physical_register + 1 : prefix_register_limit;
+    }
+    u32* foreclosure_prefix = arena_allocate(scratch.arena, u32, (u64)(function->instruction_count + 1) * prefix_register_limit);
     u8* pin_budgets = arena_allocate(scratch.arena, u8, function->instruction_count);
     u8* pin_depths = arena_allocate(scratch.arena, u8, function->instruction_count);
-    u32* foreclosed_masks = arena_allocate(scratch.arena, u32, function->instruction_count);
+    u64* foreclosed_masks = arena_allocate(scratch.arena, u64, function->instruction_count);
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
     {
         MachineInstruction* instruction = function->instructions + instruction_index;
         MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-        u32 foreclosed = info->clobber_mask;
+        u64 foreclosed = info->clobber_mask;
         if (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL)
         {
             foreclosed |= caller_saved_allocatable;
@@ -354,24 +362,24 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             MachineRefKind kind = machine_ref_kind(instruction->operands[slot]);
             if (kind == MACHINE_REF_PHYSICAL_REGISTER)
             {
-                foreclosed |= 1u << machine_ref_payload(instruction->operands[slot]);
+                foreclosed |= 1ull << machine_ref_payload(instruction->operands[slot]);
             }
             else if (kind == MACHINE_REF_VIRTUAL_REGISTER)
             {
                 register_operand_slots += 1;
                 if (constrained)
                 {
-                    foreclosed |= 1u << description->slot_scratch[slot];
+                    foreclosed |= 1ull << description->slot_scratch[slot];
                 }
             }
         }
         if (instruction->opcode == description->float_bridge_opcode)
         {
-            foreclosed |= 1u << description->float_bridge_register;
+            foreclosed |= 1ull << description->float_bridge_register;
         }
         if (instruction->opcode == description->indirect_call_opcode)
         {
-            foreclosed |= 1u << description->indirect_call_register;
+            foreclosed |= 1ull << description->indirect_call_register;
         }
         foreclosed_masks[instruction_index] = foreclosed;
         // mask64_count rather than the raw builtin: MSVC has no
@@ -387,11 +395,11 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         u32 headroom = allocatable_count - foreclosed_count;
         pin_budgets[instruction_index] = (u8)(headroom > spare ? headroom - spare : 0);
     }
-    for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
+    for (u32 physical_register = 0; physical_register < prefix_register_limit; physical_register += 1)
     {
         // Only allocatable registers can be probed through the pin file, so
-        // the reserved and vector rows of the prefix table stay unwritten —
-        // the unified file would otherwise double this pass for nothing.
+        // the reserved rows of the prefix table stay unwritten — and the
+        // vector tail sits past the table entirely.
         if (!((description->allocatable_mask >> physical_register) & 1u))
         {
             continue;
@@ -409,8 +417,8 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         heap_backup[backup_index] = heap[backup_index];
     }
     u32 heap_backup_count = heap_count;
-    u32* pin_active_masks = arena_allocate(scratch.arena, u32, function->instruction_count);
-    u32* pin_entry_masks = arena_allocate(scratch.arena, u32, function->instruction_count);
+    u64* pin_active_masks = arena_allocate(scratch.arena, u64, function->instruction_count);
+    u64* pin_entry_masks = arena_allocate(scratch.arena, u64, function->instruction_count);
     u32 assigned_starts[MACHINE_TARGET_REGISTER_LIMIT][8];
     u32 assigned_ends[MACHINE_TARGET_REGISTER_LIMIT][8];
     u32 assigned_counts[MACHINE_TARGET_REGISTER_LIMIT];
@@ -443,7 +451,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         {
             heap[backup_index] = heap_backup[backup_index];
         }
-        u32 pinned_mask = 0;
+        u64 pinned_mask = 0;
         while (heap_count)
         {
             MachineQualityInterval candidate = heap[0];
@@ -487,7 +495,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
                 assigned_ends[file_index][assigned_counts[file_index]] = candidate.end;
                 assigned_counts[file_index] += 1;
                 pinned_registers[candidate.virtual_register] = pin_register;
-                pinned_mask |= 1u << pin_register;
+                pinned_mask |= 1ull << pin_register;
                 for (u32 instruction_index = candidate.start; instruction_index <= candidate.end; instruction_index += 1)
                 {
                     pin_depths[instruction_index] += 1;
@@ -519,7 +527,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             {
                 continue;
             }
-            u32 pin_bit = 1u << pinned_registers[register_index];
+            u64 pin_bit = 1ull << pinned_registers[register_index];
             pin_entry_masks[interval_starts[register_index]] |= pin_bit;
             for (u32 instruction_index = interval_starts[register_index]; instruction_index <= interval_ends[register_index]; instruction_index += 1)
             {
@@ -563,7 +571,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         bool pins_hold = true;
         for (u32 instruction_index = 0; instruction_index < function->instruction_count && pins_hold; instruction_index += 1)
         {
-            u32 active = pin_active_masks[instruction_index];
+            u64 active = pin_active_masks[instruction_index];
             if (!active)
             {
                 continue;
@@ -585,7 +593,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         for (u32 edit_index = 0; edit_index < placement.edit_count && pins_hold; edit_index += 1)
         {
             MachineEdit* edit = placement.edits + edit_index;
-            u32 active = pin_active_masks[machine_point_instruction(edit->point)];
+            u64 active = pin_active_masks[machine_point_instruction(edit->point)];
             bool vacating = edit->kind == MACHINE_EDIT_SPILL && ((pin_entry_masks[machine_point_instruction(edit->point)] >> edit->location) & 1u);
             pins_hold &= !((active >> edit->location) & 1u) || vacating;
             pins_hold &= edit->kind != MACHINE_EDIT_COPY || !((active >> edit->subject) & 1u);

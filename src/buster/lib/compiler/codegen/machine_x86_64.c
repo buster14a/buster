@@ -131,9 +131,13 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_x86_64_description = 
     // probe in register order from RBX up.
     .quality_pin_registers = {MACHINE_X64_R15, MACHINE_X64_R14, MACHINE_X64_R13, MACHINE_X64_R12, MACHINE_X64_RBX},
     .quality_pin_register_count = 5,
-    // ZMM0-15 at unified indices 16-31; System V keeps every one
-    // caller-saved, so the call flush spills the whole vector file.
-    .vector_allocatable_mask = 0xffffu << MACHINE_X64_ZMM0,
+    // ZMM0-31 at unified indices 16-47; System V keeps every one
+    // caller-saved, so the call flush spills the whole vector file. The
+    // full file rides in the static description because it is reachable
+    // only through vector virtual registers, which the selector produces
+    // only under the AVX512F gate — the same gate that makes ZMM16-31
+    // architectural.
+    .vector_allocatable_mask = 0xffffffffull << MACHINE_X64_ZMM0,
     .vector_copy_opcode = MACHINE_X64_VMOV_RR,
     .vector_slot_scratch = {MACHINE_X64_ZMM0, MACHINE_X64_ZMM1, MACHINE_X64_ZMM2, MACHINE_X64_ZMM3},
 };
@@ -3521,17 +3525,19 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_frame_store(MachineX64Encoder* encoder
 }
 
 // EVEX prefix for the 512-bit vector rows. Unlike the canonical vocabulary's
-// fixed low scratches, allocated rows reach the whole ZMM0-15 file, so the
-// inverted R and B extension bits are computed from the register numbers;
-// nothing here reaches ZMM16+, keeping R' and V' fixed high. All forms are
-// L'L=10 and W0.
+// fixed low scratches, allocated rows reach the whole ZMM0-31 file, so every
+// inverted extension bit is computed from the register numbers: R/R' carry
+// the reg field's bits 3 and 4, B carries the rm-or-base bit 3, X doubles as
+// the rm bit 4 in register-direct forms — memory bases are general registers
+// and never reach 16, so the same expression leaves X high for them — and
+// V' carries the vvvv bit 4. All forms are L'L=10 and W0.
 BUSTER_GLOBAL_LOCAL void machine_x64_emit_evex(MachineX64Encoder* encoder, u8 map, u8 simd_prefix, u8 opcode, u32 reg, u32 vvvv, u32 mask, bool zeroing,
                                                u32 rm_or_base)
 {
     machine_x64_emit8(encoder, 0x62);
-    machine_x64_emit8(encoder, (u8)(((reg & 8) ? 0 : 0x80) | 0x40 | ((rm_or_base & 8) ? 0 : 0x20) | 0x10 | map));
+    machine_x64_emit8(encoder, (u8)(((reg & 8) ? 0 : 0x80) | ((rm_or_base & 16) ? 0 : 0x40) | ((rm_or_base & 8) ? 0 : 0x20) | ((reg & 16) ? 0 : 0x10) | map));
     machine_x64_emit8(encoder, (u8)(((~vvvv & 0xf) << 3) | 0x04 | simd_prefix));
-    machine_x64_emit8(encoder, (u8)((zeroing ? 0x80 : 0) | 0x48 | mask));
+    machine_x64_emit8(encoder, (u8)((zeroing ? 0x80 : 0) | 0x40 | ((vvvv & 16) ? 0 : 0x08) | mask));
     machine_x64_emit8(encoder, opcode);
 }
 
@@ -3757,7 +3763,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     // vzeroupper at every call and return, matching the transition hygiene
     // the canonical vector paths keep; all vector values are dead at those
     // points — the scan flushed them — and the low XMM halves the float ABI
-    // uses survive vzeroupper untouched.
+    // uses survive vzeroupper untouched. ZMM16-31 sit outside vzeroupper's
+    // reach entirely (it clears bits 128+ of the VEX-visible ymm0-15 only,
+    // and the high file has no legacy or VEX encodings to transition
+    // against), so the policy is unchanged by the widened file — the high
+    // registers still flush at calls through the caller-saved contract.
     bool function_has_vector = false;
     for (u32 vector_scan = 0; vector_scan < function->virtual_register_count; vector_scan += 1)
     {

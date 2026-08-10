@@ -12,6 +12,111 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-11c` (Linux x86_64, Zen 4 7940HS; register-allocator stage 10
+follow-on — the machine vector file widens from ZMM0-15 to ZMM0-31, the
+`10o` entry's first recorded lever. Baselines re-taken same-session on a
+frozen `b7ba8ea` main with a clang-built frozen compiler; the corpus
+driver (`tests/basic_c_vector_register_pressure.c`, main stripped, 200
+iterations of the three bodies at 2,000 rounds) reproduces `10o`'s
+numbers within ~2K instructions on the frozen binary, so it is the same
+instrument: **frozen vector corpus MIR_STACK `237,125,812` / FAST
+`106,692,452` / QUALITY `103,156,258` / clang -O2 -march=native
+`30,224,870`; frozen `b7ba8ea` stage compiles FAST `40.7039G` / QUALITY
+`39.9089G`, stage text 18,222,268 / 17,905,612; compile cost canonical
+`5.8073G` / fast `7.3510G` / quality `9.5040G`.** The stage's own
+numbers: **vector corpus FAST `91,085,049` (`-15,607,403`, `-14.6%`) and
+QUALITY `87,548,849` (`-15,607,409`, `-15.1%`), the two modes removing
+the identical traffic to within six instructions — the eighteen-value
+working set now sits fully register-resident, corpus-driver traffic FAST
+73/91 to 31/51 reloads/spills and QUALITY 63/79 to 21/39; the gap to
+clang narrows 3.53x to 3.01x (FAST) and 3.41x to 2.90x (QUALITY);
+MIR_STACK, the scalar corpus, the frozen-tree stage compiles, and
+compile cost are all flat.**)
+
+- **A contract widening, not a mask.** The unified register file grows to
+  48: general 0-15, ZMM0-31 at unified indices 16-47, exactly as `10o`
+  filed the lever. `MACHINE_TARGET_REGISTER_LIMIT` rises to 48 and every
+  allocator mask widens u32 to u64 — the description's allocatable,
+  callee-saved, and vector masks, the opcode table's clobber masks, the
+  placement's callee-saved output, the QUALITY pin plumbing
+  (`pinned_mask`, the per-instruction span and entry masks, the
+  foreclosures), and the FAST scan's candidate, reserved, contract, and
+  conform-edge `pending` masks, whose `1u <<` shifts by a register index
+  were the undefined-behavior trap the widening had to audit. The
+  architecture stays `10o`'s: one file, one scan, one edit stream, the
+  candidate set class-filtered and nothing else. ZMM16-31 need no new
+  feature gate — they are architectural wherever EVEX itself is
+  (AVX512F in 64-bit mode), which the vocabulary's selection gate
+  already requires before any vector virtual register exists.
+- **Encoder: three EVEX extension bits.** The machine EVEX emitter had
+  R' and V' pinned high and X̄ fixed. Now R' carries the reg field's bit
+  4, V' the vvvv bit 4, and X̄ doubles as the rm bit 4 in
+  register-direct forms — memory bases are general registers and never
+  reach 16, so one expression serves both addressing shapes. kmovq's VEX
+  forms are untouched (masks travel general-to-k1 only), and the
+  vzeroupper-at-call/ret policy survives unchanged: vzeroupper clears
+  bits 128+ of the VEX-visible ymm0-15 only and ZMM16-31 have no legacy
+  or VEX encodings to transition against — the high registers still
+  flush at every call through the all-caller-saved System V contract,
+  which is the widened file's remaining measured cost (the call-crossing
+  corpus body improves only through lighter contention, not contract).
+- **Costs held flat where the `10o` trims predicted.** The per-function
+  `active_register_count` trim keeps every all-scalar function's scan
+  loops at the general file, so the widening prices only functions with
+  vector virtual registers; QUALITY's foreclosure prefix table now stops
+  at the highest allocatable register instead of the unified file's end,
+  which pays for the width it would otherwise have bought. Measured on
+  the frozen workload, same-session: canonical `5.8073G` flat to 91
+  instructions, fast `7.3475G` (`-0.05%`), quality `9.5032G`
+  (`-0.01%`).
+- **What did not move, verified at the byte level.** Scalar placement is
+  untouched by construction and the proof is stronger than a corpus
+  re-run: the frozen-workload stage compilers built by the frozen and
+  the widened compiler differ in exactly 87 bytes, all inside
+  `tokenize_compact` and the classifier — the only vector-selected
+  functions in ide.c — with stage text byte-count identical (18,222,268
+  / 17,905,612) and the scalar register-pressure fixture binaries
+  byte-identical under both modes. The frozen-tree stage compiles are
+  flat (FAST `40.7040G`, `+0.0004%`; QUALITY `39.9089G`, `-0.0001%` —
+  the kernels lex buster source and `cc ide.c` never executes them) and
+  both stage compilers' canonical outputs are byte-identical. The
+  stage absolutes sit above `10o`'s references because the frozen
+  workload moved from `df11728` to the merged `b7ba8ea` main — workload
+  reasons, exactly as `10n` documented for its own re-freeze.
+- **Tests follow the claim.** The machine_test vspill differential
+  flips: eighteen accumulators against the widened file must produce
+  zero vector-class edits under FAST (the remaining scalar traffic is
+  the loop-carried counters and the frontend's stack save/restore
+  bracket, unchanged), and a placement scan asserts the high file is
+  actually handed out — eighteen live values cannot fit ZMM0-15, so
+  residency plus a `>= ZMM16` operand register is proof the extension
+  is real. The executing differential then runs those encodings against
+  the canonical NONE oracle on every AVX-512 host, which is where the
+  new EVEX bits are actually gated; hosts without the features still
+  verify selection, placement, and encoding shape.
+- **Gates, this commit:** test_all green Debug and Release (29,059
+  unit, 32 module, vector differentials in all four modes), self-host
+  fixed point deterministic, all three soaks — MIR_STACK, FAST,
+  QUALITY — byte-identical against the freshly rebuilt stage-2
+  reference, frozen-tree canonical stage outputs byte-identical,
+  `test_all_combinations_ci` green before the push (AArch64 keeps an
+  untouched 32-register description under the 48 limit).
+- **Left untaken, updated from `10o`'s list.** The bench-miscompile
+  hunt is fixed separately (`2026-08-11`, PR 261) and its dynamic
+  payoff measured (`2026-08-11b`, PR 262, below) — that entry's
+  merged-tree stage bench is the current execution reference. Vector
+  ABI stays the fixtures' whole remaining fallback. Span-scoped
+  caller-saved vector pins are now the corpus's dominant residual: the
+  call-crossing body pays the full working-set round-trip per
+  iteration by contract, and with the file no longer the bottleneck
+  that cost is most of the remaining 2.9-3.0x to clang. 64-bit-lane
+  VBINARY (W1 forms) and union-with-vector locals stand as before.
+- Reference points for the next audit, frozen `b7ba8ea` ide.c as the
+  workload (same-session invocation, absolute paths): **FAST stage
+  `40.7040G`, QUALITY stage `39.9089G`**, text 18,222,268 / 17,905,612,
+  compile cost canonical `5.8073G` / fast `7.3475G` / quality
+  `9.5032G`. Vector corpus: MIR_STACK `237,125,808`, **FAST
+  `91,085,049`**, **QUALITY `87,548,849`**, clang `30,224,870`.
 `2026-08-11b` (Linux x86_64, Zen 4 7940HS; the measurement `2026-08-10o`
 left blocked — the vector subset's dynamic payoff in buster-built stages —
 taken now that the aggregate zero-fill fix (`2026-08-11`, below) lets a
