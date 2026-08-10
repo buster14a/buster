@@ -289,13 +289,11 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // must model strictly cheaper — that modeled improvement is the
     // acceptance discipline's whole basis for keeping a schedule. The
     // low-pressure function must come back unmoved: its excess is zero and
-    // the pass gates itself out before building anything. On AArch64 the
-    // whole function must come back unmoved too, for a structural reason
-    // this test documents: that selector has no local promotion, so the
-    // thirty-two locals live in frame slots rather than virtual registers,
-    // the virtual-register peak stays tiny, and the frame traffic is
-    // memory-chained — scheduling has nothing legal to move until
-    // promotion reaches that target.
+    // the pass gates itself out before building anything. Both selectors
+    // promote the thirty-two locals into virtual registers, so the same
+    // pressure shape schedules on AArch64 too — its file is 25 allocatable
+    // registers against the 32 live products — and the acceptance
+    // discipline must hold on both targets.
     {
         String8 schedule_source = S8("unsigned long tree32(unsigned long s) {\n"
                                      "    unsigned long c0 = (s + 1) * 3; unsigned long c1 = (s + 2) * 5;\n"
@@ -352,8 +350,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             MachineScheduleResult lean_scheduled = machine_schedule_function(arguments->arena, &lean_selected.function);
             BUSTER_TEST(arguments, !lean_scheduled.moved);
             MachineScheduleResult tree_scheduled = machine_schedule_function(arguments->arena, &tree_selected.function);
-            bool expect_moved = schedule_targets[target_index].cpu_arch == CPU_ARCH_X86_64;
-            BUSTER_TEST(arguments, tree_scheduled.moved == expect_moved);
+            BUSTER_TEST(arguments, tree_scheduled.moved);
             if (!tree_scheduled.moved)
             {
                 continue;
