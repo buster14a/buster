@@ -5,6 +5,7 @@
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/string.h>
+#include <buster/lib/x86_64.h>
 
 // Size census for the hot records the register-allocator project depends
 // on. The machine rows are all-integer and hold everywhere; the typed IR and
@@ -1153,6 +1154,294 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         }
         codegen_release_executable(none_module_executable);
         codegen_release_executable(mir_module_executable);
+#endif
+    }
+
+    // Stage 10: the 512-bit vector subset. The corpus fixes a znver5 Linux
+    // target, which carries every feature the vocabulary needs, so
+    // selection, verification, placement, and encoding run on every host;
+    // the executing differential additionally requires the host's own
+    // cpuid to carry the features, since the canonical NONE oracle emits
+    // the same AVX-512 instructions the machine rows do.
+    Target machine_vector_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_AMD_ZEN_5,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    String8 machine_vector_source_head =
+        S8("typedef unsigned char u8;\n"
+           "typedef unsigned long long u64;\n"
+           "typedef u8 V64 __attribute__((vector_size(64)));\n"
+           "u64 vclassify(const u8* data, u64 valid) {\n"
+           "    V64 chunk = __builtin_buster_simd_load_masked(data, valid);\n"
+           "    V64 lower = chunk | __builtin_buster_simd_splat_byte(0x20);\n"
+           "    V64 shifted = lower - __builtin_buster_simd_splat_byte(97);\n"
+           "    u64 alpha = __builtin_buster_simd_less_byte(shifted, __builtin_buster_simd_splat_byte(26));\n"
+           "    u64 under = __builtin_buster_simd_equal_byte(chunk, __builtin_buster_simd_splat_byte(95));\n"
+           "    u64 high = __builtin_buster_simd_sign_byte(chunk);\n"
+           "    u64 bits = __builtin_buster_simd_test_byte(chunk, __builtin_buster_simd_splat_byte(0x40));\n"
+           "    return (alpha | under) ^ (high * 3) ^ bits ^ (u64)__builtin_popcountll(alpha);\n"
+           "}\n"
+           "u64 vtable(const u8* low, const u8* high, const u8* indices, u64 mask) {\n"
+           "    V64 low_v = __builtin_buster_simd_load(low);\n"
+           "    V64 high_v = __builtin_buster_simd_load(high);\n"
+           "    V64 index_v = __builtin_buster_simd_load(indices);\n"
+           "    V64 permuted = __builtin_buster_simd_permute2_byte(mask, low_v, index_v, high_v);\n"
+           "    V64 packed = __builtin_buster_simd_compress_byte(mask, permuted);\n"
+           "    V64 wide = __builtin_buster_simd_widen_byte(packed, 1);\n"
+           "    V64 shifted = __builtin_buster_simd_shift_left_word(wide, 5);\n"
+           "    V64 mixed = __builtin_buster_simd_ternary_word(packed, shifted, wide, 0xd8);\n"
+           "    return __builtin_buster_simd_sign_byte(mixed) ^ __builtin_buster_simd_test_byte(shifted, __builtin_buster_simd_splat_byte(0x80)) ^\n"
+           "           __builtin_buster_simd_equal_byte(packed, __builtin_buster_simd_splat_byte(0));\n"
+           "}\n"
+           "void vstores(u8* out, const u8* in, u64 mask) {\n"
+           "    V64 first = __builtin_buster_simd_load(in);\n"
+           "    __builtin_buster_simd_store(out, first + __builtin_buster_simd_splat_byte(1));\n"
+           "    __builtin_buster_simd_store_masked(out + 64, mask, first ^ __builtin_buster_simd_load(in + 64));\n"
+           "    __builtin_buster_simd_compress_store_byte(out + 128, mask, first);\n"
+           "}\n");
+    String8 machine_vector_source_tail =
+        S8("u64 vspill(const u8* data, u64 rounds) {\n"
+           "    V64 a0 = __builtin_buster_simd_load(data + 64 * 0);\n"
+           "    V64 a1 = __builtin_buster_simd_load(data + 64 * 1);\n"
+           "    V64 a2 = __builtin_buster_simd_load(data + 64 * 2);\n"
+           "    V64 a3 = __builtin_buster_simd_load(data + 64 * 3);\n"
+           "    V64 a4 = __builtin_buster_simd_load(data + 64 * 4);\n"
+           "    V64 a5 = __builtin_buster_simd_load(data + 64 * 5);\n"
+           "    V64 a6 = __builtin_buster_simd_load(data + 64 * 6);\n"
+           "    V64 a7 = __builtin_buster_simd_load(data + 64 * 7);\n"
+           "    V64 a8 = __builtin_buster_simd_load(data + 64 * 8);\n"
+           "    V64 a9 = __builtin_buster_simd_load(data + 64 * 9);\n"
+           "    V64 a10 = __builtin_buster_simd_load(data + 64 * 10);\n"
+           "    V64 a11 = __builtin_buster_simd_load(data + 64 * 11);\n"
+           "    V64 a12 = __builtin_buster_simd_load(data + 64 * 12);\n"
+           "    V64 a13 = __builtin_buster_simd_load(data + 64 * 13);\n"
+           "    V64 a14 = __builtin_buster_simd_load(data + 64 * 14);\n"
+           "    V64 a15 = __builtin_buster_simd_load(data + 64 * 15);\n"
+           "    V64 a16 = __builtin_buster_simd_load(data + 64 * 16);\n"
+           "    V64 a17 = __builtin_buster_simd_load(data + 64 * 17);\n"
+           "    for (u64 round = 0; round < rounds; round += 1) {\n"
+           "        a0 = a0 + (a1 ^ a17);\n"
+           "        a1 = a1 + (a2 ^ a0);\n"
+           "        a2 = a2 + (a3 ^ a1);\n"
+           "        a3 = a3 + (a4 ^ a2);\n"
+           "        a4 = a4 + (a5 ^ a3);\n"
+           "        a5 = a5 + (a6 ^ a4);\n"
+           "        a6 = a6 + (a7 ^ a5);\n"
+           "        a7 = a7 + (a8 ^ a6);\n"
+           "        a8 = a8 + (a9 ^ a7);\n"
+           "        a9 = a9 + (a10 ^ a8);\n"
+           "        a10 = a10 + (a11 ^ a9);\n"
+           "        a11 = a11 + (a12 ^ a10);\n"
+           "        a12 = a12 + (a13 ^ a11);\n"
+           "        a13 = a13 + (a14 ^ a12);\n"
+           "        a14 = a14 + (a15 ^ a13);\n"
+           "        a15 = a15 + (a16 ^ a14);\n"
+           "        a16 = a16 + (a17 ^ a15);\n"
+           "        a17 = a17 + (a0 ^ a16);\n"
+           "    }\n"
+           "    V64 combined = a0 ^ a1 ^ a2 ^ a3 ^ a4 ^ a5 ^ a6 ^ a7 ^ a8 ^ a9 ^ a10 ^ a11 ^ a12 ^ a13 ^ a14 ^ a15 ^ a16 ^ a17;\n"
+           "    return __builtin_buster_simd_sign_byte(combined) ^ __builtin_buster_simd_test_byte(a0 & a9, __builtin_buster_simd_splat_byte(0x11));\n"
+           "}\n"
+           "u64 vhelp(u64 x) { x ^= x >> 33; x *= 0xff51afd7ed558ccdUL; return x ^ (x >> 29); }\n"
+           "u64 vcalls(const u8* data, u64 rounds) {\n"
+           "    V64 b0 = __builtin_buster_simd_load(data + 64 * 0);\n"
+           "    V64 b1 = __builtin_buster_simd_load(data + 64 * 1);\n"
+           "    V64 b2 = __builtin_buster_simd_load(data + 64 * 2);\n"
+           "    V64 b3 = __builtin_buster_simd_load(data + 64 * 3);\n"
+           "    u64 total = 0;\n"
+           "    for (u64 round = 0; round < rounds; round += 1) {\n"
+           "        total += vhelp(total ^ round);\n"
+           "        V64 salt = __builtin_buster_simd_splat_byte((u8)total);\n"
+           "        b0 = b0 + (salt ^ b3);\n"
+           "        b1 = b1 + (salt ^ b0);\n"
+           "        b2 = b2 + (salt ^ b1);\n"
+           "        b3 = b3 + (salt ^ b2);\n"
+           "    }\n"
+           "    return total ^ __builtin_buster_simd_sign_byte(b0 ^ b1 ^ b2 ^ b3);\n"
+           "}\n");
+    String8 machine_vector_source = string_format(arguments->arena, S8("{S8}{S8}"), machine_vector_source_head, machine_vector_source_tail);
+    IrProgram* machine_vector_program = machine_test_compile_c(arguments->arena, S8("machine-stage10.c"), machine_vector_source, machine_vector_target);
+    BUSTER_TEST(arguments, machine_vector_program != 0);
+    if (machine_vector_program && machine_vector_program->module_count)
+    {
+        IrModule* machine_vector_module = machine_vector_program->modules;
+        String8 vector_names[] = {
+            S8_INITIALIZER("vclassify"), S8_INITIALIZER("vtable"), S8_INITIALIZER("vstores"),
+            S8_INITIALIZER("vspill"),    S8_INITIALIZER("vcalls"), S8_INITIALIZER("vhelp"),
+        };
+        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(vector_names); name_index += 1)
+        {
+            IrFunction* ir_function = machine_test_ir_function_find(machine_vector_module, vector_names[name_index]);
+            BUSTER_TEST(arguments, ir_function != 0);
+            if (!ir_function)
+            {
+                continue;
+            }
+            MachineSelectResult selected = machine_select_canonical_function(arguments->arena, machine_vector_program, ir_function, machine_vector_target);
+            BUSTER_TEST_RAW(arguments, selected.supported,
+                            string_format(arguments->arena, S8("vector select {S8} failed at opcode {u32}"), vector_names[name_index],
+                                          (u32)selected.failed_opcode));
+            if (!selected.supported)
+            {
+                continue;
+            }
+            BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+            MachineStackPlacement vector_stack = machine_stack_placement_build(arguments->arena, &selected.function);
+            MachineStackPlacement vector_fast = machine_fast_placement_build(arguments->arena, &selected.function);
+            MachineStackPlacement vector_quality = machine_quality_placement_build(arguments->arena, &selected.function);
+            BUSTER_TEST(arguments, vector_stack.valid && vector_fast.valid && vector_quality.valid);
+            MachineEncodeResult stack_encoded = machine_encode_x86_64(arguments->arena, &selected.function, &vector_stack);
+            MachineEncodeResult fast_encoded = machine_encode_x86_64(arguments->arena, &selected.function, &vector_fast);
+            MachineEncodeResult quality_encoded = machine_encode_x86_64(arguments->arena, &selected.function, &vector_quality);
+            BUSTER_TEST(arguments, stack_encoded.valid && fast_encoded.valid && quality_encoded.valid);
+            // Eighteen live vectors against a sixteen-register file: the
+            // scan must spill some of them, and only some — a placement
+            // that spilled everything would be MIR_STACK wearing a FAST
+            // badge.
+            if (string_equal(vector_names[name_index], S8("vspill")))
+            {
+                BUSTER_TEST_RAW(arguments, vector_fast.spill_count > 0 && vector_fast.spill_count < vector_stack.spill_count,
+                                string_format(arguments->arena, S8("vector spills fast {u32} stack {u32}"), vector_fast.spill_count,
+                                              vector_stack.spill_count));
+            }
+        }
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+        // Executing differential: all four modes over the same module, on
+        // hosts whose cpuid carries the vocabulary.
+        TargetCpuFeatures machine_vector_host = cpu_detect_features_x86_64();
+        bool machine_vector_host_ready =
+            target_cpu_features_contains(machine_vector_host, TARGET_CPU_FEATURE_X86_AVX512F) &&
+            target_cpu_features_contains(machine_vector_host, TARGET_CPU_FEATURE_X86_AVX512BW) &&
+            target_cpu_features_contains(machine_vector_host, TARGET_CPU_FEATURE_X86_AVX512VBMI) &&
+            target_cpu_features_contains(machine_vector_host, TARGET_CPU_FEATURE_X86_AVX512VBMI2);
+        if (machine_vector_host_ready)
+        {
+            CodegenRegisterAllocatorMode vector_modes[] = {
+                CODEGEN_REGISTER_ALLOCATOR_NONE,
+                CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+                CODEGEN_REGISTER_ALLOCATOR_FAST,
+                CODEGEN_REGISTER_ALLOCATOR_QUALITY,
+            };
+            CodegenModule vector_modules[BUSTER_ARRAY_LENGTH(vector_modes)] = {0};
+            CodegenExecutable vector_executables[BUSTER_ARRAY_LENGTH(vector_modes)] = {0};
+            bool vector_modules_ready = true;
+            for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(vector_modes); mode_index += 1)
+            {
+                vector_modules[mode_index] = codegen_generate_canonical_module(arguments->arena, machine_vector_program, machine_vector_module,
+                                                                              machine_vector_target,
+                                                                              (CodegenModuleOptions){
+                                                                                  .register_allocator = (u8)vector_modes[mode_index],
+                                                                              });
+                BUSTER_TEST(arguments, vector_modules[mode_index].error == CODEGEN_ERROR_NONE);
+                for (u32 relocation_index = 0; relocation_index < vector_modules[mode_index].relocation_count; relocation_index += 1)
+                {
+                    CodegenModuleRelocation* relocation = vector_modules[mode_index].relocations + relocation_index;
+                    if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute)
+                    {
+                        continue;
+                    }
+                    for (u32 entry_index = 0; entry_index < vector_modules[mode_index].entry_count; entry_index += 1)
+                    {
+                        if (vector_modules[mode_index].entries[entry_index].symbol.value == relocation->symbol.value)
+                        {
+                            u32 displacement = vector_modules[mode_index].entries[entry_index].offset - (relocation->offset + 4);
+                            memcpy(vector_modules[mode_index].code.pointer + relocation->offset, &displacement, sizeof(displacement));
+                            break;
+                        }
+                    }
+                }
+                vector_executables[mode_index] = codegen_make_executable((CodegenFunction){
+                    .code = vector_modules[mode_index].code,
+                });
+                BUSTER_TEST(arguments, vector_executables[mode_index].error == CODEGEN_ERROR_NONE);
+                vector_modules_ready &= vector_executables[mode_index].error == CODEGEN_ERROR_NONE && vector_executables[mode_index].address != 0;
+            }
+            u8 vector_probe_bytes[64 * 18];
+            u64 vector_probe_state = 0x9e3779b97f4a7c15ull;
+            for (u32 byte_index = 0; byte_index < BUSTER_ARRAY_LENGTH(vector_probe_bytes); byte_index += 1)
+            {
+                vector_probe_state = vector_probe_state * 6364136223846793005ull + 1442695040888963407ull;
+                vector_probe_bytes[byte_index] = (u8)(vector_probe_state >> 56);
+            }
+            typedef u64 MachineTestVectorCall(u8 const*, u64);
+            typedef u64 MachineTestVectorTable(u8 const*, u8 const*, u8 const*, u64);
+            typedef void MachineTestVectorStores(u8*, u8 const*, u64);
+            u64 vector_mask_probes[] = {~0ull, 0x00ffff0000ffff00ull, 1ull, 0x8000000000000001ull};
+            for (u32 mode_index = 1; mode_index < BUSTER_ARRAY_LENGTH(vector_modes) && vector_modules_ready; mode_index += 1)
+            {
+                for (u32 probe_index = 0; probe_index < BUSTER_ARRAY_LENGTH(vector_mask_probes); probe_index += 1)
+                {
+                    u64 probe_mask = vector_mask_probes[probe_index];
+                    String8 call_names[] = {S8_INITIALIZER("vclassify"), S8_INITIALIZER("vspill"), S8_INITIALIZER("vcalls")};
+                    for (u32 call_index = 0; call_index < BUSTER_ARRAY_LENGTH(call_names); call_index += 1)
+                    {
+                        u32 none_offset = machine_test_module_offset(&vector_modules[0], machine_vector_module, call_names[call_index]);
+                        u32 mode_offset = machine_test_module_offset(&vector_modules[mode_index], machine_vector_module, call_names[call_index]);
+                        BUSTER_TEST(arguments, none_offset != UINT32_MAX && mode_offset != UINT32_MAX);
+                        if (none_offset == UINT32_MAX || mode_offset == UINT32_MAX)
+                        {
+                            continue;
+                        }
+                        void* none_address = (u8*)vector_executables[0].address + none_offset;
+                        void* mode_address = (u8*)vector_executables[mode_index].address + mode_offset;
+                        MachineTestVectorCall* none_call = 0;
+                        MachineTestVectorCall* mode_call = 0;
+                        memcpy(&none_call, &none_address, sizeof(none_call));
+                        memcpy(&mode_call, &mode_address, sizeof(mode_call));
+                        // vclassify consumes the mask as lane validity; the
+                        // loop bodies consume it as a round count, clamped
+                        // so the differential stays fast.
+                        u64 argument = call_index == 0 ? probe_mask : (probe_mask & 15ull) + 3ull;
+                        u64 none_result = none_call(vector_probe_bytes, argument);
+                        u64 mode_result = mode_call(vector_probe_bytes, argument);
+                        BUSTER_TEST_RAW(arguments, none_result == mode_result,
+                                        string_format(arguments->arena, S8("vector {S8} mode {u32} mask {u64} none {u64} got {u64}"),
+                                                      call_names[call_index], (u32)vector_modes[mode_index], probe_mask, none_result, mode_result));
+                    }
+                    u32 none_table_offset = machine_test_module_offset(&vector_modules[0], machine_vector_module, S8("vtable"));
+                    u32 mode_table_offset = machine_test_module_offset(&vector_modules[mode_index], machine_vector_module, S8("vtable"));
+                    if (none_table_offset != UINT32_MAX && mode_table_offset != UINT32_MAX)
+                    {
+                        void* none_address = (u8*)vector_executables[0].address + none_table_offset;
+                        void* mode_address = (u8*)vector_executables[mode_index].address + mode_table_offset;
+                        MachineTestVectorTable* none_table = 0;
+                        MachineTestVectorTable* mode_table = 0;
+                        memcpy(&none_table, &none_address, sizeof(none_table));
+                        memcpy(&mode_table, &mode_address, sizeof(mode_table));
+                        u64 none_result = none_table(vector_probe_bytes, vector_probe_bytes + 64, vector_probe_bytes + 128, probe_mask);
+                        u64 mode_result = mode_table(vector_probe_bytes, vector_probe_bytes + 64, vector_probe_bytes + 128, probe_mask);
+                        BUSTER_TEST_RAW(arguments, none_result == mode_result,
+                                        string_format(arguments->arena, S8("vector vtable mode {u32} mask {u64} none {u64} got {u64}"),
+                                                      (u32)vector_modes[mode_index], probe_mask, none_result, mode_result));
+                    }
+                    u32 none_store_offset = machine_test_module_offset(&vector_modules[0], machine_vector_module, S8("vstores"));
+                    u32 mode_store_offset = machine_test_module_offset(&vector_modules[mode_index], machine_vector_module, S8("vstores"));
+                    if (none_store_offset != UINT32_MAX && mode_store_offset != UINT32_MAX)
+                    {
+                        u8 none_out[192];
+                        u8 mode_out[192];
+                        memset(none_out, 0xa5, sizeof(none_out));
+                        memset(mode_out, 0xa5, sizeof(mode_out));
+                        void* none_address = (u8*)vector_executables[0].address + none_store_offset;
+                        void* mode_address = (u8*)vector_executables[mode_index].address + mode_store_offset;
+                        MachineTestVectorStores* none_store = 0;
+                        MachineTestVectorStores* mode_store = 0;
+                        memcpy(&none_store, &none_address, sizeof(none_store));
+                        memcpy(&mode_store, &mode_address, sizeof(mode_store));
+                        none_store(none_out, vector_probe_bytes, probe_mask);
+                        mode_store(mode_out, vector_probe_bytes, probe_mask);
+                        BUSTER_TEST_RAW(arguments, memcmp(none_out, mode_out, sizeof(none_out)) == 0,
+                                        string_format(arguments->arena, S8("vector vstores mode {u32} mask {u64}"), (u32)vector_modes[mode_index],
+                                                      probe_mask));
+                    }
+                }
+            }
+            for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(vector_modes); mode_index += 1)
+            {
+                codegen_release_executable(vector_executables[mode_index]);
+            }
+        }
 #endif
     }
 

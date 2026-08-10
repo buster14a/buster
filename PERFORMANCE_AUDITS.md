@@ -12,6 +12,156 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-10o` (Linux x86_64, Zen 4 7940HS; register-allocator stage 10 —
+vectors, run as selection coverage first and allocation second, on the
+merged `df11728` main that carries `10j`+`10k`+`10l`+`10m`. Developed
+concurrently with the stage-9 scheduling entry (`2026-08-10n`, QUALITY-only,
+its own branch) against the same `df11728`; neither entry's numbers include
+the other's effect and the merged tree re-measures. Baselines were
+re-taken on that merge since no prior entry describes it: **pressure corpus
+FAST `91,322,243` / QUALITY `82,123,446` / clang -O2 `42,738,012`; frozen
+`df11728` stage compiles FAST `39.930G` / QUALITY `39.247G`; compile cost
+canonical `5.6886G` / fast `7.1697G` / quality `8.3879G`; the corpus
+driver reproduces `10m`'s numbers to the instruction.** The stage's own
+numbers: **both Validark lexer kernels now select and run fully
+register-resident under FAST/QUALITY; a first vector pressure corpus
+measures MIR_STACK `237,124,019` / FAST `106,691,250` / QUALITY
+`103,155,456` / clang -O2 -march=native `30,221,439` executed
+instructions; the scalar corpus and the frozen-stage compiles are
+unchanged to the digit; and the hunt surfaced a pre-existing machine-path
+miscompile on unmodified main — every machine-built compiler crashes
+`ide bench` — that no existing gate exercises.**)
+
+- **Census before code, as specified.** `ide cc -v`'s fallback census on
+  ide.c: 32 of 3,168 functions fall back, one reason each. The
+  vector-typed mass is exactly the two Validark lexer kernels —
+  `tokenize_compact` (1,952 IR instructions) and
+  `tokenizer_classifier_load` (216) — both rejected at their 64-byte
+  vector LOCAL by the frame's sixteen-byte alignment cap before any
+  vector operation was even reached. Everything else is non-vector:
+  thread-local GLOBAL x5, INDEX-on-rvalue-array x5 (the compound-literal
+  feature tables), CALL shapes x5, variadic signatures x11, inline
+  asm/VA_ARG/icache x4. The fixture corpus concurs: basic_c_simd.c and
+  basic_c_wide_vector_argument.c fall back nearly whole on vector ABI
+  signatures plus the vector local. Two structural facts set the design:
+  the canonical frame layout *clamps vector alignment to sixteen* and
+  uses unaligned vmovdqu8 throughout, so vector slots need no frame
+  realignment and no slot-alignment widening — only 64-byte sizes; and
+  the canonical SIMD lowering round-trips every operand through its frame
+  slot into fixed ZMM0-2/k1, so register-resident vector values are the
+  entire machine-path payoff.
+- **One unified register file, not a second allocator.** ZMM0-15 join the
+  x86-64 file as unified indices 16-31 — exactly filling
+  `MACHINE_TARGET_REGISTER_LIMIT`, so every mask stays u32 and the scan,
+  edge contracts, LRU, and edit stream carry both classes unchanged; only
+  the candidate set is class-filtered (`vector_allocatable_mask`, all
+  caller-saved on System V, so the existing call flush spills the whole
+  vector file with no new code). Vector spill homes are 64-byte dedicated
+  slots outside the 8-byte pool; masks travel in GENERAL registers as the
+  vocabulary's Mask64 design intends, staged through k1 inside the
+  encoder only. The scalar-float rows' hidden XMM scribbles became
+  declared clobbers (units 16/17; the float-argument bridge 16-23), and
+  functions that touch the vector file end their AVX-512 regions with
+  vzeroupper at calls and returns, where every vector value is dead by
+  the caller-saved contract.
+- **Selection: fifteen vector rows plus scalar POPCNT.** Whole-vector
+  moves and frame/pointer loads and stores (masked forms included), the
+  full sixteen-operation SIMD vocabulary (vpermt2b and vpternlogd read
+  their first source in place, so selection copies it into the
+  destination first and the copy coalesces when the source dies — the
+  four-source shapes fit the four-operand row that way), a three-address
+  VBINARY for 8/16/32-lane add/subtract and the bitwise trio, and
+  POPCNT32/64 — the kernels' `mask64_count` was the one *scalar* gap
+  blocking selection. Vector locals promote under the same
+  address-never-escapes rule as scalars, which is where the kernels'
+  named chunk variables stop round-tripping: the promoted form of the
+  classifier is a straight ZMM dataflow with zero vector frame traffic.
+  The 64-bit-lane VBINARY forms stay outside the subset (their EVEX
+  encodings are W1 where this vocabulary is uniformly W0), as do vector
+  ABI signatures and union-with-vector locals (alignment past sixteen,
+  canonical parity).
+- **The differential caught a real miscompile before it shipped.** The
+  new machine_test section — a znver5 vector corpus selected, verified,
+  placed, and encoded on every host, executed against the canonical NONE
+  oracle under all four modes on hosts whose cpuid carries the features —
+  failed for MIR_STACK on every probe: the placement builder's *spill*
+  loop still used the scalar per-slot scratch for vector definitions, so
+  a 512-bit result spilled as an 8-byte mov of whatever RAX held. The
+  reload side was class-aware; end-to-end fixture runs had passed on
+  accidental frame reuse. One line (class-aware spill scratch) fixes it;
+  the per-function differential now pins all four modes.
+- **Measured, on the new vector pressure corpus**
+  (tests/basic_c_vector_register_pressure.c: eighteen 64-byte values live
+  across a loop — two past the file — eight live across a scalar call
+  per iteration, and a deep tree; self-checking, zero fallbacks in every
+  mode; driver = 200 iterations of the three bodies at 2,000 rounds):
+  MIR_STACK `237,124,019`, **FAST `106,691,250`**, **QUALITY
+  `103,155,456`**, clang -O2 -march=native `30,221,439` (min of five).
+  Fixture-main traffic: FAST reloads 68 / spills 84, QUALITY 64/78 with
+  3 pins, MIR_STACK 975/866. The 3.53x gap to clang has two named
+  causes: clang allocates zmm16-31 (its eighteen accumulators never
+  spill where this file holds sixteen), and System V's all-caller-saved
+  vector file makes every call a full working-set round-trip — the
+  extended file and split-aware spill placement are the recorded levers.
+- **What did not move, exactly as predicted or better.** The scalar
+  corpus repeats to the digit (FAST `91,322,244`, QUALITY `82,123,446`)
+  and the three soak binaries are byte-identical — scalar placement is
+  untouched by construction. The frozen-stage compiles are flat (FAST
+  `39.930G`, QUALITY `39.247G`, canonical outputs byte-identical to the
+  reference stages'): the kernels lex *buster* source, and `cc ide.c`
+  never executes them — their static mass moves off the canonical
+  emitter (ide.c fallback functions 32 to 30, machine-mode canonical
+  simd_operations 112 to 0, stage text `-27,504` FAST) but their
+  executed-instruction win lives in the parser path, which leads to:
+- **Found: machine-built compilers crash `ide bench` on unmodified
+  main.** A compiler built with `-fregister-allocator=mir-stack`
+  SIGSEGVs in `finish_type_ranges` (parser.c:3747, corrupt AstType
+  chain); FAST and QUALITY builds assert in
+  `parser_source_range_set_end` (parser.c:3739). Reproduced with a
+  pristine `df11728` compiler built from a clean archive — pre-existing,
+  not introduced here. The canonical stage-2 binary runs bench clean, so
+  a machine-selected parser.c function is miscompiled, and nothing gates
+  it: the soaks only exercise `cc ide.c` (the C frontend), and
+  test_self_host benches only the canonical stage. Until that hunt
+  lands, the kernels' dynamic payoff in buster-built stages cannot be
+  measured; the vector corpus above carries this entry's execution
+  claims.
+- **Compile cost, and the width tax paid back.** The first cut measured
+  fast-mode `+1.66%` and quality-mode `+3.87%` on the frozen workload —
+  the widened file's loops taxing every all-scalar function. Three
+  scoped trims (a per-function active register count that stops the
+  scan's loops at the general file when no vector vreg exists, skipping
+  QUALITY's foreclosure prefixes for non-allocatable registers, and a
+  popcount for its foreclosure counts) land the final cost at canonical
+  `5.6886G` (flat), **fast `7.2128G` (`+0.60%`)**, **quality `8.4084G`
+  (`+0.24%`)**, byte-identical placements throughout.
+- **Gates, every commit:** test_all green (29,028 unit, 32 module,
+  including the new vector differentials), self-host fixed point
+  deterministic, all three soaks — MIR_STACK, FAST, QUALITY —
+  byte-identical against the freshly rebuilt stage-2 reference, the
+  frozen-tree canonical stage outputs byte-identical between the
+  compilers, `test_all_combinations_ci` green before the push (its qemu
+  fixture differentials are the AArch64 gate; AArch64 keeps zero vector
+  selection and an untouched description).
+- **Left untaken, in causal order.** The bench miscompile hunt gates
+  everything dynamic in the parser path and is filed separately. Vector
+  ABI (arguments and returns in ZMM registers) is the fixtures' whole
+  remaining fallback and what a vector-heavy call graph needs; zmm16-31
+  would halve the corpus pressure at the cost of EVEX R'/V' handling and
+  a wider register limit than u32 masks allow; QUALITY grew no vector
+  pins (System V has no callee-saved vectors, so only call-free spans
+  could ever earn one — the corpus's call-crossing body is the measured
+  reason to build span-scoped caller-saved vector pins); 64-bit-lane
+  VBINARY needs the W1 forms; and the union-with-vector local keeps
+  basic_c_simd's main canonical until slots past sixteen-byte alignment
+  are worth their frame contract.
+- Reference points for the next audit, frozen `df11728` ide.c as the
+  workload (same-session invocation, absolute paths): **FAST stage
+  `39.930G`, QUALITY stage `39.247G`**, text 18,061,298 / 17,851,578,
+  compile cost canonical `5.6886G` / fast `7.2128G` / quality `8.4084G`.
+  Scalar corpus: FAST `91,322,244`, QUALITY `82,123,446`, clang
+  `42,738,012`. Vector corpus: MIR_STACK `237,124,019`, **FAST
+  `106,691,250`**, **QUALITY `103,155,456`**, clang `30,221,439`.
 `2026-08-10n` (Linux x86_64, Zen 4 7940HS; register-allocator stage 9 —
 pressure-aware scheduling over the machine IR, built with the
 accept-cheaper-placement discipline and shipped in QUALITY only. Every

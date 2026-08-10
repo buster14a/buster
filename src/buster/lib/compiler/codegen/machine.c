@@ -40,6 +40,15 @@ BUSTER_F_DECL MachinePointPhase machine_point_phase(MachinePoint point)
 #define MACHINE_OPERAND_USE_GENERAL ((u8)(MACHINE_OPERAND_ROLE_USE | (MACHINE_REGISTER_CLASS_GENERAL << MACHINE_OPERAND_CLASS_SHIFT)))
 #define MACHINE_OPERAND_DEFINE_GENERAL ((u8)(MACHINE_OPERAND_ROLE_DEFINE | (MACHINE_REGISTER_CLASS_GENERAL << MACHINE_OPERAND_CLASS_SHIFT)))
 #define MACHINE_OPERAND_USE_DEFINE_GENERAL ((u8)(MACHINE_OPERAND_ROLE_USE_DEFINE | (MACHINE_REGISTER_CLASS_GENERAL << MACHINE_OPERAND_CLASS_SHIFT)))
+#define MACHINE_OPERAND_USE_VECTOR ((u8)(MACHINE_OPERAND_ROLE_USE | (MACHINE_REGISTER_CLASS_VECTOR << MACHINE_OPERAND_CLASS_SHIFT)))
+#define MACHINE_OPERAND_DEFINE_VECTOR ((u8)(MACHINE_OPERAND_ROLE_DEFINE | (MACHINE_REGISTER_CLASS_VECTOR << MACHINE_OPERAND_CLASS_SHIFT)))
+#define MACHINE_OPERAND_USE_DEFINE_VECTOR ((u8)(MACHINE_OPERAND_ROLE_USE_DEFINE | (MACHINE_REGISTER_CLASS_VECTOR << MACHINE_OPERAND_CLASS_SHIFT)))
+// The scalar-float encoder sequences stage through XMM0/XMM1 (SSE forms) and
+// the float-argument bridge writes xmm[payload] with payload at most seven;
+// in the unified numbering those are vector registers 16-23, and declaring
+// them keeps vector values clear of rows that scribble the low XMM file.
+#define MACHINE_X64_FLOAT_SCRATCH_CLOBBER ((1u << MACHINE_X64_ZMM0) | (1u << MACHINE_X64_ZMM1))
+#define MACHINE_X64_FLOAT_BRIDGE_CLOBBER (0xffu << MACHINE_X64_ZMM0)
 
 // Shorthand rows for the x86-64 scalar subset: destination-and-source
 // moves, read-modify-write arithmetic, flag producers/consumers, frame and
@@ -98,6 +107,11 @@ BUSTER_F_DECL MachinePointPhase machine_point_phase(MachinePoint point)
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {0, MACHINE_OPERAND_USE_GENERAL},                                            \
     }
+#define MACHINE_INFO_MOVE_CLOBBER(name_literal, clobbers)                                                                                                      \
+    {                                                                                                                                                          \
+        .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
+        .clobber_mask = (clobbers),                                                                                                                            \
+    }
 #define MACHINE_INFO_LOAD_POINTER(name_literal) MACHINE_INFO_MOVE(name_literal)
 #define MACHINE_INFO_STORE_POINTER(name_literal)                                                                                                               \
     {                                                                                                                                                          \
@@ -138,10 +152,10 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     // threshold on the float-to-unsigned side — so the source staged there
     // is gone after the row. Latent until local promotion: before it, the
     // staged value always died at its row, so nothing read the leftover.
-    [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_INFO_MOVE_CONSTRAINED_CLOBBER("x64_cvt_u64_to_f32", 1u << MACHINE_X64_RCX),
-    [MACHINE_X64_CVT_U64_TO_F64] = MACHINE_INFO_MOVE_CONSTRAINED_CLOBBER("x64_cvt_u64_to_f64", 1u << MACHINE_X64_RCX),
-    [MACHINE_X64_CVT_F32_TO_U64] = MACHINE_INFO_MOVE_CONSTRAINED_CLOBBER("x64_cvt_f32_to_u64", 1u << MACHINE_X64_RCX),
-    [MACHINE_X64_CVT_F64_TO_U64] = MACHINE_INFO_MOVE_CONSTRAINED_CLOBBER("x64_cvt_f64_to_u64", 1u << MACHINE_X64_RCX),
+    [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_INFO_MOVE_CONSTRAINED_CLOBBER("x64_cvt_u64_to_f32", (1u << MACHINE_X64_RCX) | MACHINE_X64_FLOAT_SCRATCH_CLOBBER),
+    [MACHINE_X64_CVT_U64_TO_F64] = MACHINE_INFO_MOVE_CONSTRAINED_CLOBBER("x64_cvt_u64_to_f64", (1u << MACHINE_X64_RCX) | MACHINE_X64_FLOAT_SCRATCH_CLOBBER),
+    [MACHINE_X64_CVT_F32_TO_U64] = MACHINE_INFO_MOVE_CONSTRAINED_CLOBBER("x64_cvt_f32_to_u64", (1u << MACHINE_X64_RCX) | MACHINE_X64_FLOAT_SCRATCH_CLOBBER),
+    [MACHINE_X64_CVT_F64_TO_U64] = MACHINE_INFO_MOVE_CONSTRAINED_CLOBBER("x64_cvt_f64_to_u64", (1u << MACHINE_X64_RCX) | MACHINE_X64_FLOAT_SCRATCH_CLOBBER),
     [MACHINE_X64_LEA_OFFSET] = MACHINE_INFO_MOVE("x64_lea_offset"),
     [MACHINE_X64_ADD64_IMM] = {
         .name = S8_INITIALIZER("x64_add64_imm"),
@@ -159,6 +173,8 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_BSF64] = MACHINE_INFO_MOVE("x64_bsf64"),
     [MACHINE_X64_BSR32] = MACHINE_INFO_MOVE("x64_bsr32"),
     [MACHINE_X64_BSR64] = MACHINE_INFO_MOVE("x64_bsr64"),
+    [MACHINE_X64_POPCNT32] = MACHINE_INFO_MOVE("x64_popcnt32"),
+    [MACHINE_X64_POPCNT64] = MACHINE_INFO_MOVE("x64_popcnt64"),
     [MACHINE_X64_ADD32] = MACHINE_INFO_READ_MODIFY("x64_add32"),
     [MACHINE_X64_ADD64] = MACHINE_INFO_READ_MODIFY("x64_add64"),
     [MACHINE_X64_SUB32] = MACHINE_INFO_READ_MODIFY("x64_sub32"),
@@ -271,24 +287,26 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("x64_farith"),
         .operand_count = 3,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
+        .clobber_mask = MACHINE_X64_FLOAT_SCRATCH_CLOBBER,
     },
     [MACHINE_X64_FCMP_SET] = {
         .name = S8_INITIALIZER("x64_fcmp_set"),
         .operand_count = 3,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
-        .clobber_mask = 1u << MACHINE_X64_RDX,
+        .clobber_mask = (1u << MACHINE_X64_RDX) | MACHINE_X64_FLOAT_SCRATCH_CLOBBER,
     },
-    [MACHINE_X64_CVT_F32_TO_F64] = MACHINE_INFO_MOVE("x64_cvt_f32_to_f64"),
-    [MACHINE_X64_CVT_F64_TO_F32] = MACHINE_INFO_MOVE("x64_cvt_f64_to_f32"),
-    [MACHINE_X64_CVT_I64_TO_F32] = MACHINE_INFO_MOVE("x64_cvt_i64_to_f32"),
-    [MACHINE_X64_CVT_I64_TO_F64] = MACHINE_INFO_MOVE("x64_cvt_i64_to_f64"),
-    [MACHINE_X64_CVT_F32_TO_I64] = MACHINE_INFO_MOVE("x64_cvt_f32_to_i64"),
-    [MACHINE_X64_CVT_F64_TO_I64] = MACHINE_INFO_MOVE("x64_cvt_f64_to_i64"),
+    [MACHINE_X64_CVT_F32_TO_F64] = MACHINE_INFO_MOVE_CLOBBER("x64_cvt_f32_to_f64", MACHINE_X64_FLOAT_SCRATCH_CLOBBER),
+    [MACHINE_X64_CVT_F64_TO_F32] = MACHINE_INFO_MOVE_CLOBBER("x64_cvt_f64_to_f32", MACHINE_X64_FLOAT_SCRATCH_CLOBBER),
+    [MACHINE_X64_CVT_I64_TO_F32] = MACHINE_INFO_MOVE_CLOBBER("x64_cvt_i64_to_f32", MACHINE_X64_FLOAT_SCRATCH_CLOBBER),
+    [MACHINE_X64_CVT_I64_TO_F64] = MACHINE_INFO_MOVE_CLOBBER("x64_cvt_i64_to_f64", MACHINE_X64_FLOAT_SCRATCH_CLOBBER),
+    [MACHINE_X64_CVT_F32_TO_I64] = MACHINE_INFO_MOVE_CLOBBER("x64_cvt_f32_to_i64", MACHINE_X64_FLOAT_SCRATCH_CLOBBER),
+    [MACHINE_X64_CVT_F64_TO_I64] = MACHINE_INFO_MOVE_CLOBBER("x64_cvt_f64_to_i64", MACHINE_X64_FLOAT_SCRATCH_CLOBBER),
     [MACHINE_X64_MOVQ_TO_XMM] = {
         .name = S8_INITIALIZER("x64_movq_to_xmm"),
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL},
+        .clobber_mask = MACHINE_X64_FLOAT_BRIDGE_CLOBBER,
     },
     [MACHINE_X64_MOVQ_FROM_XMM] = {
         .name = S8_INITIALIZER("x64_movq_from_xmm"),
@@ -350,6 +368,91 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_UD2] = {
         .name = S8_INITIALIZER("x64_ud2"),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_TERMINATOR,
+    },
+    [MACHINE_X64_VMOV_RR] = {
+        .name = S8_INITIALIZER("x64_vmov_rr"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_USE_VECTOR},
+    },
+    [MACHINE_X64_VLOAD_FRAME] = {
+        .name = S8_INITIALIZER("x64_vload_frame"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, 0},
+    },
+    [MACHINE_X64_VSTORE_FRAME] = {
+        .name = S8_INITIALIZER("x64_vstore_frame"),
+        .operand_count = 2,
+        .operand_info = {0, MACHINE_OPERAND_USE_VECTOR},
+    },
+    [MACHINE_X64_VLOAD_PTR] = {
+        .name = S8_INITIALIZER("x64_vload_ptr"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_USE_GENERAL},
+    },
+    [MACHINE_X64_VSTORE_PTR] = {
+        .name = S8_INITIALIZER("x64_vstore_ptr"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_VECTOR},
+    },
+    [MACHINE_X64_VLOAD_PTR_MASKED] = {
+        .name = S8_INITIALIZER("x64_vload_ptr_masked"),
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
+    },
+    [MACHINE_X64_VSTORE_PTR_MASKED] = {
+        .name = S8_INITIALIZER("x64_vstore_ptr_masked"),
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_VECTOR},
+    },
+    [MACHINE_X64_VCOMPRESS_STORE_PTR] = {
+        .name = S8_INITIALIZER("x64_vcompress_store_ptr"),
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_VECTOR},
+    },
+    [MACHINE_X64_VSPLATB] = {
+        .name = S8_INITIALIZER("x64_vsplatb"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_USE_GENERAL},
+    },
+    [MACHINE_X64_VPCMP_MASK] = {
+        .name = S8_INITIALIZER("x64_vpcmp_mask"),
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_VECTOR, MACHINE_OPERAND_USE_VECTOR},
+    },
+    [MACHINE_X64_VPMOVB2M] = {
+        .name = S8_INITIALIZER("x64_vpmovb2m"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_VECTOR},
+    },
+    [MACHINE_X64_VPERMT2B] = {
+        .name = S8_INITIALIZER("x64_vpermt2b"),
+        .operand_count = 4,
+        .operand_info = {MACHINE_OPERAND_USE_DEFINE_VECTOR, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_VECTOR, MACHINE_OPERAND_USE_VECTOR},
+    },
+    [MACHINE_X64_VCOMPRESSB] = {
+        .name = S8_INITIALIZER("x64_vcompressb"),
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_VECTOR},
+    },
+    [MACHINE_X64_VPMOVZXBD] = {
+        .name = S8_INITIALIZER("x64_vpmovzxbd"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_USE_VECTOR},
+    },
+    [MACHINE_X64_VPSLLD_RI] = {
+        .name = S8_INITIALIZER("x64_vpslld_ri"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_USE_VECTOR},
+    },
+    [MACHINE_X64_VPTERNLOGD] = {
+        .name = S8_INITIALIZER("x64_vpternlogd"),
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_USE_DEFINE_VECTOR, MACHINE_OPERAND_USE_VECTOR, MACHINE_OPERAND_USE_VECTOR},
+    },
+    [MACHINE_X64_VBINARY] = {
+        .name = S8_INITIALIZER("x64_vbinary"),
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_USE_VECTOR, MACHINE_OPERAND_USE_VECTOR},
     },
     [MACHINE_X64_CALL_INDIRECT] = {
         .name = S8_INITIALIZER("x64_call_indirect"),
@@ -762,7 +865,17 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
     u32 running = 0;
     for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
     {
-        running += 8;
+        // Vector values own 64-byte homes; the sixteen-byte offset rounding
+        // mirrors the canonical frame layout's vector clamp, and every
+        // access is the unaligned vmovdqu8 either way.
+        if (function->virtual_registers[register_index].register_class == MACHINE_REGISTER_CLASS_VECTOR)
+        {
+            running = ((running + 15u) & ~15u) + 64u;
+        }
+        else
+        {
+            running += 8;
+        }
         placement.virtual_register_offsets[register_index] = running;
     }
     for (u32 slot_index = 0; slot_index < function->stack_slot_count; slot_index += 1)
@@ -805,7 +918,8 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
                 continue;
             }
             u32 virtual_register = machine_ref_payload(ref);
-            *operand_register = target->slot_scratch[slot];
+            u32 operand_class = (info->operand_info[slot] >> MACHINE_OPERAND_CLASS_SHIFT) & 0x7u;
+            *operand_register = operand_class == MACHINE_REGISTER_CLASS_VECTOR ? target->vector_slot_scratch[slot] : target->slot_scratch[slot];
             // A copy into a fixed physical register reloads its source
             // directly into that register: argument sequences would
             // otherwise clobber already-placed argument registers through
@@ -843,12 +957,13 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
             }
             if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
             {
+                u32 defined_class = (info->operand_info[slot] >> MACHINE_OPERAND_CLASS_SHIFT) & 0x7u;
                 MachineEdit* edit = (MachineEdit*)machine_stream_append(arena, &edits);
                 *edit = (MachineEdit){
                     .point = machine_point_make(instruction_index, MACHINE_POINT_AFTER),
                     .kind = MACHINE_EDIT_SPILL,
                     .subject = machine_ref_payload(ref),
-                    .location = target->slot_scratch[slot],
+                    .location = defined_class == MACHINE_REGISTER_CLASS_VECTOR ? target->vector_slot_scratch[slot] : target->slot_scratch[slot],
                 };
                 placement.spill_count += 1;
             }

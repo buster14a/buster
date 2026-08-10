@@ -50,6 +50,13 @@ struct MachineFastState
     u32 const* pinned_registers;
     u32 pinned_mask;
     u32 const* pin_active_masks;
+    // The register indices the scan's loops walk. The unified file puts
+    // the vector registers past the general ones, and a function with no
+    // vector virtual registers can never own one, so its loops stop at
+    // the general file's end — the full-width `owner` state stays
+    // initialized either way, which keeps the mask-driven clobber spills
+    // (the float rows scribble low vector registers) safe no-ops.
+    u32 active_register_count;
     u32 clock;
     u32 current_point;
     // Set once the current instruction's uses and defines are placed: from
@@ -106,7 +113,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_spill(MachineFastState* state, u32 physica
 
 BUSTER_GLOBAL_LOCAL void machine_fast_flush(MachineFastState* state, u32 keep_mask)
 {
-    for (u32 physical_register = 0; physical_register < state->description->register_count; physical_register += 1)
+    for (u32 physical_register = 0; physical_register < state->active_register_count; physical_register += 1)
     {
         if ((keep_mask >> physical_register) & 1u)
         {
@@ -162,7 +169,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_append(MachineFastState* state, Ma
 BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, MachineBuilderStream* stream, MachinePoint point, u32* owner, bool* dirty,
                                                    u32* locations, u32 const* contract_owner, bool const* contract_dirty, bool allow_moves)
 {
-    u32 register_count = state->description->register_count;
+    u32 register_count = state->active_register_count;
     // Pass 1: write back what the contract sends home. Mappings survive —
     // the successor ignores them, a layout successor that designates this
     // edge still reuses the clean copies, and any register a contract value
@@ -371,13 +378,23 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_crosses_call(MachineFastState* state, u32 
     return upcoming_call != UINT32_MAX && state->last_use[virtual_register] > upcoming_call;
 }
 
+// The register file a virtual register may draw from: its class's
+// allocatable mask. The vector file shares the scan, the contracts, and
+// the edit stream with the general one — only the candidate set differs.
+BUSTER_GLOBAL_LOCAL u32 machine_fast_class_mask(MachineFastState* state, u32 virtual_register)
+{
+    return state->function->virtual_registers[virtual_register].register_class == MACHINE_REGISTER_CLASS_VECTOR
+               ? state->description->vector_allocatable_mask
+               : state->description->allocatable_mask;
+}
+
 // Picks a free allocatable register, else evicts the least recently used
 // owner — a probe bounded by the register-file size. Call-crossing values
 // reach for the callee-saved members; everything else only touches them
 // once another binding has already paid their push.
-BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u32 forbidden_mask, bool prefers_callee_saved)
+BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u32 class_mask, u32 forbidden_mask, bool prefers_callee_saved)
 {
-    u32 candidates = state->description->allocatable_mask & ~forbidden_mask & ~machine_fast_pin_active(state, state->current_point >> 2);
+    u32 candidates = class_mask & ~forbidden_mask & ~machine_fast_pin_active(state, state->current_point >> 2);
     if (!prefers_callee_saved)
     {
         // Avoid paying a new callee-saved push for a value that does not
@@ -391,7 +408,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u32 forbidden
     u32 dead = UINT32_MAX;
     u32 free_other = UINT32_MAX;
     u32 preferred_class = prefers_callee_saved ? state->description->callee_saved_mask : ~state->description->callee_saved_mask;
-    for (u32 physical_register = 0; physical_register < state->description->register_count; physical_register += 1)
+    for (u32 physical_register = 0; physical_register < state->active_register_count; physical_register += 1)
     {
         if (!(candidates & (1u << physical_register)))
         {
@@ -444,7 +461,8 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_ensure(MachineFastState* state, u32 virtual
             state->age[current] = ++state->clock;
             return current;
         }
-        target = machine_fast_pick(state, forbidden_mask, machine_fast_crosses_call(state, virtual_register));
+        target = machine_fast_pick(state, machine_fast_class_mask(state, virtual_register), forbidden_mask,
+                                   machine_fast_crosses_call(state, virtual_register));
     }
     if (current == target)
     {
@@ -555,7 +573,30 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
         .pinned_registers = pinned_registers,
         .pinned_mask = pinned_mask,
         .pin_active_masks = pin_active_masks,
+        .active_register_count = description->register_count,
     };
+    // A function with no vector virtual registers can never own a vector
+    // register, so its loops stop at the general file's end; the widened
+    // unified file would otherwise double every scan pass for the common
+    // all-scalar function.
+    if (description->vector_allocatable_mask)
+    {
+        bool scan_has_vector = false;
+        for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
+        {
+            scan_has_vector |= function->virtual_registers[register_index].register_class == MACHINE_REGISTER_CLASS_VECTOR;
+        }
+        if (!scan_has_vector)
+        {
+            u32 general_mask = description->allocatable_mask | description->callee_saved_mask;
+            u32 general_top = 0;
+            for (u32 bit_index = 0; bit_index < MACHINE_TARGET_REGISTER_LIMIT; bit_index += 1)
+            {
+                general_top = ((general_mask >> bit_index) & 1u) ? bit_index + 1 : general_top;
+            }
+            state.active_register_count = general_top;
+        }
+    }
     // Constant definitions are recreatable anywhere, so they never pay for
     // a store or a slot. A second definition of the same value disables
     // the recipe: which constant is current would then depend on the path.
@@ -676,7 +717,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
     // later contract construction conforms the snapshot retroactively and
     // its mutations persist, so two successors of one conditional never
     // write the same value back twice.
-    u32 register_count = description->register_count;
+    u32 register_count = state.active_register_count;
     u32* contract_owner = arena_allocate(arena, u32, (u64)function->block_count * register_count);
     bool* contract_dirty = arena_allocate(arena, bool, (u64)function->block_count * register_count);
     u32* out_owner = arena_allocate(arena, u32, (u64)function->block_count * register_count);
@@ -1129,7 +1170,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
                     // has not executed yet and destroy it.
                     target = machine_ref_payload(instruction->operands[1]);
                 }
-                else if (instruction->opcode == description->copy_opcode && slot == 0 &&
+                else if ((instruction->opcode == description->copy_opcode || instruction->opcode == description->vector_copy_opcode) && slot == 0 &&
                          machine_ref_kind(instruction->operands[1]) == MACHINE_REF_VIRTUAL_REGISTER &&
                          machine_ref_payload(instruction->operands[1]) != machine_ref_payload(ref) &&
                          operand_registers[1] != UINT8_MAX && !((machine_fast_pin_active(&state, instruction_index) >> operand_registers[1]) & 1u) &&
@@ -1148,7 +1189,8 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
                 }
                 else
                 {
-                    target = machine_fast_pick(&state, reserved_mask, machine_fast_crosses_call(&state, machine_ref_payload(ref)));
+                    target = machine_fast_pick(&state, machine_fast_class_mask(&state, machine_ref_payload(ref)), reserved_mask,
+                                               machine_fast_crosses_call(&state, machine_ref_payload(ref)));
                 }
                 machine_fast_bind(&state, machine_ref_payload(ref), target);
                 operand_registers[slot] = (u8)target;
@@ -1275,7 +1317,11 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
     for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
     {
         pool_indices[register_index] = UINT32_MAX;
-        if (!slot_needed[register_index] || state.escapes[register_index] || definition_blocks[register_index] == UINT32_MAX)
+        // Vector values keep dedicated slots below: the shared pool is
+        // eight bytes per entry and a sixty-four-byte member would widen
+        // every slot for a class that rarely spills.
+        if (!slot_needed[register_index] || state.escapes[register_index] || definition_blocks[register_index] == UINT32_MAX ||
+            function->virtual_registers[register_index].register_class == MACHINE_REGISTER_CLASS_VECTOR)
         {
             continue;
         }
@@ -1306,7 +1352,17 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
             placement.virtual_register_offsets[register_index] = pool_base + 8 * (pool_indices[register_index] + 1);
             continue;
         }
-        running += 8;
+        if (function->virtual_registers[register_index].register_class == MACHINE_REGISTER_CLASS_VECTOR)
+        {
+            // Sixty-four-byte home at a sixteen-byte offset boundary,
+            // mirroring the canonical frame layout's vector clamp; every
+            // access is the unaligned vmovdqu8 either way.
+            running = ((running + 15u) & ~15u) + 64u;
+        }
+        else
+        {
+            running += 8;
+        }
         placement.virtual_register_offsets[register_index] = running;
     }
     for (u32 slot_index = 0; slot_index < function->stack_slot_count; slot_index += 1)

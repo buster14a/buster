@@ -1,4 +1,5 @@
 #include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/simd.h>
 
 // QRA stages 7 and 8: global assignment over the machine IR. A live
 // interval per virtual register, a weight that pays for keeping it in a
@@ -267,8 +268,13 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         // and the push/pop pair costs more than the memory traffic saved.
         // A pin must remove more memory operations than the push and pop
         // it adds, so the value has to have cost the local scan at least
-        // three. Priority is the measured traffic, not the guess.
-        if (disqualified[register_index] || interval_starts[register_index] == UINT32_MAX || baseline_traffic[register_index] < 3)
+        // three. Priority is the measured traffic, not the guess. The pin
+        // file is general callee-saved registers, so only general-class
+        // values may enter candidacy: on System V no vector register
+        // survives a call, and a vector pinned to a general register would
+        // be a class miscompile.
+        if (disqualified[register_index] || interval_starts[register_index] == UINT32_MAX || baseline_traffic[register_index] < 3 ||
+            function->virtual_registers[register_index].register_class != MACHINE_REGISTER_CLASS_GENERAL)
         {
             continue;
         }
@@ -368,11 +374,10 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             foreclosed |= 1u << description->indirect_call_register;
         }
         foreclosed_masks[instruction_index] = foreclosed;
-        u32 foreclosed_count = 0;
-        for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
-        {
-            foreclosed_count += ((foreclosed & description->allocatable_mask) >> physical_register) & 1u;
-        }
+        // mask64_count rather than the raw builtin: MSVC has no
+        // __builtin_popcountll, and simd.h already owns that portability
+        // decision.
+        u32 foreclosed_count = mask64_count((Mask64)(foreclosed & description->allocatable_mask));
         // A row whose register operands are all forced into fixed
         // registers picks nothing; every other row needs room for its
         // own operands plus the margin.
@@ -384,6 +389,13 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     }
     for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
     {
+        // Only allocatable registers can be probed through the pin file, so
+        // the reserved and vector rows of the prefix table stay unwritten —
+        // the unified file would otherwise double this pass for nothing.
+        if (!((description->allocatable_mask >> physical_register) & 1u))
+        {
+            continue;
+        }
         u32* prefix = foreclosure_prefix + (u64)physical_register * (function->instruction_count + 1);
         prefix[0] = 0;
         for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)

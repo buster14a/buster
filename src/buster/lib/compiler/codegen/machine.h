@@ -222,6 +222,8 @@ typedef enum MachineOpcode
     MACHINE_X64_BSF64,
     MACHINE_X64_BSR32,
     MACHINE_X64_BSR64,
+    MACHINE_X64_POPCNT32, // dest def, source use; gated on the POPCNT feature
+    MACHINE_X64_POPCNT64,
     MACHINE_X64_CMP32,        // use, use; defines flags
     MACHINE_X64_CMP64,
     MACHINE_X64_TEST_RR,      // use, use; defines flags (64-bit)
@@ -318,6 +320,43 @@ typedef enum MachineOpcode
     MACHINE_X64_MFENCE,
     MACHINE_X64_INT3, // debug trap
     MACHINE_X64_UD2,  // unreachable; terminator
+    // 512-bit vector subset, mirroring the canonical AVX-512 vocabulary but
+    // with values register-resident instead of round-tripping every operand
+    // through its frame slot. Masks travel in GENERAL registers (the
+    // vocabulary's Mask64 is a plain u64); rows that need one stage through
+    // k1 internally, which no allocator models because nothing else touches
+    // the k file. Every memory form is the unaligned vmovdqu8 the canonical
+    // path uses — vector frame slots stay under the sixteen-byte alignment
+    // contract exactly like the canonical frame layout's vector clamp.
+    MACHINE_X64_VMOV_RR,      // def vec, use vec; full 512-bit copy, coalescible
+    MACHINE_X64_VLOAD_FRAME,  // def vec, stack-slot ref; 64-byte read
+    MACHINE_X64_VSTORE_FRAME, // stack-slot ref, use vec; 64-byte write
+    MACHINE_X64_VLOAD_PTR,    // def vec, use address
+    MACHINE_X64_VSTORE_PTR,   // use address, use vec
+    MACHINE_X64_VLOAD_PTR_MASKED,     // def vec, use address, use mask; zeroing
+    MACHINE_X64_VSTORE_PTR_MASKED,    // use address, use mask, use vec
+    MACHINE_X64_VCOMPRESS_STORE_PTR,  // use address, use mask, use vec
+    MACHINE_X64_VSPLATB,      // def vec, use general; vpbroadcastb from r32
+    // Byte compares producing a Mask64 in a general register; payload is
+    // 0 = vpcmpeqb, 1 = vpcmpub/lt-unsigned, 2 = vptestmb.
+    MACHINE_X64_VPCMP_MASK,   // def general mask, use vec, use vec
+    MACHINE_X64_VPMOVB2M,     // def general mask, use vec
+    // vpermt2b overwrites its low-table register with the result, so the
+    // selector copies the low table into the destination first and the row
+    // ties destination to itself; zeroing under the mask.
+    MACHINE_X64_VPERMT2B,     // use-def vec result/low, use mask, use vec indices, use vec high
+    MACHINE_X64_VCOMPRESSB,   // def vec, use mask, use vec; zeroing
+    // vpmovzxbd from the source's chosen 16-byte quarter (payload); quarters
+    // past zero extract through the destination register first.
+    MACHINE_X64_VPMOVZXBD,    // def vec, use vec; payload = quarter
+    MACHINE_X64_VPSLLD_RI,    // def vec, use vec; payload = immediate count
+    // vpternlogd reads its truth table from the destination, so the selector
+    // copies operand a in first, exactly like VPERMT2B; payload = table.
+    MACHINE_X64_VPTERNLOGD,   // use-def vec result/a, use vec b, use vec c
+    // Element-wise three-address binary; payload low byte is the 66 0F map
+    // opcode (vpaddb 0xfc family, vpand 0xdb family) chosen by the selector
+    // from the operation and lane width.
+    MACHINE_X64_VBINARY,      // def vec, use vec, use vec
     // AArch64 scalar subset. Three-address forms carry no ties; the only
     // constrained rows are the remainder macro-ops, whose div-then-msub
     // sequence needs three distinct registers. Operand slot 0 is the
@@ -558,6 +597,17 @@ struct MachineTargetDescription
     u8 float_bridge_register;
     u8 quality_pin_registers[MACHINE_TARGET_QUALITY_PIN_LIMIT];
     u8 quality_pin_register_count;
+    // The vector class's registers in the unified numbering, or zero for a
+    // target whose selector never produces vector virtual registers. The
+    // callee-saved subset is the intersection with `callee_saved_mask`;
+    // System V x86-64 has none, so every vector value dies at a call.
+    u32 vector_allocatable_mask;
+    // Full-width vector register copy, coalescible like `copy_opcode`.
+    u16 vector_copy_opcode;
+    u8 reserved[2];
+    // The fixed vector scratch per operand slot, the MIR_STACK counterpart
+    // of `slot_scratch` for vector-class operand slots.
+    u8 vector_slot_scratch[4];
 };
 
 // The contiguous per-function machine streams the builder flattens into.
@@ -634,7 +684,11 @@ typedef enum MachineA64Register
     MACHINE_A64_REGISTER_COUNT,
 } MachineA64Register;
 
-// x86-64 physical general registers in encoding order.
+// x86-64 physical registers: the general file in encoding order, then the
+// vector file as ZMM0-15 at indices 16-31. One unified numbering keeps every
+// allocator mask a u32 and lets the shared scan, contracts, and edit stream
+// carry both classes without a second file of state; the encoder recovers
+// the ZMM number by subtracting MACHINE_X64_ZMM0.
 typedef enum MachineX64Register
 {
     MACHINE_X64_RAX,
@@ -653,6 +707,22 @@ typedef enum MachineX64Register
     MACHINE_X64_R13,
     MACHINE_X64_R14,
     MACHINE_X64_R15,
+    MACHINE_X64_ZMM0,
+    MACHINE_X64_ZMM1,
+    MACHINE_X64_ZMM2,
+    MACHINE_X64_ZMM3,
+    MACHINE_X64_ZMM4,
+    MACHINE_X64_ZMM5,
+    MACHINE_X64_ZMM6,
+    MACHINE_X64_ZMM7,
+    MACHINE_X64_ZMM8,
+    MACHINE_X64_ZMM9,
+    MACHINE_X64_ZMM10,
+    MACHINE_X64_ZMM11,
+    MACHINE_X64_ZMM12,
+    MACHINE_X64_ZMM13,
+    MACHINE_X64_ZMM14,
+    MACHINE_X64_ZMM15,
     MACHINE_X64_REGISTER_COUNT,
 } MachineX64Register;
 
