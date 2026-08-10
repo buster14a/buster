@@ -1137,6 +1137,7 @@ BUSTER_GLOBAL_LOCAL bool c_lex_compact_tables_built;
 // them exhaustively against c_punctuator_length.
 BUSTER_GLOBAL_LOCAL void c_lex_compact_tables_build(void)
 {
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
     for (u32 index = 0; index < 64; index += 1)
     {
         c_lex_iota[index] = (u8)index;
@@ -1715,6 +1716,15 @@ BUSTER_GLOBAL_LOCAL void c_lex_compact(CLexState* state)
 #endif
 
 #if BUSTER_INCLUDE_TESTS
+bool c_test_lex_compact_tables_ready(void)
+{
+#if BUSTER_C_LEX_COMPACT
+    return c_lex_compact_tables_built;
+#else
+    return true;
+#endif
+}
+
 // Test seam: reconcile the emitter's hand-assigned NFA channels with the
 // spelling table the scalar path scans. For every byte sequence the window
 // pipeline can classify, the channels must legalize exactly the spellings
@@ -6205,6 +6215,12 @@ BUSTER_GLOBAL_LOCAL void c_declaration_keyword_slots_build(void)
 // initializers.
 void c_prewarm(void)
 {
+#if BUSTER_C_LEX_COMPACT
+    if (!c_lex_compact_tables_built)
+    {
+        c_lex_compact_tables_build();
+    }
+#endif
     if (!c_identifier_continue_table_built)
     {
         c_identifier_continue_table_build();

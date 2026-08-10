@@ -329,6 +329,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     // for later work on their selected context. Fill every compiler-global
     // read-only table before the first module can create those workers.
     compiler_prewarm();
+    BUSTER_CHECK(c_test_lex_compact_tables_ready());
     bool timing_enabled = program_state != 0 && program_flag_get(PROGRAM_FLAG_VERBOSE);
     if (timing_enabled)
     {

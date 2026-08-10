@@ -810,10 +810,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 
         compiler_prewarm();
 
-        CompilerPrewarmLaneObservation serial = {0};
-        compiler_prewarm_observe(state, &serial);
-        BUSTER_TEST(arguments, serial.ran && serial.buster_token_count && serial.c_token_count && !serial.c_error_count);
-
 #if BUSTER_SINGLE_THREADED
         u64 lanes = 1;
 #else
@@ -821,6 +817,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         lanes = buster_test_worker_count(lanes);
 #endif
         lane_run(lanes, &compiler_prewarm_gang, state);
+
+        CompilerPrewarmLaneObservation serial = {0};
+        compiler_prewarm_observe(state, &serial);
+        BUSTER_TEST(arguments, serial.ran && serial.buster_token_count && serial.c_token_count && !serial.c_error_count);
 
         bool lanes_agree = true;
         for (u64 lane = 0; lane < lanes; lane += 1)
