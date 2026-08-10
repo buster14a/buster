@@ -16695,6 +16695,11 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_fragments_merge(CodegenCanonicalParal
 BUSTER_GLOBAL_LOCAL ThreadReturnType codegen_canonical_parallel_lane(void* argument)
 {
     CodegenCanonicalParallelState* state = (CodegenCanonicalParallelState*)argument;
+    // Source-position recovery amortizes through mutable single-consumer
+    // cursor state. The source tables remain shared and read-only, but each
+    // lane needs its own cursor while emitting debug line rows.
+    IrProgram emission_program = *state->program;
+    emission_program.source_cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
     // A large generated function can require more transient codegen state
     // than the general-purpose 64 MiB thread scratch arena. The worker arena
     // is reset after each function; only an exact compact copy survives.
@@ -16735,7 +16740,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType codegen_canonical_parallel_lane(void* argum
         {
             bool code_buffer_exhausted = false;
             emitted_info = (CodegenCanonicalFragmentInfo){0};
-            emitted = codegen_generate_canonical_module_attempt(emission_arena, state->program, &fragment_module, state->target, fragment_options,
+            emitted = codegen_generate_canonical_module_attempt(emission_arena, &emission_program, &fragment_module, state->target, fragment_options,
                                                                  capacity_scale, &code_buffer_exhausted, false, &emitted_info);
             if (!code_buffer_exhausted)
             {
