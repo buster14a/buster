@@ -487,6 +487,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "long union_tail(long a, long b) { UTail u; u = (UTail){0};\n"
                                   "    return u.words[1] + u.words[2] + u.words[3] + u.words[4] + u.words[5] + (a & 0) + (b & 0); }\n");
     String8 machine_c_source_tail = S8(
+                                  "int nest2(int n) { int total = 0; for (int i = 0; i < n; i += 1) { for (int j = 0; j < n; j += 1) { total = total + i * j; } } return total; }\n"
                                   "long ucvt(long a, long b) { unsigned long u = ((unsigned long)a << 32) | 5u; double d = (double)u; unsigned long r = (unsigned long)d; float f = (float)(((unsigned long)b << 31) | 1u); return (long)(r >> 33) + (long)(f * 0.25f) + (long)(unsigned long)(double)((unsigned long)b | 3u); }\n"
                                   "int printf(const char* format, ...);\n"
                                   "int call_variadic(int a, long b) { return printf(\"%d %ld\", a, b); }\n"
@@ -1155,6 +1156,39 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, stack_encoded.valid && fast_encoded.valid);
                 BUSTER_TEST_RAW(arguments, fast_encoded.byte_count < stack_encoded.byte_count,
                                 string_format(arguments->arena, S8("fast bytes {u32} vs stack {u32}"), fast_encoded.byte_count, stack_encoded.byte_count));
+                // Frequency classes, stamped on QUALITY's way into the pin
+                // economics: sum_to's single while loop is one depth-1
+                // region below a depth-0 entry.
+                machine_function_stamp_frequency_classes(&traffic_selected.function);
+                u16 traffic_maximum_class = 0;
+                for (u32 block_index = 0; block_index < traffic_selected.function.block_count; block_index += 1)
+                {
+                    traffic_maximum_class = BUSTER_MAX(traffic_maximum_class, traffic_selected.function.blocks[block_index].frequency_class);
+                }
+                BUSTER_TEST(arguments, traffic_selected.function.blocks[0].frequency_class == 0);
+                BUSTER_TEST_RAW(arguments, traffic_maximum_class == 1,
+                                string_format(arguments->arena, S8("sum_to maximum frequency class {u64}"), (u64)traffic_maximum_class));
+            }
+        }
+        // The nested pair reaches depth 2 — the classes count covering
+        // backward-edge spans, not merely loop membership.
+        IrFunction* nest_function = machine_test_ir_function_find(machine_module, S8("nest2"));
+        BUSTER_TEST(arguments, nest_function != 0);
+        if (nest_function)
+        {
+            MachineSelectResult nest_selected = machine_select_canonical_function(arguments->arena, machine_program, nest_function, machine_target);
+            BUSTER_TEST(arguments, nest_selected.supported);
+            if (nest_selected.supported)
+            {
+                machine_function_stamp_frequency_classes(&nest_selected.function);
+                u16 nest_maximum_class = 0;
+                for (u32 block_index = 0; block_index < nest_selected.function.block_count; block_index += 1)
+                {
+                    nest_maximum_class = BUSTER_MAX(nest_maximum_class, nest_selected.function.blocks[block_index].frequency_class);
+                }
+                BUSTER_TEST(arguments, nest_selected.function.blocks[0].frequency_class == 0);
+                BUSTER_TEST_RAW(arguments, nest_maximum_class == 2,
+                                string_format(arguments->arena, S8("nest2 maximum frequency class {u64}"), (u64)nest_maximum_class));
             }
         }
         codegen_release_executable(none_module_executable);

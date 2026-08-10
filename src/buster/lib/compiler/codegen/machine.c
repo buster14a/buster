@@ -753,6 +753,90 @@ BUSTER_F_DECL MachineFunction machine_function_builder_finish(Arena* arena, Mach
     return function;
 }
 
+// Loop-depth frequency classes from the finished block structure. A
+// backward block reference — a block-ref operand or a switch-case target
+// naming a block at or before its own — approximates a loop over the block
+// range [target, source]. Per head only the widest span counts, so a loop
+// with several latches (a continue beside the bottom branch) stays one
+// loop, and a block's class is the number of spans covering it — the
+// nesting depth for the reducible shapes structured lowering emits.
+// Sibling spans sharing no blocks never stack, and the cap keeps a
+// pathological nest inside the u16 the block row carries.
+#define MACHINE_FREQUENCY_CLASS_LIMIT 8u
+
+BUSTER_F_DECL void machine_function_stamp_frequency_classes(MachineFunction* function)
+{
+    u32 block_count = function->block_count;
+    if (!block_count)
+    {
+        return;
+    }
+    TemporalArena scratch = scratch_begin(0, 0);
+    // Widest backward span per head block, or UINT32_MAX for no span.
+    u32* head_ends = arena_allocate(scratch.arena, u32, block_count);
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        head_ends[block_index] = UINT32_MAX;
+    }
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        MachineBlock* block = function->blocks + block_index;
+        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
+        {
+            MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
+            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+            if (!info)
+            {
+                scratch_end(scratch);
+                return;
+            }
+            for (u32 slot = 0; slot < info->operand_count; slot += 1)
+            {
+                if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_BLOCK ||
+                    machine_ref_payload(instruction->operands[slot]) > block_index)
+                {
+                    continue;
+                }
+                u32 head = machine_ref_payload(instruction->operands[slot]);
+                head_ends[head] = head_ends[head] == UINT32_MAX ? block_index : BUSTER_MAX(head_ends[head], block_index);
+            }
+            if (function->target && instruction->opcode == function->target->switch_opcode)
+            {
+                for (u32 case_index = 0; case_index < instruction->flags; case_index += 1)
+                {
+                    u32 case_target = function->switch_cases[instruction->payload + case_index].target_block;
+                    if (case_target > block_index)
+                    {
+                        continue;
+                    }
+                    head_ends[case_target] = head_ends[case_target] == UINT32_MAX ? block_index : BUSTER_MAX(head_ends[case_target], block_index);
+                }
+            }
+        }
+    }
+    s32* depth_deltas = arena_allocate(scratch.arena, s32, block_count + 1);
+    for (u32 block_index = 0; block_index <= block_count; block_index += 1)
+    {
+        depth_deltas[block_index] = 0;
+    }
+    for (u32 head = 0; head < block_count; head += 1)
+    {
+        if (head_ends[head] == UINT32_MAX)
+        {
+            continue;
+        }
+        depth_deltas[head] += 1;
+        depth_deltas[head_ends[head] + 1] -= 1;
+    }
+    s32 depth = 0;
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        depth += depth_deltas[block_index];
+        function->blocks[block_index].frequency_class = (u16)BUSTER_MIN((u32)depth, MACHINE_FREQUENCY_CLASS_LIMIT);
+    }
+    scratch_end(scratch);
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_verify_reference(MachineFunction* function, MachineRef ref)
 {
     MachineRefKind kind = machine_ref_kind(ref);

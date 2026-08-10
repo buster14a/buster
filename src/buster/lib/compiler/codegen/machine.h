@@ -106,6 +106,9 @@ struct MachineBlock
     u16 predecessor_count;
     u16 successor_count;
     u16 parameter_count;
+    // Loop-nesting depth as a static execution-frequency estimate, stamped
+    // by machine_function_stamp_frequency_classes after selection; zero for
+    // straight-line code.
     u16 frequency_class;
     u32 reserved;
 };
@@ -960,6 +963,15 @@ BUSTER_F_DECL u32 machine_builder_block_begin(MachineFunctionBuilder* builder);
 BUSTER_F_DECL u32 machine_builder_instruction(MachineFunctionBuilder* builder, MachineInstruction instruction);
 BUSTER_F_DECL void machine_builder_block_end(MachineFunctionBuilder* builder, MachineBlock block);
 BUSTER_F_DECL MachineFunction machine_function_builder_finish(Arena* arena, MachineFunctionBuilder* builder);
+// Stamps every block's `frequency_class` with its loop-nesting depth,
+// derived from backward block references (block-ref operands and
+// switch-case targets naming a block at or before their own). The class is
+// a static execution-frequency estimate consumed only by QUALITY's pin
+// economics, which runs the stamp itself before pricing traffic — FAST and
+// MIR_STACK never read a class and never pay for the walk. Idempotent, so
+// re-stamping a scheduled function that shares its blocks array with the
+// original is safe.
+BUSTER_F_DECL void machine_function_stamp_frequency_classes(MachineFunction* function);
 BUSTER_F_DECL MachineVerifyResult machine_verify_function(MachineFunction* function);
 BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* function);

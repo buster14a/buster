@@ -6,7 +6,11 @@
 // register, and a priority walk that hands the highest-weight
 // non-overlapping intervals a callee-saved register. Everything the walk
 // cannot place falls to the local scan, so QUALITY is FAST plus a global
-// layer rather than a second allocator to keep correct.
+// layer rather than a second allocator to keep correct. Weights and the
+// acceptance compare are in frequency-weighted units: every edit is
+// priced by the loop depth of the block it executes in, because the
+// unweighted economics weighed a cold-path edit equal to a hot one and
+// every static refinement of that measured negative (2026-08-10l).
 //
 // Stage 8 scopes each reservation to the interval that earned it: the
 // local scan owns a pin register at every instruction no pinned span
@@ -30,6 +34,22 @@
 // file.
 #define MACHINE_QUALITY_PIN_OPERAND_MARGIN 2u
 
+// Execution-frequency weight of one block: 4 to the power of its
+// frequency class (the loop-nesting depth the selector stamped), capped
+// so a pathological nest cannot overflow the traffic sums. Class 0 keeps
+// weight 1, so straight-line functions price exactly as they did when
+// every edit counted once. Every static refinement of unweighted counts
+// measured negative (2026-08-10l); the weighted form exists because the
+// blind spot was where edits execute, not what was counted.
+#define MACHINE_QUALITY_FREQUENCY_WEIGHT_SHIFT 2u
+#define MACHINE_QUALITY_FREQUENCY_WEIGHT_LIMIT_SHIFT 12u
+
+BUSTER_GLOBAL_LOCAL u32 machine_quality_frequency_weight(u16 frequency_class)
+{
+    u32 shift = BUSTER_MIN((u32)frequency_class * MACHINE_QUALITY_FREQUENCY_WEIGHT_SHIFT, MACHINE_QUALITY_FREQUENCY_WEIGHT_LIMIT_SHIFT);
+    return 1u << shift;
+}
+
 typedef struct MachineQualityInterval MachineQualityInterval;
 struct MachineQualityInterval
 {
@@ -37,6 +57,10 @@ struct MachineQualityInterval
     u32 start;
     u32 end;
     u32 weight;
+    // A candidate below the raw-count break-even, admitted on frequency
+    // alone; it may only take a caller-saved pin register, so it can
+    // never buy a prologue save with edits a cold loop may never run.
+    u32 marginal;
 };
 
 // Sift-down over a max-heap keyed on weight, so the priority walk needs no
@@ -82,6 +106,10 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     {
         return machine_fast_placement_build(arena, function);
     }
+    // Frequency classes are consumed only by the economics below, so only
+    // QUALITY pays the stamping walk — measured at +0.9% of fast-mode
+    // compile cost when every machine mode stamped at selection.
+    machine_function_stamp_frequency_classes(function);
     TemporalArena scratch = scratch_begin(&arena, 1);
     u32 register_count = function->virtual_register_count;
     u32* pinned_registers = arena_allocate(arena, u32, register_count ? register_count : 1);
@@ -188,17 +216,38 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         scratch_end(scratch);
         return baseline;
     }
+    // Per-instruction frequency weights from the classes the selector
+    // stamped. An edit is priced by the block its instruction sits in, so
+    // a reload inside a loop outweighs the same reload on the entry path —
+    // the execution-frequency awareness 2026-08-10l concluded every static
+    // count lacks.
+    u32* instruction_weights = arena_allocate(scratch.arena, u32, function->instruction_count ? function->instruction_count : 1);
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        MachineBlock* block = function->blocks + block_index;
+        u32 block_weight = machine_quality_frequency_weight(block->frequency_class);
+        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
+        {
+            instruction_weights[block->first_instruction + offset] = block_weight;
+        }
+    }
     u32* baseline_traffic = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
+    u32* baseline_traffic_counts = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
     for (u32 register_index = 0; register_index < register_count; register_index += 1)
     {
         baseline_traffic[register_index] = 0;
+        baseline_traffic_counts[register_index] = 0;
     }
+    u64 baseline_traffic_total = 0;
     for (u32 edit_index = 0; edit_index < baseline.edit_count; edit_index += 1)
     {
         MachineEdit* edit = baseline.edits + edit_index;
         if (edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD)
         {
-            baseline_traffic[edit->subject] += 1;
+            u32 edit_weight = instruction_weights[machine_point_instruction(edit->point)];
+            baseline_traffic[edit->subject] += edit_weight;
+            baseline_traffic_counts[edit->subject] += 1;
+            baseline_traffic_total += edit_weight;
         }
     }
     // Priority walk. The heap orders by weight; each candidate takes the
@@ -207,15 +256,23 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     u32 heap_count = 0;
     for (u32 register_index = 0; register_index < register_count && heap_count < MACHINE_QUALITY_MAXIMUM_CANDIDATES; register_index += 1)
     {
-        // The threshold is the break-even point: fewer touches than this
-        // and the push/pop pair costs more than the memory traffic saved.
-        // A pin must remove more memory operations than the push and pop
-        // it adds, so the value has to have cost the local scan at least
-        // three. Priority is the measured traffic, not the guess. The pin
-        // file is general callee-saved registers, so only general-class
-        // values may enter candidacy: on System V no vector register
-        // survives a call, and a vector pinned to a general register would
-        // be a class miscompile.
+        // The threshold is the break-even point: a pin must remove more
+        // memory traffic than it costs. A value whose raw count reaches
+        // three pays for a callee-saved push/pop the way stage 8 priced
+        // it. Below that the value is marginal: its bar is frequency —
+        // one in-loop edit clears the same weighted three — but it may
+        // only take a caller-saved pin register in the walk below, where
+        // the reservation costs no prologue and a span crossing a call
+        // can never bind, because calls foreclose the whole caller-saved
+        // file. The unrestricted weighted form re-created the
+        // threshold-2 loss of 2026-08-10l at scale (+6,865 pins, +284M
+        // on the frozen stage): a static loop is not evidence the loop
+        // runs, so a marginal pin may only take a register that is free.
+        // Priority is the measured weighted traffic, not a guess. The
+        // pin file is general registers, so only general-class values
+        // may enter candidacy: on System V no vector register survives a
+        // call, and a vector pinned to a general register would be a
+        // class miscompile.
         if (disqualified[register_index] || interval_starts[register_index] == UINT32_MAX || baseline_traffic[register_index] < 3 ||
             function->virtual_registers[register_index].register_class != MACHINE_REGISTER_CLASS_GENERAL)
         {
@@ -226,6 +283,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             .start = interval_starts[register_index],
             .end = interval_ends[register_index],
             .weight = baseline_traffic[register_index],
+            .marginal = baseline_traffic_counts[register_index] < 3,
         };
         heap_count += 1;
     }
@@ -233,7 +291,6 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     {
         machine_quality_heap_sift(heap, heap_count, root - 1);
     }
-    u32 baseline_traffic_total = baseline.reload_count + baseline.spill_count;
     if (!heap_count || !function->instruction_count)
     {
         scratch_end(scratch);
@@ -392,6 +449,24 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             heap_count -= 1;
             heap[0] = heap[heap_count];
             machine_quality_heap_sift(heap, heap_count, 0);
+            // A marginal candidate almost always dies on the call-crossing
+            // check in call-dense code, and its foreclosure probes are O(1)
+            // where the budget walk below is O(span): reject it on the
+            // prefixes first. Outcome-neutral — every acceptance condition
+            // must hold and none mutates state before a pin lands.
+            if (candidate.marginal)
+            {
+                bool caller_saved_open = false;
+                for (u32 file_index = quality_pin_count; file_index < attempt_file_count && !caller_saved_open; file_index += 1)
+                {
+                    u32 const* prefix = foreclosure_prefix + (u64)attempt_file[file_index] * (function->instruction_count + 1);
+                    caller_saved_open = prefix[candidate.end + 1] == prefix[candidate.start];
+                }
+                if (!caller_saved_open)
+                {
+                    continue;
+                }
+            }
             // The budget is register-independent, so a candidate that
             // would leave any covered instruction without its spare is
             // dropped before any register is probed.
@@ -404,7 +479,11 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             {
                 continue;
             }
-            for (u32 file_index = 0; file_index < attempt_file_count; file_index += 1)
+            // A marginal candidate starts past the callee-saved prefix:
+            // caller-saved registers only, so it costs no prologue save,
+            // and in the degraded attempt — whose file is the prefix
+            // alone — it never pins at all.
+            for (u32 file_index = candidate.marginal ? quality_pin_count : 0; file_index < attempt_file_count; file_index += 1)
             {
                 u32 pin_register = attempt_file[file_index];
                 if (assigned_counts[file_index] == BUSTER_ARRAY_LENGTH(assigned_starts[0]))
@@ -478,11 +557,15 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             }
         }
         MachineStackPlacement placement = machine_fast_placement_build_prepassed(arena, function, &prepass, pinned_registers, pinned_mask, pin_active_masks);
-        // Accept only on modeled improvement: the traffic removed has to
-        // beat the push and pop each newly reserved callee-saved register
-        // costs at entry — a caller-saved pin costs no prologue — and a
-        // pin also raises local pressure, which can add traffic
-        // elsewhere.
+        // Accept only on modeled improvement, in the same weighted units
+        // the candidacy used: both placements' spill and reload edits are
+        // priced by the frequency class of the block they land in, so a
+        // placement that moves traffic out of a loop and into the entry
+        // path wins even at an equal count, and one that does the reverse
+        // is rejected. The prologue push/pop pair each newly reserved
+        // callee-saved register costs executes once per call and stays at
+        // weight one — a caller-saved pin costs no prologue — and a pin
+        // also raises local pressure, which can add traffic elsewhere.
         u32 baseline_saved_registers = 0;
         for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
         {
@@ -494,7 +577,15 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             placement_saved_registers += (placement.callee_saved_mask >> physical_register) & 1u;
         }
         u32 added_prologue_cost = 2 * (placement_saved_registers - BUSTER_MIN(placement_saved_registers, baseline_saved_registers));
-        u32 placement_traffic_total = placement.reload_count + placement.spill_count;
+        u64 placement_traffic_total = 0;
+        for (u32 edit_index = 0; placement.valid && edit_index < placement.edit_count; edit_index += 1)
+        {
+            MachineEdit* edit = placement.edits + edit_index;
+            if (edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD)
+            {
+                placement_traffic_total += instruction_weights[machine_point_instruction(edit->point)];
+            }
+        }
         if (!placement.valid || placement_traffic_total + added_prologue_cost >= baseline_traffic_total)
         {
             if (!degradable)
