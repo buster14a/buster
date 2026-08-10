@@ -3052,7 +3052,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         compiler_driver_parse_arguments(c_vector_target_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_vector_baseline_command_line));
     CompilerDriverResult c_vector_baseline = compiler_driver_execute_invocation(c_vector_target_arena, c_vector_baseline_invocation);
     BUSTER_TEST(arguments, c_vector_baseline.error == COMPILER_DRIVER_ERROR_NONE);
-    BUSTER_TEST(arguments, c_vector_baseline.codegen_statistics.split_vector_operation_count == 6);
+    BUSTER_TEST(arguments, c_vector_baseline.codegen_statistics.split_vector_operation_count == 9);
     BUSTER_TEST(arguments, c_vector_baseline.codegen_statistics.vzeroupper_count == 0);
     BUSTER_TEST(arguments, c_vector_baseline.codegen_statistics.forwarded_wide_vector_load_count == 0);
     u64 c_vector_baseline_native_operations = c_vector_baseline.codegen_statistics.native_vector_operation_count;
@@ -3066,7 +3066,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         compiler_driver_parse_arguments(c_vector_target_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_vector_avx2_command_line));
     CompilerDriverResult c_vector_avx2 = compiler_driver_execute_invocation(c_vector_target_arena, c_vector_avx2_invocation);
     BUSTER_TEST(arguments, c_vector_avx2.error == COMPILER_DRIVER_ERROR_NONE);
-    BUSTER_TEST(arguments, c_vector_avx2.codegen_statistics.split_vector_operation_count == 4);
+    BUSTER_TEST(arguments, c_vector_avx2.codegen_statistics.split_vector_operation_count == 7);
     BUSTER_TEST(arguments, c_vector_avx2.codegen_statistics.native_vector_operation_count == c_vector_baseline_native_operations + 2);
     BUSTER_TEST(arguments, c_vector_avx2.codegen_statistics.vzeroupper_count == 1);
     BUSTER_TEST(arguments, c_vector_avx2.codegen_statistics.forwarded_wide_vector_load_count == 1);
@@ -3082,9 +3082,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     CompilerDriverResult c_vector_avx512 = compiler_driver_execute_invocation(c_vector_target_arena, c_vector_avx512_invocation);
     BUSTER_TEST(arguments, c_vector_avx512.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, c_vector_avx512.codegen_statistics.split_vector_operation_count == 0);
-    BUSTER_TEST(arguments, c_vector_avx512.codegen_statistics.native_vector_operation_count == c_vector_avx2_native_operations + 4);
-    BUSTER_TEST(arguments, c_vector_avx512.codegen_statistics.vzeroupper_count == 3);
-    BUSTER_TEST(arguments, c_vector_avx512.codegen_statistics.forwarded_wide_vector_load_count == 3);
+    BUSTER_TEST(arguments, c_vector_avx512.codegen_statistics.native_vector_operation_count == c_vector_avx2_native_operations + 7);
+    BUSTER_TEST(arguments, c_vector_avx512.codegen_statistics.vzeroupper_count == 5);
+    BUSTER_TEST(arguments, c_vector_avx512.codegen_statistics.forwarded_wide_vector_load_count == 4);
     BUSTER_TEST(arguments, arena_destroy(c_vector_target_arena, 1));
     if (c_vector.error == COMPILER_DRIVER_ERROR_NONE)
     {

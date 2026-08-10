@@ -2149,9 +2149,16 @@ void x64_emit_vector_native_binary_operation(X64Builder* builder, u8 prefix, u8 
     u8 packed_prefix = prefix == 0x66 ? 1 : 0;
     if (size == 64)
     {
+        // The EVEX forms of vpaddq/vpsubq and the packed-double arithmetic
+        // are W1 in the SDM, and Zen 4 raises #UD on their W0 encodings
+        // (measured; llvm-mc calls them invalid too), so W is set exactly
+        // where a form demands it. The legacy-SSE and VEX paths below have
+        // no W to get wrong: their D4/FB forms decode unconditionally.
+        bool wide_form = opcode == 0xd4 || opcode == 0xfb ||
+                         (packed_prefix && (opcode == 0x58 || opcode == 0x5c || opcode == 0x59 || opcode == 0x5e));
         codegen_emit_u8(&builder->buffer, 0x62);
         codegen_emit_u8(&builder->buffer, base >= X64_REGISTER_R8 ? 0xd1 : 0xf1);
-        codegen_emit_u8(&builder->buffer, (u8)(0x7c | packed_prefix));
+        codegen_emit_u8(&builder->buffer, (u8)((wide_form ? 0x80 : 0) | 0x7c | packed_prefix));
         codegen_emit_u8(&builder->buffer, 0x48);
     }
     else if (base >= X64_REGISTER_R8)

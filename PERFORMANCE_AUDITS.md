@@ -12,6 +12,174 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-11d` (Linux x86_64, Zen 4 7940HS; the merged-tree re-baseline the
+stage-9 and stage-10 entries both demanded, plus two of stage 10's recorded
+leftovers: 64-bit-lane VBINARY, and union-with-vector locals. The VBINARY
+hunt found that **the canonical emitter's 512-bit vpaddq/vpsubq and the
+packed-double arithmetic have been emitted with EVEX.W0, and Zen 4 raises
+#UD on those encodings** — a latent canonical miscompile for every 64-byte
+vector with 64-bit lanes that no fixture covered; fixed with the W bit set
+exactly where the SDM demands it, and gated by a new executing
+differential and fixture lanes chosen to carry across bit 32. **Merged-tree
+baselines (frozen `df11728` ide.c, same-session absolute paths): stage
+compiles FAST `40.0248G` / QUALITY `39.2505G`, stage text 18,254,016 /
+17,937,360, compile cost canonical `5.7077G` / fast `7.2241G` / quality
+`9.3556G`; scalar corpus FAST `91,322,243` / QUALITY `82,123,447` / clang
+-O2 `42,737,499`; vector corpus MIR_STACK `237,124,007` / FAST
+`106,691,253` / QUALITY `103,155,456` / clang -O2 -march=native
+`30,220,921`.**)
+
+- **The merged tree re-measured, as both entries required.** The corpus
+  driver reproduces `10m`/`10o` to within a few instructions (FAST
+  `91,322,243` against `10o`'s recorded `91,322,244`), so the scalar
+  corpus is genuinely unmoved by the merge, and the vector corpus QUALITY
+  lands on `103,155,456` — the digit `10o` recorded — confirming `10n`'s
+  body-by-body finding that scheduling has nothing to move there. The
+  interaction the entries could not measure is in quality-mode compile
+  cost: `9.3556G` against `10n`'s `9.3207G`, because stage 9's second
+  placements are now also paid on the kernels' newly vector-selecting
+  functions (frozen-tree QUALITY schedules 208 / keeps 183 against
+  `10n`'s 207/182; traffic reloads 51,660 / spills 81,700 / remats 4,457
+  / pins 7,939). FAST frozen traffic: 84,868 / 102,264 / remats 9,174.
+  Frozen census: 30 fallbacks in both modes. Stage-compile absolutes are
+  not comparable across sessions — the workload is invoked by absolute
+  path, so the session's directory length shifts the lexed bytes; the
+  reference block below is what the next audit compares against, taken in
+  one session with everything else.
+- **W0 is not a relaxed W1: the hardware probe.** The SDM lists
+  vpaddq/vpsubq as EVEX.W1-only, and this vocabulary's uniform-W0 claim
+  was tested before touching anything: a SIGILL-guarded probe executing
+  the exact byte sequences shows Zen 4 **#UDs W0 D4, W0 FB, and W0
+  66-prefixed 58** (register and mem+disp32 forms alike), while the W1
+  forms execute as the qword operations; `llvm-mc` calls the W0 bytes an
+  invalid encoding. So the machine path's 64-bit lanes could never have
+  shipped W0 — and the canonical native path had already been emitting
+  exactly those bytes at `codegen.c`'s `x64_emit_vector_native_binary_operation`
+  for u64/s64 lanes (D4/FB) and f64 lanes (66-prefixed 58/5C/59/5E) at
+  512 bits. Nothing executed them: `basic_c_vector.c` carried only int
+  and byte lanes at 64 bytes, which is the whole reason the bug was
+  invisible. The 16-byte legacy-SSE and 32-byte VEX paths have no W to
+  get wrong.
+- **The fix, in one place per path.** The canonical emitter derives the W
+  bit from the form (`D4`/`FB` always; `58/5C/59/5E` only under the 66
+  prefix), which covers the canonical module path and the buster-language
+  backend through their shared helper. The machine path's VBINARY row
+  carries the wide bit in payload bit 8 — the FARITH convention — set by
+  selection for 64-bit lanes, and `machine_x64_emit_evex` gained the W
+  parameter (false at every other call site: the rest of the vocabulary
+  is genuinely W0/WIG). The 64-bit-lane VBINARY forms now select instead
+  of rejecting; the bitwise trio stays W0 (`vpandd` and friends decode
+  for any lane width).
+- **Coverage that would have caught it.** `machine_test`'s vector corpus
+  gained `vqarith` — a u64x8 add/subtract/xor/and loop — selected,
+  verified, placed, encoded, and run through the four-mode executing
+  differential whose oracle is the canonical NONE path, so the oracle's
+  own W1 forms execute too. `tests/basic_c_vector.c` gained a `Long8`
+  section whose lane zero carries across bit 32 in the sum and borrows
+  across it in the difference — a dword-lane interpretation cannot pass —
+  executed natively by the driver test and compiled at every march with
+  the statistic assertions updated (baseline splits 6→9, haswell 4→7,
+  znver5 natives +7, vzeroupper 5, forwarded 4).
+- **Union-with-vector locals: canonical measured first, then mirrored.**
+  What the canonical frame layout actually does with an over-aligned
+  local was probed, not assumed: for *any* local whose IrValue alignment
+  exceeds sixteen — `basic_c_simd.c`'s `Lanes` union and plain `Simd512`
+  locals alike, since the C frontend stamps every local with its type's
+  layout alignment — canonical allocates `size + alignment - 1` raw
+  bytes and emits lea/add/and at the LOCAL instruction, storing a
+  runtime-aligned pointer through which every access then indirects
+  (`codegen.c`'s `aligned_local_offsets` and the `alignment > 16`
+  indirect-place tests). **`10o`'s claim that the canonical frame layout
+  "clamps vector alignment to sixteen" is wrong about locals** — the
+  record stands corrected here. The machine path now mirrors the
+  indirect shape for over-aligned non-vector locals: classification
+  gives them a padded slot deliberately kept out of `value_stack_slots`
+  plus a GENERAL vreg holding the aligned pointer, the LOCAL row emits
+  LEA_FRAME(+alignment-1) / MOV_RI(-alignment) / AND64, and every
+  consumer dispatches down the same pointer paths a GLOBAL's address
+  already takes — so a missed consumer can only fall back, never read
+  the padded slot as data. Promotion now runs before the alignment
+  check: a promotable over-aligned local promotes, its alignment
+  unobservable without an address.
+- **The vector-local clamp stays, and the divergence is now recorded.**
+  Stage 10's sixteen-byte clamp for `IR_TYPE_VECTOR` locals is kept: all
+  machine vector accesses are unaligned forms, the kernels' vector locals
+  promote anyway, and re-routing them through the indirect shape would
+  tax exactly the slots stage 10 measured. The honest cost is that a
+  non-promoted machine-path vector local sits at a sixteen-aligned slot
+  where canonical hands out a 64-aligned address — observable only by a
+  program inspecting the address. The new `vunion` differential returns
+  `(u64)&lanes & 63` alongside member reads and writes, so the union
+  path's alignment contract *is* executed under all four modes against
+  the canonical oracle.
+- **What moved, measured.** On the frozen workload nothing did, by
+  construction: census stays 30 in both modes (`ide.c` has no
+  union-with-vector locals or 64-bit-lane vector arithmetic), traffic and
+  placements are unchanged, canonical output is byte-identical to the
+  pre-change compiler's, and the mode costs pay for the new dispatch
+  tests alone — fast `7.2269G` (`+0.04%`), quality `9.3584G` (`+0.03%`),
+  canonical flat. Stage text grows +9,792 FAST / +9,600 QUALITY of new
+  selection code. `basic_c_simd.c`'s FAST census keeps 4 fallbacks but
+  the LOCAL rejection is gone — the union function now walks past its
+  local and stops at its vector-ABI CALL, which is the recorded remaining
+  frontier. Corpus numbers repeat to the digit.
+- **A methodology trap, paid and recorded.** The first soak comparison
+  ran the stages with absolute paths and all three "failed": the
+  self-host reference stages are built with repo-relative paths, so
+  `__FILE__` spellings and DWARF paths differ and the bytes legitimately
+  part. Soak stage compiles must use the exact repo-relative self-host
+  invocation; with it, all three modes are byte-identical.
+- **Gates, every commit:** test_all green (29,125 unit assertions, 32
+  modules, including the new W1 differentials and the union executing
+  differential), self-host fixed point deterministic on the rebased tree
+  (`SELF_HOST deterministic bytes=31949472`, with `2026-08-11`'s
+  machine-stage bench edge passing over this entry's selector), all three
+  soaks — MIR_STACK, FAST, QUALITY — byte-identical against the freshly
+  rebuilt `build/self-host/Release/ide-stage2`, the frozen-tree canonical
+  outputs byte-identical between the pre-change and post-change compilers
+  and between the compiler and both stages, `test_all_combinations_ci`
+  green before the push.
+- **Left untaken, in causal order — updated at rebase time.** The `ide
+  bench` machine-path miscompile (`10o`) was fixed concurrently and
+  merged mid-session (`2026-08-11` and `2026-08-11b` below, PRs
+  261/262); this entry rebased onto that main, so its reference block
+  describes the combined tree — the zero-fill rows move the
+  machine-built stages, and the stage compiles, stage text, and
+  machine-mode costs below were re-taken after the rebase, while the
+  corpus numbers and canonical cost reproduced unchanged. This entry
+  then rebased a second time onto a main that had, concurrently,
+  already taken the zmm16-31 widening (`2026-08-11c`), the System V
+  vector ABI (`2026-08-11i`), the a64 promotion port (`2026-08-11a`),
+  frequency-aware pin economics (`2026-08-11f`), and the remaining
+  non-vector selection gaps (`2026-08-11g`) — read those, not this
+  paragraph, for their own numbers; none of that work's measurements
+  are included in this entry's reference block above, which stays a
+  description of this entry's own tree at its first landing. The union
+  function's vector-ABI stopping point named below is therefore already
+  gone (lifted by `2026-08-11i`). The vector-local address-alignment
+  divergence recorded
+  above is still live: the one place the machine path knowingly differs
+  from canonical, worth folding into the indirect mechanism only if a
+  real program is ever found observing those addresses.
+- Reference points for the next audit, frozen `df11728` ide.c as the
+  workload (same-session invocation, absolute paths), taken on the
+  post-rebase tree that combines this entry with the `2026-08-11`
+  zero-fill fix — the zero-fill rows account for nearly all the movement
+  over the pre-rebase figures quoted in the bullets above (stage text
+  +452K, stage compiles +584M, machine-mode costs +67M fast / +244M
+  quality; canonical and both corpora byte- and digit-identical across
+  the rebase): **FAST stage `40.6088G`, QUALITY stage `39.8348G`**,
+  stage text 18,715,976 / 18,396,008, compile cost canonical `5.7076G`
+  / fast `7.2945G` / quality `9.6022G`, frozen census 30 both modes,
+  QUALITY traffic reloads 51,705 / spills 81,705 / remats 4,500 / pins
+  7,947 / scheduled 209 / kept 184; FAST 84,978 / 102,295 / remats
+  9,221. Scalar corpus: FAST `91,322,243`, QUALITY `82,123,446`, clang
+  `42,737,499`. Vector corpus: MIR_STACK `237,124,007`, **FAST
+  `106,691,255`**, **QUALITY `103,155,458`**, clang `30,220,921`.
+  Corpus-driver traffic: scalar FAST 71/88, QUALITY 33/53 with 20 pins;
+  vector MIR 987/883, FAST 70/90, QUALITY 62/79 with 5 pins (driver
+  files, not the bare fixtures).
+
 `2026-08-11f` (Linux x86_64, Zen 4 7940HS; frequency-aware pin economics —
 the lever `2026-08-10l` and `2026-08-10n`/`2026-08-10o` both named:
 `MachineBlock.frequency_class` populated and QUALITY's pin economics priced

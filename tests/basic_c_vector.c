@@ -10,6 +10,8 @@ typedef int Int16 __attribute__((vector_size(64)));
 
 typedef signed char Byte64 __attribute__((vector_size(64)));
 
+typedef unsigned long long Long8 __attribute__((vector_size(64)));
+
 typedef struct VectorPair
 {
     Float4 left;
@@ -51,6 +53,12 @@ typedef union ByteVectorStorage
     Byte64 vector;
     signed char lanes[64];
 } ByteVectorStorage;
+
+typedef union LongVectorStorage
+{
+    Long8 vector;
+    unsigned long long lanes[8];
+} LongVectorStorage;
 
 Float4 vector_identity(Float4 value)
 {
@@ -97,6 +105,10 @@ int main(void)
     ByteVectorStorage byte_left = {0};
     ByteVectorStorage byte_right = {0};
     ByteVectorStorage byte_sum = {0};
+    LongVectorStorage long_left = {0};
+    LongVectorStorage long_right = {0};
+    LongVectorStorage long_sum = {0};
+    LongVectorStorage long_difference = {0};
     input.lanes[0] = 1.25f;
     input.lanes[1] = 2.5f;
     input.lanes[2] = 3.75f;
@@ -141,6 +153,16 @@ int main(void)
     byte_right.lanes[0] = 4;
     byte_right.lanes[63] = 13;
     byte_sum.vector = byte_right.vector + (byte_left.vector + byte_right.vector);
+    // 64-bit lanes at 64 bytes: the one shape whose native EVEX forms are
+    // W1-only (vpaddq/vpsubq) — a W0 encoding here #UDs on real hardware.
+    // Lane zero carries across bit 32 in the sum and borrows across it in
+    // the difference, so a dword-lane interpretation cannot pass either.
+    long_left.lanes[0] = 0xffffffffull;
+    long_left.lanes[7] = 23;
+    long_right.lanes[0] = 1;
+    long_right.lanes[7] = 29;
+    long_sum.vector = long_right.vector + (long_left.vector + long_right.vector);
+    long_difference.vector = long_sum.vector - long_left.vector;
     float indexed = input.vector[2];
     input.vector[2] = indexed + 1.0f;
     int result = 0;
@@ -224,5 +246,13 @@ int main(void)
         return 35;
     if (byte_sum.lanes[63] != 37)
         return 36;
+    if (long_sum.lanes[0] != 0x100000001ull)
+        return 37;
+    if (long_sum.lanes[7] != 81)
+        return 38;
+    if (long_difference.lanes[0] != 2)
+        return 39;
+    if (long_difference.lanes[7] != 58)
+        return 40;
     return result;
 }

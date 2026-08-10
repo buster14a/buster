@@ -80,6 +80,13 @@ struct MachineX64Selector
     // Per IrValue: virtual register index, stack slot index, or UINT32_MAX.
     u32* value_virtual_registers;
     u32* value_stack_slots;
+    // Per IrValue: the padded raw-storage slot of an over-aligned local, or
+    // UINT32_MAX. Such a local mirrors the canonical frame layout: its
+    // virtual register holds a runtime-aligned pointer into this slot, the
+    // slot itself stays out of value_stack_slots so no consumer can read it
+    // as data, and every access dispatches down the same pointer paths a
+    // GLOBAL's address takes.
+    u32* value_indirect_slots;
     // Result value per argument index, captured at entry before any scratch
     // register can clobber the incoming fixed registers; IR_ID_UNDERLYING_INVALID
     // when the function has no such argument.
@@ -467,6 +474,15 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_append_slot(MachineX64Selector* selector, u3
     return slot_index;
 }
 
+// Mirrors the canonical emitter's indirect-place test: an over-aligned
+// local's virtual register holds a runtime-aligned pointer, so the local
+// reads and writes exactly like a GLOBAL's address, never like a direct
+// frame slot and never like a promoted register value.
+BUSTER_GLOBAL_LOCAL bool machine_x64_local_is_indirect(MachineX64Selector* selector, IrValueId value)
+{
+    return value.value < selector->function->value_count && selector->value_indirect_slots[value.value] != UINT32_MAX;
+}
+
 // Emits the row computing the address (or pointer value) of `base` into
 // `destination_register` and defines it: a direct local's frame-slot
 // address, or a copy of any vreg-held value — mirroring the canonical
@@ -489,12 +505,14 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_place_address_offset(MachineX64Selec
     }
     IrInstruction* definition = function->instructions + value->definition.value;
     u32 slot = selector->value_stack_slots[base.value];
-    if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[base.value] != UINT32_MAX)
+    if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[base.value] != UINT32_MAX &&
+        !machine_x64_local_is_indirect(selector, base))
     {
         // A promoted local has no address. The promotability scan proved
         // no use needs one, so a request here is a selector hole — refuse
         // to the canonical fallback rather than hand a register's value
-        // out as an address.
+        // out as an address. An over-aligned local's register is the
+        // aligned pointer itself and falls through to the pointer path.
         return false;
     }
     // An array or vector *value* is its storage, exactly like the
@@ -658,7 +676,39 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     {
         // Direct locals produce no code: the stack slot recorded during
         // classification is the storage, exactly like the canonical path —
-        // or, promoted, the virtual register is.
+        // or, promoted, the virtual register is. An over-aligned local
+        // computes its runtime-aligned pointer here, the same lea/add/and
+        // the canonical emitter runs at its LOCAL instruction.
+        u32 indirect_slot = selector->value_indirect_slots[instruction->result.value];
+        if (indirect_slot != UINT32_MAX)
+        {
+            u32 pointer_register = selector->value_virtual_registers[instruction->result.value];
+            IrValue* local_value = function->values + instruction->result.value;
+            IrType* local_type = ir_type_from_id(&program->types, local_value->canonical_type);
+            u32 local_alignment = BUSTER_MAX(BUSTER_MAX(local_value->alignment, local_type ? local_type->layout.alignment : 0), 8u);
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
+                                                                        machine_ref_make(MACHINE_REF_STACK_SLOT, indirect_slot)},
+                                                           .payload = local_alignment - 1,
+                                                           .opcode = MACHINE_X64_LEA_FRAME,
+                                                       });
+            machine_x64_define(selector, pointer_register, row);
+            u32 mask_register = machine_x64_synthesize_register(selector);
+            u32 immediate_index = selector->immediates.total_count;
+            u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+            *immediate_row = 0 - (u64)local_alignment;
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register),
+                                                              machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
+                                                 .opcode = MACHINE_X64_MOV_RI,
+                                             });
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register)},
+                                                 .opcode = MACHINE_X64_AND64,
+                                             });
+            return true;
+        }
         return selector->value_stack_slots[instruction->result.value] != UINT32_MAX ||
                selector->value_virtual_registers[instruction->result.value] != UINT32_MAX;
     }
@@ -1014,9 +1064,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         {
             // Element-wise integer vector binary as one three-address EVEX
             // row; the payload carries the 66 0F map opcode the canonical
-            // native path picks by operation and lane width. The 64-bit
-            // lanes stay outside the subset: their EVEX forms are W1 where
-            // everything this vocabulary emits is W0.
+            // native path picks by operation and lane width, and bit 8
+            // marks the 64-bit-lane forms whose EVEX encodings are W1
+            // (vpaddq/vpsubq — their W0 encodings #UD on real hardware).
             if (!machine_x64_type_is_vector_register(operand_type) || !machine_x64_simd_supported(selector->target, IR_SIMD_SPLAT_BYTE))
             {
                 return false;
@@ -1031,10 +1081,18 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             {
                 break;
             case IR_BINARY_VECTOR_INTEGER_ADD:
-                vector_opcode = element->bit_width == 8 ? 0xfcu : element->bit_width == 16 ? 0xfdu : element->bit_width == 32 ? 0xfeu : 0;
+                vector_opcode = element->bit_width == 8    ? 0xfcu
+                                : element->bit_width == 16 ? 0xfdu
+                                : element->bit_width == 32 ? 0xfeu
+                                : element->bit_width == 64 ? (0xd4u | 0x100u)
+                                                           : 0;
                 break;
             case IR_BINARY_VECTOR_INTEGER_SUBTRACT:
-                vector_opcode = element->bit_width == 8 ? 0xf8u : element->bit_width == 16 ? 0xf9u : element->bit_width == 32 ? 0xfau : 0;
+                vector_opcode = element->bit_width == 8    ? 0xf8u
+                                : element->bit_width == 16 ? 0xf9u
+                                : element->bit_width == 32 ? 0xfau
+                                : element->bit_width == 64 ? (0xfbu | 0x100u)
+                                                           : 0;
                 break;
             case IR_BINARY_VECTOR_INTEGER_BITWISE_AND:
                 vector_opcode = 0xdbu;
@@ -1579,7 +1637,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                 return true;
             }
             if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-                definition->opcode == IR_OPCODE_FIELD)
+                definition->opcode == IR_OPCODE_FIELD || machine_x64_local_is_indirect(selector, instruction->operands[0]))
             {
                 u32 address_register;
                 if (!machine_x64_operand_register(selector, instruction->operands[0], &address_register))
@@ -1611,7 +1669,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             {
                 return false;
             }
-            if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[instruction->operands[0].value] != UINT32_MAX)
+            if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[instruction->operands[0].value] != UINT32_MAX &&
+                !machine_x64_local_is_indirect(selector, instruction->operands[0]))
             {
                 if (result_register == selector->value_virtual_registers[instruction->operands[0].value])
                 {
@@ -1639,7 +1698,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                 return true;
             }
             if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-                definition->opcode == IR_OPCODE_FIELD)
+                definition->opcode == IR_OPCODE_FIELD || machine_x64_local_is_indirect(selector, instruction->operands[0]))
             {
                 u32 address_register;
                 if (!machine_x64_operand_register(selector, instruction->operands[0], &address_register))
@@ -1656,7 +1715,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             }
             return false;
         }
-        if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[instruction->operands[0].value] != UINT32_MAX)
+        if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[instruction->operands[0].value] != UINT32_MAX &&
+            !machine_x64_local_is_indirect(selector, instruction->operands[0]))
         {
             if (result_register == selector->value_virtual_registers[instruction->operands[0].value])
             {
@@ -1684,7 +1744,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             return true;
         }
         if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-            definition->opcode == IR_OPCODE_FIELD)
+            definition->opcode == IR_OPCODE_FIELD || machine_x64_local_is_indirect(selector, instruction->operands[0]))
         {
             u32 address_register;
             if (!machine_x64_operand_register(selector, instruction->operands[0], &address_register))
@@ -1771,7 +1831,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                 return true;
             }
             if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-                definition->opcode == IR_OPCODE_FIELD)
+                definition->opcode == IR_OPCODE_FIELD || machine_x64_local_is_indirect(selector, instruction->operands[0]))
             {
                 u32 address_register;
                 if (!machine_x64_operand_register(selector, instruction->operands[0], &address_register))
@@ -1803,7 +1863,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             {
                 return false;
             }
-            if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[instruction->operands[0].value] != UINT32_MAX)
+            if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[instruction->operands[0].value] != UINT32_MAX &&
+                !machine_x64_local_is_indirect(selector, instruction->operands[0]))
             {
                 u32 place_register = selector->value_virtual_registers[instruction->operands[0].value];
                 u32 row = machine_x64_select_row(selector, (MachineInstruction){
@@ -1824,7 +1885,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                 return true;
             }
             if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-                definition->opcode == IR_OPCODE_FIELD)
+                definition->opcode == IR_OPCODE_FIELD || machine_x64_local_is_indirect(selector, instruction->operands[0]))
             {
                 u32 address_register;
                 if (!machine_x64_operand_register(selector, instruction->operands[0], &address_register))
@@ -1845,7 +1906,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         {
             return false;
         }
-        if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[instruction->operands[0].value] != UINT32_MAX)
+        if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[instruction->operands[0].value] != UINT32_MAX &&
+            !machine_x64_local_is_indirect(selector, instruction->operands[0]))
         {
             // Promoted local: the store is a full-width register copy —
             // the same 64-bit image a direct-slot store writes, since the
@@ -1874,7 +1936,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             return true;
         }
         if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-            definition->opcode == IR_OPCODE_FIELD)
+            definition->opcode == IR_OPCODE_FIELD || machine_x64_local_is_indirect(selector, instruction->operands[0]))
         {
             u32 address_register;
             if (!machine_x64_operand_register(selector, instruction->operands[0], &address_register))
@@ -2808,6 +2870,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .builder = machine_function_builder_begin(arena),
         .value_virtual_registers = arena_allocate(arena, u32, function->value_count),
         .value_stack_slots = arena_allocate(arena, u32, function->value_count),
+        .value_indirect_slots = arena_allocate(arena, u32, function->value_count),
         .target = target,
         .supported = true,
         .failed_opcode = IR_OPCODE_COUNT,
@@ -2834,6 +2897,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     {
         selector.value_virtual_registers[value_index] = UINT32_MAX;
         selector.value_stack_slots[value_index] = UINT32_MAX;
+        selector.value_indirect_slots[value_index] = UINT32_MAX;
     }
     for (u32 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(selector.argument_values); argument_index += 1)
     {
@@ -3065,7 +3129,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 {
                     local_alignment = BUSTER_MIN(local_alignment, 16u);
                 }
-                if (!local_type || !local_type->layout.resolved || local_alignment > 16 || local_type->layout.size > UINT32_MAX - 7)
+                if (!local_type || !local_type->layout.resolved || local_type->layout.size > UINT32_MAX - 7)
                 {
                     machine_x64_reject(&selector, instruction->opcode);
                     break;
@@ -3077,13 +3141,37 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     // and stores lower to copies, and its definition point
                     // is patched at the first store like any other
                     // classification vreg. Vector locals promote into the
-                    // vector class.
+                    // vector class. Promotion also covers over-aligned
+                    // locals: the scan proved no use needs the address, so
+                    // the declared alignment is unobservable.
                     selector.value_virtual_registers[instruction->result.value] =
                         machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
                                                                                 .definition_point = MACHINE_POINT_INVALID,
                                                                                 .register_class = promotable_locals[instruction->result.value] == 64
                                                                                                       ? MACHINE_REGISTER_CLASS_VECTOR
                                                                                                       : MACHINE_REGISTER_CLASS_GENERAL,
+                                                                                .typed_origin = instruction->result.value,
+                                                                            });
+                    continue;
+                }
+                if (local_alignment > 16)
+                {
+                    // Over-aligned local, the canonical frame layout's
+                    // shape exactly: a padded raw slot and a pointer
+                    // aligned into it at runtime by the LOCAL's own rows.
+                    // The slot stays out of value_stack_slots so every
+                    // consumer takes the pointer paths a GLOBAL takes.
+                    if (local_type->layout.size > UINT32_MAX - 7 - local_alignment)
+                    {
+                        machine_x64_reject(&selector, instruction->opcode);
+                        break;
+                    }
+                    selector.value_indirect_slots[instruction->result.value] =
+                        machine_x64_append_slot(&selector, (u32)((local_type->layout.size + local_alignment - 1 + 7) & ~(u64)7), 8u);
+                    selector.value_virtual_registers[instruction->result.value] =
+                        machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
+                                                                                .definition_point = MACHINE_POINT_INVALID,
+                                                                                .register_class = MACHINE_REGISTER_CLASS_GENERAL,
                                                                                 .typed_origin = instruction->result.value,
                                                                             });
                     continue;
@@ -3755,13 +3843,15 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_frame_store(MachineX64Encoder* encoder
 // the reg field's bits 3 and 4, B carries the rm-or-base bit 3, X doubles as
 // the rm bit 4 in register-direct forms — memory bases are general registers
 // and never reach 16, so the same expression leaves X high for them — and
-// V' carries the vvvv bit 4. All forms are L'L=10 and W0.
+// V' carries the vvvv bit 4. All forms are L'L=10; `wide` sets EVEX.W for
+// the forms the SDM defines as W1 only (vpaddq/vpsubq), whose W0 encodings
+// raise #UD on real hardware.
 BUSTER_GLOBAL_LOCAL void machine_x64_emit_evex(MachineX64Encoder* encoder, u8 map, u8 simd_prefix, u8 opcode, u32 reg, u32 vvvv, u32 mask, bool zeroing,
-                                               u32 rm_or_base)
+                                               bool wide, u32 rm_or_base)
 {
     machine_x64_emit8(encoder, 0x62);
     machine_x64_emit8(encoder, (u8)(((reg & 8) ? 0 : 0x80) | ((rm_or_base & 16) ? 0 : 0x40) | ((rm_or_base & 8) ? 0 : 0x20) | ((reg & 16) ? 0 : 0x10) | map));
-    machine_x64_emit8(encoder, (u8)(((~vvvv & 0xf) << 3) | 0x04 | simd_prefix));
+    machine_x64_emit8(encoder, (u8)((wide ? 0x80 : 0) | ((~vvvv & 0xf) << 3) | 0x04 | simd_prefix));
     machine_x64_emit8(encoder, (u8)((zeroing ? 0x80 : 0) | 0x40 | ((vvvv & 16) ? 0 : 0x08) | mask));
     machine_x64_emit8(encoder, opcode);
 }
@@ -3770,7 +3860,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_evex(MachineX64Encoder* encoder, u8 ma
 // size, and mod=00 with an RBP base means RIP-relative.
 BUSTER_GLOBAL_LOCAL void machine_x64_emit_evex_frame(MachineX64Encoder* encoder, u8 map, u8 simd_prefix, u8 opcode, u32 reg, u32 mask, bool zeroing, u32 offset)
 {
-    machine_x64_emit_evex(encoder, map, simd_prefix, opcode, reg, 0, mask, zeroing, 0);
+    machine_x64_emit_evex(encoder, map, simd_prefix, opcode, reg, 0, mask, zeroing, false, 0);
     machine_x64_emit8(encoder, (u8)(0x85 | ((reg & 7) << 3)));
     machine_x64_emit32(encoder, (u32)(0 - (s32)offset));
 }
@@ -3780,7 +3870,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_evex_frame(MachineX64Encoder* encoder,
 BUSTER_GLOBAL_LOCAL void machine_x64_emit_evex_indirect(MachineX64Encoder* encoder, u8 map, u8 simd_prefix, u8 opcode, u32 reg, u32 mask, bool zeroing,
                                                         u32 base)
 {
-    machine_x64_emit_evex(encoder, map, simd_prefix, opcode, reg, 0, mask, zeroing, base);
+    machine_x64_emit_evex(encoder, map, simd_prefix, opcode, reg, 0, mask, zeroing, false, base);
     u32 base_low = base & 7;
     if (base_low == 4)
     {
@@ -3799,9 +3889,9 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_evex_indirect(MachineX64Encoder* encod
 }
 
 BUSTER_GLOBAL_LOCAL void machine_x64_emit_evex_register(MachineX64Encoder* encoder, u8 map, u8 simd_prefix, u8 opcode, u32 reg, u32 vvvv, u32 mask,
-                                                        bool zeroing, u32 rm)
+                                                        bool zeroing, bool wide, u32 rm)
 {
-    machine_x64_emit_evex(encoder, map, simd_prefix, opcode, reg, vvvv, mask, zeroing, rm);
+    machine_x64_emit_evex(encoder, map, simd_prefix, opcode, reg, vvvv, mask, zeroing, wide, rm);
     machine_x64_emit8(encoder, (u8)(0xc0 | ((reg & 7) << 3) | (rm & 7)));
 }
 
@@ -3838,7 +3928,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_vector_frame(MachineX64Encoder* encode
 
 BUSTER_GLOBAL_LOCAL void machine_x64_emit_vector_copy(MachineX64Encoder* encoder, u32 destination_zmm, u32 source_zmm)
 {
-    machine_x64_emit_evex_register(encoder, 1, 3, 0x6f, destination_zmm, 0, 0, false, source_zmm);
+    machine_x64_emit_evex_register(encoder, 1, 3, 0x6f, destination_zmm, 0, 0, false, false, source_zmm);
 }
 
 // [base + disp] addressing for allocated bases. The RSP/R12 encodings
@@ -5061,7 +5151,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 break;
             case MACHINE_X64_VSPLATB:
                 // vpbroadcastb zmm, r32.
-                machine_x64_emit_evex_register(&encoder, 2, 1, 0x7a, operand_registers[0] - MACHINE_X64_ZMM0, 0, 0, false, operand_registers[1]);
+                machine_x64_emit_evex_register(&encoder, 2, 1, 0x7a, operand_registers[0] - MACHINE_X64_ZMM0, 0, 0, false, false, operand_registers[1]);
                 break;
             case MACHINE_X64_VPCMP_MASK:
             {
@@ -5069,35 +5159,35 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 u32 compare_right = operand_registers[2] - MACHINE_X64_ZMM0;
                 if (instruction->payload == 0)
                 {
-                    machine_x64_emit_evex_register(&encoder, 1, 1, 0x74, MACHINE_X64_STAGE_MASK, compare_left, 0, false, compare_right);
+                    machine_x64_emit_evex_register(&encoder, 1, 1, 0x74, MACHINE_X64_STAGE_MASK, compare_left, 0, false, false, compare_right);
                 }
                 else if (instruction->payload == 1)
                 {
                     // vpcmpub with predicate 1: unsigned less-than.
-                    machine_x64_emit_evex_register(&encoder, 3, 1, 0x3e, MACHINE_X64_STAGE_MASK, compare_left, 0, false, compare_right);
+                    machine_x64_emit_evex_register(&encoder, 3, 1, 0x3e, MACHINE_X64_STAGE_MASK, compare_left, 0, false, false, compare_right);
                     machine_x64_emit8(&encoder, 1);
                 }
                 else
                 {
-                    machine_x64_emit_evex_register(&encoder, 2, 1, 0x26, MACHINE_X64_STAGE_MASK, compare_left, 0, false, compare_right);
+                    machine_x64_emit_evex_register(&encoder, 2, 1, 0x26, MACHINE_X64_STAGE_MASK, compare_left, 0, false, false, compare_right);
                 }
                 machine_x64_emit_kmovq_to_general(&encoder, operand_registers[0], MACHINE_X64_STAGE_MASK);
             }
             break;
             case MACHINE_X64_VPMOVB2M:
                 // vpmovb2m has no memory form and its source is the rm.
-                machine_x64_emit_evex_register(&encoder, 2, 2, 0x29, MACHINE_X64_STAGE_MASK, 0, 0, false, operand_registers[1] - MACHINE_X64_ZMM0);
+                machine_x64_emit_evex_register(&encoder, 2, 2, 0x29, MACHINE_X64_STAGE_MASK, 0, 0, false, false, operand_registers[1] - MACHINE_X64_ZMM0);
                 machine_x64_emit_kmovq_to_general(&encoder, operand_registers[0], MACHINE_X64_STAGE_MASK);
                 break;
             case MACHINE_X64_VPERMT2B:
                 machine_x64_emit_kmovq_from_general(&encoder, MACHINE_X64_STAGE_MASK, operand_registers[1]);
                 machine_x64_emit_evex_register(&encoder, 2, 1, 0x7d, operand_registers[0] - MACHINE_X64_ZMM0, operand_registers[2] - MACHINE_X64_ZMM0,
-                                               MACHINE_X64_STAGE_MASK, true, operand_registers[3] - MACHINE_X64_ZMM0);
+                                               MACHINE_X64_STAGE_MASK, true, false, operand_registers[3] - MACHINE_X64_ZMM0);
                 break;
             case MACHINE_X64_VCOMPRESSB:
                 // Register form: rm is the destination and reg the source.
                 machine_x64_emit_kmovq_from_general(&encoder, MACHINE_X64_STAGE_MASK, operand_registers[1]);
-                machine_x64_emit_evex_register(&encoder, 2, 1, 0x63, operand_registers[2] - MACHINE_X64_ZMM0, 0, MACHINE_X64_STAGE_MASK, true,
+                machine_x64_emit_evex_register(&encoder, 2, 1, 0x63, operand_registers[2] - MACHINE_X64_ZMM0, 0, MACHINE_X64_STAGE_MASK, true, false,
                                                operand_registers[0] - MACHINE_X64_ZMM0);
                 break;
             case MACHINE_X64_VPMOVZXBD:
@@ -5109,27 +5199,30 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     // vextracti32x4 xmm, zmm, quarter names its destination
                     // in rm, so the destination doubles as the scratch and
                     // no extra register is needed.
-                    machine_x64_emit_evex_register(&encoder, 3, 1, 0x39, widen_source, 0, 0, false, widen_destination);
+                    machine_x64_emit_evex_register(&encoder, 3, 1, 0x39, widen_source, 0, 0, false, false, widen_destination);
                     machine_x64_emit8(&encoder, (u8)instruction->payload);
                     widen_source = widen_destination;
                 }
-                machine_x64_emit_evex_register(&encoder, 2, 1, 0x31, widen_destination, 0, 0, false, widen_source);
+                machine_x64_emit_evex_register(&encoder, 2, 1, 0x31, widen_destination, 0, 0, false, false, widen_source);
             }
             break;
             case MACHINE_X64_VPSLLD_RI:
                 // vpslld with an immediate: /6, destination in vvvv.
-                machine_x64_emit_evex_register(&encoder, 1, 1, 0x72, 6, operand_registers[0] - MACHINE_X64_ZMM0, 0, false,
+                machine_x64_emit_evex_register(&encoder, 1, 1, 0x72, 6, operand_registers[0] - MACHINE_X64_ZMM0, 0, false, false,
                                                operand_registers[1] - MACHINE_X64_ZMM0);
                 machine_x64_emit8(&encoder, (u8)instruction->payload);
                 break;
             case MACHINE_X64_VPTERNLOGD:
                 machine_x64_emit_evex_register(&encoder, 3, 1, 0x25, operand_registers[0] - MACHINE_X64_ZMM0, operand_registers[1] - MACHINE_X64_ZMM0, 0,
-                                               false, operand_registers[2] - MACHINE_X64_ZMM0);
+                                               false, false, operand_registers[2] - MACHINE_X64_ZMM0);
                 machine_x64_emit8(&encoder, (u8)instruction->payload);
                 break;
             case MACHINE_X64_VBINARY:
+                // Payload bit 8 marks the EVEX.W1 forms (vpaddq/vpsubq), the
+                // same wide-bit convention FARITH uses for its double forms.
                 machine_x64_emit_evex_register(&encoder, 1, 1, (u8)instruction->payload, operand_registers[0] - MACHINE_X64_ZMM0,
-                                               operand_registers[1] - MACHINE_X64_ZMM0, 0, false, operand_registers[2] - MACHINE_X64_ZMM0);
+                                               operand_registers[1] - MACHINE_X64_ZMM0, 0, false, (instruction->payload & 0x100) != 0,
+                                               operand_registers[2] - MACHINE_X64_ZMM0);
                 break;
             case MACHINE_X64_MFENCE:
             {

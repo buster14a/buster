@@ -1330,6 +1330,38 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
            "        b3 = b3 + (salt ^ b2);\n"
            "    }\n"
            "    return total ^ __builtin_buster_simd_sign_byte(b0 ^ b1 ^ b2 ^ b3);\n"
+           "}\n"
+           // 64-bit lanes: vpaddq/vpsubq are the vocabulary's only EVEX.W1
+           // rows, and their W0 encodings #UD on real hardware, so this body
+           // is the differential that keeps both the machine wide bit and
+           // the canonical oracle's W1 forms honest.
+           "typedef u64 Q8 __attribute__((vector_size(64)));\n"
+           "u64 vqarith(const u8* data, u64 rounds) {\n"
+           "    const Q8* row = (const Q8*)(const void*)data;\n"
+           "    Q8 accumulator = row[0];\n"
+           "    Q8 step = row[1];\n"
+           "    Q8 bias = row[2];\n"
+           "    for (u64 round = 0; round < rounds; round += 1) {\n"
+           "        accumulator = (accumulator + step) - bias;\n"
+           "        accumulator = accumulator + (step ^ bias);\n"
+           "        accumulator = accumulator - (step & bias);\n"
+           "    }\n"
+           "    u64 out[8];\n"
+           "    *(Q8*)(void*)out = accumulator;\n"
+           "    return out[0] ^ out[1] ^ out[2] ^ out[3] ^ out[4] ^ out[5] ^ out[6] ^ out[7];\n"
+           "}\n"
+           // A union with a vector member is a 64-byte-aligned local: the
+           // machine path mirrors the canonical over-aligned frame shape
+           // (padded slot, runtime-aligned pointer), and the returned
+           // low address bits assert the alignment actually holds.
+           "typedef union Lanes { V64 vector; u8 bytes[64]; u64 words[8]; } Lanes;\n"
+           "u64 vunion(const u8* data, u64 salt) {\n"
+           "    Lanes lanes;\n"
+           "    lanes.vector = __builtin_buster_simd_load(data);\n"
+           "    lanes.words[0] += salt;\n"
+           "    lanes.bytes[63] = (u8)salt;\n"
+           "    u64 misalignment = (u64)&lanes & 63;\n"
+           "    return lanes.words[0] ^ lanes.words[7] ^ __builtin_buster_simd_sign_byte(lanes.vector) ^ misalignment;\n"
            "}\n");
     // The System V vector ABI: 64-byte values crossing call boundaries in
     // ZMM registers — parameters, returns, the mixed integer/vector
@@ -1366,7 +1398,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("vclassify"), S8_INITIALIZER("vtable"), S8_INITIALIZER("vstores"),
             S8_INITIALIZER("vspill"),    S8_INITIALIZER("vcalls"), S8_INITIALIZER("vhelp"),
             S8_INITIALIZER("vident"),    S8_INITIALIZER("vmix"),   S8_INITIALIZER("vninth"),
-            S8_INITIALIZER("vabi"),
+            S8_INITIALIZER("vabi"),      S8_INITIALIZER("vqarith"), S8_INITIALIZER("vunion"),
         };
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(vector_names); name_index += 1)
         {
@@ -1493,7 +1525,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 for (u32 probe_index = 0; probe_index < BUSTER_ARRAY_LENGTH(vector_mask_probes); probe_index += 1)
                 {
                     u64 probe_mask = vector_mask_probes[probe_index];
-                    String8 call_names[] = {S8_INITIALIZER("vclassify"), S8_INITIALIZER("vspill"), S8_INITIALIZER("vcalls"), S8_INITIALIZER("vabi")};
+                    String8 call_names[] = {S8_INITIALIZER("vclassify"), S8_INITIALIZER("vspill"),   S8_INITIALIZER("vcalls"),
+                                            S8_INITIALIZER("vabi"),      S8_INITIALIZER("vqarith"), S8_INITIALIZER("vunion")};
                     for (u32 call_index = 0; call_index < BUSTER_ARRAY_LENGTH(call_names); call_index += 1)
                     {
                         u32 none_offset = machine_test_module_offset(&vector_modules[0], machine_vector_module, call_names[call_index]);
