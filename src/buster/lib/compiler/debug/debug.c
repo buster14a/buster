@@ -8,12 +8,15 @@ BUSTER_GLOBAL_LOCAL String8 debug_string(Arena* arena, String8 string)
     return string.length ? string_duplicate_arena(arena, string, false) : (String8){0};
 }
 
+// One of the four places a range's line and column are worth recovering: a
+// declaration site that reaches a DWARF DIE or a CodeView record.
 BUSTER_GLOBAL_LOCAL DebugSourceLocation debug_source_from_ir(Arena* arena, IrProgram* program, IrSourceRange range)
 {
+    IrSourcePosition position = ir_source_position(program, range);
     DebugSourceLocation result = {
-        .line = range.line ? range.line : 1,
-        .column = range.column ? range.column : 1,
-        .offset = range.offset,
+        .line = position.line ? position.line : 1,
+        .column = position.column ? position.column : 1,
+        .offset = position.offset,
         .length = range.length,
     };
     if (program && range.source.value < program->sources.count)

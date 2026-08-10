@@ -7655,7 +7655,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                 .code_offset = entry->offset,
                 .code_size = (u32)(end - entry->offset),
                 .file = declaration.source.value < program->sources.count ? declaration.source.value : 0,
-                .line = declaration.line,
+                .line = ir_source_position(program, declaration).line,
             };
             debug_functions[entry_index] = (DebugFunctionSeed){
                 .name = functions[entry_index].name,

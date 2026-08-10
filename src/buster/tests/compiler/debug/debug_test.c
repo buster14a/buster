@@ -102,7 +102,10 @@ UnitTestResult debug_model_tests(UnitTestArguments* arguments)
 
     // Canonical IR type graphs may be recursive.  The model keeps the
     // frontend names while preserving the cycle through explicit IDs.
-    IrField canonical_field = {.name = S8("next"), .type = {.value = 2}, .source = {.source = {.value = 0}, .line = 3}};
+    // Canonical ranges carry an offset, not a line: the source's own text is
+    // what turns one back into a line, so the fixture supplies both.
+    String8 canonical_text = S8("one\ntwo\nthree\n");
+    IrField canonical_field = {.name = S8("next"), .type = {.value = 2}, .source = {.source = {.value = 0}, .offset = 8}};
     IrType canonical_types[] = {
         {.name = S8("void"), .id = {.value = 0}, .unqualified_type = IR_TYPE_ID_INVALID, .kind = IR_TYPE_VOID},
         {.name = S8("Node"), .id = {.value = 1}, .unqualified_type = IR_TYPE_ID_INVALID, .fields = &canonical_field, .field_count = 1,
@@ -110,9 +113,9 @@ UnitTestResult debug_model_tests(UnitTestArguments* arguments)
         {.name = S8("Node*"), .id = {.value = 2}, .unqualified_type = IR_TYPE_ID_INVALID, .element_type = {.value = 1},
          .layout = {.size = 8, .alignment = 8}, .kind = IR_TYPE_POINTER},
     };
-    IrSource canonical_source = {.path = S8("node.bbb"), .id = {.value = 0}};
+    IrSource canonical_source = {.path = S8("node.bbb"), .text = canonical_text, .id = {.value = 0}};
     IrSymbol canonical_symbol = {
-        .name = S8("node_function"), .id = {.value = 0}, .type = {.value = 1}, .source = {.source = {.value = 0}, .line = 2},
+        .name = S8("node_function"), .id = {.value = 0}, .type = {.value = 1}, .source = {.source = {.value = 0}, .offset = 4},
         .kind = IR_SYMBOL_FUNCTION,
     };
     IrProgram canonical_program = {

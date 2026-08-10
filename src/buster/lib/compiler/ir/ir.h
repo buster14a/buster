@@ -585,6 +585,13 @@ struct IrProgram
     IrTypeTable types;
     IrSymbolTable symbols;
     IrSourceTable sources;
+    // How the frontend's byte space maps back to lines, when the sources are
+    // not indexed by their own bytes. Empty for frontends that fill
+    // IrSource.text instead.
+    IrSourceMap source_map;
+    // Scratch for ir_source_position; a program is resolved by one consumer
+    // at a time, walking in roughly ascending offset order.
+    IrSourceMapCursor source_cursor;
     u32 module_count;
     u32 lowered_function_count;
     u32 rejected_function_count;
@@ -656,6 +663,11 @@ BUSTER_F_DECL IrInstructionExtra* ir_instruction_extra_ensure(Arena* arena, IrFu
 // function's dense source array is absent (canonical C functions).
 BUSTER_F_DECL ParserSourceRange ir_instruction_source(IrFunction* function, IrInstructionId instruction);
 BUSTER_F_DECL IrSourceRange ir_instruction_canonical_source(IrFunction* function, IrInstructionId instruction);
+// Where a range points, line and column included. This is the only place
+// line and column are computed: everything upstream of it carries the source
+// and the offset alone. A range that was never filled in resolves to line 0,
+// which every consumer already treats as "no position".
+BUSTER_F_DECL IrSourcePosition ir_source_position(IrProgram* program, IrSourceRange range);
 BUSTER_F_DECL bool ir_label_provenance_valid(IrValueLabelMetadata* value);
 BUSTER_F_DECL bool ir_label_storage_provenance_valid(IrValueLabelMetadata* value);
 BUSTER_F_DECL bool ir_block_id_array_unique(IrBlockId* blocks, u32 count);

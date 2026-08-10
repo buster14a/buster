@@ -738,6 +738,21 @@ has hard design constraints:
   both slower and weaker than the proof. Keep new consumers on the same array
   rather than adding another local one, and report an ownership failure as
   `IR_VALIDATION_INSTRUCTION_OWNERSHIP`.
+- **An `IrSourceRange` is a source, a byte offset and a length — never a line
+  or a column.** Lowering builds one range per instruction; a compile asks for
+  a line at four places only: diagnostic formatting, DWARF line-table
+  generation, CodeView line generation, and source-navigation requests.
+  `ir_source_position` is the one place line and column are computed. It
+  resolves either through the program's `IrSourceMap` — sorted regions over
+  the frontend's byte space, with per-line checkpoints and one stamped
+  position per macro expansion, which the C frontend hands over as its
+  preprocessing map so ranges carry spelling-space offsets — or by scanning
+  `IrSource.text`, for frontends whose ranges index the parsed bytes
+  directly. Producers must not resolve a position to fill a range, and
+  consumers that record one row per instruction must reject the repeat on the
+  range's own offset before resolving: consecutive instructions overwhelmingly
+  come from one token, and resolving first puts the search back on the hot
+  path it was moved off (measured at `+99 M` stage-1 instructions when it was).
 - The typed IR must not retain parser/AST operation identifiers.
   Unary and binary instructions use IR-native operations that encode the
   semantic domain (integer, float, boolean, or pointer) and signed behavior;

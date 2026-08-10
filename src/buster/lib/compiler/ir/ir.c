@@ -30,6 +30,215 @@ IrSource* ir_source_from_id(IrSourceTable* table, IrSourceId id)
     return table->sources + id.value;
 }
 
+// Greatest region whose start is <= offset; keys[0] starts at 0, so the
+// search always lands. The page index brackets it to the regions starting
+// within one page, so a miss costs one load and a couple of steps.
+BUSTER_GLOBAL_LOCAL u32 ir_source_map_find(IrSourceMap const* map, u32 offset)
+{
+    IrSourceRegionKey const* keys = map->keys;
+    u32 low = 0;
+    u32 high = map->count;
+    if (map->page_count)
+    {
+        u32 page = offset >> IR_SOURCE_MAP_PAGE_SHIFT;
+        if (page >= map->page_count)
+        {
+            page = map->page_count - 1;
+        }
+        low = map->pages[page];
+        if (page + 1 < map->page_count)
+        {
+            u32 bracket = map->pages[page + 1] + 1;
+            high = bracket < high ? bracket : high;
+        }
+    }
+    while (low + 1 < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (keys[middle].start <= offset)
+        {
+            low = middle;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_source_map_key_contains(IrSourceRegionKey const* keys, u32 index, u32 offset)
+{
+    return keys[index].start <= offset && keys[index + 1].start > offset;
+}
+
+// The region an offset falls in, remembered in the cursor. Text and stamp
+// regions get a slot each: a line's macro-expanded output sits at the tail of
+// the space while the file bytes around it sit low, so one slot would miss on
+// every interleave. The stamp slot is checked first: it is the narrower of
+// the two, so a hit there is decisive, and asking the other way round
+// measured `+1 M` on the self-host stage.
+BUSTER_GLOBAL_LOCAL u32 ir_source_map_region(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
+{
+    IrSourceRegionKey const* keys = map->keys;
+    if (ir_source_map_key_contains(keys, cursor->stamp_region, offset))
+    {
+        return cursor->stamp_region;
+    }
+    if (ir_source_map_key_contains(keys, cursor->text_region, offset))
+    {
+        return cursor->text_region;
+    }
+    u32 index = ir_source_map_find(map, offset);
+    if (map->regions[index].kind == IR_SOURCE_REGION_STAMP)
+    {
+        cursor->stamp_region = index;
+    }
+    else
+    {
+        cursor->text_region = index;
+        cursor->checkpoint = 0;
+    }
+    return index;
+}
+
+BUSTER_GLOBAL_LOCAL IrSourcePosition ir_source_region_position(IrSourceRegion const* region, u32 offset, u32* checkpoint_cursor)
+{
+    if (region->kind == IR_SOURCE_REGION_STAMP)
+    {
+        return region->stamp;
+    }
+    if (!region->checkpoint_count)
+    {
+        return (IrSourcePosition){.source = region->source};
+    }
+    u32 count = region->checkpoint_count;
+    u32 const* offsets = region->checkpoint_offsets;
+    u32 local = offset - region->base;
+    u32 cursor = checkpoint_cursor ? *checkpoint_cursor : 0;
+    if (cursor >= count || offsets[cursor] > local || (cursor + 1 < count && offsets[cursor + 1] <= local))
+    {
+        u32 low = 0;
+        u32 high = count;
+        while (low + 1 < high)
+        {
+            u32 middle = low + (high - low) / 2;
+            if (offsets[middle] <= local)
+            {
+                low = middle;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+        cursor = low;
+        if (checkpoint_cursor)
+        {
+            *checkpoint_cursor = cursor;
+        }
+    }
+    IrSourceCheckpoint checkpoint = region->checkpoints[cursor];
+    u32 delta = local - offsets[cursor];
+    s64 line = (s64)checkpoint.line + region->line_delta;
+    if (line < 1)
+    {
+        line = 1;
+    }
+    if (line > (s64)UINT32_MAX)
+    {
+        line = (s64)UINT32_MAX;
+    }
+    return (IrSourcePosition){
+        .source = region->source,
+        .offset = checkpoint.offset + delta,
+        .line = (u32)line,
+        .column = checkpoint.column + delta,
+    };
+}
+
+// The source alone, for producers that only need to name the file a range
+// belongs to. It is the region search without the per-line checkpoint search
+// that a full position runs after it — the difference between the two is paid
+// once per lowered instruction, so the short answer has its own entry point,
+// and the key it reads carries the source beside the start it matched on.
+u32 ir_source_map_source(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
+{
+    if (!map || !map->keys)
+    {
+        return 0;
+    }
+    IrSourceMapCursor local_cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
+    return map->keys[ir_source_map_region(map, offset, cursor ? cursor : &local_cursor)].source;
+}
+
+IrSourcePosition ir_source_map_position(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
+{
+    if (!map || !map->keys)
+    {
+        return (IrSourcePosition){0};
+    }
+    if (!cursor)
+    {
+        // No cursor to amortize through and no memo to keep: search outright.
+        u32 index = ir_source_map_find(map, offset);
+        return ir_source_region_position(map->regions + index, offset, 0);
+    }
+    if (offset == cursor->memo_offset)
+    {
+        return cursor->memo_position;
+    }
+    u32 index = ir_source_map_region(map, offset, cursor);
+    IrSourcePosition position = ir_source_region_position(map->regions + index, offset, &cursor->checkpoint);
+    cursor->memo_offset = offset;
+    cursor->memo_position = position;
+    return position;
+}
+
+IrSourcePosition ir_source_text_position(String8 text, u32 source, u32 offset, IrSourceMapCursor* cursor)
+{
+    if (!text.pointer || offset > text.length)
+    {
+        return (IrSourcePosition){.source = source};
+    }
+    IrSourceMapCursor local_cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
+    if (!cursor)
+    {
+        cursor = &local_cursor;
+    }
+    // The cursor's memo doubles as the scan's resume point: `memo_position`
+    // is the line and line start reached at `memo_offset`, so an ascending
+    // walk over one source counts every byte once across all its queries. A
+    // zero line means no position was ever recorded, which is also what an
+    // all-zero cursor reads as, so an uninitialized one simply rescans.
+    u32 scanned = 0;
+    u32 line = 1;
+    u32 line_start = 0;
+    if (cursor->memo_position.line && cursor->memo_position.source == source && cursor->memo_offset <= offset)
+    {
+        scanned = cursor->memo_offset;
+        line = cursor->memo_position.line;
+        line_start = cursor->memo_offset + 1 - cursor->memo_position.column;
+    }
+    for (; scanned < offset; scanned += 1)
+    {
+        if (text.pointer[scanned] == '\n')
+        {
+            line += 1;
+            line_start = scanned + 1;
+        }
+    }
+    IrSourcePosition position = {
+        .source = source,
+        .offset = offset,
+        .line = line,
+        .column = offset - line_start + 1,
+    };
+    cursor->memo_offset = offset;
+    cursor->memo_position = position;
+    return position;
+}
+
 typedef struct IrLowered IrLowered;
 struct IrLowered
 {
@@ -611,6 +820,24 @@ IrSourceRange ir_instruction_canonical_source(IrFunction* function, IrInstructio
         return (IrSourceRange){0};
     }
     return function->instruction_canonical_sources[instruction.value];
+}
+
+IrSourcePosition ir_source_position(IrProgram* program, IrSourceRange range)
+{
+    if (!program)
+    {
+        return (IrSourcePosition){0};
+    }
+    if (program->source_map.count)
+    {
+        return ir_source_map_position(&program->source_map, range.offset, &program->source_cursor);
+    }
+    IrSource* source = ir_source_from_id(&program->sources, range.source);
+    if (!source || !source->text.length)
+    {
+        return (IrSourcePosition){.source = range.source.value};
+    }
+    return ir_source_text_position(source->text, range.source.value, range.offset, &program->source_cursor);
 }
 
 IrValueLabelMetadata* ir_value_label_metadata_ensure(Arena* arena, IrFunction* function, IrValueId value)
@@ -4025,8 +4252,6 @@ BUSTER_GLOBAL_LOCAL IrModule ir_module_initialize(Arena* result_arena, AnalysisR
                     .source = {.value = entity->source.value},
                     .offset = entity->range.offset,
                     .length = entity->range.length,
-                    .line = entity->range.line + 1,
-                    .column = entity->range.column + 1,
                 },
             .canonical_type = IR_TYPE_ID_INVALID,
             .entity = entity->id,
@@ -4083,8 +4308,6 @@ BUSTER_GLOBAL_LOCAL IrModule ir_module_initialize(Arena* result_arena, AnalysisR
                     .source = {.value = entity->source.value},
                     .offset = entity->range.offset,
                     .length = entity->range.length,
-                    .line = entity->range.line + 1,
-                    .column = entity->range.column + 1,
                 },
             .canonical_type = IR_TYPE_ID_INVALID,
             .entity = entity->id,
@@ -4271,16 +4494,15 @@ BUSTER_GLOBAL_LOCAL IrSymbolKind ir_symbol_kind_from_analysis(AnalysisEntityKind
     return IR_SYMBOL_COUNT;
 }
 
-// Parser lines and columns are zero-based; canonical IR source ranges are
-// one-based, matching the C frontend and DWARF.
+// Buster sources are mapped by their own bytes (IrSource.text), so the
+// parser's offset carries over unchanged and its line and column are dropped:
+// ir_source_position recovers them, one-based, from the same offset.
 BUSTER_GLOBAL_LOCAL IrSourceRange ir_source_range_from_parser(IrSourceId source, ParserSourceRange range)
 {
     return (IrSourceRange){
         .source = source,
         .offset = range.offset,
         .length = range.length,
-        .line = range.line + 1,
-        .column = range.column + 1,
     };
 }
 
@@ -5005,6 +5227,9 @@ BUSTER_GLOBAL_LOCAL void ir_program_metadata_initialize(Arena* arena, AnalysisPr
             };
             program->sources.sources[id.value] = (IrSource){
                 .path = source->path,
+                // Ranges from this frontend index the parsed bytes directly,
+                // so the text is the whole line/column recovery it needs.
+                .text = source->parser ? source->parser->source : (String8){0},
                 .id = id,
             };
             ir_module->frontend_source_map[source_index] = id;

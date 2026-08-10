@@ -1,6 +1,7 @@
 #pragma once
 
 #include <buster/lib/arena.h>
+#include <buster/lib/compiler/ir/model.h>
 #include <buster/lib/target.h>
 
 typedef enum CTokenKind
@@ -86,13 +87,18 @@ typedef enum CPunctuator
     C_PUNCTUATOR_COUNT,
 } CPunctuator;
 
+// A recovered position: `offset` is the byte index into the file, and
+// `map_offset` is the spelling-space offset it was recovered from — the key
+// a later lookup takes, and what an IrSourceRange stores in place of the
+// line and column recovering them would have cost.
 typedef struct CSourceLocation CSourceLocation;
 struct CSourceLocation
 {
-    u64 offset;
+    u32 offset;
     u32 line;
     u32 column;
     u32 file;
+    u32 map_offset;
 };
 
 // A token no longer stores its spelling pointer or an eager source location.
@@ -256,7 +262,7 @@ struct CLexResult
     // line/column recover on demand from its offset: the original-source
     // location at each linearity break beside the translated offset of that
     // break (see c_translate_source in c.c).
-    CSourceLocation* checkpoints;
+    IrSourceCheckpoint* checkpoints;
     u32* checkpoint_offsets;
     u32 checkpoint_count;
     // Spelling-space offset of translated_source.pointer (0 standalone).
@@ -310,34 +316,6 @@ struct CPreprocessOptions
 
 typedef struct CSymbolTable CSymbolTable;
 
-// One region of the spelling space, keyed by its first offset; a region
-// covers up to the next entry's start (entries are sorted by start, gaps
-// belong to the preceding entry). FILE entries recover line/column through
-// the owning lex result's checkpoints with the #line delta of the region;
-// EXPANSION entries carry one location shared by every offset in the region
-// (macro expansion output copies its spellings contiguously, so one entry
-// covers one invocation's tokens).
-typedef enum CSourceMapEntryKind
-{
-    C_SOURCE_MAP_FILE,
-    C_SOURCE_MAP_EXPANSION,
-} CSourceMapEntryKind;
-
-typedef struct CSourceMapEntry CSourceMapEntry;
-struct CSourceMapEntry
-{
-    u32 start;
-    u32 file;
-    CSourceLocation* checkpoints;
-    u32* checkpoint_offsets;
-    u32 checkpoint_count;
-    u32 translated_offset;
-    s64 line_delta;
-    CSourceLocation location;
-    CSourceMapEntryKind kind;
-    u32 reserved;
-};
-
 // The spelling space of every preprocess result begins with this fixed
 // prelude, so tokens synthesized after preprocessing (static-assert
 // wrappers, lowering-internal constants, C23 respells) can reference
@@ -368,24 +346,29 @@ enum
 
 BUSTER_CT_CHECK(sizeof(C_SPELLING_PRELUDE_TEXT) - 1 == C_SPELLING_PRELUDE_LENGTH);
 
-// Location-recovery state of one preprocess run: the sorted spelling-space
-// regions, the page-bracket index (entry covering each 1 KB page's first
-// byte) that turns lookups into one load and a short bounded search, and
-// the commit-on-demand arena owning the spelling space. Behind one pointer
-// because CPreprocessResult travels by value through the whole parse and
-// lowering surface — growing that struct taxes every call.
+// Location-recovery state of one preprocess run: the source map over the
+// spelling space, and the commit-on-demand arena owning that space. Behind
+// one pointer because CPreprocessResult travels by value through the whole
+// parse and lowering surface — growing that struct taxes every call.
+//
+// The map partitions the space into IrSourceRegions: TEXT regions recover
+// line/column through the owning lex result's checkpoints with the #line
+// delta of the region, and STAMP regions carry one position shared by every
+// offset in them (macro expansion output copies its spellings contiguously,
+// so one region covers one invocation's tokens). The preprocessor and every
+// IR consumer read it through the same `ir_source_map_position`, so a
+// token's position and the position an IR range resolves to are one lookup
+// over one structure — the program keeps a pointer to this very map.
 typedef struct CSourceMapRecovery CSourceMapRecovery;
 struct CSourceMapRecovery
 {
     // Must outlive every consumer of the tokens; a caller compiling many
     // units may destroy it once the unit's compilation is complete.
     Arena* spelling_arena;
-    CSourceMapEntry* entries;
-    u32* pages;
-    u32 count;
-    u32 page_count;
+    IrSourceMap map;
+    // Region-array capacity, kept across the respell pass that may append.
+    u32 capacity;
     u32 reserved;
-    u32 padding;
 };
 
 typedef struct CPreprocessResult CPreprocessResult;

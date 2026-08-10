@@ -39,7 +39,7 @@ typedef struct CTranslatedSource CTranslatedSource;
 struct CTranslatedSource
 {
     String8 source;
-    CSourceLocation* checkpoints;
+    IrSourceCheckpoint* checkpoints;
     u32* checkpoint_offsets;
     u32 checkpoint_count;
     // Spelling-space offset of source.pointer (0 without a space).
@@ -157,25 +157,51 @@ typedef struct CSourceMap CSourceMap;
 struct CSourceMap
 {
     Arena* arena;
-    CSourceMapEntry* entries;
+    IrSourceRegion* regions;
     u32 count;
     u32 capacity;
 };
 
-BUSTER_GLOBAL_LOCAL void c_source_map_append(CSourceMap* map, CSourceMapEntry entry)
+BUSTER_GLOBAL_LOCAL void c_source_map_append(CSourceMap* map, IrSourceRegion region)
 {
     if (map->count == map->capacity)
     {
         u32 capacity = map->capacity ? map->capacity * 2 : 256;
-        CSourceMapEntry* entries = arena_allocate(map->arena, CSourceMapEntry, capacity);
+        IrSourceRegion* regions = arena_allocate(map->arena, IrSourceRegion, capacity);
         if (map->count)
         {
-            memcpy(entries, map->entries, sizeof(*entries) * map->count);
+            memcpy(regions, map->regions, sizeof(*regions) * map->count);
         }
-        map->entries = entries;
+        map->regions = regions;
         map->capacity = capacity;
     }
-    map->entries[map->count++] = entry;
+    map->regions[map->count++] = region;
+}
+
+// Hand the finished regions to the map every lookup reads, deriving the key
+// array the region search and the source query run on. A trailing sentinel
+// key ends the space, so a containment check needs no bounds test.
+BUSTER_GLOBAL_LOCAL void c_source_map_publish(Arena* arena, CSourceMapRecovery* recovery, CSourceMap const* map)
+{
+    if (!map->count)
+    {
+        // A published key array always has a region to answer with, so the
+        // lookups test the array alone and never a count as well.
+        return;
+    }
+    IrSourceRegionKey* keys = arena_allocate(arena, IrSourceRegionKey, map->count + 1);
+    for (u32 index = 0; index < map->count; index += 1)
+    {
+        keys[index] = (IrSourceRegionKey){
+            .start = map->regions[index].start,
+            .source = map->regions[index].source,
+        };
+    }
+    keys[map->count] = (IrSourceRegionKey){.start = UINT32_MAX};
+    recovery->map.keys = keys;
+    recovery->map.regions = map->regions;
+    recovery->map.count = map->count;
+    recovery->capacity = map->capacity;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_source_location_equal(CSourceLocation left, CSourceLocation right)
@@ -320,7 +346,7 @@ BUSTER_GLOBAL_LOCAL CTranslatedSource c_translate_source(Arena* arena, CSpelling
     }
     char8* translated = space ? c_space_allocate(space, source.length + 1) : arena_allocate(arena, char8, source.length + 1);
     result.translated_offset = space ? c_space_offset(space, translated) : 0;
-    CSourceLocation* checkpoints = arena_allocate(arena, CSourceLocation, source.length + 2);
+    IrSourceCheckpoint* checkpoints = arena_allocate(arena, IrSourceCheckpoint, source.length + 2);
     u32* checkpoint_offsets = arena_allocate(arena, u32, source.length + 2);
     u32 checkpoint_count = 0;
     u64 input = 0;
@@ -366,8 +392,8 @@ BUSTER_GLOBAL_LOCAL CTranslatedSource c_translate_source(Arena* arena, CSpelling
         {
             if (run_broken)
             {
-                checkpoints[checkpoint_count] = (CSourceLocation){
-                    .offset = input,
+                checkpoints[checkpoint_count] = (IrSourceCheckpoint){
+                    .offset = (u32)input,
                     .line = line,
                     .column = column,
                 };
@@ -414,8 +440,8 @@ BUSTER_GLOBAL_LOCAL CTranslatedSource c_translate_source(Arena* arena, CSpelling
         }
         if (run_broken)
         {
-            checkpoints[checkpoint_count] = (CSourceLocation){
-                .offset = input,
+            checkpoints[checkpoint_count] = (IrSourceCheckpoint){
+                .offset = (u32)input,
                 .line = line,
                 .column = column,
             };
@@ -439,8 +465,8 @@ BUSTER_GLOBAL_LOCAL CTranslatedSource c_translate_source(Arena* arena, CSpelling
         }
     }
     translated[output] = 0;
-    checkpoints[checkpoint_count] = (CSourceLocation){
-        .offset = source.length,
+    checkpoints[checkpoint_count] = (IrSourceCheckpoint){
+        .offset = (u32)source.length,
         .line = line,
         .column = column,
     };
@@ -484,11 +510,14 @@ BUSTER_GLOBAL_LOCAL CSourceLocation c_lex_local_location(CLexResult* result, u64
         cursor -= 1;
     }
     result->location_cursor = cursor;
-    CSourceLocation location = result->checkpoints[cursor];
-    u64 delta = offset - result->checkpoint_offsets[cursor];
-    location.offset += delta;
-    location.column += (u32)delta;
-    return location;
+    IrSourceCheckpoint checkpoint = result->checkpoints[cursor];
+    u32 delta = (u32)offset - result->checkpoint_offsets[cursor];
+    return (CSourceLocation){
+        .offset = checkpoint.offset + delta,
+        .line = checkpoint.line,
+        .column = checkpoint.column + delta,
+        .map_offset = (u32)offset + result->translated_offset,
+    };
 }
 
 CSourceLocation c_lex_token_location(CLexResult* lex, CToken token)
@@ -496,180 +525,52 @@ CSourceLocation c_lex_token_location(CLexResult* lex, CToken token)
     return c_lex_local_location(lex, token.offset - lex->translated_offset);
 }
 
-enum
+// The stamp a macro invocation's output carries: one position every offset
+// in the copied run resolves to.
+BUSTER_GLOBAL_LOCAL IrSourcePosition c_position_from_source_location(CSourceLocation location)
 {
-    C_SOURCE_MAP_PAGE_SHIFT = 10,
-};
-
-// Greatest entry whose start is <= offset; entries[0] starts at 0 (the
-// prelude), so the search always lands. The page index brackets the search
-// to the entries starting within one 1 KB page, so a miss costs one load
-// and a couple of steps instead of a full binary search.
-BUSTER_GLOBAL_LOCAL u32 c_source_map_find(CSourceMapRecovery const* recovery, u32 offset)
-{
-    CSourceMapEntry const* entries = recovery->entries;
-    u32 low = 0;
-    u32 high = recovery->count;
-    if (recovery->page_count)
-    {
-        u32 page = offset >> C_SOURCE_MAP_PAGE_SHIFT;
-        if (page >= recovery->page_count)
-        {
-            page = recovery->page_count - 1;
-        }
-        low = recovery->pages[page];
-        if (page + 1 < recovery->page_count)
-        {
-            u32 bracket = recovery->pages[page + 1] + 1;
-            high = bracket < high ? bracket : high;
-        }
-    }
-    while (low + 1 < high)
-    {
-        u32 middle = low + (high - low) / 2;
-        if (entries[middle].start <= offset)
-        {
-            low = middle;
-        }
-        else
-        {
-            high = middle;
-        }
-    }
-    return low;
+    return (IrSourcePosition){
+        .source = location.file,
+        .offset = location.offset,
+        .line = location.line,
+        .column = location.column,
+    };
 }
 
-BUSTER_GLOBAL_LOCAL CSourceLocation c_source_map_entry_location_cursor(CSourceMapEntry const* entry, u32 offset, u32* checkpoint_cursor)
+// A position, in the shape this frontend's diagnostics take.
+BUSTER_GLOBAL_LOCAL CSourceLocation c_source_location_from_position(u32 map_offset, IrSourcePosition position)
 {
-    if (entry->kind == C_SOURCE_MAP_EXPANSION)
-    {
-        return entry->location;
-    }
-    if (!entry->checkpoint_count)
-    {
-        return (CSourceLocation){.file = entry->file};
-    }
-    u64 local = offset - entry->translated_offset;
-    u32 cursor = checkpoint_cursor ? *checkpoint_cursor : 0;
-    if (cursor >= entry->checkpoint_count || entry->checkpoint_offsets[cursor] > local ||
-        (cursor + 1 < entry->checkpoint_count && entry->checkpoint_offsets[cursor + 1] <= local))
-    {
-        u32 low = 0;
-        u32 high = entry->checkpoint_count;
-        while (low + 1 < high)
-        {
-            u32 middle = low + (high - low) / 2;
-            if (entry->checkpoint_offsets[middle] <= local)
-            {
-                low = middle;
-            }
-            else
-            {
-                high = middle;
-            }
-        }
-        cursor = low;
-        if (checkpoint_cursor)
-        {
-            *checkpoint_cursor = cursor;
-        }
-    }
-    CSourceLocation location = entry->checkpoints[cursor];
-    u64 delta = local - entry->checkpoint_offsets[cursor];
-    location.offset += delta;
-    location.column += (u32)delta;
-    s64 line = (s64)location.line + entry->line_delta;
-    if (line < 1)
-    {
-        line = 1;
-    }
-    if (line > (s64)UINT32_MAX)
-    {
-        line = (s64)UINT32_MAX;
-    }
-    location.line = (u32)line;
-    location.file = entry->file;
-    return location;
+    return (CSourceLocation){
+        .offset = position.offset,
+        .line = position.line,
+        .column = position.column,
+        .file = position.source,
+        .map_offset = map_offset,
+    };
 }
 
 CSourceLocation c_preprocess_token_location(CPreprocessResult const* preprocess, CToken token)
 {
     CSourceMapRecovery const* recovery = preprocess->recovery;
-    if (!recovery || !recovery->count)
-    {
-        return (CSourceLocation){0};
-    }
-    u32 entry_index = c_source_map_find(recovery, token.offset);
-    return c_source_map_entry_location_cursor(recovery->entries + entry_index, token.offset, 0);
+    return c_source_location_from_position(token.offset, recovery ? ir_source_map_position(&recovery->map, token.offset, 0) : (IrSourcePosition){0});
 }
 
 // The amortized variant for consumers whose queries mostly ascend (parsing
-// and lowering walk tokens roughly in stream order): the two-word cursor
-// remembers the last map entry and checkpoint, and containment checks skip
-// both binary searches on a hit.
-// File tokens sit low in the space while a line's macro-expanded neighbors
-// sit at the tail where their spellings were copied, so one cursor slot
-// would thrash on every file/expansion interleave; a slot per kind keeps
-// both regions hot.
-typedef struct CTokenLocationCursor CTokenLocationCursor;
-struct CTokenLocationCursor
+// walks tokens roughly in stream order).
+BUSTER_GLOBAL_LOCAL CSourceLocation c_preprocess_token_location_cursor(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
 {
-    u32 file_entry;
-    u32 checkpoint;
-    u32 expansion_entry;
-    // Emission paths ask for the same token's location several times in a
-    // row (every instruction of one expression); the memo answers repeats
-    // with one compare. UINT32_MAX = empty.
-    u32 memo_offset;
-    CSourceLocation memo_location;
-};
-
-BUSTER_GLOBAL_LOCAL bool c_source_map_entry_contains(CSourceMapEntry const* entries, u32 count, u32 index, u32 offset)
-{
-    return index < count && entries[index].start <= offset && (index + 1 >= count || entries[index + 1].start > offset);
+    CSourceMapRecovery const* recovery = preprocess->recovery;
+    return c_source_location_from_position(token.offset,
+                                           recovery ? ir_source_map_position(&recovery->map, token.offset, cursor) : (IrSourcePosition){0});
 }
 
-BUSTER_GLOBAL_LOCAL CSourceLocation c_preprocess_token_location_cursor(CPreprocessResult const* preprocess, CToken token, CTokenLocationCursor* cursor)
+// Which source a token belongs to, without recovering its line and column:
+// what lowering wants, since an IR source range is a source plus the offset
+// the token already carries.
+BUSTER_GLOBAL_LOCAL u32 c_preprocess_token_source(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
 {
-    if (token.offset == cursor->memo_offset)
-    {
-        return cursor->memo_location;
-    }
     CSourceMapRecovery const* recovery = preprocess->recovery;
-    u32 count = recovery ? recovery->count : 0;
-    if (!count)
-    {
-        return (CSourceLocation){0};
-    }
-    CSourceMapEntry const* entries = recovery->entries;
-    CSourceLocation location;
-    if (c_source_map_entry_contains(entries, count, cursor->expansion_entry, token.offset))
-    {
-        location = entries[cursor->expansion_entry].location;
-    }
-    else
-    {
-        u32 index = cursor->file_entry;
-        bool expansion = false;
-        if (!c_source_map_entry_contains(entries, count, index, token.offset))
-        {
-            index = c_source_map_find(recovery, token.offset);
-            if (entries[index].kind == C_SOURCE_MAP_EXPANSION)
-            {
-                cursor->expansion_entry = index;
-                expansion = true;
-            }
-            else
-            {
-                cursor->file_entry = index;
-                cursor->checkpoint = 0;
-            }
-        }
-        location = expansion ? entries[index].location : c_source_map_entry_location_cursor(entries + index, token.offset, &cursor->checkpoint);
-    }
-    cursor->memo_offset = token.offset;
-    cursor->memo_location = location;
-    return location;
+    return recovery ? ir_source_map_source(&recovery->map, token.offset, cursor) : 0;
 }
 
 // One finished line, classified by what the lexer saw on it. Branchless: the
@@ -4498,11 +4399,11 @@ BUSTER_GLOBAL_LOCAL void c_preprocess_process_expanded_line(Arena* arena, CPrepr
             }
             if (!run_open || !c_source_location_equal(run_location, item.location))
             {
-                c_source_map_append(map, (CSourceMapEntry){
+                c_source_map_append(map, (IrSourceRegion){
                                              .start = c_space_offset(space, copy),
-                                             .file = item.location.file,
-                                             .location = item.location,
-                                             .kind = C_SOURCE_MAP_EXPANSION,
+                                             .source = item.location.file,
+                                             .stamp = c_position_from_source_location(item.location),
+                                             .kind = IR_SOURCE_REGION_STAMP,
                                          });
                 run_open = true;
                 run_location = item.location;
@@ -5227,9 +5128,7 @@ BUSTER_GLOBAL_LOCAL void c_preprocess_respell_c23(CSpellingSpace* space, CSource
         return;
     }
     char8 const* base = space->base;
-    CTokenLocationCursor cursor = {
-        .memo_offset = UINT32_MAX,
-    };
+    IrSourceMapCursor cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
     for (u64 index = 0; index < result->token_count; index += 1)
     {
         CToken* token = result->tokens + index;
@@ -5263,16 +5162,17 @@ BUSTER_GLOBAL_LOCAL void c_preprocess_respell_c23(CSpellingSpace* space, CSource
         {
             CSourceLocation location = c_preprocess_token_location_cursor(result, *token, &cursor);
             CToken copy = c_space_token(space, respelled, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
-            c_source_map_append(map, (CSourceMapEntry){
+            c_source_map_append(map, (IrSourceRegion){
                                          .start = copy.offset,
-                                         .file = location.file,
-                                         .location = location,
-                                         .kind = C_SOURCE_MAP_EXPANSION,
+                                         .source = location.file,
+                                         .stamp = c_position_from_source_location(location),
+                                         .kind = IR_SOURCE_REGION_STAMP,
                                      });
-            // Appends can move the entry array; keep the result's view (the
-            // recovery above reads through it) current.
-            result->recovery->entries = map->entries;
-            result->recovery->count = map->count;
+            // Appends can move the region array; keep the result's view (the
+            // recovery above reads through it) current. The new region is at
+            // the tail, past every key already published, so the lookups keep
+            // answering through the keys until the map is republished.
+            result->recovery->map.regions = map->regions;
             token->offset = copy.offset;
             token->length = copy.length;
             // The symbol travels with the spelling: a respelled token must
@@ -5355,9 +5255,9 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     CSourceMap map = {
         .arena = arena,
     };
-    c_source_map_append(&map, (CSourceMapEntry){
+    c_source_map_append(&map, (IrSourceRegion){
                                   .start = 0,
-                                  .kind = C_SOURCE_MAP_EXPANSION,
+                                  .kind = IR_SOURCE_REGION_STAMP,
                               });
     CLexResult root_lex = c_lex_space(arena, space, source);
     CSourceMetricsFileSet metrics_files = {0};
@@ -5660,14 +5560,14 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     CPreprocessSourceFrame* source_frame = &root_frame;
     CPreprocessFileTable file_table = {0};
     root_frame.map_entry = map.count;
-    c_source_map_append(&map, (CSourceMapEntry){
+    c_source_map_append(&map, (IrSourceRegion){
                                   .start = root_lex.translated_offset,
-                                  .file = c_preprocess_file_index(arena, &file_table, root_frame.logical_path),
+                                  .source = c_preprocess_file_index(arena, &file_table, root_frame.logical_path),
                                   .checkpoints = root_lex.checkpoints,
                                   .checkpoint_offsets = root_lex.checkpoint_offsets,
                                   .checkpoint_count = root_lex.checkpoint_count,
-                                  .translated_offset = root_lex.translated_offset,
-                                  .kind = C_SOURCE_MAP_FILE,
+                                  .base = root_lex.translated_offset,
+                                  .kind = IR_SOURCE_REGION_TEXT,
                               });
     u32 include_depth_limit = options.include_depth_limit ? options.include_depth_limit : 256;
     c_preprocess_builtins(arena, symbol_table, &first_macro, &last_macro, root_frame.logical_path,
@@ -5901,15 +5801,15 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                         // delta and logical file; entries partition the file's
                         // span by offset, so the split is one append.
                         source_frame->map_entry = map.count;
-                        c_source_map_append(&map, (CSourceMapEntry){
+                        c_source_map_append(&map, (IrSourceRegion){
                                                       .start = lex.tokens[line_end].offset,
-                                                      .file = UINT32_MAX,
+                                                      .source = UINT32_MAX,
                                                       .checkpoints = source_frame->lex.checkpoints,
                                                       .checkpoint_offsets = source_frame->lex.checkpoint_offsets,
                                                       .checkpoint_count = source_frame->lex.checkpoint_count,
-                                                      .translated_offset = source_frame->lex.translated_offset,
+                                                      .base = source_frame->lex.translated_offset,
                                                       .line_delta = source_frame->line_delta,
-                                                      .kind = C_SOURCE_MAP_FILE,
+                                                      .kind = IR_SOURCE_REGION_TEXT,
                                                   });
                     }
                 }
@@ -6027,14 +5927,14 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                     .include_origin = include_origin,
                                 };
                                 include_frame->map_entry = map.count;
-                                c_source_map_append(&map, (CSourceMapEntry){
+                                c_source_map_append(&map, (IrSourceRegion){
                                                               .start = include_lex.translated_offset,
-                                                              .file = UINT32_MAX,
+                                                              .source = UINT32_MAX,
                                                               .checkpoints = include_lex.checkpoints,
                                                               .checkpoint_offsets = include_lex.checkpoint_offsets,
                                                               .checkpoint_count = include_lex.checkpoint_count,
-                                                              .translated_offset = include_lex.translated_offset,
-                                                              .kind = C_SOURCE_MAP_FILE,
+                                                              .base = include_lex.translated_offset,
+                                                              .kind = IR_SOURCE_REGION_TEXT,
                                                           });
                             }
                             else
@@ -6146,9 +6046,9 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 needs_expansion = line_macro && line_macro->definition.defined;
             }
         }
-        if (logical_token_count && map.entries[source_frame->map_entry].file == UINT32_MAX)
+        if (logical_token_count && map.regions[source_frame->map_entry].source == UINT32_MAX)
         {
-            map.entries[source_frame->map_entry].file = c_preprocess_file_index(arena, &file_table, source_frame->logical_path);
+            map.regions[source_frame->map_entry].source = c_preprocess_file_index(arena, &file_table, source_frame->logical_path);
         }
         if (!needs_expansion)
         {
@@ -6215,36 +6115,35 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     // the insertion pass is effectively linear.
     for (u32 entry_index = 1; entry_index < map.count; entry_index += 1)
     {
-        CSourceMapEntry entry = map.entries[entry_index];
+        IrSourceRegion region = map.regions[entry_index];
         u32 probe = entry_index;
-        while (probe && map.entries[probe - 1].start > entry.start)
+        while (probe && map.regions[probe - 1].start > region.start)
         {
-            map.entries[probe] = map.entries[probe - 1];
+            map.regions[probe] = map.regions[probe - 1];
             probe -= 1;
         }
-        map.entries[probe] = entry;
+        map.regions[probe] = region;
     }
-    recovery->entries = map.entries;
-    recovery->count = map.count;
-    recovery->reserved = map.capacity;
+    c_source_map_publish(arena, recovery, &map);
+    // Respelling appends regions at the tail of the space, in order, and
+    // queries the map as it goes; publish once so those queries land, and
+    // again for what they added.
     c_preprocess_respell_c23(space, &map, &result);
-    recovery->entries = map.entries;
-    recovery->count = map.count;
-    recovery->reserved = map.capacity;
-    u32 page_count = (u32)((space->used >> C_SOURCE_MAP_PAGE_SHIFT) + 1);
+    c_source_map_publish(arena, recovery, &map);
+    u32 page_count = (u32)((space->used >> IR_SOURCE_MAP_PAGE_SHIFT) + 1);
     u32* pages = arena_allocate(arena, u32, page_count);
     u32 fill_entry = 0;
     for (u32 page = 0; page < page_count; page += 1)
     {
-        u32 page_start = page << C_SOURCE_MAP_PAGE_SHIFT;
-        while (fill_entry + 1 < map.count && map.entries[fill_entry + 1].start <= page_start)
+        u32 page_start = page << IR_SOURCE_MAP_PAGE_SHIFT;
+        while (fill_entry + 1 < map.count && map.regions[fill_entry + 1].start <= page_start)
         {
             fill_entry += 1;
         }
         pages[page] = fill_entry;
     }
-    recovery->pages = pages;
-    recovery->page_count = page_count;
+    recovery->map.pages = pages;
+    recovery->map.page_count = page_count;
     return result;
 }
 
@@ -17051,10 +16950,8 @@ BUSTER_GLOBAL_LOCAL IrSourceRange c_ir_source_range(CSourceLocation location, u6
 {
     return (IrSourceRange){
         .source = {.value = location.file},
-        .offset = location.offset,
-        .length = length,
-        .line = location.line,
-        .column = location.column,
+        .offset = location.map_offset,
+        .length = (u32)length,
     };
 }
 
@@ -18157,10 +18054,10 @@ struct CIntegerIrBuilder
     IrTypeId return_type;
     Target target;
     IrSourceId source;
-    // Amortizes token location recovery: lowering walks tokens roughly in
-    // stream order, so the last map entry/checkpoint almost always hits.
+    // Amortizes source-map lookups: lowering walks tokens roughly in stream
+    // order, so the last region almost always hits.
     // memo_offset must initialize to UINT32_MAX (see c_lower_to_ir).
-    CTokenLocationCursor location_cursor;
+    IrSourceMapCursor location_cursor;
     IrInstructionId last_instruction;
     // Predecessor of last_instruction within the current block, maintained by
     // c_ir_append_instruction so popping the just-emitted load in the
@@ -18204,9 +18101,17 @@ struct CIntegerIrBuilder
 
 BUSTER_GLOBAL_LOCAL IrSourceRange c_ir_source_range(CSourceLocation location, u64 length);
 
+// The hot one: every lowered instruction asks for the range of the token it
+// came from. It is the token's own offset and length plus the source they
+// land in — the line and column the old design recovered here are recovered
+// from the same offset later, and only where they are printed.
 BUSTER_GLOBAL_LOCAL IrSourceRange c_ir_token_source_range(CIntegerIrBuilder* builder, CToken token)
 {
-    return c_ir_source_range(c_preprocess_token_location_cursor(&builder->preprocess, token, &builder->location_cursor), token.length);
+    return (IrSourceRange){
+        .source = {.value = c_preprocess_token_source(&builder->preprocess, token, &builder->location_cursor)},
+        .offset = token.offset,
+        .length = token.length,
+    };
 }
 
 BUSTER_GLOBAL_LOCAL CSourceLocation c_ir_token_location(CIntegerIrBuilder* builder, CToken token)
@@ -44140,6 +44045,14 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     module->global_capacity = parse.declaration_count;
     module->assemblies = arena_allocate(arena, IrModuleAssembly, parse.declaration_count);
     module->assembly_capacity = parse.declaration_count;
+    // Hand the preprocessing source map to the program: it is what turns the
+    // offsets the ranges carry back into lines, at the DWARF, CodeView and
+    // diagnostic boundaries that ask.
+    if (preprocess.recovery)
+    {
+        program->source_map = preprocess.recovery->map;
+        program->source_cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
+    }
     // Register the preprocess file table in order so token file indices double
     // as IR source ids (see c_ir_source_range).
     IrSourceId source_id = {0};

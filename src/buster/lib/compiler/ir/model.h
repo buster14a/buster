@@ -39,15 +39,137 @@ BUSTER_CT_CHECK(sizeof(IrSymbolId) == sizeof(IrIdUnderlying));
 BUSTER_CT_CHECK(sizeof(IrLocalId) == sizeof(IrIdUnderlying));
 BUSTER_CT_CHECK(sizeof(IrSourceId) == sizeof(IrIdUnderlying));
 
+// What an IR instruction remembers about where it came from: the source it
+// belongs to, and the byte offset and length of its spelling in the byte
+// space the producing frontend maps (see IrSourceMap). Line and column are
+// deliberately absent — recovering them costs a search per query, and the
+// number of ranges a lowering builds is orders of magnitude larger than the
+// number a compile ever asks a line of. They resolve through
+// `ir_source_position` at the only four places that need them: diagnostic
+// formatting, DWARF line-table generation, CodeView line generation, and
+// source-navigation requests.
 typedef struct IrSourceRange IrSourceRange;
 struct IrSourceRange
 {
     IrSourceId source;
-    u64 offset;
-    u64 length;
+    u32 offset;
+    u32 length;
+};
+
+// A range is copied by value through the whole lowering surface and stored
+// once per instruction, so its size is part of the design, not an accident.
+BUSTER_CT_CHECK(sizeof(IrSourceRange) == 12);
+
+// One range resolved: the source it lands in, the byte offset within that
+// source's own text, and the one-based line and column there. `line == 0`
+// means the range carried no position — an unresolvable offset, a frontend
+// that published no map, or a range that was never filled in.
+typedef struct IrSourcePosition IrSourcePosition;
+struct IrSourcePosition
+{
+    u32 source;
+    u32 offset;
     u32 line;
     u32 column;
 };
+
+// A retained line start: the offset in the source's own text where a line
+// begins, and the line/column there. Offset and column advance one per byte
+// from a checkpoint until the next one, so a checkpoint is needed only where
+// that linearity breaks — a newline, or a byte the frontend deleted while
+// translating (a C line splice, a stripped carriage return).
+typedef struct IrSourceCheckpoint IrSourceCheckpoint;
+struct IrSourceCheckpoint
+{
+    u32 offset;
+    u32 line;
+    u32 column;
+};
+
+typedef enum IrSourceRegionKind
+{
+    // Offsets resolve through the checkpoints, shifted by `line_delta`.
+    IR_SOURCE_REGION_TEXT,
+    // Every offset in the region resolves to `stamp`: a run of bytes with no
+    // source text of its own, such as one macro invocation's output.
+    IR_SOURCE_REGION_STAMP,
+} IrSourceRegionKind;
+
+// One region of the mapped byte space, keyed by its first offset; a region
+// covers up to the next region's start (regions are sorted by start, gaps
+// belong to the preceding one).
+typedef struct IrSourceRegion IrSourceRegion;
+struct IrSourceRegion
+{
+    u32 start;
+    u32 source;
+    IrSourceCheckpoint* checkpoints;
+    // Mapped-space offsets of the checkpoints, relative to `base`.
+    u32* checkpoint_offsets;
+    u32 checkpoint_count;
+    u32 base;
+    // What `#line` (or any other renumbering directive) moved this region's
+    // lines by, relative to what the checkpoints recorded.
+    s64 line_delta;
+    IrSourcePosition stamp;
+    IrSourceRegionKind kind;
+    u32 reserved;
+};
+
+// Everything a lookup needs before it knows which region it wants: the
+// region's first offset, and the source it belongs to. Split out of the
+// region because a 64-byte region row puts consecutive `start` fields on
+// different cache lines, and both the region search and the answer to "which
+// source is this offset in" — the query every lowered instruction runs — read
+// nothing else. Eight keys share a line, so the search strides one line per
+// three steps instead of one per step, and a containment check that hits
+// touches exactly one.
+typedef struct IrSourceRegionKey IrSourceRegionKey;
+struct IrSourceRegionKey
+{
+    u32 start;
+    u32 source;
+};
+
+// The frontend's byte space, partitioned into regions. The page index holds
+// the region covering each 1 KB page's first byte, so a lookup is one load
+// and a short bounded search instead of a binary search over every region.
+typedef struct IrSourceMap IrSourceMap;
+struct IrSourceMap
+{
+    // `count + 1` entries: the last is a sentinel starting at UINT32_MAX, so
+    // a containment check never needs an end-of-array branch.
+    IrSourceRegionKey* keys;
+    IrSourceRegion* regions;
+    u32* pages;
+    u32 count;
+    u32 page_count;
+};
+
+enum
+{
+    IR_SOURCE_MAP_PAGE_SHIFT = 10,
+};
+
+// Amortizes the two searches a lookup would otherwise run. Consumers query
+// in roughly ascending offset order, so the remembered region and checkpoint
+// answer most queries with a containment check. Text and stamp regions get a
+// slot each: a line's macro-expanded output sits far from the file bytes
+// around it, so one slot would thrash on every interleave.
+typedef struct IrSourceMapCursor IrSourceMapCursor;
+struct IrSourceMapCursor
+{
+    u32 text_region;
+    u32 checkpoint;
+    u32 stamp_region;
+    // Repeat queries for one offset are common (every instruction of one
+    // expression asks about the same token); the memo answers them with one
+    // compare. UINT32_MAX = empty.
+    u32 memo_offset;
+    IrSourcePosition memo_position;
+};
+
+#define IR_SOURCE_MAP_CURSOR_EMPTY ((IrSourceMapCursor){.memo_offset = UINT32_MAX})
 
 typedef enum IrTypeKind
 {
@@ -245,6 +367,12 @@ typedef struct IrSource IrSource;
 struct IrSource
 {
     String8 path;
+    // The bytes an IrSourceRange offset indexes, for frontends that keep
+    // their sources whole and map them one-to-one. Empty when the program
+    // carries an IrSourceMap instead, which is the case whenever the byte
+    // space is not the file (the C frontend's preprocessing space holds
+    // every include's translated text and every synthesized spelling).
+    String8 text;
     IrSourceId id;
 };
 
@@ -259,3 +387,13 @@ struct IrSourceTable
 BUSTER_F_DECL IrType* ir_type_from_id(IrTypeTable* table, IrTypeId id);
 BUSTER_F_DECL IrSymbol* ir_symbol_from_id(IrSymbolTable* table, IrSymbolId id);
 BUSTER_F_DECL IrSource* ir_source_from_id(IrSourceTable* table, IrSourceId id);
+
+// The mapped byte space, resolved. `cursor` may be null; passing one across a
+// walk is what keeps a sequence of lookups from re-searching.
+BUSTER_F_DECL IrSourcePosition ir_source_map_position(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor);
+// Only which source the offset lands in, skipping the line/column search.
+BUSTER_F_DECL u32 ir_source_map_source(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor);
+// The same, for a source the frontend handed over whole: counts the line
+// breaks that precede `offset` in `text`, advancing `cursor` instead of
+// rescanning when queries ascend.
+BUSTER_F_DECL IrSourcePosition ir_source_text_position(String8 text, u32 source, u32 offset, IrSourceMapCursor* cursor);

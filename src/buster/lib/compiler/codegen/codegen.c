@@ -3929,6 +3929,18 @@ BUSTER_GLOBAL_LOCAL bool x64_emit_instruction(X64Builder* builder, IrBlockId blo
     return true;
 }
 
+// The declaration line of a Buster function. An IR source range carries the
+// offset alone, and these emitters are handed an analysis rather than a
+// program, so the line comes back from the entity the range was taken from.
+BUSTER_GLOBAL_LOCAL ParserSourceRange codegen_analysis_declaration_range(AnalysisResult* analysis, IrFunction* function)
+{
+    if (!analysis || function->entity.index.value >= analysis->module.entity_count)
+    {
+        return (ParserSourceRange){0};
+    }
+    return analysis->module.entities[function->entity.index.value].range;
+}
+
 void codegen_record_line(CodegenLineEntry* entries, u32* count, u32 capacity, u32 code_offset, u32 source, u32 line, u32 column)
 {
     if (!entries || !line || *count >= capacity)
@@ -4438,7 +4450,9 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_x86_64(Arena* arena, Analys
     u32 line_entry_capacity = function->instruction_count + 1;
     CodegenLineEntry* line_entries = record_lines ? arena_allocate(arena, CodegenLineEntry, line_entry_capacity) : 0;
     u32 line_entry_count = 0;
-    codegen_record_line(line_entries, &line_entry_count, line_entry_capacity, 0, 0, function->source.line, function->source.column);
+    ParserSourceRange declaration_range = codegen_analysis_declaration_range(analysis, function);
+    // Parser lines are zero-based; recorded lines are one-based.
+    codegen_record_line(line_entries, &line_entry_count, line_entry_capacity, 0, 0, declaration_range.line + 1, declaration_range.column + 1);
     for (u32 block_index = 0; block_index < function->block_count && builder.buffer.error == CODEGEN_ERROR_NONE; block_index += 1)
     {
         IrBlock* block = function->blocks + block_index;
@@ -5580,7 +5594,9 @@ BUSTER_GLOBAL_LOCAL CodegenFunction codegen_generate_aarch64(Arena* arena, Analy
     u32 line_entry_capacity = function->instruction_count + 1;
     CodegenLineEntry* line_entries = record_lines ? arena_allocate(arena, CodegenLineEntry, line_entry_capacity) : 0;
     u32 line_entry_count = 0;
-    codegen_record_line(line_entries, &line_entry_count, line_entry_capacity, 0, 0, function->source.line, function->source.column);
+    ParserSourceRange declaration_range = codegen_analysis_declaration_range(analysis, function);
+    // Parser lines are zero-based; recorded lines are one-based.
+    codegen_record_line(line_entries, &line_entry_count, line_entry_capacity, 0, 0, declaration_range.line + 1, declaration_range.column + 1);
     for (u32 block_index = 0; block_index < function->block_count && buffer.error == CODEGEN_ERROR_NONE; block_index += 1)
     {
         IrBlock* block = function->blocks + block_index;
@@ -9596,9 +9612,13 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         {
             // A row at the function start makes the prologue map to the
             // declaration line instead of falling outside the line table.
+            IrSourcePosition declaration = ir_source_position(program, function->source);
             codegen_record_line(result.line_entries, &result.line_entry_count, line_entry_capacity, (u32)buffer.count, function->source.source.value,
-                                function->source.line, function->source.column);
+                                declaration.line, declaration.column);
         }
+        // The declaration row is not an instruction's; the next instruction
+        // must still be able to record one.
+        IrSourceRange recorded_source = {.source = IR_SOURCE_ID_INVALID, .offset = UINT32_MAX};
         IrBlock* entry = function->blocks + function->entry.value;
         if (entry->first_instruction.value >= function->instruction_count)
         {
@@ -10061,10 +10081,20 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
                     continue;
                 }
                 IrSourceRange canonical_source = ir_instruction_canonical_source(function, instruction_id);
-                if (canonical_source.source.value != IR_ID_UNDERLYING_INVALID)
+                // The line table is one of the four consumers that pay for a
+                // line and a column, and the only one that asks per
+                // instruction. Consecutive instructions overwhelmingly carry
+                // the same range — every instruction of one expression comes
+                // from one token — so the repeat is rejected on the offset the
+                // range already holds, and a position is recovered only for an
+                // offset that can still produce a row.
+                if (canonical_source.source.value != IR_ID_UNDERLYING_INVALID &&
+                    (canonical_source.offset != recorded_source.offset || canonical_source.source.value != recorded_source.source.value))
                 {
+                    recorded_source = canonical_source;
+                    IrSourcePosition position = ir_source_position(program, canonical_source);
                     codegen_record_line(result.line_entries, &result.line_entry_count, line_entry_capacity, (u32)buffer.count,
-                                        canonical_source.source.value, canonical_source.line, canonical_source.column);
+                                        canonical_source.source.value, position.line, position.column);
                 }
                 if (x64_upper_vector_dirty && !codegen_canonical_x64_instruction_preserves_wide_vector(program, instruction) &&
                     !codegen_canonical_x64_instruction_uses_wide_vector(program, function, instruction, target))
