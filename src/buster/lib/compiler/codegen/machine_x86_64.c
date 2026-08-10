@@ -46,6 +46,21 @@ struct MachineX64ArgumentPlacement
     u8 reserved[3];
 };
 
+// A conditional branch whose condition chain folded into the branch: the
+// terminator re-selects the innermost comparison as CMP (or the truthiness
+// test as TEST) immediately before JCC, and every absorbed chain member
+// selects into nothing. Indexed by the branch's condition value; a zero
+// condition nibble means no fusion (the mapping never produces 0).
+typedef struct MachineX64BranchFusion MachineX64BranchFusion;
+struct MachineX64BranchFusion
+{
+    u32 left;  // value the CMP/TEST reads
+    u32 right; // CMP's second value, or UINT32_MAX for the TEST form
+    u8 condition;
+    u8 wide;
+    u8 reserved[2];
+};
+
 typedef struct MachineX64Selector MachineX64Selector;
 struct MachineX64Selector
 {
@@ -75,6 +90,10 @@ struct MachineX64Selector
     // Definition point per virtual register, patched into the flattened
     // rows because builder chunks are write-once.
     u32* virtual_register_definitions;
+    // Per IrValue: the fusion a BRANCH_IF on that condition value selects,
+    // and whether the value is a chain member that selects into nothing.
+    MachineX64BranchFusion* branch_fusions;
+    u8* fused_dead;
     u32 virtual_register_count;
     IrOpcode failed_opcode;
     bool supported;
@@ -315,6 +334,43 @@ BUSTER_GLOBAL_LOCAL void machine_x64_reject(MachineX64Selector* selector, IrOpco
     selector->failed_opcode = opcode;
 }
 
+// The x86 condition nibble for an integer/pointer/boolean comparison, or 0
+// (never a comparison's nibble) for everything else. The nibbles pair as
+// exact complements, so negation is condition ^ 1.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_condition_from_comparison(IrBinaryOperation operation)
+{
+    switch (operation)
+    {
+        break;
+    case IR_BINARY_INTEGER_EQUAL:
+    case IR_BINARY_POINTER_EQUAL:
+    case IR_BINARY_BOOLEAN_EQUAL:
+        return MACHINE_X64_CONDITION_EQUAL;
+    case IR_BINARY_INTEGER_NOT_EQUAL:
+    case IR_BINARY_POINTER_NOT_EQUAL:
+    case IR_BINARY_BOOLEAN_NOT_EQUAL:
+        return MACHINE_X64_CONDITION_NOT_EQUAL;
+    case IR_BINARY_SIGNED_LESS:
+        return MACHINE_X64_CONDITION_LESS;
+    case IR_BINARY_SIGNED_LESS_EQUAL:
+        return MACHINE_X64_CONDITION_LESS_EQUAL;
+    case IR_BINARY_SIGNED_GREATER:
+        return MACHINE_X64_CONDITION_GREATER;
+    case IR_BINARY_SIGNED_GREATER_EQUAL:
+        return MACHINE_X64_CONDITION_GREATER_EQUAL;
+    case IR_BINARY_UNSIGNED_LESS:
+        return MACHINE_X64_CONDITION_BELOW;
+    case IR_BINARY_UNSIGNED_LESS_EQUAL:
+        return MACHINE_X64_CONDITION_BELOW_EQUAL;
+    case IR_BINARY_UNSIGNED_GREATER:
+        return MACHINE_X64_CONDITION_ABOVE;
+    case IR_BINARY_UNSIGNED_GREATER_EQUAL:
+        return MACHINE_X64_CONDITION_ABOVE_EQUAL;
+    default:
+        return 0;
+    }
+}
+
 // Emits the row computing the address (or pointer value) of `base` into
 // `destination_register` and defines it: a direct local's frame-slot
 // address, or a copy of any vreg-held value — mirroring the canonical
@@ -465,6 +521,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     u32 result_register = UINT32_MAX;
     if (instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value < function->value_count)
     {
+        // A branch-fusion chain member selects into nothing: the branch
+        // re-selects the compare at its own row, and the member's only
+        // consumer is the chain. Every marked member is pure.
+        if (selector->fused_dead[instruction->result.value])
+        {
+            return true;
+        }
         result_register = selector->value_virtual_registers[instruction->result.value];
     }
     switch (instruction->opcode)
@@ -935,47 +998,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                              });
             return true;
         }
-        u32 condition = 0;
-        switch (instruction->binary_operation)
-        {
-            break;
-        case IR_BINARY_INTEGER_EQUAL:
-        case IR_BINARY_POINTER_EQUAL:
-        case IR_BINARY_BOOLEAN_EQUAL:
-            condition = MACHINE_X64_CONDITION_EQUAL;
-            break;
-        case IR_BINARY_INTEGER_NOT_EQUAL:
-        case IR_BINARY_POINTER_NOT_EQUAL:
-        case IR_BINARY_BOOLEAN_NOT_EQUAL:
-            condition = MACHINE_X64_CONDITION_NOT_EQUAL;
-            break;
-        case IR_BINARY_SIGNED_LESS:
-            condition = MACHINE_X64_CONDITION_LESS;
-            break;
-        case IR_BINARY_SIGNED_LESS_EQUAL:
-            condition = MACHINE_X64_CONDITION_LESS_EQUAL;
-            break;
-        case IR_BINARY_SIGNED_GREATER:
-            condition = MACHINE_X64_CONDITION_GREATER;
-            break;
-        case IR_BINARY_SIGNED_GREATER_EQUAL:
-            condition = MACHINE_X64_CONDITION_GREATER_EQUAL;
-            break;
-        case IR_BINARY_UNSIGNED_LESS:
-            condition = MACHINE_X64_CONDITION_BELOW;
-            break;
-        case IR_BINARY_UNSIGNED_LESS_EQUAL:
-            condition = MACHINE_X64_CONDITION_BELOW_EQUAL;
-            break;
-        case IR_BINARY_UNSIGNED_GREATER:
-            condition = MACHINE_X64_CONDITION_ABOVE;
-            break;
-        case IR_BINARY_UNSIGNED_GREATER_EQUAL:
-            condition = MACHINE_X64_CONDITION_ABOVE_EQUAL;
-            break;
-        default:
-            condition = 0;
-        }
+        u32 condition = machine_x64_condition_from_comparison(instruction->binary_operation);
         if (!condition)
         {
             return false;
@@ -1993,6 +2016,48 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     break;
     case IR_OPCODE_BRANCH_IF:
     {
+        // A fused condition re-selects the chain's innermost comparison
+        // here, immediately before JCC: only allocator edits can land
+        // between the flags define and its use, and every edit form is a
+        // flag-preserving mov (frame load/store, reg copy, movabs remat).
+        MachineX64BranchFusion* fusion =
+            instruction->operands[0].value < function->value_count ? selector->branch_fusions + instruction->operands[0].value : 0;
+        if (fusion && fusion->condition)
+        {
+            u32 left_register;
+            u32 right_register;
+            if (!machine_x64_operand_register(selector, (IrValueId){.value = fusion->left}, &left_register))
+            {
+                return false;
+            }
+            if (fusion->right != UINT32_MAX)
+            {
+                if (!machine_x64_operand_register(selector, (IrValueId){.value = fusion->right}, &right_register))
+                {
+                    return false;
+                }
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                                     .opcode = (u16)(fusion->wide ? MACHINE_X64_CMP64 : MACHINE_X64_CMP32),
+                                                 });
+            }
+            else
+            {
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register)},
+                                                     .opcode = MACHINE_X64_TEST_RR,
+                                                 });
+            }
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[0].value),
+                                                              machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[1].value)},
+                                                 .payload = fusion->condition,
+                                                 .opcode = MACHINE_X64_JCC,
+                                             });
+            return true;
+        }
         u32 condition_register;
         if (!machine_x64_operand_register(selector, instruction->operands[0], &condition_register))
         {
@@ -2238,11 +2303,19 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     u32* value_last_use_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
     u32* value_use_blocks = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
     u32* local_store_counts = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+    u32* value_use_counts = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+    u32* value_def_rows = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+    u32* value_def_blocks = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+    u32* value_def_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
     for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
     {
         value_last_use_ordinals[value_index] = 0;
         value_use_blocks[value_index] = UINT32_MAX;
         local_store_counts[value_index] = 0;
+        value_use_counts[value_index] = 0;
+        value_def_rows[value_index] = UINT32_MAX;
+        value_def_blocks[value_index] = UINT32_MAX;
+        value_def_ordinals[value_index] = 0;
     }
     u32 walk_ordinal = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
@@ -2252,6 +2325,12 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         {
             IrInstruction* instruction = function->instructions + id.value;
             walk_ordinal += 1;
+            if (instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value < function->value_count)
+            {
+                value_def_rows[instruction->result.value] = id.value;
+                value_def_blocks[instruction->result.value] = block_index;
+                value_def_ordinals[instruction->result.value] = walk_ordinal;
+            }
             for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
             {
                 u32 used = instruction->operands[operand_index].value;
@@ -2260,6 +2339,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     continue;
                 }
                 value_last_use_ordinals[used] = walk_ordinal;
+                value_use_counts[used] += 1;
                 value_use_blocks[used] = value_use_blocks[used] == UINT32_MAX || value_use_blocks[used] == block_index ? block_index : UINT32_MAX - 1;
                 if (!promotable_locals[used])
                 {
@@ -2456,6 +2536,222 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         if (load_aliases[value_index] != UINT32_MAX && selector.value_virtual_registers[load_aliases[value_index]] != UINT32_MAX)
         {
             selector.value_virtual_registers[value_index] = selector.value_virtual_registers[load_aliases[value_index]];
+        }
+    }
+    // Compare/branch fusion. A C loop head lowers its controlling
+    // expression as compare → widen → (!= 0) → BRANCH_IF, and each link
+    // materializes: SETCC/MOVZX makes a bool, a movabs makes the zero, a
+    // second compare makes a second flag, and the branch tests it — ~10
+    // instructions where clang emits cmp+jcc. When every member of that
+    // chain has exactly one use and sits in the branch's own block, the
+    // branch re-selects the innermost comparison as CMP (or the residual
+    // truthiness test as TEST) at the terminator and the members select
+    // into nothing. Walking the chain keeps an invariant — the branch
+    // outcome equals truthy(chain value) xor negate — through (!= 0) and
+    // (== 0) against a literal zero, truthiness-preserving extensions,
+    // and BOOLEAN_NOT; a comparison that is none of those terminates the
+    // walk as the CMP, and anything else terminates it as TEST. Both
+    // read their operands at the branch row instead of the member's, so
+    // a promoted local stored between the deepest absorbed member and
+    // the branch forecloses the fusion — the walk stamps every promoted
+    // local's latest store ordinal and the commit compares. Types stay
+    // integer-class scalars throughout: float compares keep their
+    // FCMP_SET materialization and only feed the chain as its bool.
+    selector.branch_fusions = arena_allocate(arena, MachineX64BranchFusion, function->value_count ? function->value_count : 1);
+    selector.fused_dead = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
+    u32* local_store_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+    {
+        selector.branch_fusions[value_index] = (MachineX64BranchFusion){0};
+        selector.fused_dead[value_index] = 0;
+        local_store_ordinals[value_index] = 0;
+    }
+    u32 fusion_ordinal = 0;
+    for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+        {
+            IrInstruction* instruction = function->instructions + id.value;
+            fusion_ordinal += 1;
+            if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
+                promotable_locals[instruction->operands[0].value])
+            {
+                local_store_ordinals[instruction->operands[0].value] = fusion_ordinal;
+            }
+            if (instruction->opcode != IR_OPCODE_BRANCH_IF || instruction->operand_count < 1 || instruction->operands[0].value >= function->value_count)
+            {
+                continue;
+            }
+            u32 chain_value = instruction->operands[0].value;
+            u32 absorbed_members[16];
+            u32 absorbed_count = 0;
+            u32 dead_zeros[16];
+            u32 dead_zero_count = 0;
+            u32 negate = 0;
+            u32 innermost_ordinal = 0;
+            u32 read_left = UINT32_MAX;
+            u32 read_right = UINT32_MAX;
+            u32 condition = 0;
+            bool wide = false;
+            while (absorbed_count < BUSTER_ARRAY_LENGTH(absorbed_members))
+            {
+                if (chain_value >= function->value_count || value_use_counts[chain_value] != 1 || value_def_blocks[chain_value] != block_index ||
+                    value_def_rows[chain_value] == UINT32_MAX)
+                {
+                    break;
+                }
+                IrInstruction* member = function->instructions + value_def_rows[chain_value];
+                if (member->opcode == IR_OPCODE_BINARY && member->operand_count >= 2 && member->operands[0].value < function->value_count &&
+                    member->operands[1].value < function->value_count)
+                {
+                    u32 member_condition = machine_x64_condition_from_comparison(member->binary_operation);
+                    IrTypeId member_operand_type_id = function->values[member->operands[0].value].canonical_type;
+                    if (!member_condition || !machine_x64_type_is_scalar_register(ir_type_from_id(&program->types, member_operand_type_id)))
+                    {
+                        break;
+                    }
+                    if (member_condition == MACHINE_X64_CONDITION_EQUAL || member_condition == MACHINE_X64_CONDITION_NOT_EQUAL)
+                    {
+                        // A literal zero side may sit behind one widening
+                        // cast (extending zero is zero). The cast dies only
+                        // when this compare is its one use, and the
+                        // constant only once nothing still reads it.
+                        u32 zero_side = UINT32_MAX;
+                        u32 zero_cast = UINT32_MAX;
+                        u32 zero_constant = UINT32_MAX;
+                        for (u32 side = 0; side < 2 && zero_side == UINT32_MAX; side += 1)
+                        {
+                            u32 constant_value = member->operands[side].value;
+                            u32 through_cast = UINT32_MAX;
+                            if (value_def_rows[constant_value] == UINT32_MAX)
+                            {
+                                continue;
+                            }
+                            IrInstruction* side_definition = function->instructions + value_def_rows[constant_value];
+                            if (side_definition->opcode == IR_OPCODE_CAST && side_definition->operand_count >= 1 &&
+                                side_definition->operands[0].value < function->value_count &&
+                                (side_definition->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ||
+                                 side_definition->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND ||
+                                 side_definition->conversion_operation == IR_CONVERSION_IDENTITY))
+                            {
+                                through_cast = constant_value;
+                                constant_value = side_definition->operands[0].value;
+                                if (value_def_rows[constant_value] == UINT32_MAX)
+                                {
+                                    continue;
+                                }
+                                side_definition = function->instructions + value_def_rows[constant_value];
+                            }
+                            if (side_definition->opcode == IR_OPCODE_CONSTANT_INTEGER && side_definition->immediate_count && side_definition->immediates &&
+                                side_definition->immediates[0] == 0)
+                            {
+                                zero_side = side;
+                                zero_cast = through_cast;
+                                zero_constant = constant_value;
+                            }
+                        }
+                        if (zero_side != UINT32_MAX)
+                        {
+                            absorbed_members[absorbed_count++] = chain_value;
+                            innermost_ordinal = value_def_ordinals[chain_value];
+                            bool cast_dies = zero_cast == UINT32_MAX ||
+                                             (value_use_counts[zero_cast] == 1 && dead_zero_count < BUSTER_ARRAY_LENGTH(dead_zeros));
+                            if (zero_cast != UINT32_MAX && cast_dies)
+                            {
+                                dead_zeros[dead_zero_count++] = zero_cast;
+                            }
+                            if (cast_dies && value_use_counts[zero_constant] == 1 && dead_zero_count < BUSTER_ARRAY_LENGTH(dead_zeros))
+                            {
+                                dead_zeros[dead_zero_count++] = zero_constant;
+                            }
+                            negate ^= member_condition == MACHINE_X64_CONDITION_EQUAL;
+                            chain_value = member->operands[1 - zero_side].value;
+                            continue;
+                        }
+                    }
+                    absorbed_members[absorbed_count++] = chain_value;
+                    innermost_ordinal = value_def_ordinals[chain_value];
+                    read_left = member->operands[0].value;
+                    read_right = member->operands[1].value;
+                    condition = member_condition ^ negate;
+                    wide = machine_x64_type_is_64_bit(program, member_operand_type_id);
+                    break;
+                }
+                if (member->opcode == IR_OPCODE_CAST && member->operand_count >= 1 && member->operands[0].value < function->value_count &&
+                    (member->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ||
+                     member->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND || member->conversion_operation == IR_CONVERSION_IDENTITY) &&
+                    machine_x64_type_is_scalar_register(
+                        ir_type_from_id(&program->types, function->values[member->operands[0].value].canonical_type)))
+                {
+                    absorbed_members[absorbed_count++] = chain_value;
+                    innermost_ordinal = value_def_ordinals[chain_value];
+                    chain_value = member->operands[0].value;
+                    continue;
+                }
+                if (member->opcode == IR_OPCODE_UNARY && member->unary_operation == IR_UNARY_BOOLEAN_NOT && member->operand_count >= 1 &&
+                    member->operands[0].value < function->value_count &&
+                    machine_x64_type_is_scalar_register(
+                        ir_type_from_id(&program->types, function->values[member->operands[0].value].canonical_type)))
+                {
+                    absorbed_members[absorbed_count++] = chain_value;
+                    innermost_ordinal = value_def_ordinals[chain_value];
+                    negate ^= 1;
+                    chain_value = member->operands[0].value;
+                    continue;
+                }
+                break;
+            }
+            if (!absorbed_count)
+            {
+                continue;
+            }
+            if (read_left == UINT32_MAX)
+            {
+                // Truthiness terminal: TEST64 of the register content is
+                // exact because sub-64-bit values sit extended with clean
+                // upper bits, matching the CMP-against-zero it replaces.
+                if (chain_value >= function->value_count ||
+                    !machine_x64_type_is_scalar_register(ir_type_from_id(&program->types, function->values[chain_value].canonical_type)))
+                {
+                    continue;
+                }
+                read_left = chain_value;
+                condition = MACHINE_X64_CONDITION_NOT_EQUAL ^ negate;
+            }
+            bool reads_safe = selector.value_virtual_registers[read_left] != UINT32_MAX &&
+                              (read_right == UINT32_MAX || selector.value_virtual_registers[read_right] != UINT32_MAX);
+            for (u32 read_side = 0; read_side < 2 && reads_safe; read_side += 1)
+            {
+                u32 read_value = read_side ? read_right : read_left;
+                if (read_value == UINT32_MAX)
+                {
+                    continue;
+                }
+                u32 read_root = load_aliases[read_value];
+                if (read_root != UINT32_MAX && local_store_ordinals[read_root] > innermost_ordinal)
+                {
+                    reads_safe = false;
+                }
+            }
+            if (!reads_safe)
+            {
+                continue;
+            }
+            selector.branch_fusions[instruction->operands[0].value] = (MachineX64BranchFusion){
+                .left = read_left,
+                .right = read_right,
+                .condition = (u8)condition,
+                .wide = wide,
+            };
+            for (u32 member_index = 0; member_index < absorbed_count; member_index += 1)
+            {
+                selector.fused_dead[absorbed_members[member_index]] = 1;
+            }
+            for (u32 zero_index = 0; zero_index < dead_zero_count; zero_index += 1)
+            {
+                selector.fused_dead[dead_zeros[zero_index]] = 1;
+            }
         }
     }
     selector.virtual_register_count = selector.builder.virtual_registers.total_count;
