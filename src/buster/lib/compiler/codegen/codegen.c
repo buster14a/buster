@@ -10449,6 +10449,44 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     : options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY
                         ? machine_quality_placement_build(machine_scratch.arena, &selected.function)
                         : machine_stack_placement_build(machine_scratch.arena, &selected.function);
+                // Stage-9 scheduling, QUALITY only: reorder rows within
+                // over-pressured blocks to sink definitions toward their
+                // first use, then keep whichever form places cheaper. The
+                // currency is the stage-7 acceptance metric — memory
+                // traffic plus a push/pop pair per callee-saved register
+                // the placement binds — so a schedule that trades reloads
+                // for prologue saves cannot sneak through, and an unmoved
+                // schedule costs nothing. FAST measured the same absolute
+                // win but pays the acceptance's second placement out of the
+                // budget that makes it the default -O allocator, so it
+                // stays byte-identical to the unscheduled path
+                // (2026-08-10n). The traffic gate bounds the pass's cost:
+                // a placement that evicted nothing has nothing to save.
+                if (placement.valid && placement.reload_count + placement.spill_count > 0 &&
+                    options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY)
+                {
+                    MachineScheduleResult scheduled = machine_schedule_function(machine_scratch.arena, &selected.function);
+                    if (scheduled.moved)
+                    {
+                        result.statistics.allocator_scheduled_function_count += 1;
+                        MachineStackPlacement scheduled_placement = machine_quality_placement_build(machine_scratch.arena, &scheduled.function);
+                        u32 placement_saved_registers = 0;
+                        u32 scheduled_saved_registers = 0;
+                        for (u32 physical_register = 0; physical_register < MACHINE_TARGET_REGISTER_LIMIT; physical_register += 1)
+                        {
+                            placement_saved_registers += (placement.callee_saved_mask >> physical_register) & 1u;
+                            scheduled_saved_registers += (scheduled_placement.callee_saved_mask >> physical_register) & 1u;
+                        }
+                        if (scheduled_placement.valid &&
+                            scheduled_placement.reload_count + scheduled_placement.spill_count + 2 * scheduled_saved_registers <
+                                placement.reload_count + placement.spill_count + 2 * placement_saved_registers)
+                        {
+                            result.statistics.allocator_schedule_kept_count += 1;
+                            selected.function = scheduled.function;
+                            placement = scheduled_placement;
+                        }
+                    }
+                }
                 if (!placement.valid)
                 {
                     result.statistics.fallback_placement_count += 1;
@@ -17365,6 +17403,8 @@ BUSTER_GLOBAL_LOCAL void codegen_statistics_add(CodegenStatistics* destination, 
     destination->allocator_boundary_copy_count += source.allocator_boundary_copy_count;
     destination->allocator_rematerialize_count += source.allocator_rematerialize_count;
     destination->allocator_pinned_register_count += source.allocator_pinned_register_count;
+    destination->allocator_scheduled_function_count += source.allocator_scheduled_function_count;
+    destination->allocator_schedule_kept_count += source.allocator_schedule_kept_count;
 }
 
 BUSTER_GLOBAL_LOCAL u64 codegen_module_lane_count(CodegenModuleOptions options, u32 function_count)

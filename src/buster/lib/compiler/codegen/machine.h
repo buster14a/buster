@@ -685,6 +685,20 @@ struct MachineSelectResult
     u32 machine_instructions;
 };
 
+// Stage-9 scheduling output: a reordered copy of the input function, or the
+// input itself when no row moved. Instructions, virtual registers (their
+// definition points remapped), and line marks (remapped and re-sorted) are
+// fresh arrays; every other side table is shared with the input, whose own
+// arrays are never modified. The caller keeps whichever of the two placements
+// models cheaper, so the pass cannot lose by construction.
+typedef struct MachineScheduleResult MachineScheduleResult;
+struct MachineScheduleResult
+{
+    MachineFunction function;
+    bool moved;
+    u8 reserved[7];
+};
+
 // MIR_STACK placement: every virtual register owns one 8-byte frame slot and
 // every operand round-trips through a fixed scratch register. This is the
 // selector/encoder verification mode, not an allocator.
@@ -849,6 +863,7 @@ BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, Mac
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target);
+BUSTER_F_DECL MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function);
 // The FAST scan with explicit pins: `pinned_registers` holds a physical

@@ -279,6 +279,142 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_STRING_TEST(arguments, codegen_register_allocator_mode_string(CODEGEN_REGISTER_ALLOCATOR_FAST), S8("fast"));
     BUSTER_STRING_TEST(arguments, codegen_register_allocator_mode_string(CODEGEN_REGISTER_ALLOCATOR_QUALITY), S8("quality"));
 
+    // Stage-9 scheduling. Thirty-two independent products all combined at
+    // the end hold every intermediate live to the combine in source order —
+    // more than the x86-64 register file — and sinking each product to its
+    // first use removes the excess. The pass must keep the block partition
+    // and the SSA def-before-use order, its output must satisfy the
+    // structural verifier, and on this shape the scheduled FAST placement
+    // must model strictly cheaper — that modeled improvement is the
+    // acceptance discipline's whole basis for keeping a schedule. The
+    // low-pressure function must come back unmoved: its excess is zero and
+    // the pass gates itself out before building anything. On AArch64 the
+    // whole function must come back unmoved too, for a structural reason
+    // this test documents: that selector has no local promotion, so the
+    // thirty-two locals live in frame slots rather than virtual registers,
+    // the virtual-register peak stays tiny, and the frame traffic is
+    // memory-chained — scheduling has nothing legal to move until
+    // promotion reaches that target.
+    {
+        String8 schedule_source = S8("unsigned long tree32(unsigned long s) {\n"
+                                     "    unsigned long c0 = (s + 1) * 3; unsigned long c1 = (s + 2) * 5;\n"
+                                     "    unsigned long c2 = (s + 3) * 7; unsigned long c3 = (s + 4) * 11;\n"
+                                     "    unsigned long c4 = (s + 5) * 13; unsigned long c5 = (s + 6) * 17;\n"
+                                     "    unsigned long c6 = (s + 7) * 19; unsigned long c7 = (s + 8) * 23;\n"
+                                     "    unsigned long c8 = (s + 9) * 29; unsigned long c9 = (s + 10) * 31;\n"
+                                     "    unsigned long c10 = (s + 11) * 37; unsigned long c11 = (s + 12) * 41;\n"
+                                     "    unsigned long c12 = (s + 13) * 43; unsigned long c13 = (s + 14) * 47;\n"
+                                     "    unsigned long c14 = (s + 15) * 53; unsigned long c15 = (s + 16) * 59;\n"
+                                     "    unsigned long c16 = (s + 17) * 61; unsigned long c17 = (s + 18) * 67;\n"
+                                     "    unsigned long c18 = (s + 19) * 71; unsigned long c19 = (s + 20) * 73;\n"
+                                     "    unsigned long c20 = (s + 21) * 79; unsigned long c21 = (s + 22) * 83;\n"
+                                     "    unsigned long c22 = (s + 23) * 89; unsigned long c23 = (s + 24) * 97;\n"
+                                     "    unsigned long c24 = (s + 25) * 101; unsigned long c25 = (s + 26) * 103;\n"
+                                     "    unsigned long c26 = (s + 27) * 107; unsigned long c27 = (s + 28) * 109;\n"
+                                     "    unsigned long c28 = (s + 29) * 113; unsigned long c29 = (s + 30) * 127;\n"
+                                     "    unsigned long c30 = (s + 31) * 131; unsigned long c31 = (s + 32) * 137;\n"
+                                     "    return (((c0 ^ c1) + (c2 ^ c3)) * ((c4 ^ c5) + (c6 ^ c7))) ^\n"
+                                     "           (((c8 ^ c9) + (c10 ^ c11)) * ((c12 ^ c13) + (c14 ^ c15))) ^\n"
+                                     "           (((c16 ^ c17) + (c18 ^ c19)) * ((c20 ^ c21) + (c22 ^ c23))) ^\n"
+                                     "           (((c24 ^ c25) + (c26 ^ c27)) * ((c28 ^ c29) + (c30 ^ c31)));\n"
+                                     "}\n"
+                                     "unsigned long lean(unsigned long a, unsigned long b) { return a * 3 + b; }\n");
+        Target schedule_targets[] = {
+            {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+            {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        };
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(schedule_targets); target_index += 1)
+        {
+            IrProgram* schedule_program =
+                machine_test_compile_c(arguments->arena, S8("machine-schedule.c"), schedule_source, schedule_targets[target_index]);
+            BUSTER_TEST(arguments, schedule_program && schedule_program->module_count);
+            if (!schedule_program || !schedule_program->module_count)
+            {
+                continue;
+            }
+            IrFunction* tree_function = machine_test_ir_function_find(schedule_program->modules, S8("tree32"));
+            IrFunction* lean_function = machine_test_ir_function_find(schedule_program->modules, S8("lean"));
+            BUSTER_TEST(arguments, tree_function && lean_function);
+            if (!tree_function || !lean_function)
+            {
+                continue;
+            }
+            MachineSelectResult tree_selected =
+                machine_select_canonical_function(arguments->arena, schedule_program, tree_function, schedule_targets[target_index]);
+            MachineSelectResult lean_selected =
+                machine_select_canonical_function(arguments->arena, schedule_program, lean_function, schedule_targets[target_index]);
+            BUSTER_TEST(arguments, tree_selected.supported && lean_selected.supported);
+            if (!tree_selected.supported || !lean_selected.supported)
+            {
+                continue;
+            }
+            MachineScheduleResult lean_scheduled = machine_schedule_function(arguments->arena, &lean_selected.function);
+            BUSTER_TEST(arguments, !lean_scheduled.moved);
+            MachineScheduleResult tree_scheduled = machine_schedule_function(arguments->arena, &tree_selected.function);
+            bool expect_moved = schedule_targets[target_index].cpu_arch == CPU_ARCH_X86_64;
+            BUSTER_TEST(arguments, tree_scheduled.moved == expect_moved);
+            if (!tree_scheduled.moved)
+            {
+                continue;
+            }
+            BUSTER_TEST(arguments, machine_verify_function(&tree_scheduled.function).error == MACHINE_VERIFY_NONE);
+            BUSTER_TEST(arguments, tree_scheduled.function.instruction_count == tree_selected.function.instruction_count);
+            BUSTER_TEST(arguments, tree_scheduled.function.blocks == tree_selected.function.blocks);
+            // Single-definition values must still define above every use.
+            u32 schedule_register_count = tree_scheduled.function.virtual_register_count;
+            u32* schedule_definition_rows = arena_allocate(arguments->arena, u32, schedule_register_count);
+            u32* schedule_definition_counts = arena_allocate(arguments->arena, u32, schedule_register_count);
+            for (u32 register_index = 0; register_index < schedule_register_count; register_index += 1)
+            {
+                schedule_definition_rows[register_index] = 0;
+                schedule_definition_counts[register_index] = 0;
+            }
+            for (u32 row = 0; row < tree_scheduled.function.instruction_count; row += 1)
+            {
+                MachineInstruction* instruction = tree_scheduled.function.instructions + row;
+                MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                for (u32 slot = 0; info && slot < info->operand_count; slot += 1)
+                {
+                    if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_VIRTUAL_REGISTER)
+                    {
+                        continue;
+                    }
+                    u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                    if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+                    {
+                        schedule_definition_rows[machine_ref_payload(instruction->operands[slot])] = row;
+                        schedule_definition_counts[machine_ref_payload(instruction->operands[slot])] += 1;
+                    }
+                }
+            }
+            bool uses_follow_definitions = true;
+            for (u32 row = 0; row < tree_scheduled.function.instruction_count; row += 1)
+            {
+                MachineInstruction* instruction = tree_scheduled.function.instructions + row;
+                MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                for (u32 slot = 0; info && slot < info->operand_count; slot += 1)
+                {
+                    if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_VIRTUAL_REGISTER)
+                    {
+                        continue;
+                    }
+                    u32 virtual_register = machine_ref_payload(instruction->operands[slot]);
+                    u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                    if (role == MACHINE_OPERAND_ROLE_USE && schedule_definition_counts[virtual_register] == 1)
+                    {
+                        uses_follow_definitions &= schedule_definition_rows[virtual_register] <= row;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, uses_follow_definitions);
+            MachineStackPlacement tree_base_placement = machine_fast_placement_build(arguments->arena, &tree_selected.function);
+            MachineStackPlacement tree_scheduled_placement = machine_fast_placement_build(arguments->arena, &tree_scheduled.function);
+            BUSTER_TEST(arguments, tree_base_placement.valid && tree_scheduled_placement.valid);
+            BUSTER_TEST(arguments, tree_scheduled_placement.reload_count + tree_scheduled_placement.spill_count <
+                                       tree_base_placement.reload_count + tree_base_placement.spill_count);
+        }
+    }
+
     // Stage 2: x86-64 selection, MIR_STACK placement, and encoding over the
     // scalar subset. Selection and encoding are host-independent; execution
     // requires a non-sanitized x86-64 host and runs the same functions

@@ -964,6 +964,7 @@ BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, Mac
 
 #include <buster/lib/compiler/codegen/machine_x86_64.c>
 #include <buster/lib/compiler/codegen/machine_aarch64.c>
+#include <buster/lib/compiler/codegen/machine_schedule.c>
 #include <buster/lib/compiler/codegen/register_allocator_fast.c>
 #include <buster/lib/compiler/codegen/register_allocator_quality.c>
 
