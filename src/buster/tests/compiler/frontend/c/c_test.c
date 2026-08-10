@@ -1775,15 +1775,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
         }
     }
 
-    // The real corpus: every C fixture the driver tests compile, plus the C
-    // frontend's own translation unit, which is the largest and most varied C
-    // file in the tree.
+    // The real corpus: every C fixture the driver tests compile, and on the
+    // desktop platforms the frontend's own sources too — c.c is the largest
+    // and most varied C file in the tree, so it is worth lexing whole.
+    //
+    // The Android package and the iOS bundle ship `tests/` and not `src/`, so
+    // the source half is desktop-only. Both halves still assert the file
+    // opened: a path that stops resolving must fail the gate rather than
+    // silently shrink the corpus.
     {
         String8 corpus[] = {
+#if !BUSTER_ANDROID && !BUSTER_IOS
             S8("src/buster/lib/compiler/frontend/c/c.c"),
             S8("src/buster/lib/compiler/frontend/c/c.h"),
             S8("src/buster/lib/base.h"),
             S8("src/buster/apps/ide/ide.c"),
+#endif
             S8("tests/basic_c_compile.c"),
             S8("tests/basic_c_operations.c"),
             S8("tests/basic_c_stdatomic.c"),
