@@ -68,6 +68,17 @@ BUSTER_F_DECL MachinePointPhase machine_point_phase(MachinePoint point)
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,                                                                                                    \
     }
+#define MACHINE_INFO_THREE_ADDRESS(name_literal)                                                                                                               \
+    {                                                                                                                                                          \
+        .name = S8_INITIALIZER(name_literal), .operand_count = 3,                                                                                              \
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                                            \
+    }
+#define MACHINE_INFO_THREE_ADDRESS_CONSTRAINED(name_literal)                                                                                                   \
+    {                                                                                                                                                          \
+        .name = S8_INITIALIZER(name_literal), .operand_count = 3,                                                                                              \
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                                            \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,                                                                                                    \
+    }
 #define MACHINE_INFO_UNARY_READ_MODIFY(name_literal)                                                                                                           \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 1, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL},                                        \
@@ -334,6 +345,130 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_CALL_DIRECT] = {
         .name = S8_INITIALIZER("x64_call_direct"),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
+    [MACHINE_A64_MOV_RI] = {
+        .name = S8_INITIALIZER("a64_mov_ri"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, 0},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
+    },
+    [MACHINE_A64_MOV_RR] = MACHINE_INFO_MOVE("a64_mov_rr"),
+    [MACHINE_A64_MOV32_RR] = MACHINE_INFO_MOVE("a64_mov32_rr"),
+    [MACHINE_A64_SXTB] = MACHINE_INFO_MOVE("a64_sxtb"),
+    [MACHINE_A64_SXTH] = MACHINE_INFO_MOVE("a64_sxth"),
+    [MACHINE_A64_SXTW] = MACHINE_INFO_MOVE("a64_sxtw"),
+    [MACHINE_A64_UXTB] = MACHINE_INFO_MOVE("a64_uxtb"),
+    [MACHINE_A64_UXTH] = MACHINE_INFO_MOVE("a64_uxth"),
+    [MACHINE_A64_ADD32] = MACHINE_INFO_THREE_ADDRESS("a64_add32"),
+    [MACHINE_A64_ADD64] = MACHINE_INFO_THREE_ADDRESS("a64_add64"),
+    [MACHINE_A64_SUB32] = MACHINE_INFO_THREE_ADDRESS("a64_sub32"),
+    [MACHINE_A64_SUB64] = MACHINE_INFO_THREE_ADDRESS("a64_sub64"),
+    [MACHINE_A64_AND32] = MACHINE_INFO_THREE_ADDRESS("a64_and32"),
+    [MACHINE_A64_AND64] = MACHINE_INFO_THREE_ADDRESS("a64_and64"),
+    [MACHINE_A64_ORR32] = MACHINE_INFO_THREE_ADDRESS("a64_orr32"),
+    [MACHINE_A64_ORR64] = MACHINE_INFO_THREE_ADDRESS("a64_orr64"),
+    [MACHINE_A64_EOR32] = MACHINE_INFO_THREE_ADDRESS("a64_eor32"),
+    [MACHINE_A64_EOR64] = MACHINE_INFO_THREE_ADDRESS("a64_eor64"),
+    [MACHINE_A64_MUL32] = MACHINE_INFO_THREE_ADDRESS("a64_mul32"),
+    [MACHINE_A64_MUL64] = MACHINE_INFO_THREE_ADDRESS("a64_mul64"),
+    [MACHINE_A64_SDIV32] = MACHINE_INFO_THREE_ADDRESS("a64_sdiv32"),
+    [MACHINE_A64_SDIV64] = MACHINE_INFO_THREE_ADDRESS("a64_sdiv64"),
+    [MACHINE_A64_UDIV32] = MACHINE_INFO_THREE_ADDRESS("a64_udiv32"),
+    [MACHINE_A64_UDIV64] = MACHINE_INFO_THREE_ADDRESS("a64_udiv64"),
+    [MACHINE_A64_SREM32] = MACHINE_INFO_THREE_ADDRESS_CONSTRAINED("a64_srem32"),
+    [MACHINE_A64_SREM64] = MACHINE_INFO_THREE_ADDRESS_CONSTRAINED("a64_srem64"),
+    [MACHINE_A64_UREM32] = MACHINE_INFO_THREE_ADDRESS_CONSTRAINED("a64_urem32"),
+    [MACHINE_A64_UREM64] = MACHINE_INFO_THREE_ADDRESS_CONSTRAINED("a64_urem64"),
+    [MACHINE_A64_LSL32] = MACHINE_INFO_THREE_ADDRESS("a64_lsl32"),
+    [MACHINE_A64_LSL64] = MACHINE_INFO_THREE_ADDRESS("a64_lsl64"),
+    [MACHINE_A64_ASR32] = MACHINE_INFO_THREE_ADDRESS("a64_asr32"),
+    [MACHINE_A64_ASR64] = MACHINE_INFO_THREE_ADDRESS("a64_asr64"),
+    [MACHINE_A64_LSR32] = MACHINE_INFO_THREE_ADDRESS("a64_lsr32"),
+    [MACHINE_A64_LSR64] = MACHINE_INFO_THREE_ADDRESS("a64_lsr64"),
+    [MACHINE_A64_NEG32] = MACHINE_INFO_MOVE("a64_neg32"),
+    [MACHINE_A64_NEG64] = MACHINE_INFO_MOVE("a64_neg64"),
+    [MACHINE_A64_NOT32] = MACHINE_INFO_MOVE("a64_not32"),
+    [MACHINE_A64_NOT64] = MACHINE_INFO_MOVE("a64_not64"),
+    [MACHINE_A64_CMP32] = MACHINE_INFO_COMPARE("a64_cmp32"),
+    [MACHINE_A64_CMP64] = MACHINE_INFO_COMPARE("a64_cmp64"),
+    [MACHINE_A64_CMP_ZERO] = {
+        .name = S8_INITIALIZER("a64_cmp_zero"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+    },
+    [MACHINE_A64_CSET] = {
+        .name = S8_INITIALIZER("a64_cset"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE,
+    },
+    [MACHINE_A64_LOAD_FRAME] = {
+        .name = S8_INITIALIZER("a64_load_frame"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, 0},
+    },
+    [MACHINE_A64_STORE_FRAME8] = MACHINE_INFO_STORE_FRAME("a64_store_frame8"),
+    [MACHINE_A64_STORE_FRAME16] = MACHINE_INFO_STORE_FRAME("a64_store_frame16"),
+    [MACHINE_A64_STORE_FRAME32] = MACHINE_INFO_STORE_FRAME("a64_store_frame32"),
+    [MACHINE_A64_STORE_FRAME64] = MACHINE_INFO_STORE_FRAME("a64_store_frame64"),
+    [MACHINE_A64_LOAD_PTR8] = MACHINE_INFO_LOAD_POINTER("a64_load_ptr8"),
+    [MACHINE_A64_LOAD_PTR16] = MACHINE_INFO_LOAD_POINTER("a64_load_ptr16"),
+    [MACHINE_A64_LOAD_PTR32] = MACHINE_INFO_LOAD_POINTER("a64_load_ptr32"),
+    [MACHINE_A64_LOAD_PTR64] = MACHINE_INFO_LOAD_POINTER("a64_load_ptr64"),
+    [MACHINE_A64_STORE_PTR8] = MACHINE_INFO_STORE_POINTER("a64_store_ptr8"),
+    [MACHINE_A64_STORE_PTR16] = MACHINE_INFO_STORE_POINTER("a64_store_ptr16"),
+    [MACHINE_A64_STORE_PTR32] = MACHINE_INFO_STORE_POINTER("a64_store_ptr32"),
+    [MACHINE_A64_STORE_PTR64] = MACHINE_INFO_STORE_POINTER("a64_store_ptr64"),
+    [MACHINE_A64_LEA_FRAME] = {
+        .name = S8_INITIALIZER("a64_lea_frame"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, 0},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
+    },
+    [MACHINE_A64_LEA_OFFSET] = MACHINE_INFO_MOVE("a64_lea_offset"),
+    [MACHINE_A64_B] = {
+        .name = S8_INITIALIZER("a64_b"),
+        .operand_count = 1,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_TERMINATOR,
+    },
+    [MACHINE_A64_BCC] = {
+        .name = S8_INITIALIZER("a64_bcc"),
+        .operand_count = 2,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_TERMINATOR | MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE,
+    },
+    [MACHINE_A64_RET] = {
+        .name = S8_INITIALIZER("a64_ret"),
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_TERMINATOR,
+    },
+    [MACHINE_A64_FMOV_TO_VEC] = {
+        .name = S8_INITIALIZER("a64_fmov_to_vec"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL},
+    },
+    [MACHINE_A64_FMOV_FROM_VEC] = {
+        .name = S8_INITIALIZER("a64_fmov_from_vec"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+    },
+    [MACHINE_A64_BRK] = {
+        .name = S8_INITIALIZER("a64_brk"),
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
+    [MACHINE_A64_UDF] = {
+        .name = S8_INITIALIZER("a64_udf"),
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_TERMINATOR,
+    },
+    [MACHINE_A64_READ_SP] = {
+        .name = S8_INITIALIZER("a64_read_sp"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+    },
+    [MACHINE_A64_WRITE_SP] = {
+        .name = S8_INITIALIZER("a64_write_sp"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
     },
 };
 
@@ -797,5 +932,15 @@ BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, Mac
 }
 
 #include <buster/lib/compiler/codegen/machine_x86_64.c>
+#include <buster/lib/compiler/codegen/machine_aarch64.c>
 #include <buster/lib/compiler/codegen/register_allocator_fast.c>
 #include <buster/lib/compiler/codegen/register_allocator_quality.c>
+
+BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target)
+{
+    if (target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        return machine_select_canonical_function_aarch64(arena, program, function, target);
+    }
+    return machine_select_canonical_function_x86_64(arena, program, function, target);
+}

@@ -82,7 +82,8 @@ BUSTER_GLOBAL_LOCAL MachineEncodeResult machine_test_encode(Arena* arena, IrProg
     {
         return encoded;
     }
-    return machine_encode_x86_64(arena, &selected.function, &placement);
+    return target.cpu_arch == CPU_ARCH_AARCH64 ? machine_encode_aarch64(arena, &selected.function, &placement)
+                                               : machine_encode_x86_64(arena, &selected.function, &placement);
 }
 
 // Every caller sits inside the executing-differential sections below, so
@@ -1016,6 +1017,234 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         }
         codegen_release_executable(none_module_executable);
         codegen_release_executable(mir_module_executable);
+#endif
+    }
+
+    // Stage 11: AArch64 selection, MIR_STACK placement, and encoding over
+    // the scalar integer subset, on the same C corpus with a fixed
+    // aarch64-linux target so the machine path exercises on every host.
+    // Execution requires a non-sanitized AArch64 host; the subset's
+    // register-argument scalar signatures place identically under AAPCS64
+    // and the Darwin convention, so the Linux-target bytes execute
+    // natively on both.
+    Target machine_a64_target = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    IrProgram* machine_a64_program = machine_test_compile_c(arguments->arena, S8("machine-stage11.c"), machine_c_source, machine_a64_target);
+    BUSTER_TEST(arguments, machine_a64_program != 0);
+    if (machine_a64_program && machine_a64_program->module_count)
+    {
+        IrModule* machine_a64_module = machine_a64_program->modules;
+        CodegenModule a64_none_module = codegen_generate_canonical_module(arguments->arena, machine_a64_program, machine_a64_module, machine_a64_target,
+                                                                          (CodegenModuleOptions){0});
+        BUSTER_TEST(arguments, a64_none_module.error == CODEGEN_ERROR_NONE);
+        String8 a64_supported_names[] = {
+            S8_INITIALIZER("add"),     S8_INITIALIZER("mul"),    S8_INITIALIZER("widen"),  S8_INITIALIZER("narrow"),
+            S8_INITIALIZER("negate"),  S8_INITIALIZER("bitnot"), S8_INITIALIZER("lnot"),   S8_INITIALIZER("less"),
+            S8_INITIALIZER("uless"),   S8_INITIALIZER("six"),    S8_INITIALIZER("seven"),  S8_INITIALIZER("sum_to"),
+            S8_INITIALIZER("readp"),   S8_INITIALIZER("writep"), S8_INITIALIZER("divide"), S8_INITIALIZER("srem"),
+            S8_INITIALIZER("udiv"),    S8_INITIALIZER("shl"),    S8_INITIALIZER("sar"),    S8_INITIALIZER("shr"),
+            S8_INITIALIZER("local_pair"),
+        };
+        MachineEncodeResult a64_encoded[BUSTER_ARRAY_LENGTH(a64_supported_names)] = {0};
+        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names); name_index += 1)
+        {
+            IrFunction* ir_function = machine_test_ir_function_find(machine_a64_module, a64_supported_names[name_index]);
+            BUSTER_TEST(arguments, ir_function != 0);
+            if (!ir_function)
+            {
+                continue;
+            }
+            MachineSelectResult selected = {0};
+            a64_encoded[name_index] = machine_test_encode(arguments->arena, machine_a64_program, ir_function, machine_a64_target, &selected);
+            BUSTER_TEST_RAW(arguments, selected.supported,
+                            string_format(arguments->arena, S8("a64 select {S8} failed at opcode {u32}"), a64_supported_names[name_index],
+                                          (u32)selected.failed_opcode));
+            BUSTER_TEST(arguments, a64_encoded[name_index].valid);
+            BUSTER_TEST(arguments, a64_encoded[name_index].byte_count > 16 && a64_encoded[name_index].byte_count % 4 == 0);
+            if (!a64_encoded[name_index].valid)
+            {
+                continue;
+            }
+            // The prologue shape is fixed: stp x29, x30, [sp, #-16]!;
+            // mov x29, sp.
+            u32 first_word = 0;
+            u32 second_word = 0;
+            memcpy(&first_word, a64_encoded[name_index].bytes, sizeof(first_word));
+            memcpy(&second_word, a64_encoded[name_index].bytes + 4, sizeof(second_word));
+            BUSTER_TEST(arguments, first_word == 0xa9bf7bfd && second_word == 0x910003fd);
+            // Every return emits one recorded epilogue.
+            BUSTER_TEST(arguments, a64_encoded[name_index].epilog_count >= 1);
+        }
+        // Placement over the AArch64 rows: the shared MIR_STACK builder
+        // consumes the target description the selector stamped.
+        IrFunction* a64_add_function = machine_test_ir_function_find(machine_a64_module, S8("add"));
+        if (a64_add_function)
+        {
+            MachineSelectResult a64_add_selected =
+                machine_select_canonical_function(arguments->arena, machine_a64_program, a64_add_function, machine_a64_target);
+            BUSTER_TEST(arguments, a64_add_selected.supported);
+            BUSTER_TEST(arguments, a64_add_selected.function.target == machine_target_aarch64());
+            MachineStackPlacement a64_add_placement = machine_stack_placement_build(arguments->arena, &a64_add_selected.function);
+            BUSTER_TEST(arguments, a64_add_placement.valid);
+            BUSTER_TEST(arguments, a64_add_placement.reload_count > 0 && a64_add_placement.spill_count > 0);
+            BUSTER_TEST(arguments, a64_add_placement.frame_size % 16 == 0);
+        }
+        // Calls and float signatures are the current explicit unsupported
+        // representatives of the AArch64 subset.
+        IrFunction* a64_call_function = machine_test_ir_function_find(machine_a64_module, S8("with_call"));
+        BUSTER_TEST(arguments, a64_call_function != 0);
+        if (a64_call_function)
+        {
+            MachineSelectResult a64_call_selected =
+                machine_select_canonical_function(arguments->arena, machine_a64_program, a64_call_function, machine_a64_target);
+            BUSTER_TEST(arguments, !a64_call_selected.supported);
+        }
+        IrFunction* a64_float_function = machine_test_ir_function_find(machine_a64_module, S8("fadd"));
+        BUSTER_TEST(arguments, a64_float_function != 0);
+        if (a64_float_function)
+        {
+            MachineSelectResult a64_float_selected =
+                machine_select_canonical_function(arguments->arena, machine_a64_program, a64_float_function, machine_a64_target);
+            BUSTER_TEST(arguments, !a64_float_selected.supported);
+        }
+        // Module wiring: MIR_STACK on the AArch64 target routes the subset
+        // through the machine path and counts the rest.
+        CodegenModule a64_mir_module = codegen_generate_canonical_module(arguments->arena, machine_a64_program, machine_a64_module, machine_a64_target,
+                                                                         (CodegenModuleOptions){
+                                                                             .register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+                                                                         });
+        BUSTER_TEST(arguments, a64_mir_module.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, a64_none_module.statistics.fallback_function_count == 0);
+        BUSTER_TEST(arguments, a64_mir_module.statistics.fallback_function_count > 0);
+        IrFunction* a64_mir_add = machine_test_ir_function_find(machine_a64_module, S8("add"));
+        if (a64_mir_add)
+        {
+            CodegenFunctionDescriptor* a64_add_descriptor = 0;
+            for (u32 descriptor_index = 0; descriptor_index < a64_mir_module.function_count; descriptor_index += 1)
+            {
+                if (a64_mir_module.functions[descriptor_index].symbol.value == a64_mir_add->symbol.value)
+                {
+                    a64_add_descriptor = a64_mir_module.functions + descriptor_index;
+                    break;
+                }
+            }
+            BUSTER_TEST(arguments, a64_add_descriptor != 0);
+            BUSTER_TEST(arguments, a64_add_descriptor && a64_add_descriptor->code_size > 16);
+            // The machine prologue's actions mirror the canonical AArch64
+            // shape: the frame-pointer pair's allocation first, the x28
+            // save last, and one recorded epilogue per return.
+            BUSTER_TEST(arguments, a64_add_descriptor && a64_add_descriptor->unwind_action_count >= 5 &&
+                                       a64_add_descriptor->unwind_actions[0].kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK &&
+                                       a64_add_descriptor->unwind_actions[0].value == 16);
+            BUSTER_TEST(arguments, a64_add_descriptor && a64_add_descriptor->epilog_count >= 1);
+            BUSTER_TEST(arguments, a64_add_descriptor && a64_add_descriptor->prolog_size >= 24 && a64_add_descriptor->prolog_size % 4 == 0);
+        }
+#if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+        // Native execution differential: the canonical NONE module is the
+        // oracle at each function's entry offset. Only call-free,
+        // global-free functions execute from raw code copies.
+        CodegenExecutable a64_none_executable = codegen_make_executable((CodegenFunction){
+            .code = a64_none_module.code,
+        });
+        BUSTER_TEST(arguments, a64_none_executable.error == CODEGEN_ERROR_NONE);
+        typedef s64 MachineTestA64Call2(s64, s64);
+        typedef s64 MachineTestA64Call7(s64, s64, s64, s64, s64, s64, s64);
+        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names) && a64_none_executable.address; name_index += 1)
+        {
+            if (!a64_encoded[name_index].valid)
+            {
+                continue;
+            }
+            IrFunction* ir_function = machine_test_ir_function_find(machine_a64_module, a64_supported_names[name_index]);
+            u32 none_offset = UINT32_MAX;
+            for (u32 entry_index = 0; entry_index < a64_none_module.entry_count; entry_index += 1)
+            {
+                if (ir_function && a64_none_module.entries[entry_index].symbol.value == ir_function->symbol.value)
+                {
+                    none_offset = a64_none_module.entries[entry_index].offset;
+                    break;
+                }
+            }
+            BUSTER_TEST(arguments, none_offset != UINT32_MAX);
+            CodegenExecutable a64_machine_executable = codegen_make_executable((CodegenFunction){
+                .code = {.pointer = a64_encoded[name_index].bytes, .length = a64_encoded[name_index].byte_count},
+            });
+            BUSTER_TEST(arguments, a64_machine_executable.error == CODEGEN_ERROR_NONE);
+            if (none_offset == UINT32_MAX || !a64_machine_executable.address)
+            {
+                continue;
+            }
+            bool is_writep = string_equal(a64_supported_names[name_index], S8("writep"));
+            bool is_readp = string_equal(a64_supported_names[name_index], S8("readp"));
+            bool is_many = string_equal(a64_supported_names[name_index], S8("six")) || string_equal(a64_supported_names[name_index], S8("seven"));
+            bool is_loop = string_equal(a64_supported_names[name_index], S8("sum_to"));
+            bool wide_result = string_equal(a64_supported_names[name_index], S8("widen")) ||
+                               string_equal(a64_supported_names[name_index], S8("bitnot")) ||
+                               string_equal(a64_supported_names[name_index], S8("sar")) ||
+                               string_equal(a64_supported_names[name_index], S8("udiv")) || is_readp;
+            bool is_division = string_equal(a64_supported_names[name_index], S8("divide")) ||
+                               string_equal(a64_supported_names[name_index], S8("srem")) ||
+                               string_equal(a64_supported_names[name_index], S8("udiv"));
+            s64 probe_arguments[][2] = {
+                {0, 0}, {1, 2}, {-1, 5}, {123456789, -987654321}, {-2147483647, 2147483647}, {40, 2}, {7, -7},
+            };
+            bool all_equal = true;
+            for (u32 probe_index = 0; probe_index < BUSTER_ARRAY_LENGTH(probe_arguments); probe_index += 1)
+            {
+                s64 left = probe_arguments[probe_index][0];
+                s64 right = probe_arguments[probe_index][1];
+                if (is_loop)
+                {
+                    left &= 63;
+                }
+                if (is_division)
+                {
+                    right |= 1;
+                }
+                void* none_address = (u8*)a64_none_executable.address + none_offset;
+                void* machine_address = a64_machine_executable.address;
+                MachineTestA64Call2* none_call = 0;
+                MachineTestA64Call2* machine_call = 0;
+                memcpy(&none_call, &none_address, sizeof(none_call));
+                memcpy(&machine_call, &machine_address, sizeof(machine_call));
+                if (is_writep)
+                {
+                    s32 none_cell = 0;
+                    s32 machine_cell = 0;
+                    none_call((s64)(u64)&none_cell, right);
+                    machine_call((s64)(u64)&machine_cell, right);
+                    all_equal &= none_cell == machine_cell;
+                }
+                else if (is_readp)
+                {
+                    s64 cell = left * 3 + right;
+                    all_equal &= none_call((s64)(u64)&cell, 0) == machine_call((s64)(u64)&cell, 0);
+                }
+                else if (is_many)
+                {
+                    MachineTestA64Call7* none_call7 = 0;
+                    MachineTestA64Call7* machine_call7 = 0;
+                    memcpy(&none_call7, &none_address, sizeof(none_call7));
+                    memcpy(&machine_call7, &machine_address, sizeof(machine_call7));
+                    s32 none_result = (s32)none_call7(left, right, left + 1, right + 1, left - 2, right - 2, left + 3);
+                    s32 machine_result = (s32)machine_call7(left, right, left + 1, right + 1, left - 2, right - 2, left + 3);
+                    all_equal &= none_result == machine_result;
+                }
+                else if (wide_result)
+                {
+                    all_equal &= none_call(left, right) == machine_call(left, right);
+                }
+                else
+                {
+                    all_equal &= (s32)none_call(left, right) == (s32)machine_call(left, right);
+                }
+            }
+            BUSTER_TEST_RAW(arguments, all_equal, a64_supported_names[name_index]);
+            codegen_release_executable(a64_machine_executable);
+        }
+        codegen_release_executable(a64_none_executable);
 #endif
     }
 

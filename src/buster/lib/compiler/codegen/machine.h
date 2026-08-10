@@ -318,6 +318,84 @@ typedef enum MachineOpcode
     MACHINE_X64_MFENCE,
     MACHINE_X64_INT3, // debug trap
     MACHINE_X64_UD2,  // unreachable; terminator
+    // AArch64 scalar subset. Three-address forms carry no ties; the only
+    // constrained rows are the remainder macro-ops, whose div-then-msub
+    // sequence needs three distinct registers. Operand slot 0 is the
+    // destination where one exists.
+    MACHINE_A64_MOV_RI,   // def, immediate-pool ref; movz/movk materialize
+    MACHINE_A64_MOV_RR,   // def, use; 64-bit orr-based register copy
+    MACHINE_A64_MOV32_RR, // def, use; 32-bit move, zero-extends
+    MACHINE_A64_SXTB,     // def, use; sign-extend from 8 bits
+    MACHINE_A64_SXTH,     // def, use; sign-extend from 16 bits
+    MACHINE_A64_SXTW,     // def, use; sign-extend from 32 bits
+    MACHINE_A64_UXTB,     // def, use; zero-extend from 8 bits
+    MACHINE_A64_UXTH,     // def, use; zero-extend from 16 bits
+    MACHINE_A64_ADD32,    // def, use, use
+    MACHINE_A64_ADD64,
+    MACHINE_A64_SUB32,
+    MACHINE_A64_SUB64,
+    MACHINE_A64_AND32,
+    MACHINE_A64_AND64,
+    MACHINE_A64_ORR32,
+    MACHINE_A64_ORR64,
+    MACHINE_A64_EOR32,
+    MACHINE_A64_EOR64,
+    MACHINE_A64_MUL32,
+    MACHINE_A64_MUL64,
+    MACHINE_A64_SDIV32,
+    MACHINE_A64_SDIV64,
+    MACHINE_A64_UDIV32,
+    MACHINE_A64_UDIV64,
+    // Remainder as div-then-msub with the destination as the quotient
+    // scratch; the constrained slot layout keeps all three registers
+    // distinct, which the sequence requires.
+    MACHINE_A64_SREM32,
+    MACHINE_A64_SREM64,
+    MACHINE_A64_UREM32,
+    MACHINE_A64_UREM64,
+    MACHINE_A64_LSL32, // def, use, use; variable shifts take any register
+    MACHINE_A64_LSL64,
+    MACHINE_A64_ASR32,
+    MACHINE_A64_ASR64,
+    MACHINE_A64_LSR32,
+    MACHINE_A64_LSR64,
+    MACHINE_A64_NEG32, // def, use; subtract from the zero register
+    MACHINE_A64_NEG64,
+    MACHINE_A64_NOT32, // def, use; orn from the zero register
+    MACHINE_A64_NOT64,
+    MACHINE_A64_CMP32,     // use, use; defines flags
+    MACHINE_A64_CMP64,
+    MACHINE_A64_CMP_ZERO,  // use; defines flags (64-bit compare against zero)
+    MACHINE_A64_CSET,      // def; payload = MachineA64Condition; uses flags
+    MACHINE_A64_LOAD_FRAME, // def, stack-slot ref; 64-bit read at slot + payload byte offset
+    MACHINE_A64_STORE_FRAME8, // stack-slot ref, use; sized store at slot + payload byte offset
+    MACHINE_A64_STORE_FRAME16,
+    MACHINE_A64_STORE_FRAME32,
+    MACHINE_A64_STORE_FRAME64,
+    MACHINE_A64_LOAD_PTR8, // def, use address; zero-extends
+    MACHINE_A64_LOAD_PTR16,
+    MACHINE_A64_LOAD_PTR32,
+    MACHINE_A64_LOAD_PTR64,
+    MACHINE_A64_STORE_PTR8, // use address, use value
+    MACHINE_A64_STORE_PTR16,
+    MACHINE_A64_STORE_PTR32,
+    MACHINE_A64_STORE_PTR64,
+    MACHINE_A64_LEA_FRAME,  // def, stack-slot ref: address of a frame slot + payload byte offset
+    MACHINE_A64_LEA_OFFSET, // def, base use; payload = byte displacement
+    MACHINE_A64_B,          // block ref; terminator
+    MACHINE_A64_BCC,        // block ref taken, block ref fallthrough; payload = condition; terminator
+    MACHINE_A64_RET,        // terminator; emits the full canonical epilogue
+    // Bit-exact bridges between general registers and the low vector file
+    // for the float ABI; payload is the vector register index.
+    MACHINE_A64_FMOV_TO_VEC,   // use general source; v[payload] = bits
+    MACHINE_A64_FMOV_FROM_VEC, // def general destination = v[payload] bits
+    MACHINE_A64_BRK, // debug trap
+    MACHINE_A64_UDF, // unreachable; terminator
+    // SP travels through adds, not the orr-based moves, whose register 31
+    // reads as the zero register; with STACK_ALLOCATE outside the subset,
+    // stack save/restore pairs reduce to exact SP copies.
+    MACHINE_A64_READ_SP,  // def = current stack pointer
+    MACHINE_A64_WRITE_SP, // use; stack pointer = use
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -345,6 +423,21 @@ struct MachineSwitchCase
     u32 reserved;
 };
 BUSTER_CT_CHECK(sizeof(MachineSwitchCase) == 16);
+
+// AArch64 condition codes as encoded in B.cond and CSINC.
+typedef enum MachineA64Condition
+{
+    MACHINE_A64_CONDITION_EQUAL = 0x0,
+    MACHINE_A64_CONDITION_NOT_EQUAL = 0x1,
+    MACHINE_A64_CONDITION_ABOVE_EQUAL = 0x2, // hs
+    MACHINE_A64_CONDITION_BELOW = 0x3,       // lo
+    MACHINE_A64_CONDITION_ABOVE = 0x8,       // hi
+    MACHINE_A64_CONDITION_BELOW_EQUAL = 0x9, // ls
+    MACHINE_A64_CONDITION_GREATER_EQUAL = 0xa,
+    MACHINE_A64_CONDITION_LESS = 0xb,
+    MACHINE_A64_CONDITION_GREATER = 0xc,
+    MACHINE_A64_CONDITION_LESS_EQUAL = 0xd,
+} MachineA64Condition;
 
 // x86 condition-code low nibble as used by SETcc (0x0f 0x90+cc) and Jcc
 // (0x0f 0x80+cc).
@@ -482,6 +575,45 @@ struct MachineFunction
     u32 reserved;
 };
 
+// AArch64 physical general registers in encoding order; 31 encodes SP or
+// the zero register depending on the instruction, and is never allocatable.
+typedef enum MachineA64Register
+{
+    MACHINE_A64_X0,
+    MACHINE_A64_X1,
+    MACHINE_A64_X2,
+    MACHINE_A64_X3,
+    MACHINE_A64_X4,
+    MACHINE_A64_X5,
+    MACHINE_A64_X6,
+    MACHINE_A64_X7,
+    MACHINE_A64_X8,
+    MACHINE_A64_X9,
+    MACHINE_A64_X10,
+    MACHINE_A64_X11,
+    MACHINE_A64_X12,
+    MACHINE_A64_X13,
+    MACHINE_A64_X14,
+    MACHINE_A64_X15,
+    MACHINE_A64_X16,
+    MACHINE_A64_X17,
+    MACHINE_A64_X18,
+    MACHINE_A64_X19,
+    MACHINE_A64_X20,
+    MACHINE_A64_X21,
+    MACHINE_A64_X22,
+    MACHINE_A64_X23,
+    MACHINE_A64_X24,
+    MACHINE_A64_X25,
+    MACHINE_A64_X26,
+    MACHINE_A64_X27,
+    MACHINE_A64_X28,
+    MACHINE_A64_X29,
+    MACHINE_A64_X30,
+    MACHINE_A64_SP,
+    MACHINE_A64_REGISTER_COUNT,
+} MachineA64Register;
+
 // x86-64 physical general registers in encoding order.
 typedef enum MachineX64Register
 {
@@ -584,7 +716,12 @@ struct MachineEncodeResult
     // ahead of its reload edits, parallel to the instruction array.
     u32* row_offsets;
     MachineCallSite* call_sites;
+    // Function-relative offset of each emitted epilogue's first
+    // instruction, one per return row; the AArch64 encoder fills these for
+    // the Windows unwind data, the x86-64 encoder leaves them empty.
+    u32* epilog_offsets;
     u32 call_site_count;
+    u32 epilog_count;
     bool valid;
     u8 reserved[3];
 };
@@ -665,6 +802,7 @@ BUSTER_F_DECL u32 machine_point_instruction(MachinePoint point);
 BUSTER_F_DECL MachinePointPhase machine_point_phase(MachinePoint point);
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode);
 BUSTER_F_DECL MachineTargetDescription const* machine_target_x86_64(void);
+BUSTER_F_DECL MachineTargetDescription const* machine_target_aarch64(void);
 BUSTER_F_DECL void machine_stream_initialize(MachineBuilderStream* stream, u64 element_size);
 BUSTER_F_DECL void* machine_stream_append(Arena* arena, MachineBuilderStream* stream);
 BUSTER_F_DECL void machine_stream_flatten(MachineBuilderStream* stream, void* destination);
@@ -677,7 +815,11 @@ BUSTER_F_DECL MachineFunction machine_function_builder_finish(Arena* arena, Mach
 BUSTER_F_DECL MachineVerifyResult machine_verify_function(MachineFunction* function);
 BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* function);
+// Dispatches on the target architecture; each backend rejects a target it
+// does not own with an explicit unsupported result.
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target);
+BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target);
+BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target);
 BUSTER_F_DECL MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function);
 // QUALITY: a global pass pins the highest-weight non-overlapping live
@@ -685,3 +827,4 @@ BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, M
 // same local scan places everything else around them.
 BUSTER_F_DECL MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
+BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);

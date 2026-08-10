@@ -2070,7 +2070,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     return false;
 }
 
-MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target)
+MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target)
 {
     MachineSelectResult result = {
         .failed_opcode = IR_OPCODE_COUNT,
