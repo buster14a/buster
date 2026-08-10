@@ -515,8 +515,10 @@ struct MachineOpcodeInfo
 
 // Upper bound on any target's general register file; masks stay u32.
 #define MACHINE_TARGET_REGISTER_LIMIT 32u
-// Callee-saved registers the QUALITY pass may pin, in preference order.
-#define MACHINE_TARGET_QUALITY_PIN_LIMIT 2u
+// Upper bound on the callee-saved registers the QUALITY pass may pin;
+// each target lists its own file in preference order and reports how much
+// of it is real through `quality_pin_register_count`.
+#define MACHINE_TARGET_QUALITY_PIN_LIMIT 9u
 
 // Target-supplied allocator parameters: the register file and the opcode
 // identities the shared allocators special-case. One static instance per
@@ -555,6 +557,7 @@ struct MachineTargetDescription
     u8 indirect_call_register;
     u8 float_bridge_register;
     u8 quality_pin_registers[MACHINE_TARGET_QUALITY_PIN_LIMIT];
+    u8 quality_pin_register_count;
 };
 
 // The contiguous per-function machine streams the builder flattens into.
@@ -848,11 +851,14 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target);
 BUSTER_F_DECL MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function);
-// The FAST scan with explicit whole-function pins: `pinned_registers`
-// holds a physical register per virtual register or UINT32_MAX, and
-// `pinned_mask` collects them. QUALITY derives its pins through this.
+// The FAST scan with explicit pins: `pinned_registers` holds a physical
+// register per virtual register or UINT32_MAX and `pinned_mask` collects
+// them. `pin_active_masks` — one register mask per instruction — scopes
+// each reservation to the span that wants it, so the local scan owns the
+// register everywhere outside; null reserves `pinned_mask` for the whole
+// function. QUALITY derives its pins through this.
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineFunction* function, u32 const* pinned_registers,
-                                                                        u32 pinned_mask);
+                                                                        u32 pinned_mask, u32 const* pin_active_masks);
 // QUALITY: a global pass pins the highest-weight non-overlapping live
 // intervals to callee-saved registers for their whole lifetime, then the
 // same local scan places everything else around them.

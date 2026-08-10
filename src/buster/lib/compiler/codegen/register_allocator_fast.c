@@ -43,10 +43,13 @@ struct MachineFastState
     // materialization, or UINT32_MAX. Such a value is never stored and
     // never occupies a slot: any reload of it re-materializes instead.
     u32* rematerialize_immediates;
-    // Globally pinned registers, owned for the whole function by the
-    // QUALITY pass and invisible to the local scan.
+    // Pinned registers, owned by the QUALITY pass and invisible to the
+    // local scan. `pin_active_masks` holds one register mask per
+    // instruction scoping each reservation to its value's live span; null
+    // means `pinned_mask` holds everywhere.
     u32 const* pinned_registers;
     u32 pinned_mask;
+    u32 const* pin_active_masks;
     u32 clock;
     u32 current_point;
     // Set once the current instruction's uses and defines are placed: from
@@ -54,6 +57,14 @@ struct MachineFastState
     // the final time, so the flush and write-back can drop its store.
     bool uses_consumed;
 };
+
+// The registers pinned values own at this instruction, which the local
+// scan must stand clear of. Outside every pinned span the register is an
+// ordinary member of the pool.
+BUSTER_GLOBAL_LOCAL u32 machine_fast_pin_active(MachineFastState* state, u32 instruction_index)
+{
+    return state->pin_active_masks ? state->pin_active_masks[instruction_index] : state->pinned_mask;
+}
 
 BUSTER_GLOBAL_LOCAL bool machine_fast_owner_is_dead(MachineFastState* state, u32 physical_register)
 {
@@ -366,7 +377,7 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_crosses_call(MachineFastState* state, u32 
 // once another binding has already paid their push.
 BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u32 forbidden_mask, bool prefers_callee_saved)
 {
-    u32 candidates = state->description->allocatable_mask & ~forbidden_mask & ~state->pinned_mask;
+    u32 candidates = state->description->allocatable_mask & ~forbidden_mask & ~machine_fast_pin_active(state, state->current_point >> 2);
     if (!prefers_callee_saved)
     {
         candidates &= ~(state->description->callee_saved_mask & ~state->placement->callee_saved_mask);
@@ -500,10 +511,14 @@ BUSTER_GLOBAL_LOCAL void machine_fast_bind(MachineFastState* state, u32 virtual_
 }
 
 // `pinned_registers` holds a physical register per virtual register that
-// owns it for the whole function, or UINT32_MAX; `pinned_mask` collects
-// them. The local scan never picks, binds, spills, or reloads a pinned
-// value: its operands simply name the register. FAST passes neither.
-MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineFunction* function, u32 const* pinned_registers, u32 pinned_mask)
+// owns it, or UINT32_MAX; `pinned_mask` collects them; `pin_active_masks`
+// scopes each reservation to its value's span, or reserves `pinned_mask`
+// whole-function when null. The local scan never picks, binds, spills, or
+// reloads a pinned value: its operands simply name the register, and the
+// register rejoins the pool wherever no span covers the instruction. FAST
+// passes none of the three.
+MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineFunction* function, u32 const* pinned_registers, u32 pinned_mask,
+                                                          u32 const* pin_active_masks)
 {
     // Frame layout is shared with the stack placement for now; slot
     // elimination is the stage-6 optimization.
@@ -533,6 +548,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
         .rematerialize_immediates = arena_allocate(arena, u32, function->virtual_register_count),
         .pinned_registers = pinned_registers,
         .pinned_mask = pinned_mask,
+        .pin_active_masks = pin_active_masks,
     };
     // Constant definitions are recreatable anywhere, so they never pay for
     // a store or a slot. A second definition of the same value disables
@@ -794,11 +810,15 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
             {
                 u32 const* donor_owner = out_owner + (u64)designated * register_count;
                 bool const* donor_dirty = out_dirty + (u64)designated * register_count;
+                // A register a pinned span holds at this block's entry
+                // belongs to the pinned value here, whatever any edge
+                // delivers, so the contract cannot promise it.
+                u32 entry_pin_active = block->instruction_count ? machine_fast_pin_active(&state, block->first_instruction) : 0;
                 for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
                 {
                     u32 value = donor_owner[contract_register];
-                    if (value == UINT32_MAX || !state.escapes[value] || state.rematerialize_immediates[value] != UINT32_MAX ||
-                        state.last_use[value] < block->first_instruction)
+                    if (value == UINT32_MAX || ((entry_pin_active >> contract_register) & 1u) || !state.escapes[value] ||
+                        state.rematerialize_immediates[value] != UINT32_MAX || state.last_use[value] < block->first_instruction)
                     {
                         continue;
                     }
@@ -836,10 +856,11 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
                     bool const* edge_dirty = out_dirty + (u64)predecessor * register_count;
                     MachineBlock* predecessor_block = function->blocks + predecessor;
                     bool repairs_fully = false;
+                    u32 repair_pin_active = 0;
                     if (predecessor_block->instruction_count)
                     {
-                        MachineInstruction* predecessor_terminator =
-                            function->instructions + predecessor_block->first_instruction + predecessor_block->instruction_count - 1;
+                        u32 terminator_index = predecessor_block->first_instruction + predecessor_block->instruction_count - 1;
+                        MachineInstruction* predecessor_terminator = function->instructions + terminator_index;
                         MachineOpcodeInfo const* terminator_info = machine_opcode_info(predecessor_terminator->opcode);
                         u32 terminator_targets = 0;
                         for (u32 slot = 0; slot < terminator_info->operand_count; slot += 1)
@@ -847,6 +868,12 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
                             terminator_targets += machine_ref_kind(predecessor_terminator->operands[slot]) == MACHINE_REF_BLOCK;
                         }
                         repairs_fully = terminator_targets == 1 && predecessor_terminator->opcode != description->switch_opcode;
+                        // A repair on this edge writes at the terminator,
+                        // so it may not target a register a pinned span
+                        // holds there; a matching delivery is proof the
+                        // register was free, since a span's register is
+                        // never in the scan's own file while it is held.
+                        repair_pin_active = machine_fast_pin_active(&state, terminator_index);
                     }
                     for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
                     {
@@ -859,7 +886,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
                         {
                             entry_dirty[contract_register] |= edge_dirty[contract_register];
                         }
-                        else if (repairs_fully)
+                        else if (repairs_fully && !((repair_pin_active >> contract_register) & 1u))
                         {
                             for (u32 other = 0; other < register_count; other += 1)
                             {
@@ -944,6 +971,24 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
             }
             state.current_point = machine_point_make(instruction_index, MACHINE_POINT_BEFORE);
             state.uses_consumed = false;
+            // A register entering a pinned span belongs to its value from
+            // here, so any local owner leaves first. At a block head the
+            // contract construction already refused these registers, so
+            // the eviction only fires where a span opens mid-block — at a
+            // pinned value's definition — which is a point that cannot
+            // re-execute without passing the block head again.
+            u32 pins_opening = machine_fast_pin_active(&state, instruction_index);
+            for (u32 physical_register = 0; pins_opening; physical_register += 1)
+            {
+                if (pins_opening & (1u << physical_register))
+                {
+                    pins_opening &= ~(1u << physical_register);
+                    if (state.owner[physical_register] != UINT32_MAX)
+                    {
+                        machine_fast_spill(&state, physical_register);
+                    }
+                }
+            }
             u8* operand_registers = placement.operand_registers + (u64)instruction_index * 4;
             bool constrained = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) != 0;
             bool is_call = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL) != 0;
@@ -1081,7 +1126,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
                 else if (instruction->opcode == description->copy_opcode && slot == 0 &&
                          machine_ref_kind(instruction->operands[1]) == MACHINE_REF_VIRTUAL_REGISTER &&
                          machine_ref_payload(instruction->operands[1]) != machine_ref_payload(ref) &&
-                         operand_registers[1] != UINT8_MAX && !((state.pinned_mask >> operand_registers[1]) & 1u) &&
+                         operand_registers[1] != UINT8_MAX && !((machine_fast_pin_active(&state, instruction_index) >> operand_registers[1]) & 1u) &&
                          machine_fast_source_dies_here(&state, machine_ref_payload(instruction->operands[1])))
                 {
                     // Coalesce: the source's last use is this copy, so the
@@ -1271,5 +1316,5 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
 
 MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function)
 {
-    return machine_fast_placement_build_pinned(arena, function, 0, 0);
+    return machine_fast_placement_build_pinned(arena, function, 0, 0, 0);
 }

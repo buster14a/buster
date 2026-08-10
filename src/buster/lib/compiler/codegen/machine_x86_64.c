@@ -105,7 +105,11 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_x86_64_description = 
     .float_bridge_opcode = MACHINE_X64_MOVQ_TO_XMM,
     .indirect_call_register = MACHINE_X64_R10,
     .float_bridge_register = MACHINE_X64_RAX,
-    .quality_pin_registers = {MACHINE_X64_R14, MACHINE_X64_R15},
+    // The whole callee-saved file, highest register first so the pins
+    // collide last with the local scan's own callee-saved bindings, which
+    // probe in register order from RBX up.
+    .quality_pin_registers = {MACHINE_X64_R15, MACHINE_X64_R14, MACHINE_X64_R13, MACHINE_X64_R12, MACHINE_X64_RBX},
+    .quality_pin_register_count = 5,
 };
 
 BUSTER_F_DECL MachineTargetDescription const* machine_target_x86_64(void)

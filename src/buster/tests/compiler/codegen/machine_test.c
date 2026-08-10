@@ -1110,7 +1110,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 }
                 forced_pins[0] = MACHINE_A64_X27;
                 MachineStackPlacement a64_pinned_placement =
-                    machine_fast_placement_build_pinned(arguments->arena, &a64_pin_selected.function, forced_pins, 1u << MACHINE_A64_X27);
+                    machine_fast_placement_build_pinned(arguments->arena, &a64_pin_selected.function, forced_pins, 1u << MACHINE_A64_X27, 0);
                 BUSTER_TEST(arguments, a64_pinned_placement.valid);
                 BUSTER_TEST(arguments, (a64_pinned_placement.callee_saved_mask >> MACHINE_A64_X27) & 1u);
                 MachineEncodeResult a64_pinned_encoded = machine_encode_aarch64(arguments->arena, &a64_pin_selected.function, &a64_pinned_placement);

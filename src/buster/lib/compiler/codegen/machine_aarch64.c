@@ -48,7 +48,12 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_aarch64_description =
     .float_bridge_opcode = MACHINE_A64_FMOV_TO_VEC,
     .indirect_call_register = MACHINE_A64_X16,
     .float_bridge_register = MACHINE_A64_X9,
-    .quality_pin_registers = {MACHINE_A64_X26, MACHINE_A64_X27},
+    // The whole callee-saved file, highest register first so the pins
+    // collide last with the local scan's own callee-saved bindings, which
+    // probe in register order from X19 up.
+    .quality_pin_registers = {MACHINE_A64_X27, MACHINE_A64_X26, MACHINE_A64_X25, MACHINE_A64_X24, MACHINE_A64_X23, MACHINE_A64_X22, MACHINE_A64_X21,
+                              MACHINE_A64_X20, MACHINE_A64_X19},
+    .quality_pin_register_count = 9,
 };
 
 BUSTER_F_DECL MachineTargetDescription const* machine_target_aarch64(void)
