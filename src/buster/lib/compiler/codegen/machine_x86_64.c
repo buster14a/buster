@@ -2369,8 +2369,7 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
                 *mark = (MachineLineMark){
                     .row = selector.builder.instructions.total_count,
                     .source = mark_source.source.value,
-                    .line = mark_source.line,
-                    .column = mark_source.column,
+                    .offset = mark_source.offset,
                 };
             }
             if (!machine_x64_select_instruction(&selector, instruction))

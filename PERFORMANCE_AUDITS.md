@@ -12,7 +12,7 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
-`2026-08-10a` (Linux x86_64, Zen 4 7940HS; rebase onto main, and the
+`2026-08-10g` (Linux x86_64, Zen 4 7940HS; rebase onto main, and the
 numbers refreshed on the merged tree.)
 
 - **Why the entries above are renumbered.** Main independently used
@@ -34,6 +34,480 @@ numbers refreshed on the merged tree.)
 - **Gates on the merged tree:** test_all green (20454 unit, 31 module),
   all three soaks — MIR_STACK, FAST and QUALITY — byte-identical against
   a fresh canonical reference, self-host fixed point holds.
+
+`2026-08-10f` (Linux x86_64, Zen 4 7940HS; not a throughput audit — an ABI
+feature costed against the gate. **Stage 1 `5.3442 G` to `5.3516 G`
+instructions (`+7.44 M`, `+0.14%`)** against the parent commit `e8586c1`, of
+which `~1.45 M` is the unit being compiled growing `18.396.357` to
+`18.401.349` bytes; instructions per byte `290.503` to `290.828` (`+0.11%`),
+per preprocessed token `3773.411` to `3777.595` (`+0.11%`), is the work
+itself. Fixed point deterministic, `test_all` green in Release and in Debug.)
+
+- **What moved.** x86-64 SystemV and Darwin can now pass and return a vector
+  wider than any register the target owns. `ir_classify_abi_value` classifies
+  a vector by the psABI rule alone — a 512-bit vector is one
+  `IR_ABI_CLASS_VECTOR` part whatever the machine — so the canonical backend
+  is where the target gets a say. Two helpers say it once:
+  `codegen_canonical_x64_vector_part_registers` reports how many consecutive
+  registers a part occupies and how much each carries, and
+  `codegen_canonical_x64_abi_value_in_registers` answers whether the value
+  fits the registers its classification named. A return and a call result
+  split across as many registers as it takes — `xmm0`–`xmm3` for a 64-byte
+  vector without AVX, `ymm0`/`ymm1` with it; an argument that does not fit one
+  register is passed in memory, because it competes for a shared pool a return
+  does not. Both are what clang emits for the same declaration, verified by
+  linking the two compilers' halves of one program at all three widths, both
+  directions, at 32 stack offsets each and under `gdb`.
+- **What it cost.** Three predicate calls per argument — the call layout, the
+  callee's own argument, and each argument before it in the callee's
+  register-accounting walk, which was already quadratic in the parameter
+  count. The cost is the calls, not their work: making the answer for a
+  scalar part a single `size > 16` compare instead of a CPU-feature-set walk
+  moved nothing measurable, and the figure only came down (`-1.8 M`, measured
+  before this was rebased) when the two 48- and 56-byte structs stopped being
+  passed by value. That is the floor for this shape. **If this tenth of a
+  percent is wanted back**, the shape is to fold the predicate into the
+  classification the backend already reads, so the answer is computed once per
+  type per convention where `IrTypeAbi` caches it rather than once per
+  argument occurrence — which needs that cache keyed by target and not only by
+  convention.
+- **What this depended on.** The stack-passed half of it only works because
+  `2026-08-10a` aligned the System V outgoing argument area first. This work
+  found that gap and left it — a stack-passed 512-bit vector read back with
+  `vmovaps zmm` agreed or faulted by where the stack happened to be — and
+  `2026-08-10a` took it, which is why `vector_ninth`'s spilled ninth argument
+  is deterministic here and was a lottery when it was written. The two land
+  in either order; only together do they make the fixture's nine-vector shape
+  mean anything against another compiler's object.
+
+`2026-08-10e` (Linux x86_64, Zen 4 7940HS; the retry `2026-08-10d` left
+untaken, built and measured. **Stage 1 `5.3955 G` to `5.3443 G` instructions
+(`-0.95%`), which is the whole of `10d`'s walk and a quarter percent more —
+the result sits below `10d`'s own parent, `5.3537 G`, and not merely below
+`10d`.** Fixed point deterministic, `test_all` green in Release and in
+sanitized Debug, and the objects both wide-argument fixtures produce are
+byte-identical to the ones the walk's reserve produced for all sixteen
+target/fixture pairs the driver test builds.)
+
+- **The measurements.** Four `test_self_host --config Release` runs on one
+  tree, one machine, one session, quoted per token as well because the source
+  moves slightly between variants. The walk, which is `10d` as merged,
+  `5.395535 G` / `3809.236` instructions per token — that reproduces `10d`'s
+  own gate figure exactly. The flat reserve with no retry, which is this change
+  with the doubling removed and both wide fixtures failing, `5.359087 G` /
+  `3784.383`. This change, `5.344287 G` / `3773.478`, with a second run at
+  `5.344313 G` for the reproducibility band. So the walk costs `0.68%` on this
+  tree and this change gives back `0.95%`.
+- **What was built.** `codegen_generate_canonical_module` is now a wrapper: it
+  checks the target, prepares the program ABI and validates the IR once, then
+  snapshots the arena and calls an attempt function that generates the whole
+  module into a code buffer reserved at a scale times the flat per-instruction
+  estimate. When the attempt reports that the *code buffer specifically* ran
+  out, the wrapper rewinds the arena and generates again with twice the room.
+  The signal is one `bool*` on `CodegenBuffer`, written only where
+  `codegen_emit_u8` refuses a byte, so the capacity failures a bigger buffer
+  cannot fix — an out-of-range frame displacement, a frame past `UINT32_MAX`, a
+  reserve already at the limit of a `u32` offset — are reported as they stand
+  instead of being recompiled up to twenty-eight times. The reserve's own
+  `UINT32_MAX` ceiling is what ends the doubling; the `10d` and `2026-08-10`
+  `.p2align` padding guards are what keep an exhausted buffer terminating
+  rather than hanging. The `.p2align` and over-aligned-argument reserves stay:
+  both are computed in loops that already run, and neither is a walk.
+- **The retry is free because it almost never fires.** Not once on the
+  self-host unity translation unit, which is the gate; twice (scale 4) for
+  `basic_c_wide_argument.c` on Win64 and once (scale 2) for the same fixture on
+  x86-64 SystemV. A module that needs it pays one extra generation of itself
+  and nothing else pays anything.
+- **The flag cost `+0.21%` written inline, and the fix was to move the refusal
+  out of line.** Reporting it inside `codegen_emit_u8` — a load, a branch and a
+  store, on a path never taken — measured `5.370319 G` / `3791.940`, `+0.21%`
+  over the flat reserve with no retry at all and `+0.49%` over what shipped.
+  `codegen_emit_u8` is inlined into every emitter in the backend and the unity
+  build emits nineteen megabytes of code through it, so growing its body
+  changes inlining decisions all over the emitters; the cost is per emitted
+  byte, not per refused one. Reporting from a
+  `BUSTER_COLD BUSTER_PRESERVE_MOST` helper, and moving the `buffer->error`
+  store into it as well, made the hot body *smaller* than it was before this
+  work and landed `0.28%` under the no-retry reference — which is where the
+  extra quarter percent in the headline comes from. This is the trap the
+  nested-ternary label fix paid in the C frontend's hot per-token predicate,
+  which is where `BUSTER_PRESERVE_MOST` came from; assume it applies to any
+  edit inside `codegen_emit_u8`, however cold the new code looks, and A/B it
+  on the same corpus rather than reasoning about which branch runs.
+
+`2026-08-10d` (Linux x86_64, Zen 4 7940HS; not a throughput audit — a
+correctness fix costed against the gate, recorded here so the next audit does
+not read the step as a regression of its own. **Gate: stage 1 `5.3537 G` to
+`5.3955 G` instructions (`+0.78%`)** against the parent commit `2997c5a`, not
+against `2026-08-10c`'s tree; fixed point deterministic, `test_all` green in
+Release and in sanitized Debug. **The retry it leaves untaken is built in
+`2026-08-10e`.**)
+
+- **What moved.** The module code buffer was reserved at a flat 48 bytes per
+  IR instruction on x86-64 (128 on aarch64), but an instruction that moves an
+  aggregate encodes a load and a store per eightbyte, so its size grows with
+  the type and not with the instruction count. Two 64-byte vectors by value
+  was already more code than a whole small module was given, and the buffer
+  ran out. `codegen_generate_canonical_module` now adds a reserve for the
+  values wider than an eightbyte that each instruction can move — its own and
+  every operand it reads — which costs one walk of the instruction and operand
+  arrays per function that holds such a value.
+- **What it cost and why it was paid anyway.** The walk is the whole `+0.78%`:
+  a `perf` line profile of one stage-1 compile splits it about evenly between
+  filling the per-value reserve alongside the frame-slot loop that already
+  reads every value's type, and the instruction and operand walk itself. Two
+  cheaper shapes were measured and rejected — recomputing each operand's type
+  in the walk instead of tabling it per value is worse, and splitting the table
+  fill into a second value pass taken only by functions that hold a wide value
+  is also worse, because most C functions hold one. Those two were measured
+  before this work was rebased, against the pre-`2026-08-09h` main, where the
+  shipped shape cost `+0.96%` (`5.1329 G` to `5.1822 G`) against the other
+  two's `+1.59%` and `+1.27%`; the ordering is what the numbers are for, not
+  the absolute values. The alternative that costs nothing in the
+  common case is to keep the cheap estimate and generate the module again with
+  more room when it runs out; it was left untaken because
+  `CODEGEN_ERROR_CAPACITY` is also raised for reasons a bigger buffer cannot
+  fix (an out-of-range frame displacement, a frame past `UINT32_MAX`), so a
+  retry needs a signal that the code buffer specifically overflowed, and there
+  is no return path in that function that carries one today. **If this
+  percent is wanted back, that is the shape to build**: one flag on
+  `CodegenBuffer` set only where `codegen_emit_u8` refuses a byte, surfaced on
+  the result, and the estimate reverts to the flat reserve.
+`2026-08-10c` (Linux x86_64, Zen 4 7940HS; the structural buy-back the
+`2026-08-09g` entry recorded as its next step — IR source ranges stop
+carrying line and column, and the four consumers that print one recover it
+from the offset the range already holds. Developed against the pre-`h` main.
+**The throughput figures below were measured on `05c8973`**, three points
+taken back to back against the `2026-08-09j` reference points there: stage
+1 `5.2514 G` instructions / `209.8 k` minor faults / `131.5 M` L1d load
+misses, `instructions_per_token 3716.662`. The branch was then rebased onto
+`bd754be`, where the `2026-08-10b` `c_lex` compaction moved the baseline to
+`instructions_per_token 3648.608` — the deltas are the ones to read, and CI
+publishes the absolutes on the current base. Correctness and the fixed
+point were re-verified on the rebased tree. **Two changes, and they pull
+opposite ways. The deferral is `-45.1 M` on its own (stage 1 `5.2064 G`, `-0.86%`;
+`-0.94%` on the fixed-workload cross-check), `201.1 k` minor faults
+(`-4.2%`), `125.9 M` L1d (`-4.3%`), emission byte-identical. Sizing
+`instruction_canonical_sources` with the instructions then puts the C line
+table back — `3,457` `.debug_line` rows to `529,928` — for `+235 M`, of
+which `+152 M` is the position resolutions a real line table has to run.
+Net on the gate: stage 1 `5.4409 G`, `+3.61%` over the baseline and
+`+3.50%` per token, in exchange for debug information that was silently
+absent. A `-g0` compile pays `+4.6 M` of that.**)
+
+- **What was built.** `IrSourceRange` is `{IrSourceId source; u32 offset;
+  u32 length}` — 12 bytes, down from 32. Line and column resolve through
+  `ir_source_position`, over one of two frontend-neutral structures the IR
+  model now owns: an `IrSourceMap` (sorted `IrSourceRegion`s over the
+  frontend's byte space, per-line `IrSourceCheckpoint`s in TEXT regions and
+  one stamped position per macro expansion in STAMP regions), or
+  `IrSource.text` scanned with a resume cursor for frontends whose ranges
+  index the parsed bytes. The C frontend's `CSourceMapEntry`/
+  `CSourceMapRecovery` became that map — it is handed to the program as
+  data, so the preprocessor's own `c_preprocess_token_location*` and every
+  IR consumer are one lookup over one structure, and no callback crosses
+  the frontend boundary. `CSourceLocation` keeps the file byte offset and
+  gains `map_offset`, the spelling-space offset it was recovered from,
+  which is what a range stores. Checkpoints dropped their unused `file`
+  and their `u64` offset: 24 bytes to 12, and the lexer writes one per
+  line of every include.
+- **The prize, measured before building anything.** Returning a constant
+  from `c_ir_token_source_range` was `-76.2 M`; keeping the region lookup
+  but skipping the per-line checkpoint search inside the shared recovery
+  was `-57.9 M`. The gap between them is the region lookup, and the `57.9`
+  is *not* all deferrable: it also covers the cursorless
+  `c_preprocess_token_location` that parsing calls for diagnostics, which
+  has to produce a line no matter when it runs.
+- **Probe counters first, and they moved the design twice.** Stage 1 runs
+  `1,135,745` recovery queries from lowering (34% memo hits, 26% reaching a
+  checkpoint binary search) and `955,269` canonical-source reads in
+  codegen. The first working deferral measured **`+94 M`**, worse than the
+  eager design, and two finds turned it around:
+  - **The line table asked for a position per instruction.** Deferral moves
+    the query, it does not delete it. Rejecting the repeat on the range's
+    own offset before resolving — consecutive instructions overwhelmingly
+    come from one token, so `955,269` reads hold only a few hundred
+    distinct offsets — was worth **`-99 M`**.
+  - **The region search read `start` fields 64 bytes apart.** Splitting
+    `{start, source}` out of the 64-byte region into a dense
+    `IrSourceRegionKey` array (eight per cache line, with a `UINT32_MAX`
+    sentinel so a containment check needs no bounds test) took the
+    remaining lowering-side lookup from `55 M` to `14 M`: **`-41 M`**. The
+    hot query has its own entry point, `ir_source_map_source`, because
+    naming the file is the region search *without* the checkpoint search
+    that a full position runs after it.
+- **Measured negative, do not retry as written:** checking the cursor's
+  text-region slot before its stamp slot (`+1.0 M` — the stamp slot is the
+  narrower of the two, so a hit there is decisive and belongs first).
+- **The line table the gate was not emitting, now emitted.**
+  `function->instruction_canonical_sources` was null for essentially every
+  canonical function — `948,328` of the `955,269` reads codegen makes —
+  because `c_lower_to_ir` preallocates `function->instructions` at a measured
+  capacity and `ir_function_add_instruction` stores a canonical source only
+  into an array that already exists. `939,423` of the `1,004,390` ranges the
+  lowering built were computed and dropped, and a stage-1 executable carried
+  `3,457` `.debug_line` rows: one per function, plus the handful from the
+  functions that outgrew their preallocation. Sizing the array with the
+  instructions fixes it — **`529,928` rows**, with columns that track
+  sub-expressions (verified against a hand-checked fixture: a three-statement
+  function now maps its operand loads, its operator and its store to the
+  right columns of the right lines).
+- **What that costs, decomposed.** Stage 1 goes `5.2064 G` to `5.4409 G`
+  (`+4.51%`, `+4.49%` per token), and the split is not where it looks: the array and its store
+  per instruction are `+4.6 M`, the `698,278` position resolutions are
+  `+152 M`, and recording `520 k` rows plus encoding them into
+  `.debug_line` is `+83 M`. Resolution dominates because a line table walks
+  lines: about half the queries land on a different checkpoint than the last
+  and pay a search. **This is the price of the debug information, not of the
+  deferral** — a `-g0` compile pays only the `+4.6 M`, and the same unit
+  compiles in `5.005 G` with `-g0` against `5.441 G` with `-g`, so debug
+  information is now 8% of what a self-host stage costs and the gate has
+  been measuring it all along without emitting it. (The three-way split was
+  taken on the pre-rebase base, where the total was the same `+231 M`.)
+- **Bracketing the checkpoint search by page** — the same shape
+  `IrSourceMap.pages` already gives the region search, one entry per 128
+  bytes of a region's text, built in the lexer's one linear pass over the
+  finished checkpoints — was `-8.2 M`. `256` bytes measured `-6.4 M` and
+  `1 KB` nothing, so the bracket has to be finer than a source line's
+  scale to bite.
+- **Measured negative on the resolution path, do not retry as written:**
+  stepping the checkpoint cursor forward before falling back to the search
+  (`+44 M` at a limit of 16, `+26 M` at 4). A probe said 89% of the searches
+  were forward moves, which reads like a walk — but the distance is a
+  statement's worth of lines, so the steps ran out and the search happened
+  anyway: `4.0 M` steps bought `88 k` skipped searches. Holding the
+  checkpoint cursor per region instead of per querying cursor, so a
+  file/macro interleave stops discarding the file's position, was `+3.8 M`
+  — the store into the 64-byte region row costs more than the resets save.
+- **Verification, on the rebased tree.** Fixed point holds (`SELF_HOST
+  deterministic bytes=29452352`) with `530,535` `.debug_line` rows, and the
+  hand-checked fixtures still map operand loads, operator and store to the
+  right columns and macro-expanded code to its invocation line — the
+  `2026-08-10b` `c_lex` rewrite lands on the same checkpoints. The deferral
+  on its own was emission-byte-identical: a frozen snapshot of the
+  pre-change tree compiled with the pre-change and post-change compilers
+  produced identical executables, unity translation unit included — the line
+  table is the only thing that changed after it. `ide bench` is untouched;
+  the buster tokenizer is not on this path. 24317 Release unit tests, 23420
+  sanitized unit tests and 30 module tests pass. Cycles are not quoted: the
+  measurements ran with other load on the box, and instructions and minor
+  faults are the counters that survive that.
+- **The next lever on the resolution, unmeasured and not taken.** Codegen
+  resolves in emission order, which defeats the cursor; resolving a
+  function's rows in offset order would answer all of them from one
+  monotone walk over the checkpoints and no searches at all. That means
+  recording `(code_offset, source, offset)` unresolved, ordering by offset
+  — nearly sorted already, so an insertion pass — then resolving and
+  compacting in code order. Rough estimate `~40 M` against the `152 M`
+  standing today. It restructures how `codegen_generate_canonical_module`
+  records lines and moves the row dedupe after resolution, so it belongs in
+  its own session with its own fixture check.
+- Reference points for the next audit, all clang-built on this host:
+  stage 1 `5.4409 G` instructions / `212.2 k` minor faults / `128.8 M` L1d
+  load misses, `instructions_per_token 3846.918` — all on `05c8973`, before
+  the `c_lex` compaction landed under this branch — 24317 Release unit
+  tests and 30 module tests, `CToken` 16 bytes, `IrSourceRange` **12
+  bytes**,
+  `530,535` `.debug_line` rows in a stage-1 executable, byte-identical
+  fixed point (`SELF_HOST deterministic bytes=29452352`) on `bd754be`.
+  Stage 2 `73.052 G`, validation only. The `5.2064 G` the deferral reached before
+  the line table went in is the number to compare against if that trade is
+  ever revisited.
+`2026-08-10b` (Linux x86_64, Zen 4 7940HS; the structural buy-back
+`2026-08-09g` recorded as the next step — the `2026-08-09c` Deus-Lex
+compaction architecture ported from the buster tokenizer to `c_lex`, which
+still held `~300 M` and now had a 16-byte row to store into. Every number
+clang-built on a quiet machine, counter medians of 5 runs, with a
+fixed-workload cross-check separating compiler efficiency from the tree's own
+growth. **Stage 1 `5.1968 G` to `5.0945 G` instructions (`-102.3 M`,
+`-1.97%`), branches `992.10 M` to `956.86 M` (`-3.55%`), both from a
+fixed-workload cross-check on the identical tree. Fixed point
+deterministic.** Landed with a prerequisite codegen fix described below,
+without which the emitter measured `+221 M` instead.)
+
+- **What was built.** `c_lex` now dispatches to a compaction emitter
+  (`c_lex_compact`, guarded `__AVX512VBMI__ && __AVX512VBMI2__` on top of
+  AVX-512, so MSVC, aarch64, non-AVX-512 hosts and the self-hosted stages keep
+  the scalar loop) that walks the translated source in **item-aligned 64-byte
+  windows**, the same architecture the buster tokenizer runs: one masked load
+  classifies every byte class in lockstep; quote/comment/escape spans resolve
+  by mask arithmetic with escape parity from the simdjson backslash algorithm;
+  multi-character punctuators legalize through a bit-channel `vpermi2b` NFA;
+  preprocessing-number extents are one `tzcnt` over a continuation mask; and
+  emission is the `vpcompressb` iota compaction — starts and ends compress
+  through the token-boundary masks, one byte subtract yields every length, the
+  kind and punctuator vectors compress by the same starts mask, and widening
+  interleaved stores write the 16-byte `CToken` rows eight at a time
+  (`vpermi2q` twice per eight rows).
+- **Three places where C forced a different shape than the buster tokenizer,
+  and they are the whole design.** (1) **C skips whitespace and comments
+  instead of tokenizing them**, so the reference's `ends = starts >> 1` is
+  wrong — `a  b` would give `a` length 3. Ends come instead from
+  `((boundary >> 1) | bit(bound-1)) & token_span`, where `boundary` marks
+  every position that begins *anything* (whitespace per byte, so a window of
+  pure whitespace still advances 63 bytes instead of one) and `token_span` is
+  the complement of the bytes no token owns. (2) **A preprocessing number's
+  continuation set is context-sensitive** — `+`/`-` continue only after
+  `e`/`E`/`p`/`P` — but `(plus|minus) & (exponent_letter << 1)` models that
+  exactly, so C numbers need no scalar scanner at all, where the buster
+  emitter had to keep one. (3) **Four item kinds can swallow another item's
+  start** (numbers, comments, literals, and `...`, whose last dot would
+  otherwise seed the number in `...5`), so one left-to-right cursor loop
+  resolves all four and everything else — identifiers, punctuators,
+  whitespace, newlines — falls out of pure mask arithmetic. That loop runs
+  about two or three times per window on real C, not once per token.
+- **Two exactness details worth keeping.** Lookahead loads are masked by the
+  **file** bounds, not the window's: a punctuator or comment delimiter near
+  the window end is spelled from bytes the next window owns, and reading them
+  as zero would silently mis-spell `%:%:` at offset 61 into two `%:`. And the
+  literal-prefix rule (`u8`/`u`/`U`/`L`) is decided from the word run in front
+  of the quote measured against the cursor, which is what keeps `L'a'` a
+  character literal, `x'a'` an identifier plus a character literal, and
+  `1'000` a single preprocessing number — the three readings of the same
+  adjacency.
+- **The differential gate.** `c_lex_reference` stays exported and
+  `c_test_frontend_lex_differential` asserts the two paths agree on token
+  rows (`memcmp`), the whole `CSourceMetrics` struct, and every diagnostic's
+  kind, message and location: 53 construct cases each slid across the window
+  boundary by 0-66 pad bytes, ten single-item shapes at ten lengths spanning
+  whole windows, twelve real C files including `c.c` and `ide.c` whole plus
+  their heads at all 67 window phases, and 48 deterministic LCG fuzz blobs
+  over the lexer's full alphabet. The measurement struct is in the comparison
+  deliberately — it is what the window pipeline reconstructs from masks
+  rather than from the branches it replaced, and it is where the first bug
+  would have hidden. Separately, `c_test_lex_punctuator_nfa_mismatches`
+  reconciles the hand-assigned NFA channels against `c_punctuator_length`
+  exhaustively over every byte sequence the emitter can classify, because the
+  spelling tables are derived from `c_punctuator_spellings` while the channels
+  are not.
+- **The one bug the gate caught, and it was the interesting one:** `...5`.
+  The dot-plus-digit number seed fired on the ellipsis's third dot, because
+  spans were resolved before punctuators. Adding `...` to the cursor loop's
+  candidates fixes it, and the reason it is the *only* such case is worth
+  recording — a number seed is a digit or a dot, no punctuator spelling
+  contains a digit, and `...` is the only spelling with a dot anywhere but
+  first.
+- **Measured negative, do not retry:** guarding the first store pass on a
+  non-empty window (`+2.0 M` on the identical workload). A window with no
+  token at all needs 64 bytes of whitespace or comment, which escapes to the
+  scalar scanner long before it reaches the emitter, so the branch is paid
+  every window and the two stores it saves are almost never there.
+- **Measured and kept:** the per-window
+  `BUSTER_CHECK(count == popcount(end_mask))` that pairs the compressed
+  starts against the compressed ends costs `230 k` instructions, `0.005%` of
+  stage 1. `BUSTER_CHECK` is live in Release, so it was priced rather than
+  assumed free; a divergence there would mis-pair every start with the wrong
+  end and emit plausible garbage silently, which is the `2026-08-09c`
+  Windows Token-ABI failure mode, and 0.005% is the right price for catching
+  it on any host.
+- **The prerequisite: `optnone` had been leaking onto every AVX-512
+  intrinsic in the tree.** `ide.c` wraps the unity build's
+  `#include <buster/tests/test.c>` in
+  `#pragma clang attribute push (__attribute__((optnone)), apply_to=function)`
+  to keep test bodies out of the optimizer. `apply_to=function` stamps the
+  attribute on every function *declared* while it is pushed, headers
+  included — and `2026-08-09i`'s new `simd_test.c` reached
+  `<buster/lib/simd.h>`, and through it the compiler's `<immintrin.h>`,
+  inside that region for the first time. Clang's intrinsics are
+  `static inline __always_inline__` wrappers around one instruction each, and
+  an `optnone` function cannot be inlined however it is attributed, so every
+  SIMD kernel in the clang-built unity Release binary began paying a real
+  call per operation. Cost, measured: `ide bench` `343.2 M` to `446.7 M`
+  (`+30%`) with `BENCH_PARSE` median `~47 us` to `92.3 us` — a regression
+  that reached main unnoticed because `2026-08-09i` quoted the self-hosted
+  stage-2 benchmark, which improved for its own reasons, rather than the
+  clang-built number `feedback-perf-clang-binaries-only` requires. This
+  emitter then lost `+221 M` on top. Including `<buster/lib/simd.h>` ahead of
+  the push restores all of it: 33 out-of-line `_mm512_*` symbols to 0,
+  `ide bench` back to `343.19 M`.
+- **Counters, both compilers on the identical tree with that fix in, medians
+  of 3:** instructions `5196.8 M` to `5094.5 M` (`-1.97%`), branches
+  `992.10 M` to `956.86 M` (`-3.55%`). The instruction counter reproduced to
+  `~150 k` across runs, so the `-102.3 M` is ~700x the noise. Pre-rebase the
+  same change measured `-101.6 M` and `-34.7 M` branches against a different
+  base, so the win is stable across two independent baselines. **Cycles do
+  not move measurably at this workload's IPC and that is not evidence
+  against the change** — the same note stands in `2026-08-09b` and
+  `2026-08-09f`.
+- **Unchanged as required:** `ide bench` `343.19 M`, back to the
+  `2026-08-09c` reference once the `optnone` leak above is closed — the
+  buster tokenizer itself is untouched by this change. Stage 2 `70.68 G`
+  and its benchmark `6.89 G` (validation only): the self-hosted stages still
+  compile the scalar lexer, so their share of this change is the cost of
+  extracting `c_lex_scan_one` out of the scalar loop, the same outlining tax
+  the `2026-08-09c` entry priced at `+3.9 M` on its side. Measured directly
+  on the gate, that extraction is `+20.2 M` with the emitter compiled out.
+- **Validated:** fixed point deterministic (`SELF_HOST deterministic
+  bytes=26954520`), all 24139 Release and all sanitized (ASan+UBSan) tests
+  pass, and the unity translation unit compiles clean under
+  `-mno-avx512vbmi2`, `-mno-avx512vbmi` and `-mno-avx512f` — all three ways
+  the emitter can be compiled out.
+- **Leads left standing for the next session:** the scalar escape still owns
+  every comment and literal longer than a window, which on this
+  comment-heavy tree is the emitter's largest remaining slice — a
+  64-byte-at-a-time forward scan for `*/` and `\n` inside `c_lex_scan_one`
+  would pay on both paths; the punctuator array is the one memory round-trip
+  left in the window (five masked `vpermi2b` blends would retire it, and the
+  trade was not measured); `2026-08-09g`'s recorded next step of dropping
+  per-IR-instruction line/column recovery is untouched; and the
+  `2026-08-08g` Token 4 B to 2 B and vectorized keyword hash items remain
+  open.
+- Reference points for the next audit, all clang-built on this host: stage 1
+  **`5.0947 G`** instructions / `~956.9 M` branches, `ide bench`
+  **`343.19 M`**, Release `ide test` 24139 tests in 30 modules, `CToken` 16
+  bytes, byte-identical fixed point (`SELF_HOST deterministic
+  bytes=26954520`). Stage 2 `70.68 G` and its benchmark `6.89 G`, validation
+  only. **Check `nm build/Release/ide | grep -c ' t _mm512_'` is 0 before
+  trusting any SIMD measurement on this tree** — it is the cheap probe for
+  the `optnone` leak above, and it reads 0 when the intrinsics are inlined.
+
+`2026-08-10a` (Linux x86_64, Zen 4 7940HS; not a throughput audit — the
+System V outgoing-argument alignment fix costed against the gate, measured
+against its own parent on the same tree so the next audit does not read the
+step as a regression of its own. Stage 1 `5.1954 G` to `5.2055 G`
+instructions (`+0.19%`) while the unit grows `1.398.030` to `1.398.884`
+preprocessed tokens, so instructions per token goes `3716.226` to `3721.160`
+(`+0.13%`). Rebased onto `05c8973` the gate reads `5.2608 G` over `1.413.856`
+tokens — `3720.910` per token, the same ratio — and **that is the reference
+point for the next audit**; the pair above is this change against its own
+parent and is not comparable to it. Fixed point deterministic, `test_all`
+green in Release and in sanitized Debug.)
+
+- **What moved.** A stack-passed argument was placed immediately after the one
+  before it, so an argument wanting more than eight bytes of alignment landed
+  wherever the pushes left it. `codegen_canonical_x64_call_layout` now records
+  each stack argument at an offset rounded up to its own alignment and the
+  area's own alignment alongside it; the `IR_OPCODE_ARGUMENT` prologue walks
+  the incoming area by the same rule, and the `va_arg` overflow cursor rounds
+  before reading. A call whose area wants more than sixteen bytes cannot be
+  built by pushing at all — it saves the stack pointer to a frame slot, lowers
+  and rounds it down, fills the area with `mov`, and restores from the slot.
+- **What it cost and why it was paid anyway.** The gate moves for three
+  additions, all of them per value or per argument rather than per
+  instruction: the frame loop's flag for the save slot, the code-buffer
+  reserve for an area filled an eightbyte at a time, and the rounding in the
+  layout and prologue walks. **Two shapes were measured.** Computing the prior
+  parameter's alignment once at the top of the prologue's walk instead of
+  inside the branches that place a stack argument is *not* where the cost is:
+  making it lazy measured `5.2078 G` against `5.2073 G`, inside the `54 K`
+  spread two runs of identical code show. Reading the flag and the reserve off
+  the `slot_alignment` the two value loops already compute, instead of loading
+  `layout.alignment` again, is worth `2.3 M` and is what is in the tree; it
+  over-approximates — an over-aligned local that is never an argument also
+  reserves the eight bytes — which costs a frame slot and no work.
+- **The reserve is the part to revisit.** `aligned_argument_capacity` pays
+  `15` bytes per eightbyte plus `32` for every value wider than sixteen bytes,
+  because the flat 48-bytes-per-instruction module reserve does not carry a
+  call that copies a 64-byte argument in eightbytes. It is charged per value
+  and not per call that actually passes one, since finding those needs the
+  call-layout pre-pass only Windows runs today. **If this is wanted back**, the
+  shape is a flag on `CodegenBuffer` set only where `codegen_emit_u8` refuses a
+  byte and surfaced on the result, so a short estimate becomes a retry with
+  more room rather than a `CODEGEN_ERROR_CAPACITY` that cannot be told apart
+  from the ones a bigger buffer will never fix — an out-of-range frame
+  displacement, a frame past `UINT32_MAX`. The flat per-instruction reserve is
+  short for the same reason anywhere an instruction moves an aggregate, so
+  that flag would pay for more than this entry.
 
 `2026-08-09ap` (Linux x86_64, Zen 4 7940HS; local promotion built,
 measured, and reverted — with the sequencing it proves.)

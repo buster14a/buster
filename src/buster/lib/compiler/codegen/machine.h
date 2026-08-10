@@ -329,8 +329,11 @@ struct MachineLineMark
 {
     u32 row;
     u32 source;
-    u32 line;
-    u32 column;
+    // The byte offset inside that source, not a resolved position: the line
+    // and column are recovered once per emitted row, which is the same
+    // on-demand contract the canonical path follows.
+    u32 offset;
+    u32 reserved;
 };
 BUSTER_CT_CHECK(sizeof(MachineLineMark) == 16);
 

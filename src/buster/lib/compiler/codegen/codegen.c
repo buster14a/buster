@@ -10514,10 +10514,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             for (u32 mark_index = 0; mark_index < selected.function.line_mark_count; mark_index += 1)
                             {
                                 MachineLineMark* mark = selected.function.line_marks + mark_index;
-                                if (mark->row < selected.function.instruction_count)
+                                if (result.line_entries && mark->row < selected.function.instruction_count)
                                 {
+                                    // Positions are recovered here rather than
+                                    // carried through selection, so a row that
+                                    // never reaches the line table costs
+                                    // nothing to resolve.
+                                    IrSourcePosition position = ir_source_position(program, (IrSourceRange){
+                                                                                                .source = {.value = mark->source},
+                                                                                                .offset = mark->offset,
+                                                                                            });
                                     codegen_record_line(result.line_entries, &result.line_entry_count, line_entry_capacity,
-                                                        (u32)buffer.count + encoded.row_offsets[mark->row], mark->source, mark->line, mark->column);
+                                                        (u32)buffer.count + encoded.row_offsets[mark->row], mark->source, position.line, position.column);
                                 }
                             }
                             for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)
@@ -16522,6 +16530,23 @@ BUSTER_GLOBAL_LOCAL void codegen_statistics_add(CodegenStatistics* destination, 
     destination->simd_operation_count += source.simd_operation_count;
     destination->function_count += source.function_count;
     destination->maximum_stack_frame_bytes = BUSTER_MAX(destination->maximum_stack_frame_bytes, source.maximum_stack_frame_bytes);
+    // Register-allocator accounting is per function, so it accumulates the
+    // same way the rest does; a lane that never ran the machine path simply
+    // contributes zeroes.
+    destination->fallback_function_count += source.fallback_function_count;
+    for (u32 reason = 0; reason <= IR_OPCODE_COUNT; reason += 1)
+    {
+        destination->fallback_opcode_counts[reason] += source.fallback_opcode_counts[reason];
+    }
+    destination->fallback_verify_count += source.fallback_verify_count;
+    destination->fallback_placement_count += source.fallback_placement_count;
+    destination->fallback_encode_count += source.fallback_encode_count;
+    destination->allocator_reload_count += source.allocator_reload_count;
+    destination->allocator_spill_count += source.allocator_spill_count;
+    destination->allocator_copy_count += source.allocator_copy_count;
+    destination->allocator_boundary_spill_count += source.allocator_boundary_spill_count;
+    destination->allocator_rematerialize_count += source.allocator_rematerialize_count;
+    destination->allocator_pinned_register_count += source.allocator_pinned_register_count;
 }
 
 BUSTER_GLOBAL_LOCAL u64 codegen_module_lane_count(CodegenModuleOptions options, u32 function_count)
