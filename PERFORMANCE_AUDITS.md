@@ -131,6 +131,95 @@ the stages.**)
   12,544,794 / QUALITY 12,328,170. Pressure corpus: **FAST `91.32M`**,
   **QUALITY `82.12M`**, clang `47.54M`, allocator traffic reloads 34 /
   spills 53 / pins 20.
+`2026-08-10k` (Linux x86_64, Zen 4 7940HS; the second `2026-08-10j`
+selection lead taken — every integer immediate spent the ten-byte
+movabs, and the machine encoders now pick the shortest form that
+reproduces all sixty-four result bits. Developed concurrently with
+`2026-08-10m` (compare/branch fusion, PR 257) against the same
+`bbb319d` main and rebased onto its merge afterwards; correctness
+gates were re-run on the rebased tree, the measurements are as taken
+on the pre-fusion base, and neither entry's numbers include the
+other's effect — the next audit re-measures the merged tree.
+**Executed instructions do not
+move and were never expected to: the pressure corpus is
+instruction-for-instruction identical before and after (FAST
+`98.53M`, QUALITY `87.73M`), the frozen-tree stage compiles repeat
+inside the band (FAST `49.018G`, QUALITY `48.337G`). Text and fetch
+move instead: stage text FAST `20,028,267` to `18,977,035` (`-5.2%`),
+QUALITY `19,814,923` to `18,759,691` (`-5.3%`), and stage-compile
+cycles at those flat instruction counts FAST `20.058G` to `19.653G`
+(`-2.0%`), QUALITY `19.736G` to `19.106G` (`-3.2%`), min of five. The
+canonical stage stays byte-identical across the compiler change.**)
+
+- **What changed.** `machine_x64_emit_immediate` — the single emitter
+  behind `MACHINE_X64_MOV_RI` rows and `MACHINE_EDIT_REMATERIALIZE`
+  re-emissions, so the fast allocator's remat recipe shortened with it
+  for free — picks the five-or-six-byte zero-extending `mov r32,imm32`
+  when the value fits unsigned thirty-two bits, the seven-byte
+  sign-extended `mov r64,imm32` when it fits signed thirty-two, and the
+  ten-byte movabs only past both. Every form is flag-neutral, which is
+  a hard constraint and not a preference: rematerializations land
+  between arbitrary rows, including a compare and its branch, so
+  xor-zeroing is unavailable. On the corpus binaries the movabs count
+  falls 60 to 2 (the two genuinely 64-bit seeds) and the fixture text
+  drops `-8.6%` FAST / `-9.1%` QUALITY. The `emit_immediate` comment
+  had claimed since birth that remat reloads already took the
+  five-byte form — it was aspirational; nothing did.
+- **AArch64 had the matching gap, taken in the same change.** The seed
+  movz always landed on halfword zero — a wasted word whenever that
+  halfword is zero — and a negative cost movz plus three movk. The
+  emitter now counts zero and all-ones halfwords, seeds movz or movn
+  by whichever fill covers more, lands the seed on the first halfword
+  differing from the fill (the top one when none does, which makes
+  zero and minus-one single instructions with no special case), and
+  movk-patches only the differing rest: `-1` and `-100` are one movn
+  where they were four words. Desk-checked value-exact and
+  never-longer across seed and boundary cases; the qemu fixture
+  differentials in the matrix are the execution gate. The canonical
+  `a64_emit_constant` keeps its movz-first shape untouched.
+- **The corpus understates the fetch win; the stages state it.** The
+  three bodies are uop-cache resident, so corpus cycles move only
+  `-1.1%` FAST / `-0.7%` QUALITY (min of seven) against the stages'
+  `-2.0%`/`-3.2%` over nineteen megabytes of text. Quality-mode
+  compile cost also got `10M` cheaper (`8.628G` to `8.618G`): fewer
+  bytes through the emit stream outweigh the form-selection branches.
+- **Methodology drift, recorded for the next audit.** The frozen
+  workload here is `bbb319d` — it contains the stage-8 allocator
+  source, so the baselines legitimately sit above `2026-08-10j`'s
+  references (FAST `48.923G` to `49.018G`, QUALITY text `19,726,835`
+  to `19,814,923` before this change); every pair above is measured on
+  this one frozen tree. The corpus driver was reconstructed from the
+  `10j` description (main stripped, accumulator feeding each seed, 200
+  iterations of the three bodies at 2,000 rounds) and reproduces the
+  recorded FAST/QUALITY numbers to within ten instructions, which
+  validates both driver and band; the local clang -O2 reference
+  measures `42.74M` against the recorded `47.54M` — toolchain drift,
+  not workload drift, since the buster numbers land exactly.
+- **Left untaken, in causal order.** The executed-instruction half of
+  the increment lead still stands: every materialized int immediate
+  trails a `movslq` (`mov $0x1,%eax; movslq %eax,%rcx`) because
+  selection materializes then sign-extends instead of folding the
+  known immediate's extension into the materialization. The
+  setcc/movzx/cmp loop-head ladder from `10j` is taken concurrently by
+  `2026-08-10m` (PR 257), whose fused CMP still reads two registers —
+  its noted CMP_RI lead would remove the very materializations this
+  change shortens, and wins over both entries where it fires. And the
+  switch compare chain still spends a full `movabs` into RCX per case
+  constant — it mirrors the canonical chain's shape, so shortening it
+  is legal for the machine path but was left with the selection leads.
+- **Gates:** test_all green (28,809 unit, 31 module), self-host fixed
+  point deterministic, all three soaks — MIR_STACK, FAST, QUALITY —
+  byte-identical against the freshly rebuilt stage-2 reference, the
+  frozen-tree canonical stage byte-identical between the two
+  compilers, `test_all_combinations_ci` green before the push.
+- Reference points for the next audit, frozen `bbb319d` ide.c as the
+  workload: **FAST `49.018G`, text `18,977,035`**; **QUALITY
+  `48.337G`, text `18,759,691`**; quality-mode compile cost `8.618G`.
+  Pressure corpus: FAST `98.53M`, QUALITY `87.73M`, clang -O2 `42.74M`
+  (local toolchain; `10j` recorded `47.54M`), corpus cycles FAST
+  `21.72M`, QUALITY `20.75M`. (`2026-08-10m` merged first and its
+  reference points measure the fusion tree without this change; no
+  entry's references describe the merged tree — re-measure.)
 
 `2026-08-10j` (Linux x86_64, Zen 4 7940HS; register-allocator stage 8 —
 live-range-scoped pins, and the first QUALITY win under real register
