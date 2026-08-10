@@ -1200,6 +1200,39 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         {
             return false;
         }
+        if (!type->layout.resolved || type->layout.size > INT32_MAX)
+        {
+            return false;
+        }
+        // The operands need not cover the object — a union initializes only
+        // one member, and padding is never an operand — so the whole slot is
+        // zero-filled first, exactly like the canonical path.
+        u32 zero_register = machine_x64_synthesize_register(selector);
+        u32 zero_fill_immediate = selector->immediates.total_count;
+        u64* zero_fill_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+        *zero_fill_row = 0;
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, zero_register),
+                                                          machine_ref_make(MACHINE_REF_IMMEDIATE, zero_fill_immediate)},
+                                             .opcode = MACHINE_X64_MOV_RI,
+                                         });
+        u64 zero_filled = 0;
+        while (zero_filled < type->layout.size)
+        {
+            u64 zero_remaining = type->layout.size - zero_filled;
+            u32 zero_chunk = zero_remaining >= 8 ? 8 : zero_remaining >= 4 ? 4 : zero_remaining >= 2 ? 2 : 1;
+            u16 zero_store_opcode = zero_chunk == 1   ? MACHINE_X64_STORE_FRAME8
+                                    : zero_chunk == 2 ? MACHINE_X64_STORE_FRAME16
+                                    : zero_chunk == 4 ? MACHINE_X64_STORE_FRAME32
+                                                      : MACHINE_X64_STORE_FRAME64;
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, zero_register)},
+                                                 .payload = (u32)zero_filled,
+                                                 .opcode = zero_store_opcode,
+                                             });
+            zero_filled += zero_chunk;
+        }
         u8* member_emitted = arena_allocate(selector->arena, u8, instruction->operand_count ? instruction->operand_count : 1);
         for (u32 index = 0; index < instruction->operand_count; index += 1)
         {

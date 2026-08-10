@@ -482,7 +482,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "long pair_sum(void) { return pair.first + pair.second; }\n"
                                   "int locals_array(int n) { int a[4]; a[0] = n; a[1] = n + 1; a[2] = a[0] * a[1]; a[3] = a[2] - n; return a[3]; }\n"
                                   "int local_pair(int x) { Pair p; p.first = x; p.second = x * 2; return p.first + (int)p.second; }\n"
-                                  "int pick(int k) { switch (k) { case 1: return 10; case 3: return 30; case 7: return 70; default: return -k; } }\n");
+                                  "int pick(int k) { switch (k) { case 1: return 10; case 3: return 30; case 7: return 70; default: return -k; } }\n"
+                                  // The union's zero literal covers one byte of forty-eight, so
+                                  // a selection that skips the aggregate zero-fill returns
+                                  // whatever the probe stack held (the state_push regression).
+                                  "typedef union UTail { char head; long words[6]; } UTail;\n"
+                                  "long union_tail(long a, long b) { UTail u; u = (UTail){0};\n"
+                                  "    return u.words[1] + u.words[2] + u.words[3] + u.words[4] + u.words[5] + (a & 0) + (b & 0); }\n");
     String8 machine_c_source_tail = S8(
                                   "long ucvt(long a, long b) { unsigned long u = ((unsigned long)a << 32) | 5u; double d = (double)u; unsigned long r = (unsigned long)d; float f = (float)(((unsigned long)b << 31) | 1u); return (long)(r >> 33) + (long)(f * 0.25f) + (long)(unsigned long)(double)((unsigned long)b | 3u); }\n"
                                   "int printf(const char* format, ...);\n"
@@ -534,6 +540,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("aligned_local"), S8_INITIALIZER("span_length"), S8_INITIALIZER("span_make"), S8_INITIALIZER("span_round_trip"),
             S8_INITIALIZER("single_round_trip"), S8_INITIALIZER("fmath"), S8_INITIALIZER("f32math"),
             S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnegate"), S8_INITIALIZER("fnan"), S8_INITIALIZER("fuconv"),
+            S8_INITIALIZER("union_tail"),
         };
         MachineEncodeResult machine_encoded[BUSTER_ARRAY_LENGTH(supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(supported_names); name_index += 1)
@@ -688,7 +695,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             bool wide_result = string_equal(supported_names[name_index], S8("widen")) ||
                                string_equal(supported_names[name_index], S8("bitnot")) ||
                                string_equal(supported_names[name_index], S8("sar")) ||
-                               string_equal(supported_names[name_index], S8("udiv")) || is_readp;
+                               string_equal(supported_names[name_index], S8("udiv")) ||
+                               string_equal(supported_names[name_index], S8("union_tail")) || is_readp;
             bool is_division = string_equal(supported_names[name_index], S8("divide")) ||
                                string_equal(supported_names[name_index], S8("srem")) ||
                                string_equal(supported_names[name_index], S8("udiv"));
