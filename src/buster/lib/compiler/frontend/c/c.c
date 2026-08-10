@@ -17515,8 +17515,8 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_array_type(IrProgram* program, CIrPointerT
 BUSTER_GLOBAL_LOCAL IrTypeId c_ir_add_qualified_type(IrProgram* program, IrTypeId unqualified, bool is_atomic, bool is_volatile)
 {
     IrType* base = ir_type_from_id(&program->types, unqualified);
-    if (!base || base->is_atomic || base->is_volatile || base->kind == IR_TYPE_VOID || base->kind == IR_TYPE_FUNCTION ||
-        (is_atomic && base->kind == IR_TYPE_ARRAY))
+    if (!base || base->is_atomic || base->is_volatile || base->kind == IR_TYPE_FUNCTION ||
+        (is_atomic && (base->kind == IR_TYPE_VOID || base->kind == IR_TYPE_ARRAY)))
     {
         return IR_TYPE_ID_INVALID;
     }

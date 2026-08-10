@@ -4468,6 +4468,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
                "   global_value = local;"
                "   pair->member = global_value;"
                "   return *pointer + pair->member;"
+               " }"
+               " struct Locale { int *locinfo; };"
+               " typedef struct Locale *locale_t;"
+               " int *get_locale_data_prefix(void const volatile *const locale_pointers) {"
+               "   locale_t const typed_locale_pointers = (locale_t)locale_pointers;"
+               "   return typed_locale_pointers->locinfo;"
                " }"),
             S8("volatile-accesses.c"), target_native, &volatile_tokens, &volatile_parse);
         BUSTER_TEST(arguments, volatile_tokens.diagnostic_count == 0 && volatile_parse.diagnostic_count == 0 &&
@@ -4486,6 +4492,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
             }
             BUSTER_TEST(arguments, memory_access_count > volatile_access_count && volatile_access_count == 8);
             BUSTER_TEST(arguments, ir_validate_canonical_module(volatile_ir.program, &volatile_ir.program->modules[0]).error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, volatile_ir.program->modules[0].function_count == 2);
+            if (volatile_ir.program->modules[0].function_count == 2)
+            {
+                IrFunction* locale_function = volatile_ir.program->modules[0].functions + 1;
+                IrType* signature = ir_type_from_id(&volatile_ir.program->types, locale_function->canonical_type);
+                IrType* parameter = signature && signature->parameter_count == 1
+                                        ? ir_type_from_id(&volatile_ir.program->types, signature->parameter_types[0])
+                                        : 0;
+                IrType* element = parameter && parameter->kind == IR_TYPE_POINTER
+                                      ? ir_type_from_id(&volatile_ir.program->types, parameter->element_type)
+                                      : 0;
+                BUSTER_TEST(arguments, element && element->kind == IR_TYPE_VOID && element->is_volatile);
+            }
         }
         scratch_end(volatile_temporary);
     }
