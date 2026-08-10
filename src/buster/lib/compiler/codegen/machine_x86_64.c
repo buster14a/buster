@@ -333,6 +333,14 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_place_address_offset(MachineX64Selec
     }
     IrInstruction* definition = function->instructions + value->definition.value;
     u32 slot = selector->value_stack_slots[base.value];
+    if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[base.value] != UINT32_MAX)
+    {
+        // A promoted local has no address. The promotability scan proved
+        // no use needs one, so a request here is a selector hole — refuse
+        // to the canonical fallback rather than hand a register's value
+        // out as an address.
+        return false;
+    }
     if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
     {
         u32 row = machine_x64_select_row(selector, (MachineInstruction){
@@ -461,8 +469,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     case IR_OPCODE_LOCAL:
     {
         // Direct locals produce no code: the stack slot recorded during
-        // classification is the storage, exactly like the canonical path.
-        return selector->value_stack_slots[instruction->result.value] != UINT32_MAX;
+        // classification is the storage, exactly like the canonical path —
+        // or, promoted, the virtual register is.
+        return selector->value_stack_slots[instruction->result.value] != UINT32_MAX ||
+               selector->value_virtual_registers[instruction->result.value] != UINT32_MAX;
     }
     break;
     case IR_OPCODE_STACK_SAVE:
@@ -987,6 +997,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         {
             return false;
         }
+        if (result_register == source_register)
+        {
+            // Aliased through the pointer chain: the dereference is a
+            // name for the promoted local, not code.
+            return true;
+        }
         u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                     machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
@@ -1331,6 +1347,23 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         {
             return false;
         }
+        if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[instruction->operands[0].value] != UINT32_MAX)
+        {
+            if (result_register == selector->value_virtual_registers[instruction->operands[0].value])
+            {
+                // Aliased: the load is a name for the local, not code.
+                return true;
+            }
+            // Promoted but not aliasable here: the load is a register copy.
+            u32 row = machine_x64_select_row(
+                selector, (MachineInstruction){
+                              .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                           machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, selector->value_virtual_registers[instruction->operands[0].value])},
+                              .opcode = MACHINE_X64_MOV_RR,
+                          });
+            machine_x64_define(selector, result_register, row);
+            return true;
+        }
         if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
         {
             u32 row = machine_x64_select_row(selector, (MachineInstruction){
@@ -1455,6 +1488,20 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         if (size_index == UINT32_MAX)
         {
             return false;
+        }
+        if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[instruction->operands[0].value] != UINT32_MAX)
+        {
+            // Promoted local: the store is a full-width register copy —
+            // the same 64-bit image a direct-slot store writes, since the
+            // register model keeps every value zero-extended.
+            u32 place_register = selector->value_virtual_registers[instruction->operands[0].value];
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, place_register),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                           .opcode = MACHINE_X64_MOV_RR,
+                                                       });
+            machine_x64_define(selector, place_register, row);
+            return true;
         }
         if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
         {
@@ -2153,6 +2200,174 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     {
         selector.argument_values[argument_index] = IR_ID_UNDERLYING_INVALID;
     }
+    // Local promotion, the mem2reg the machine path was built for: a
+    // scalar local whose address never leaves a load or a store needs no
+    // memory at all. Two passes — eligibility by type (a 4- or 8-byte
+    // scalar register type), then disqualification by any use that is not
+    // the place operand of a same-width scalar load or store: a field or
+    // index selection, an address handed to a call, a mixed-width access,
+    // and the atomic forms all keep the local in its slot. The byte size
+    // is recorded so the width check needs no second type walk.
+    u8* promotable_locals = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
+    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+    {
+        promotable_locals[value_index] = 0;
+    }
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+        {
+            IrInstruction* instruction = function->instructions + id.value;
+            if (instruction->opcode != IR_OPCODE_LOCAL || instruction->result.value == IR_ID_UNDERLYING_INVALID ||
+                instruction->result.value >= function->value_count)
+            {
+                continue;
+            }
+            IrType* local_type = ir_type_from_id(&program->types, function->values[instruction->result.value].canonical_type);
+            if (machine_x64_type_is_scalar_register(local_type) && (local_type->layout.size == 4 || local_type->layout.size == 8))
+            {
+                promotable_locals[instruction->result.value] = (u8)local_type->layout.size;
+            }
+        }
+    }
+    u32* value_last_use_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+    u32* value_use_blocks = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+    u32* local_store_counts = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+    {
+        value_last_use_ordinals[value_index] = 0;
+        value_use_blocks[value_index] = UINT32_MAX;
+        local_store_counts[value_index] = 0;
+    }
+    u32 walk_ordinal = 0;
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+        {
+            IrInstruction* instruction = function->instructions + id.value;
+            walk_ordinal += 1;
+            for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+            {
+                u32 used = instruction->operands[operand_index].value;
+                if (used >= function->value_count)
+                {
+                    continue;
+                }
+                value_last_use_ordinals[used] = walk_ordinal;
+                value_use_blocks[used] = value_use_blocks[used] == UINT32_MAX || value_use_blocks[used] == block_index ? block_index : UINT32_MAX - 1;
+                if (!promotable_locals[used])
+                {
+                    continue;
+                }
+                bool place_use = false;
+                if (operand_index == 0 && instruction->opcode == IR_OPCODE_LOAD)
+                {
+                    IrType* access_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                    place_use = machine_x64_type_is_scalar_register(access_type) && access_type->layout.size == promotable_locals[used];
+                }
+                else if (operand_index == 0 && instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 2 &&
+                         instruction->operands[1].value < function->value_count)
+                {
+                    IrType* access_type = ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type);
+                    place_use = machine_x64_type_is_scalar_register(access_type) && access_type->layout.size == promotable_locals[used];
+                    local_store_counts[used] += 1;
+                }
+                if (!place_use)
+                {
+                    promotable_locals[used] = 0;
+                }
+            }
+        }
+    }
+    // Load aliasing over the promoted locals. The measured cost of
+    // promotion is the copy every load lowers to: its source is the local,
+    // which lives on, so the copy never coalesces — one extra register
+    // move per read, and a second instruction whenever the local was not
+    // resident. A load result whose every use sits in the load's own block
+    // before the local's next store *is* the local: it shares the local's
+    // virtual register and the load selects into nothing. The block-local
+    // requirement is what makes the layout reasoning sound — a jump can
+    // only re-enter at a block head, above the load, never between the
+    // load and a use.
+    u32* load_aliases = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+    u32* next_store_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+    u32* next_store_epochs = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+    u32* block_row_ids = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
+    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+    {
+        load_aliases[value_index] = UINT32_MAX;
+        next_store_ordinals[value_index] = 0;
+        next_store_epochs[value_index] = 0;
+    }
+    // Two identical reverse sweeps: the first aliases loads, the second
+    // extends each alias through IR_OPCODE_DEREFERENCE, whose selection is
+    // a plain pointer copy — an aliased pointer load feeding a dereference
+    // used to coalesce because the load temporary died at the copy, and an
+    // aliased value never dies, so the chain must collapse at selection or
+    // the copy just moves from the load to the address staging. A field or
+    // index base folds its offset into a real lea and stops the chain.
+    for (u32 alias_sweep = 0; alias_sweep < 2; alias_sweep += 1)
+    {
+        u32 walked_ordinals = 0;
+        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        {
+            IrBlock* block = function->blocks + block_index;
+            u32 epoch = alias_sweep * function->block_count + block_index + 1;
+            u32 row_count = 0;
+            for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+            {
+                block_row_ids[row_count++] = id.value;
+            }
+            for (u32 remaining = row_count; remaining > 0; remaining -= 1)
+            {
+                IrInstruction* instruction = function->instructions + block_row_ids[remaining - 1];
+                u32 instruction_ordinal = walked_ordinals + remaining;
+                if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
+                    promotable_locals[instruction->operands[0].value])
+                {
+                    next_store_ordinals[instruction->operands[0].value] = instruction_ordinal;
+                    next_store_epochs[instruction->operands[0].value] = epoch;
+                }
+                // The rooting local of a candidate: the load's own place,
+                // or the alias the previous sweep gave a dereference's
+                // pointer operand.
+                u32 root = UINT32_MAX;
+                if (instruction->opcode == IR_OPCODE_LOAD && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
+                    promotable_locals[instruction->operands[0].value])
+                {
+                    root = instruction->operands[0].value;
+                }
+                else if (instruction->opcode == IR_OPCODE_DEREFERENCE && instruction->operand_count >= 1 &&
+                         instruction->operands[0].value < function->value_count)
+                {
+                    root = load_aliases[instruction->operands[0].value];
+                }
+                if (root == UINT32_MAX || instruction->result.value == IR_ID_UNDERLYING_INVALID || instruction->result.value >= function->value_count)
+                {
+                    continue;
+                }
+                u32 candidate = instruction->result.value;
+                // A single-store local — a saved parameter, an init-once
+                // configuration value — never changes after its one store,
+                // so every read of it everywhere is the local, uses in
+                // other blocks included. Otherwise the reverse walk means
+                // next_store already names the nearest store strictly
+                // below this row when its epoch stamp is current, and the
+                // block-local containment is what keeps the layout
+                // reasoning sound: a jump can only re-enter at a block
+                // head, above the row, never between it and a use.
+                if (local_store_counts[root] == 1 ||
+                    (value_use_blocks[candidate] == block_index &&
+                     (next_store_epochs[root] != epoch || next_store_ordinals[root] > value_last_use_ordinals[candidate])))
+                {
+                    load_aliases[candidate] = root;
+                }
+            }
+            walked_ordinals += row_count;
+        }
+    }
     // Classification pass: direct locals become stack slots, every other
     // scalar result becomes a virtual register, in stable value-id order.
     for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
@@ -2179,6 +2394,21 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 {
                     machine_x64_reject(&selector, instruction->opcode);
                     break;
+                }
+                if (promotable_locals[instruction->result.value])
+                {
+                    // Promoted: the local is a virtual register for its
+                    // whole life and never owns a frame slot. Its loads
+                    // and stores lower to copies, and its definition point
+                    // is patched at the first store like any other
+                    // classification vreg.
+                    selector.value_virtual_registers[instruction->result.value] =
+                        machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
+                                                                                .definition_point = MACHINE_POINT_INVALID,
+                                                                                .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                                                .typed_origin = instruction->result.value,
+                                                                            });
+                    continue;
                 }
                 selector.value_stack_slots[instruction->result.value] =
                     machine_x64_append_slot(&selector, (u32)((local_type->layout.size + 7) & ~(u64)7), local_alignment);
@@ -2211,6 +2441,17 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 selector.value_stack_slots[instruction->result.value] =
                     machine_x64_append_slot(&selector, (u32)((value_type->layout.size + 7) & ~(u64)7), 8);
             }
+        }
+    }
+    // Aliased load results share their local's virtual register: every use
+    // site then names the local directly and the load emits nothing. The
+    // result's own classification vreg goes unused, which costs an id and
+    // nothing else.
+    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+    {
+        if (load_aliases[value_index] != UINT32_MAX && selector.value_virtual_registers[load_aliases[value_index]] != UINT32_MAX)
+        {
+            selector.value_virtual_registers[value_index] = selector.value_virtual_registers[load_aliases[value_index]];
         }
     }
     selector.virtual_register_count = selector.builder.virtual_registers.total_count;

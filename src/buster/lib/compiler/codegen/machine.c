@@ -68,6 +68,11 @@ BUSTER_F_DECL MachinePointPhase machine_point_phase(MachinePoint point)
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,                                                                                                    \
     }
+#define MACHINE_INFO_MOVE_CONSTRAINED_CLOBBER(name_literal, clobbers)                                                                                          \
+    {                                                                                                                                                          \
+        .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED, .clobber_mask = (clobbers),                                                                        \
+    }
 #define MACHINE_INFO_THREE_ADDRESS(name_literal)                                                                                                               \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 3,                                                                                              \
@@ -128,10 +133,15 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_MOVSX32_RR] = MACHINE_INFO_MOVE("x64_movsx32_rr"),
     [MACHINE_X64_MOVZX8_RR] = MACHINE_INFO_MOVE("x64_movzx8_rr"),
     [MACHINE_X64_MOVZX16_RR] = MACHINE_INFO_MOVE("x64_movzx16_rr"),
-    [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_INFO_MOVE_CONSTRAINED("x64_cvt_u64_to_f32"),
-    [MACHINE_X64_CVT_U64_TO_F64] = MACHINE_INFO_MOVE_CONSTRAINED("x64_cvt_u64_to_f64"),
-    [MACHINE_X64_CVT_F32_TO_U64] = MACHINE_INFO_MOVE_CONSTRAINED("x64_cvt_f32_to_u64"),
-    [MACHINE_X64_CVT_F64_TO_U64] = MACHINE_INFO_MOVE_CONSTRAINED("x64_cvt_f64_to_u64"),
+    // The branchy conversion sequences reuse RCX as an internal scratch —
+    // the sticky-bit halving on the unsigned-to-float side, the constant
+    // threshold on the float-to-unsigned side — so the source staged there
+    // is gone after the row. Latent until local promotion: before it, the
+    // staged value always died at its row, so nothing read the leftover.
+    [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_INFO_MOVE_CONSTRAINED_CLOBBER("x64_cvt_u64_to_f32", 1u << MACHINE_X64_RCX),
+    [MACHINE_X64_CVT_U64_TO_F64] = MACHINE_INFO_MOVE_CONSTRAINED_CLOBBER("x64_cvt_u64_to_f64", 1u << MACHINE_X64_RCX),
+    [MACHINE_X64_CVT_F32_TO_U64] = MACHINE_INFO_MOVE_CONSTRAINED_CLOBBER("x64_cvt_f32_to_u64", 1u << MACHINE_X64_RCX),
+    [MACHINE_X64_CVT_F64_TO_U64] = MACHINE_INFO_MOVE_CONSTRAINED_CLOBBER("x64_cvt_f64_to_u64", 1u << MACHINE_X64_RCX),
     [MACHINE_X64_LEA_OFFSET] = MACHINE_INFO_MOVE("x64_lea_offset"),
     [MACHINE_X64_ADD64_IMM] = {
         .name = S8_INITIALIZER("x64_add64_imm"),
@@ -310,6 +320,11 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        // xchg writes the swapped-out memory word back into the value
+        // register, so the operand's scratch does not hold the value
+        // after the row — the atomics differential caught this as a real
+        // miscompile once promotion made staged values outlive their row.
+        .clobber_mask = 1u << MACHINE_X64_RCX,
     },
     [MACHINE_X64_ATOMIC_RMW] = {
         .name = S8_INITIALIZER("x64_atomic_rmw"),
