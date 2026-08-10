@@ -12,6 +12,111 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-11b` (Linux x86_64, Zen 4 7940HS; the measurement `2026-08-10o`
+left blocked — the vector subset's dynamic payoff in buster-built stages —
+taken now that the aggregate zero-fill fix (`2026-08-11`, below) lets a
+machine-built stage run `bench` at all. Frozen-tree methodology, re-scoped
+from compile cost to stage execution: one `git archive` of main `b7ba8ea`
+(the stage-10 merge) is the source, `build/generated` copied in, and stage
+binaries are built from that frozen source twice with the exact self-host
+recipe (`cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1
+-DBUSTER_INCLUDE_TESTS=0 -g -fregister-allocator=<mode>`) — once by a
+pre-stage-10 compiler (clang-built Release at `1e37e12` in a scratch clone,
+the zero-fill fix cherry-picked on top, without which every machine-built
+stage still crashes `bench`) and once by current main's compiler (this
+tree, which carries the same fix) — then every stage runs `bench` from the
+frozen repo root under `perf stat -e instructions:u`, min of five, 61-file
+corpus, 200 iterations. No pre-PR-261 machine-stage bench number is a
+reference (they all ran the corrupt parser), so every row below is
+re-baselined from scratch. **FAST-built stage: BENCH_PARSE min_ns
+`822,970` to `688,051` (`-16.4%`), BENCH_IO `993,378` to `859,660`
+(`-13.5%`), executed instructions `3.5830G` to `3.3116G` (`-271.4M`,
+`-7.6%`). QUALITY: parse `795,989` to `682,781` (`-14.2%`), IO `975,362`
+to `866,193` (`-11.2%`), instructions `3.6355G` to `3.3622G` (`-273.3M`,
+`-7.5%`). MIR_STACK: parse `1,395,670` to `1,346,615` (`-3.5%`), IO
+`-3.7%`, instructions `6.2585G` to `6.1418G` (`-116.7M`, `-1.9%`). The
+canonical stage — byte-identical between the two builder compilers — is
+the fixed reference at parse `1,527,202` / IO `1,754,128` / `6.8926G`:
+machine-built stages now parse the corpus in 45% of canonical's time.**)
+
+- **Why `bench` is the workload, restated.** `tokenize_compact` and
+  `tokenizer_classifier_load` lex *buster* source, so they execute only
+  in the buster-language parser that `bench` drives; `cc ide.c` never
+  runs them, and `2026-08-10o` already measured the frozen-stage
+  compiles flat to the digit. This entry is the other half of that
+  audit: the same static change, measured where it executes.
+- **The payoff is the kernels going register-resident.** The two
+  builders differ only in the stage-10 vector subset (`1e37e12` is
+  `b7ba8ea`'s parent; the zero-fill fix is applied to both), so the
+  deltas are attributable by construction. Under FAST and QUALITY the
+  canonical fallback's frame round-trip per SIMD operand becomes a
+  straight ZMM dataflow, and the bench workload drops `-271.4M` /
+  `-273.3M` executed instructions — `-7.6%`/`-7.5%` of the whole stage,
+  `-16.4%`/`-14.2%` of BENCH_PARSE min wall time. MIR_STACK selects the
+  same rows but keeps its per-row stack round-trips, and still gains
+  `-116.7M` (`-1.9%`, `-3.5%` parse) over its canonical-fallback self.
+  The static side agrees: stage text FAST `-56,912`, QUALITY `-59,024`,
+  MIR_STACK `-6,808` — the same shape `10o` measured statically on the
+  `df11728` workload.
+- **Why the percentages differ in scope.** The instruction count is
+  whole-process (startup plus both bench phases); the min_ns numbers
+  are per phase. The kernels run in *both* phases — BENCH_IO
+  re-tokenizes from the filesystem, BENCH_PARSE from preloaded bytes —
+  so the `-271M` splits across them, and the per-phase wall drops
+  (`-13.5%`/`-16.4%` FAST) are consistent with that split at roughly
+  flat IPC: the phase percentages look larger than the process
+  percentage because the denominator sheds the startup and non-kernel
+  mass, not because the eliminated instructions were disproportionately
+  slow ones. The pre-existing FAST/QUALITY
+  inversion also survives the vector subset: QUALITY executes *more*
+  instructions than FAST on this workload (`3.6355G` vs `3.5830G`
+  before, `3.3622G` vs `3.3116G` after — both drop the same `~272M`)
+  yet wins parse wall time in both generations (`795,989` vs `822,970`;
+  `682,781` vs `688,051`) — instruction count is not the scoreboard
+  between those two, only within a mode across compilers.
+- **Cross-checks.** The `-v` census on the frozen workload pins the
+  attribution directly: fast-mode fallback_functions 33 to 30 (the two
+  kernels plus `mask64_count`), machine-mode canonical simd_operations
+  112 to 0, code_bytes 12,421,734 to 12,364,822 — `10o`'s static
+  fingerprint, reproduced on this workload. The canonical stages built
+  by the two compilers are byte-identical (one md5 covers both),
+  re-confirming stage 10 changed no canonical output; and this session's
+  current-main MIR_STACK stage benches at medians 1.634 ms IO /
+  1.414 ms parse against the `2026-08-11` entry's 1.58 / 1.40 on the
+  older `df11728`-plus-fix workload — the reference reproduces across
+  the re-freeze. `test_self_host`'s new machine-stage bench row on this
+  tree counts `6.1421G` instructions against this entry's frozen-tree
+  `6.1418G` — two independent trees, 250K apart. Bands: executed
+  instructions repeat within `~200K` (0.006%), min_ns within `~2%`
+  across the five runs.
+- **Distance to the ceiling, as context.** The clang-built Release ide
+  runs the same bench at parse `45,167` / IO `206,717` / `338.5M`
+  instructions: the best machine-built stage still executes 9.8x the
+  instructions and 15.2x the parse wall time. That gap is the levers
+  `10o` recorded, now with a dynamic number attached: vector ABI,
+  zmm16-31, and scheduling over vector rows all live between these two
+  columns.
+- **Method note.** PR 261 (the zero-fill fix, the `2026-08-11` entry)
+  was still open when this was measured; this branch carries its
+  commits because no machine-built stage runs `bench` without them, and
+  this entry sits above that one deliberately — merge order must keep
+  it that way. Buster-built stages come out of `cc` without the execute
+  bit; `chmod +x` before invoking them.
+- **Gates:** documentation-only on top of the PR-261 tree; test_all,
+  test_self_host (now itself benching a mir-stack stage), the three
+  byte-identity soaks — MIR_STACK, FAST, QUALITY against the canonical
+  stage-2 reference — and `test_all_combinations_ci` all green on this
+  tree before the push.
+- Reference points for the next audit, frozen `b7ba8ea` as source and
+  its 61-file bench corpus as workload (min of five, this machine):
+  canonical stage parse `1,527,202` / IO `1,754,128` / `6.8926G`;
+  **FAST parse `688,051` / IO `859,660` / `3.3116G`**; **QUALITY parse
+  `682,781` / IO `866,193` / `3.3622G`**; MIR_STACK parse `1,346,615` /
+  IO `1,538,093` / `6.1418G`; clang Release ide parse `45,167` / IO
+  `206,717` / `338.5M`. Stage text (BSD `size`): canonical
+  `27,780,812`, FAST `18,672,532`, QUALITY `18,352,740`, MIR_STACK
+  `27,886,076`.
+
 `2026-08-11` (Linux x86_64, Zen 4 7940HS; correctness, not throughput: every
 machine-register-allocator-built stage crashed `ide bench` — MIR_STACK with a
 SIGSEGV walking a corrupt `AstType` chain in `finish_type_ranges`, FAST and
