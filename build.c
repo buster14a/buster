@@ -133,6 +133,9 @@ struct ProcessRun
     String8 timing_configuration;
     u64 start_us;
     u64 start_instructions;
+    // Kept so self_host_compare_action can divide the source metrics by the
+    // exact wall time reported for the compile.
+    u64 elapsed_us;
     // The reported delta, kept rather than only printed, so a later callback
     // step can divide it by what that run measured about its own work; see
     // self_host_compare_action. Zero when the counter is unavailable.
@@ -2269,8 +2272,8 @@ BUSTER_GLOBAL_LOCAL bool text_parse_u64(String8 value, u64* result)
 }
 
 // The denominators STEP_INSTRUCTIONS lacks, read back from the `-fsource-
-// metrics=` file each self-host stage writes. Only the three units worth
-// trending are kept; the file carries the whole SOURCE table and readers take
+// metrics=` file each self-host stage writes. Only the units worth trending
+// are kept; the file carries the whole SOURCE table and readers take
 // what they need.
 typedef struct SelfHostSourceMetrics SelfHostSourceMetrics;
 struct SelfHostSourceMetrics
@@ -2279,6 +2282,10 @@ struct SelfHostSourceMetrics
     // returns and line splices are folded out, so the same source measures the
     // same on every platform.
     u64 bytes;
+    // All lines the lexer scanned, over every inclusion and after line splices
+    // are folded out. This is the LOC denominator; sloc below is its code-only
+    // subset.
+    u64 loc;
     // Lines carrying at least one preprocessing token, over every inclusion.
     u64 sloc;
     // Tokens handed to the parser, and the sum of their spellings. The source
@@ -2461,6 +2468,10 @@ BUSTER_GLOBAL_LOCAL bool self_host_source_metrics_read(Arena* arena, String8 pat
         {
             text_parse_u64(value, &metrics->bytes);
         }
+        else if (string_equal(key, S8("lexed.translated_lines")))
+        {
+            text_parse_u64(value, &metrics->loc);
+        }
         else if (string_equal(key, S8("lexed.code_lines")))
         {
             text_parse_u64(value, &metrics->sloc);
@@ -2475,7 +2486,7 @@ BUSTER_GLOBAL_LOCAL bool self_host_source_metrics_read(Arena* arena, String8 pat
         }
     }
 
-    return metrics->bytes && metrics->sloc && metrics->tokens && metrics->token_bytes;
+    return metrics->bytes && metrics->loc && metrics->sloc && metrics->tokens && metrics->token_bytes;
 }
 
 // The two stages read different source and are meant to: the bootstrap
@@ -2506,28 +2517,67 @@ BUSTER_GLOBAL_LOCAL String8 self_host_throughput_ratio(Arena* arena, u64 instruc
     return string_format(arena, S8("{u64}.{u64:width=[0,3]}"), thousandths / 1000, thousandths % 1000);
 }
 
+// Units per second to three decimals. elapsed_us is used directly so the
+// timing printed for the build step and the bandwidth reported here have one
+// source of truth.
+BUSTER_GLOBAL_LOCAL String8 self_host_units_per_second(Arena* arena, u64 units, u64 elapsed_us)
+{
+    u64 thousandths = (units * 1000000000 + elapsed_us / 2) / elapsed_us;
+    return string_format(arena, S8("{u64}.{u64:width=[0,3]}"), thousandths / 1000, thousandths % 1000);
+}
+
+// Decimal MB/s (1 MB = 1,000,000 bytes). With elapsed time in microseconds,
+// bytes / elapsed_us is already MB/s; scale only for three decimal places.
+BUSTER_GLOBAL_LOCAL String8 self_host_mb_per_second(Arena* arena, u64 bytes, u64 elapsed_us)
+{
+    u64 thousandths = (bytes * 1000 + elapsed_us / 2) / elapsed_us;
+    return string_format(arena, S8("{u64}.{u64:width=[0,3]}"), thousandths / 1000, thousandths % 1000);
+}
+
 // STEP_INSTRUCTIONS says what a stage cost; this says what it cost per unit of
 // what it compiled, which is the series that stays comparable when the code
 // base grows. The two stages are reported separately and their source counts
 // are never compared: the bootstrap resolves its host compiler's resource
-// headers and the self-hosted stages the builtin ones, so the bytes and sLOC
+// headers and the self-hosted stages the builtin ones, so bytes, LOC, and sLOC
 // legitimately differ. Only the token counts are held equal, by
 // self_host_preprocessed_equal below.
 BUSTER_GLOBAL_LOCAL void self_host_report_throughput(Arena* arena, String8 stage, ProcessRun* run, SelfHostSourceMetrics metrics)
 {
-    // No instruction counter on this host (see instruction_counter_open): the
-    // units still belong in the log, the ratios have no numerator.
-    if (!run || !run->instructions)
+    bool has_instructions = run && run->instructions;
+    bool has_bandwidth = run && run->elapsed_us;
+    if (!has_instructions && !has_bandwidth)
     {
-        string_print(S8("SELF_HOST throughput stage={S8} bytes={u64} sloc={u64} tokens={u64}\n"), stage, metrics.bytes, metrics.sloc, metrics.tokens);
+        string_print(S8("SELF_HOST throughput stage={S8} bytes={u64} loc={u64} sloc={u64} tokens={u64}\n"), stage, metrics.bytes, metrics.loc,
+                     metrics.sloc, metrics.tokens);
+        return;
+    }
+
+    if (!has_instructions)
+    {
+        string_print(S8("SELF_HOST throughput stage={S8} bytes={u64} loc={u64} sloc={u64} tokens={u64} loc_per_second={S8} sloc_per_second={S8} "
+                        "mb_per_second={S8}\n"),
+                     stage, metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens, self_host_units_per_second(arena, metrics.loc, run->elapsed_us),
+                     self_host_units_per_second(arena, metrics.sloc, run->elapsed_us), self_host_mb_per_second(arena, metrics.bytes, run->elapsed_us));
         return;
     }
 
     u64 instructions = run->instructions;
-    string_print(S8("SELF_HOST throughput stage={S8} instructions={u64} bytes={u64} sloc={u64} tokens={u64} instructions_per_byte={S8} "
-                    "instructions_per_sloc={S8} instructions_per_token={S8}\n"),
-                 stage, instructions, metrics.bytes, metrics.sloc, metrics.tokens, self_host_throughput_ratio(arena, instructions, metrics.bytes),
-                 self_host_throughput_ratio(arena, instructions, metrics.sloc), self_host_throughput_ratio(arena, instructions, metrics.tokens));
+    if (!has_bandwidth)
+    {
+        string_print(S8("SELF_HOST throughput stage={S8} instructions={u64} bytes={u64} loc={u64} sloc={u64} tokens={u64} instructions_per_byte={S8} "
+                        "instructions_per_sloc={S8} instructions_per_token={S8}\n"),
+                     stage, instructions, metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens,
+                     self_host_throughput_ratio(arena, instructions, metrics.bytes), self_host_throughput_ratio(arena, instructions, metrics.sloc),
+                     self_host_throughput_ratio(arena, instructions, metrics.tokens));
+        return;
+    }
+
+    string_print(S8("SELF_HOST throughput stage={S8} instructions={u64} bytes={u64} loc={u64} sloc={u64} tokens={u64} instructions_per_byte={S8} "
+                    "instructions_per_sloc={S8} instructions_per_token={S8} loc_per_second={S8} sloc_per_second={S8} mb_per_second={S8}\n"),
+                 stage, instructions, metrics.bytes, metrics.loc, metrics.sloc, metrics.tokens,
+                 self_host_throughput_ratio(arena, instructions, metrics.bytes), self_host_throughput_ratio(arena, instructions, metrics.sloc),
+                 self_host_throughput_ratio(arena, instructions, metrics.tokens), self_host_units_per_second(arena, metrics.loc, run->elapsed_us),
+                 self_host_units_per_second(arena, metrics.sloc, run->elapsed_us), self_host_mb_per_second(arena, metrics.bytes, run->elapsed_us));
 }
 
 BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* data)
@@ -20234,6 +20284,7 @@ BUSTER_GLOBAL_LOCAL void process_run_report_timing(ProcessRun* run)
     }
 
     u64 elapsed_us = os_now_microseconds() - run->start_us;
+    run->elapsed_us = elapsed_us;
     u64 elapsed_ns = elapsed_us * 1000;
     u64 seconds_whole = elapsed_us / 1000000;
     u64 seconds_fraction = elapsed_us % 1000000;

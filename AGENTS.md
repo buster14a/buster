@@ -311,21 +311,25 @@ enabled.
   to: the bootstrap finds its host compiler's resource headers and the
   self-hosted stages fall back to the builtin ones, which is why the file
   table is populated lazily (see `map_entry` in `c.c`).
-- **`SELF_HOST throughput stage=<1|2> instructions=… bytes=… sloc=…
+- **`SELF_HOST throughput stage=<1|2> instructions=… bytes=… loc=… sloc=…
   tokens=… instructions_per_byte=… instructions_per_sloc=…
-  instructions_per_token=…`** is the division done: the numbers to trend
+  instructions_per_token=… loc_per_second=… sloc_per_second=…
+  mb_per_second=…`** is the division done: the numbers to trend
   across commits, printed by `self_host_compare_action` beside the
   `SELF_HOST deterministic` line. `-v` prints the `SOURCE` table for a human;
   `ide cc -fsource-metrics=<path>` writes the same measurement as
   `<group>.<field>=<value>` lines for a program, each self-host stage writes
-  one beside its executable, and build.c divides the stage's own
-  `STEP_INSTRUCTIONS` delta by three of them. A file rather than another
-  stdout line, because capturing a compile step's output would stop its
-  diagnostics from streaming as it runs. `bytes` is `lexed.translated_bytes`
-  and `sloc` is `lexed.code_lines`, both of which legitimately differ between
-  the two stages for the resource-header reason above; `tokens` is
-  `preprocessed.tokens`, which does not differ, and is the denominator to
-  reach for when comparing the stages to each other. The ratios carry three
+  one beside its executable, and build.c combines the relevant fields with
+  the stage's own `STEP_INSTRUCTIONS` delta and wall time. A file rather than
+  another stdout line, because capturing a compile step's output would stop its
+  diagnostics from streaming as it runs. `bytes` is `lexed.translated_bytes`,
+  `loc` is `lexed.translated_lines`, and `sloc` is `lexed.code_lines`; all
+  three legitimately differ between the two stages for the resource-header
+  reason above. `loc_per_second` and `sloc_per_second` divide those line counts
+  by the stage's recorded wall time; `mb_per_second` uses decimal megabytes
+  (1,000,000 bytes). `tokens` is `preprocessed.tokens`, which does not differ,
+  and is the denominator to reach for when comparing the stages to each other.
+  The ratios carry three
   decimals because a compile costs a few hundred instructions per byte, and
   whole units would quantize the series to about 0.3% — coarser than the
   regressions the counter exists to catch. Without a usable instruction
