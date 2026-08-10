@@ -92,6 +92,7 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_memory(u16 opcode)
         case MACHINE_X64_COPY_PTR_FROM_FRAME:
         case MACHINE_X64_LOAD_INCOMING:
         case MACHINE_A64_LOAD_FRAME:
+        case MACHINE_A64_LOAD_FRAME32:
         case MACHINE_A64_STORE_FRAME8:
         case MACHINE_A64_STORE_FRAME16:
         case MACHINE_A64_STORE_FRAME32:
@@ -104,6 +105,9 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_memory(u16 opcode)
         case MACHINE_A64_STORE_PTR16:
         case MACHINE_A64_STORE_PTR32:
         case MACHINE_A64_STORE_PTR64:
+        case MACHINE_A64_COPY_FRAME_FROM_FRAME:
+        case MACHINE_A64_COPY_FRAME_FROM_PTR:
+        case MACHINE_A64_COPY_PTR_FROM_FRAME:
             return true;
         default:
             return false;

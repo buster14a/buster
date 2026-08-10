@@ -62,6 +62,35 @@ BUSTER_F_DECL MachineTargetDescription const* machine_target_aarch64(void)
     return &machine_aarch64_description;
 }
 
+// How one AAPCS64 signature value travels: one integer part for the scalar
+// subset, one float part for a float scalar, one or two integer parts for a
+// register aggregate, up to four float parts for an HFA, or indirect for a
+// large result through the X8 pointer. Anything else (indirect arguments,
+// stack arguments, vectors) is outside the subset.
+typedef struct MachineA64ValueShape MachineA64ValueShape;
+struct MachineA64ValueShape
+{
+    u32 part_offsets[4];
+    u8 part_is_float[4];
+    u8 part_sizes[4];
+    u32 part_count;
+    u32 byte_size;
+    bool aggregate;
+    // Indirect result: returned through the caller's buffer named by X8.
+    bool indirect;
+    u8 reserved[2];
+};
+
+// One argument's placement: its shape's parts in consecutive per-class
+// registers, integer parts from X0 and float parts from V0. The subset
+// carries no stack arguments — placement fails instead.
+typedef struct MachineA64ArgumentPlacement MachineA64ArgumentPlacement;
+struct MachineA64ArgumentPlacement
+{
+    u16 first_integer;
+    u16 first_float;
+};
+
 // A conditional branch whose condition chain folded into the branch: the
 // terminator re-selects the innermost comparison as CMP (or the truthiness
 // test as CMP_ZERO) immediately before BCC, and every absorbed chain
@@ -100,6 +129,13 @@ struct MachineA64Selector
     // Result value per argument index, captured at entry before any scratch
     // register can clobber the incoming fixed registers.
     u32 argument_values[MACHINE_A64_MAX_ARGUMENTS];
+    // Register shape and placement per parameter, plus the return shape,
+    // computed once from the IR-owned AAPCS64 classification.
+    MachineA64ValueShape parameter_shapes[MACHINE_A64_MAX_ARGUMENTS];
+    MachineA64ArgumentPlacement parameter_placements[MACHINE_A64_MAX_ARGUMENTS];
+    MachineA64ValueShape return_shape;
+    // Frame slot holding the incoming hidden result pointer, or UINT32_MAX.
+    u32 hidden_return_slot;
     // Definition point per virtual register, patched into the flattened
     // rows because builder chunks are write-once.
     u32* virtual_register_definitions;
@@ -126,6 +162,110 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_type_is_64_bit(IrProgram* program, IrTypeId
 {
     IrType* type = ir_type_from_id(&program->types, type_id);
     return type && (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION || (type->kind == IR_TYPE_INTEGER && type->bit_width > 32));
+}
+
+// Float scalars travel as bit images in general registers exactly like the
+// x86-64 machine path, bridging into the vector file only at the ABI
+// boundaries; the bits above a 32-bit image are unspecified, which AAPCS64
+// permits for every float passing site.
+BUSTER_GLOBAL_LOCAL bool machine_a64_type_is_float_scalar(IrType* type)
+{
+    return type && type->layout.resolved && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId type_id, Target target, IrAbiUse use, MachineA64ValueShape* shape)
+{
+    IrType* type = ir_type_from_id(&program->types, type_id);
+    if (machine_a64_type_is_scalar_register(type))
+    {
+        *shape = (MachineA64ValueShape){
+            .part_sizes = {8},
+            .part_count = 1,
+            .byte_size = 8,
+        };
+        return true;
+    }
+    if (machine_a64_type_is_float_scalar(type))
+    {
+        *shape = (MachineA64ValueShape){
+            .part_is_float = {1},
+            .part_sizes = {(u8)(type->bit_width / 8)},
+            .part_count = 1,
+            .byte_size = 8,
+        };
+        return true;
+    }
+    if (!type || !type->layout.resolved || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_SLICE))
+    {
+        return false;
+    }
+    if (type->layout.size > UINT32_MAX - 7)
+    {
+        return false;
+    }
+    IrAbiValue abi = ir_type_abi_value(program, type_id, ir_abi_convention_for_target(target), use);
+    if (abi.indirect || abi.memory || !abi.part_count || abi.part_count > 4)
+    {
+        if (use == IR_ABI_USE_RESULT && abi.indirect)
+        {
+            // Large results return through the caller's X8-named buffer.
+            *shape = (MachineA64ValueShape){
+                .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
+                .aggregate = true,
+                .indirect = true,
+            };
+            return true;
+        }
+        // Indirect arguments would need a caller-side defensive copy the
+        // subset does not stage; they keep the canonical path.
+        return false;
+    }
+    MachineA64ValueShape built = {
+        .part_count = abi.part_count,
+        .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
+        .aggregate = true,
+    };
+    for (u32 part_index = 0; part_index < abi.part_count; part_index += 1)
+    {
+        bool part_float = abi.parts[part_index].abi_class == IR_ABI_CLASS_FLOAT;
+        if ((abi.parts[part_index].abi_class != IR_ABI_CLASS_INTEGER && abi.parts[part_index].abi_class != IR_ABI_CLASS_POINTER && !part_float) ||
+            abi.parts[part_index].size > 8 || (part_float && abi.parts[part_index].size != 4 && abi.parts[part_index].size != 8))
+        {
+            return false;
+        }
+        built.part_offsets[part_index] = abi.parts[part_index].value_offset;
+        built.part_is_float[part_index] = part_float ? 1 : 0;
+        built.part_sizes[part_index] = (u8)abi.parts[part_index].size;
+    }
+    *shape = built;
+    return true;
+}
+
+// Consecutive-register assignment per class: integer parts take the next
+// X argument register, float parts the next V register. AAPCS64 stack
+// arguments stay outside the subset, so overflow fails the placement
+// instead of spilling to the outgoing area.
+BUSTER_GLOBAL_LOCAL bool machine_a64_place_argument(MachineA64ValueShape* shape, u32* integer_count, u32* float_count,
+                                                    MachineA64ArgumentPlacement* placement)
+{
+    u32 integer_parts = 0;
+    u32 float_parts = 0;
+    for (u32 part_index = 0; part_index < shape->part_count; part_index += 1)
+    {
+        integer_parts += shape->part_is_float[part_index] == 0;
+        float_parts += shape->part_is_float[part_index] != 0;
+    }
+    if (*integer_count + integer_parts > 8 || *float_count + float_parts > 8)
+    {
+        return false;
+    }
+    *placement = (MachineA64ArgumentPlacement){
+        .first_integer = (u16)*integer_count,
+        .first_float = (u16)*float_count,
+    };
+    *integer_count += integer_parts;
+    *float_count += float_parts;
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL u32 machine_a64_scalar_bit_width(IrType* type)
@@ -376,18 +516,22 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
             return false;
         }
         u32 argument_index = (u32)instruction->immediates[0];
-        return argument_index < MACHINE_A64_MAX_ARGUMENTS && result_register != UINT32_MAX &&
+        return argument_index < MACHINE_A64_MAX_ARGUMENTS &&
+               (result_register != UINT32_MAX || selector->value_stack_slots[instruction->result.value] != UINT32_MAX) &&
                selector->argument_values[argument_index] == instruction->result.value;
     }
     break;
     case IR_OPCODE_CONSTANT_INTEGER:
+    case IR_OPCODE_CONSTANT_FLOAT:
     {
         if (result_register == UINT32_MAX)
         {
             return false;
         }
+        // Float constants carry their IEEE bit pattern in the immediate,
+        // exactly like the canonical shared constant path.
         u64 immediate = instruction->immediates[0];
-        if (instruction->immediate_is_negative)
+        if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER && instruction->immediate_is_negative)
         {
             immediate = 0 - immediate;
         }
@@ -780,27 +924,132 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
         }
         IrType* callee_return_type = ir_type_from_id(&program->types, callee_type->return_type);
         bool callee_returns_value = callee_return_type && callee_return_type->kind != IR_TYPE_VOID;
-        if (callee_returns_value && !machine_a64_type_is_scalar_register(callee_return_type))
+        MachineA64ValueShape callee_return_shape = {0};
+        if (callee_returns_value && !machine_a64_value_shape(program, callee_type->return_type, selector->target, IR_ABI_USE_RESULT, &callee_return_shape))
         {
             return false;
         }
+        MachineA64ValueShape argument_shapes[MACHINE_A64_MAX_ARGUMENTS];
+        MachineA64ArgumentPlacement argument_placements[MACHINE_A64_MAX_ARGUMENTS];
+        u32 call_integer_count = 0;
+        u32 call_float_count = 0;
+        u32 indirect_result_slot = UINT32_MAX;
+        if (callee_return_shape.indirect)
+        {
+            if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
+            {
+                indirect_result_slot = selector->value_stack_slots[instruction->result.value];
+                if (indirect_result_slot == UINT32_MAX)
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                // An unused indirect result still needs backing storage.
+                indirect_result_slot = machine_a64_append_slot(selector, callee_return_shape.byte_size, 8);
+            }
+        }
         u32 argument_registers[MACHINE_A64_MAX_ARGUMENTS];
+        u32 argument_slots[MACHINE_A64_MAX_ARGUMENTS];
         for (u32 argument_index = 0; argument_index < call_argument_count; argument_index += 1)
         {
             IrTypeId argument_type_id = argument_index < callee_type->parameter_count
                                             ? callee_type->parameter_types[argument_index]
                                             : function->values[instruction->operands[argument_index + 1].value].canonical_type;
-            IrType* argument_type = ir_type_from_id(&program->types, argument_type_id);
-            if (!machine_a64_type_is_scalar_register(argument_type) ||
-                !machine_a64_operand_register(selector, instruction->operands[argument_index + 1], argument_registers + argument_index))
+            if (!machine_a64_value_shape(program, argument_type_id, selector->target, IR_ABI_USE_ARGUMENT, argument_shapes + argument_index) ||
+                !machine_a64_place_argument(argument_shapes + argument_index, &call_integer_count, &call_float_count,
+                                            argument_placements + argument_index))
+            {
+                return false;
+            }
+            argument_registers[argument_index] = UINT32_MAX;
+            argument_slots[argument_index] = selector->value_stack_slots[instruction->operands[argument_index + 1].value];
+            if (argument_shapes[argument_index].aggregate)
+            {
+                if (argument_slots[argument_index] == UINT32_MAX)
+                {
+                    return false;
+                }
+                continue;
+            }
+            if (!machine_a64_operand_register(selector, instruction->operands[argument_index + 1], argument_registers + argument_index))
             {
                 return false;
             }
         }
+        // Explicit fixed-register argument staging: integer parts load
+        // directly into their X registers (never through a scratch that
+        // could disturb an already placed argument), and float parts
+        // bridge into their V registers, which no general-register write
+        // can touch. The hidden result pointer rides X8, outside the
+        // argument file.
+        if (callee_return_shape.indirect)
+        {
+            u32 result_pointer_register = machine_a64_synthesize_register(selector);
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_pointer_register),
+                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, indirect_result_slot)},
+                                                 .opcode = MACHINE_A64_LEA_FRAME,
+                                             });
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X8),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_pointer_register)},
+                                                 .opcode = MACHINE_A64_MOV_RR,
+                                             });
+        }
         for (u32 argument_index = 0; argument_index < call_argument_count; argument_index += 1)
         {
+            MachineA64ValueShape* shape = argument_shapes + argument_index;
+            u32 next_integer = argument_placements[argument_index].first_integer;
+            u32 next_float = argument_placements[argument_index].first_float;
+            if (shape->aggregate)
+            {
+                for (u32 part_index = 0; part_index < shape->part_count; part_index += 1)
+                {
+                    bool part_float = shape->part_is_float[part_index] != 0;
+                    u16 part_load_opcode =
+                        (u16)(part_float && shape->part_sizes[part_index] == 4 ? MACHINE_A64_LOAD_FRAME32 : MACHINE_A64_LOAD_FRAME);
+                    if (part_float)
+                    {
+                        u32 bounce_register = machine_a64_synthesize_register(selector);
+                        machine_a64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register),
+                                                                          machine_ref_make(MACHINE_REF_STACK_SLOT, argument_slots[argument_index])},
+                                                             .payload = shape->part_offsets[part_index],
+                                                             .opcode = part_load_opcode,
+                                                         });
+                        machine_a64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                             .payload = next_float,
+                                                             .opcode = MACHINE_A64_FMOV_TO_VEC,
+                                                         });
+                        next_float += 1;
+                    }
+                    else
+                    {
+                        machine_a64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, next_integer),
+                                                                          machine_ref_make(MACHINE_REF_STACK_SLOT, argument_slots[argument_index])},
+                                                             .payload = shape->part_offsets[part_index],
+                                                             .opcode = MACHINE_A64_LOAD_FRAME,
+                                                         });
+                        next_integer += 1;
+                    }
+                }
+                continue;
+            }
+            if (shape->part_is_float[0])
+            {
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_registers[argument_index])},
+                                                     .payload = next_float,
+                                                     .opcode = MACHINE_A64_FMOV_TO_VEC,
+                                                 });
+                continue;
+            }
             machine_a64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, argument_index),
+                                                 .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, next_integer),
                                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_registers[argument_index])},
                                                  .opcode = MACHINE_A64_MOV_RR,
                                              });
@@ -822,13 +1071,74 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
                                                  .opcode = MACHINE_A64_CALL_INDIRECT,
                                              });
         }
-        if (callee_returns_value && instruction->result.value != IR_ID_UNDERLYING_INVALID && result_register != UINT32_MAX)
+        if (callee_returns_value && instruction->result.value != IR_ID_UNDERLYING_INVALID)
         {
-            u32 row = machine_a64_select_row(selector, (MachineInstruction){
+            if (callee_return_shape.indirect)
+            {
+                // The callee already stored the value through the hidden
+                // pointer into the result slot.
+                return true;
+            }
+            if (callee_return_shape.aggregate)
+            {
+                u32 result_slot = selector->value_stack_slots[instruction->result.value];
+                if (result_slot == UINT32_MAX)
+                {
+                    return false;
+                }
+                u32 return_integer_index = 0;
+                u32 return_float_index = 0;
+                for (u32 part_index = 0; part_index < callee_return_shape.part_count; part_index += 1)
+                {
+                    if (callee_return_shape.part_is_float[part_index])
+                    {
+                        u32 bounce_register = machine_a64_synthesize_register(selector);
+                        machine_a64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                             .payload = return_float_index,
+                                                             .opcode = MACHINE_A64_FMOV_FROM_VEC,
+                                                         });
+                        machine_a64_select_row(
+                            selector, (MachineInstruction){
+                                          .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                          .payload = callee_return_shape.part_offsets[part_index],
+                                          .opcode = (u16)(callee_return_shape.part_sizes[part_index] == 4 ? MACHINE_A64_STORE_FRAME32
+                                                                                                          : MACHINE_A64_STORE_FRAME64),
+                                      });
+                        return_float_index += 1;
+                        continue;
+                    }
+                    machine_a64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                                      machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, return_integer_index)},
+                                                         .payload = callee_return_shape.part_offsets[part_index],
+                                                         .opcode = MACHINE_A64_STORE_FRAME64,
+                                                     });
+                    return_integer_index += 1;
+                }
+                return true;
+            }
+            if (result_register == UINT32_MAX)
+            {
+                return false;
+            }
+            u32 row;
+            if (callee_return_shape.part_is_float[0])
+            {
+                row = machine_a64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                           .opcode = MACHINE_A64_FMOV_FROM_VEC,
+                                                       });
+            }
+            else
+            {
+                row = machine_a64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                         machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X0)},
                                                            .opcode = MACHINE_A64_MOV_RR,
                                                        });
+            }
             machine_a64_define(selector, result_register, row);
         }
         return true;
@@ -853,6 +1163,44 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
         }
         IrInstruction* definition = function->instructions + place->definition.value;
         u32 slot = selector->value_stack_slots[instruction->operands[0].value];
+        u32 result_slot = selector->value_stack_slots[instruction->result.value];
+        if (result_register == UINT32_MAX && result_slot != UINT32_MAX)
+        {
+            // Aggregate load: exact-size copy into the result slot, from a
+            // direct local slot or through an address vreg.
+            IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
+            if (!loaded_type || !loaded_type->layout.resolved || loaded_type->layout.size > UINT32_MAX)
+            {
+                return false;
+            }
+            if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
+            {
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
+                                                     .payload = (u32)loaded_type->layout.size,
+                                                     .opcode = MACHINE_A64_COPY_FRAME_FROM_FRAME,
+                                                 });
+                return true;
+            }
+            if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
+                definition->opcode == IR_OPCODE_FIELD)
+            {
+                u32 address_register;
+                if (!machine_a64_operand_register(selector, instruction->operands[0], &address_register))
+                {
+                    return false;
+                }
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register)},
+                                                     .payload = (u32)loaded_type->layout.size,
+                                                     .opcode = MACHINE_A64_COPY_FRAME_FROM_PTR,
+                                                 });
+                return true;
+            }
+            return false;
+        }
         if (result_register == UINT32_MAX)
         {
             return false;
@@ -929,6 +1277,42 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
         IrType* stored_type = ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type);
         u64 size = stored_type && stored_type->layout.resolved ? stored_type->layout.size : 0;
         u32 slot = selector->value_stack_slots[instruction->operands[0].value];
+        u32 value_slot = selector->value_stack_slots[instruction->operands[1].value];
+        if (value_slot != UINT32_MAX && selector->value_virtual_registers[instruction->operands[1].value] == UINT32_MAX)
+        {
+            // Aggregate store: exact-size copy out of the value slot.
+            if (!size || size > UINT32_MAX)
+            {
+                return false;
+            }
+            if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
+            {
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                     .payload = (u32)size,
+                                                     .opcode = MACHINE_A64_COPY_FRAME_FROM_FRAME,
+                                                 });
+                return true;
+            }
+            if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
+                definition->opcode == IR_OPCODE_FIELD)
+            {
+                u32 address_register;
+                if (!machine_a64_operand_register(selector, instruction->operands[0], &address_register))
+                {
+                    return false;
+                }
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                     .payload = (u32)size,
+                                                     .opcode = MACHINE_A64_COPY_PTR_FROM_FRAME,
+                                                 });
+                return true;
+            }
+            return false;
+        }
         u32 value_register;
         if (!machine_a64_operand_register(selector, instruction->operands[1], &value_register))
         {
@@ -1069,16 +1453,97 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
     {
         if (instruction->operand_count)
         {
-            u32 value_register;
-            if (!machine_a64_operand_register(selector, instruction->operands[0], &value_register))
+            if (selector->return_shape.indirect)
             {
-                return false;
+                // Copy the value through the caller's buffer, whose
+                // address the entry saved from X8. AAPCS64 does not
+                // return the pointer, so nothing writes X0.
+                u32 value_slot = instruction->operands[0].value < function->value_count
+                                     ? selector->value_stack_slots[instruction->operands[0].value]
+                                     : UINT32_MAX;
+                if (value_slot == UINT32_MAX || selector->hidden_return_slot == UINT32_MAX)
+                {
+                    return false;
+                }
+                u32 pointer_register = machine_a64_synthesize_register(selector);
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, selector->hidden_return_slot)},
+                                                     .opcode = MACHINE_A64_LOAD_FRAME,
+                                                 });
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                     .payload = selector->return_shape.byte_size,
+                                                     .opcode = MACHINE_A64_COPY_PTR_FROM_FRAME,
+                                                 });
             }
-            machine_a64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X0),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
-                                                 .opcode = MACHINE_A64_MOV_RR,
-                                             });
+            else if (selector->return_shape.aggregate)
+            {
+                u32 value_slot = instruction->operands[0].value < function->value_count
+                                     ? selector->value_stack_slots[instruction->operands[0].value]
+                                     : UINT32_MAX;
+                if (value_slot == UINT32_MAX)
+                {
+                    return false;
+                }
+                u32 return_integer_index = 0;
+                u32 return_float_index = 0;
+                for (u32 part_index = 0; part_index < selector->return_shape.part_count; part_index += 1)
+                {
+                    if (selector->return_shape.part_is_float[part_index])
+                    {
+                        u32 bounce_register = machine_a64_synthesize_register(selector);
+                        machine_a64_select_row(
+                            selector, (MachineInstruction){
+                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register),
+                                                       machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                          .payload = selector->return_shape.part_offsets[part_index],
+                                          .opcode = (u16)(selector->return_shape.part_sizes[part_index] == 4 ? MACHINE_A64_LOAD_FRAME32
+                                                                                                             : MACHINE_A64_LOAD_FRAME),
+                                      });
+                        machine_a64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                             .payload = return_float_index,
+                                                             .opcode = MACHINE_A64_FMOV_TO_VEC,
+                                                         });
+                        return_float_index += 1;
+                        continue;
+                    }
+                    machine_a64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, return_integer_index),
+                                                                      machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                         .payload = selector->return_shape.part_offsets[part_index],
+                                                         .opcode = MACHINE_A64_LOAD_FRAME,
+                                                     });
+                    return_integer_index += 1;
+                }
+            }
+            else if (selector->return_shape.part_is_float[0])
+            {
+                u32 value_register;
+                if (!machine_a64_operand_register(selector, instruction->operands[0], &value_register))
+                {
+                    return false;
+                }
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                     .opcode = MACHINE_A64_FMOV_TO_VEC,
+                                                 });
+            }
+            else
+            {
+                u32 value_register;
+                if (!machine_a64_operand_register(selector, instruction->operands[0], &value_register))
+                {
+                    return false;
+                }
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X0),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                     .opcode = MACHINE_A64_MOV_RR,
+                                                 });
+            }
         }
         machine_a64_select_row(selector, (MachineInstruction){
                                              .opcode = MACHINE_A64_RET,
@@ -1108,18 +1573,27 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
     {
         return result;
     }
-    // The scalar subset: every parameter and the return value must occupy
-    // one integer register. Anything else stays canonical for now.
+    // The AAPCS64 shape gate: every parameter and the return value must
+    // classify to register parts — integer scalars, float scalars,
+    // one-or-two-part register aggregates, HFAs — or an indirect result.
+    // Indirect and stack arguments stay canonical.
     IrType* return_type = ir_type_from_id(&program->types, function_type->return_type);
     bool returns_value = return_type && return_type->kind != IR_TYPE_VOID;
-    if (returns_value && !machine_a64_type_is_scalar_register(return_type))
+    MachineA64ValueShape signature_return_shape = {0};
+    if (returns_value && !machine_a64_value_shape(program, function_type->return_type, target, IR_ABI_USE_RESULT, &signature_return_shape))
     {
         return result;
     }
+    MachineA64ValueShape signature_parameter_shapes[MACHINE_A64_MAX_ARGUMENTS] = {0};
+    MachineA64ArgumentPlacement signature_parameter_placements[MACHINE_A64_MAX_ARGUMENTS] = {0};
+    u32 signature_integer_count = 0;
+    u32 signature_float_count = 0;
     for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
     {
-        IrType* parameter_type = ir_type_from_id(&program->types, function_type->parameter_types[parameter_index]);
-        if (!machine_a64_type_is_scalar_register(parameter_type))
+        if (!machine_a64_value_shape(program, function_type->parameter_types[parameter_index], target, IR_ABI_USE_ARGUMENT,
+                                     signature_parameter_shapes + parameter_index) ||
+            !machine_a64_place_argument(signature_parameter_shapes + parameter_index, &signature_integer_count, &signature_float_count,
+                                        signature_parameter_placements + parameter_index))
         {
             return result;
         }
@@ -1170,6 +1644,17 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
     machine_stream_initialize(&selector.call_targets, sizeof(IrSymbolId));
     MachineBuilderStream line_marks;
     machine_stream_initialize(&line_marks, sizeof(MachineLineMark));
+    selector.return_shape = signature_return_shape;
+    selector.hidden_return_slot = UINT32_MAX;
+    if (signature_return_shape.indirect)
+    {
+        selector.hidden_return_slot = machine_a64_append_slot(&selector, 8, 8);
+    }
+    for (u32 parameter_index = 0; parameter_index < BUSTER_ARRAY_LENGTH(selector.parameter_shapes); parameter_index += 1)
+    {
+        selector.parameter_shapes[parameter_index] = signature_parameter_shapes[parameter_index];
+        selector.parameter_placements[parameter_index] = signature_parameter_placements[parameter_index];
+    }
     for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
     {
         selector.value_virtual_registers[value_index] = UINT32_MAX;
@@ -1412,7 +1897,11 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 continue;
             }
             IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
-            if (machine_a64_type_is_scalar_register(value_type) || machine_a64_opcode_produces_address(instruction->opcode))
+            // Float scalars hold their bit image in a general register, and
+            // address producers hold an 8-byte address no matter what their
+            // declared canonical type is.
+            if (machine_a64_type_is_scalar_register(value_type) || machine_a64_type_is_float_scalar(value_type) ||
+                machine_a64_opcode_produces_address(instruction->opcode))
             {
                 u32 register_index = machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
                                                                                              .definition_point = MACHINE_POINT_INVALID,
@@ -1420,6 +1909,18 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                                                                                              .typed_origin = instruction->result.value,
                                                                                          });
                 selector.value_virtual_registers[instruction->result.value] = register_index;
+            }
+            else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD || instruction->opcode == IR_OPCODE_CALL ||
+                      instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY) &&
+                     value_type && value_type->layout.resolved && value_type->layout.size <= UINT32_MAX - 7 &&
+                     (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE ||
+                      ((instruction->opcode == IR_OPCODE_ARRAY || instruction->opcode == IR_OPCODE_LOAD) && value_type->kind == IR_TYPE_ARRAY)))
+            {
+                // Aggregate values own a frame slot like the canonical
+                // path's per-value storage; copies and ABI part transfers
+                // address it directly.
+                selector.value_stack_slots[instruction->result.value] =
+                    machine_a64_append_slot(&selector, (u32)((value_type->layout.size + 7) & ~(u64)7), 8);
             }
         }
     }
@@ -1658,25 +2159,110 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         {
             // Capture every incoming argument register at entry, before any
             // body row can use an argument register as an operand scratch.
-            for (u32 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(selector.argument_values); argument_index += 1)
+            // Integer parts capture first because float captures scratch
+            // general registers; the vector file survives that pass
+            // untouched. The hidden result pointer arrives in X8, outside
+            // the argument registers.
+            if (selector.return_shape.indirect)
             {
-                u32 argument_value = selector.argument_values[argument_index];
-                if (argument_value == IR_ID_UNDERLYING_INVALID)
+                machine_a64_select_row(&selector, (MachineInstruction){
+                                                      .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector.hidden_return_slot),
+                                                                   machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X8)},
+                                                      .opcode = MACHINE_A64_STORE_FRAME64,
+                                                  });
+            }
+            for (u32 capture_pass = 0; capture_pass < 2 && selector.supported; capture_pass += 1)
+            {
+                bool float_pass = capture_pass == 1;
+                for (u32 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(selector.argument_values); argument_index += 1)
                 {
-                    continue;
+                    u32 argument_value = selector.argument_values[argument_index];
+                    if (argument_value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        continue;
+                    }
+                    MachineA64ValueShape* shape = selector.parameter_shapes + argument_index;
+                    MachineA64ArgumentPlacement* parameter_placement = selector.parameter_placements + argument_index;
+                    u32 next_integer = parameter_placement->first_integer;
+                    u32 next_float = parameter_placement->first_float;
+                    if (shape->aggregate)
+                    {
+                        u32 slot = selector.value_stack_slots[argument_value];
+                        if (slot == UINT32_MAX)
+                        {
+                            machine_a64_reject(&selector, IR_OPCODE_ARGUMENT);
+                            break;
+                        }
+                        for (u32 part_index = 0; part_index < shape->part_count; part_index += 1)
+                        {
+                            bool part_float = shape->part_is_float[part_index] != 0;
+                            u32 part_integer = next_integer;
+                            u32 part_float_register = next_float;
+                            next_integer += !part_float;
+                            next_float += part_float;
+                            if (part_float != float_pass)
+                            {
+                                continue;
+                            }
+                            if (part_float)
+                            {
+                                u32 bounce_register = machine_a64_synthesize_register(&selector);
+                                machine_a64_select_row(&selector, (MachineInstruction){
+                                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                                      .payload = part_float_register,
+                                                                      .opcode = MACHINE_A64_FMOV_FROM_VEC,
+                                                                  });
+                                machine_a64_select_row(&selector,
+                                                       (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bounce_register)},
+                                                           .payload = shape->part_offsets[part_index],
+                                                           .opcode = (u16)(shape->part_sizes[part_index] == 4 ? MACHINE_A64_STORE_FRAME32
+                                                                                                             : MACHINE_A64_STORE_FRAME64),
+                                                       });
+                            }
+                            else
+                            {
+                                machine_a64_select_row(&selector, (MachineInstruction){
+                                                                      .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                                                   machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, part_integer)},
+                                                                      .payload = shape->part_offsets[part_index],
+                                                                      .opcode = MACHINE_A64_STORE_FRAME64,
+                                                                  });
+                            }
+                        }
+                        continue;
+                    }
+                    bool scalar_float = shape->part_is_float[0] != 0;
+                    if (scalar_float != float_pass)
+                    {
+                        continue;
+                    }
+                    u32 argument_register = selector.value_virtual_registers[argument_value];
+                    if (argument_register == UINT32_MAX)
+                    {
+                        machine_a64_reject(&selector, IR_OPCODE_ARGUMENT);
+                        break;
+                    }
+                    u32 row;
+                    if (scalar_float)
+                    {
+                        row = machine_a64_select_row(&selector, (MachineInstruction){
+                                                                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_register)},
+                                                                    .payload = next_float,
+                                                                    .opcode = MACHINE_A64_FMOV_FROM_VEC,
+                                                                });
+                    }
+                    else
+                    {
+                        row = machine_a64_select_row(&selector, (MachineInstruction){
+                                                                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_register),
+                                                                                 machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, next_integer)},
+                                                                    .opcode = MACHINE_A64_MOV_RR,
+                                                                });
+                    }
+                    machine_a64_define(&selector, argument_register, row);
                 }
-                u32 argument_register = selector.value_virtual_registers[argument_value];
-                if (argument_register == UINT32_MAX)
-                {
-                    machine_a64_reject(&selector, IR_OPCODE_ARGUMENT);
-                    break;
-                }
-                u32 row = machine_a64_select_row(&selector, (MachineInstruction){
-                                                                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, argument_register),
-                                                                             machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, argument_index)},
-                                                                .opcode = MACHINE_A64_MOV_RR,
-                                                            });
-                machine_a64_define(&selector, argument_register, row);
             }
         }
         for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID && selector.supported;
@@ -1850,6 +2436,29 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_load(MachineA64Encoder* encoder,
     machine_a64_emit_frame_memory(encoder, register_number, offset, 8, false);
 }
 
+// Sized memory operation through a pointer register with a scaled unsigned
+// immediate offset, for the aggregate copy loops; an offset outside the
+// imm12 form is an encode error, which falls the function back whole.
+BUSTER_GLOBAL_LOCAL void machine_a64_emit_pointer_memory(MachineA64Encoder* encoder, u32 register_number, u32 base_register, u32 offset, u32 size, bool store)
+{
+    u32 scale = size;
+    if ((size != 1 && size != 2 && size != 4 && size != 8) || offset % scale || offset / scale > 4095)
+    {
+        encoder->error = true;
+        return;
+    }
+    u32 instruction;
+    if (store)
+    {
+        instruction = size == 8 ? 0xf9000000 : size == 4 ? 0xb9000000 : size == 2 ? 0x79000000 : 0x39000000;
+    }
+    else
+    {
+        instruction = size == 8 ? 0xf9400000 : size == 4 ? 0xb9400000 : size == 2 ? 0x79400000 : 0x39400000;
+    }
+    machine_a64_emit(encoder, instruction | ((offset / scale) << 10) | (base_register << 5) | register_number);
+}
+
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_store(MachineA64Encoder* encoder, u32 register_number, u32 offset)
 {
     machine_a64_emit_frame_memory(encoder, register_number, offset, 8, true);
@@ -1910,6 +2519,13 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             break;
         case MACHINE_A64_RET:
             capacity64 += 20 + (u64)frame_chunk_words * 4 + (u64)push_count * 4;
+            break;
+        case MACHINE_A64_COPY_FRAME_FROM_FRAME:
+        case MACHINE_A64_COPY_FRAME_FROM_PTR:
+        case MACHINE_A64_COPY_PTR_FROM_FRAME:
+            // One load/store word pair per eight-byte chunk, plus sized
+            // tail accesses that may each take the large-offset form.
+            capacity64 += ((u64)capacity_row->payload / 8) * 8 + 48;
             break;
         default:
             capacity64 += 12;
@@ -2124,6 +2740,12 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                     &encoder, operand_registers[0],
                     machine_a64_frame_offset(frame_area, placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])] - instruction->payload));
                 break;
+            case MACHINE_A64_LOAD_FRAME32:
+                machine_a64_emit_frame_memory(
+                    &encoder, operand_registers[0],
+                    machine_a64_frame_offset(frame_area, placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])] - instruction->payload),
+                    4, false);
+                break;
             case MACHINE_A64_STORE_FRAME8:
             case MACHINE_A64_STORE_FRAME16:
             case MACHINE_A64_STORE_FRAME32:
@@ -2202,6 +2824,66 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 }
             }
             break;
+            case MACHINE_A64_COPY_FRAME_FROM_FRAME:
+            case MACHINE_A64_COPY_FRAME_FROM_PTR:
+            case MACHINE_A64_COPY_PTR_FROM_FRAME:
+            {
+                // Chunked copy through the X17 data scratch — X16 stays the
+                // large-offset address scratch inside the frame accesses.
+                // Chunks descend in size, so every access stays aligned.
+                u32 destination_slot_offset = 0;
+                u32 source_slot_offset = 0;
+                u32 pointer_register = 0;
+                if (instruction->opcode == MACHINE_A64_COPY_FRAME_FROM_FRAME)
+                {
+                    destination_slot_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])];
+                    source_slot_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])];
+                }
+                else if (instruction->opcode == MACHINE_A64_COPY_FRAME_FROM_PTR)
+                {
+                    destination_slot_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])];
+                    pointer_register = operand_registers[1];
+                }
+                else
+                {
+                    pointer_register = operand_registers[0];
+                    source_slot_offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])];
+                }
+                u32 copied = 0;
+                u32 remaining = instruction->payload;
+                while (remaining && !encoder.overflow && !encoder.error)
+                {
+                    u32 chunk = remaining >= 8 ? 8u : remaining >= 4 ? 4u : remaining >= 2 ? 2u : 1u;
+                    if (instruction->opcode == MACHINE_A64_COPY_PTR_FROM_FRAME)
+                    {
+                        machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X17, machine_a64_frame_offset(frame_area, source_slot_offset - copied), chunk,
+                                                      false);
+                        machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X17, pointer_register, copied, chunk, true);
+                    }
+                    else if (instruction->opcode == MACHINE_A64_COPY_FRAME_FROM_PTR)
+                    {
+                        machine_a64_emit_pointer_memory(&encoder, MACHINE_A64_X17, pointer_register, copied, chunk, false);
+                        machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X17, machine_a64_frame_offset(frame_area, destination_slot_offset - copied),
+                                                      chunk, true);
+                    }
+                    else
+                    {
+                        machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X17, machine_a64_frame_offset(frame_area, source_slot_offset - copied), chunk,
+                                                      false);
+                        machine_a64_emit_frame_memory(&encoder, MACHINE_A64_X17, machine_a64_frame_offset(frame_area, destination_slot_offset - copied),
+                                                      chunk, true);
+                    }
+                    copied += chunk;
+                    remaining -= chunk;
+                }
+            }
+            break;
+            case MACHINE_A64_FMOV_TO_VEC:
+                machine_a64_emit(&encoder, 0x9e670000 | ((u32)operand_registers[0] << 5) | (instruction->payload & 0x1f));
+                break;
+            case MACHINE_A64_FMOV_FROM_VEC:
+                machine_a64_emit(&encoder, 0x9e660000 | ((instruction->payload & 0x1f) << 5) | operand_registers[0]);
+                break;
             case MACHINE_A64_B:
             {
                 MachineA64BranchFixup* fixup = (MachineA64BranchFixup*)machine_stream_append(arena, &fixups);

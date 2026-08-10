@@ -407,6 +407,7 @@ typedef enum MachineOpcode
     MACHINE_A64_CMP_ZERO,  // use; defines flags (64-bit compare against zero)
     MACHINE_A64_CSET,      // def; payload = MachineA64Condition; uses flags
     MACHINE_A64_LOAD_FRAME, // def, stack-slot ref; 64-bit read at slot + payload byte offset
+    MACHINE_A64_LOAD_FRAME32, // def, stack-slot ref; 32-bit read at slot + payload byte offset, zero-extends
     MACHINE_A64_STORE_FRAME8, // stack-slot ref, use; sized store at slot + payload byte offset
     MACHINE_A64_STORE_FRAME16,
     MACHINE_A64_STORE_FRAME32,
@@ -421,6 +422,11 @@ typedef enum MachineOpcode
     MACHINE_A64_STORE_PTR64,
     MACHINE_A64_LEA_FRAME,  // def, stack-slot ref: address of a frame slot + payload byte offset
     MACHINE_A64_LEA_OFFSET, // def, base use; payload = byte displacement
+    // Sized aggregate copies through the reserved X17 data scratch (X16
+    // stays the large-offset address scratch); payload = exact byte size.
+    MACHINE_A64_COPY_FRAME_FROM_FRAME, // slot ref destination, slot ref source
+    MACHINE_A64_COPY_FRAME_FROM_PTR,   // slot ref destination, use address
+    MACHINE_A64_COPY_PTR_FROM_FRAME,   // use address destination, slot ref source
     MACHINE_A64_B,          // block ref; terminator
     MACHINE_A64_BCC,        // block ref taken, block ref fallthrough; payload = condition; terminator
     MACHINE_A64_RET,        // terminator; emits the full canonical epilogue

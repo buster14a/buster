@@ -526,6 +526,11 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, 0},
     },
+    [MACHINE_A64_LOAD_FRAME32] = {
+        .name = S8_INITIALIZER("a64_load_frame32"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, 0},
+    },
     [MACHINE_A64_STORE_FRAME8] = MACHINE_INFO_STORE_FRAME("a64_store_frame8"),
     [MACHINE_A64_STORE_FRAME16] = MACHINE_INFO_STORE_FRAME("a64_store_frame16"),
     [MACHINE_A64_STORE_FRAME32] = MACHINE_INFO_STORE_FRAME("a64_store_frame32"),
@@ -545,6 +550,22 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
     },
     [MACHINE_A64_LEA_OFFSET] = MACHINE_INFO_MOVE("a64_lea_offset"),
+    // The copies run through the reserved X17 data scratch, so unlike their
+    // x86-64 counterparts they clobber no allocatable register.
+    [MACHINE_A64_COPY_FRAME_FROM_FRAME] = {
+        .name = S8_INITIALIZER("a64_copy_frame_from_frame"),
+        .operand_count = 2,
+    },
+    [MACHINE_A64_COPY_FRAME_FROM_PTR] = {
+        .name = S8_INITIALIZER("a64_copy_frame_from_ptr"),
+        .operand_count = 2,
+        .operand_info = {0, MACHINE_OPERAND_USE_GENERAL},
+    },
+    [MACHINE_A64_COPY_PTR_FROM_FRAME] = {
+        .name = S8_INITIALIZER("a64_copy_ptr_from_frame"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, 0},
+    },
     [MACHINE_A64_B] = {
         .name = S8_INITIALIZER("a64_b"),
         .operand_count = 1,

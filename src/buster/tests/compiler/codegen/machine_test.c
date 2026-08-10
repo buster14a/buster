@@ -1473,7 +1473,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     }
 
     // Stage 11: AArch64 selection, MIR_STACK placement, and encoding over
-    // the scalar integer subset, on the same C corpus with a fixed
+    // the scalar integer subset — plus the AAPCS64 shape coverage: a
+    // two-part register aggregate parameter (kagg_take) and an indirect
+    // result through X8 (big_make) — on the same C corpus with a fixed
     // aarch64-linux target so the machine path exercises on every host.
     // Execution requires a non-sanitized AArch64 host; the subset's
     // register-argument scalar signatures place identically under AAPCS64
@@ -1497,7 +1499,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("uless"),   S8_INITIALIZER("six"),    S8_INITIALIZER("seven"),  S8_INITIALIZER("sum_to"),
             S8_INITIALIZER("readp"),   S8_INITIALIZER("writep"), S8_INITIALIZER("divide"), S8_INITIALIZER("srem"),
             S8_INITIALIZER("udiv"),    S8_INITIALIZER("shl"),    S8_INITIALIZER("sar"),    S8_INITIALIZER("shr"),
-            S8_INITIALIZER("local_pair"),
+            S8_INITIALIZER("local_pair"), S8_INITIALIZER("kagg_take"), S8_INITIALIZER("big_make"),
         };
         MachineEncodeResult a64_encoded[BUSTER_ARRAY_LENGTH(a64_supported_names)] = {0};
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names); name_index += 1)
