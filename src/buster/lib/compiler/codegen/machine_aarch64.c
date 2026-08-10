@@ -1505,15 +1505,36 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit(MachineA64Encoder* encoder, u32 word)
     encoder->count += 4;
 }
 
-// movz/movk materialization, mirroring the canonical a64_emit_constant.
+// Seeded movz/movn materialization. The seed picks the fill — zeros or
+// ones — matching more of the four halfwords, lands on the first
+// halfword that differs from the fill (the top one when none does), and
+// movk patches only the remaining differing halfwords, so a negative
+// costs one movn instead of a movz and three movk. The canonical
+// a64_emit_constant keeps its movz-first shape untouched.
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_immediate(MachineA64Encoder* encoder, u32 register_number, u64 value)
 {
-    machine_a64_emit(encoder, 0xd2800000 | ((u32)(value & 0xffff) << 5) | register_number);
-    for (u32 shift = 16; shift < 64; shift += 16)
+    u32 zero_halfwords = 0;
+    u32 ones_halfwords = 0;
+    for (u32 shift = 0; shift < 64; shift += 16)
     {
-        if ((value >> shift) & 0xffff)
+        zero_halfwords += ((value >> shift) & 0xffff) == 0;
+        ones_halfwords += ((value >> shift) & 0xffff) == 0xffff;
+    }
+    u32 fill = ones_halfwords > zero_halfwords ? 0xffffu : 0u;
+    u32 seed_shift = 0;
+    while (seed_shift < 48 && ((value >> seed_shift) & 0xffff) == fill)
+    {
+        seed_shift += 16;
+    }
+    u32 seed_halfword = (u32)((value >> seed_shift) & 0xffff);
+    u32 seed_opcode = fill ? 0x92800000 | ((~seed_halfword & 0xffffu) << 5) : 0xd2800000 | (seed_halfword << 5);
+    machine_a64_emit(encoder, seed_opcode | ((seed_shift / 16) << 21) | register_number);
+    for (u32 shift = seed_shift + 16; shift < 64; shift += 16)
+    {
+        u32 halfword = (u32)((value >> shift) & 0xffff);
+        if (halfword != fill)
         {
-            machine_a64_emit(encoder, 0xf2800000 | ((shift / 16) << 21) | ((u32)((value >> shift) & 0xffff) << 5) | register_number);
+            machine_a64_emit(encoder, 0xf2800000 | ((shift / 16) << 21) | (halfword << 5) | register_number);
         }
     }
 }

@@ -3046,15 +3046,36 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_frame_load(MachineX64Encoder* encoder,
     machine_x64_emit_frame_modrm(encoder, reg, offset);
 }
 
-// Materializes a constant. The canonical path always spends the ten-byte
-// movabs, so the machine rows keep that form to stay byte-comparable;
-// only the rematerialized reloads, which have no canonical counterpart,
-// take the five-byte zero-extending form when the value fits.
+// Materializes a constant through the shortest form that reproduces all
+// sixty-four result bits: the zero-extending mov r32 when the value fits
+// unsigned thirty-two, the sign-extended mov r64 when it fits signed
+// thirty-two, the ten-byte movabs otherwise. Every form must leave flags
+// alone — rematerializations land between arbitrary rows, including a
+// compare and its branch — so zero takes the five-byte mov, never xor.
 BUSTER_GLOBAL_LOCAL void machine_x64_emit_immediate(MachineX64Encoder* encoder, u32 reg, u64 value)
 {
-    machine_x64_emit8(encoder, (u8)(0x48 | (reg >= 8 ? 0x01 : 0)));
-    machine_x64_emit8(encoder, (u8)(0xb8 | (reg & 7)));
-    machine_x64_emit64(encoder, value);
+    if (value <= UINT32_MAX)
+    {
+        if (reg >= 8)
+        {
+            machine_x64_emit8(encoder, 0x41);
+        }
+        machine_x64_emit8(encoder, (u8)(0xb8 | (reg & 7)));
+        machine_x64_emit32(encoder, (u32)value);
+    }
+    else if (value >= UINT64_C(0xffffffff80000000))
+    {
+        machine_x64_emit8(encoder, (u8)(0x48 | (reg >= 8 ? 0x01 : 0)));
+        machine_x64_emit8(encoder, 0xc7);
+        machine_x64_emit8(encoder, (u8)(0xc0 | (reg & 7)));
+        machine_x64_emit32(encoder, (u32)value);
+    }
+    else
+    {
+        machine_x64_emit8(encoder, (u8)(0x48 | (reg >= 8 ? 0x01 : 0)));
+        machine_x64_emit8(encoder, (u8)(0xb8 | (reg & 7)));
+        machine_x64_emit64(encoder, value);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void machine_x64_emit_frame_store(MachineX64Encoder* encoder, u32 reg, u32 offset)
