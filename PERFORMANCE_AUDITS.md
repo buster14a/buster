@@ -12,6 +12,154 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-10b` (Linux x86_64, Zen 4 7940HS; the structural buy-back
+`2026-08-09g` recorded as the next step — the `2026-08-09c` Deus-Lex
+compaction architecture ported from the buster tokenizer to `c_lex`, which
+still held `~300 M` and now had a 16-byte row to store into. Every number
+clang-built on a quiet machine, counter medians of 5 runs, with a
+fixed-workload cross-check separating compiler efficiency from the tree's own
+growth. **Stage 1 `5.1968 G` to `5.0945 G` instructions (`-102.3 M`,
+`-1.97%`), branches `992.10 M` to `956.86 M` (`-3.55%`), both from a
+fixed-workload cross-check on the identical tree. Fixed point
+deterministic.** Landed with a prerequisite codegen fix described below,
+without which the emitter measured `+221 M` instead.)
+
+- **What was built.** `c_lex` now dispatches to a compaction emitter
+  (`c_lex_compact`, guarded `__AVX512VBMI__ && __AVX512VBMI2__` on top of
+  AVX-512, so MSVC, aarch64, non-AVX-512 hosts and the self-hosted stages keep
+  the scalar loop) that walks the translated source in **item-aligned 64-byte
+  windows**, the same architecture the buster tokenizer runs: one masked load
+  classifies every byte class in lockstep; quote/comment/escape spans resolve
+  by mask arithmetic with escape parity from the simdjson backslash algorithm;
+  multi-character punctuators legalize through a bit-channel `vpermi2b` NFA;
+  preprocessing-number extents are one `tzcnt` over a continuation mask; and
+  emission is the `vpcompressb` iota compaction — starts and ends compress
+  through the token-boundary masks, one byte subtract yields every length, the
+  kind and punctuator vectors compress by the same starts mask, and widening
+  interleaved stores write the 16-byte `CToken` rows eight at a time
+  (`vpermi2q` twice per eight rows).
+- **Three places where C forced a different shape than the buster tokenizer,
+  and they are the whole design.** (1) **C skips whitespace and comments
+  instead of tokenizing them**, so the reference's `ends = starts >> 1` is
+  wrong — `a  b` would give `a` length 3. Ends come instead from
+  `((boundary >> 1) | bit(bound-1)) & token_span`, where `boundary` marks
+  every position that begins *anything* (whitespace per byte, so a window of
+  pure whitespace still advances 63 bytes instead of one) and `token_span` is
+  the complement of the bytes no token owns. (2) **A preprocessing number's
+  continuation set is context-sensitive** — `+`/`-` continue only after
+  `e`/`E`/`p`/`P` — but `(plus|minus) & (exponent_letter << 1)` models that
+  exactly, so C numbers need no scalar scanner at all, where the buster
+  emitter had to keep one. (3) **Four item kinds can swallow another item's
+  start** (numbers, comments, literals, and `...`, whose last dot would
+  otherwise seed the number in `...5`), so one left-to-right cursor loop
+  resolves all four and everything else — identifiers, punctuators,
+  whitespace, newlines — falls out of pure mask arithmetic. That loop runs
+  about two or three times per window on real C, not once per token.
+- **Two exactness details worth keeping.** Lookahead loads are masked by the
+  **file** bounds, not the window's: a punctuator or comment delimiter near
+  the window end is spelled from bytes the next window owns, and reading them
+  as zero would silently mis-spell `%:%:` at offset 61 into two `%:`. And the
+  literal-prefix rule (`u8`/`u`/`U`/`L`) is decided from the word run in front
+  of the quote measured against the cursor, which is what keeps `L'a'` a
+  character literal, `x'a'` an identifier plus a character literal, and
+  `1'000` a single preprocessing number — the three readings of the same
+  adjacency.
+- **The differential gate.** `c_lex_reference` stays exported and
+  `c_test_frontend_lex_differential` asserts the two paths agree on token
+  rows (`memcmp`), the whole `CSourceMetrics` struct, and every diagnostic's
+  kind, message and location: 53 construct cases each slid across the window
+  boundary by 0-66 pad bytes, ten single-item shapes at ten lengths spanning
+  whole windows, twelve real C files including `c.c` and `ide.c` whole plus
+  their heads at all 67 window phases, and 48 deterministic LCG fuzz blobs
+  over the lexer's full alphabet. The measurement struct is in the comparison
+  deliberately — it is what the window pipeline reconstructs from masks
+  rather than from the branches it replaced, and it is where the first bug
+  would have hidden. Separately, `c_test_lex_punctuator_nfa_mismatches`
+  reconciles the hand-assigned NFA channels against `c_punctuator_length`
+  exhaustively over every byte sequence the emitter can classify, because the
+  spelling tables are derived from `c_punctuator_spellings` while the channels
+  are not.
+- **The one bug the gate caught, and it was the interesting one:** `...5`.
+  The dot-plus-digit number seed fired on the ellipsis's third dot, because
+  spans were resolved before punctuators. Adding `...` to the cursor loop's
+  candidates fixes it, and the reason it is the *only* such case is worth
+  recording — a number seed is a digit or a dot, no punctuator spelling
+  contains a digit, and `...` is the only spelling with a dot anywhere but
+  first.
+- **Measured negative, do not retry:** guarding the first store pass on a
+  non-empty window (`+2.0 M` on the identical workload). A window with no
+  token at all needs 64 bytes of whitespace or comment, which escapes to the
+  scalar scanner long before it reaches the emitter, so the branch is paid
+  every window and the two stores it saves are almost never there.
+- **Measured and kept:** the per-window
+  `BUSTER_CHECK(count == popcount(end_mask))` that pairs the compressed
+  starts against the compressed ends costs `230 k` instructions, `0.005%` of
+  stage 1. `BUSTER_CHECK` is live in Release, so it was priced rather than
+  assumed free; a divergence there would mis-pair every start with the wrong
+  end and emit plausible garbage silently, which is the `2026-08-09c`
+  Windows Token-ABI failure mode, and 0.005% is the right price for catching
+  it on any host.
+- **The prerequisite: `optnone` had been leaking onto every AVX-512
+  intrinsic in the tree.** `ide.c` wraps the unity build's
+  `#include <buster/tests/test.c>` in
+  `#pragma clang attribute push (__attribute__((optnone)), apply_to=function)`
+  to keep test bodies out of the optimizer. `apply_to=function` stamps the
+  attribute on every function *declared* while it is pushed, headers
+  included — and `2026-08-09i`'s new `simd_test.c` reached
+  `<buster/lib/simd.h>`, and through it the compiler's `<immintrin.h>`,
+  inside that region for the first time. Clang's intrinsics are
+  `static inline __always_inline__` wrappers around one instruction each, and
+  an `optnone` function cannot be inlined however it is attributed, so every
+  SIMD kernel in the clang-built unity Release binary began paying a real
+  call per operation. Cost, measured: `ide bench` `343.2 M` to `446.7 M`
+  (`+30%`) with `BENCH_PARSE` median `~47 us` to `92.3 us` — a regression
+  that reached main unnoticed because `2026-08-09i` quoted the self-hosted
+  stage-2 benchmark, which improved for its own reasons, rather than the
+  clang-built number `feedback-perf-clang-binaries-only` requires. This
+  emitter then lost `+221 M` on top. Including `<buster/lib/simd.h>` ahead of
+  the push restores all of it: 33 out-of-line `_mm512_*` symbols to 0,
+  `ide bench` back to `343.19 M`.
+- **Counters, both compilers on the identical tree with that fix in, medians
+  of 3:** instructions `5196.8 M` to `5094.5 M` (`-1.97%`), branches
+  `992.10 M` to `956.86 M` (`-3.55%`). The instruction counter reproduced to
+  `~150 k` across runs, so the `-102.3 M` is ~700x the noise. Pre-rebase the
+  same change measured `-101.6 M` and `-34.7 M` branches against a different
+  base, so the win is stable across two independent baselines. **Cycles do
+  not move measurably at this workload's IPC and that is not evidence
+  against the change** — the same note stands in `2026-08-09b` and
+  `2026-08-09f`.
+- **Unchanged as required:** `ide bench` `343.19 M`, back to the
+  `2026-08-09c` reference once the `optnone` leak above is closed — the
+  buster tokenizer itself is untouched by this change. Stage 2 `70.68 G`
+  and its benchmark `6.89 G` (validation only): the self-hosted stages still
+  compile the scalar lexer, so their share of this change is the cost of
+  extracting `c_lex_scan_one` out of the scalar loop, the same outlining tax
+  the `2026-08-09c` entry priced at `+3.9 M` on its side. Measured directly
+  on the gate, that extraction is `+20.2 M` with the emitter compiled out.
+- **Validated:** fixed point deterministic (`SELF_HOST deterministic
+  bytes=26954520`), all 24139 Release and all sanitized (ASan+UBSan) tests
+  pass, and the unity translation unit compiles clean under
+  `-mno-avx512vbmi2`, `-mno-avx512vbmi` and `-mno-avx512f` — all three ways
+  the emitter can be compiled out.
+- **Leads left standing for the next session:** the scalar escape still owns
+  every comment and literal longer than a window, which on this
+  comment-heavy tree is the emitter's largest remaining slice — a
+  64-byte-at-a-time forward scan for `*/` and `\n` inside `c_lex_scan_one`
+  would pay on both paths; the punctuator array is the one memory round-trip
+  left in the window (five masked `vpermi2b` blends would retire it, and the
+  trade was not measured); `2026-08-09g`'s recorded next step of dropping
+  per-IR-instruction line/column recovery is untouched; and the
+  `2026-08-08g` Token 4 B to 2 B and vectorized keyword hash items remain
+  open.
+- Reference points for the next audit, all clang-built on this host: stage 1
+  **`5.0947 G`** instructions / `~956.9 M` branches, `ide bench`
+  **`343.19 M`**, Release `ide test` 24139 tests in 30 modules, `CToken` 16
+  bytes, byte-identical fixed point (`SELF_HOST deterministic
+  bytes=26954520`). Stage 2 `70.68 G` and its benchmark `6.89 G`, validation
+  only. **Check `nm build/Release/ide | grep -c ' t _mm512_'` is 0 before
+  trusting any SIMD measurement on this tree** — it is the cheap probe for
+  the `optnone` leak above, and it reads 0 when the intrinsics are inlined.
+
 `2026-08-10a` (Linux x86_64, Zen 4 7940HS; not a throughput audit — the
 System V outgoing-argument alignment fix costed against the gate, measured
 against its own parent on the same tree so the next audit does not read the

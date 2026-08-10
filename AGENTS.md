@@ -624,6 +624,25 @@ history.
   parity uses the simdjson backslash algorithm (simdjson PR #2042 has the
   current best form). All of it sits behind the guard rules of the tuning
   target above; scalar fallbacks keep the exact current semantics.
+  **Both lexers now run this architecture**: `tokenize_compact` in
+  `parser.c` for the buster language and `c_lex_compact` in `frontend/c/c.c`
+  for C, each walking its source in **item-aligned 64-byte windows** so no
+  lexer state crosses a window — the item touching a window's last byte is
+  deferred and rescanned by the next one, and the shapes the masks do not
+  model escape to the scalar path's own single-item scanner
+  (`tokenizer_scan_one_token`, `c_lex_scan_one`), which is what makes the two
+  paths agree by construction rather than by duplicated reasoning. Read
+  `c_lex_compact` before writing a third: it is the one that had to solve the
+  general cases, because C skips whitespace and comments instead of
+  tokenizing them (so token ends need an explicit boundary mask, not
+  `starts >> 1`), and because lookahead loads there are masked by the **file**
+  bounds rather than the window's — a delimiter near the window end is
+  spelled from bytes the next window owns. Every such emitter must ship a
+  differential gate asserting byte-identical agreement with its scalar
+  reference over construct cases slid across the window boundary, items
+  longer than a window, the real corpus at every window phase, and fuzz
+  blobs over the full alphabet; that gate is what catches the ordering bugs,
+  and it caught one in each emitter so far.
 - **Warnings are errors** under a very large warning set (see
   `GNU_FAMILY_WARNINGS` in `CMakeLists.txt`), and code must stay clean under
   Clang, GCC, Zig cc, and MSVC. TCC is required only to compile/bootstrap the
@@ -945,7 +964,7 @@ Compiler (`src/buster/lib/compiler/`):
 | Path | Contents |
 |---|---|
 | `frontend/buster/parser.{c,h}` | Lexer + explicit-stack parser; owns the `.bbb` fixture array and parser benchmarks. `parser_file_tests()` lives in `src/buster/tests/compiler/frontend/buster/parser_test.c`. |
-| `frontend/c/c.{c,h}` | GNU C frontend in progress: source translation, preprocessing tokens/macros/includes/conditionals, non-recursive external-declaration parsing with strong IDs, flattened scalar/pointer/array/function/aggregate types, nested lexical scopes with entity-based identifier binding and canonical redeclarations, and target-aware shared-IR lowering for scalar/pointer/aggregate parameters, locals, static-storage objects, explicit conversions, array decay/indexing, chained field access, control flow, short-circuit and conditional expressions, direct calls, and constant aggregate initialization. |
+| `frontend/c/c.{c,h}` | GNU C frontend in progress: source translation, the compaction lexer described below, preprocessing tokens/macros/includes/conditionals, non-recursive external-declaration parsing with strong IDs, flattened scalar/pointer/array/function/aggregate types, nested lexical scopes with entity-based identifier binding and canonical redeclarations, and target-aware shared-IR lowering for scalar/pointer/aggregate parameters, locals, static-storage objects, explicit conversions, array decay/indexing, chained field access, control flow, short-circuit and conditional expressions, direct calls, and constant aggregate initialization. |
 | `assembly/assembly.{c,h}` | Standalone target assembly parser and encoder with labels, expressions, relocations, symbols, and structured diagnostics. `assembly/generated/` contains pinned reduced XED/LLVM metadata and its provenance; regenerate it only through `build.c`'s explicit `import_assembly_metadata` command. |
 | `frontend/buster/analysis.{c,h}` | Buster semantic indexing, interface resolution, body analysis, layouts, ABI classification, specialization, and dependency scheduling. Fixture-wide tests live in `src/buster/tests/compiler/frontend/buster/analysis_test.c`. |
 | `ir/model.h` | Format-neutral canonical typed IR data model shared by frontends, codegen, debug metadata, objects, and the interpreter. |
