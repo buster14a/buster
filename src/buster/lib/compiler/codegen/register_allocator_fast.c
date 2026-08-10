@@ -11,28 +11,21 @@
 // untouched: per-slot operand registers plus a point-sorted reload/spill
 // edit stream.
 
-// Registers the local allocator may own between instructions; RSP and
-// RBP are reserved. The callee-saved members survive calls, cost one
-// push/pop pair per function that binds them, and their pushes carry
-// unwind actions.
-#define MACHINE_FAST_CALLEE_SAVED_MASK                                                                                                                         \
-    ((1u << MACHINE_X64_RBX) | (1u << MACHINE_X64_R12) | (1u << MACHINE_X64_R13) | (1u << MACHINE_X64_R14) | (1u << MACHINE_X64_R15))
-#define MACHINE_FAST_ALLOCATABLE_MASK                                                                                                                          \
-    ((1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX) | (1u << MACHINE_X64_RDX) | (1u << MACHINE_X64_RSI) | (1u << MACHINE_X64_RDI) |                         \
-     (1u << MACHINE_X64_R8) | (1u << MACHINE_X64_R9) | (1u << MACHINE_X64_R10) | (1u << MACHINE_X64_R11) | MACHINE_FAST_CALLEE_SAVED_MASK)
-
 typedef struct MachineFastState MachineFastState;
 struct MachineFastState
 {
     Arena* arena;
     MachineFunction* function;
+    // The target's register file and special-opcode identities; every
+    // machine-specific decision below reads from here.
+    MachineTargetDescription const* description;
     MachineStackPlacement* placement;
     MachineBuilderStream* edits;
     // Register file: owning vreg per physical register, age for LRU
     // eviction, and whether the register is newer than the vreg's slot.
-    u32 owner[MACHINE_X64_REGISTER_COUNT];
-    u32 age[MACHINE_X64_REGISTER_COUNT];
-    bool dirty[MACHINE_X64_REGISTER_COUNT];
+    u32 owner[MACHINE_TARGET_REGISTER_LIMIT];
+    u32 age[MACHINE_TARGET_REGISTER_LIMIT];
+    bool dirty[MACHINE_TARGET_REGISTER_LIMIT];
     // Current register per vreg, or UINT32_MAX when the slot is the home.
     u32* virtual_register_locations;
     // Stage-5 liveness: the instruction index of each vreg's last textual
@@ -77,82 +70,6 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_owner_is_dead(MachineFastState* state, u32
     return !state->escapes[owner] && (state->uses_consumed ? current_index >= last : current_index > last);
 }
 
-// The encoder sequences of these opcodes pin operand registers (divides,
-// shift counts in CL, setcc through AL/DL, switch chains, atomic layouts,
-// copy scratches), so their operands take the historical per-slot scratch
-// assignment and everything else in the file must stand clear.
-BUSTER_GLOBAL_LOCAL bool machine_fast_opcode_is_constrained(u16 opcode)
-{
-    switch (opcode)
-    {
-        break;
-    case MACHINE_X64_SETCC:
-    case MACHINE_X64_FCMP_SET:
-    case MACHINE_X64_SHL32:
-    case MACHINE_X64_SHL64:
-    case MACHINE_X64_SAR32:
-    case MACHINE_X64_SAR64:
-    case MACHINE_X64_SHR32:
-    case MACHINE_X64_SHR64:
-    case MACHINE_X64_SDIV32:
-    case MACHINE_X64_SDIV64:
-    case MACHINE_X64_UDIV32:
-    case MACHINE_X64_UDIV64:
-    case MACHINE_X64_SREM32:
-    case MACHINE_X64_SREM64:
-    case MACHINE_X64_UREM32:
-    case MACHINE_X64_UREM64:
-    case MACHINE_X64_SWITCH:
-    case MACHINE_X64_ATOMIC_STORE_XCHG:
-    case MACHINE_X64_ATOMIC_RMW:
-    case MACHINE_X64_ATOMIC_CMPXCHG:
-    case MACHINE_X64_COPY_FRAME_FROM_PTR:
-    case MACHINE_X64_COPY_PTR_FROM_FRAME:
-    case MACHINE_X64_CVT_U64_TO_F32:
-    case MACHINE_X64_CVT_U64_TO_F64:
-    case MACHINE_X64_CVT_F32_TO_U64:
-    case MACHINE_X64_CVT_F64_TO_U64:
-        return true;
-    default:
-        return false;
-    }
-    return false;
-}
-
-// Extra registers an opcode's encoder sequence scribbles on beyond its
-// declared operands; owners must vacate before the instruction runs.
-BUSTER_GLOBAL_LOCAL u32 machine_fast_opcode_clobber_mask(u16 opcode)
-{
-    switch (opcode)
-    {
-        break;
-    case MACHINE_X64_SDIV32:
-    case MACHINE_X64_SDIV64:
-    case MACHINE_X64_UDIV32:
-    case MACHINE_X64_UDIV64:
-    case MACHINE_X64_SREM32:
-    case MACHINE_X64_SREM64:
-    case MACHINE_X64_UREM32:
-    case MACHINE_X64_UREM64:
-        return 1u << MACHINE_X64_RDX;
-    case MACHINE_X64_FCMP_SET:
-        return 1u << MACHINE_X64_RDX;
-    case MACHINE_X64_SWITCH:
-        return 1u << MACHINE_X64_RCX;
-    case MACHINE_X64_ATOMIC_RMW:
-        return 1u << MACHINE_X64_R8;
-    case MACHINE_X64_COPY_FRAME_FROM_FRAME:
-        return 1u << MACHINE_X64_RAX;
-    case MACHINE_X64_COPY_FRAME_FROM_PTR:
-        return 1u << MACHINE_X64_RAX;
-    case MACHINE_X64_COPY_PTR_FROM_FRAME:
-        return (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RDX);
-    default:
-        return 0;
-    }
-    return 0;
-}
-
 BUSTER_GLOBAL_LOCAL void machine_fast_spill(MachineFastState* state, u32 physical_register)
 {
     u32 owner = state->owner[physical_register];
@@ -178,7 +95,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_spill(MachineFastState* state, u32 physica
 
 BUSTER_GLOBAL_LOCAL void machine_fast_flush(MachineFastState* state, u32 keep_mask)
 {
-    for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
+    for (u32 physical_register = 0; physical_register < state->description->register_count; physical_register += 1)
     {
         if ((keep_mask >> physical_register) & 1u)
         {
@@ -193,7 +110,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_flush(MachineFastState* state, u32 keep_ma
 // a successor that inherits the state.
 BUSTER_GLOBAL_LOCAL void machine_fast_writeback(MachineFastState* state)
 {
-    for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
+    for (u32 physical_register = 0; physical_register < state->description->register_count; physical_register += 1)
     {
         if (state->owner[physical_register] == UINT32_MAX)
         {
@@ -238,17 +155,17 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_crosses_call(MachineFastState* state, u32 
 // once another binding has already paid their push.
 BUSTER_GLOBAL_LOCAL u32 machine_fast_pick(MachineFastState* state, u32 forbidden_mask, bool prefers_callee_saved)
 {
-    u32 candidates = MACHINE_FAST_ALLOCATABLE_MASK & ~forbidden_mask & ~state->pinned_mask;
+    u32 candidates = state->description->allocatable_mask & ~forbidden_mask & ~state->pinned_mask;
     if (!prefers_callee_saved)
     {
-        candidates &= ~(MACHINE_FAST_CALLEE_SAVED_MASK & ~state->placement->callee_saved_mask);
+        candidates &= ~(state->description->callee_saved_mask & ~state->placement->callee_saved_mask);
     }
     u32 best = UINT32_MAX;
     u32 best_age = UINT32_MAX;
     u32 dead = UINT32_MAX;
     u32 free_other = UINT32_MAX;
-    u32 preferred_class = prefers_callee_saved ? MACHINE_FAST_CALLEE_SAVED_MASK : ~MACHINE_FAST_CALLEE_SAVED_MASK;
-    for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
+    u32 preferred_class = prefers_callee_saved ? state->description->callee_saved_mask : ~state->description->callee_saved_mask;
+    for (u32 physical_register = 0; physical_register < state->description->register_count; physical_register += 1)
     {
         if (!(candidates & (1u << physical_register)))
         {
@@ -351,7 +268,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_ensure(MachineFastState* state, u32 virtual
     state->owner[target] = virtual_register;
     state->virtual_register_locations[virtual_register] = target;
     state->age[target] = ++state->clock;
-    state->placement->callee_saved_mask |= (1u << target) & MACHINE_FAST_CALLEE_SAVED_MASK;
+    state->placement->callee_saved_mask |= (1u << target) & state->description->callee_saved_mask;
     return target;
 }
 
@@ -368,7 +285,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_bind(MachineFastState* state, u32 virtual_
     state->dirty[target] = true;
     state->virtual_register_locations[virtual_register] = target;
     state->age[target] = ++state->clock;
-    state->placement->callee_saved_mask |= (1u << target) & MACHINE_FAST_CALLEE_SAVED_MASK;
+    state->placement->callee_saved_mask |= (1u << target) & state->description->callee_saved_mask;
 }
 
 // `pinned_registers` holds a physical register per virtual register that
@@ -384,12 +301,18 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
         .stack_slot_offsets = arena_allocate(arena, u32, function->stack_slot_count),
         .operand_registers = arena_allocate(arena, u8, (u64)function->instruction_count * 4),
     };
+    MachineTargetDescription const* description = function->target;
+    if (!description)
+    {
+        return placement;
+    }
     MachineBuilderStream edits;
     machine_stream_initialize(&edits, sizeof(MachineEdit));
     placement.callee_saved_mask |= pinned_mask;
     MachineFastState state = {
         .arena = arena,
         .function = function,
+        .description = description,
         .placement = &placement,
         .edits = &edits,
         .virtual_register_locations = arena_allocate(arena, u32, function->virtual_register_count),
@@ -430,7 +353,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
                 continue;
             }
             u32 defined = machine_ref_payload(ref);
-            bool constant_definition = instruction->opcode == MACHINE_X64_MOV_RI && slot == 0 &&
+            bool constant_definition = instruction->opcode == description->constant_opcode && slot == 0 &&
                                        machine_ref_kind(instruction->operands[1]) == MACHINE_REF_IMMEDIATE;
             state.rematerialize_immediates[defined] =
                 constant_definition && !definition_seen[defined] ? machine_ref_payload(instruction->operands[1]) : UINT32_MAX;
@@ -559,7 +482,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
             }
         }
     }
-    for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
+    for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
     {
         state.owner[physical_register] = UINT32_MAX;
     }
@@ -569,7 +492,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
         bool inherits = block_index > 0 && predecessor_counts[block_index] == 1 && single_predecessors[block_index] == block_index - 1;
         if (!inherits)
         {
-            for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
+            for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
             {
                 u32 owner = state.owner[physical_register];
                 if (owner != UINT32_MAX)
@@ -592,12 +515,12 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
             state.current_point = machine_point_make(instruction_index, MACHINE_POINT_BEFORE);
             state.uses_consumed = false;
             u8* operand_registers = placement.operand_registers + (u64)instruction_index * 4;
-            bool constrained = machine_fast_opcode_is_constrained(instruction->opcode);
+            bool constrained = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) != 0;
             bool is_call = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL) != 0;
             bool is_terminator = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) != 0;
             // Fixed physical operands and the constrained layout vacate
             // their registers first so uses cannot land on them.
-            u32 reserved_mask = machine_fast_opcode_clobber_mask(instruction->opcode);
+            u32 reserved_mask = info->clobber_mask;
             for (u32 slot = 0; slot < info->operand_count; slot += 1)
             {
                 MachineRef ref = instruction->operands[slot];
@@ -607,7 +530,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
                 }
                 else if (constrained && machine_ref_kind(ref) == MACHINE_REF_VIRTUAL_REGISTER)
                 {
-                    reserved_mask |= 1u << machine_x64_slot_scratch[slot];
+                    reserved_mask |= 1u << description->slot_scratch[slot];
                 }
             }
             // Uses first: constrained slots force their scratch register,
@@ -640,22 +563,22 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
                     operand_registers[slot] = (u8)state.pinned_registers[machine_ref_payload(ref)];
                     continue;
                 }
-                u32 target = constrained ? machine_x64_slot_scratch[slot]
-                             : instruction->opcode == MACHINE_X64_CALL_INDIRECT ? (u32)MACHINE_X64_R10
-                                                                                : UINT32_MAX;
+                u32 target = constrained                                          ? description->slot_scratch[slot]
+                             : instruction->opcode == description->indirect_call_opcode ? (u32)description->indirect_call_register
+                                                                                        : UINT32_MAX;
                 // A copy into a fixed physical register stages its source in
                 // that same register, so an argument sequence can never
                 // clobber an already-placed argument through a free pick;
                 // the float-argument bridge stages through RAX, which is
                 // never an argument register.
-                if (instruction->opcode == MACHINE_X64_MOV_RR && slot == 1 &&
+                if (instruction->opcode == description->copy_opcode && slot == 1 &&
                     machine_ref_kind(instruction->operands[0]) == MACHINE_REF_PHYSICAL_REGISTER)
                 {
                     target = machine_ref_payload(instruction->operands[0]);
                 }
-                if (instruction->opcode == MACHINE_X64_MOVQ_TO_XMM)
+                if (instruction->opcode == description->float_bridge_opcode)
                 {
-                    target = MACHINE_X64_RAX;
+                    target = description->float_bridge_register;
                 }
                 u32 used = machine_fast_ensure(&state, machine_ref_payload(ref), target,
                                                target == UINT32_MAX ? reserved_mask : 0);
@@ -683,7 +606,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
                     }
                 }
             }
-            u32 clobber_mask = machine_fast_opcode_clobber_mask(instruction->opcode);
+            u32 clobber_mask = info->clobber_mask;
             for (u32 physical_register = 0; clobber_mask; physical_register += 1)
             {
                 if (clobber_mask & (1u << physical_register))
@@ -713,11 +636,11 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
                 u32 target;
                 if (constrained)
                 {
-                    target = machine_x64_slot_scratch[slot];
+                    target = description->slot_scratch[slot];
                 }
-                else if (instruction->opcode == MACHINE_X64_MOV_RR && slot == 0 &&
+                else if (instruction->opcode == description->copy_opcode && slot == 0 &&
                          machine_ref_kind(instruction->operands[1]) == MACHINE_REF_PHYSICAL_REGISTER &&
-                         (MACHINE_FAST_ALLOCATABLE_MASK >> machine_ref_payload(instruction->operands[1])) & 1u)
+                         (description->allocatable_mask >> machine_ref_payload(instruction->operands[1])) & 1u)
                 {
                     // A capture of a fixed physical register (incoming
                     // argument, call result) binds in place: a free pick here
@@ -725,7 +648,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
                     // has not executed yet and destroy it.
                     target = machine_ref_payload(instruction->operands[1]);
                 }
-                else if (instruction->opcode == MACHINE_X64_MOV_RR && slot == 0 &&
+                else if (instruction->opcode == description->copy_opcode && slot == 0 &&
                          machine_ref_kind(instruction->operands[1]) == MACHINE_REF_VIRTUAL_REGISTER &&
                          machine_ref_payload(instruction->operands[1]) != machine_ref_payload(ref) &&
                          operand_registers[1] != UINT8_MAX && !((state.pinned_mask >> operand_registers[1]) & 1u) &&
@@ -754,7 +677,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
             {
                 // Callee-saved members survive the call by definition;
                 // everything else is caller-saved and flushes.
-                machine_fast_flush(&state, MACHINE_FAST_CALLEE_SAVED_MASK);
+                machine_fast_flush(&state, description->callee_saved_mask);
             }
             if (is_terminator)
             {
@@ -820,7 +743,7 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
     // slots, so every offset starts past them, and the stack allocation
     // keeps sixteen-alignment across an odd push count.
     u32 push_count = 0;
-    for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
+    for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
     {
         push_count += (placement.callee_saved_mask >> physical_register) & 1u;
     }

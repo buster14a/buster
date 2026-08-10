@@ -53,6 +53,21 @@ BUSTER_F_DECL MachinePointPhase machine_point_phase(MachinePoint point)
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},           \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,                                                                                                   \
     }
+#define MACHINE_INFO_SHIFT(name_literal)                                                                                                                       \
+    {                                                                                                                                                          \
+        .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},           \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,                                                            \
+    }
+#define MACHINE_INFO_DIVIDE(name_literal)                                                                                                                      \
+    {                                                                                                                                                          \
+        .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},           \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED, .clobber_mask = 1u << MACHINE_X64_RDX,                     \
+    }
+#define MACHINE_INFO_MOVE_CONSTRAINED(name_literal)                                                                                                            \
+    {                                                                                                                                                          \
+        .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,                                                                                                    \
+    }
 #define MACHINE_INFO_UNARY_READ_MODIFY(name_literal)                                                                                                           \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 1, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL},                                        \
@@ -102,10 +117,10 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_MOVSX32_RR] = MACHINE_INFO_MOVE("x64_movsx32_rr"),
     [MACHINE_X64_MOVZX8_RR] = MACHINE_INFO_MOVE("x64_movzx8_rr"),
     [MACHINE_X64_MOVZX16_RR] = MACHINE_INFO_MOVE("x64_movzx16_rr"),
-    [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_INFO_MOVE("x64_cvt_u64_to_f32"),
-    [MACHINE_X64_CVT_U64_TO_F64] = MACHINE_INFO_MOVE("x64_cvt_u64_to_f64"),
-    [MACHINE_X64_CVT_F32_TO_U64] = MACHINE_INFO_MOVE("x64_cvt_f32_to_u64"),
-    [MACHINE_X64_CVT_F64_TO_U64] = MACHINE_INFO_MOVE("x64_cvt_f64_to_u64"),
+    [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_INFO_MOVE_CONSTRAINED("x64_cvt_u64_to_f32"),
+    [MACHINE_X64_CVT_U64_TO_F64] = MACHINE_INFO_MOVE_CONSTRAINED("x64_cvt_u64_to_f64"),
+    [MACHINE_X64_CVT_F32_TO_U64] = MACHINE_INFO_MOVE_CONSTRAINED("x64_cvt_f32_to_u64"),
+    [MACHINE_X64_CVT_F64_TO_U64] = MACHINE_INFO_MOVE_CONSTRAINED("x64_cvt_f64_to_u64"),
     [MACHINE_X64_LEA_OFFSET] = MACHINE_INFO_MOVE("x64_lea_offset"),
     [MACHINE_X64_ADD64_IMM] = {
         .name = S8_INITIALIZER("x64_add64_imm"),
@@ -146,7 +161,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("x64_setcc"),
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
     },
     [MACHINE_X64_LOAD_FRAME] = {
         .name = S8_INITIALIZER("x64_load_frame"),
@@ -177,23 +192,22 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     },
     [MACHINE_X64_RET] = {
         .name = S8_INITIALIZER("x64_ret"),
-        .implicit_mask = 1u << MACHINE_X64_RAX,
         .attributes = MACHINE_OPCODE_ATTRIBUTE_TERMINATOR,
     },
-    [MACHINE_X64_SHL32] = MACHINE_INFO_READ_MODIFY("x64_shl32"),
-    [MACHINE_X64_SHL64] = MACHINE_INFO_READ_MODIFY("x64_shl64"),
-    [MACHINE_X64_SAR32] = MACHINE_INFO_READ_MODIFY("x64_sar32"),
-    [MACHINE_X64_SAR64] = MACHINE_INFO_READ_MODIFY("x64_sar64"),
-    [MACHINE_X64_SHR32] = MACHINE_INFO_READ_MODIFY("x64_shr32"),
-    [MACHINE_X64_SHR64] = MACHINE_INFO_READ_MODIFY("x64_shr64"),
-    [MACHINE_X64_SDIV32] = MACHINE_INFO_READ_MODIFY("x64_sdiv32"),
-    [MACHINE_X64_SDIV64] = MACHINE_INFO_READ_MODIFY("x64_sdiv64"),
-    [MACHINE_X64_UDIV32] = MACHINE_INFO_READ_MODIFY("x64_udiv32"),
-    [MACHINE_X64_UDIV64] = MACHINE_INFO_READ_MODIFY("x64_udiv64"),
-    [MACHINE_X64_SREM32] = MACHINE_INFO_READ_MODIFY("x64_srem32"),
-    [MACHINE_X64_SREM64] = MACHINE_INFO_READ_MODIFY("x64_srem64"),
-    [MACHINE_X64_UREM32] = MACHINE_INFO_READ_MODIFY("x64_urem32"),
-    [MACHINE_X64_UREM64] = MACHINE_INFO_READ_MODIFY("x64_urem64"),
+    [MACHINE_X64_SHL32] = MACHINE_INFO_SHIFT("x64_shl32"),
+    [MACHINE_X64_SHL64] = MACHINE_INFO_SHIFT("x64_shl64"),
+    [MACHINE_X64_SAR32] = MACHINE_INFO_SHIFT("x64_sar32"),
+    [MACHINE_X64_SAR64] = MACHINE_INFO_SHIFT("x64_sar64"),
+    [MACHINE_X64_SHR32] = MACHINE_INFO_SHIFT("x64_shr32"),
+    [MACHINE_X64_SHR64] = MACHINE_INFO_SHIFT("x64_shr64"),
+    [MACHINE_X64_SDIV32] = MACHINE_INFO_DIVIDE("x64_sdiv32"),
+    [MACHINE_X64_SDIV64] = MACHINE_INFO_DIVIDE("x64_sdiv64"),
+    [MACHINE_X64_UDIV32] = MACHINE_INFO_DIVIDE("x64_udiv32"),
+    [MACHINE_X64_UDIV64] = MACHINE_INFO_DIVIDE("x64_udiv64"),
+    [MACHINE_X64_SREM32] = MACHINE_INFO_DIVIDE("x64_srem32"),
+    [MACHINE_X64_SREM64] = MACHINE_INFO_DIVIDE("x64_srem64"),
+    [MACHINE_X64_UREM32] = MACHINE_INFO_DIVIDE("x64_urem32"),
+    [MACHINE_X64_UREM64] = MACHINE_INFO_DIVIDE("x64_urem64"),
     [MACHINE_X64_LEA_FRAME] = {
         .name = S8_INITIALIZER("x64_lea_frame"),
         .operand_count = 2,
@@ -210,24 +224,27 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("x64_switch"),
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, 0},
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_TERMINATOR | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_TERMINATOR | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = 1u << MACHINE_X64_RCX,
     },
     [MACHINE_X64_COPY_FRAME_FROM_FRAME] = {
         .name = S8_INITIALIZER("x64_copy_frame_from_frame"),
         .operand_count = 2,
-        .implicit_mask = 1u << MACHINE_X64_RAX,
+        .clobber_mask = 1u << MACHINE_X64_RAX,
     },
     [MACHINE_X64_COPY_FRAME_FROM_PTR] = {
         .name = S8_INITIALIZER("x64_copy_frame_from_ptr"),
         .operand_count = 2,
         .operand_info = {0, MACHINE_OPERAND_USE_GENERAL},
-        .implicit_mask = 1u << MACHINE_X64_RAX,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = 1u << MACHINE_X64_RAX,
     },
     [MACHINE_X64_COPY_PTR_FROM_FRAME] = {
         .name = S8_INITIALIZER("x64_copy_ptr_from_frame"),
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, 0},
-        .implicit_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RDX),
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RDX),
     },
     [MACHINE_X64_FARITH] = {
         .name = S8_INITIALIZER("x64_farith"),
@@ -238,7 +255,8 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("x64_fcmp_set"),
         .operand_count = 3,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = 1u << MACHINE_X64_RDX,
     },
     [MACHINE_X64_CVT_F32_TO_F64] = MACHINE_INFO_MOVE("x64_cvt_f32_to_f64"),
     [MACHINE_X64_CVT_F64_TO_F32] = MACHINE_INFO_MOVE("x64_cvt_f64_to_f32"),
@@ -280,20 +298,20 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("x64_atomic_store_xchg"),
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
     },
     [MACHINE_X64_ATOMIC_RMW] = {
         .name = S8_INITIALIZER("x64_atomic_rmw"),
         .operand_count = 3,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
-        .implicit_mask = 1u << MACHINE_X64_R8,
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = 1u << MACHINE_X64_R8,
     },
     [MACHINE_X64_ATOMIC_CMPXCHG] = {
         .name = S8_INITIALIZER("x64_atomic_cmpxchg"),
         .operand_count = 4,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
     },
     [MACHINE_X64_MFENCE] = {
         .name = S8_INITIALIZER("x64_mfence"),
@@ -311,14 +329,10 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("x64_call_indirect"),
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL},
-        .implicit_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX) | (1u << MACHINE_X64_RDX) | (1u << MACHINE_X64_RSI) | (1u << MACHINE_X64_RDI) |
-                         (1u << MACHINE_X64_R8) | (1u << MACHINE_X64_R9) | (1u << MACHINE_X64_R10) | (1u << MACHINE_X64_R11),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
     },
     [MACHINE_X64_CALL_DIRECT] = {
         .name = S8_INITIALIZER("x64_call_direct"),
-        .implicit_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX) | (1u << MACHINE_X64_RDX) | (1u << MACHINE_X64_RSI) | (1u << MACHINE_X64_RDI) |
-                         (1u << MACHINE_X64_R8) | (1u << MACHINE_X64_R9) | (1u << MACHINE_X64_R10) | (1u << MACHINE_X64_R11),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
     },
 };
@@ -560,6 +574,125 @@ BUSTER_F_DECL MachineVerifyResult machine_verify_function(MachineFunction* funct
         }
     }
     return result;
+}
+
+// MIR_STACK placement: every virtual register owns one 8-byte frame slot
+// and every operand round-trips through the target's fixed per-slot scratch
+// register. This is the selector/encoder verification mode, not an
+// allocator, and it is target-independent: everything target-specific comes
+// through the function's MachineTargetDescription.
+MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function)
+{
+    MachineStackPlacement placement = {
+        .virtual_register_offsets = arena_allocate(arena, u32, function->virtual_register_count),
+        .stack_slot_offsets = arena_allocate(arena, u32, function->stack_slot_count),
+        .operand_registers = arena_allocate(arena, u8, (u64)function->instruction_count * 4),
+    };
+    MachineTargetDescription const* target = function->target;
+    if (!target)
+    {
+        return placement;
+    }
+    u32 running = 0;
+    for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
+    {
+        running += 8;
+        placement.virtual_register_offsets[register_index] = running;
+    }
+    for (u32 slot_index = 0; slot_index < function->stack_slot_count; slot_index += 1)
+    {
+        // The frame base is sixteen-aligned, so a slot whose start offset is
+        // a multiple of its alignment is aligned in memory.
+        u32 slot_alignment = function->stack_slot_alignments ? function->stack_slot_alignments[slot_index] : 8;
+        running = (running + function->stack_slot_sizes[slot_index] + slot_alignment - 1) & ~(slot_alignment - 1);
+        placement.stack_slot_offsets[slot_index] = running;
+    }
+    placement.frame_size = (running + 15u) & ~15u;
+    MachineBuilderStream edits;
+    machine_stream_initialize(&edits, sizeof(MachineEdit));
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        MachineInstruction* instruction = function->instructions + instruction_index;
+        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+        if (!info)
+        {
+            return placement;
+        }
+        for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(instruction->operands); slot += 1)
+        {
+            u8* operand_register = placement.operand_registers + (u64)instruction_index * 4 + slot;
+            *operand_register = UINT8_MAX;
+            if (slot >= info->operand_count)
+            {
+                continue;
+            }
+            u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+            MachineRef ref = instruction->operands[slot];
+            MachineRefKind kind = machine_ref_kind(ref);
+            if (kind == MACHINE_REF_PHYSICAL_REGISTER)
+            {
+                *operand_register = (u8)machine_ref_payload(ref);
+                continue;
+            }
+            if (kind != MACHINE_REF_VIRTUAL_REGISTER || role == MACHINE_OPERAND_ROLE_NONE)
+            {
+                continue;
+            }
+            u32 virtual_register = machine_ref_payload(ref);
+            *operand_register = target->slot_scratch[slot];
+            // A copy into a fixed physical register reloads its source
+            // directly into that register: argument sequences would
+            // otherwise clobber already-placed argument registers through
+            // the shared operand scratches.
+            if (instruction->opcode == target->copy_opcode && slot == 1 &&
+                machine_ref_kind(instruction->operands[0]) == MACHINE_REF_PHYSICAL_REGISTER)
+            {
+                *operand_register = (u8)machine_ref_payload(instruction->operands[0]);
+            }
+            if (instruction->opcode == target->indirect_call_opcode)
+            {
+                // The callee pointer's register survives the argument
+                // registers and any variadic setup.
+                *operand_register = target->indirect_call_register;
+            }
+            if (role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+            {
+                MachineEdit* edit = (MachineEdit*)machine_stream_append(arena, &edits);
+                *edit = (MachineEdit){
+                    .point = machine_point_make(instruction_index, MACHINE_POINT_BEFORE),
+                    .kind = MACHINE_EDIT_RELOAD,
+                    .subject = virtual_register,
+                    .location = *operand_register,
+                };
+                placement.reload_count += 1;
+            }
+        }
+        for (u32 slot = 0; slot < info->operand_count; slot += 1)
+        {
+            u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+            MachineRef ref = instruction->operands[slot];
+            if (machine_ref_kind(ref) != MACHINE_REF_VIRTUAL_REGISTER)
+            {
+                continue;
+            }
+            if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+            {
+                MachineEdit* edit = (MachineEdit*)machine_stream_append(arena, &edits);
+                *edit = (MachineEdit){
+                    .point = machine_point_make(instruction_index, MACHINE_POINT_AFTER),
+                    .kind = MACHINE_EDIT_SPILL,
+                    .subject = machine_ref_payload(ref),
+                    .location = target->slot_scratch[slot],
+                };
+                placement.spill_count += 1;
+            }
+        }
+    }
+    placement.edits = arena_allocate(arena, MachineEdit, edits.total_count);
+    placement.edit_count = edits.total_count;
+    machine_stream_flatten(&edits, placement.edits);
+    placement.valid = true;
+    return placement;
 }
 
 typedef struct MachineReplayHeader MachineReplayHeader;

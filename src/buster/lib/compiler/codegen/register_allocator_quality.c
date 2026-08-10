@@ -24,10 +24,6 @@ struct MachineQualityInterval
     u32 weight;
 };
 
-BUSTER_GLOBAL_LOCAL u32 machine_quality_callee_saved[2] = {
-    MACHINE_X64_R14, MACHINE_X64_R15,
-};
-
 // Sift-down over a max-heap keyed on weight, so the priority walk needs no
 // sort routine and no recursion.
 BUSTER_GLOBAL_LOCAL void machine_quality_heap_sift(MachineQualityInterval* heap, u32 count, u32 root)
@@ -58,6 +54,11 @@ BUSTER_GLOBAL_LOCAL void machine_quality_heap_sift(MachineQualityInterval* heap,
 
 MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunction* function)
 {
+    MachineTargetDescription const* description = function->target;
+    if (!description)
+    {
+        return (MachineStackPlacement){0};
+    }
     // A switch's targets live in the case table rather than in block-ref
     // operands, so the loop extension below cannot see whether any of them
     // points backwards. Rather than reason about that, functions with a
@@ -94,7 +95,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             scratch_end(scratch);
             return (MachineStackPlacement){0};
         }
-        bool constrained = machine_fast_opcode_is_constrained(instruction->opcode);
+        bool constrained = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) != 0;
         for (u32 slot = 0; slot < info->operand_count; slot += 1)
         {
             MachineRef ref = instruction->operands[slot];
@@ -196,10 +197,10 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     {
         machine_quality_heap_sift(heap, heap_count, root - 1);
     }
-    u32 assigned_starts[BUSTER_ARRAY_LENGTH(machine_quality_callee_saved)][8];
-    u32 assigned_ends[BUSTER_ARRAY_LENGTH(machine_quality_callee_saved)][8];
-    u32 assigned_counts[BUSTER_ARRAY_LENGTH(machine_quality_callee_saved)];
-    for (u32 file_index = 0; file_index < BUSTER_ARRAY_LENGTH(machine_quality_callee_saved); file_index += 1)
+    u32 assigned_starts[MACHINE_TARGET_QUALITY_PIN_LIMIT][8];
+    u32 assigned_ends[MACHINE_TARGET_QUALITY_PIN_LIMIT][8];
+    u32 assigned_counts[MACHINE_TARGET_QUALITY_PIN_LIMIT];
+    for (u32 file_index = 0; file_index < MACHINE_TARGET_QUALITY_PIN_LIMIT; file_index += 1)
     {
         assigned_counts[file_index] = 0;
     }
@@ -210,7 +211,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         heap_count -= 1;
         heap[0] = heap[heap_count];
         machine_quality_heap_sift(heap, heap_count, 0);
-        for (u32 file_index = 0; file_index < BUSTER_ARRAY_LENGTH(machine_quality_callee_saved); file_index += 1)
+        for (u32 file_index = 0; file_index < MACHINE_TARGET_QUALITY_PIN_LIMIT; file_index += 1)
         {
             if (assigned_counts[file_index] == BUSTER_ARRAY_LENGTH(assigned_starts[0]))
             {
@@ -228,8 +229,8 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             assigned_starts[file_index][assigned_counts[file_index]] = candidate.start;
             assigned_ends[file_index][assigned_counts[file_index]] = candidate.end;
             assigned_counts[file_index] += 1;
-            pinned_registers[candidate.virtual_register] = machine_quality_callee_saved[file_index];
-            pinned_mask |= 1u << machine_quality_callee_saved[file_index];
+            pinned_registers[candidate.virtual_register] = description->quality_pin_registers[file_index];
+            pinned_mask |= 1u << description->quality_pin_registers[file_index];
             break;
         }
     }
@@ -244,12 +245,12 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     // the push and pop each newly reserved register costs at entry, and a
     // pin also raises local pressure, which can add traffic elsewhere.
     u32 baseline_saved_registers = 0;
-    for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
+    for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
     {
         baseline_saved_registers += (baseline.callee_saved_mask >> physical_register) & 1u;
     }
     u32 placement_saved_registers = 0;
-    for (u32 physical_register = 0; physical_register < MACHINE_X64_REGISTER_COUNT; physical_register += 1)
+    for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
     {
         placement_saved_registers += (placement.callee_saved_mask >> physical_register) & 1u;
     }

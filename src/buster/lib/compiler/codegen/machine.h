@@ -382,6 +382,11 @@ BUSTER_CT_CHECK(MACHINE_REGISTER_CLASS_COUNT <= (1u << 3));
 #define MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE (1u << 3)
 #define MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE (1u << 4)
 #define MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE (1u << 5)
+// The encoder sequence pins its operand registers (divides, shift counts,
+// setcc bytes, switch chains, atomic layouts, copy scratches), so operands
+// take the target's fixed per-slot scratch assignment and every allocator
+// must stand clear of them.
+#define MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED (1u << 6)
 
 typedef struct MachineOpcodeInfo MachineOpcodeInfo;
 struct MachineOpcodeInfo
@@ -395,10 +400,51 @@ struct MachineOpcodeInfo
     u8 tied_pair;
     u8 early_clobber_mask;
     u16 fixed_register_set;
-    u16 implicit_mask;
     u16 memory_fold_alternate;
     u16 encoding_form;
     u16 attributes;
+    // Extra registers the opcode's encoder sequence scribbles on beyond its
+    // declared operands; owners must vacate before the instruction runs.
+    u32 clobber_mask;
+};
+
+// Upper bound on any target's general register file; masks stay u32.
+#define MACHINE_TARGET_REGISTER_LIMIT 32u
+// Callee-saved registers the QUALITY pass may pin, in preference order.
+#define MACHINE_TARGET_QUALITY_PIN_LIMIT 2u
+
+// Target-supplied allocator parameters: the register file and the opcode
+// identities the shared allocators special-case. One static instance per
+// machine backend; the selector stamps it into every MachineFunction it
+// builds, so the allocators themselves carry no target assumptions.
+typedef struct MachineTargetDescription MachineTargetDescription;
+struct MachineTargetDescription
+{
+    // Registers the local allocator may own between instructions; the
+    // stack/frame registers stay out. The callee-saved subset survives
+    // calls, costs one prologue save per function that binds it, and its
+    // saves carry unwind actions.
+    u32 allocatable_mask;
+    u32 callee_saved_mask;
+    u32 register_count;
+    // The fixed scratch register per inline operand slot, used by MIR_STACK
+    // for every operand and by the allocators for constrained opcodes.
+    u8 slot_scratch[4];
+    // Full-width register copy: coalescible, and the encoder emits nothing
+    // when both operands land on the same register.
+    u16 copy_opcode;
+    // Whole-definition constant materialization — the rematerialization
+    // recipe's shape.
+    u16 constant_opcode;
+    // Indirect call and the fixed register its callee pointer rides in,
+    // immune to the argument registers and any variadic setup.
+    u16 indirect_call_opcode;
+    // General-to-float bridge and the fixed general register it stages
+    // through, never an argument register.
+    u16 float_bridge_opcode;
+    u8 indirect_call_register;
+    u8 float_bridge_register;
+    u8 quality_pin_registers[MACHINE_TARGET_QUALITY_PIN_LIMIT];
 };
 
 // The contiguous per-function machine streams the builder flattens into.
@@ -422,6 +468,9 @@ struct MachineFunction
     IrSymbolId* call_targets;
     MachineSwitchCase* switch_cases;
     MachineLineMark* line_marks;
+    // The backend that selected this function; placement reads its register
+    // file and special-opcode identities from here.
+    MachineTargetDescription const* target;
     u32 instruction_count;
     u32 virtual_register_count;
     u32 block_count;
@@ -615,6 +664,7 @@ BUSTER_F_DECL MachinePoint machine_point_make(u32 instruction_index, MachinePoin
 BUSTER_F_DECL u32 machine_point_instruction(MachinePoint point);
 BUSTER_F_DECL MachinePointPhase machine_point_phase(MachinePoint point);
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode);
+BUSTER_F_DECL MachineTargetDescription const* machine_target_x86_64(void);
 BUSTER_F_DECL void machine_stream_initialize(MachineBuilderStream* stream, u64 element_size);
 BUSTER_F_DECL void* machine_stream_append(Arena* arena, MachineBuilderStream* stream);
 BUSTER_F_DECL void machine_stream_flatten(MachineBuilderStream* stream, void* destination);

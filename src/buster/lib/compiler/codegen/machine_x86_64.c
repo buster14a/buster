@@ -84,10 +84,33 @@ BUSTER_GLOBAL_LOCAL u8 const machine_x64_system_v_arguments[6] = {
     MACHINE_X64_RDI, MACHINE_X64_RSI, MACHINE_X64_RDX, MACHINE_X64_RCX, MACHINE_X64_R8, MACHINE_X64_R9,
 };
 
-// The fixed scratch register per inline operand slot in MIR_STACK placement.
-BUSTER_GLOBAL_LOCAL u8 const machine_x64_slot_scratch[4] = {
-    MACHINE_X64_RAX, MACHINE_X64_RCX, MACHINE_X64_RDX, MACHINE_X64_RSI,
+BUSTER_CT_CHECK(MACHINE_X64_REGISTER_COUNT <= MACHINE_TARGET_REGISTER_LIMIT);
+
+// The register file and special-opcode identities the shared allocators
+// consume; RSP and RBP are reserved. The callee-saved members cost one
+// push/pop pair per function that binds them, and their pushes carry
+// unwind actions.
+BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_x86_64_description = {
+    .allocatable_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX) | (1u << MACHINE_X64_RDX) | (1u << MACHINE_X64_RSI) | (1u << MACHINE_X64_RDI) |
+                        (1u << MACHINE_X64_R8) | (1u << MACHINE_X64_R9) | (1u << MACHINE_X64_R10) | (1u << MACHINE_X64_R11) | (1u << MACHINE_X64_RBX) |
+                        (1u << MACHINE_X64_R12) | (1u << MACHINE_X64_R13) | (1u << MACHINE_X64_R14) | (1u << MACHINE_X64_R15),
+    .callee_saved_mask =
+        (1u << MACHINE_X64_RBX) | (1u << MACHINE_X64_R12) | (1u << MACHINE_X64_R13) | (1u << MACHINE_X64_R14) | (1u << MACHINE_X64_R15),
+    .register_count = MACHINE_X64_REGISTER_COUNT,
+    .slot_scratch = {MACHINE_X64_RAX, MACHINE_X64_RCX, MACHINE_X64_RDX, MACHINE_X64_RSI},
+    .copy_opcode = MACHINE_X64_MOV_RR,
+    .constant_opcode = MACHINE_X64_MOV_RI,
+    .indirect_call_opcode = MACHINE_X64_CALL_INDIRECT,
+    .float_bridge_opcode = MACHINE_X64_MOVQ_TO_XMM,
+    .indirect_call_register = MACHINE_X64_R10,
+    .float_bridge_register = MACHINE_X64_RAX,
+    .quality_pin_registers = {MACHINE_X64_R14, MACHINE_X64_R15},
 };
+
+BUSTER_F_DECL MachineTargetDescription const* machine_target_x86_64(void)
+{
+    return &machine_x86_64_description;
+}
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_scalar_register(IrType* type)
 {
@@ -2386,6 +2409,7 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
         return result;
     }
     result.function = machine_function_builder_finish(arena, &selector.builder);
+    result.function.target = &machine_x86_64_description;
     result.function.immediates = arena_allocate(arena, u64, selector.immediates.total_count);
     result.function.immediate_count = selector.immediates.total_count;
     machine_stream_flatten(&selector.immediates, result.function.immediates);
@@ -2414,114 +2438,6 @@ MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* p
     result.selected_typed_instructions = typed_instruction_count;
     result.machine_instructions = result.function.instruction_count;
     return result;
-}
-
-MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function)
-{
-    MachineStackPlacement placement = {
-        .virtual_register_offsets = arena_allocate(arena, u32, function->virtual_register_count),
-        .stack_slot_offsets = arena_allocate(arena, u32, function->stack_slot_count),
-        .operand_registers = arena_allocate(arena, u8, (u64)function->instruction_count * 4),
-    };
-    u32 running = 0;
-    for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
-    {
-        running += 8;
-        placement.virtual_register_offsets[register_index] = running;
-    }
-    for (u32 slot_index = 0; slot_index < function->stack_slot_count; slot_index += 1)
-    {
-        // The frame base is sixteen-aligned, so a slot whose start offset is
-        // a multiple of its alignment is aligned in memory.
-        u32 slot_alignment = function->stack_slot_alignments ? function->stack_slot_alignments[slot_index] : 8;
-        running = (running + function->stack_slot_sizes[slot_index] + slot_alignment - 1) & ~(slot_alignment - 1);
-        placement.stack_slot_offsets[slot_index] = running;
-    }
-    placement.frame_size = (running + 15u) & ~15u;
-    MachineBuilderStream edits;
-    machine_stream_initialize(&edits, sizeof(MachineEdit));
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-    {
-        MachineInstruction* instruction = function->instructions + instruction_index;
-        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-        if (!info)
-        {
-            return placement;
-        }
-        for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(instruction->operands); slot += 1)
-        {
-            u8* operand_register = placement.operand_registers + (u64)instruction_index * 4 + slot;
-            *operand_register = UINT8_MAX;
-            if (slot >= info->operand_count)
-            {
-                continue;
-            }
-            u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-            MachineRef ref = instruction->operands[slot];
-            MachineRefKind kind = machine_ref_kind(ref);
-            if (kind == MACHINE_REF_PHYSICAL_REGISTER)
-            {
-                *operand_register = (u8)machine_ref_payload(ref);
-                continue;
-            }
-            if (kind != MACHINE_REF_VIRTUAL_REGISTER || role == MACHINE_OPERAND_ROLE_NONE)
-            {
-                continue;
-            }
-            u32 virtual_register = machine_ref_payload(ref);
-            *operand_register = machine_x64_slot_scratch[slot];
-            // A copy into a fixed physical register reloads its source
-            // directly into that register: argument sequences would
-            // otherwise clobber already-placed argument registers through
-            // the shared operand scratches.
-            if (instruction->opcode == MACHINE_X64_MOV_RR && slot == 1 &&
-                machine_ref_kind(instruction->operands[0]) == MACHINE_REF_PHYSICAL_REGISTER)
-            {
-                *operand_register = (u8)machine_ref_payload(instruction->operands[0]);
-            }
-            if (instruction->opcode == MACHINE_X64_CALL_INDIRECT)
-            {
-                // R10 survives the argument registers and the AL setup.
-                *operand_register = MACHINE_X64_R10;
-            }
-            if (role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
-            {
-                MachineEdit* edit = (MachineEdit*)machine_stream_append(arena, &edits);
-                *edit = (MachineEdit){
-                    .point = machine_point_make(instruction_index, MACHINE_POINT_BEFORE),
-                    .kind = MACHINE_EDIT_RELOAD,
-                    .subject = virtual_register,
-                    .location = *operand_register,
-                };
-                placement.reload_count += 1;
-            }
-        }
-        for (u32 slot = 0; slot < info->operand_count; slot += 1)
-        {
-            u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-            MachineRef ref = instruction->operands[slot];
-            if (machine_ref_kind(ref) != MACHINE_REF_VIRTUAL_REGISTER)
-            {
-                continue;
-            }
-            if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
-            {
-                MachineEdit* edit = (MachineEdit*)machine_stream_append(arena, &edits);
-                *edit = (MachineEdit){
-                    .point = machine_point_make(instruction_index, MACHINE_POINT_AFTER),
-                    .kind = MACHINE_EDIT_SPILL,
-                    .subject = machine_ref_payload(ref),
-                    .location = machine_x64_slot_scratch[slot],
-                };
-                placement.spill_count += 1;
-            }
-        }
-    }
-    placement.edits = arena_allocate(arena, MachineEdit, edits.total_count);
-    placement.edit_count = edits.total_count;
-    machine_stream_flatten(&edits, placement.edits);
-    placement.valid = true;
-    return placement;
 }
 
 typedef struct MachineX64Encoder MachineX64Encoder;
