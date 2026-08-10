@@ -496,6 +496,14 @@ typedef enum MachineA64Condition
     MACHINE_A64_CONDITION_LESS_EQUAL = 0xd,
 } MachineA64Condition;
 
+// Per-row dynamic flag on x86-64 CALL and RET rows: a vector-class value —
+// staged ZMM arguments at a call, the ZMM0 return at a return — is live in
+// registers across this row, so the encoder's transition-hygiene vzeroupper
+// (which zeroes bits 128+ of ZMM0-15) must not fire here. Calls keep their
+// low flag bits for the variadic AL protocol; SWITCH rows, whose flags hold
+// a case count, never carry this bit.
+#define MACHINE_X64_INSTRUCTION_FLAG_VECTOR_LIVE (1u << 15)
+
 // x86 condition-code low nibble as used by SETcc (0x0f 0x90+cc) and Jcc
 // (0x0f 0x80+cc).
 typedef enum MachineX64Condition

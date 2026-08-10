@@ -1265,7 +1265,32 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
            "    }\n"
            "    return total ^ __builtin_buster_simd_sign_byte(b0 ^ b1 ^ b2 ^ b3);\n"
            "}\n");
-    String8 machine_vector_source = string_format(arguments->arena, S8("{S8}{S8}"), machine_vector_source_head, machine_vector_source_tail);
+    // The System V vector ABI: 64-byte values crossing call boundaries in
+    // ZMM registers — parameters, returns, the mixed integer/vector
+    // signature, and the ninth argument that overflows to the caller's
+    // 64-aligned stack eightbytes. vabi drives them all from one
+    // u64-returning wrapper so the differential below can execute it
+    // through the scalar calling shape it already uses.
+    String8 machine_vector_source_abi =
+        S8("V64 vident(V64 v) { return v; }\n"
+           "V64 vmix(u64 salt, V64 a, u64 salt2, V64 b) {\n"
+           "    return a + (b ^ __builtin_buster_simd_splat_byte((u8)(salt + salt2)));\n"
+           "}\n"
+           "V64 vninth(V64 a, V64 b, V64 c, V64 d, V64 e, V64 f, V64 g, V64 h, V64 i) {\n"
+           "    return a + (h ^ i);\n"
+           "}\n"
+           "u64 vabi(const u8* data, u64 mask) {\n"
+           "    V64 first = __builtin_buster_simd_load(data);\n"
+           "    V64 second = __builtin_buster_simd_load(data + 64);\n"
+           "    V64 ident = vident(first);\n"
+           "    V64 mixed = vmix(mask, ident, mask >> 7, second);\n"
+           "    V64 nine = vninth(first, second, ident, mixed, first, second, ident, mixed, first ^ second);\n"
+           "    return __builtin_buster_simd_sign_byte(nine) ^\n"
+           "           __builtin_buster_simd_test_byte(mixed, __builtin_buster_simd_splat_byte(0x21)) ^\n"
+           "           __builtin_buster_simd_equal_byte(vident(nine), nine);\n"
+           "}\n");
+    String8 machine_vector_source =
+        string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_vector_source_head, machine_vector_source_tail, machine_vector_source_abi);
     IrProgram* machine_vector_program = machine_test_compile_c(arguments->arena, S8("machine-stage10.c"), machine_vector_source, machine_vector_target);
     BUSTER_TEST(arguments, machine_vector_program != 0);
     if (machine_vector_program && machine_vector_program->module_count)
@@ -1274,6 +1299,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         String8 vector_names[] = {
             S8_INITIALIZER("vclassify"), S8_INITIALIZER("vtable"), S8_INITIALIZER("vstores"),
             S8_INITIALIZER("vspill"),    S8_INITIALIZER("vcalls"), S8_INITIALIZER("vhelp"),
+            S8_INITIALIZER("vident"),    S8_INITIALIZER("vmix"),   S8_INITIALIZER("vninth"),
+            S8_INITIALIZER("vabi"),
         };
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(vector_names); name_index += 1)
         {
@@ -1400,7 +1427,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 for (u32 probe_index = 0; probe_index < BUSTER_ARRAY_LENGTH(vector_mask_probes); probe_index += 1)
                 {
                     u64 probe_mask = vector_mask_probes[probe_index];
-                    String8 call_names[] = {S8_INITIALIZER("vclassify"), S8_INITIALIZER("vspill"), S8_INITIALIZER("vcalls")};
+                    String8 call_names[] = {S8_INITIALIZER("vclassify"), S8_INITIALIZER("vspill"), S8_INITIALIZER("vcalls"), S8_INITIALIZER("vabi")};
                     for (u32 call_index = 0; call_index < BUSTER_ARRAY_LENGTH(call_names); call_index += 1)
                     {
                         u32 none_offset = machine_test_module_offset(&vector_modules[0], machine_vector_module, call_names[call_index]);
@@ -1416,10 +1443,12 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                         MachineTestVectorCall* mode_call = 0;
                         memcpy(&none_call, &none_address, sizeof(none_call));
                         memcpy(&mode_call, &mode_address, sizeof(mode_call));
-                        // vclassify consumes the mask as lane validity; the
-                        // loop bodies consume it as a round count, clamped
-                        // so the differential stays fast.
-                        u64 argument = call_index == 0 ? probe_mask : (probe_mask & 15ull) + 3ull;
+                        // vclassify consumes the mask as lane validity and
+                        // vabi as a salt, so both take it raw; the loop
+                        // bodies consume it as a round count, clamped so the
+                        // differential stays fast.
+                        bool mask_shaped = call_index == 0 || call_index == 3;
+                        u64 argument = mask_shaped ? probe_mask : (probe_mask & 15ull) + 3ull;
                         u64 none_result = none_call(vector_probe_bytes, argument);
                         u64 mode_result = mode_call(vector_probe_bytes, argument);
                         BUSTER_TEST_RAW(arguments, none_result == mode_result,

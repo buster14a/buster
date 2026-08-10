@@ -1105,8 +1105,10 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 // that same register, so an argument sequence can never
                 // clobber an already-placed argument through a free pick;
                 // the float-argument bridge stages through RAX, which is
-                // never an argument register.
-                if (instruction->opcode == description->copy_opcode && slot == 1 &&
+                // never an argument register. The vector copy stages the
+                // same way: a reload landing on an already-staged ZMM
+                // argument register would destroy it.
+                if ((instruction->opcode == description->copy_opcode || instruction->opcode == description->vector_copy_opcode) && slot == 1 &&
                     machine_ref_kind(instruction->operands[0]) == MACHINE_REF_PHYSICAL_REGISTER)
                 {
                     target = machine_ref_payload(instruction->operands[0]);
@@ -1173,14 +1175,16 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 {
                     target = description->slot_scratch[slot];
                 }
-                else if (instruction->opcode == description->copy_opcode && slot == 0 &&
+                else if ((instruction->opcode == description->copy_opcode || instruction->opcode == description->vector_copy_opcode) && slot == 0 &&
                          machine_ref_kind(instruction->operands[1]) == MACHINE_REF_PHYSICAL_REGISTER &&
-                         (description->allocatable_mask >> machine_ref_payload(instruction->operands[1])) & 1u)
+                         ((description->allocatable_mask | description->vector_allocatable_mask) >> machine_ref_payload(instruction->operands[1])) & 1u)
                 {
                     // A capture of a fixed physical register (incoming
                     // argument, call result) binds in place: a free pick here
                     // could land on an argument register whose own capture
-                    // has not executed yet and destroy it.
+                    // has not executed yet and destroy it. Vector captures —
+                    // incoming ZMM arguments, the ZMM0 call result — bind the
+                    // same way in the vector file.
                     target = machine_ref_payload(instruction->operands[1]);
                 }
                 else if ((instruction->opcode == description->copy_opcode || instruction->opcode == description->vector_copy_opcode) && slot == 0 &&

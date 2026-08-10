@@ -944,8 +944,10 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
             // A copy into a fixed physical register reloads its source
             // directly into that register: argument sequences would
             // otherwise clobber already-placed argument registers through
-            // the shared operand scratches.
-            if (instruction->opcode == target->copy_opcode && slot == 1 &&
+            // the shared operand scratches. The vector copy stages the same
+            // way, or its reload through the shared ZMM scratch would
+            // destroy an already-staged vector argument register.
+            if ((instruction->opcode == target->copy_opcode || instruction->opcode == target->vector_copy_opcode) && slot == 1 &&
                 machine_ref_kind(instruction->operands[0]) == MACHINE_REF_PHYSICAL_REGISTER)
             {
                 *operand_register = (u8)machine_ref_payload(instruction->operands[0]);
