@@ -12,6 +12,119 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-11a` (Linux x86_64, Zen 4 7940HS; the AArch64 machine backend's
+second installment — local promotion brought to x86-64 parity, then the
+AAPCS64 shape machinery the `2026-08-10h` census ranked as the next lift,
+in two gated commits on top of `b7ba8ea`. This is a coverage-and-identity
+entry, not a throughput audit: qemu-aarch64 is the only execution vehicle
+on this host, so every claim below is coverage, byte-identity, or a
+differential; a64 throughput lands where the aarch64-macos runner does
+native self-host. **Fixture-corpus machine coverage (FAST, aarch64-linux,
+`cc -v` fallback census): 88 to 99 of 211 functions, signature rejections
+52 to 21. Stage 1 `5.8075G` to `5.8314G`
+instructions (`+23.9M`, `+0.41%`), all of it source growth: preprocessed
+tokens `1479081` to `1484788` (`+0.39%`), instructions per token
+`3926.4` to `3927.4` (`+0.03%`) — the new selector code compiles for
+x86-64 and executes nothing there. Self-host fixed point deterministic (`SELF_HOST deterministic
+bytes=32072088`), all three byte-identity soaks green, qemu fixture
+differential 32 fixtures x 4 allocator modes, 0 mismatches.**)
+
+- **Promotion ships as the trio or not at all.** The port carries the
+  x86-64 promotability scan (4- or 8-byte scalar locals whose address
+  never escapes a same-width non-volatile load or store, the
+  `!volatile_access` guard included), classification of promoted locals
+  into general vregs, and load aliasing — block-confined load results and
+  every load of a single-store local share the local's vreg, chains
+  extending one level through DEREFERENCE — in one commit because
+  `2026-08-10i` measured the first without the third at **+2.8% worse**:
+  the copy a promoted load lowers to never coalesces. On AArch64 the
+  same reasoning holds structurally (the copy is an orr-move instead of
+  a mov), so the pair never existed apart here.
+- **Porting promotion required porting the fused-read sinking check.**
+  The a64 compare/branch fusion sank its reads to the branch row under a
+  "every vreg is single-definition" argument (`2026-08-10m`'s soundness
+  section). Promotion makes that argument false — promoted locals are
+  exactly the multi-definition vregs — so the fusion walk now stamps
+  every promoted local's latest store ordinal and the commit rejects any
+  fusion whose read (through the load-alias root) was re-stored past the
+  deepest absorbed member, byte-for-byte the x86-64 rule. Cross-block
+  stores still need no check: a jump re-enters at a block head, above
+  the compare, never between it and the branch.
+- **Stage 9's finding (5) is resolved: AArch64 now schedules.** The
+  32-product tree32 body that selected to a ~6-vreg-peak block of frame
+  traffic now selects its locals into 32 live virtual registers against
+  the 25-register allocatable file, and the stage-9 scheduler moves and
+  keeps it under the same strict placement-improvement acceptance as
+  x86-64. The machine test that documented a64 inertness now asserts
+  movement on both targets.
+- **AAPCS64 shapes, by census mass.** Signatures classify through the
+  IR-owned `ir_type_abi_value` AAPCS64 machinery: float scalars travel
+  as 64-bit bit images in general registers and bridge through the
+  FMOV_TO_VEC/FROM_VEC rows at ABI boundaries (the bits above a 32-bit
+  float are unspecified at every AAPCS64 passing site, the same
+  argument the x86-64 movq bridges lean on); one-or-two-part register
+  aggregates ride X registers; HFAs ride up to four consecutive V
+  registers, with a new 32-bit LOAD_FRAME32 row because an f32 part at
+  a 4-byte offset fails the 64-bit frame form's alignment contract; and
+  large results travel through the X8 hidden pointer — which AAPCS64,
+  unlike System V, does not return, so the epilogue writes no X0.
+  Variadic AAPCS64 calls pass anonymous floats and aggregates exactly
+  like named ones; Darwin variadic and Windows-on-ARM stay canonical as
+  `2026-08-10h` scoped them.
+- **Aggregate flow needed copy rows, and they clobber nothing.** An
+  aggregate parameter stored to its shadow local is a slot-to-slot
+  copy, so the shapes are unusable without COPY_FRAME_FROM_FRAME /
+  COPY_FRAME_FROM_PTR / COPY_PTR_FROM_FRAME. The a64 forms chunk
+  through the reserved X17 data scratch (X16 stays the large-offset
+  address scratch), descending 8/4/2/1 so every access stays aligned —
+  and unlike their x86-64 counterparts they carry no clobber mask, so
+  the allocators keep every allocatable register live across them. The
+  three rows join the scheduler's memory chain; the FMOV bridges were
+  already in its float-state chain. Taking the copy rows also cleared
+  the census's aggregate-load line (6 to 0) in passing.
+- **Where the census mass went.** Signature rejections fell 52 to 21
+  (the residue: vectors, indirect parameters, >8-register arities), and
+  the freed functions moved inward exactly as the x86-64 stage-3 ABI
+  work did: ARRAY/AGGREGATE literals now hold 31 fallbacks, float
+  CAST/BINARY bodies 17 (a64 has no FARITH analog yet), and the
+  legitimate tail (inline assembly 10, label addresses 8, TLS 4,
+  atomics 6, STACK_ALLOCATE 4) is unchanged. CONSTANT_FLOAT cleared to
+  0 by sharing the CONSTANT_INTEGER bit-image materialization.
+- **Directed differential beyond the corpus.** A shape fixture in the
+  corpus style — two-part aggregates, a 12-byte mixed aggregate, f32
+  HFA2/HFA3, f64 HFA4, 32-byte indirect results, aggregate re-stores,
+  float scalars, and a mixed signature interleaving a Pair between
+  float and integer arguments — agrees across NONE/MIR_STACK/FAST/
+  QUALITY under qemu, with 13 of its 17 functions machine-selected and
+  the rest exercising the canonical/machine ABI boundary from both
+  sides.
+- **Gates, both commits:** test_all green (29,076 unit assertions, 32
+  modules — kagg_take and big_make joined the stage-11 selection list),
+  self-host fixed point deterministic, all three soaks — MIR_STACK,
+  FAST, QUALITY compilers' canonical outputs byte-identical to the
+  stage-2 reference's — `test_all_combinations_ci` green before the
+  push (its qemu fixture differentials are the a64 gate). The
+  byte-identity soak for the AArch64 target itself still only runs on
+  an aarch64 host, as `2026-08-10h` recorded.
+- **Left untaken, in census order.** ARRAY/AGGREGATE literals (31) are
+  now the top body mass; float bodies (17) need the FARITH/FCMP
+  analog; stack arguments and indirect arguments (the caller-side
+  defensive copy) would lift the remaining signature mass; float
+  locals stay unpromoted (the scan is integer-only — the float-scalar
+  vreg model makes extending it mechanical once float bodies select);
+  and a64 QUALITY/FAST throughput against canonical on native hardware
+  is unmeasured — the aarch64-macos runner is where that number lives.
+  `frequency_class` remains unwritten on both targets.
+- Reference points for the next audit: fixture-corpus machine coverage
+  99 of 211 (FAST, aarch64-linux), signature rejections 21, stage 1
+  `5.8314G` instructions / `1484788` tokens, qemu differential 32
+  fixtures / 4 modes. Reproduction: compile fixtures with `-target
+  aarch64-linux` (the target must precede any `-march`) at each
+  `-fregister-allocator=` mode and run under qemu-aarch64; the census
+  is the summed `CODEGEN_FALLBACK` lines of a `-v -c` compile per
+  fixture.
+
+
 `2026-08-11e` (Linux x86_64, Zen 4 7940HS; register-allocator — QUALITY's
 span pins extended to the vector register file, the lead `2026-08-10o`
 recorded as "QUALITY grew no vector pins". **Measured negative, no code
