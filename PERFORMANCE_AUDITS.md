@@ -12,6 +12,60 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-11k` (Linux x86_64, Zen 4 7940HS; correction record, no code
+change: the `2026-08-11` entry's sentence "its `bench` medians 1.58 ms IO /
+1.40 ms parse against canonical 0.9 ms" mislabels its comparison point —
+**0.9 ms is not a canonical-stage figure**. The df11728-plus-fix context was
+rebuilt exactly as that entry ran it (scratch clone at `df11728`, `5da81e8`
+cherry-picked, clang Release ide, stages built with the self-host recipe
+`cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0
+-g [-fregister-allocator=<mode>] src/buster/apps/ide/ide.c`, `chmod +x`,
+`bench` from the repo root, five runs per stage, idle machine) and the
+canonical stage's bench medians are **1.712 ms IO / 1.505 ms parse**
+(median-of-five; run medians 1,706,882–1,722,021 / 1,498,234–1,516,539 ns;
+min-of-five 1,678,087 / 1,485,049 ns). Canonical is *slower* than the
+MIR_STACK stage on this workload, not 1.6x faster — the comparison the
+sentence implied is inverted.)
+
+- **The rebuilt context is the one the entry measured.** Three
+  cross-checks pin it: the MIR_STACK control stage rebuilt in this
+  context benches medians 1.551 ms IO / 1.349 ms parse against the
+  entry's recorded 1.58 / 1.40 (within ~3%, and `2026-08-11b` already
+  reproduced the same reference across the b7ba8ea re-freeze at
+  1.634 / 1.414); the clang-built Release ide benches parse min
+  `44,525` / IO min `210,672`, matching `2026-08-11b`'s `45,167` /
+  `206,717`; and the canonical figure itself sits where `2026-08-11b`'s
+  frozen-b7ba8ea canonical row sits (parse min `1,527,202` / IO min
+  `1,754,128`). The `2026-08-11b` observation that prompted this check —
+  canonical measuring ~1.65 ms parse while "canonical 0.9 ms" stood on
+  the books — was not workload drift: canonical never measured 0.9 ms.
+- **Where the stray figure came from.** FAST and QUALITY stages built in
+  this same context bench medians **0.967 ms IO / 0.783 ms parse**
+  (both modes, within a thousandth of each other; mins FAST
+  `952,631` / `769,772`, QUALITY `949,895` / `766,986` — the same band
+  as `2026-08-11b`'s pre-stage-10 column, FAST `993,378` / `822,970`).
+  "0.9 ms" is the machine-built FAST/QUALITY band — the two modes that
+  `2026-08-11` session had just un-crashed and was benching alongside
+  MIR_STACK — recorded against the wrong label.
+- **Corrected reading of the `2026-08-11` reference points.** On the
+  df11728-plus-fix workload: FAST/QUALITY ~0.97 IO / ~0.78 parse,
+  MIR_STACK 1.551 / 1.349, canonical 1.712 / 1.505, clang Release ide
+  0.215 / 0.046 (all medians, ms). The machine-built MIR_STACK stage is
+  ~10% *faster* than canonical, FAST/QUALITY roughly 2x faster — the
+  same ordering `2026-08-11b` measured on frozen `b7ba8ea`.
+- **Method note: the first measurement attempt was garbage.** The first
+  bench pass ran against a load-average-33 machine (concurrent clang
+  builds from another session) and inflated every stage roughly 2x with
+  medians drifting run to run; the same contention OOM-killed the first
+  Release builder compile in a tmpfs work directory. Numbers here were
+  taken at load ~1.1, gated on the MIR_STACK and clang-ide cross-checks
+  landing on their references. Run-to-run median band on the idle
+  machine: ~1%.
+- **Entries are records.** `2026-08-11` stays as written; this entry is
+  the correction. Nothing below it changes: `2026-08-11b`'s rows were
+  measured on frozen `b7ba8ea` with re-baselined references and are
+  unaffected by the mislabel.
+
 `2026-08-11a` (Linux x86_64, Zen 4 7940HS; the AArch64 machine backend's
 second installment — local promotion brought to x86-64 parity, then the
 AAPCS64 shape machinery the `2026-08-10h` census ranked as the next lift,
@@ -318,6 +372,7 @@ compile cost are all flat.**)
   compile cost canonical `5.8073G` / fast `7.3475G` / quality
   `9.5032G`. Vector corpus: MIR_STACK `237,125,808`, **FAST
   `91,085,049`**, **QUALITY `87,548,849`**, clang `30,224,870`.
+
 `2026-08-11b` (Linux x86_64, Zen 4 7940HS; the measurement `2026-08-10o`
 left blocked — the vector subset's dynamic payoff in buster-built stages —
 taken now that the aggregate zero-fill fix (`2026-08-11`, below) lets a
