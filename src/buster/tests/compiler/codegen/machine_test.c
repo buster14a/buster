@@ -515,7 +515,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "DPair dpair_make(double x, double y) { DPair p; p.x = x; p.y = y; return p; }\n"
                                   "typedef struct Tagged { long tag; double v; } Tagged;\n"
                                   "double tagged_get(Tagged t) { return t.tag ? t.v : -t.v; }\n"
-                                  "double dcall(double a, double b) { DPair p = dpair_make(a, b); return dpair_sum(p) * dadd(a, b); }\n");
+                                  "double dcall(double a, double b) { DPair p = dpair_make(a, b); return dpair_sum(p) * dadd(a, b); }\n"
+                                  "_Thread_local long tls_cell;\n"
+                                  "long tls_bump(long by) { tls_cell = tls_cell + by; return tls_cell; }\n"
+                                  "static long rv_take(const long* values, int count) { long s = 0; int i = 0; while (i < count) { s = s + values[i]; i = i + 1; } return s; }\n"
+                                  "long rv_lit(long a, long b) { return rv_take((const long[]){a, b, a * b, 7}, 4); }\n"
+                                  "static unsigned __int128 u128_idem(unsigned __int128 v) { return v; }\n"
+                                  "unsigned __int128 u128_ferry(unsigned __int128 v) { return u128_idem(v); }\n"
+                                  "int call_seventeen(int a) { return printf(\"%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\",\n"
+                                  "    a, a + 1, a + 2, a + 3, a + 4, a + 5, a + 6, a + 7, a + 8, a + 9, a + 10, a + 11, a + 12, a + 13, a + 14, a + 15); }\n");
     String8 machine_c_source = string_format(arguments->arena, S8("{S8}{S8}"), machine_c_source_head, machine_c_source_tail);
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
     BUSTER_TEST(arguments, machine_program != 0);
@@ -634,6 +642,30 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         {
             MachineSelectResult variadic_selected = machine_select_canonical_function(arguments->arena, machine_program, variadic_function, machine_target);
             BUSTER_TEST(arguments, variadic_selected.supported);
+        }
+        // The lifted non-vector gaps: a thread-local address (ELF local-exec
+        // fs sequence), an rvalue compound-literal array base, a variadic
+        // call past sixteen arguments, and 128-bit integers ferried through
+        // calls as the two-eightbyte pair. Their relocations or link-only
+        // callees keep execution with the full-unity soak, where every one
+        // of these shapes runs in the compiler's own hot path.
+        String8 lifted_gap_names[] = {
+            S8_INITIALIZER("tls_bump"),
+            S8_INITIALIZER("rv_lit"),
+            S8_INITIALIZER("u128_ferry"),
+            S8_INITIALIZER("call_seventeen"),
+        };
+        for (u32 lifted_index = 0; lifted_index < BUSTER_ARRAY_LENGTH(lifted_gap_names); lifted_index += 1)
+        {
+            IrFunction* lifted_function = machine_test_ir_function_find(machine_module, lifted_gap_names[lifted_index]);
+            BUSTER_TEST(arguments, lifted_function != 0);
+            if (lifted_function)
+            {
+                MachineSelectResult lifted_selected = machine_select_canonical_function(arguments->arena, machine_program, lifted_function, machine_target);
+                BUSTER_TEST_RAW(arguments, lifted_selected.supported,
+                                string_format(arguments->arena, S8("select {S8} failed at opcode {u32}"), lifted_gap_names[lifted_index],
+                                              (u32)lifted_selected.failed_opcode));
+            }
         }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
         CodegenExecutable none_executable = codegen_make_executable((CodegenFunction){

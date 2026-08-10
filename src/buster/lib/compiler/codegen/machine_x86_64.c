@@ -10,7 +10,7 @@
 #include <buster/lib/string.h>
 
 // Supported argument-list length: six register slots plus stack parts.
-#define MACHINE_X64_MAX_ARGUMENTS 16
+#define MACHINE_X64_MAX_ARGUMENTS 24
 
 // The register shape of one argument or result under the subset: scalar
 // values occupy one integer register; small integer-class aggregates occupy
@@ -227,6 +227,20 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
             .part_is_float = {1},
             .part_count = 1,
             .byte_size = 8,
+        };
+        return true;
+    }
+    // A 128-bit integer is the System V two-eightbyte INTEGER pair — RAX:RDX
+    // as a result, two consecutive GPRs or whole-value stack eightbytes as an
+    // argument — the same parts the canonical integer-aggregate rule builds,
+    // carried by the aggregate machinery over the value's 16-byte slot.
+    if (type && type->layout.resolved && type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+    {
+        *shape = (MachineX64ValueShape){
+            .part_offsets = {0, 8},
+            .part_count = 2,
+            .byte_size = 16,
+            .aggregate = true,
         };
         return true;
     }
@@ -483,7 +497,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_place_address_offset(MachineX64Selec
         // out as an address.
         return false;
     }
-    if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
+    // An array or vector *value* is its storage, exactly like the
+    // canonical INDEX base rule: its slot address is the base address.
+    // Slices and struct values stay on the loaded-pointer path below,
+    // matching the canonical emitter's per-opcode base handling.
+    IrType* value_type = ir_type_from_id(&selector->program->types, value->canonical_type);
+    bool storage_value = definition->opcode == IR_OPCODE_LOCAL ||
+                         (value->category == IR_VALUE_VALUE && value_type &&
+                          (value_type->kind == IR_TYPE_ARRAY || value_type->kind == IR_TYPE_VECTOR));
+    if (storage_value && slot != UINT32_MAX)
     {
         u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, destination_register),
@@ -1207,7 +1229,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     case IR_OPCODE_GLOBAL:
     {
         IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
-        if (result_register == UINT32_MAX || !symbol || symbol->is_thread_local)
+        if (result_register == UINT32_MAX || !symbol)
+        {
+            return false;
+        }
+        // Thread-local addresses select only where the canonical emitter's
+        // local-exec fs-base sequence applies; other OSes keep the fallback.
+        if (symbol->is_thread_local && selector->target.os != OPERATING_SYSTEM_LINUX && selector->target.os != OPERATING_SYSTEM_ANDROID)
         {
             return false;
         }
@@ -1217,7 +1245,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
                                                        .payload = target_index,
-                                                       .opcode = MACHINE_X64_LEA_SYMBOL,
+                                                       .opcode = (u16)(symbol->is_thread_local ? MACHINE_X64_LEA_TLS : MACHINE_X64_LEA_SYMBOL),
                                                    });
         machine_x64_define(selector, result_register, row);
         return true;
@@ -3095,6 +3123,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                       instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY) &&
                      value_type && value_type->layout.resolved && value_type->layout.size <= UINT32_MAX - 7 &&
                      (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE ||
+                      (value_type->kind == IR_TYPE_INTEGER && value_type->bit_width == 128) ||
                       ((instruction->opcode == IR_OPCODE_ARRAY || instruction->opcode == IR_OPCODE_LOAD) && value_type->kind == IR_TYPE_ARRAY)))
             {
                 // Aggregate values own a frame slot like the canonical
@@ -4549,6 +4578,34 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 *site = (MachineCallSite){
                     .code_offset = encoder.count,
                     .target = instruction->payload,
+                };
+                machine_x64_emit32(&encoder, 0);
+            }
+            break;
+            case MACHINE_X64_LEA_TLS:
+            {
+                // mov dest, fs:[0] — the thread pointer — then
+                // lea dest, [dest + tpoff] with the displacement patched
+                // thread-locally, byte-for-byte the canonical sequence.
+                u32 destination = operand_registers[0];
+                machine_x64_emit8(&encoder, 0x64);
+                machine_x64_emit8(&encoder, (u8)(0x48 | (destination >= 8 ? 0x04 : 0)));
+                machine_x64_emit8(&encoder, 0x8b);
+                machine_x64_emit8(&encoder, (u8)(0x04 | ((destination & 7) << 3)));
+                machine_x64_emit8(&encoder, 0x25);
+                machine_x64_emit32(&encoder, 0);
+                machine_x64_emit8(&encoder, (u8)(0x48 | (destination >= 8 ? 0x05 : 0)));
+                machine_x64_emit8(&encoder, 0x8d);
+                machine_x64_emit8(&encoder, (u8)(0x80 | ((destination & 7) << 3) | (destination & 7)));
+                if ((destination & 7) == 4)
+                {
+                    machine_x64_emit8(&encoder, 0x24);
+                }
+                MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                *site = (MachineCallSite){
+                    .code_offset = encoder.count,
+                    .target = instruction->payload,
+                    .is_thread_local = 1,
                 };
                 machine_x64_emit32(&encoder, 0);
             }

@@ -777,6 +777,116 @@ compile cost are all flat.**)
   `9.5032G`. Vector corpus: MIR_STACK `237,125,808`, **FAST
   `91,085,049`**, **QUALITY `87,548,849`**, clang `30,224,870`.
 
+`2026-08-11g` (Linux x86_64, Zen 4 7940HS; the remaining non-vector selection
+gaps of the `2026-08-10o` census, lifted in measured order on merged main
+`b7ba8ea`. Developed concurrently with the bench-crash fix (PR 261, entry
+`2026-08-11`, merged while this ran) and its payoff measurement
+(`2026-08-11b`, merged), the ZMM0-31 widening (PR 263, `2026-08-11c`),
+the stage-10 leftovers (`2026-08-11d`), the vector span pins (PR 265,
+`2026-08-11e`), and the frequency-aware pin economics (`2026-08-11f`) —
+none of their numbers are included here and the merged tree re-measures. Baselines were re-taken on `b7ba8ea`
+since the workload grew past `10o`'s frozen tree: **frozen `b7ba8ea` stage
+compiles FAST `40.7039G` / QUALITY `39.9089G`; compile cost canonical
+`5.8074G` / fast `7.3510G` / quality `9.5040G`.** The entry's own numbers:
+**ide.c fallback functions 30 to 14; frozen-tree stage compiles FAST
+`40.6981G` (`-5.70M`, `-0.0140%`) / QUALITY `39.9038G` (`-4.91M`,
+`-0.0123%`), same-session interleaved min of three; stage text FAST
+21,552,104 to 21,472,792 (`-0.37%`), QUALITY 21,249,520 to 21,166,216
+(`-0.39%`); compile cost canonical flat, fast `7.3607G` (`+0.13%`),
+quality `9.5331G` (`+0.31%`); every gate green and the three soaks
+byte-identical.**)
+
+- **Census before code, and the census ranked the work.** The `10o` census
+  named 30 fallback functions with one reason each; a temporary
+  per-function name print at the fallback-count site (removed before
+  commit) confirmed all 30 on `b7ba8ea` to the function. Three gaps were
+  lifted, in measured-effect order; the executed-instruction story is
+  brutally front-loaded: **the INDEX batch is `-5.58M` of the `-5.70M`**,
+  because its five functions (`x86_64_cpu_features_from_cpuid` and the
+  target-feature family, 4,255 IR instructions) run at every compile's
+  target setup, while the TLS batch measured `-0.14M` and the CALL batch
+  `-12K` — inside the run band. Static mass predicted none of that.
+- **INDEX on rvalue arrays: one condition in the base-address rule.**
+  `machine_x64_select_place_address_offset` formed frame addresses only
+  for LOCAL-defined slots; the canonical INDEX base rule says an array or
+  vector *value* (`IR_VALUE_VALUE` category) is its storage. The
+  extension mirrors that rule exactly — slices and struct values keep the
+  loaded-pointer path, matching the canonical emitter's per-opcode base
+  handling — and the five compound-literal feature-table functions
+  select. Payload: `-5.58M` executed on the FAST stage compile.
+- **Thread-local GLOBAL: the canonical local-exec pair as one row.** A new
+  `MACHINE_X64_LEA_TLS` row (def, rematerializable, payload indexing
+  call_targets like `LEA_SYMBOL`) encodes `mov dest, fs:[0]` plus
+  `lea dest, [dest + tpoff]` byte-for-byte as the canonical sequence but
+  into any allocated register, with the SIB fixup for the r12/rsp column.
+  The `MachineCallSite` reserved word became `is_thread_local` and the
+  x86-64 call-site loop carries it onto the module relocation, which the
+  existing TPOFF resolution consumes unchanged; selection accepts TLS
+  symbols only for Linux/Android targets, where that sequence is the
+  canonical form. The five arena/thread-context functions select; the
+  soak executes them on every allocation the stage compiler makes.
+  Measured: `-0.14M` — hot functions, cold TLS fraction.
+- **CALL shapes: probed first, and the probe named two cheap fixes.** The
+  temporary reject print showed exactly two causes across the five CALL
+  functions: a callee returning a 16-byte `IR_TYPE_INTEGER` (u128 —
+  `timestamp_take`), and variadic calls carrying seventeen arguments
+  against the sixteen-slot cap (`string_format` call sites in
+  `analysis_serialize_module_interface` and `run_c_compiler`).
+  `MACHINE_X64_MAX_ARGUMENTS` went 16 to 24 — the arrays it sizes are
+  per-selection stack storage, and no placement logic keys on the
+  constant — and a 128-bit integer became the System V two-eightbyte
+  INTEGER pair in `machine_x64_value_shape` (parts at offsets 0/8 over a
+  16-byte slot, the same parts the canonical integer-aggregate rule
+  builds), with classification giving u128 ARGUMENT/LOAD/CALL results
+  slots like any two-eightbyte aggregate. All five CALL functions select,
+  and `timestamp_ns_between` came along free. Measured: `-12K`, i.e.
+  nothing — none of these run meaningfully inside `cc` — recorded here so
+  the next audit does not re-derive that.
+- **What moved forward, not away.** Three of the eleven `10o`
+  "variadic-signature" rejects were really u128 signatures:
+  `timestamp_take` and the two `string_format_u128_parts` helpers now
+  select their signatures and stop at their bodies' 128-bit `CAST`
+  (opcode 27) — the census now says what they actually need.
+- **Costs, and where they come from.** Canonical compile cost is flat to
+  the megainstruction. Fast `+9.75M` (`+0.13%`) and quality `+29.0M`
+  (`+0.31%`) are sixteen more functions through selection, placement, and
+  encoding — including the two biggest fallbacks (`analysis_serialize_
+  module_interface` 1,950 IR, `run_graphical_app` 951) — priced at the
+  same rate the stage-10 widening paid. The widened argument arrays'
+  zero-fill is noise at this scale.
+- **Nothing else moved, proven byte-for-byte.** Both pressure corpora
+  compile byte-identical under MIR_STACK, FAST, and QUALITY from a
+  pristine-`b7ba8ea`-built compiler and this change's compiler — every
+  previously selecting function keeps its exact code, because each lifted
+  gap was previously a whole-function reject. The canonical stage outputs
+  are byte-identical between the compilers (the soaks below).
+- **Left untaken, sized.** The 128-bit `CAST` tail (3 functions, 132 IR)
+  needs the extend/truncate arms — the sign-extend high half wants a
+  cqo-shaped row the vocabulary lacks — and the parts helpers likely hit
+  128-bit `BINARY` right behind it; dynamic effect ≈ 0. The variadic
+  signatures (7 functions, ~210 IR) plus `VA_ARG` (`string_format_va`,
+  2,888 IR) are the register-save-area prologue, va_list initialization,
+  and the va_arg branch machine — real new machinery, none of it falling
+  out of existing shapes, for formatters a quiet compile never calls;
+  sized and deliberately not taken. `cpuid`/`xgetbv` (inline assembly)
+  and `os_flush_instruction_cache` are outside the machine path by
+  design. The census floor on ide.c is now 14 = 7 variadic + 3 CAST-128 +
+  1 VA_ARG + 2 inline-asm + 1 icache.
+- **Gates, every commit:** test_all green (29,066 unit, 32 module,
+  including four new lifted-gap selection differentials in
+  machine_test.c: `tls_bump`, `rv_lit`, `u128_ferry`, `call_seventeen` —
+  link-time relocations keep their execution with the soak, where every
+  one of these shapes runs in the compiler's own hot path);
+  test_self_host deterministic (stage 1 `5.8093G` on the grown tree);
+  all three soaks — MIR_STACK, FAST, QUALITY — byte-identical against
+  the freshly rebuilt `build/self-host/Release/ide-stage2`;
+  `test_all_combinations_ci` green before the push.
+- Reference points for the next audit, frozen `b7ba8ea` ide.c as the
+  workload (same-session invocation, absolute paths): **FAST stage
+  `40.6981G`, QUALITY stage `39.9038G`**, stage text 21,472,792 /
+  21,166,216, compile cost canonical `5.8074G` / fast `7.3607G` /
+  quality `9.5331G`, ide.c fallback functions 14.
+
 `2026-08-11b` (Linux x86_64, Zen 4 7940HS; the measurement `2026-08-10o`
 left blocked — the vector subset's dynamic payoff in buster-built stages —
 taken now that the aggregate zero-fill fix (`2026-08-11`, below) lets a

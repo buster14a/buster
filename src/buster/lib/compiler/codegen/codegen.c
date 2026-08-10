@@ -10689,6 +10689,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
                                     .symbol = selected.function.call_targets[encoded.call_sites[site_index].target],
                                     .offset = (u32)buffer.count + encoded.call_sites[site_index].code_offset,
+                                    .is_thread_local = encoded.call_sites[site_index].is_thread_local != 0,
                                 };
                             }
                             buffer.count += encoded.byte_count;

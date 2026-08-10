@@ -271,6 +271,10 @@ typedef enum MachineOpcode
     MACHINE_X64_CALL_DIRECT,
     MACHINE_X64_LEA_FRAME,    // def, stack-slot ref: address of a frame slot
     MACHINE_X64_LEA_SYMBOL,   // def; payload indexes call_targets: rip-relative symbol address
+    // Thread-local symbol address, ELF local-exec form: fs-base load plus a
+    // lea whose displacement carries the TPOFF relocation, exactly the
+    // canonical emitter's sequence. def; payload indexes call_targets.
+    MACHINE_X64_LEA_TLS,
     // Terminator compare chain: use condition, block ref default; payload
     // is the first row in the switch-case side table and flags holds the
     // case count.
@@ -854,7 +858,9 @@ struct MachineCallSite
     u32 code_offset;
     u32 target;
     u32 absolute;
-    u32 reserved;
+    // The patched field resolves thread-locally (x86-64 TPOFF); the module
+    // relocation row carries the flag through unchanged.
+    u32 is_thread_local;
 };
 
 typedef struct MachineEncodeResult MachineEncodeResult;

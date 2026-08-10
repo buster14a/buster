@@ -257,6 +257,12 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
     },
+    [MACHINE_X64_LEA_TLS] = {
+        .name = S8_INITIALIZER("x64_lea_tls"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
+    },
     [MACHINE_X64_SWITCH] = {
         .name = S8_INITIALIZER("x64_switch"),
         .operand_count = 2,
