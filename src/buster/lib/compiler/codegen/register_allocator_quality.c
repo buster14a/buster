@@ -17,6 +17,22 @@
 // covers, so binding the whole callee-saved file no longer starves the
 // scan the way the whole-function pins of 2026-08-09al measured.
 //
+// Live-range splitting — the half of plan stage 7 the span-pin design
+// deferred: a candidate whose whole interval cannot be placed may pin
+// one merged loop region of it instead — the sub-span where its
+// weighted traffic actually sits — with the boundary work in code the
+// loop never repeats: entry installs ride the edge contracts of the
+// region head's entering edges, and a value living past the region
+// stores back at landing-pad blocks every exit passes at most once per
+// function entry. A split span is exactly one merged region, which
+// preserves the closure every span already leans on — a span meeting a
+// loop covers it. The split gate reuses the same per-instruction
+// frequency weights the whole-placement economics price everything
+// else in: boundary rows sit outside the region by construction, so
+// they price at their own (lower) block frequency with no separate
+// constant needed, and the final whole-placement acceptance below
+// weighs a split's entry/store edits exactly like any other edit.
+//
 // Callee-saved is the register class that makes a span binding sound
 // without a clobber analysis: calls preserve those registers, and every
 // encoder scratch and macro-op sequence in this backend works out of the
@@ -33,6 +49,15 @@
 // pins keep spanning call rows that foreclose the whole caller-saved
 // file.
 #define MACHINE_QUALITY_PIN_OPERAND_MARGIN 2u
+
+// Rows a register's split boundary edits write outside any of its spans
+// — entry installs at the entering terminators, landing-pad stores at
+// the exit blocks — which no other span on the same register may cover.
+#define MACHINE_QUALITY_EXCLUDED_ROW_LIMIT 16u
+// Plan capacities; a function splitting past these keeps its remaining
+// candidates whole rather than growing the plan.
+#define MACHINE_QUALITY_SPLIT_ENTRY_LIMIT 128u
+#define MACHINE_QUALITY_SPLIT_STORE_LIMIT 256u
 
 // Execution-frequency weight of one block: 4 to the power of its
 // frequency class (the loop-nesting depth the selector stamped), capped
@@ -60,6 +85,7 @@ struct MachineQualityInterval
     // A candidate below the raw-count break-even, admitted on frequency
     // alone; it may only take a caller-saved pin register, so it can
     // never buy a prologue save with edits a cold loop may never run.
+    // Split probing honors the same restriction for the same reason.
     u32 marginal;
 };
 
@@ -89,6 +115,50 @@ BUSTER_GLOBAL_LOCAL void machine_quality_heap_sift(MachineQualityInterval* heap,
         heap[largest] = swapped;
         root = largest;
     }
+}
+
+// The merged loop region containing an instruction, or UINT32_MAX. The
+// regions are disjoint and sorted, so the last one starting at or before
+// the instruction is the only candidate.
+BUSTER_GLOBAL_LOCAL u32 machine_quality_region_find(u64 const* spans, u32 count, u32 instruction_index)
+{
+    u32 low = 0;
+    u32 high = count;
+    while (low < high)
+    {
+        u32 middle = (low + high) / 2;
+        if ((u32)(spans[middle] >> 32) <= instruction_index)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low && instruction_index <= (u32)spans[low - 1] ? low - 1 : UINT32_MAX;
+}
+
+// Foreclosure-prefix rows build lazily, on a register's first probe: the
+// pin file is walked front-first and most functions place their pins
+// within the callee-saved prefix, so eagerly summing every allocatable
+// row was mostly work nobody read. Rows are pin-independent, so one
+// build serves the whole-placement loop and the split probe alike, and
+// persists across every attempt in the same pass.
+BUSTER_GLOBAL_LOCAL u32* machine_quality_foreclosure_prefix_ensure(u32* foreclosure_prefix, u32* prefix_built_mask, u64 const* foreclosed_masks,
+                                                                    u32 instruction_count, u32 pin_register)
+{
+    u32* prefix = foreclosure_prefix + (u64)pin_register * (instruction_count + 1);
+    if (!((*prefix_built_mask >> pin_register) & 1u))
+    {
+        *prefix_built_mask |= 1u << pin_register;
+        prefix[0] = 0;
+        for (u32 instruction_index = 0; instruction_index < instruction_count; instruction_index += 1)
+        {
+            prefix[instruction_index + 1] = prefix[instruction_index] + ((foreclosed_masks[instruction_index] >> pin_register) & 1u);
+        }
+    }
+    return prefix;
 }
 
 MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunction* function)
@@ -142,7 +212,8 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     // latch alive at its head. Overlapping and touching spans merge into
     // disjoint regions first, which makes one ascending pass exact: no
     // extension can reach past its own merged region into an earlier one,
-    // so nothing cascades and nothing needs a second look.
+    // so nothing cascades and nothing needs a second look. The merged,
+    // sorted spans double as the split candidate's region table below.
     u64* loop_spans = prepass.loop_spans;
     u32 loop_span_count = prepass.loop_span_count;
     u64* loop_span_scratch = arena_allocate(scratch.arena, u64, loop_span_count ? loop_span_count : 1);
@@ -210,7 +281,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     // traffic it removes, which is exactly the edit count of that value,
     // and heuristics guessing at this were measurably worse than the
     // truth (2026-08-09ai).
-    MachineStackPlacement baseline = machine_fast_placement_build_prepassed(arena, function, &prepass, 0, 0, 0);
+    MachineStackPlacement baseline = machine_fast_placement_build_prepassed(arena, function, &prepass, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     if (!baseline.valid)
     {
         scratch_end(scratch);
@@ -220,7 +291,10 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     // stamped. An edit is priced by the block its instruction sits in, so
     // a reload inside a loop outweighs the same reload on the entry path —
     // the execution-frequency awareness 2026-08-10l concluded every static
-    // count lacks.
+    // count lacks. A split's boundary edits (entry installs, landing-pad
+    // stores) land at rows outside the region by construction, so this
+    // same array prices them at their own — lower — enclosing frequency
+    // with no separate accounting.
     u32* instruction_weights = arena_allocate(scratch.arena, u32, function->instruction_count ? function->instruction_count : 1);
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
@@ -252,6 +326,14 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     }
     // Priority walk. The heap orders by weight; each candidate takes the
     // first callee-saved register whose assigned spans it misses entirely.
+    // `candidate_indices` maps a virtual register back to its heap slot so
+    // the split probe below can look up its per-region traffic without a
+    // linear search.
+    u32* candidate_indices = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
+    for (u32 register_index = 0; register_index < register_count; register_index += 1)
+    {
+        candidate_indices[register_index] = UINT32_MAX;
+    }
     MachineQualityInterval* heap = arena_allocate(scratch.arena, MachineQualityInterval, MACHINE_QUALITY_MAXIMUM_CANDIDATES);
     u32 heap_count = 0;
     for (u32 register_index = 0; register_index < register_count && heap_count < MACHINE_QUALITY_MAXIMUM_CANDIDATES; register_index += 1)
@@ -261,23 +343,24 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         // three pays for a callee-saved push/pop the way stage 8 priced
         // it. Below that the value is marginal: its bar is frequency —
         // one in-loop edit clears the same weighted three — but it may
-        // only take a caller-saved pin register in the walk below, where
-        // the reservation costs no prologue and a span crossing a call
-        // can never bind, because calls foreclose the whole caller-saved
-        // file. The unrestricted weighted form re-created the
-        // threshold-2 loss of 2026-08-10l at scale (+6,865 pins, +284M
-        // on the frozen stage): a static loop is not evidence the loop
-        // runs, so a marginal pin may only take a register that is free.
-        // Priority is the measured weighted traffic, not a guess. The
-        // pin file is general registers, so only general-class values
-        // may enter candidacy: on System V no vector register survives a
-        // call, and a vector pinned to a general register would be a
-        // class miscompile.
+        // only take a caller-saved pin register in the walk below (and in
+        // any split probe it enters), where the reservation costs no
+        // prologue and a span crossing a call can never bind, because
+        // calls foreclose the whole caller-saved file. The unrestricted
+        // weighted form re-created the threshold-2 loss of 2026-08-10l at
+        // scale (+6,865 pins, +284M on the frozen stage): a static loop is
+        // not evidence the loop runs, so a marginal pin may only take a
+        // register that is free. Priority is the measured weighted
+        // traffic, not a guess. The pin file is general registers, so only
+        // general-class values may enter candidacy: on System V no vector
+        // register survives a call, and a vector pinned to a general
+        // register would be a class miscompile.
         if (disqualified[register_index] || interval_starts[register_index] == UINT32_MAX || baseline_traffic[register_index] < 3 ||
             function->virtual_registers[register_index].register_class != MACHINE_REGISTER_CLASS_GENERAL)
         {
             continue;
         }
+        candidate_indices[register_index] = heap_count;
         heap[heap_count] = (MachineQualityInterval){
             .virtual_register = register_index,
             .start = interval_starts[register_index],
@@ -301,7 +384,8 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     // local scan's caller-saved working pool is eaten last — then the
     // caller-saved members, descending, which only a span that crosses no
     // call may take and whose reservation costs no prologue save. The
-    // second, degraded attempt below keeps only the callee-saved prefix.
+    // degraded attempts below drop splitting first and then keep only the
+    // callee-saved prefix.
     u32 pin_file[MACHINE_TARGET_REGISTER_LIMIT];
     u32 pin_file_count = 0;
     u64 caller_saved_allocatable = description->allocatable_mask & ~description->callee_saved_mask;
@@ -395,13 +479,219 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         u32 headroom = allocatable_count - foreclosed_count;
         pin_budgets[instruction_index] = (u8)(headroom > spare ? headroom - spare : 0);
     }
-    // Prefix rows build lazily, on a register's first probe: the pin file is
-    // walked front-first and most functions place their pins within the
-    // callee-saved prefix, so eagerly summing all fourteen allocatable rows
-    // was mostly work nobody read — measured at a quarter of this pass's
-    // whole cost. Rows are pin-independent, so one build serves both
-    // attempts.
-    u32 prefix_built_mask = 0;
+    // Region metadata for splitting, all one pass over the block-ref
+    // operands. A region accepts splits only when every entering edge can
+    // host the install — a single-target terminator reaching the head
+    // from outside, the shape the retroactive conform repairs fully — and
+    // no edge from outside lands mid-region, where the install would
+    // never have run. Exit stores additionally need every departure
+    // target to be a landing pad: all of its predecessors inside the
+    // region, and the block itself inside no region at all, which is what
+    // proves its head runs at most once per function entry. `cold_blocks`
+    // comes straight from the prepass — the same switch/both-backward
+    // rule this needed locally before the prepass carried it.
+    u8 const* cold_blocks = prepass.cold_blocks;
+    u32* block_regions = 0;
+    u32* region_head_blocks = 0;
+    u8* region_ok = 0;
+    u8* region_exit_ok = 0;
+    u32* region_entry_counts = 0;
+    u32* region_entry_offsets = 0;
+    u32* region_entry_rows = 0;
+    u32* region_exit_offsets = 0;
+    u32* region_exit_counts = 0;
+    u32* region_exit_blocks = 0;
+    u32* candidate_region_traffic = 0;
+    if (merged_span_count)
+    {
+        u32* instruction_blocks = arena_allocate(scratch.arena, u32, function->instruction_count);
+        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        {
+            MachineBlock* block = function->blocks + block_index;
+            for (u32 offset = 0; offset < block->instruction_count; offset += 1)
+            {
+                instruction_blocks[block->first_instruction + offset] = block_index;
+            }
+        }
+        block_regions = arena_allocate(scratch.arena, u32, function->block_count ? function->block_count : 1);
+        region_head_blocks = arena_allocate(scratch.arena, u32, merged_span_count);
+        region_ok = arena_allocate(scratch.arena, u8, merged_span_count);
+        region_exit_ok = arena_allocate(scratch.arena, u8, merged_span_count);
+        region_entry_counts = arena_allocate(scratch.arena, u32, merged_span_count);
+        region_entry_offsets = arena_allocate(scratch.arena, u32, merged_span_count + 1);
+        region_exit_offsets = arena_allocate(scratch.arena, u32, merged_span_count + 1);
+        region_exit_counts = arena_allocate(scratch.arena, u32, merged_span_count);
+        u32* region_exit_capacities = arena_allocate(scratch.arena, u32, merged_span_count);
+        // Sole predecessor region per block: UINT32_MAX while no edge has
+        // arrived, the region index while every edge agrees, and
+        // merged_span_count once any edge comes from elsewhere.
+        u32* sole_pred_regions = arena_allocate(scratch.arena, u32, function->block_count ? function->block_count : 1);
+        for (u32 region_index = 0; region_index < merged_span_count; region_index += 1)
+        {
+            region_head_blocks[region_index] = UINT32_MAX;
+            region_ok[region_index] = 1;
+            region_exit_ok[region_index] = 1;
+            region_entry_counts[region_index] = 0;
+            region_exit_counts[region_index] = 0;
+            region_exit_capacities[region_index] = 0;
+        }
+        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        {
+            MachineBlock* block = function->blocks + block_index;
+            u32 region_index = machine_quality_region_find(loop_spans, merged_span_count, block->first_instruction);
+            block_regions[block_index] = region_index;
+            if (region_index != UINT32_MAX && (u32)(loop_spans[region_index] >> 32) == block->first_instruction)
+            {
+                region_head_blocks[region_index] = block_index;
+            }
+            sole_pred_regions[block_index] = UINT32_MAX;
+        }
+        for (u32 pass = 0; pass < 2; pass += 1)
+        {
+            if (pass == 1)
+            {
+                region_entry_offsets[0] = 0;
+                region_exit_offsets[0] = 0;
+                for (u32 region_index = 0; region_index < merged_span_count; region_index += 1)
+                {
+                    region_entry_offsets[region_index + 1] = region_entry_offsets[region_index] + region_entry_counts[region_index];
+                    region_exit_offsets[region_index + 1] = region_exit_offsets[region_index] + region_exit_capacities[region_index];
+                    region_entry_counts[region_index] = 0;
+                }
+                region_entry_rows = arena_allocate(scratch.arena, u32, region_entry_offsets[merged_span_count] ? region_entry_offsets[merged_span_count] : 1);
+                region_exit_blocks = arena_allocate(scratch.arena, u32, region_exit_offsets[merged_span_count] ? region_exit_offsets[merged_span_count] : 1);
+            }
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                MachineInstruction* instruction = function->instructions + instruction_index;
+                MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                u32 targets[BUSTER_ARRAY_LENGTH(instruction->operands)];
+                u32 target_count = 0;
+                for (u32 slot = 0; slot < info->operand_count; slot += 1)
+                {
+                    if (machine_ref_kind(instruction->operands[slot]) == MACHINE_REF_BLOCK)
+                    {
+                        targets[target_count] = machine_ref_payload(instruction->operands[slot]);
+                        target_count += 1;
+                    }
+                }
+                if (!target_count)
+                {
+                    continue;
+                }
+                u32 source_block = instruction_blocks[instruction_index];
+                u32 source_region = block_regions[source_block];
+                for (u32 target_index = 0; target_index < target_count; target_index += 1)
+                {
+                    u32 target_block = targets[target_index];
+                    u32 target_region = block_regions[target_block];
+                    if (pass == 0)
+                    {
+                        u32 incoming = source_region == UINT32_MAX ? merged_span_count : source_region;
+                        u32 sole = sole_pred_regions[target_block];
+                        sole_pred_regions[target_block] = sole == UINT32_MAX || sole == incoming ? incoming : merged_span_count;
+                    }
+                    if (target_region != UINT32_MAX && target_region != source_region)
+                    {
+                        if (target_block == region_head_blocks[target_region])
+                        {
+                            if (pass == 0)
+                            {
+                                region_entry_counts[target_region] += 1;
+                                if (target_count != 1 || target_block <= source_block)
+                                {
+                                    region_ok[target_region] = 0;
+                                }
+                            }
+                            else
+                            {
+                                region_entry_rows[region_entry_offsets[target_region] + region_entry_counts[target_region]] = instruction_index;
+                                region_entry_counts[target_region] += 1;
+                            }
+                        }
+                        else if (pass == 0)
+                        {
+                            region_ok[target_region] = 0;
+                        }
+                    }
+                    if (source_region != UINT32_MAX && target_region != source_region)
+                    {
+                        if (pass == 0)
+                        {
+                            region_exit_capacities[source_region] += 1;
+                            if (target_region != UINT32_MAX)
+                            {
+                                region_exit_ok[source_region] = 0;
+                            }
+                        }
+                        else
+                        {
+                            u32* successors = region_exit_blocks + region_exit_offsets[source_region];
+                            bool seen = false;
+                            for (u32 successor_index = 0; successor_index < region_exit_counts[source_region]; successor_index += 1)
+                            {
+                                seen |= successors[successor_index] == target_block;
+                            }
+                            if (!seen)
+                            {
+                                successors[region_exit_counts[source_region]] = target_block;
+                                region_exit_counts[source_region] += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (u32 region_index = 0; region_index < merged_span_count; region_index += 1)
+        {
+            u32 head = region_head_blocks[region_index];
+            if (head == UINT32_MAX || head == 0 || cold_blocks[head] || !region_entry_counts[region_index])
+            {
+                region_ok[region_index] = 0;
+            }
+            for (u32 successor_index = 0; successor_index < region_exit_counts[region_index]; successor_index += 1)
+            {
+                u32 successor = region_exit_blocks[region_exit_offsets[region_index] + successor_index];
+                if (sole_pred_regions[successor] != region_index)
+                {
+                    region_exit_ok[region_index] = 0;
+                }
+            }
+        }
+        // Where each candidate's traffic actually sits: its baseline
+        // edits bucketed by the region containing them, weighted exactly
+        // like the whole-placement economics — each edit prices at its
+        // own row's frequency, so a merged region spanning more than one
+        // nesting depth still weighs its inner rows heavier than its
+        // outer ones. This is the per-candidate number the split gate
+        // compares against the boundary work — never a reorder of the
+        // priority heap, which 2026-08-10l measured as wrong at every
+        // weight.
+        candidate_region_traffic = arena_allocate(scratch.arena, u32, (u64)heap_count * merged_span_count);
+        for (u64 cell_index = 0; cell_index < (u64)heap_count * merged_span_count; cell_index += 1)
+        {
+            candidate_region_traffic[cell_index] = 0;
+        }
+        for (u32 edit_index = 0; edit_index < baseline.edit_count; edit_index += 1)
+        {
+            MachineEdit* edit = baseline.edits + edit_index;
+            if (edit->kind != MACHINE_EDIT_SPILL && edit->kind != MACHINE_EDIT_RELOAD)
+            {
+                continue;
+            }
+            u32 candidate_slot = candidate_indices[edit->subject];
+            if (candidate_slot == UINT32_MAX)
+            {
+                continue;
+            }
+            u32 edit_instruction = machine_point_instruction(edit->point);
+            u32 region_index = machine_quality_region_find(loop_spans, merged_span_count, edit_instruction);
+            if (region_index != UINT32_MAX)
+            {
+                candidate_region_traffic[(u64)candidate_slot * merged_span_count + region_index] += instruction_weights[edit_instruction];
+            }
+        }
+    }
     MachineQualityInterval* heap_backup = arena_allocate(scratch.arena, MachineQualityInterval, heap_count);
     for (u32 backup_index = 0; backup_index < heap_count; backup_index += 1)
     {
@@ -410,17 +700,27 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     u32 heap_backup_count = heap_count;
     u64* pin_active_masks = arena_allocate(scratch.arena, u64, function->instruction_count);
     u64* pin_entry_masks = arena_allocate(scratch.arena, u64, function->instruction_count);
+    u32* span_starts = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
+    u32* span_ends = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
     u32 assigned_starts[MACHINE_TARGET_REGISTER_LIMIT][8];
     u32 assigned_ends[MACHINE_TARGET_REGISTER_LIMIT][8];
     u32 assigned_counts[MACHINE_TARGET_REGISTER_LIMIT];
-    // Attempt 0 packs over the full file; if its placement is rejected or
-    // a pin fails verification, attempt 1 degrades to the callee-saved
-    // file alone before giving the function back to the local allocator —
-    // over-pinning a hot loop must not cost the pins that were winning.
-    for (u32 attempt = 0; attempt < 2; attempt += 1)
+    u32 excluded_rows[MACHINE_TARGET_REGISTER_LIMIT][MACHINE_QUALITY_EXCLUDED_ROW_LIMIT];
+    u32 excluded_row_counts[MACHINE_TARGET_REGISTER_LIMIT];
+    MachinePinSplitEntry split_entries[MACHINE_QUALITY_SPLIT_ENTRY_LIMIT];
+    MachinePinSplitStore split_stores[MACHINE_QUALITY_SPLIT_STORE_LIMIT];
+    // Prefix rows are pin-independent, so one build serves every attempt;
+    // the mask persists across the attempt loop below.
+    u32 prefix_built_mask = 0;
+    // Attempt 0 packs the full file with splitting; a rejected or
+    // unverifiable placement retries without the machinery it actually
+    // used — splits first, then the caller-saved file — so over-pinning
+    // one hot loop cannot cost a function the pins that were winning.
+    for (u32 attempt = 0; attempt < 3; attempt += 1)
     {
+        bool allow_splits = attempt == 0 && merged_span_count != 0;
         u32 const* attempt_file = pin_file;
-        u32 attempt_file_count = attempt ? quality_pin_count : pin_file_count;
+        u32 attempt_file_count = attempt == 2 ? quality_pin_count : pin_file_count;
         if (!attempt_file_count)
         {
             continue;
@@ -428,10 +728,13 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         for (u32 register_index = 0; register_index < register_count; register_index += 1)
         {
             pinned_registers[register_index] = UINT32_MAX;
+            span_starts[register_index] = interval_starts[register_index];
+            span_ends[register_index] = interval_ends[register_index];
         }
         for (u32 file_index = 0; file_index < attempt_file_count; file_index += 1)
         {
             assigned_counts[file_index] = 0;
+            excluded_row_counts[file_index] = 0;
         }
         for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
         {
@@ -443,6 +746,8 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             heap[backup_index] = heap_backup[backup_index];
         }
         u64 pinned_mask = 0;
+        u32 split_entry_count = 0;
+        u32 split_store_count = 0;
         while (heap_count)
         {
             MachineQualityInterval candidate = heap[0];
@@ -453,13 +758,22 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             // check in call-dense code, and its foreclosure probes are O(1)
             // where the budget walk below is O(span): reject it on the
             // prefixes first. Outcome-neutral — every acceptance condition
-            // must hold and none mutates state before a pin lands.
+            // must hold and none mutates state before a pin lands. The
+            // prefix row must go through the same lazy-build guard as
+            // every other reader: arenas hand out dirty, not zeroed,
+            // memory on reuse (`arena_allocate_bytes`), so probing an
+            // unbuilt row directly reads whatever an earlier function's
+            // scratch pass left there — a real, previously-latent source
+            // of run-to-run nondeterminism this early-reject must not
+            // reintroduce.
             if (candidate.marginal)
             {
                 bool caller_saved_open = false;
                 for (u32 file_index = quality_pin_count; file_index < attempt_file_count && !caller_saved_open; file_index += 1)
                 {
-                    u32 const* prefix = foreclosure_prefix + (u64)attempt_file[file_index] * (function->instruction_count + 1);
+                    u32 pin_register = attempt_file[file_index];
+                    u32 const* prefix = machine_quality_foreclosure_prefix_ensure(foreclosure_prefix, &prefix_built_mask, foreclosed_masks,
+                                                                                  function->instruction_count, pin_register);
                     caller_saved_open = prefix[candidate.end + 1] == prefix[candidate.start];
                 }
                 if (!caller_saved_open)
@@ -475,54 +789,223 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             {
                 over_budget = pin_depths[instruction_index] >= pin_budgets[instruction_index];
             }
-            if (over_budget)
+            bool assigned = false;
+            if (!over_budget)
+            {
+                // A marginal candidate starts past the callee-saved
+                // prefix: caller-saved registers only, so it costs no
+                // prologue save, and in the degraded attempt — whose file
+                // is the prefix alone — it never pins at all.
+                for (u32 file_index = candidate.marginal ? quality_pin_count : 0; file_index < attempt_file_count; file_index += 1)
+                {
+                    u32 pin_register = attempt_file[file_index];
+                    if (assigned_counts[file_index] == BUSTER_ARRAY_LENGTH(assigned_starts[0]))
+                    {
+                        continue;
+                    }
+                    u32* prefix = machine_quality_foreclosure_prefix_ensure(foreclosure_prefix, &prefix_built_mask, foreclosed_masks,
+                                                                            function->instruction_count, pin_register);
+                    if (prefix[candidate.end + 1] != prefix[candidate.start])
+                    {
+                        continue;
+                    }
+                    bool overlaps = false;
+                    for (u32 span = 0; span < assigned_counts[file_index]; span += 1)
+                    {
+                        overlaps |= candidate.start <= assigned_ends[file_index][span] && assigned_starts[file_index][span] <= candidate.end;
+                    }
+                    for (u32 row_index = 0; row_index < excluded_row_counts[file_index]; row_index += 1)
+                    {
+                        overlaps |= candidate.start <= excluded_rows[file_index][row_index] && excluded_rows[file_index][row_index] <= candidate.end;
+                    }
+                    if (overlaps)
+                    {
+                        continue;
+                    }
+                    assigned_starts[file_index][assigned_counts[file_index]] = candidate.start;
+                    assigned_ends[file_index][assigned_counts[file_index]] = candidate.end;
+                    assigned_counts[file_index] += 1;
+                    pinned_registers[candidate.virtual_register] = pin_register;
+                    pinned_mask |= 1ull << pin_register;
+                    for (u32 instruction_index = candidate.start; instruction_index <= candidate.end; instruction_index += 1)
+                    {
+                        pin_depths[instruction_index] += 1;
+                    }
+                    assigned = true;
+                    break;
+                }
+            }
+            u32 candidate_slot = candidate_indices[candidate.virtual_register];
+            if (assigned || !allow_splits || !candidate_region_traffic || candidate_slot == UINT32_MAX)
             {
                 continue;
             }
-            // A marginal candidate starts past the callee-saved prefix:
-            // caller-saved registers only, so it costs no prologue save,
-            // and in the degraded attempt — whose file is the prefix
-            // alone — it never pins at all.
-            for (u32 file_index = candidate.marginal ? quality_pin_count : 0; file_index < attempt_file_count; file_index += 1)
+            // Split probe: the candidate could not be placed whole, so try
+            // pinning exactly one merged region of it — regions in
+            // descending order of the candidate's weighted traffic inside
+            // them, each gated on modeled improvement for this candidate
+            // alone: the weighted traffic the sub-span removes must beat
+            // the boundary edits it adds (one install per entering edge,
+            // one store per landing pad when the value lives past the
+            // region, each priced by its own row's frequency through the
+            // same `instruction_weights` array the whole-placement
+            // economics use) plus the push/pop pair when the register
+            // would newly join the saved set, at the unweighted cost the
+            // prologue always prices at. A marginal candidate keeps its
+            // caller-saved-only restriction here too, for the reason
+            // candidacy imposed it.
+            u32 previous_traffic = UINT32_MAX;
+            u32 previous_region = UINT32_MAX;
+            while (!assigned)
             {
-                u32 pin_register = attempt_file[file_index];
-                if (assigned_counts[file_index] == BUSTER_ARRAY_LENGTH(assigned_starts[0]))
+                u32 best_region = UINT32_MAX;
+                u32 best_traffic = 0;
+                for (u32 region_index = 0; region_index < merged_span_count; region_index += 1)
                 {
-                    continue;
-                }
-                u32* prefix = foreclosure_prefix + (u64)pin_register * (function->instruction_count + 1);
-                if (!((prefix_built_mask >> pin_register) & 1u))
-                {
-                    prefix_built_mask |= 1u << pin_register;
-                    prefix[0] = 0;
-                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                    u32 traffic = candidate_region_traffic[(u64)candidate_slot * merged_span_count + region_index];
+                    if (!traffic || traffic > previous_traffic || (traffic == previous_traffic && region_index <= previous_region))
                     {
-                        prefix[instruction_index + 1] = prefix[instruction_index] + ((foreclosed_masks[instruction_index] >> pin_register) & 1u);
+                        continue;
+                    }
+                    if (traffic > best_traffic)
+                    {
+                        best_traffic = traffic;
+                        best_region = region_index;
                     }
                 }
-                if (prefix[candidate.end + 1] != prefix[candidate.start])
+                if (best_region == UINT32_MAX)
+                {
+                    break;
+                }
+                previous_traffic = best_traffic;
+                previous_region = best_region;
+                u32 region_start = (u32)(loop_spans[best_region] >> 32);
+                u32 region_end = (u32)loop_spans[best_region];
+                // The interval must begin before the region — the entry
+                // install needs a value to install — and cover it whole,
+                // which meeting it guarantees through the extension.
+                if (!region_ok[best_region] || candidate.start >= region_start || candidate.end < region_end)
                 {
                     continue;
                 }
-                bool overlaps = false;
-                for (u32 span = 0; span < assigned_counts[file_index]; span += 1)
-                {
-                    overlaps |= candidate.start <= assigned_ends[file_index][span] && assigned_starts[file_index][span] <= candidate.end;
-                }
-                if (overlaps)
+                // The prepass's raw last-use — never loop-extended — is
+                // exactly the question a split needs answered: does the
+                // value have a real occurrence past the region, obliging
+                // an exit store, as opposed to an interval end that is
+                // only loop-extension math.
+                bool lives_past = prepass.last_use[candidate.virtual_register] > region_end;
+                if (lives_past && !region_exit_ok[best_region])
                 {
                     continue;
                 }
-                assigned_starts[file_index][assigned_counts[file_index]] = candidate.start;
-                assigned_ends[file_index][assigned_counts[file_index]] = candidate.end;
-                assigned_counts[file_index] += 1;
-                pinned_registers[candidate.virtual_register] = pin_register;
-                pinned_mask |= 1ull << pin_register;
-                for (u32 instruction_index = candidate.start; instruction_index <= candidate.end; instruction_index += 1)
+                bool region_over_budget = false;
+                for (u32 instruction_index = region_start; instruction_index <= region_end && !region_over_budget; instruction_index += 1)
                 {
-                    pin_depths[instruction_index] += 1;
+                    region_over_budget = pin_depths[instruction_index] >= pin_budgets[instruction_index];
                 }
-                break;
+                if (region_over_budget)
+                {
+                    continue;
+                }
+                u32 entry_count = region_entry_counts[best_region];
+                u32 exit_count = lives_past ? region_exit_counts[best_region] : 0;
+                if (split_entry_count == MACHINE_QUALITY_SPLIT_ENTRY_LIMIT || split_store_count + exit_count > MACHINE_QUALITY_SPLIT_STORE_LIMIT)
+                {
+                    break;
+                }
+                u32 entry_weight = 0;
+                for (u32 entry_index = 0; entry_index < entry_count; entry_index += 1)
+                {
+                    entry_weight += instruction_weights[region_entry_rows[region_entry_offsets[best_region] + entry_index]];
+                }
+                u32 exit_weight = 0;
+                for (u32 successor_index = 0; successor_index < exit_count; successor_index += 1)
+                {
+                    u32 store_row = function->blocks[region_exit_blocks[region_exit_offsets[best_region] + successor_index]].first_instruction;
+                    exit_weight += instruction_weights[store_row];
+                }
+                for (u32 file_index = candidate.marginal ? quality_pin_count : 0; file_index < attempt_file_count; file_index += 1)
+                {
+                    u32 pin_register = attempt_file[file_index];
+                    if (assigned_counts[file_index] == BUSTER_ARRAY_LENGTH(assigned_starts[0]) ||
+                        excluded_row_counts[file_index] + entry_count + exit_count > MACHINE_QUALITY_EXCLUDED_ROW_LIMIT)
+                    {
+                        continue;
+                    }
+                    u32* prefix = machine_quality_foreclosure_prefix_ensure(foreclosure_prefix, &prefix_built_mask, foreclosed_masks,
+                                                                            function->instruction_count, pin_register);
+                    if (prefix[region_end + 1] != prefix[region_start])
+                    {
+                        continue;
+                    }
+                    bool conflicts = false;
+                    for (u32 span = 0; span < assigned_counts[file_index]; span += 1)
+                    {
+                        conflicts |= region_start <= assigned_ends[file_index][span] && assigned_starts[file_index][span] <= region_end;
+                        // The boundary rows write the register outside this
+                        // span, so no other span on it may cover them.
+                        for (u32 entry_index = 0; entry_index < entry_count; entry_index += 1)
+                        {
+                            u32 entry_row = region_entry_rows[region_entry_offsets[best_region] + entry_index];
+                            conflicts |= assigned_starts[file_index][span] <= entry_row && entry_row <= assigned_ends[file_index][span];
+                        }
+                        for (u32 successor_index = 0; successor_index < exit_count; successor_index += 1)
+                        {
+                            u32 store_row =
+                                function->blocks[region_exit_blocks[region_exit_offsets[best_region] + successor_index]].first_instruction;
+                            conflicts |= assigned_starts[file_index][span] <= store_row && store_row <= assigned_ends[file_index][span];
+                        }
+                    }
+                    for (u32 row_index = 0; row_index < excluded_row_counts[file_index]; row_index += 1)
+                    {
+                        conflicts |= region_start <= excluded_rows[file_index][row_index] && excluded_rows[file_index][row_index] <= region_end;
+                    }
+                    if (conflicts)
+                    {
+                        continue;
+                    }
+                    u32 prologue_cost = ((description->callee_saved_mask >> pin_register) & 1u) && !((baseline.callee_saved_mask >> pin_register) & 1u)
+                                            ? 2u
+                                            : 0u;
+                    if (best_traffic <= entry_weight + exit_weight + prologue_cost)
+                    {
+                        continue;
+                    }
+                    assigned_starts[file_index][assigned_counts[file_index]] = region_start;
+                    assigned_ends[file_index][assigned_counts[file_index]] = region_end;
+                    assigned_counts[file_index] += 1;
+                    pinned_registers[candidate.virtual_register] = pin_register;
+                    pinned_mask |= 1ull << pin_register;
+                    span_starts[candidate.virtual_register] = region_start;
+                    span_ends[candidate.virtual_register] = region_end;
+                    for (u32 instruction_index = region_start; instruction_index <= region_end; instruction_index += 1)
+                    {
+                        pin_depths[instruction_index] += 1;
+                    }
+                    split_entries[split_entry_count] = (MachinePinSplitEntry){
+                        .block = region_head_blocks[best_region],
+                        .virtual_register = candidate.virtual_register,
+                    };
+                    split_entry_count += 1;
+                    for (u32 entry_index = 0; entry_index < entry_count; entry_index += 1)
+                    {
+                        excluded_rows[file_index][excluded_row_counts[file_index]] = region_entry_rows[region_entry_offsets[best_region] + entry_index];
+                        excluded_row_counts[file_index] += 1;
+                    }
+                    for (u32 successor_index = 0; successor_index < exit_count; successor_index += 1)
+                    {
+                        u32 store_row = function->blocks[region_exit_blocks[region_exit_offsets[best_region] + successor_index]].first_instruction;
+                        excluded_rows[file_index][excluded_row_counts[file_index]] = store_row;
+                        excluded_row_counts[file_index] += 1;
+                        split_stores[split_store_count] = (MachinePinSplitStore){
+                            .row = store_row,
+                            .virtual_register = candidate.virtual_register,
+                        };
+                        split_store_count += 1;
+                    }
+                    assigned = true;
+                    break;
+                }
             }
         }
         if (!pinned_mask)
@@ -550,22 +1033,39 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
                 continue;
             }
             u64 pin_bit = 1ull << pinned_registers[register_index];
-            pin_entry_masks[interval_starts[register_index]] |= pin_bit;
-            for (u32 instruction_index = interval_starts[register_index]; instruction_index <= interval_ends[register_index]; instruction_index += 1)
+            pin_entry_masks[span_starts[register_index]] |= pin_bit;
+            for (u32 instruction_index = span_starts[register_index]; instruction_index <= span_ends[register_index]; instruction_index += 1)
             {
                 pin_active_masks[instruction_index] |= pin_bit;
             }
         }
-        MachineStackPlacement placement = machine_fast_placement_build_prepassed(arena, function, &prepass, pinned_registers, pinned_mask, pin_active_masks);
+        // The scan drains the stores through one row cursor.
+        for (u32 store_index = 1; store_index < split_store_count; store_index += 1)
+        {
+            MachinePinSplitStore moved = split_stores[store_index];
+            u32 store_slot = store_index;
+            while (store_slot && split_stores[store_slot - 1].row > moved.row)
+            {
+                split_stores[store_slot] = split_stores[store_slot - 1];
+                store_slot -= 1;
+            }
+            split_stores[store_slot] = moved;
+        }
+        MachineStackPlacement placement = machine_fast_placement_build_prepassed(arena, function, &prepass, pinned_registers, pinned_mask,
+                                                                                  pin_active_masks, span_starts, span_ends, split_entries,
+                                                                                  split_entry_count, split_stores, split_store_count);
         // Accept only on modeled improvement, in the same weighted units
         // the candidacy used: both placements' spill and reload edits are
         // priced by the frequency class of the block they land in, so a
         // placement that moves traffic out of a loop and into the entry
         // path wins even at an equal count, and one that does the reverse
-        // is rejected. The prologue push/pop pair each newly reserved
-        // callee-saved register costs executes once per call and stays at
-        // weight one — a caller-saved pin costs no prologue — and a pin
-        // also raises local pressure, which can add traffic elsewhere.
+        // is rejected — which is exactly what a split's landing-pad
+        // stores and entry installs need, priced at their own row's
+        // frequency with no special-casing. The prologue push/pop pair
+        // each newly reserved callee-saved register costs executes once
+        // per call and stays at weight one — a caller-saved pin costs no
+        // prologue — and a pin also raises local pressure, which can add
+        // traffic elsewhere.
         u32 baseline_saved_registers = 0;
         for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
         {
@@ -588,20 +1088,33 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         }
         if (!placement.valid || placement_traffic_total + added_prologue_cost >= baseline_traffic_total)
         {
-            if (!degradable)
+            if (attempt == 0 && split_entry_count)
             {
-                break;
+                // Retrying without splits is a genuinely different pack;
+                // the normal attempt increment explores it.
+                continue;
             }
-            continue;
+            // No splits fired this round, so a plain retry at attempt 1
+            // would repeat attempt 0 exactly — jump straight past it to
+            // the callee-saved-only attempt when that can still help.
+            if (degradable)
+            {
+                attempt = 1;
+                continue;
+            }
+            break;
         }
         // Pin verification. Within its span a pinned register belongs to
         // its value: no other value's operand may sit in it there, no
         // edit may name it as a target — except the spill that vacates it
-        // where the span opens — and no copy may read it as a source. The
-        // local scan has several paths that bypass its own register pool
-        // — copy coalescing was one — and a wrong pin is a silent
-        // miscompile, so the placement is checked rather than trusted,
-        // and a violation degrades like a rejection.
+        // where the span opens — and no copy may read it as a source. A
+        // split's boundary edits need no exception: its installs and
+        // landing-pad stores all sit at rows the excluded-row bookkeeping
+        // keeps outside every span of the register they touch. The local
+        // scan has several paths that bypass its own register pool — copy
+        // coalescing was one — and a wrong pin is a silent miscompile, so
+        // the placement is checked rather than trusted, and a violation
+        // degrades like a rejection.
         bool pins_hold = true;
         for (u32 instruction_index = 0; instruction_index < function->instruction_count && pins_hold; instruction_index += 1)
         {
@@ -627,24 +1140,31 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         for (u32 edit_index = 0; edit_index < placement.edit_count && pins_hold; edit_index += 1)
         {
             MachineEdit* edit = placement.edits + edit_index;
-            u64 active = pin_active_masks[machine_point_instruction(edit->point)];
-            bool vacating = edit->kind == MACHINE_EDIT_SPILL && ((pin_entry_masks[machine_point_instruction(edit->point)] >> edit->location) & 1u);
+            u32 edit_instruction = machine_point_instruction(edit->point);
+            u64 active = pin_active_masks[edit_instruction];
+            bool vacating = edit->kind == MACHINE_EDIT_SPILL && ((pin_entry_masks[edit_instruction] >> edit->location) & 1u);
             pins_hold &= !((active >> edit->location) & 1u) || vacating;
             pins_hold &= edit->kind != MACHINE_EDIT_COPY || !((active >> edit->subject) & 1u);
         }
         if (!pins_hold)
         {
-            if (!degradable)
+            if (attempt == 0 && split_entry_count)
             {
-                break;
+                continue;
             }
-            continue;
+            if (degradable)
+            {
+                attempt = 1;
+                continue;
+            }
+            break;
         }
         placement.pinned_register_count = 0;
         for (u32 register_index = 0; register_index < register_count; register_index += 1)
         {
             placement.pinned_register_count += pinned_registers[register_index] != UINT32_MAX;
         }
+        placement.split_register_count = split_entry_count;
         scratch_end(scratch);
         return placement;
     }

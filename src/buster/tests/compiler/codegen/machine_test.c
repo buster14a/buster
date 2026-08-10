@@ -524,7 +524,40 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "unsigned __int128 u128_ferry(unsigned __int128 v) { return u128_idem(v); }\n"
                                   "int call_seventeen(int a) { return printf(\"%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\",\n"
                                   "    a, a + 1, a + 2, a + 3, a + 4, a + 5, a + 6, a + 7, a + 8, a + 9, a + 10, a + 11, a + 12, a + 13, a + 14, a + 15); }\n");
-    String8 machine_c_source = string_format(arguments->arena, S8("{S8}{S8}"), machine_c_source_head, machine_c_source_tail);
+    // A third fixture segment: `machine_c_source_tail` is already at the
+    // C99 4095-byte string-literal limit, so new fixture text lands here
+    // instead of growing it further.
+    String8 machine_c_source_extra = S8(
+                                  // The live-range-splitting shape: twenty-four values live from before
+                                  // a call-free hot loop across a later call loop — past both
+                                  // targets' register files. The calls foreclose the
+                                  // caller-saved file over every whole interval and the
+                                  // callee-saved file cannot hold them all, so the only
+                                  // register residency left for the rest is a split to the
+                                  // first loop.
+                                  "static unsigned long sp_mix(unsigned long v) { v ^= v >> 31; v *= 0x9e3779b97f4a7c15UL; v ^= v >> 27; return v; }\n"
+                                  "unsigned long split_phase(unsigned long seed, unsigned long rounds) {\n"
+                                  "    unsigned long k0 = seed + 1; unsigned long k1 = seed + 2; unsigned long k2 = seed + 3; unsigned long k3 = seed + 4;\n"
+                                  "    unsigned long k4 = seed + 5; unsigned long k5 = seed + 6; unsigned long k6 = seed + 7; unsigned long k7 = seed + 8;\n"
+                                  "    unsigned long k8 = seed + 9; unsigned long k9 = seed + 10; unsigned long k10 = seed + 11; unsigned long k11 = seed + 12;\n"
+                                  "    unsigned long k12 = seed + 13; unsigned long k13 = seed + 14; unsigned long k14 = seed + 15; unsigned long k15 = seed + 16;\n"
+                                  "    unsigned long k16 = seed + 17; unsigned long k17 = seed + 18; unsigned long k18 = seed + 19; unsigned long k19 = seed + 20;\n"
+                                  "    unsigned long k20 = seed + 21; unsigned long k21 = seed + 22; unsigned long k22 = seed + 23; unsigned long k23 = seed + 24;\n"
+                                  "    unsigned long acc = seed;\n"
+                                  "    for (unsigned long round = 0; round < rounds; round += 1) {\n"
+                                  "        acc += k0 ^ (acc << 1); acc += k1 ^ (acc << 2); acc += k2 ^ (acc << 3); acc += k3 ^ (acc << 4);\n"
+                                  "        acc += k4 ^ (acc << 5); acc += k5 ^ (acc << 6); acc += k6 ^ (acc << 7); acc += k7 ^ (acc << 1);\n"
+                                  "        acc += k8 ^ (acc << 2); acc += k9 ^ (acc << 3); acc += k10 ^ (acc << 4); acc += k11 ^ (acc << 5);\n"
+                                  "        acc += k12 ^ (acc << 6); acc += k13 ^ (acc << 7); acc += k14 ^ (acc << 1); acc += k15 ^ (acc << 2);\n"
+                                  "        acc += k16 ^ (acc << 3); acc += k17 ^ (acc << 4); acc += k18 ^ (acc << 5); acc += k19 ^ (acc << 6);\n"
+                                  "        acc += k20 ^ (acc << 7); acc += k21 ^ (acc << 1); acc += k22 ^ (acc << 2); acc += k23 ^ (acc << 3);\n"
+                                  "    }\n"
+                                  "    for (unsigned long round = 0; round < rounds; round += 1) { acc += sp_mix(acc ^ k0 ^ k23); }\n"
+                                  "    return acc ^ k1 ^ k2 ^ k3 ^ k4 ^ k5 ^ k6 ^ k7 ^ k8 ^ k9 ^ k10 ^ k11 ^ k12 ^ k13 ^ k14 ^ k15 ^ k16 ^ k17 ^ k18 ^ k19 ^\n"
+                                  "           k20 ^ k21 ^ k22;\n"
+                                  "}\n");
+    String8 machine_c_source =
+        string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra);
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
     BUSTER_TEST(arguments, machine_program != 0);
     if (machine_program && machine_program->module_count)
@@ -665,6 +698,29 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 BUSTER_TEST_RAW(arguments, lifted_selected.supported,
                                 string_format(arguments->arena, S8("select {S8} failed at opcode {u32}"), lifted_gap_names[lifted_index],
                                               (u32)lifted_selected.failed_opcode));
+            }
+        }
+        // Live-range splitting: split_phase must take at least one split — a value
+        // register-resident for the first loop only, installed on the
+        // entering edges and stored back at the landing pad — and the
+        // placement must survive the pin verifier, since a degraded
+        // placement reports zero splits. The traffic bound holds the
+        // whole-placement acceptance to its meaning.
+        IrFunction* split_function = machine_test_ir_function_find(machine_module, S8("split_phase"));
+        BUSTER_TEST(arguments, split_function != 0);
+        if (split_function)
+        {
+            MachineSelectResult split_selected = machine_select_canonical_function(arguments->arena, machine_program, split_function, machine_target);
+            BUSTER_TEST(arguments, split_selected.supported);
+            if (split_selected.supported)
+            {
+                MachineStackPlacement split_quality = machine_quality_placement_build(arguments->arena, &split_selected.function);
+                MachineStackPlacement split_fast = machine_fast_placement_build(arguments->arena, &split_selected.function);
+                BUSTER_TEST(arguments, split_quality.valid && split_fast.valid);
+                BUSTER_TEST_RAW(arguments, split_quality.split_register_count >= 1,
+                                string_format(arguments->arena, S8("split_phase splits {u32} pins {u32}"), split_quality.split_register_count,
+                                              split_quality.pinned_register_count));
+                BUSTER_TEST(arguments, split_quality.reload_count + split_quality.spill_count < split_fast.reload_count + split_fast.spill_count);
             }
         }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
@@ -923,6 +979,63 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             }
             BUSTER_TEST_RAW(arguments, module_equal, module_names[name_index]);
         }
+        // Splitting executing differential: the QUALITY module carries the
+        // split placement of split_phase — the entry installs, the span
+        // itself, and the landing-pad stores — against the canonical
+        // oracle, including a zero-round probe where the installs and
+        // stores run but neither loop body does.
+        CodegenModule quality_module = codegen_generate_canonical_module(arguments->arena, machine_program, machine_module, machine_target,
+                                                                         (CodegenModuleOptions){
+                                                                             .register_allocator = CODEGEN_REGISTER_ALLOCATOR_QUALITY,
+                                                                         });
+        BUSTER_TEST(arguments, quality_module.error == CODEGEN_ERROR_NONE);
+        for (u32 relocation_index = 0; relocation_index < quality_module.relocation_count; relocation_index += 1)
+        {
+            CodegenModuleRelocation* relocation = quality_module.relocations + relocation_index;
+            if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute)
+            {
+                continue;
+            }
+            for (u32 entry_index = 0; entry_index < quality_module.entry_count; entry_index += 1)
+            {
+                if (quality_module.entries[entry_index].symbol.value == relocation->symbol.value)
+                {
+                    u32 displacement = quality_module.entries[entry_index].offset - (relocation->offset + 4);
+                    memcpy(quality_module.code.pointer + relocation->offset, &displacement, sizeof(displacement));
+                    break;
+                }
+            }
+        }
+        CodegenExecutable quality_module_executable = codegen_make_executable((CodegenFunction){
+            .code = quality_module.code,
+        });
+        BUSTER_TEST(arguments, quality_module_executable.error == CODEGEN_ERROR_NONE);
+        u32 split_none_offset = machine_test_module_offset(&none_module, machine_module, S8("split_phase"));
+        u32 split_quality_offset = machine_test_module_offset(&quality_module, machine_module, S8("split_phase"));
+        BUSTER_TEST(arguments, split_none_offset != UINT32_MAX && split_quality_offset != UINT32_MAX);
+        if (none_module_executable.address && quality_module_executable.address && split_none_offset != UINT32_MAX &&
+            split_quality_offset != UINT32_MAX)
+        {
+            typedef u64 MachineTestSplitCall(u64, u64);
+            void* split_none_address = (u8*)none_module_executable.address + split_none_offset;
+            void* split_quality_address = (u8*)quality_module_executable.address + split_quality_offset;
+            MachineTestSplitCall* split_none_call = 0;
+            MachineTestSplitCall* split_quality_call = 0;
+            memcpy(&split_none_call, &split_none_address, sizeof(split_none_call));
+            memcpy(&split_quality_call, &split_quality_address, sizeof(split_quality_call));
+            u64 split_probes[][2] = {
+                {0x9e3779b97f4a7c15ull, 12}, {5, 7}, {0xffffffffffffffffull, 3}, {123456789, 0}, {0, 1},
+            };
+            for (u32 probe_index = 0; probe_index < BUSTER_ARRAY_LENGTH(split_probes); probe_index += 1)
+            {
+                u64 none_result = split_none_call(split_probes[probe_index][0], split_probes[probe_index][1]);
+                u64 quality_result = split_quality_call(split_probes[probe_index][0], split_probes[probe_index][1]);
+                BUSTER_TEST_RAW(arguments, none_result == quality_result,
+                                string_format(arguments->arena, S8("split_phase probe {u64} none {u64} quality {u64}"), split_probes[probe_index][1],
+                                              none_result, quality_result));
+            }
+        }
+        codegen_release_executable(quality_module_executable);
         // Float-signature shapes need typed callers: XMM scalars, mixed
         // integer/float argument sequences, all-float and mixed aggregates,
         // aggregate float returns, and machine-to-machine float calls.
@@ -1692,7 +1805,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 }
                 forced_pins[0] = MACHINE_A64_X27;
                 MachineStackPlacement a64_pinned_placement =
-                    machine_fast_placement_build_pinned(arguments->arena, &a64_pin_selected.function, forced_pins, 1u << MACHINE_A64_X27, 0);
+                    machine_fast_placement_build_pinned(arguments->arena, &a64_pin_selected.function, forced_pins, 1u << MACHINE_A64_X27, 0, 0, 0, 0, 0, 0, 0);
                 BUSTER_TEST(arguments, a64_pinned_placement.valid);
                 BUSTER_TEST(arguments, (a64_pinned_placement.callee_saved_mask >> MACHINE_A64_X27) & 1u);
                 MachineEncodeResult a64_pinned_encoded = machine_encode_aarch64(arguments->arena, &a64_pin_selected.function, &a64_pinned_placement);
@@ -1729,6 +1842,27 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     }
 #endif
                 }
+            }
+        }
+        // Splitting on the second target: the split machinery is
+        // target-parameterized and split_phase must select and place
+        // cleanly under the AArch64 file. No split can fire here yet —
+        // the AArch64 selector does not promote scalar locals the way
+        // stage 10i taught the x86-64 one, so the loop values stay
+        // frame-resident and QUALITY sees no candidates; when promotion
+        // reaches this selector, this block should tighten to the x86-64
+        // assertion.
+        IrFunction* a64_split_function = machine_test_ir_function_find(machine_a64_module, S8("split_phase"));
+        BUSTER_TEST(arguments, a64_split_function != 0);
+        if (a64_split_function)
+        {
+            MachineSelectResult a64_split_selected =
+                machine_select_canonical_function(arguments->arena, machine_a64_program, a64_split_function, machine_a64_target);
+            BUSTER_TEST(arguments, a64_split_selected.supported);
+            if (a64_split_selected.supported)
+            {
+                MachineStackPlacement a64_split_quality = machine_quality_placement_build(arguments->arena, &a64_split_selected.function);
+                BUSTER_TEST(arguments, a64_split_quality.valid);
             }
         }
         // Direct calls select into fixed-register argument copies plus a

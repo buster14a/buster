@@ -46,10 +46,21 @@ struct MachineFastState
     // Pinned registers, owned by the QUALITY pass and invisible to the
     // local scan. `pin_active_masks` holds one register mask per
     // instruction scoping each reservation to its value's live span; null
-    // means `pinned_mask` holds everywhere.
+    // means `pinned_mask` holds everywhere. The span arrays give each
+    // pinned value its own inclusive instruction range, and the split
+    // plans carry the boundary work for spans covering only part of a
+    // value's life: contract installs at each span's head block and
+    // landing-pad write-backs where a value lives past its span.
     u32 const* pinned_registers;
     u64 pinned_mask;
     u64 const* pin_active_masks;
+    u32 const* pin_span_starts;
+    u32 const* pin_span_ends;
+    MachinePinSplitEntry const* split_entries;
+    u32 split_entry_count;
+    MachinePinSplitStore const* split_stores;
+    u32 split_store_count;
+    u32 split_store_cursor;
     // The register indices the scan's loops walk. The unified file puts
     // the vector registers past the general ones, and a function with no
     // vector virtual registers can never own one, so its loops stop at
@@ -71,6 +82,21 @@ struct MachineFastState
 BUSTER_GLOBAL_LOCAL u64 machine_fast_pin_active(MachineFastState* state, u32 instruction_index)
 {
     return state->pin_active_masks ? state->pin_active_masks[instruction_index] : state->pinned_mask;
+}
+
+// True when the virtual register is pinned and its span covers the
+// instruction. A stage-8 span covers every occurrence of its value, so
+// each one resolves to the pinned register; a split span opens later or
+// closes earlier, and the value is an ordinary scan citizen at the
+// occurrences outside.
+BUSTER_GLOBAL_LOCAL bool machine_fast_pin_covers(MachineFastState* state, u32 virtual_register, u32 instruction_index)
+{
+    if (!state->pinned_registers || state->pinned_registers[virtual_register] == UINT32_MAX)
+    {
+        return false;
+    }
+    return !state->pin_span_starts ||
+           (state->pin_span_starts[virtual_register] <= instruction_index && instruction_index <= state->pin_span_ends[virtual_register]);
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_fast_owner_is_dead(MachineFastState* state, u32 physical_register)
@@ -202,14 +228,27 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
         }
         dirty[physical_register] = false;
     }
-    // Pass 2: place every contract value not already in its register.
+    // Pass 2: place every contract value not already in its register. An
+    // entry whose value's own pinned span covers this edge's source is
+    // already satisfied by the span invariant — the register carries the
+    // value there even though the scan's file does not track it — and
+    // installing it again would run once per iteration on a backward
+    // edge, which is exactly the traffic a split span exists to remove.
+    u32 source_instruction = machine_point_instruction(point);
     u64 pending = 0;
     for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
     {
-        if (contract_owner[contract_register] != UINT32_MAX && owner[contract_register] != contract_owner[contract_register])
+        u32 contract_value = contract_owner[contract_register];
+        if (contract_value == UINT32_MAX || owner[contract_register] == contract_value)
         {
-            pending |= 1ull << contract_register;
+            continue;
         }
+        if (state->pinned_registers && state->pinned_registers[contract_value] == contract_register &&
+            machine_fast_pin_covers(state, contract_value, source_instruction))
+        {
+            continue;
+        }
+        pending |= 1ull << contract_register;
     }
     while (pending)
     {
@@ -754,19 +793,31 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
 // `pinned_registers` holds a physical register per virtual register that
 // owns it, or UINT32_MAX; `pinned_mask` collects them; `pin_active_masks`
 // scopes each reservation to its value's span, or reserves `pinned_mask`
-// whole-function when null. The local scan never picks, binds, spills, or
-// reloads a pinned value: its operands simply name the register, and the
-// register rejoins the pool wherever no span covers the instruction. FAST
-// passes none of the three.
+// whole-function when null. Within its span the local scan never picks,
+// binds, spills, or reloads a pinned value: its operands simply name the
+// register, and the register rejoins the pool wherever no span covers the
+// instruction. The span arrays make that boundary per-value; a split
+// span's handoff arrives pre-validated in `split_entries` (the head-block
+// contract installs the value, so every entering edge conforms it into
+// the register while the backward edges the span covers are satisfied by
+// the span invariant) and `split_stores` (row-sorted landing-pad
+// write-backs for values living past their span). FAST passes none of
+// them.
 MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineFunction* function, u32 const* pinned_registers, u64 pinned_mask,
-                                                          u64 const* pin_active_masks)
+                                                          u64 const* pin_active_masks, u32 const* pin_span_starts, u32 const* pin_span_ends,
+                                                          MachinePinSplitEntry const* split_entries, u32 split_entry_count,
+                                                          MachinePinSplitStore const* split_stores, u32 split_store_count)
 {
     MachineFastPrepass prepass = machine_fast_prepass_build(arena, function);
-    return machine_fast_placement_build_prepassed(arena, function, &prepass, pinned_registers, pinned_mask, pin_active_masks);
+    return machine_fast_placement_build_prepassed(arena, function, &prepass, pinned_registers, pinned_mask, pin_active_masks, pin_span_starts,
+                                                  pin_span_ends, split_entries, split_entry_count, split_stores, split_store_count);
 }
 
 MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, MachineFunction* function, MachineFastPrepass const* prepass,
-                                                             u32 const* pinned_registers, u64 pinned_mask, u64 const* pin_active_masks)
+                                                             u32 const* pinned_registers, u64 pinned_mask, u64 const* pin_active_masks,
+                                                             u32 const* pin_span_starts, u32 const* pin_span_ends,
+                                                             MachinePinSplitEntry const* split_entries, u32 split_entry_count,
+                                                             MachinePinSplitStore const* split_stores, u32 split_store_count)
 {
     // Frame layout is shared with the stack placement for now; slot
     // elimination is the stage-6 optimization.
@@ -803,6 +854,12 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         .pinned_registers = pinned_registers,
         .pinned_mask = pinned_mask,
         .pin_active_masks = pin_active_masks,
+        .pin_span_starts = pin_span_starts,
+        .pin_span_ends = pin_span_ends,
+        .split_entries = split_entries,
+        .split_entry_count = split_entry_count,
+        .split_stores = split_stores,
+        .split_store_count = split_store_count,
         .active_register_count = prepass->active_register_count,
     };
     u32 const* predecessor_offsets = prepass->predecessor_offsets;
@@ -962,6 +1019,36 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 }
             }
         }
+        // Split spans opening at this block force their value into the
+        // contract: every entering edge then installs it into the pinned
+        // register through the ordinary conform below, and the backward
+        // edges the span covers satisfy the entry through the conform's
+        // span-invariant skip. Any other contract entry carrying the
+        // value goes — a second register holding a copy the span's writes
+        // would silently stale is exactly the hazard the pin verifier
+        // exists for. The entry promises dirty: the value's slot is
+        // refreshed by its landing-pad stores when it lives past the
+        // span, and nothing reads it when it does not, so a dirty
+        // delivery pays no entry store.
+        for (u32 split_index = 0; split_index < state.split_entry_count; split_index += 1)
+        {
+            if (state.split_entries[split_index].block != block_index)
+            {
+                continue;
+            }
+            u32 split_value = state.split_entries[split_index].virtual_register;
+            u32 split_register = state.pinned_registers[split_value];
+            for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
+            {
+                if (entry_owner[contract_register] == split_value)
+                {
+                    entry_owner[contract_register] = UINT32_MAX;
+                    entry_dirty[contract_register] = false;
+                }
+            }
+            entry_owner[split_register] = split_value;
+            entry_dirty[split_register] = true;
+        }
         // Conform every scanned predecessor edge to the contract just
         // fixed (the empty one for cold blocks and for blocks no scanned
         // edge reaches). The edits land retroactively at each source
@@ -1008,11 +1095,17 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // working set, and making it the preferred eviction victim would
         // have the body displace exactly what the back edge must then
         // restore, every iteration. Dead expression temporaries are still
-        // free victims through the eviction's dead-owner preference.
+        // free victims through the eviction's dead-owner preference. An
+        // entry naming a register a pinned span holds at this block's
+        // head is the span's own installed value: it lives outside the
+        // scan's file — the span invariant owns it — and loading it as a
+        // local owner would have the opening eviction store it back
+        // spuriously at a point every iteration passes.
+        u64 head_pin_active = block->instruction_count ? machine_fast_pin_active(&state, block->first_instruction) : 0;
         for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
         {
             u32 value = entry_owner[contract_register];
-            if (value != UINT32_MAX)
+            if (value != UINT32_MAX && !((head_pin_active >> contract_register) & 1u))
             {
                 state.owner[contract_register] = value;
                 state.dirty[contract_register] = entry_dirty[contract_register];
@@ -1031,6 +1124,26 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             }
             state.current_point = machine_point_make(instruction_index, MACHINE_POINT_BEFORE);
             state.uses_consumed = false;
+            // Split write-backs land at this row's head: the landing pad
+            // every path out of the split span passes, where the value's
+            // register still holds it. Emitted ahead of the row's own
+            // edits, so nothing at this point can have touched the
+            // register first, and the slot is current before any reload
+            // of the value the row itself places.
+            while (state.split_store_cursor < state.split_store_count && state.split_stores[state.split_store_cursor].row == instruction_index)
+            {
+                u32 stored_value = state.split_stores[state.split_store_cursor].virtual_register;
+                MachineEdit* store_edit = (MachineEdit*)machine_stream_append(state.arena, state.edits);
+                *store_edit = (MachineEdit){
+                    .point = state.current_point,
+                    .kind = MACHINE_EDIT_SPILL,
+                    .subject = stored_value,
+                    .location = state.pinned_registers[stored_value],
+                };
+                placement.spill_count += 1;
+                placement.boundary_spill_count += 1;
+                state.split_store_cursor += 1;
+            }
             // A register entering a pinned span belongs to its value from
             // here, so any local owner leaves first. At a block head the
             // contract construction already refused these registers, so
@@ -1093,7 +1206,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 {
                     continue;
                 }
-                if (state.pinned_registers && state.pinned_registers[machine_ref_payload(ref)] != UINT32_MAX)
+                if (machine_fast_pin_covers(&state, machine_ref_payload(ref), instruction_index))
                 {
                     operand_registers[slot] = (u8)state.pinned_registers[machine_ref_payload(ref)];
                     continue;
@@ -1165,7 +1278,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 {
                     continue;
                 }
-                if (state.pinned_registers && state.pinned_registers[machine_ref_payload(ref)] != UINT32_MAX)
+                if (machine_fast_pin_covers(&state, machine_ref_payload(ref), instruction_index))
                 {
                     operand_registers[slot] = (u8)state.pinned_registers[machine_ref_payload(ref)];
                     continue;
@@ -1395,5 +1508,5 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
 
 MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function)
 {
-    return machine_fast_placement_build_pinned(arena, function, 0, 0, 0);
+    return machine_fast_placement_build_pinned(arena, function, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 }

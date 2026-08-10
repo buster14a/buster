@@ -10607,6 +10607,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.statistics.allocator_boundary_spill_count += placement.boundary_spill_count;
                             result.statistics.allocator_rematerialize_count += placement.rematerialize_count;
                             result.statistics.allocator_pinned_register_count += placement.pinned_register_count;
+                            result.statistics.allocator_split_register_count += placement.split_register_count;
                         }
                     }
                     else if (encoded.valid && buffer.count + encoded.byte_count <= buffer.capacity)
@@ -10711,6 +10712,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.statistics.allocator_boundary_copy_count += placement.boundary_copy_count;
                             result.statistics.allocator_rematerialize_count += placement.rematerialize_count;
                             result.statistics.allocator_pinned_register_count += placement.pinned_register_count;
+                            result.statistics.allocator_split_register_count += placement.split_register_count;
                         }
                     }
                 }
@@ -17411,6 +17413,7 @@ BUSTER_GLOBAL_LOCAL void codegen_statistics_add(CodegenStatistics* destination, 
     destination->allocator_boundary_copy_count += source.allocator_boundary_copy_count;
     destination->allocator_rematerialize_count += source.allocator_rematerialize_count;
     destination->allocator_pinned_register_count += source.allocator_pinned_register_count;
+    destination->allocator_split_register_count += source.allocator_split_register_count;
     destination->allocator_scheduled_function_count += source.allocator_scheduled_function_count;
     destination->allocator_schedule_kept_count += source.allocator_schedule_kept_count;
 }

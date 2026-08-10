@@ -833,6 +833,9 @@ struct MachineStackPlacement
     u32 rematerialize_count;
     // Values QUALITY gave a register for their whole lifetime.
     u32 pinned_register_count;
+    // Subset of pinned_register_count whose reservation covers a split
+    // sub-span of the value's live range rather than the whole of it.
+    u32 split_register_count;
     // Subset of spill_count emitted at block boundaries — edge-contract
     // conformance today, the unconditional write-back before it — rather
     // than by eviction pressure: the two want different fixes.
@@ -989,14 +992,47 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Aren
 BUSTER_F_DECL MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function);
+
+// A split pin's handoff plan, built and validated by QUALITY. The entry
+// names the block whose contract installs the value into its pinned
+// register, so every edge entering the span conforms it there through the
+// ordinary edge machinery — and a backward edge, which the span itself
+// covers, installs nothing. A store names a landing-pad row — the head of
+// a block every path out of the span passes, whose predecessors all sit
+// inside the span and which no loop region contains — where the value
+// writes back to its slot while its register still holds it.
+typedef struct MachinePinSplitEntry MachinePinSplitEntry;
+struct MachinePinSplitEntry
+{
+    u32 block;
+    u32 virtual_register;
+};
+
+typedef struct MachinePinSplitStore MachinePinSplitStore;
+struct MachinePinSplitStore
+{
+    u32 row;
+    u32 virtual_register;
+};
+
 // The FAST scan with explicit pins: `pinned_registers` holds a physical
 // register per virtual register or UINT32_MAX and `pinned_mask` collects
 // them. `pin_active_masks` — one register mask per instruction — scopes
 // each reservation to the span that wants it, so the local scan owns the
 // register everywhere outside; null reserves `pinned_mask` for the whole
-// function. QUALITY derives its pins through this.
+// function. `pin_span_starts`/`pin_span_ends` give each pinned value its
+// span as an inclusive instruction range; null means every span covers
+// every occurrence of its value, which is the stage-8 shape. A span that
+// covers only part of its value's live range is a split: the value is an
+// ordinary scan citizen outside the span, and the caller supplies the
+// boundary plan — `split_entries` (contract installs, one per split) and
+// `split_stores` (landing-pad write-backs for values living past their
+// span, sorted by row). QUALITY derives its pins through this.
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineFunction* function, u32 const* pinned_registers,
-                                                                        u64 pinned_mask, u64 const* pin_active_masks);
+                                                                        u64 pinned_mask, u64 const* pin_active_masks, u32 const* pin_span_starts,
+                                                                        u32 const* pin_span_ends, MachinePinSplitEntry const* split_entries,
+                                                                        u32 split_entry_count, MachinePinSplitStore const* split_stores,
+                                                                        u32 split_store_count);
 // Everything the FAST scan derives from the function alone, independent of
 // any pin set: rematerialization recipes, block adjacency and cold entries,
 // liveness (defining blocks, last uses, escapes), per-row next calls, the
@@ -1028,12 +1064,17 @@ struct MachineFastPrepass
     u8 reserved[3];
 };
 BUSTER_F_DECL MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* function);
-// The pinned scan against an already-built prepass of the same function.
+// The pinned scan against an already-built prepass of the same function,
+// same pin/span/split contract as `machine_fast_placement_build_pinned`.
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, MachineFunction* function, MachineFastPrepass const* prepass,
-                                                                           u32 const* pinned_registers, u64 pinned_mask, u64 const* pin_active_masks);
+                                                                           u32 const* pinned_registers, u64 pinned_mask, u64 const* pin_active_masks,
+                                                                           u32 const* pin_span_starts, u32 const* pin_span_ends,
+                                                                           MachinePinSplitEntry const* split_entries, u32 split_entry_count,
+                                                                           MachinePinSplitStore const* split_stores, u32 split_store_count);
 // QUALITY: a global pass pins the highest-weight non-overlapping live
-// intervals to callee-saved registers for their whole lifetime, then the
-// same local scan places everything else around them.
+// intervals to registers for their loop-extended live spans — split down
+// to one hot loop region when the whole interval cannot be placed — then
+// the same local scan places everything else around them.
 BUSTER_F_DECL MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
 BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);

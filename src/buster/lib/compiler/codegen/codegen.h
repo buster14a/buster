@@ -277,6 +277,7 @@ struct CodegenStatistics
     u64 allocator_boundary_copy_count;
     u64 allocator_rematerialize_count;
     u64 allocator_pinned_register_count;
+    u64 allocator_split_register_count;
     // Stage-9 scheduling: functions where the pass moved at least one row,
     // and the subset whose scheduled placement modeled cheaper and shipped.
     u64 allocator_scheduled_function_count;
