@@ -12,6 +12,126 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-10m` (Linux x86_64, Zen 4 7940HS; instruction selection — the
+compare/branch fusion `2026-08-10j` recorded as its top selection lead,
+on both machine targets. Developed concurrently with `2026-08-10k`
+(shortest-form immediates, PR 254) and `2026-08-10l` (pin economics,
+PR 256) against the same `bbb319d` main, so every number below shares
+their baseline and none of the three includes another's effect. **Pressure corpus (200 iterations of the three
+bodies at 2,000 rounds, executed instructions): FAST `98.53M` to
+`91.32M` (`-7.3%`), QUALITY `87.73M` to `82.12M` (`-6.4%`), clang -O2
+`47.54M`, so QUALITY's pressure gap closes from 1.85x to 1.73x.
+Buster-built stage comparison on a frozen current-main ide.c: FAST
+`49.017G` to `39.560G` (`-19.3%`), QUALITY `48.337G` to `38.885G`
+(`-19.6%`), against same-session reference stages that reproduce
+`2026-08-10j`'s numbers within 0.2% (the +0.09G systematic offset is
+the absolute-path invocation, identical on both sides). Text
+13,653,610 to 12,544,794 FAST (`-8.1%`), 13,428,186 to 12,328,170
+QUALITY (`-8.2%`). Repeat band ~2 instructions on the corpus, ~6 K on
+the stages.**)
+
+- **What the ladder was.** A C loop head lowers its controlling
+  expression as compare → widen → `(!= 0)` → BRANCH_IF, and every link
+  materialized: CMP + SETCC (whose encoding carries its own MOVZX), a
+  MOVZX widening cast, a 10-byte movabs zero, a second CMP, a second
+  SETCC, then TEST + JNE at the branch — ten instructions per loop
+  iteration where clang emits cmp+jcc. The fix is selection-only: when
+  every member of that chain has exactly one use and sits in the
+  branch's own block, the branch re-selects the innermost comparison
+  as CMP (x86-64) or CMP (AArch64) immediately before JCC/BCC, and the
+  members select into nothing. A chain that bottoms out in something
+  that is not a comparison keeps a residual truthiness test — TEST on
+  x86-64, the CMP_ZERO row AArch64 already branched through — so
+  `if (ptr)` and `while (n)` fuse too, and the movabs zero dies with
+  the compare that read it.
+- **The walk is an invariant, not a pattern.** The marking pass keeps
+  "branch outcome equals truthy(chain value) xor negate" through
+  `(!= 0)`/`(== 0)` against a literal zero (the zero may hide behind
+  one widening cast — extending zero is zero), truthiness-preserving
+  zero/sign extensions, and BOOLEAN_NOT, absorbing each member;
+  an integer comparison that is none of those terminates the walk as
+  the fused CMP with its condition xor'd by negate (both targets'
+  condition codes pair as exact complements, so negation is `cc ^ 1`),
+  and anything else terminates as the truthiness test. Types stay
+  integer-class scalars throughout: float compares keep their FCMP_SET
+  materialization and feed the chain only as its bool. The 64-bit
+  truthiness test is exact because sub-64-bit values sit extended with
+  clean upper bits — the same invariant the old TEST-on-the-condition
+  already leaned on.
+- **Flag safety is by construction, verified against every edit form.**
+  The fused compare is the row immediately before the terminator, so
+  only allocator edits can land between the FLAGS_DEFINE and its
+  FLAGS_USE (the machine.c attributes already stated the contract;
+  nothing consumed them). Every edit form is a flag-preserving move on
+  both targets: frame load/store movs, register-copy movs, and movabs
+  rematerialization on x86-64; ldr/str, orr copies, and movz/movk
+  rematerialization on AArch64. The disassembly shows the shape
+  working: a spill mov sits between `cmp` and `jb` in the fused
+  wide_live_loop head, exactly the allowed intruder.
+- **Sinking the reads is the one soundness obligation.** The fused
+  compare reads its operands at the branch row instead of the
+  member's, and on x86-64 promoted locals are the one source of
+  multi-definition vregs: a store between the compare and the branch
+  would redefine what the sunk read sees. The marking walk stamps
+  every promoted local's latest store ordinal and the commit rejects
+  any fusion whose read (through the load-alias root) was re-stored
+  past the deepest absorbed member. Cross-block stores need no check
+  for the same reason load aliasing is sound — a jump re-enters at a
+  block head, above the compare, never between it and the branch. The
+  AArch64 selector has no promotion, so every vreg is
+  single-definition and sinking is unconditionally safe.
+- **The stage win dwarfs the corpus win, and the traffic says why.**
+  The corpus is arithmetic-dense, so fusion trims only its loop heads
+  (`-6.4%` QUALITY); a compiler is comparison-dense — parsers,
+  kind-switch guards, bounds checks — and the frozen-stage comparison
+  drops `-19.3%`/`-19.6%`. Allocator traffic on the corpus is near
+  identical before and after (reloads 34/spills 53/pins 20 against
+  35/51/20): the win is rows that no longer exist, invisible to every
+  allocator statistic, which is why `2026-08-10j` could only see it in
+  the disassembly.
+- **Compile cost went down, not up.** The marking pass adds two linear
+  IR walks per function, and quality-mode compile cost on the frozen
+  workload still falls `8.628G` to `8.320G` (`-3.6%`), fast-mode
+  `7.241G` to `7.112G` (`-1.8%`): the absorbed members are rows the
+  allocator and encoder never see. Canonical NONE-mode cost is
+  untouched at `5.637G`, as it must be — the canonical emitter never
+  runs machine selection.
+- **What stays materialized, correctly.** Value-context bools (a
+  compare result stored, merged, or returned — main's epilogue chain
+  in the fixture), multi-use zeros, and loop-variable init zeros keep
+  their SETCC/movabs forms: fusion only fires where the single
+  consumer is the branch. The residual `movabs $0` sites in the fused
+  fixture are all inits or value-context, none are branch fuel.
+- **Gates, every commit:** test_all green (28,809 unit, 31 module),
+  self-host fixed point deterministic, all three soaks — MIR_STACK,
+  FAST, QUALITY — byte-identical against the freshly rebuilt stage-2
+  reference, `test_all_combinations_ci` green before the push (its
+  qemu fixture differentials are the AArch64 gate; the fused a64
+  fixture also runs clean under qemu locally, loop heads at
+  `cmp w0,w1; b.lo` and truthiness at `cmp x1,#0; b.ne`). The fused
+  stages' own canonical outputs are byte-identical to the reference
+  stages' outputs on the frozen workload — the differential the soak
+  structure exists to catch.
+- **Left untaken.** The movabs-immediates lead `2026-08-10j` named is
+  taken concurrently by `2026-08-10k` (PR 254), and the three pin
+  leads by `2026-08-10l` (PR 256) — measure any interaction on the
+  merged tree, not by adding these entries' numbers. New here:
+  compare-fed conditional *values* (selects/phis once block parameters
+  enter the subset) still materialize through SETCC, and the fused CMP
+  cannot yet fold an immediate operand — it reads two registers even
+  when one side is a constant, so `x < 16` still materializes the 16
+  (the shortest-form encoders shrink that materialization; a CMP_RI
+  row would remove it). Traffic priorities remain static counts with
+  `MachineBlock.frequency_class` unused, the frequency-blindness
+  `2026-08-10l` measures as the residual QUALITY gap.
+- Reference points for the next audit, frozen current-main ide.c as
+  the workload (same-session invocation, absolute paths): **FAST
+  `39.560G`**, **QUALITY `38.885G`**, canonical-mode compile cost
+  `5.637G`, quality-mode `8.320G`, fast-mode `7.112G`, text FAST
+  12,544,794 / QUALITY 12,328,170. Pressure corpus: **FAST `91.32M`**,
+  **QUALITY `82.12M`**, clang `47.54M`, allocator traffic reloads 34 /
+  spills 53 / pins 20.
+
 `2026-08-10j` (Linux x86_64, Zen 4 7940HS; register-allocator stage 8 —
 live-range-scoped pins, and the first QUALITY win under real register
 pressure. **Pressure corpus (200 iterations of the three bodies at 2,000
