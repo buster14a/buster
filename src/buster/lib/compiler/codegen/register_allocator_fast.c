@@ -534,6 +534,223 @@ BUSTER_GLOBAL_LOCAL void machine_fast_bind(MachineFastState* state, u32 virtual_
     state->placement->callee_saved_mask |= (1ull << target) & state->description->callee_saved_mask;
 }
 
+// The pin-independent half of the scan, computed once per function and read
+// by every scan of it. Two merged walks replace the former one-walk-per-fact
+// shape: the first collects everything a single forward pass can —
+// rematerialization recipes, predecessor counts, defining blocks, last
+// textual uses, whole-function touch intervals with their constrained
+// disqualifications, and the backward-edge tally — and the second, once
+// defining blocks and predecessor offsets are complete, fills the adjacency
+// list, marks cold entries, decides escapes, and records the backward-edge
+// spans. QUALITY reads the intervals and spans for its global layer and
+// hands the same prepass to both of its scan runs.
+MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* function)
+{
+    MachineFastPrepass prepass = {0};
+    MachineTargetDescription const* description = function->target;
+    u32 register_count = function->virtual_register_count;
+    prepass.rematerialize_immediates = arena_allocate(arena, u32, register_count ? register_count : 1);
+    prepass.definition_blocks = arena_allocate(arena, u32, register_count ? register_count : 1);
+    prepass.last_use = arena_allocate(arena, u32, register_count ? register_count : 1);
+    prepass.escapes = arena_allocate(arena, u8, register_count ? register_count : 1);
+    prepass.next_call = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
+    prepass.interval_starts = arena_allocate(arena, u32, register_count ? register_count : 1);
+    prepass.interval_ends = arena_allocate(arena, u32, register_count ? register_count : 1);
+    prepass.disqualified = arena_allocate(arena, u8, register_count ? register_count : 1);
+    prepass.predecessor_offsets = arena_allocate(arena, u32, function->block_count + 1);
+    prepass.cold_blocks = arena_allocate(arena, u8, function->block_count ? function->block_count : 1);
+    if (!description)
+    {
+        return prepass;
+    }
+    u8* definition_seen = arena_allocate(arena, u8, register_count ? register_count : 1);
+    for (u32 register_index = 0; register_index < register_count; register_index += 1)
+    {
+        prepass.rematerialize_immediates[register_index] = UINT32_MAX;
+        prepass.definition_blocks[register_index] = UINT32_MAX;
+        prepass.last_use[register_index] = 0;
+        prepass.escapes[register_index] = 0;
+        prepass.interval_starts[register_index] = UINT32_MAX;
+        prepass.interval_ends[register_index] = 0;
+        prepass.disqualified[register_index] = 0;
+        definition_seen[register_index] = 0;
+    }
+    for (u32 block_index = 0; block_index <= function->block_count; block_index += 1)
+    {
+        prepass.predecessor_offsets[block_index] = 0;
+    }
+    u32 backward_edge_count = 0;
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        MachineBlock* block = function->blocks + block_index;
+        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
+        {
+            u32 instruction_index = block->first_instruction + offset;
+            MachineInstruction* instruction = function->instructions + instruction_index;
+            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+            if (!info)
+            {
+                return prepass;
+            }
+            bool constrained = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) != 0;
+            for (u32 slot = 0; slot < info->operand_count; slot += 1)
+            {
+                MachineRef ref = instruction->operands[slot];
+                MachineRefKind kind = machine_ref_kind(ref);
+                if (kind == MACHINE_REF_BLOCK)
+                {
+                    u32 successor = machine_ref_payload(ref);
+                    prepass.predecessor_offsets[successor + 1] += 1;
+                    backward_edge_count += successor <= block_index;
+                    continue;
+                }
+                if (kind != MACHINE_REF_VIRTUAL_REGISTER)
+                {
+                    continue;
+                }
+                u32 virtual_register = machine_ref_payload(ref);
+                prepass.interval_starts[virtual_register] = BUSTER_MIN(prepass.interval_starts[virtual_register], instruction_index);
+                prepass.interval_ends[virtual_register] = BUSTER_MAX(prepass.interval_ends[virtual_register], instruction_index);
+                prepass.disqualified[virtual_register] |= constrained ? 1u : 0u;
+                u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+                {
+                    if (prepass.definition_blocks[virtual_register] == UINT32_MAX)
+                    {
+                        prepass.definition_blocks[virtual_register] = block_index;
+                    }
+                    // Constant definitions are recreatable anywhere, so they
+                    // never pay for a store or a slot. A second definition of
+                    // the same value disables the recipe: which constant is
+                    // current would then depend on the path.
+                    bool constant_definition = instruction->opcode == description->constant_opcode && slot == 0 &&
+                                               machine_ref_kind(instruction->operands[1]) == MACHINE_REF_IMMEDIATE;
+                    prepass.rematerialize_immediates[virtual_register] =
+                        constant_definition && !definition_seen[virtual_register] ? machine_ref_payload(instruction->operands[1]) : UINT32_MAX;
+                    definition_seen[virtual_register] = 1;
+                }
+                if (role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+                {
+                    prepass.last_use[virtual_register] = BUSTER_MAX(prepass.last_use[virtual_register], instruction_index);
+                }
+            }
+        }
+    }
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        prepass.predecessor_offsets[block_index + 1] += prepass.predecessor_offsets[block_index];
+    }
+    u32 predecessor_total = prepass.predecessor_offsets[function->block_count];
+    prepass.predecessor_list = arena_allocate(arena, u32, predecessor_total ? predecessor_total : 1);
+    u32* predecessor_cursors = arena_allocate(arena, u32, function->block_count ? function->block_count : 1);
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        predecessor_cursors[block_index] = prepass.predecessor_offsets[block_index];
+        prepass.cold_blocks[block_index] = 0;
+    }
+    for (u32 case_index = 0; case_index < function->switch_case_count; case_index += 1)
+    {
+        prepass.cold_blocks[function->switch_cases[case_index].target_block] = 1;
+    }
+    prepass.loop_spans = arena_allocate(arena, u64, backward_edge_count ? backward_edge_count : 1);
+    // A block must start cold — the empty contract — when some future edge
+    // into it could not conform: a switch dispatch cannot host per-target
+    // repairs, and a two-target conditional whose successors both precede
+    // it has no later successor left to absorb repairs made for the other.
+    // Terminator shapes classify structurally by block-ref operand count,
+    // so the rules hold on any target; only the table dispatch needs its
+    // identity from the description. Escapes decide here too, now that the
+    // defining blocks are complete: layout order does not prove a def
+    // precedes its uses, so the first walk alone could not tell.
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        MachineBlock* block = function->blocks + block_index;
+        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
+        {
+            MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
+            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+            u32 target_references[BUSTER_ARRAY_LENGTH(instruction->operands)];
+            u32 target_reference_count = 0;
+            for (u32 slot = 0; slot < info->operand_count; slot += 1)
+            {
+                MachineRef ref = instruction->operands[slot];
+                MachineRefKind kind = machine_ref_kind(ref);
+                if (kind == MACHINE_REF_BLOCK)
+                {
+                    u32 successor = machine_ref_payload(ref);
+                    prepass.predecessor_list[predecessor_cursors[successor]++] = block_index;
+                    target_references[target_reference_count++] = successor;
+                    if (instruction->opcode == description->switch_opcode)
+                    {
+                        prepass.cold_blocks[successor] = 1;
+                    }
+                    if (successor <= block_index)
+                    {
+                        u32 loop_start = function->blocks[successor].first_instruction;
+                        u32 loop_end = block->first_instruction + block->instruction_count - 1;
+                        prepass.loop_spans[prepass.loop_span_count] = ((u64)loop_start << 32) | loop_end;
+                        prepass.loop_span_count += 1;
+                    }
+                }
+                else if (kind == MACHINE_REF_VIRTUAL_REGISTER)
+                {
+                    u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                    if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) &&
+                        prepass.definition_blocks[machine_ref_payload(ref)] != block_index)
+                    {
+                        prepass.escapes[machine_ref_payload(ref)] = 1;
+                    }
+                }
+            }
+            if (target_reference_count == 2 && target_references[0] <= block_index && target_references[1] <= block_index)
+            {
+                prepass.cold_blocks[target_references[0]] = 1;
+                prepass.cold_blocks[target_references[1]] = 1;
+            }
+        }
+    }
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        MachineBlock* block = function->blocks + block_index;
+        u32 upcoming_call = UINT32_MAX;
+        for (u32 offset = block->instruction_count; offset > 0; offset -= 1)
+        {
+            u32 instruction_index = block->first_instruction + offset - 1;
+            MachineOpcodeInfo const* call_info = machine_opcode_info(function->instructions[instruction_index].opcode);
+            if (call_info && (call_info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL))
+            {
+                upcoming_call = instruction_index;
+            }
+            prepass.next_call[instruction_index] = upcoming_call;
+        }
+    }
+    // A function with no vector virtual registers can never own a vector
+    // register, so its loops stop at the general file's end; the widened
+    // unified file would otherwise double every scan pass for the common
+    // all-scalar function.
+    prepass.active_register_count = description->register_count;
+    if (description->vector_allocatable_mask)
+    {
+        bool scan_has_vector = false;
+        for (u32 register_index = 0; register_index < register_count; register_index += 1)
+        {
+            scan_has_vector |= function->virtual_registers[register_index].register_class == MACHINE_REGISTER_CLASS_VECTOR;
+        }
+        if (!scan_has_vector)
+        {
+            u64 general_mask = description->allocatable_mask | description->callee_saved_mask;
+            u32 general_top = 0;
+            for (u32 bit_index = 0; bit_index < MACHINE_TARGET_REGISTER_LIMIT; bit_index += 1)
+            {
+                general_top = ((general_mask >> bit_index) & 1u) ? bit_index + 1 : general_top;
+            }
+            prepass.active_register_count = general_top;
+        }
+    }
+    prepass.valid = true;
+    return prepass;
+}
+
 // `pinned_registers` holds a physical register per virtual register that
 // owns it, or UINT32_MAX; `pinned_mask` collects them; `pin_active_masks`
 // scopes each reservation to its value's span, or reserves `pinned_mask`
@@ -544,6 +761,13 @@ BUSTER_GLOBAL_LOCAL void machine_fast_bind(MachineFastState* state, u32 virtual_
 MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineFunction* function, u32 const* pinned_registers, u64 pinned_mask,
                                                           u64 const* pin_active_masks)
 {
+    MachineFastPrepass prepass = machine_fast_prepass_build(arena, function);
+    return machine_fast_placement_build_prepassed(arena, function, &prepass, pinned_registers, pinned_mask, pin_active_masks);
+}
+
+MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, MachineFunction* function, MachineFastPrepass const* prepass,
+                                                             u32 const* pinned_registers, u64 pinned_mask, u64 const* pin_active_masks)
+{
     // Frame layout is shared with the stack placement for now; slot
     // elimination is the stage-6 optimization.
     MachineStackPlacement placement = {
@@ -553,6 +777,10 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
     };
     MachineTargetDescription const* description = function->target;
     if (!description)
+    {
+        return placement;
+    }
+    if (!prepass->valid)
     {
         return placement;
     }
@@ -568,151 +796,19 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
         .placement = &placement,
         .edits = &edits,
         .virtual_register_locations = arena_allocate(arena, u32, function->virtual_register_count),
-        .last_use = arena_allocate(arena, u32, function->virtual_register_count),
-        .escapes = arena_allocate(arena, u8, function->virtual_register_count),
-        .next_call = arena_allocate(arena, u32, function->instruction_count),
-        .rematerialize_immediates = arena_allocate(arena, u32, function->virtual_register_count),
+        .last_use = prepass->last_use,
+        .escapes = prepass->escapes,
+        .next_call = prepass->next_call,
+        .rematerialize_immediates = prepass->rematerialize_immediates,
         .pinned_registers = pinned_registers,
         .pinned_mask = pinned_mask,
         .pin_active_masks = pin_active_masks,
-        .active_register_count = description->register_count,
+        .active_register_count = prepass->active_register_count,
     };
-    // A function with no vector virtual registers can never own a vector
-    // register, so its loops stop at the general file's end; the widened
-    // unified file would otherwise double every scan pass for the common
-    // all-scalar function.
-    if (description->vector_allocatable_mask)
-    {
-        bool scan_has_vector = false;
-        for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
-        {
-            scan_has_vector |= function->virtual_registers[register_index].register_class == MACHINE_REGISTER_CLASS_VECTOR;
-        }
-        if (!scan_has_vector)
-        {
-            u64 general_mask = description->allocatable_mask | description->callee_saved_mask;
-            u32 general_top = 0;
-            for (u32 bit_index = 0; bit_index < MACHINE_TARGET_REGISTER_LIMIT; bit_index += 1)
-            {
-                general_top = ((general_mask >> bit_index) & 1u) ? bit_index + 1 : general_top;
-            }
-            state.active_register_count = general_top;
-        }
-    }
-    // Constant definitions are recreatable anywhere, so they never pay for
-    // a store or a slot. A second definition of the same value disables
-    // the recipe: which constant is current would then depend on the path.
-    u8* definition_seen = arena_allocate(arena, u8, function->virtual_register_count);
-    for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
-    {
-        state.rematerialize_immediates[register_index] = UINT32_MAX;
-        definition_seen[register_index] = 0;
-    }
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-    {
-        MachineInstruction* instruction = function->instructions + instruction_index;
-        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-        if (!info)
-        {
-            return placement;
-        }
-        for (u32 slot = 0; slot < info->operand_count; slot += 1)
-        {
-            MachineRef ref = instruction->operands[slot];
-            if (machine_ref_kind(ref) != MACHINE_REF_VIRTUAL_REGISTER)
-            {
-                continue;
-            }
-            u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-            if (role != MACHINE_OPERAND_ROLE_DEFINE && role != MACHINE_OPERAND_ROLE_USE_DEFINE)
-            {
-                continue;
-            }
-            u32 defined = machine_ref_payload(ref);
-            bool constant_definition = instruction->opcode == description->constant_opcode && slot == 0 &&
-                                       machine_ref_kind(instruction->operands[1]) == MACHINE_REF_IMMEDIATE;
-            state.rematerialize_immediates[defined] =
-                constant_definition && !definition_seen[defined] ? machine_ref_payload(instruction->operands[1]) : UINT32_MAX;
-            definition_seen[defined] = 1;
-        }
-    }
-    // Stage-5 edge contracts, static side. Predecessor adjacency comes from
-    // the block-ref operands (the selectors put block refs only on
-    // terminators); switch case-table edges are excluded because their
-    // targets are forced cold below and a switch edge is conformed inline
-    // at its own terminator, so its retroactive conform would be a no-op.
-    u32* predecessor_offsets = arena_allocate(arena, u32, function->block_count + 1);
-    for (u32 block_index = 0; block_index <= function->block_count; block_index += 1)
-    {
-        predecessor_offsets[block_index] = 0;
-    }
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-    {
-        MachineInstruction* instruction = function->instructions + instruction_index;
-        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-        for (u32 slot = 0; slot < info->operand_count; slot += 1)
-        {
-            if (machine_ref_kind(instruction->operands[slot]) == MACHINE_REF_BLOCK)
-            {
-                predecessor_offsets[machine_ref_payload(instruction->operands[slot]) + 1] += 1;
-            }
-        }
-    }
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        predecessor_offsets[block_index + 1] += predecessor_offsets[block_index];
-    }
-    u32* predecessor_list = arena_allocate(arena, u32, predecessor_offsets[function->block_count] ? predecessor_offsets[function->block_count] : 1);
-    u32* predecessor_cursors = arena_allocate(arena, u32, function->block_count);
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        predecessor_cursors[block_index] = predecessor_offsets[block_index];
-    }
-    // A block must start cold — the empty contract — when some future edge
-    // into it could not conform: a switch dispatch cannot host per-target
-    // repairs, and a two-target conditional whose successors both precede
-    // it has no later successor left to absorb repairs made for the other.
-    // Terminator shapes classify structurally by block-ref operand count,
-    // so the rules hold on any target; only the table dispatch needs its
-    // identity from the description.
-    u8* cold_blocks = arena_allocate(arena, u8, function->block_count);
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        cold_blocks[block_index] = 0;
-    }
-    for (u32 case_index = 0; case_index < function->switch_case_count; case_index += 1)
-    {
-        cold_blocks[function->switch_cases[case_index].target_block] = 1;
-    }
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        MachineBlock* block = function->blocks + block_index;
-        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
-        {
-            MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
-            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-            u32 target_references[BUSTER_ARRAY_LENGTH(instruction->operands)];
-            u32 target_reference_count = 0;
-            for (u32 slot = 0; slot < info->operand_count; slot += 1)
-            {
-                if (machine_ref_kind(instruction->operands[slot]) == MACHINE_REF_BLOCK)
-                {
-                    u32 successor = machine_ref_payload(instruction->operands[slot]);
-                    predecessor_list[predecessor_cursors[successor]++] = block_index;
-                    target_references[target_reference_count++] = successor;
-                    if (instruction->opcode == description->switch_opcode)
-                    {
-                        cold_blocks[successor] = 1;
-                    }
-                }
-            }
-            if (target_reference_count == 2 && target_references[0] <= block_index && target_references[1] <= block_index)
-            {
-                cold_blocks[target_references[0]] = 1;
-                cold_blocks[target_references[1]] = 1;
-            }
-        }
-    }
+    u32 const* predecessor_offsets = prepass->predecessor_offsets;
+    u32 const* predecessor_list = prepass->predecessor_list;
+    u8 const* cold_blocks = prepass->cold_blocks;
+    u32 const* definition_blocks = prepass->definition_blocks;
     // Contracts and per-edge snapshots, one register file per block. A
     // block's out state is recorded at its terminator after any inline
     // conforms, which is exactly what every one of its edges delivers; a
@@ -733,94 +829,9 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
     }
     MachineBuilderStream retro_edits;
     machine_stream_initialize(&retro_edits, sizeof(MachineEdit));
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        MachineBlock* block = function->blocks + block_index;
-        u32 upcoming_call = UINT32_MAX;
-        for (u32 offset = block->instruction_count; offset > 0; offset -= 1)
-        {
-            u32 instruction_index = block->first_instruction + offset - 1;
-            MachineOpcodeInfo const* call_info = machine_opcode_info(function->instructions[instruction_index].opcode);
-            if (call_info && (call_info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL))
-            {
-                upcoming_call = instruction_index;
-            }
-            state.next_call[instruction_index] = upcoming_call;
-        }
-    }
     for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
     {
         state.virtual_register_locations[register_index] = UINT32_MAX;
-        state.last_use[register_index] = 0;
-        state.escapes[register_index] = 0;
-    }
-    // Liveness pre-passes: defining blocks first (a def dominates its uses,
-    // but layout order does not prove it precedes them), then last textual
-    // uses and block escapes.
-    u32* definition_blocks = arena_allocate(arena, u32, function->virtual_register_count);
-    for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
-    {
-        definition_blocks[register_index] = UINT32_MAX;
-    }
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        MachineBlock* block = function->blocks + block_index;
-        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
-        {
-            u32 instruction_index = block->first_instruction + offset;
-            MachineInstruction* instruction = function->instructions + instruction_index;
-            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-            if (!info)
-            {
-                return placement;
-            }
-            for (u32 slot = 0; slot < info->operand_count; slot += 1)
-            {
-                MachineRef ref = instruction->operands[slot];
-                if (machine_ref_kind(ref) != MACHINE_REF_VIRTUAL_REGISTER)
-                {
-                    continue;
-                }
-                u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-                u32 virtual_register = machine_ref_payload(ref);
-                if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
-                {
-                    if (definition_blocks[virtual_register] == UINT32_MAX)
-                    {
-                        definition_blocks[virtual_register] = block_index;
-                    }
-                }
-                if (role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
-                {
-                    state.last_use[virtual_register] = BUSTER_MAX(state.last_use[virtual_register], instruction_index);
-                }
-            }
-        }
-    }
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        MachineBlock* block = function->blocks + block_index;
-        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
-        {
-            u32 instruction_index = block->first_instruction + offset;
-            MachineInstruction* instruction = function->instructions + instruction_index;
-            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-            for (u32 slot = 0; slot < info->operand_count; slot += 1)
-            {
-                MachineRef ref = instruction->operands[slot];
-                if (machine_ref_kind(ref) != MACHINE_REF_VIRTUAL_REGISTER)
-                {
-                    continue;
-                }
-                u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-                u32 virtual_register = machine_ref_payload(ref);
-                if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) &&
-                    definition_blocks[virtual_register] != block_index)
-                {
-                    state.escapes[virtual_register] = 1;
-                }
-            }
-        }
     }
     for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
     {

@@ -89,41 +89,20 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     {
         pinned_registers[register_index] = UINT32_MAX;
     }
-    u32* interval_starts = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
-    u32* interval_ends = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
-    u8* disqualified = arena_allocate(scratch.arena, u8, register_count ? register_count : 1);
-    for (u32 register_index = 0; register_index < register_count; register_index += 1)
+    // One prepass feeds this whole pass and both scan runs below: the touch
+    // intervals with their constrained-opcode disqualifications (a value
+    // touched by an opcode whose encoder pins its operands cannot hold an
+    // arbitrary register for its whole life), the raw backward-edge spans,
+    // and everything the local scan derives that no pin set changes.
+    MachineFastPrepass prepass = machine_fast_prepass_build(scratch.arena, function);
+    if (!prepass.valid)
     {
-        interval_starts[register_index] = UINT32_MAX;
-        interval_ends[register_index] = 0;
-        disqualified[register_index] = 0;
+        scratch_end(scratch);
+        return (MachineStackPlacement){0};
     }
-    // Interval pass. A value touched by an opcode whose encoder pins its
-    // operands cannot hold an arbitrary register for its whole life, so it
-    // is disqualified rather than special-cased.
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-    {
-        MachineInstruction* instruction = function->instructions + instruction_index;
-        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-        if (!info)
-        {
-            scratch_end(scratch);
-            return (MachineStackPlacement){0};
-        }
-        bool constrained = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) != 0;
-        for (u32 slot = 0; slot < info->operand_count; slot += 1)
-        {
-            MachineRef ref = instruction->operands[slot];
-            if (machine_ref_kind(ref) != MACHINE_REF_VIRTUAL_REGISTER)
-            {
-                continue;
-            }
-            u32 virtual_register = machine_ref_payload(ref);
-            interval_starts[virtual_register] = BUSTER_MIN(interval_starts[virtual_register], instruction_index);
-            interval_ends[virtual_register] = BUSTER_MAX(interval_ends[virtual_register], instruction_index);
-            disqualified[virtual_register] |= constrained ? 1u : 0u;
-        }
-    }
+    u32* interval_starts = prepass.interval_starts;
+    u32* interval_ends = prepass.interval_ends;
+    u8* disqualified = prepass.disqualified;
     // Loop extension: a backward edge can re-run everything between its
     // target and itself, so any interval meeting that span must cover the
     // whole span or two values alive in different iterations could share a
@@ -136,45 +115,9 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     // disjoint regions first, which makes one ascending pass exact: no
     // extension can reach past its own merged region into an earlier one,
     // so nothing cascades and nothing needs a second look.
-    u32 backward_edge_count = 0;
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        MachineBlock* block = function->blocks + block_index;
-        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
-        {
-            MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
-            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-            for (u32 slot = 0; slot < info->operand_count; slot += 1)
-            {
-                backward_edge_count += machine_ref_kind(instruction->operands[slot]) == MACHINE_REF_BLOCK &&
-                                       machine_ref_payload(instruction->operands[slot]) <= block_index;
-            }
-        }
-    }
-    u64* loop_spans = arena_allocate(scratch.arena, u64, backward_edge_count ? backward_edge_count : 1);
-    u64* loop_span_scratch = arena_allocate(scratch.arena, u64, backward_edge_count ? backward_edge_count : 1);
-    u32 loop_span_count = 0;
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        MachineBlock* block = function->blocks + block_index;
-        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
-        {
-            MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
-            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-            for (u32 slot = 0; slot < info->operand_count; slot += 1)
-            {
-                if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_BLOCK ||
-                    machine_ref_payload(instruction->operands[slot]) > block_index)
-                {
-                    continue;
-                }
-                u32 loop_start = function->blocks[machine_ref_payload(instruction->operands[slot])].first_instruction;
-                u32 loop_end = block->first_instruction + block->instruction_count - 1;
-                loop_spans[loop_span_count] = ((u64)loop_start << 32) | loop_end;
-                loop_span_count += 1;
-            }
-        }
-    }
+    u64* loop_spans = prepass.loop_spans;
+    u32 loop_span_count = prepass.loop_span_count;
+    u64* loop_span_scratch = arena_allocate(scratch.arena, u64, loop_span_count ? loop_span_count : 1);
     // Bottom-up stable merge sort by packed start, then the standard
     // overlap merge; touching spans merge too, since an interval ending
     // exactly where the next span starts meets both.
@@ -239,7 +182,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     // traffic it removes, which is exactly the edit count of that value,
     // and heuristics guessing at this were measurably worse than the
     // truth (2026-08-09ai).
-    MachineStackPlacement baseline = machine_fast_placement_build_pinned(arena, function, 0, 0, 0);
+    MachineStackPlacement baseline = machine_fast_placement_build_prepassed(arena, function, &prepass, 0, 0, 0);
     if (!baseline.valid)
     {
         scratch_end(scratch);
@@ -395,22 +338,13 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         u32 headroom = allocatable_count - foreclosed_count;
         pin_budgets[instruction_index] = (u8)(headroom > spare ? headroom - spare : 0);
     }
-    for (u32 physical_register = 0; physical_register < prefix_register_limit; physical_register += 1)
-    {
-        // Only allocatable registers can be probed through the pin file, so
-        // the reserved rows of the prefix table stay unwritten — and the
-        // vector tail sits past the table entirely.
-        if (!((description->allocatable_mask >> physical_register) & 1u))
-        {
-            continue;
-        }
-        u32* prefix = foreclosure_prefix + (u64)physical_register * (function->instruction_count + 1);
-        prefix[0] = 0;
-        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-        {
-            prefix[instruction_index + 1] = prefix[instruction_index] + ((foreclosed_masks[instruction_index] >> physical_register) & 1u);
-        }
-    }
+    // Prefix rows build lazily, on a register's first probe: the pin file is
+    // walked front-first and most functions place their pins within the
+    // callee-saved prefix, so eagerly summing all fourteen allocatable rows
+    // was mostly work nobody read — measured at a quarter of this pass's
+    // whole cost. Rows are pin-independent, so one build serves both
+    // attempts.
+    u32 prefix_built_mask = 0;
     MachineQualityInterval* heap_backup = arena_allocate(scratch.arena, MachineQualityInterval, heap_count);
     for (u32 backup_index = 0; backup_index < heap_count; backup_index += 1)
     {
@@ -477,7 +411,16 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
                 {
                     continue;
                 }
-                u32 const* prefix = foreclosure_prefix + (u64)pin_register * (function->instruction_count + 1);
+                u32* prefix = foreclosure_prefix + (u64)pin_register * (function->instruction_count + 1);
+                if (!((prefix_built_mask >> pin_register) & 1u))
+                {
+                    prefix_built_mask |= 1u << pin_register;
+                    prefix[0] = 0;
+                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                    {
+                        prefix[instruction_index + 1] = prefix[instruction_index] + ((foreclosed_masks[instruction_index] >> pin_register) & 1u);
+                    }
+                }
                 if (prefix[candidate.end + 1] != prefix[candidate.start])
                 {
                     continue;
@@ -534,7 +477,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
                 pin_active_masks[instruction_index] |= pin_bit;
             }
         }
-        MachineStackPlacement placement = machine_fast_placement_build_pinned(arena, function, pinned_registers, pinned_mask, pin_active_masks);
+        MachineStackPlacement placement = machine_fast_placement_build_prepassed(arena, function, &prepass, pinned_registers, pinned_mask, pin_active_masks);
         // Accept only on modeled improvement: the traffic removed has to
         // beat the push and pop each newly reserved callee-saved register
         // costs at entry — a caller-saved pin costs no prologue — and a

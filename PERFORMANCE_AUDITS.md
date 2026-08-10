@@ -12,6 +12,140 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-11h` (Linux x86_64, Zen 4 7940HS; where quality-mode compile cost
+goes, and the register-allocator plan's stage 12 settled. Developed
+against the stage-9+10 merged `b7ba8ea`; rebased twice as main moved
+underneath it — first onto `c81a974` (PRs 261/262, aggregate zero-fill and
+its payoff measurement), then onto `30aceb9` (PRs 263 ZMM0-31 widening /
+`11c`, 264 AArch64 promotion+AAPCS64 / `11a`, 265 vector span pins /
+`11e`, and the `11k` bench-figure correction) — **every number below is
+from the second rebase, the tree this entry actually ships on.**
+Baselines on the frozen `df11728` ide.c workload (same-session invocation,
+absolute paths, `perf stat` instructions:u, min of three): **canonical
+`5.7069G` / fast `7.2879G` / quality `9.5985G`** — this entry's own
+re-baseline on `30aceb9` (`11c`'s narrower-scope reference, taken at
+`079add9` before 264/265/`11k` landed, was canonical `5.8073G` / fast
+`7.3475G` / quality `9.5032G`; the two disagree because `11c` measured a
+different, now-superseded point on main, not because either is wrong).
+**After this entry's algorithmic trims: canonical `5.7069G` (flat, `-3.5K`
+within the run-to-run band), fast `7.1344G` (`-153.6M`, `-2.11%`), quality
+`8.7324G` (`-866.1M`, `-9.02%`), placements byte-identical in every mode —
+the compile outputs of the trimmed compiler `cmp` equal to the untrimmed
+`30aceb9` compiler's under none, fast, and quality on the frozen
+workload, and all three soaks hold.**)
+
+- **The profile, before anything moved** (perf record instructions:u at
+  fixed period 100003, leaf attribution symbolized per the AGENTS.md
+  recipe; quality mode, shares of the pre-trim `9.356G` measured at
+  `b7ba8ea`, ahead of the widening — the profile was not retaken after
+  263/264/265 since none of them touch the scan/quality-pass hot lines
+  this entry trims, only the register-file width they iterate over,
+  which the shares below are insensitive to at the row level):
+  `machine_fast_placement_build_pinned` **23.2% (`2.15G`)**,
+  `machine_quality_placement_build` self 6.0% (`0.56G`),
+  `machine_schedule_function` self 1.9% (`0.18G`),
+  `machine_fast_conform_edge` 1.0% (`0.10G`); selection/verify/encode
+  ~9% and flat against fast mode. The quality-minus-fast delta
+  (`2.131G`, `+29.5%` over fast) is 95% those first three rows: the scan
+  runs twice per function (baseline and pinned, call-site frames split
+  ~50/50), the quality pass's own walks re-derive what the scan already
+  knew, and the scheduler's kept candidates each pay a full second
+  quality placement. Line-level, the scan's cost was spread across five
+  pre-pass walks (rematerialization recipes, predecessor counts, cold
+  blocks, two liveness passes, next-call) plus the main scan — every one
+  a separate full decode of the operand stream — and 27% of the quality
+  pass's self cost was one line: the eager foreclosure prefix build
+  summing all fourteen allocatable rows.
+- **The stage-9 scheduling block decomposes as assumed, and the DAG was
+  never the story.** Its `+11.2%` is ~`0.18G` of pass self-cost (gates,
+  queue, demand updates — the never-profiled DAG build is a minor slice
+  of even that) and ~`0.76G` of second placements for the kept scheduled
+  functions, which the acceptance rule pays by design; the two excess
+  gates stay exactly as `2026-08-10n` measured them mandatory. Nothing
+  here was trimmed.
+- **Trim 1, one prepass instead of five walks, shared across every scan
+  of a function.** Everything the scan derives that no pin set changes —
+  rematerialization recipes, predecessor offsets/list, cold entries,
+  defining blocks, last uses, escapes, next-call indices, the
+  class-trimmed register-file width — now builds once in
+  `machine_fast_prepass_build` as two merged walks (facts a single
+  forward pass can collect, then the adjacency/escape/span walk that
+  needs completed defining blocks), and both of QUALITY's scan runs read
+  the same prepass; FAST builds it once inside the unchanged
+  `machine_fast_placement_build_pinned` wrapper and gets the walk merge
+  for free. The merge is byte-identity-safe by construction: every moved
+  accumulation is order-free (remat's last-write-wins is a function of
+  definition count alone; min/max/count/first-def-wins commute), and the
+  escapes rule keeps its two-phase shape because layout order does not
+  prove a def precedes its uses. Masks throughout are `u64` (the widened
+  unified file, `11c`) — `machine_fast_prepass_build`'s general-register
+  top-bit scan already used the widened type; the placement-build
+  wrapper and the prepassed entry point take `pinned_mask`/
+  `pin_active_masks` as `u64` to match.
+- **Trim 2, the prepass also feeds QUALITY's own front matter.** The
+  quality pass's interval walk (starts/ends/constrained
+  disqualification) and its two backward-edge walks (count, then span
+  collection) were the same operand decode again; the prepass now
+  carries `interval_starts`/`interval_ends`/`disqualified` and the raw
+  span array, and the quality pass starts at the sort/merge.
+- **Trim 3, foreclosure prefix rows build lazily on first probe.** The
+  pin file is walked front-first and most functions place their pins
+  within the callee-saved prefix, so eagerly summing all fourteen
+  allocatable rows was mostly work nobody read. Rows are pin-independent
+  and persist across both attempts; values are identical to the eager
+  build's, so probes and placements are unchanged. `11c` independently
+  scoped the prefix table's width to `prefix_register_limit` (the
+  highest allocatable general index, still fourteen on x86-64) rather
+  than the full widened file; the two changes compose directly — lazy
+  build over the narrower table.
+- **Stage 12's verdict: closed with no SIMD kernels, premise void.** The
+  plan assumed dense per-block liveness/interference bitsets would
+  dominate and specified host-dispatched scalar/AVX2/AVX-512 kernels for
+  the `new_in = use | (live_out & ~def)` chains. The shipped allocators
+  never built those structures — the scan's cross-block state is
+  per-block contracts over a ≤16-entry register file and the quality
+  layer's span legality is prefix counts — and the profile confirms
+  nothing dense-and-wide remains: after the trims the scan core is
+  14.6% of quality mode as an irregular serial state machine (LRU
+  picks, contract conforms, per-row operand decoding with data-dependent
+  branching), the prepass is 2.9% of linear decode, and the one loop
+  that ever matched the stage-12 shape — the fourteen-lane prefix sum —
+  is exactly what trim 3 removed rather than vectorized. A 512-bit
+  kernel has nothing to run on; the acceptance bar (whole-allocator Zen
+  5 win, Zen 4 break-even, bit-identical output) is unreachable when no
+  candidate loop is dense, so the stage closes as understood-and-
+  recorded rather than built. The nearest miss is recorded for
+  completeness: `machine_fast_conform_edge`'s kept-check compares a
+  resident value against the 14-entry contract row (~0.5% of quality
+  mode, one `vpcmpeqd` in shape) — too small to clear the
+  whole-allocator bar on any host.
+- **What stays, understood.** The dual scan per quality function is the
+  candidate-selection design (`2026-08-09ai`: measured traffic beats
+  every guessing heuristic) — the prepass halves its overhead without
+  touching the decision. The kept schedules' second placements are the
+  stage-7 acceptance currency. The main scan's remaining cost is the
+  allocation itself; its loops are the register file's width and carry
+  per-iteration side effects, so neither wider hardware nor a kernel
+  changes them. `frequency_class` remains unwritten and is a lever named
+  by prior entries, not this one.
+- **Gates, on the twice-rebased trimmed tree:** Release `test_all` green
+  (29,298 unit assertions, 33 modules), self-host fixed point
+  deterministic (`SELF_HOST deterministic bytes=32184608`), all three soaks — MIR_STACK, FAST,
+  QUALITY — byte-identical against the freshly rebuilt canonical stage-2
+  reference, and the frozen-workload compile outputs of the trimmed
+  compiler byte-identical to the untrimmed `30aceb9` compiler's in every
+  mode. `test_all_combinations_ci` green before the push.
+- Reference points for the next audit, frozen `df11728` ide.c as the
+  workload (same-session invocation, absolute paths): compile cost
+  **canonical `5.7069G` / fast `7.1344G` / quality
+  `8.7324G`**; allocator traffic on that workload reloads 51,705 /
+  spills 81,705 / remats 4,500 / pins 7,947 / scheduled 209 / kept 184
+  (unchanged by the trims by construction). Buster-built stage compiles
+  on this tree: FAST `40.6087G`, QUALITY `39.8348G` (current-tree
+  stages, frozen workload, min of three — the tree's own source grew
+  across the merges and this patch, so these sit beside, not against,
+  `11c`'s frozen-tree numbers).
+
 `2026-08-11k` (Linux x86_64, Zen 4 7940HS; correction record, no code
 change: the `2026-08-11` entry's sentence "its `bench` medians 1.58 ms IO /
 1.40 ms parse against canonical 0.9 ms" mislabels its comparison point —

@@ -971,6 +971,40 @@ BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, M
 // function. QUALITY derives its pins through this.
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineFunction* function, u32 const* pinned_registers,
                                                                         u64 pinned_mask, u64 const* pin_active_masks);
+// Everything the FAST scan derives from the function alone, independent of
+// any pin set: rematerialization recipes, block adjacency and cold entries,
+// liveness (defining blocks, last uses, escapes), per-row next calls, the
+// class-trimmed register-file width, and — for QUALITY's global layer —
+// whole-function touch intervals with their constrained-opcode
+// disqualifications and the raw backward-edge spans. Computed once and
+// shared across every scan of the same function: QUALITY's baseline and
+// pinned runs read one prepass instead of re-deriving it all per run.
+typedef struct MachineFastPrepass MachineFastPrepass;
+struct MachineFastPrepass
+{
+    u32* rematerialize_immediates;
+    u32* definition_blocks;
+    u32* last_use;
+    u8* escapes;
+    u32* next_call;
+    u32* predecessor_offsets;
+    u32* predecessor_list;
+    u8* cold_blocks;
+    u32* interval_starts;
+    u32* interval_ends;
+    u8* disqualified;
+    // Backward-edge spans packed (start << 32) | end in block walk order,
+    // unsorted; QUALITY sorts and merges its own copy.
+    u64* loop_spans;
+    u32 loop_span_count;
+    u32 active_register_count;
+    bool valid;
+    u8 reserved[3];
+};
+BUSTER_F_DECL MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* function);
+// The pinned scan against an already-built prepass of the same function.
+BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, MachineFunction* function, MachineFastPrepass const* prepass,
+                                                                           u32 const* pinned_registers, u64 pinned_mask, u64 const* pin_active_masks);
 // QUALITY: a global pass pins the highest-weight non-overlapping live
 // intervals to callee-saved registers for their whole lifetime, then the
 // same local scan places everything else around them.
