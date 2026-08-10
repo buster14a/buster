@@ -178,7 +178,11 @@ through `-mattr=+feature,-feature`, and x86 assembly dialect selection through
 spellings printed by `cpu_model_to_string_os`, such as `baseline`, `native`,
 `haswell`, `znver5`, and `apple-m4`; incompatible target/model pairs are
 diagnosed. `-v` reports the selected CPU, the sorted effective feature set,
-and maximum native vector width.
+and maximum native vector width. `-target`/`--target` strings are
+`arch[-vendor][-os][-environment]`: the vendor and environment components stay
+free-form, but a CPU model there is rejected in favor of `-march=`, and so is
+anything past the fourth component. Both used to be dropped silently, which
+left baseline code generation and no hint that the request was ignored.
 
 Ninja targets: `ide`, `test_all` (on Android packages/runs the APK, on iOS
 drives the simulator), `bench_all` (desktop only — runs `ide bench`),

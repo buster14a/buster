@@ -381,6 +381,21 @@ TargetParseResult target_parse_triple(String8 triple)
                 return result;
             }
         }
+        // No operating system spells itself like a CPU model, so testing the
+        // model names first costs nothing and keeps `-march=`-shaped mistakes
+        // out of the vendor and environment fields.
+        else if (cpu_model_from_string(component) != CPU_MODEL_ERROR)
+        {
+            result.invalid_component = component;
+            result.error = TARGET_PARSE_ERROR_CPU_MODEL;
+            return result;
+        }
+        else if (component_index >= TARGET_TRIPLE_COMPONENT_LIMIT)
+        {
+            result.invalid_component = component;
+            result.error = TARGET_PARSE_ERROR_EXCESS_COMPONENT;
+            return result;
+        }
         else if (target_component_equal(component, S8("android")) || target_component_starts_with(component, S8("android")))
         {
             if (!target_parse_version_suffix(component, S8("android").length, &result.target))

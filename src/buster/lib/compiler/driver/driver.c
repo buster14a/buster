@@ -103,6 +103,30 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_set_cpu_model(Arena* arena, CompilerDri
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_set_target(Arena* arena, CompilerDriverInvocation* invocation, String8 target_string)
+{
+    TargetParseResult parsed = target_parse_triple(target_string);
+    switch (parsed.error)
+    {
+    case TARGET_PARSE_ERROR_NONE:
+        invocation->target = parsed.target;
+        return true;
+    case TARGET_PARSE_ERROR_CPU_MODEL:
+        compiler_driver_argument_error(arena, invocation, S8("CPU model must be selected with -march=: {S8}"), parsed.invalid_component);
+        return false;
+    case TARGET_PARSE_ERROR_EXCESS_COMPONENT:
+        compiler_driver_argument_error(arena, invocation, S8("unsupported target component: {S8}"), parsed.invalid_component);
+        return false;
+    case TARGET_PARSE_ERROR_EMPTY:
+    case TARGET_PARSE_ERROR_ARCHITECTURE:
+    case TARGET_PARSE_ERROR_OPERATING_SYSTEM:
+    case TARGET_PARSE_ERROR_COUNT:
+        break;
+    }
+    compiler_driver_argument_error(arena, invocation, S8("unsupported target: {S8}"), target_string);
+    return false;
+}
+
 typedef struct CompilerDriverFeatureOverride CompilerDriverFeatureOverride;
 struct CompilerDriverFeatureOverride
 {
@@ -350,13 +374,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             else if (string_equal(argument, S8("-target")) || string_equal(argument, S8("--target")))
             {
-                TargetParseResult parsed = target_parse_triple(value);
-                if (parsed.error != TARGET_PARSE_ERROR_NONE)
+                if (!compiler_driver_set_target(arena, &invocation, value))
                 {
-                    compiler_driver_argument_error(arena, &invocation, S8("unsupported target: {S8}"), value);
                     return invocation;
                 }
-                invocation.target = parsed.target;
             }
             else if (string_equal(argument, S8("-march")) || string_equal(argument, S8("-mcpu")))
             {
@@ -397,13 +418,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         String8 value = compiler_driver_option_value(argument, S8("--target="));
         if (value.length)
         {
-            TargetParseResult parsed = target_parse_triple(value);
-            if (parsed.error != TARGET_PARSE_ERROR_NONE)
+            if (!compiler_driver_set_target(arena, &invocation, value))
             {
-                compiler_driver_argument_error(arena, &invocation, S8("unsupported target: {S8}"), value);
                 return invocation;
             }
-            invocation.target = parsed.target;
             continue;
         }
         value = compiler_driver_option_value(argument, S8("--sysroot="));

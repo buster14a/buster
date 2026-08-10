@@ -72,6 +72,32 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, bad_architecture.error == TARGET_PARSE_ERROR_ARCHITECTURE);
     TargetParseResult bad_operating_system = target_parse_triple(S8("x86_64-unknown-haiku"));
     BUSTER_TEST(arguments, bad_operating_system.error == TARGET_PARSE_ERROR_OPERATING_SYSTEM);
+    // A CPU model in a target string used to be dropped, leaving baseline code
+    // generation behind: reject it and keep `-march=` the one way to ask.
+    struct
+    {
+        String8 triple;
+        String8 invalid_component;
+        TargetParseError error;
+    } rejected_component_cases[] = {
+        {S8("x86_64-unknown-linux-gnu-znver4"), S8("znver4"), TARGET_PARSE_ERROR_CPU_MODEL},
+        {S8("x86_64-linux-gnu-znver4"), S8("znver4"), TARGET_PARSE_ERROR_CPU_MODEL},
+        {S8("x86_64-linux-baseline"), S8("baseline"), TARGET_PARSE_ERROR_CPU_MODEL},
+        {S8("arm64-apple-ios17.0-simulator-extra"), S8("extra"), TARGET_PARSE_ERROR_EXCESS_COMPONENT},
+        {S8("x86_64-unknown-linux-gnu-notacpu"), S8("notacpu"), TARGET_PARSE_ERROR_EXCESS_COMPONENT},
+        {S8("x86_64-unknown-linux-gnu-xxxx"), S8("xxxx"), TARGET_PARSE_ERROR_EXCESS_COMPONENT},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(rejected_component_cases); case_index += 1)
+    {
+        TargetParseResult rejected = target_parse_triple(rejected_component_cases[case_index].triple);
+        BUSTER_TEST(arguments, rejected.error == rejected_component_cases[case_index].error);
+        BUSTER_STRING_TEST(arguments, rejected.invalid_component, rejected_component_cases[case_index].invalid_component);
+    }
+    // The vendor and the environment stay free-form within the four components
+    // a target string has, and `native` keeps bypassing component parsing.
+    BUSTER_TEST(arguments, target_parse_triple(S8("x86_64-alpine-linux-musl")).error == TARGET_PARSE_ERROR_NONE);
+    BUSTER_TEST(arguments, target_parse_triple(S8("x86_64-w64-windows-gnu")).error == TARGET_PARSE_ERROR_NONE);
+    BUSTER_TEST(arguments, target_parse_triple(S8("native")).error == TARGET_PARSE_ERROR_NONE);
     BUSTER_TEST(arguments, cpu_model_from_string(S8("znver5")) == CPU_MODEL_AMD_ZEN_5);
     BUSTER_TEST(arguments, cpu_model_from_string(S8("apple-m4")) == CPU_MODEL_A64_APPLE_M4);
     BUSTER_TEST(arguments, cpu_model_from_string(S8("not-a-processor")) == CPU_MODEL_ERROR);

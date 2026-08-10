@@ -1061,6 +1061,37 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     };
     CompilerDriverInvocation invalid_invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_command_line));
     BUSTER_TEST(arguments, invalid_invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, invalid_invocation.diagnostic, S8("unsupported target: riscv64-unknown-linux-gnu"));
+    // A trailing component in a target string used to be dropped, so a CPU
+    // model asked for there left baseline code generation and a surprising
+    // CODEGEN_ERROR_UNSUPPORTED_ABI on the first wide vector argument.
+    String8 target_cpu_model_command_line[] = {
+        S8("-target"),
+        S8("x86_64-unknown-linux-gnu-znver4"),
+        S8("-c"),
+        S8("source.c"),
+    };
+    CompilerDriverInvocation target_cpu_model =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(target_cpu_model_command_line));
+    BUSTER_TEST(arguments, target_cpu_model.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, target_cpu_model.diagnostic, S8("CPU model must be selected with -march=: znver4"));
+    String8 target_excess_component_command_line[] = {
+        S8("--target=x86_64-unknown-linux-gnu-notacpu"),
+        S8("-c"),
+        S8("source.c"),
+    };
+    CompilerDriverInvocation target_excess_component =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(target_excess_component_command_line));
+    BUSTER_TEST(arguments, target_excess_component.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, target_excess_component.diagnostic, S8("unsupported target component: notacpu"));
+    // The spelling that works, and the wide vector registers it unlocks.
+    String8 target_march_command_line[] = {
+        S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-march=znver4"), S8("-c"), S8("source.c"),
+    };
+    CompilerDriverInvocation target_march = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(target_march_command_line));
+    BUSTER_TEST(arguments, target_march.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, target_march.target.cpu_model == CPU_MODEL_AMD_ZEN_4);
+    BUSTER_TEST(arguments, target_vector_register_size(target_march.target) == 64);
     String8 preprocess_command_line[] = {
         S8("-E"),
         S8("-DADDED=5"),

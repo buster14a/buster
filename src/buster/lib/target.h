@@ -376,12 +376,24 @@ struct TargetStringSplit
     String8 s[(u64)TARGET_STRING_COMPONENT_COUNT];
 };
 
+// A target string is `arch[-vendor][-os][-environment]`: the vendor and the
+// environment are free-form, so anything past the fourth component is not a
+// target string at all, and a CPU model never belongs in one — `-march=` owns
+// that. Both are diagnosed instead of dropped, because dropping them leaves
+// baseline code generation behind with no hint that the request was ignored.
+enum
+{
+    TARGET_TRIPLE_COMPONENT_LIMIT = 4,
+};
+
 typedef enum TargetParseError
 {
     TARGET_PARSE_ERROR_NONE,
     TARGET_PARSE_ERROR_EMPTY,
     TARGET_PARSE_ERROR_ARCHITECTURE,
     TARGET_PARSE_ERROR_OPERATING_SYSTEM,
+    TARGET_PARSE_ERROR_CPU_MODEL,
+    TARGET_PARSE_ERROR_EXCESS_COMPONENT,
     TARGET_PARSE_ERROR_COUNT,
 } TargetParseError;
 
