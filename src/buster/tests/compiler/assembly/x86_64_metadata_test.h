@@ -4,7 +4,6 @@
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #if !BUSTER_SINGLE_THREADED
 #include <buster/lib/os.h>
-#include <stdatomic.h>
 #endif
 
 #if BUSTER_INCLUDE_TESTS

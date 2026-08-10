@@ -412,14 +412,14 @@ enum
 typedef struct X86_64MetadataConcurrentLookupState X86_64MetadataConcurrentLookupState;
 struct X86_64MetadataConcurrentLookupState
 {
-    atomic_bool start;
-    atomic_bool failed;
+    AtomicU64 start;
+    AtomicU64 failed;
 };
 
 BUSTER_GLOBAL_LOCAL void x86_64_metadata_test_concurrent_lookup(void* argument)
 {
     X86_64MetadataConcurrentLookupState* state = (X86_64MetadataConcurrentLookupState*)argument;
-    while (!atomic_load_explicit(&state->start, memory_order_acquire))
+    while (!atomic_u64_add(&state->start, 0))
     {
     }
     for (u32 iteration = 0; iteration < 64; iteration += 1)
@@ -428,7 +428,7 @@ BUSTER_GLOBAL_LOCAL void x86_64_metadata_test_concurrent_lookup(void* argument)
         u32 form_id = 0;
         if (!range.count || !x86_64_metadata_test_candidate(range, 0, &form_id) || form_id >= buster_x86_metadata_form_count())
         {
-            atomic_store_explicit(&state->failed, true, memory_order_release);
+            atomic_u64_increment(&state->failed);
             return;
         }
     }
@@ -443,8 +443,6 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_lookup_stress(u32 reque
     // BUSTER_CHECK_SERIAL_INITIALIZATION rather than producing torn answers.
     buster_x86_metadata_prewarm();
     X86_64MetadataConcurrentLookupState state = {0};
-    atomic_init(&state.start, false);
-    atomic_init(&state.failed, false);
     OsThreadHandle* threads[X86_64_METADATA_TEST_MAX_THREAD_COUNT] = {0};
     u32 thread_count = 0;
     bool created = true;
@@ -462,9 +460,9 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_lookup_stress(u32 reque
         }
         thread_count += 1;
     }
-    atomic_store_explicit(&state.start, true, memory_order_release);
+    atomic_u64_increment(&state.start);
     for (u32 index = 0; index < thread_count; index += 1) created &= os_thread_join(threads[index]);
-    return created && thread_count == requested_thread_count && !atomic_load_explicit(&state.failed, memory_order_acquire);
+    return created && thread_count == requested_thread_count && !atomic_u64_add(&state.failed, 0);
 }
 #endif
 
