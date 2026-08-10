@@ -16482,13 +16482,20 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_fragments_merge(CodegenCanonicalParal
         debug_location_capacity_64 += fragment->debug_location_count;
     }
     if (function_code_size > UINT32_MAX || relocation_capacity_64 > UINT32_MAX || line_entry_capacity_64 > UINT32_MAX ||
-        debug_location_capacity_64 > UINT32_MAX || state->assembly_capacity > (UINT64_MAX - function_code_size - 64) / 4 ||
-        state->assembly_alignment_capacity > UINT64_MAX - function_code_size - state->assembly_capacity * 4 - 64)
+        debug_location_capacity_64 > UINT32_MAX || state->assembly_alignment_capacity > UINT64_MAX - function_code_size - 64)
     {
         result.error = CODEGEN_ERROR_CAPACITY;
         state->result = result;
         return;
     }
+    u64 code_capacity = function_code_size + state->assembly_alignment_capacity + 64;
+    if (state->assembly_capacity > (UINT64_MAX - code_capacity) / 4)
+    {
+        result.error = CODEGEN_ERROR_CAPACITY;
+        state->result = result;
+        return;
+    }
+    code_capacity += state->assembly_capacity * 4;
 
     u32 global_relocation_count = result.relocation_count;
     CodegenModuleRelocation* global_relocations = result.relocations;
@@ -16510,7 +16517,6 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_fragments_merge(CodegenCanonicalParal
         memcpy(result.relocations, global_relocations, sizeof(*result.relocations) * global_relocation_count);
     }
 
-    u64 code_capacity = function_code_size + state->assembly_capacity * 4 + state->assembly_alignment_capacity + 64;
     if (code_capacity > UINT32_MAX)
     {
         result.error = CODEGEN_ERROR_CAPACITY;
@@ -16830,7 +16836,13 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             return result;
         }
         assembly_capacity += module->assemblies[assembly_index].source.length;
-        assembly_alignment_capacity += codegen_global_assembly_alignment_padding(module->assemblies[assembly_index].source);
+        u64 alignment_padding = codegen_global_assembly_alignment_padding(module->assemblies[assembly_index].source);
+        if (alignment_padding > UINT64_MAX - assembly_alignment_capacity)
+        {
+            result.error = CODEGEN_ERROR_CAPACITY;
+            return result;
+        }
+        assembly_alignment_capacity += alignment_padding;
     }
     CodegenCanonicalFragment* fragments = arena_allocate(arena, CodegenCanonicalFragment, module->function_count);
     if (module->function_count)
