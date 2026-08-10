@@ -2551,6 +2551,7 @@ BUSTER_GLOBAL_LOCAL void self_host_report_throughput(Arena* arena, String8 stage
 
     if (has_bandwidth)
     {
+        string_print(S8("  elapsed:       {u64}.{u64:width=[0,6]} seconds\n"), run->elapsed_us / 1000000, run->elapsed_us % 1000000);
         string_print(S8("  bandwidth:     {S8} MB/s | {S8} LOC/s | {S8} SLOC/s\n"), self_host_mb_per_second(arena, metrics.bytes, run->elapsed_us),
                      self_host_units_per_second(arena, metrics.loc, run->elapsed_us), self_host_units_per_second(arena, metrics.sloc, run->elapsed_us));
     }

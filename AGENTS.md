@@ -313,9 +313,10 @@ enabled.
   table is populated lazily (see `map_entry` in `c.c`).
 - **The `SELF_HOST stage <1|2> throughput` block** is the division done: its
   `workload` row reports bytes, LOC, SLOC and tokens; its `bandwidth` row
-  reports MB/s, LOC/s and SLOC/s; and, where the platform exposes a hardware
-  counter, its `instructions` row reports the total and the per-byte, per-SLOC
-  and per-token ratios. These are the numbers to trend across commits, printed
+  reports MB/s, LOC/s and SLOC/s from the execution time shown immediately
+  above it; and, where the platform exposes a hardware counter, its
+  `instructions` row reports the total and the per-byte, per-SLOC and per-token
+  ratios. These are the numbers to trend across commits, printed
   by `self_host_compare_action` beside the `SELF_HOST deterministic` line. `-v`
   prints the `SOURCE` table for a human;
   `ide cc -fsource-metrics=<path>` writes the same measurement as
