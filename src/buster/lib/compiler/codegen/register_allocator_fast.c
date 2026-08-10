@@ -105,31 +105,242 @@ BUSTER_GLOBAL_LOCAL void machine_fast_flush(MachineFastState* state, u32 keep_ma
     }
 }
 
-// Block-boundary write-back: dirty live values reach their slots so every
-// successor sees consistent memory, but the register mappings survive for
-// a successor that inherits the state.
-BUSTER_GLOBAL_LOCAL void machine_fast_writeback(MachineFastState* state)
+// Stage-5 edge contracts. A block's contract is the register file it may
+// assume at entry: an owning virtual register and a dirtiness per physical
+// register, agreed once when the block is scanned and then satisfied by
+// every edge into it. An edge whose delivered state differs conforms — the
+// difference becomes edits at the source terminator's BEFORE point, so a
+// value stays in its register across the boundary instead of round-tripping
+// through its slot the way the old unconditional write-back forced.
+BUSTER_GLOBAL_LOCAL u32 const machine_fast_empty_contract_owner[MACHINE_TARGET_REGISTER_LIMIT] = {
+    UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+    UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+    UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+    UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+};
+BUSTER_GLOBAL_LOCAL bool const machine_fast_empty_contract_dirty[MACHINE_TARGET_REGISTER_LIMIT] = {0};
+
+BUSTER_GLOBAL_LOCAL void machine_fast_conform_append(MachineFastState* state, MachineBuilderStream* stream, MachinePoint point, u16 kind, u32 subject,
+                                                     u32 location)
 {
-    for (u32 physical_register = 0; physical_register < state->description->register_count; physical_register += 1)
+    MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, stream);
+    *edit = (MachineEdit){
+        .point = point,
+        .kind = kind,
+        .subject = subject,
+        .location = location,
+    };
+}
+
+// Rewrites one edge's delivered register file into the shape a successor's
+// contract promises. Values the contract leaves in memory write back (the
+// boundary spills the old write-back emitted for every boundary), and the
+// values it keeps in registers resolve as a parallel move set: a copy when
+// the value is already in a register, a rematerialization or reload when it
+// is not, and a spill through memory as the cycle breaker when every
+// remaining contract register still holds another pending value's only
+// dirty copy. `owner`/`dirty` are either the live scan state at a
+// terminator whose successor contract is already fixed (`locations`
+// alongside) or a recorded edge snapshot (locations null, conforming
+// retroactively while a later block chooses its contract). `allow_moves`
+// is false for a snapshot edge whose source has other successors: a copy
+// or reload there would also execute on paths that already consumed the
+// snapshot state, so such an edge is only ever asked for the universally
+// safe spills — the contract construction drops any entry the edge does
+// not already satisfy.
+BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, MachineBuilderStream* stream, MachinePoint point, u32* owner, bool* dirty,
+                                                   u32* locations, u32 const* contract_owner, bool const* contract_dirty, bool allow_moves)
+{
+    u32 register_count = state->description->register_count;
+    // Pass 1: write back what the contract sends home. Mappings survive —
+    // the successor ignores them, a layout successor that designates this
+    // edge still reuses the clean copies, and any register a contract value
+    // needs is reclaimed by the placement pass below. Values that never
+    // escape their block are dead at a boundary and rematerializable
+    // constants never store, exactly as the eviction path treats them.
+    for (u32 physical_register = 0; physical_register < register_count; physical_register += 1)
     {
-        if (state->owner[physical_register] == UINT32_MAX)
+        u32 resident = owner[physical_register];
+        if (resident == UINT32_MAX || !dirty[physical_register])
         {
             continue;
         }
-        if (state->dirty[physical_register] && state->rematerialize_immediates[state->owner[physical_register]] == UINT32_MAX &&
-            !machine_fast_owner_is_dead(state, physical_register))
+        bool kept = false;
+        for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
         {
-            MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, state->edits);
-            *edit = (MachineEdit){
-                .point = state->current_point,
-                .kind = MACHINE_EDIT_SPILL,
-                .subject = state->owner[physical_register],
-                .location = physical_register,
-            };
+            kept |= contract_owner[contract_register] == resident;
+        }
+        if (kept)
+        {
+            continue;
+        }
+        if (state->escapes[resident] && state->rematerialize_immediates[resident] == UINT32_MAX)
+        {
+            machine_fast_conform_append(state, stream, point, MACHINE_EDIT_SPILL, resident, physical_register);
             state->placement->spill_count += 1;
             state->placement->boundary_spill_count += 1;
         }
-        state->dirty[physical_register] = false;
+        dirty[physical_register] = false;
+    }
+    // Pass 2: place every contract value not already in its register.
+    u32 pending = 0;
+    for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
+    {
+        if (contract_owner[contract_register] != UINT32_MAX && owner[contract_register] != contract_owner[contract_register])
+        {
+            pending |= 1u << contract_register;
+        }
+    }
+    while (pending)
+    {
+        BUSTER_CHECK(allow_moves);
+        bool progressed = false;
+        for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
+        {
+            if (!((pending >> contract_register) & 1u))
+            {
+                continue;
+            }
+            u32 value = contract_owner[contract_register];
+            u32 resident = owner[contract_register];
+            if (resident != UINT32_MAX && resident != value && dirty[contract_register])
+            {
+                // The occupant blocks the claim only while it is another
+                // pending value's single dirty copy; a clean occupant
+                // reloads at its own turn, its slot current by the
+                // clean-implies-stored invariant.
+                bool resident_pending = false;
+                for (u32 other = 0; other < register_count; other += 1)
+                {
+                    resident_pending |= contract_owner[other] == resident && ((pending >> other) & 1u);
+                }
+                if (resident_pending)
+                {
+                    continue;
+                }
+            }
+            if (resident != UINT32_MAX && resident != value)
+            {
+                owner[contract_register] = UINT32_MAX;
+                if (locations)
+                {
+                    locations[resident] = UINT32_MAX;
+                }
+                dirty[contract_register] = false;
+            }
+            u32 source = UINT32_MAX;
+            if (locations)
+            {
+                source = locations[value];
+            }
+            else
+            {
+                for (u32 other = 0; other < register_count; other += 1)
+                {
+                    source = owner[other] == value ? other : source;
+                }
+            }
+            if (source != UINT32_MAX)
+            {
+                machine_fast_conform_append(state, stream, point, MACHINE_EDIT_COPY, source, contract_register);
+                state->placement->copy_count += 1;
+                state->placement->boundary_copy_count += 1;
+                dirty[contract_register] = dirty[source];
+                owner[source] = UINT32_MAX;
+                dirty[source] = false;
+            }
+            else if (state->rematerialize_immediates[value] != UINT32_MAX)
+            {
+                machine_fast_conform_append(state, stream, point, MACHINE_EDIT_REMATERIALIZE, state->rematerialize_immediates[value], contract_register);
+                state->placement->rematerialize_count += 1;
+                dirty[contract_register] = false;
+            }
+            else
+            {
+                machine_fast_conform_append(state, stream, point, MACHINE_EDIT_RELOAD, value, contract_register);
+                state->placement->reload_count += 1;
+                state->placement->boundary_reload_count += 1;
+                dirty[contract_register] = false;
+            }
+            owner[contract_register] = value;
+            if (locations)
+            {
+                locations[value] = contract_register;
+            }
+            pending &= ~(1u << contract_register);
+            progressed = true;
+        }
+        if (!progressed)
+        {
+            // Every remaining target holds another pending value's only
+            // dirty copy: a cycle. Break it through memory — write one
+            // occupant back and release it, and its own claim reloads it.
+            u32 broken = 0;
+            while (!((pending >> broken) & 1u))
+            {
+                broken += 1;
+            }
+            u32 resident = owner[broken];
+            machine_fast_conform_append(state, stream, point, MACHINE_EDIT_SPILL, resident, broken);
+            state->placement->spill_count += 1;
+            state->placement->boundary_spill_count += 1;
+            dirty[broken] = false;
+            owner[broken] = UINT32_MAX;
+            if (locations)
+            {
+                locations[resident] = UINT32_MAX;
+            }
+        }
+    }
+    // Pass 3: a delivery dirtier than the contract admits stores now — the
+    // successor believes the slot is current and would evict silently. A
+    // cleaner delivery than promised is free.
+    for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
+    {
+        u32 value = contract_owner[contract_register];
+        if (value != UINT32_MAX && owner[contract_register] == value && dirty[contract_register] && !contract_dirty[contract_register])
+        {
+            machine_fast_conform_append(state, stream, point, MACHINE_EDIT_SPILL, value, contract_register);
+            state->placement->spill_count += 1;
+            state->placement->boundary_spill_count += 1;
+            dirty[contract_register] = false;
+        }
+    }
+}
+
+// Retroactive edits target points the main stream has already passed, in
+// whatever order later contract constructions reached them; the encoder
+// walks one sorted cursor. Bottom-up stable merge sort — a single-successor
+// edge's repair sequence is a little program whose internal order is
+// meaning.
+BUSTER_GLOBAL_LOCAL void machine_fast_sort_edits(MachineEdit* edits, MachineEdit* scratch, u32 count)
+{
+    for (u32 width = 1; width < count; width *= 2)
+    {
+        for (u32 start = 0; start < count; start += 2 * width)
+        {
+            u32 middle = BUSTER_MIN(start + width, count);
+            u32 limit = BUSTER_MIN(start + 2 * width, count);
+            u32 left = start;
+            u32 right = middle;
+            u32 out = start;
+            while (left < middle && right < limit)
+            {
+                scratch[out++] = edits[right].point < edits[left].point ? edits[right++] : edits[left++];
+            }
+            while (left < middle)
+            {
+                scratch[out++] = edits[left++];
+            }
+            while (right < limit)
+            {
+                scratch[out++] = edits[right++];
+            }
+        }
+        for (u32 index = 0; index < count; index += 1)
+        {
+            edits[index] = scratch[index];
+        }
     }
 }
 
@@ -360,16 +571,53 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
             definition_seen[defined] = 1;
         }
     }
-    // Edge contract, straight-line form: a block whose only predecessor is
-    // its layout neighbor sees exactly the scan state the neighbor's
-    // write-back left behind, so it inherits the register file; every
-    // other block starts cold. Switch targets over-count conservatively.
-    u32* predecessor_counts = arena_allocate(arena, u32, function->block_count);
-    u32* single_predecessors = arena_allocate(arena, u32, function->block_count);
+    // Stage-5 edge contracts, static side. Predecessor adjacency comes from
+    // the block-ref operands (the selectors put block refs only on
+    // terminators); switch case-table edges are excluded because their
+    // targets are forced cold below and a switch edge is conformed inline
+    // at its own terminator, so its retroactive conform would be a no-op.
+    u32* predecessor_offsets = arena_allocate(arena, u32, function->block_count + 1);
+    for (u32 block_index = 0; block_index <= function->block_count; block_index += 1)
+    {
+        predecessor_offsets[block_index] = 0;
+    }
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        MachineInstruction* instruction = function->instructions + instruction_index;
+        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+        for (u32 slot = 0; slot < info->operand_count; slot += 1)
+        {
+            if (machine_ref_kind(instruction->operands[slot]) == MACHINE_REF_BLOCK)
+            {
+                predecessor_offsets[machine_ref_payload(instruction->operands[slot]) + 1] += 1;
+            }
+        }
+    }
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
-        predecessor_counts[block_index] = 0;
-        single_predecessors[block_index] = UINT32_MAX;
+        predecessor_offsets[block_index + 1] += predecessor_offsets[block_index];
+    }
+    u32* predecessor_list = arena_allocate(arena, u32, predecessor_offsets[function->block_count] ? predecessor_offsets[function->block_count] : 1);
+    u32* predecessor_cursors = arena_allocate(arena, u32, function->block_count);
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        predecessor_cursors[block_index] = predecessor_offsets[block_index];
+    }
+    // A block must start cold — the empty contract — when some future edge
+    // into it could not conform: a switch dispatch cannot host per-target
+    // repairs, and a two-target conditional whose successors both precede
+    // it has no later successor left to absorb repairs made for the other.
+    // Terminator shapes classify structurally by block-ref operand count,
+    // so the rules hold on any target; only the table dispatch needs its
+    // identity from the description.
+    u8* cold_blocks = arena_allocate(arena, u8, function->block_count);
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        cold_blocks[block_index] = 0;
+    }
+    for (u32 case_index = 0; case_index < function->switch_case_count; case_index += 1)
+    {
+        cold_blocks[function->switch_cases[case_index].target_block] = 1;
     }
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
@@ -378,21 +626,48 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
         {
             MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
             MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+            u32 target_references[BUSTER_ARRAY_LENGTH(instruction->operands)];
+            u32 target_reference_count = 0;
             for (u32 slot = 0; slot < info->operand_count; slot += 1)
             {
                 if (machine_ref_kind(instruction->operands[slot]) == MACHINE_REF_BLOCK)
                 {
                     u32 successor = machine_ref_payload(instruction->operands[slot]);
-                    predecessor_counts[successor] += 1;
-                    single_predecessors[successor] = block_index;
+                    predecessor_list[predecessor_cursors[successor]++] = block_index;
+                    target_references[target_reference_count++] = successor;
+                    if (instruction->opcode == description->switch_opcode)
+                    {
+                        cold_blocks[successor] = 1;
+                    }
                 }
+            }
+            if (target_reference_count == 2 && target_references[0] <= block_index && target_references[1] <= block_index)
+            {
+                cold_blocks[target_references[0]] = 1;
+                cold_blocks[target_references[1]] = 1;
             }
         }
     }
-    for (u32 case_index = 0; case_index < function->switch_case_count; case_index += 1)
+    // Contracts and per-edge snapshots, one register file per block. A
+    // block's out state is recorded at its terminator after any inline
+    // conforms, which is exactly what every one of its edges delivers; a
+    // later contract construction conforms the snapshot retroactively and
+    // its mutations persist, so two successors of one conditional never
+    // write the same value back twice.
+    u32 register_count = description->register_count;
+    u32* contract_owner = arena_allocate(arena, u32, (u64)function->block_count * register_count);
+    bool* contract_dirty = arena_allocate(arena, bool, (u64)function->block_count * register_count);
+    u32* out_owner = arena_allocate(arena, u32, (u64)function->block_count * register_count);
+    bool* out_dirty = arena_allocate(arena, bool, (u64)function->block_count * register_count);
+    for (u64 entry_index = 0; entry_index < (u64)function->block_count * register_count; entry_index += 1)
     {
-        predecessor_counts[function->switch_cases[case_index].target_block] += 2;
+        contract_owner[entry_index] = UINT32_MAX;
+        contract_dirty[entry_index] = false;
+        out_owner[entry_index] = UINT32_MAX;
+        out_dirty[entry_index] = false;
     }
+    MachineBuilderStream retro_edits;
+    machine_stream_initialize(&retro_edits, sizeof(MachineEdit));
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         MachineBlock* block = function->blocks + block_index;
@@ -489,18 +764,173 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         MachineBlock* block = function->blocks + block_index;
-        bool inherits = block_index > 0 && predecessor_counts[block_index] == 1 && single_predecessors[block_index] == block_index - 1;
-        if (!inherits)
+        u32* entry_owner = contract_owner + (u64)block_index * register_count;
+        bool* entry_dirty = contract_dirty + (u64)block_index * register_count;
+        // Contract construction. The designated predecessor — the layout
+        // neighbor when it is a real edge, else the first already-scanned
+        // one — donates its out state, filtered to values worth carrying: a
+        // value must escape its block (anything else is dead at a
+        // boundary), still be live here, and not be a rematerializable
+        // constant, which recreates anywhere for less than a register.
+        if (block_index > 0 && !cold_blocks[block_index])
         {
-            for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
+            u32 first_predecessor = predecessor_offsets[block_index];
+            u32 predecessor_limit = predecessor_offsets[block_index + 1];
+            u32 designated = UINT32_MAX;
+            bool has_unscanned_predecessor = false;
+            for (u32 predecessor_index = first_predecessor; predecessor_index < predecessor_limit; predecessor_index += 1)
             {
-                u32 owner = state.owner[physical_register];
-                if (owner != UINT32_MAX)
+                u32 predecessor = predecessor_list[predecessor_index];
+                if (predecessor >= block_index)
                 {
-                    state.virtual_register_locations[owner] = UINT32_MAX;
-                    state.owner[physical_register] = UINT32_MAX;
-                    state.dirty[physical_register] = false;
+                    has_unscanned_predecessor = true;
                 }
+                else if (predecessor == block_index - 1 || designated == UINT32_MAX)
+                {
+                    designated = predecessor;
+                }
+            }
+            if (designated != UINT32_MAX)
+            {
+                u32 const* donor_owner = out_owner + (u64)designated * register_count;
+                bool const* donor_dirty = out_dirty + (u64)designated * register_count;
+                for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
+                {
+                    u32 value = donor_owner[contract_register];
+                    if (value == UINT32_MAX || !state.escapes[value] || state.rematerialize_immediates[value] != UINT32_MAX ||
+                        state.last_use[value] < block->first_instruction)
+                    {
+                        continue;
+                    }
+                    // A clean value is carried through single-predecessor
+                    // and join blocks, where retention costs nothing on
+                    // any edge that still holds it — but not into a block
+                    // a back edge reaches, where the loop would reload it
+                    // every iteration whether or not the body wants it.
+                    // Measured on the pair's final shape: -20 M against
+                    // carrying clean values everywhere. Dirty values are
+                    // always worth carrying: the entry is the write-back
+                    // its edge would otherwise pay.
+                    if (has_unscanned_predecessor && !donor_dirty[contract_register] && predecessor_limit - first_predecessor > 1)
+                    {
+                        continue;
+                    }
+                    entry_owner[contract_register] = value;
+                    entry_dirty[contract_register] = donor_dirty[contract_register];
+                }
+                // Intersection with the other scanned predecessors. An
+                // edge from a single-successor jump repairs retroactively,
+                // so a mismatch there keeps the entry and the conform
+                // below moves or reloads the value; any other source has
+                // successors that already consumed its state, so only its
+                // exact matches survive. Dirtiness is the OR over what the
+                // keeping edges actually deliver.
+                for (u32 predecessor_index = first_predecessor; predecessor_index < predecessor_limit; predecessor_index += 1)
+                {
+                    u32 predecessor = predecessor_list[predecessor_index];
+                    if (predecessor >= block_index || predecessor == designated)
+                    {
+                        continue;
+                    }
+                    u32 const* edge_owner = out_owner + (u64)predecessor * register_count;
+                    bool const* edge_dirty = out_dirty + (u64)predecessor * register_count;
+                    MachineBlock* predecessor_block = function->blocks + predecessor;
+                    bool repairs_fully = false;
+                    if (predecessor_block->instruction_count)
+                    {
+                        MachineInstruction* predecessor_terminator =
+                            function->instructions + predecessor_block->first_instruction + predecessor_block->instruction_count - 1;
+                        MachineOpcodeInfo const* terminator_info = machine_opcode_info(predecessor_terminator->opcode);
+                        u32 terminator_targets = 0;
+                        for (u32 slot = 0; slot < terminator_info->operand_count; slot += 1)
+                        {
+                            terminator_targets += machine_ref_kind(predecessor_terminator->operands[slot]) == MACHINE_REF_BLOCK;
+                        }
+                        repairs_fully = terminator_targets == 1 && predecessor_terminator->opcode != description->switch_opcode;
+                    }
+                    for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
+                    {
+                        u32 value = entry_owner[contract_register];
+                        if (value == UINT32_MAX)
+                        {
+                            continue;
+                        }
+                        if (edge_owner[contract_register] == value)
+                        {
+                            entry_dirty[contract_register] |= edge_dirty[contract_register];
+                        }
+                        else if (repairs_fully)
+                        {
+                            for (u32 other = 0; other < register_count; other += 1)
+                            {
+                                entry_dirty[contract_register] |= edge_owner[other] == value && edge_dirty[other];
+                            }
+                        }
+                        else
+                        {
+                            entry_owner[contract_register] = UINT32_MAX;
+                            entry_dirty[contract_register] = false;
+                        }
+                    }
+                }
+            }
+        }
+        // Conform every scanned predecessor edge to the contract just
+        // fixed (the empty one for cold blocks and for blocks no scanned
+        // edge reaches). The edits land retroactively at each source
+        // terminator's point — the merge below re-sorts the stream — and
+        // the snapshot mutations persist so a second successor of the
+        // same source sees what its edge now actually delivers.
+        if (block_index > 0)
+        {
+            for (u32 predecessor_index = predecessor_offsets[block_index]; predecessor_index < predecessor_offsets[block_index + 1]; predecessor_index += 1)
+            {
+                u32 predecessor = predecessor_list[predecessor_index];
+                MachineBlock* predecessor_block = function->blocks + predecessor;
+                if (predecessor >= block_index || !predecessor_block->instruction_count)
+                {
+                    continue;
+                }
+                u32 terminator_index = predecessor_block->first_instruction + predecessor_block->instruction_count - 1;
+                MachineInstruction* predecessor_terminator = function->instructions + terminator_index;
+                MachineOpcodeInfo const* terminator_info = machine_opcode_info(predecessor_terminator->opcode);
+                u32 terminator_targets = 0;
+                for (u32 slot = 0; slot < terminator_info->operand_count; slot += 1)
+                {
+                    terminator_targets += machine_ref_kind(predecessor_terminator->operands[slot]) == MACHINE_REF_BLOCK;
+                }
+                machine_fast_conform_edge(&state, &retro_edits, machine_point_make(terminator_index, MACHINE_POINT_BEFORE),
+                                          out_owner + (u64)predecessor * register_count, out_dirty + (u64)predecessor * register_count, 0, entry_owner,
+                                          entry_dirty, terminator_targets == 1 && predecessor_terminator->opcode != description->switch_opcode);
+            }
+        }
+        // The scan state becomes exactly the contract: the register file of
+        // the block ahead is an interface every edge satisfies, not
+        // whatever the layout neighbor happened to leave behind.
+        for (u32 physical_register = 0; physical_register < register_count; physical_register += 1)
+        {
+            u32 owner = state.owner[physical_register];
+            if (owner != UINT32_MAX)
+            {
+                state.virtual_register_locations[owner] = UINT32_MAX;
+                state.owner[physical_register] = UINT32_MAX;
+                state.dirty[physical_register] = false;
+            }
+        }
+        // Carried values enter fresh: in a loop the contract is the
+        // working set, and making it the preferred eviction victim would
+        // have the body displace exactly what the back edge must then
+        // restore, every iteration. Dead expression temporaries are still
+        // free victims through the eviction's dead-owner preference.
+        for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
+        {
+            u32 value = entry_owner[contract_register];
+            if (value != UINT32_MAX)
+            {
+                state.owner[contract_register] = value;
+                state.dirty[contract_register] = entry_dirty[contract_register];
+                state.virtual_register_locations[value] = contract_register;
+                state.age[contract_register] = ++state.clock;
             }
         }
         for (u32 offset = 0; offset < block->instruction_count; offset += 1)
@@ -681,20 +1111,84 @@ MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineF
             }
             if (is_terminator)
             {
-                // Dirty values return to their slots at the boundary so
-                // every successor sees consistent memory; the mappings
-                // stay for a straight-line successor to inherit. The
-                // stores cannot disturb the flags a conditional
-                // terminator just consumed, and the edits stay at this
-                // terminator's BEFORE point, which the encoder emits
-                // ahead of it.
-                machine_fast_writeback(&state);
+                // Successors whose contract is already fixed — every
+                // backward edge, the self loop, and any statically cold
+                // target — get the state rewritten to their contract here.
+                // The edits stay at this terminator's BEFORE point, which
+                // the encoder emits ahead of the branch, and none of them
+                // can disturb the flags a conditional terminator just
+                // consumed. A forward, not-yet-cold successor takes the
+                // state as it stands: the snapshot recorded below is what
+                // its own contract construction conforms retroactively.
+                if (instruction->opcode == description->switch_opcode)
+                {
+                    // Case targets and the default are all cold, so one
+                    // conform to the empty contract serves every edge the
+                    // dispatch fans out to.
+                    machine_fast_conform_edge(&state, &edits, state.current_point, state.owner, state.dirty, state.virtual_register_locations,
+                                              machine_fast_empty_contract_owner, machine_fast_empty_contract_dirty, true);
+                }
+                else
+                {
+                    for (u32 slot = 0; slot < info->operand_count; slot += 1)
+                    {
+                        if (machine_ref_kind(instruction->operands[slot]) != MACHINE_REF_BLOCK)
+                        {
+                            continue;
+                        }
+                        u32 successor = machine_ref_payload(instruction->operands[slot]);
+                        if (successor <= block_index)
+                        {
+                            machine_fast_conform_edge(&state, &edits, state.current_point, state.owner, state.dirty, state.virtual_register_locations,
+                                                      contract_owner + (u64)successor * register_count, contract_dirty + (u64)successor * register_count,
+                                                      true);
+                        }
+                        else if (cold_blocks[successor])
+                        {
+                            machine_fast_conform_edge(&state, &edits, state.current_point, state.owner, state.dirty, state.virtual_register_locations,
+                                                      machine_fast_empty_contract_owner, machine_fast_empty_contract_dirty, true);
+                        }
+                    }
+                }
+                // A return keeps its dirty values: the frame dies with it
+                // and there is no successor to see the slots.
+                u32* exit_owner = out_owner + (u64)block_index * register_count;
+                bool* exit_dirty = out_dirty + (u64)block_index * register_count;
+                for (u32 physical_register = 0; physical_register < register_count; physical_register += 1)
+                {
+                    exit_owner[physical_register] = state.owner[physical_register];
+                    exit_dirty[physical_register] = state.dirty[physical_register];
+                }
             }
         }
     }
-    placement.edits = arena_allocate(arena, MachineEdit, edits.total_count);
-    placement.edit_count = edits.total_count;
-    machine_stream_flatten(&edits, placement.edits);
+    // The scan's own stream is point-sorted by construction; retroactive
+    // conforms are not, so they sort and merge behind it — after the
+    // terminator's own edits at the same point, which is the state every
+    // retroactive repair was computed against.
+    placement.edit_count = edits.total_count + retro_edits.total_count;
+    placement.edits = arena_allocate(arena, MachineEdit, placement.edit_count ? placement.edit_count : 1);
+    if (!retro_edits.total_count)
+    {
+        machine_stream_flatten(&edits, placement.edits);
+    }
+    else
+    {
+        MachineEdit* main_edits = arena_allocate(arena, MachineEdit, edits.total_count ? edits.total_count : 1);
+        MachineEdit* retro_flat = arena_allocate(arena, MachineEdit, retro_edits.total_count);
+        MachineEdit* retro_scratch = arena_allocate(arena, MachineEdit, retro_edits.total_count);
+        machine_stream_flatten(&edits, main_edits);
+        machine_stream_flatten(&retro_edits, retro_flat);
+        machine_fast_sort_edits(retro_flat, retro_scratch, retro_edits.total_count);
+        u32 main_cursor = 0;
+        u32 retro_cursor = 0;
+        for (u32 edit_index = 0; edit_index < placement.edit_count; edit_index += 1)
+        {
+            bool take_main = main_cursor < edits.total_count &&
+                             (retro_cursor >= retro_edits.total_count || main_edits[main_cursor].point <= retro_flat[retro_cursor].point);
+            placement.edits[edit_index] = take_main ? main_edits[main_cursor++] : retro_flat[retro_cursor++];
+        }
+    }
     // Frame layout runs after the scan: every touch of a vreg slot flows
     // through the edit stream, so only edit subjects get backing slots.
     // Values that never left their registers cost no frame bytes.

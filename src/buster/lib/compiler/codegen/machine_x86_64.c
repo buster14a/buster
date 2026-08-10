@@ -101,6 +101,7 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_x86_64_description = 
     .copy_opcode = MACHINE_X64_MOV_RR,
     .constant_opcode = MACHINE_X64_MOV_RI,
     .indirect_call_opcode = MACHINE_X64_CALL_INDIRECT,
+    .switch_opcode = MACHINE_X64_SWITCH,
     .float_bridge_opcode = MACHINE_X64_MOVQ_TO_XMM,
     .indirect_call_register = MACHINE_X64_R10,
     .float_bridge_register = MACHINE_X64_RAX,

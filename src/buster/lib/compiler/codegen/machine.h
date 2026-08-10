@@ -544,6 +544,11 @@ struct MachineTargetDescription
     // Indirect call and the fixed register its callee pointer rides in,
     // immune to the argument registers and any variadic setup.
     u16 indirect_call_opcode;
+    // Table dispatch, or MACHINE_OPCODE_INVALID for a target without one.
+    // Its targets cannot host per-edge repairs, so the edge contracts
+    // force them cold; every other terminator classifies structurally by
+    // its block-ref operand count.
+    u16 switch_opcode;
     // General-to-float bridge and the fixed general register it stages
     // through, never an argument register.
     u16 float_bridge_opcode;
@@ -699,9 +704,14 @@ struct MachineStackPlacement
     u32 rematerialize_count;
     // Values QUALITY gave a register for their whole lifetime.
     u32 pinned_register_count;
-    // Subset of spill_count emitted by the block-boundary write-back
-    // rather than by eviction pressure: the two want different fixes.
+    // Subset of spill_count emitted at block boundaries — edge-contract
+    // conformance today, the unconditional write-back before it — rather
+    // than by eviction pressure: the two want different fixes.
     u32 boundary_spill_count;
+    // Reloads and register copies the edge-contract conformance emitted,
+    // split from the eviction-driven traffic for the same reason.
+    u32 boundary_reload_count;
+    u32 boundary_copy_count;
     // Callee-saved registers the placement assigned; the encoder pushes and
     // pops them around the frame and the unwind actions record the pushes.
     u32 callee_saved_mask;

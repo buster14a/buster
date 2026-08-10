@@ -10656,6 +10656,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.statistics.allocator_spill_count += placement.spill_count;
                             result.statistics.allocator_copy_count += placement.copy_count;
                             result.statistics.allocator_boundary_spill_count += placement.boundary_spill_count;
+                            result.statistics.allocator_boundary_reload_count += placement.boundary_reload_count;
+                            result.statistics.allocator_boundary_copy_count += placement.boundary_copy_count;
                             result.statistics.allocator_rematerialize_count += placement.rematerialize_count;
                             result.statistics.allocator_pinned_register_count += placement.pinned_register_count;
                         }
@@ -16656,6 +16658,8 @@ BUSTER_GLOBAL_LOCAL void codegen_statistics_add(CodegenStatistics* destination, 
     destination->allocator_spill_count += source.allocator_spill_count;
     destination->allocator_copy_count += source.allocator_copy_count;
     destination->allocator_boundary_spill_count += source.allocator_boundary_spill_count;
+    destination->allocator_boundary_reload_count += source.allocator_boundary_reload_count;
+    destination->allocator_boundary_copy_count += source.allocator_boundary_copy_count;
     destination->allocator_rematerialize_count += source.allocator_rematerialize_count;
     destination->allocator_pinned_register_count += source.allocator_pinned_register_count;
 }
