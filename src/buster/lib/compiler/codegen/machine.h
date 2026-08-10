@@ -838,6 +838,11 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target);
 BUSTER_F_DECL MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function);
+// The FAST scan with explicit whole-function pins: `pinned_registers`
+// holds a physical register per virtual register or UINT32_MAX, and
+// `pinned_mask` collects them. QUALITY derives its pins through this.
+BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build_pinned(Arena* arena, MachineFunction* function, u32 const* pinned_registers,
+                                                                        u32 pinned_mask);
 // QUALITY: a global pass pins the highest-weight non-overlapping live
 // intervals to callee-saved registers for their whole lifetime, then the
 // same local scan places everything else around them.

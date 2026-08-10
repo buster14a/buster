@@ -10388,7 +10388,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // machine path sizes its own frame after this allocation, so the
         // allocator modes reserve room for its worst-case chunk count.
         u32 unwind_action_capacity = (target.cpu_arch == CPU_ARCH_X86_64 ? 8u : windows_aarch64 ? 6u : 5u) + stack_action_capacity +
-                                     (target.cpu_arch == CPU_ARCH_AARCH64 && options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE ? 10u : 0u);
+                                     (target.cpu_arch == CPU_ARCH_AARCH64 && options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE ? 20u : 0u);
         CodegenFunctionDescriptor* descriptor = result.functions + result.function_count;
         result.function_count += 1;
         *descriptor = (CodegenFunctionDescriptor){
@@ -10461,10 +10461,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     {
                         // The machine prologue mirrors the canonical
                         // AArch64 shape exactly: stp x29/x30, establish
-                        // x29, probed sub chunks, save x28 at the frame
-                        // top, repoint x28. Every prologue instruction is
-                        // one word, so the action offsets are exact.
-                        u32 machine_frame_total = placement.frame_size + 16;
+                        // x29, probed sub chunks, the callee-saved saves
+                        // at the top of the frame area, x28 saved above
+                        // them, x28 repointed. Every prologue instruction
+                        // is one word, so the action offsets are exact.
+                        u32 machine_push_count = 0;
+                        for (u32 saved_register = 0; saved_register < 32u; saved_register += 1)
+                        {
+                            machine_push_count += (placement.callee_saved_mask >> saved_register) & 1u;
+                        }
+                        u32 machine_frame_area = placement.frame_size + 8 * machine_push_count;
+                        u32 machine_frame_total = machine_frame_area + 16;
                         bool machine_unwind_valid =
                             codegen_unwind_action_append(descriptor, unwind_action_capacity, 4, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, 16);
                         machine_unwind_valid =
@@ -10488,9 +10495,23 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             machine_prologue_cursor += 4;
                             machine_frame_remaining -= machine_frame_chunk;
                         }
+                        u32 machine_save_slot = 0;
+                        for (u32 saved_register = 0; saved_register < 32u; saved_register += 1)
+                        {
+                            if (!((placement.callee_saved_mask >> saved_register) & 1u))
+                            {
+                                continue;
+                            }
+                            machine_save_slot += 1;
+                            machine_prologue_cursor += 4;
+                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                CODEGEN_UNWIND_ACTION_SAVE_REGISTER, (u8)saved_register,
+                                                                                machine_frame_area - 8 * machine_save_slot) &&
+                                                   machine_unwind_valid;
+                        }
                         machine_prologue_cursor += 4;
                         machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
-                                                                            CODEGEN_UNWIND_ACTION_SAVE_REGISTER, 28, placement.frame_size) &&
+                                                                            CODEGEN_UNWIND_ACTION_SAVE_REGISTER, 28, machine_frame_area) &&
                                                machine_unwind_valid;
                         machine_prologue_cursor += 4;
                         for (u32 epilog_index = 0; epilog_index < encoded.epilog_count; epilog_index += 1)

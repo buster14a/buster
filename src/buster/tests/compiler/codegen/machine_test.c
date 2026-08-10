@@ -1091,6 +1091,64 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, a64_add_placement.reload_count > 0 && a64_add_placement.spill_count > 0);
             BUSTER_TEST(arguments, a64_add_placement.frame_size % 16 == 0);
         }
+        // Callee-saved encoding: a value pinned to X27 for its whole
+        // lifetime forces the prologue save at the top of the frame area
+        // and the epilogue restore, which nothing in the C corpus's
+        // two-instruction lifetimes otherwise exercises.
+        IrFunction* a64_pin_function = machine_test_ir_function_find(machine_a64_module, S8("add"));
+        if (a64_pin_function)
+        {
+            MachineSelectResult a64_pin_selected =
+                machine_select_canonical_function(arguments->arena, machine_a64_program, a64_pin_function, machine_a64_target);
+            BUSTER_TEST(arguments, a64_pin_selected.supported);
+            if (a64_pin_selected.supported && a64_pin_selected.function.virtual_register_count)
+            {
+                u32* forced_pins = arena_allocate(arguments->arena, u32, a64_pin_selected.function.virtual_register_count);
+                for (u32 register_index = 0; register_index < a64_pin_selected.function.virtual_register_count; register_index += 1)
+                {
+                    forced_pins[register_index] = UINT32_MAX;
+                }
+                forced_pins[0] = MACHINE_A64_X27;
+                MachineStackPlacement a64_pinned_placement =
+                    machine_fast_placement_build_pinned(arguments->arena, &a64_pin_selected.function, forced_pins, 1u << MACHINE_A64_X27);
+                BUSTER_TEST(arguments, a64_pinned_placement.valid);
+                BUSTER_TEST(arguments, (a64_pinned_placement.callee_saved_mask >> MACHINE_A64_X27) & 1u);
+                MachineEncodeResult a64_pinned_encoded = machine_encode_aarch64(arguments->arena, &a64_pin_selected.function, &a64_pinned_placement);
+                BUSTER_TEST(arguments, a64_pinned_encoded.valid);
+                if (a64_pinned_encoded.valid)
+                {
+                    // The save is one scaled str of x27 against SP; its
+                    // exact offset rides at the top of the frame area.
+                    u32 a64_pin_area = a64_pinned_placement.frame_size + 8;
+                    u32 save_word = 0xf90003e0u | (((a64_pin_area - 8) / 8) << 10) | ((u32)MACHINE_A64_SP << 5) | MACHINE_A64_X27;
+                    u32 restore_word = 0xf94003e0u | (((a64_pin_area - 8) / 8) << 10) | ((u32)MACHINE_A64_SP << 5) | MACHINE_A64_X27;
+                    bool save_found = false;
+                    bool restore_found = false;
+                    for (u32 byte_offset = 0; byte_offset + 4 <= a64_pinned_encoded.byte_count; byte_offset += 4)
+                    {
+                        u32 word = 0;
+                        memcpy(&word, a64_pinned_encoded.bytes + byte_offset, sizeof(word));
+                        save_found |= word == save_word;
+                        restore_found |= word == restore_word;
+                    }
+                    BUSTER_TEST(arguments, save_found && restore_found);
+#if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+                    CodegenExecutable a64_pinned_executable = codegen_make_executable((CodegenFunction){
+                        .code = {.pointer = a64_pinned_encoded.bytes, .length = a64_pinned_encoded.byte_count},
+                    });
+                    BUSTER_TEST(arguments, a64_pinned_executable.error == CODEGEN_ERROR_NONE);
+                    if (a64_pinned_executable.address)
+                    {
+                        typedef s64 MachineTestA64Pinned(s64, s64);
+                        MachineTestA64Pinned* pinned_call = 0;
+                        memcpy(&pinned_call, &a64_pinned_executable.address, sizeof(pinned_call));
+                        BUSTER_TEST(arguments, (s32)pinned_call(19, 23) == 42);
+                        codegen_release_executable(a64_pinned_executable);
+                    }
+#endif
+                }
+            }
+        }
         // Direct calls select into fixed-register argument copies plus a
         // relocated call row; float signatures are the current explicit
         // unsupported representative.

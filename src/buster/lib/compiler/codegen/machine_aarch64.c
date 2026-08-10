@@ -1293,32 +1293,41 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_move(MachineA64Encoder* encoder, u32 d
 }
 
 // Frame-slot placement offsets grow downward from the frame base; the
-// X28-relative byte offset is their distance from the frame top.
-BUSTER_GLOBAL_LOCAL u32 machine_a64_frame_offset(MachineStackPlacement* placement, u32 placement_offset)
+// X28-relative byte offset is their distance from the top of the frame
+// area. The area's first 8 * push_count bytes — the offsets the shared
+// placement reserved for the x86-64 pushes — hold the callee-saved saves.
+BUSTER_GLOBAL_LOCAL u32 machine_a64_frame_offset(u32 frame_area, u32 placement_offset)
 {
-    return placement->frame_size - placement_offset;
+    return frame_area - placement_offset;
 }
 
 MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement)
 {
     MachineEncodeResult result = {0};
-    if (!placement->valid || placement->callee_saved_mask || placement->frame_size > MACHINE_A64_MAX_FRAME_BYTES)
+    u32 push_count = 0;
+    for (u32 saved_register = 0; saved_register < MACHINE_A64_REGISTER_COUNT; saved_register += 1)
     {
-        // Callee-saved allocation needs the prologue save area a later
-        // stage adds; outsized frames need multi-word prologue stores the
-        // module wiring's cursor accounting does not model yet.
+        push_count += (placement->callee_saved_mask >> saved_register) & 1u;
+    }
+    // Stack layout: [sp .. sp+frame_area) holds the placement's slots with
+    // the callee-saved save area at the top (the offsets the shared
+    // placement reserved for pushes), [sp+frame_area] saves the caller's
+    // x28, and eight padding bytes keep the total sixteen-aligned. The
+    // placement frame plus the save area is sixteen-aligned already, so
+    // the total is too. Outsized frames need multi-word prologue stores
+    // the module wiring's cursor accounting does not model, so they stay
+    // canonical.
+    u32 frame_area = placement->frame_size + 8 * push_count;
+    if (!placement->valid || frame_area > MACHINE_A64_MAX_FRAME_BYTES)
+    {
         return result;
     }
-    // Stack layout: [sp .. sp+frame_size) holds the placement's slots,
-    // [sp+frame_size] saves the caller's x28, and eight padding bytes keep
-    // the total sixteen-aligned. The placement frame is sixteen-aligned
-    // already, so the total is too.
-    u32 frame_total = placement->frame_size + 16;
+    u32 frame_total = frame_area + 16;
     // Per-row worst-case byte budget: constants and remainders expand, the
     // epilogue carries the frame release, everything else is one word plus
     // slack for large-offset frame addressing.
     u32 frame_chunk_words = frame_total / 4080 + 1;
-    u64 capacity64 = 64 + (u64)frame_chunk_words * 8;
+    u64 capacity64 = 64 + (u64)frame_chunk_words * 8 + (u64)push_count * 4;
     for (u32 capacity_index = 0; capacity_index < function->instruction_count; capacity_index += 1)
     {
         MachineInstruction* capacity_row = function->instructions + capacity_index;
@@ -1330,7 +1339,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             capacity64 += 16;
             break;
         case MACHINE_A64_RET:
-            capacity64 += 20 + (u64)frame_chunk_words * 4;
+            capacity64 += 20 + (u64)frame_chunk_words * 4 + (u64)push_count * 4;
             break;
         default:
             capacity64 += 12;
@@ -1367,7 +1376,17 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
         machine_a64_emit(&encoder, 0xf90003ff);
         frame_remaining -= frame_chunk;
     }
-    machine_a64_emit(&encoder, 0xf90003e0 | ((placement->frame_size / 8) << 10) | (MACHINE_A64_SP << 5) | MACHINE_A64_X28);
+    u32 save_slot = 0;
+    for (u32 saved_register = 0; saved_register < MACHINE_A64_REGISTER_COUNT; saved_register += 1)
+    {
+        if (!((placement->callee_saved_mask >> saved_register) & 1u))
+        {
+            continue;
+        }
+        save_slot += 1;
+        machine_a64_emit(&encoder, 0xf90003e0 | (((frame_area - 8 * save_slot) / 8) << 10) | (MACHINE_A64_SP << 5) | saved_register);
+    }
+    machine_a64_emit(&encoder, 0xf90003e0 | ((frame_area / 8) << 10) | (MACHINE_A64_SP << 5) | MACHINE_A64_X28);
     machine_a64_emit(&encoder, 0x910003fc);
     u32 edit_cursor = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
@@ -1386,7 +1405,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 MachineEdit* edit = placement->edits + edit_cursor;
                 if (edit->kind == MACHINE_EDIT_SPILL)
                 {
-                    machine_a64_emit_frame_store(&encoder, edit->location, machine_a64_frame_offset(placement, placement->virtual_register_offsets[edit->subject]));
+                    machine_a64_emit_frame_store(&encoder, edit->location, machine_a64_frame_offset(frame_area, placement->virtual_register_offsets[edit->subject]));
                 }
                 else if (edit->kind == MACHINE_EDIT_COPY)
                 {
@@ -1398,7 +1417,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 }
                 else
                 {
-                    machine_a64_emit_frame_load(&encoder, edit->location, machine_a64_frame_offset(placement, placement->virtual_register_offsets[edit->subject]));
+                    machine_a64_emit_frame_load(&encoder, edit->location, machine_a64_frame_offset(frame_area, placement->virtual_register_offsets[edit->subject]));
                 }
                 edit_cursor += 1;
             }
@@ -1533,7 +1552,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             case MACHINE_A64_LOAD_FRAME:
                 machine_a64_emit_frame_load(
                     &encoder, operand_registers[0],
-                    machine_a64_frame_offset(placement, placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])] - instruction->payload));
+                    machine_a64_frame_offset(frame_area, placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])] - instruction->payload));
                 break;
             case MACHINE_A64_STORE_FRAME8:
             case MACHINE_A64_STORE_FRAME16:
@@ -1546,7 +1565,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                                                                               : 8u;
                 machine_a64_emit_frame_memory(
                     &encoder, operand_registers[1],
-                    machine_a64_frame_offset(placement, placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])] - instruction->payload),
+                    machine_a64_frame_offset(frame_area, placement->stack_slot_offsets[machine_ref_payload(instruction->operands[0])] - instruction->payload),
                     size, true);
             }
             break;
@@ -1582,7 +1601,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 // not — mirroring the canonical base-address helper with
                 // the destination as its own scratch.
                 u32 frame_offset = machine_a64_frame_offset(
-                    placement, placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])] - instruction->payload);
+                    frame_area, placement->stack_slot_offsets[machine_ref_payload(instruction->operands[1])] - instruction->payload);
                 if (frame_offset <= 4095)
                 {
                     machine_a64_emit(&encoder, 0x91000000 | (frame_offset << 10) | ((u32)MACHINE_A64_X28 << 5) | operand_registers[0]);
@@ -1649,7 +1668,17 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 u32* epilog = (u32*)machine_stream_append(arena, &epilogs);
                 *epilog = encoder.count;
                 machine_a64_emit(&encoder, 0x9100039f);
-                machine_a64_emit(&encoder, 0xf94003e0 | ((placement->frame_size / 8) << 10) | (MACHINE_A64_SP << 5) | MACHINE_A64_X28);
+                u32 restore_slot = 0;
+                for (u32 saved_register = 0; saved_register < MACHINE_A64_REGISTER_COUNT; saved_register += 1)
+                {
+                    if (!((placement->callee_saved_mask >> saved_register) & 1u))
+                    {
+                        continue;
+                    }
+                    restore_slot += 1;
+                    machine_a64_emit(&encoder, 0xf94003e0 | (((frame_area - 8 * restore_slot) / 8) << 10) | (MACHINE_A64_SP << 5) | saved_register);
+                }
+                machine_a64_emit(&encoder, 0xf94003e0 | ((frame_area / 8) << 10) | (MACHINE_A64_SP << 5) | MACHINE_A64_X28);
                 u32 release_remaining = frame_total;
                 while (release_remaining)
                 {
@@ -1710,7 +1739,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 MachineEdit* edit = placement->edits + edit_cursor;
                 if (edit->kind == MACHINE_EDIT_RELOAD)
                 {
-                    machine_a64_emit_frame_load(&encoder, edit->location, machine_a64_frame_offset(placement, placement->virtual_register_offsets[edit->subject]));
+                    machine_a64_emit_frame_load(&encoder, edit->location, machine_a64_frame_offset(frame_area, placement->virtual_register_offsets[edit->subject]));
                 }
                 else if (edit->kind == MACHINE_EDIT_COPY)
                 {
@@ -1722,7 +1751,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 }
                 else
                 {
-                    machine_a64_emit_frame_store(&encoder, edit->location, machine_a64_frame_offset(placement, placement->virtual_register_offsets[edit->subject]));
+                    machine_a64_emit_frame_store(&encoder, edit->location, machine_a64_frame_offset(frame_area, placement->virtual_register_offsets[edit->subject]));
                 }
                 edit_cursor += 1;
             }
