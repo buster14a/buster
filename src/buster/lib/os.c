@@ -4,6 +4,10 @@
 #include <buster/lib/integer.h>
 #include <buster/lib/string.h>
 
+#if BUSTER_MACOS && BUSTER_CPU_ARCH_AARCH64 && defined(MAP_JIT)
+extern void pthread_jit_write_protect_np(int enabled);
+#endif
+
 #if BUSTER_LINK_LIBC && !BUSTER_SINGLE_THREADED && defined(__TINYC__) && defined(__APPLE__) && BUSTER_CPU_ARCH_AARCH64
 #define BUSTER_THREAD_CONTEXT_USE_PTHREAD_TLS 1
 #else
@@ -299,7 +303,10 @@ BUSTER_GLOBAL_LOCAL int os_posix_map_flags(MapFlags flags)
 #ifdef __linux__
         MAP_POPULATE * flags.populate |
 #endif
-        MAP_PRIVATE * flags.priv | MAP_ANON * flags.anonymous | MAP_NORESERVE * flags.no_reserve;
+#if defined(__APPLE__) && defined(MAP_JIT)
+        MAP_JIT * flags.jit |
+#endif
+        MAP_FIXED * flags.fixed | MAP_PRIVATE * flags.priv | MAP_ANON * flags.anonymous | MAP_NORESERVE * flags.no_reserve;
 
     return result;
 }
@@ -429,6 +436,16 @@ bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock)
     return result;
 }
 
+bool os_protect(void* address, u64 size, ProtectionFlags protection)
+{
+#if defined(__linux__) || defined(__APPLE__)
+    return mprotect(address, size, os_posix_protection_flags(protection)) == 0;
+#elif defined(_WIN32)
+    DWORD previous_protection = 0;
+    return VirtualProtect(address, (SIZE_T)size, os_windows_protection_flags(protection), &previous_protection) != 0;
+#endif
+}
+
 bool os_decommit(void* address, u64 size)
 {
     u64 page_size = os_get_page_size();
@@ -457,6 +474,12 @@ void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map)
     void* address = 0;
 
 #if defined(__linux__) || defined(__APPLE__)
+#if defined(__APPLE__) && !defined(MAP_JIT)
+    if (map.jit)
+    {
+        return 0;
+    }
+#endif
     int protection_flags = os_posix_protection_flags(protection);
     int map_flags = os_posix_map_flags(map);
 
@@ -488,6 +511,15 @@ bool os_flush_instruction_cache(void* address, u64 size)
     BUSTER_UNUSED(address);
     BUSTER_UNUSED(size);
     return true;
+#endif
+}
+
+void os_jit_write_protect(bool enabled)
+{
+#if BUSTER_MACOS && BUSTER_CPU_ARCH_AARCH64 && defined(MAP_JIT)
+    pthread_jit_write_protect_np(enabled);
+#else
+    BUSTER_UNUSED(enabled);
 #endif
 }
 

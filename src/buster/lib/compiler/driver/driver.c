@@ -2272,10 +2272,97 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_parser_diagnostic(Arena* arena, Stri
     return string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), path, diagnostic->range.line, diagnostic->range.column, diagnostic->message);
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_jit_u8_pointer_pointer(AnalysisResult* analysis, AnalysisTypeId type_id)
+{
+    AnalysisType* pointer = analysis_type_from_id(analysis, type_id);
+    if (pointer->kind != ANALYSIS_TYPE_POINTER)
+    {
+        return false;
+    }
+    pointer = analysis_type_from_id(analysis, pointer->as.element_type);
+    if (pointer->kind != ANALYSIS_TYPE_POINTER)
+    {
+        return false;
+    }
+    return pointer->as.element_type.value == analysis->types.builtin.u8_type.value;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerDriverEntrySignature compiler_driver_jit_entry_signature(Arena* scratch_arena, AnalysisProgram* program, String8* diagnostic)
+{
+    AnalysisResult* analysis = program->root ? program->root->analysis : 0;
+    AnalysisEntity* main = analysis ? analysis_value_entity_find(analysis, S8("main")) : 0;
+    if (!main)
+    {
+        *diagnostic = S8("JIT entry point main was not found in the root module");
+        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
+    }
+    if (main->kind != ANALYSIS_ENTITY_CODE || !main->ast.code)
+    {
+        *diagnostic = S8("JIT entry point main must be a code function");
+        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
+    }
+    if (!main->ast.code->exported)
+    {
+        *diagnostic = S8("JIT entry point main must be exported");
+        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
+    }
+    if (!main->ast.code->has_body)
+    {
+        *diagnostic = S8("JIT entry point main must be defined in the root module");
+        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
+    }
+    if (analysis_entity_is_generic(scratch_arena, analysis, main))
+    {
+        *diagnostic = S8("JIT entry point main must not be generic");
+        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
+    }
+
+    AnalysisTypeId function_type_id = analysis->module.semantics[main->id.index.value].type;
+    AnalysisType* function = analysis_type_from_id(analysis, function_type_id);
+    if (function->kind != ANALYSIS_TYPE_FUNCTION)
+    {
+        *diagnostic = S8("JIT entry point main must have a function type");
+        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
+    }
+    if (function->as.function.is_variadic)
+    {
+        *diagnostic = S8("JIT entry point main must not be variadic");
+        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
+    }
+    if (function->as.function.calling_convention != AST_CALLING_CONVENTION_C)
+    {
+        *diagnostic = S8("JIT entry point main must use the C calling convention");
+        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
+    }
+    if (function->as.function.return_type.value != analysis->types.builtin.s32_type.value)
+    {
+        *diagnostic = S8("JIT entry point main must return s32");
+        return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
+    }
+    if (function->as.function.argument_count == 0)
+    {
+        return COMPILER_DRIVER_ENTRY_SIGNATURE_S32_VOID;
+    }
+    if (function->as.function.argument_count == 3)
+    {
+        AnalysisTypeId argc = function->as.function.argument_types[0];
+        bool argc_valid = argc.value == analysis->types.builtin.s32_type.value || argc.value == analysis->types.builtin.u32_type.value;
+        if (argc_valid && compiler_driver_jit_u8_pointer_pointer(analysis, function->as.function.argument_types[1]) &&
+            compiler_driver_jit_u8_pointer_pointer(analysis, function->as.function.argument_types[2]))
+        {
+            return COMPILER_DRIVER_ENTRY_SIGNATURE_S32_ARGC_ARGV_ENVP;
+        }
+    }
+    *diagnostic = S8("JIT entry point main must have signature s32(void) or s32(s32|u32, u8**, u8**)");
+    return COMPILER_DRIVER_ENTRY_SIGNATURE_NONE;
+}
+
 CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions options)
 {
     CompilerDriverResult result = {0};
-    if (!arena || !options.source_path.length || !options.output_path.length)
+    if (!arena || !options.source_path.length || (u32)options.output_kind >= (u32)COMPILER_DRIVER_OUTPUT_KIND_COUNT ||
+        (options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_NATIVE_EXECUTABLE && !options.output_path.length) ||
+        (options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_JIT && options.output_path.length))
     {
         result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
         return result;
@@ -2299,14 +2386,13 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
                                                          .pointer_size = data_layout.pointer.size,
                                                          .pointer_alignment = data_layout.pointer.alignment,
                                                      });
-    arena_destroy(expression_arena, 1);
     result.parser_diagnostic_count = analysis.parser_diagnostic_count;
     result.analysis_diagnostic_count = analysis.analysis_diagnostic_count;
     if (analysis.load_failed)
     {
         result.error = COMPILER_DRIVER_ERROR_FILE_READ;
         result.diagnostic = string_format(arena, S8("could not load {S8} or one of its imported modules"), options.source_path);
-        return result;
+        goto cleanup;
     }
     if (analysis.parser_diagnostic_count)
     {
@@ -2324,7 +2410,7 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
         {
             result.diagnostic = string_format(arena, S8("tokenization failed with {u32} error(s)"), analysis.parser_diagnostic_count);
         }
-        return result;
+        goto cleanup;
     }
     if (analysis.analysis_diagnostic_count)
     {
@@ -2338,8 +2424,19 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
                 break;
             }
         }
-        return result;
+        goto cleanup;
     }
+    if (options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_JIT)
+    {
+        result.entry_signature = compiler_driver_jit_entry_signature(expression_arena, &analysis, &result.diagnostic);
+        if (result.entry_signature == COMPILER_DRIVER_ENTRY_SIGNATURE_NONE)
+        {
+            result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
+            goto cleanup;
+        }
+    }
+    arena_destroy(expression_arena, 1);
+    expression_arena = 0;
     IrProgram ir = ir_generate_program(arena, &analysis);
     ObjectFile* objects = arena_allocate(arena, ObjectFile, analysis.module_count);
     u32 object_count = 0;
@@ -2357,7 +2454,7 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
             result.error = COMPILER_DRIVER_ERROR_IR;
             result.diagnostic =
                 string_format(arena, S8("IR validation failed in module {S8} with error {u32}"), module_analysis->module.name, (u32)validation.error);
-            return result;
+            goto cleanup;
         }
         CodegenModule code = codegen_generate_module(arena, module_analysis, module_ir, options.target,
                                                      (CodegenModuleOptions){
@@ -2370,7 +2467,7 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
             result.error = COMPILER_DRIVER_ERROR_CODEGEN;
             result.diagnostic =
                 string_format(arena, S8("native code generation failed in module {S8} with error {u32}"), module_analysis->module.name, (u32)code.error);
-            return result;
+            goto cleanup;
         }
         ObjectFile object = object_from_codegen_module(arena, module_analysis, &code, options.target);
         result.object_error = object.error;
@@ -2379,7 +2476,7 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
             result.error = COMPILER_DRIVER_ERROR_OBJECT;
             result.diagnostic =
                 string_format(arena, S8("object generation failed in module {S8} with error {u32}"), module_analysis->module.name, (u32)object.error);
-            return result;
+            goto cleanup;
         }
         objects[object_count++] = object;
     }
@@ -2387,7 +2484,7 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
     {
         result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
         result.diagnostic = S8("the program contains no compilable modules");
-        return result;
+        goto cleanup;
     }
     LinkObjectResult linked = link_objects(arena, objects, object_count,
                                            (LinkOptions){
@@ -2397,7 +2494,13 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
         result.diagnostic = string_format(arena, S8("object linking failed with error {u32}: {S8}"), (u32)linked.error, linked.symbol);
-        return result;
+        goto cleanup;
+    }
+    if (options.output_kind == COMPILER_DRIVER_OUTPUT_KIND_JIT)
+    {
+        result.object = linked.object;
+        result.has_object = true;
+        goto cleanup;
     }
     result.native_link = link_native_executable(arena, &linked.object,
                                                 (NativeExecutableLinkOptions){
@@ -2410,6 +2513,12 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
         result.error = COMPILER_DRIVER_ERROR_LINK;
         result.diagnostic =
             string_format(arena, S8("native executable linking failed with error {u32}: {S8}"), (u32)result.native_link.error, result.native_link.symbol);
+    }
+cleanup:
+    analysis_program_unmap_sources(&analysis);
+    if (expression_arena)
+    {
+        arena_destroy(expression_arena, 1);
     }
     return result;
 }

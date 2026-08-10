@@ -17,7 +17,9 @@ struct MapFlags
     u64 anonymous : 1;
     u64 no_reserve : 1;
     u64 populate : 1;
-    u64 reserved : 60;
+    u64 jit : 1;
+    u64 fixed : 1;
+    u64 reserved : 58;
 };
 
 typedef struct OpenFlags OpenFlags;
@@ -298,9 +300,13 @@ BUSTER_NORETURN BUSTER_F_DECL void os_exit(u32 code);
 
 BUSTER_F_DECL void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map);
 BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock);
+BUSTER_F_DECL bool os_protect(void* address, u64 size, ProtectionFlags protection);
 BUSTER_F_DECL bool os_decommit(void* address, u64 size);
 BUSTER_F_DECL bool os_unreserve(void* address, u64 size);
 BUSTER_F_DECL bool os_flush_instruction_cache(void* address, u64 size);
+// Selects write (false) or execute (true) access for MAP_JIT mappings on the
+// calling Apple Silicon macOS thread. It is a no-op everywhere else.
+BUSTER_F_DECL void os_jit_write_protect(bool enabled);
 
 BUSTER_F_DECL bool os_is_tty(OsFileDescriptor* file);
 BUSTER_F_DECL OsModuleHandle* os_dynamic_library_load(String8 library);

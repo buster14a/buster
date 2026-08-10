@@ -850,6 +850,7 @@ buster_register_module(compiler_dwarf "${BUSTER_SOURCE_DIR}/compiler/dwarf/dwarf
 buster_register_module(compiler_codeview "${BUSTER_SOURCE_DIR}/compiler/codeview/codeview${COMMON_EXTENSION}")
 buster_register_module(compiler_pdb "${BUSTER_SOURCE_DIR}/compiler/pdb/pdb${COMMON_EXTENSION}")
 buster_register_module(compiler_object "${BUSTER_SOURCE_DIR}/compiler/object/object${COMMON_EXTENSION}")
+buster_register_module(compiler_jit "${BUSTER_SOURCE_DIR}/compiler/jit/jit${COMMON_EXTENSION}")
 buster_register_module(compiler_link "${BUSTER_SOURCE_DIR}/compiler/link/link${COMMON_EXTENSION}")
 buster_register_module(compiler_driver "${BUSTER_SOURCE_DIR}/compiler/driver/driver${COMMON_EXTENSION}")
 buster_register_module(simd "${BUSTER_SOURCE_DIR}/simd${COMMON_EXTENSION}")
@@ -894,6 +895,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/codeview/codeview_test.c
     src/buster/tests/compiler/pdb/pdb_test.c
     src/buster/tests/compiler/object/object_test.c
+    src/buster/tests/compiler/jit/jit_test.c
     src/buster/tests/compiler/link/link_test.c
     src/buster/tests/compiler/driver/driver_test.c
 )
@@ -925,6 +927,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/codeview/codeview_test.h
     src/buster/tests/compiler/pdb/pdb_test.h
     src/buster/tests/compiler/object/object_test.h
+    src/buster/tests/compiler/jit/jit_test.h
     src/buster/tests/compiler/link/link_test.h
     src/buster/tests/compiler/driver/driver_test.h
 )
@@ -1763,6 +1766,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_codeview
     compiler_pdb
     compiler_object
+    compiler_jit
     compiler_link
     compiler_driver
     simd

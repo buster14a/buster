@@ -801,6 +801,7 @@ BUSTER_F_DECL void analysis_resolve_imports(Arena* result_arena, AnalysisResult*
 BUSTER_F_DECL void analysis_resolve_program_interfaces(Arena* result_arena, AnalysisResult** modules, u32 module_count);
 BUSTER_F_DECL AnalysisEntity* analysis_find_qualified_entity(AnalysisResult* module, String8 import_name_space, String8 entity_name,
                                                              AnalysisNamespace name_space);
+BUSTER_F_DECL AnalysisEntity* analysis_value_entity_find(AnalysisResult* result, String8 name);
 BUSTER_F_DECL String8 analysis_serialize_module_interface(Arena* arena, AnalysisResult* result);
 BUSTER_F_DECL AnalysisInterfaceSummary analysis_module_interface_summary(Arena* arena, AnalysisResult* result);
 BUSTER_F_DECL bool analysis_interface_summary_is_valid(AnalysisInterfaceSummary summary);

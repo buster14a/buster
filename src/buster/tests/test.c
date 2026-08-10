@@ -22,6 +22,7 @@
 #include <buster/lib/compiler/codeview/codeview.h>
 #include <buster/lib/compiler/pdb/pdb.h>
 #include <buster/lib/compiler/object/object.h>
+#include <buster/lib/compiler/jit/jit.h>
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/ide_document.h>
@@ -51,6 +52,7 @@
 #include <buster/tests/compiler/codeview/codeview_test.h>
 #include <buster/tests/compiler/pdb/pdb_test.h>
 #include <buster/tests/compiler/object/object_test.h>
+#include <buster/tests/compiler/jit/jit_test.h>
 #include <buster/tests/compiler/link/link_test.h>
 #include <buster/tests/compiler/driver/driver_test.h>
 
@@ -84,6 +86,7 @@
 #include <buster/tests/compiler/codeview/codeview_test.c>
 #include <buster/tests/compiler/pdb/pdb_test.c>
 #include <buster/tests/compiler/object/object_test.c>
+#include <buster/tests/compiler/jit/jit_test.c>
 #include <buster/tests/compiler/link/link_test.c>
 #include <buster/tests/compiler/driver/driver_test.c>
 #if BUSTER_CPU_ARCH_X86_64
@@ -205,6 +208,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
     {S8_INITIALIZER("codeview_tests"), &codeview_tests},
     {S8_INITIALIZER("pdb_tests"), &pdb_tests},
     {S8_INITIALIZER("object_tests"), &object_tests},
+    {S8_INITIALIZER("jit_tests"), &jit_tests},
     {S8_INITIALIZER("link_tests"), &link_tests},
     {S8_INITIALIZER("compiler_driver_tests"), &compiler_driver_tests},
 #if BUSTER_CPU_ARCH_X86_64
@@ -213,9 +217,9 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
 };
 
 #if BUSTER_CPU_ARCH_X86_64
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 31);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 32);
 #else
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 30);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 31);
 #endif
 #endif
 

@@ -20,6 +20,7 @@
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/object/object.h>
+#include <buster/lib/compiler/jit/jit.h>
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/ide_document.h>
@@ -87,6 +88,7 @@
 #include <buster/lib/compiler/codeview/codeview.c>
 #include <buster/lib/compiler/pdb/pdb.c>
 #include <buster/lib/compiler/object/object.c>
+#include <buster/lib/compiler/jit/jit.c>
 #include <buster/lib/compiler/link/link.c>
 #include <buster/lib/compiler/driver/driver.c>
 #include <buster/lib/hash.c>
@@ -143,13 +145,17 @@ struct IdeProgram
     String8 compile_output_path;
     String8 compile_linker;
     String8 compile_module_root;
+    String8 jit_source_path;
+    String8 jit_module_root;
     SliceString8 cc_arguments;
     SliceString8 fuzz_arguments;
+    SliceString8 jit_arguments;
     bool test;
     bool bench;
     bool compile;
     bool compile_debug_info;
     bool cc;
+    bool jit;
     bool fuzz;
     bool test_app;
     bool document_model_ready;
@@ -743,6 +749,67 @@ ProcessResult process_arguments(void)
             i += 1;
             ide_state.compile_source_path = arguments.pointer[i];
         }
+        else if (string_equal(arg, S8("jit")))
+        {
+#if BUSTER_IOS || BUSTER_ANDROID || !BUSTER_LINK_LIBC
+            string_print(S8("jit is not available on this target\n"));
+            result = PROCESS_RESULT_FAILED;
+            break;
+#else
+            if (i != 1 || ide_state.test || ide_state.bench || ide_state.compile || ide_state.cc || ide_state.jit || ide_state.fuzz ||
+                i + 1 >= arguments.length)
+            {
+                string_print(S8("usage: ide jit <source.bbb> [--module-root=<path>] [-- <program args>...]\n"));
+                result = PROCESS_RESULT_FAILED;
+                break;
+            }
+            i += 1;
+            ide_state.jit_source_path = arguments.pointer[i];
+            if (string_equal(ide_state.jit_source_path, S8("--")) || string_starts_with_sequence(ide_state.jit_source_path, S8("--module-root=")))
+            {
+                string_print(S8("usage: ide jit <source.bbb> [--module-root=<path>] [-- <program args>...]\n"));
+                result = PROCESS_RESULT_FAILED;
+                break;
+            }
+            ide_state.jit = true;
+            for (i += 1; i < arguments.length; i += 1)
+            {
+                arg = arguments.pointer[i];
+                if (string_equal(arg, S8("--")))
+                {
+                    ide_state.jit_arguments = (SliceString8){
+                        .pointer = arguments.pointer + i + 1,
+                        .length = arguments.length - i - 1,
+                    };
+                    break;
+                }
+                if (string_starts_with_sequence(arg, S8("--module-root=")))
+                {
+                    if (ide_state.jit_module_root.length)
+                    {
+                        string_print(S8("jit: --module-root may only be specified once\n"));
+                        result = PROCESS_RESULT_FAILED;
+                        break;
+                    }
+                    ide_state.jit_module_root = (String8){
+                        .pointer = arg.pointer + S8("--module-root=").length,
+                        .length = arg.length - S8("--module-root=").length,
+                    };
+                    if (!ide_state.jit_module_root.length)
+                    {
+                        string_print(S8("jit: expected a module root after --module-root=\n"));
+                        result = PROCESS_RESULT_FAILED;
+                        break;
+                    }
+                    continue;
+                }
+                string_print(S8("jit: unsupported option: {S8}\n"), arg);
+                result = PROCESS_RESULT_FAILED;
+                break;
+            }
+            break;
+#endif
+        }
         else if (string_equal(arg, S8("cc")))
         {
             ide_state.cc = true;
@@ -826,7 +893,7 @@ ProcessResult process_arguments(void)
         }
     }
 
-    if (ide_state.test || ide_state.bench || ide_state.compile || ide_state.cc || ide_state.fuzz)
+    if (ide_state.test || ide_state.bench || ide_state.compile || ide_state.cc || ide_state.jit || ide_state.fuzz)
     {
         ide_state.startup_open_path = (String8){0};
     }
@@ -2457,6 +2524,129 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_compiler(void)
     return result;
 }
 
+typedef s32 IdeJitMainVoid(void);
+typedef s32 IdeJitMainArguments(s32 argument_count, u8** arguments, u8** environment);
+
+BUSTER_GLOBAL_LOCAL ProcessResult run_jit(void)
+{
+#if BUSTER_IOS || BUSTER_ANDROID || !BUSTER_LINK_LIBC
+    string_print(S8("jit is not available on this target\n"));
+    return PROCESS_RESULT_FAILED;
+#else
+    Arena* arena = arena_create((ArenaCreation){
+        .reserved_size = BUSTER_GB(1),
+    });
+    if (!arena)
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    CompilerDriverResult compile = compiler_driver_compile(arena, (CompilerDriverOptions){
+                                                                      .source_path = ide_state.jit_source_path,
+                                                                      .module_root = ide_state.jit_module_root,
+                                                                      .target = target_native,
+                                                                      .output_kind = COMPILER_DRIVER_OUTPUT_KIND_JIT,
+                                                                  });
+    if (compile.error != COMPILER_DRIVER_ERROR_NONE)
+    {
+        if (compile.diagnostic.length)
+        {
+            string_print(S8("jit: error: {S8}\n"), compile.diagnostic);
+        }
+        else
+        {
+            string_print(S8("jit: compilation failed with error {u32}\n"), (u32)compile.error);
+        }
+        arena_destroy(arena, 1);
+        return PROCESS_RESULT_FAILED;
+    }
+    if (!compile.has_object || compile.entry_signature <= COMPILER_DRIVER_ENTRY_SIGNATURE_NONE ||
+        compile.entry_signature >= COMPILER_DRIVER_ENTRY_SIGNATURE_COUNT)
+    {
+        string_print(S8("jit: compiler did not produce a valid in-memory entry point\n"));
+        arena_destroy(arena, 1);
+        return PROCESS_RESULT_FAILED;
+    }
+    if (compile.entry_signature == COMPILER_DRIVER_ENTRY_SIGNATURE_S32_ARGC_ARGV_ENVP && ide_state.jit_arguments.length > (u64)INT32_MAX - 1)
+    {
+        string_print(S8("jit: too many program arguments\n"));
+        arena_destroy(arena, 1);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    JitProgram program = jit_link_object(&compile.object, (JitOptions){0});
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    s32 guest_result = 0;
+    if (program.error != JIT_ERROR_NONE)
+    {
+        if (program.failing_symbol.length)
+        {
+            string_print(S8("jit: error: {S8}: {S8}\n"), jit_error_string(program.error), program.failing_symbol);
+        }
+        else
+        {
+            string_print(S8("jit: error: {S8}\n"), jit_error_string(program.error));
+        }
+        goto cleanup;
+    }
+
+    void* main_address = jit_program_symbol(&program, S8("main"));
+    if (!main_address)
+    {
+        string_print(S8("jit: error: {S8}\n"), jit_error_string(program.error));
+        goto cleanup;
+    }
+    if (compile.entry_signature == COMPILER_DRIVER_ENTRY_SIGNATURE_S32_VOID)
+    {
+        IdeJitMainVoid* main_function = 0;
+        BUSTER_CT_CHECK(sizeof(main_function) == sizeof(main_address));
+        memcpy(&main_function, &main_address, sizeof(main_function));
+        guest_result = main_function();
+    }
+    else if (compile.entry_signature == COMPILER_DRIVER_ENTRY_SIGNATURE_S32_ARGC_ARGV_ENVP)
+    {
+        u64 argument_count = ide_state.jit_arguments.length + 1;
+        String8* argument_strings = arena_allocate(arena, String8, argument_count);
+        argument_strings[0] = string_duplicate_arena(arena, ide_state.jit_source_path, true);
+        for (u64 argument_index = 1; argument_index < argument_count; argument_index += 1)
+        {
+            argument_strings[argument_index] = string_duplicate_arena(arena, ide_state.jit_arguments.pointer[argument_index - 1], true);
+        }
+        PosixStringList argument_list = posix_string_list_from_slice_string(arena, (SliceString8){
+                                                                                     .pointer = argument_strings,
+                                                                                     .length = argument_count,
+                                                                                 });
+        PosixStringList environment_list = posix_environment_from_keys_and_values(
+            arena, program_state->input.environment_keys, program_state->input.environment_values);
+        u8** guest_arguments = 0;
+        u8** guest_environment = 0;
+        BUSTER_CT_CHECK(sizeof(guest_arguments) == sizeof(argument_list));
+        BUSTER_CT_CHECK(sizeof(guest_environment) == sizeof(environment_list));
+        memcpy(&guest_arguments, &argument_list, sizeof(guest_arguments));
+        memcpy(&guest_environment, &environment_list, sizeof(guest_environment));
+
+        IdeJitMainArguments* main_function = 0;
+        BUSTER_CT_CHECK(sizeof(main_function) == sizeof(main_address));
+        memcpy(&main_function, &main_address, sizeof(main_function));
+        guest_result = main_function((s32)argument_count, guest_arguments, guest_environment);
+    }
+    else
+    {
+        string_print(S8("jit: compiler returned an unsupported entry signature\n"));
+        goto cleanup;
+    }
+    result = PROCESS_RESULT_SUCCESS;
+
+cleanup:
+    jit_program_release(&program);
+    arena_destroy(arena, 1);
+    if (result == PROCESS_RESULT_SUCCESS)
+    {
+        entry_point_exit_code_set(guest_result);
+    }
+    return result;
+#endif
+}
+
 // The source measurement table (see CSourceMetrics), two aggregates side by
 // side so include amplification reads off the page: `unique` covers the
 // distinct files of the include closure, `lexed` every inclusion, and a
@@ -2794,6 +2984,10 @@ ProcessResult entry_point(void)
     if (ide_state.compile)
     {
         return run_compiler();
+    }
+    if (ide_state.jit)
+    {
+        return run_jit();
     }
     if (ide_state.bench)
     {

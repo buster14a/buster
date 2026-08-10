@@ -3736,6 +3736,97 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                                                        .pointer = (u8*)source.pointer,
                                                        .length = source.length,
                                                    }));
+    CompilerDriverResult jit_void_compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
+                                                                                          .source_path = source_path,
+                                                                                          .target = target_native,
+                                                                                          .output_kind = COMPILER_DRIVER_OUTPUT_KIND_JIT,
+                                                                                      });
+    BUSTER_TEST(arguments, jit_void_compile.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, jit_void_compile.has_object && jit_void_compile.object.symbol_count != 0);
+    BUSTER_TEST(arguments, jit_void_compile.entry_signature == COMPILER_DRIVER_ENTRY_SIGNATURE_S32_VOID);
+
+    String8 jit_arguments_path = buster_test_temporary_path(arguments->arena, S8("buster-driver-jit-arguments"), S8(".bbb"));
+    String8 jit_arguments_source = S8("code main[export] : fn[cc(c)] (argument_count: u32, argv: &&u8, envp: &&u8) s32\n"
+                                      "{\n"
+                                      "    return 0;\n"
+                                      "}\n");
+    BUSTER_TEST(arguments, file_write(jit_arguments_path, BUSTER_SLICE_TO_BYTE_SLICE(jit_arguments_source)));
+    CompilerDriverResult jit_arguments_compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
+                                                                                               .source_path = jit_arguments_path,
+                                                                                               .target = target_native,
+                                                                                               .output_kind = COMPILER_DRIVER_OUTPUT_KIND_JIT,
+                                                                                           });
+    BUSTER_TEST(arguments, jit_arguments_compile.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, jit_arguments_compile.has_object && jit_arguments_compile.object.symbol_count != 0);
+    BUSTER_TEST(arguments, jit_arguments_compile.entry_signature == COMPILER_DRIVER_ENTRY_SIGNATURE_S32_ARGC_ARGV_ENVP);
+
+    String8 jit_wrong_path = buster_test_temporary_path(arguments->arena, S8("buster-driver-jit-wrong-main"), S8(".bbb"));
+    String8 jit_wrong_source = S8("code main[export] : fn[cc(c)] (value: s64) s32\n"
+                                  "{\n"
+                                  "    return 0;\n"
+                                  "}\n");
+    BUSTER_TEST(arguments, file_write(jit_wrong_path, BUSTER_SLICE_TO_BYTE_SLICE(jit_wrong_source)));
+    CompilerDriverResult jit_wrong_compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
+                                                                                           .source_path = jit_wrong_path,
+                                                                                           .target = target_native,
+                                                                                           .output_kind = COMPILER_DRIVER_OUTPUT_KIND_JIT,
+                                                                                       });
+    BUSTER_TEST(arguments, jit_wrong_compile.error == COMPILER_DRIVER_ERROR_INVALID_INPUT && !jit_wrong_compile.has_object);
+    BUSTER_STRING_TEST(arguments, jit_wrong_compile.diagnostic,
+                       S8("JIT entry point main must have signature s32(void) or s32(s32|u32, u8**, u8**)"));
+
+    String8 jit_missing_path = buster_test_temporary_path(arguments->arena, S8("buster-driver-jit-missing-main"), S8(".bbb"));
+    String8 jit_missing_source = S8("code helper[export] : fn[cc(c)] () s32\n"
+                                    "{\n"
+                                    "    return 0;\n"
+                                    "}\n");
+    BUSTER_TEST(arguments, file_write(jit_missing_path, BUSTER_SLICE_TO_BYTE_SLICE(jit_missing_source)));
+    CompilerDriverResult jit_missing_compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
+                                                                                             .source_path = jit_missing_path,
+                                                                                             .target = target_native,
+                                                                                             .output_kind = COMPILER_DRIVER_OUTPUT_KIND_JIT,
+                                                                                         });
+    BUSTER_TEST(arguments, jit_missing_compile.error == COMPILER_DRIVER_ERROR_INVALID_INPUT && !jit_missing_compile.has_object);
+    BUSTER_STRING_TEST(arguments, jit_missing_compile.diagnostic, S8("JIT entry point main was not found in the root module"));
+
+    String8 jit_private_path = buster_test_temporary_path(arguments->arena, S8("buster-driver-jit-private-main"), S8(".bbb"));
+    String8 jit_private_source = S8("code main : fn[cc(c)] () s32\n"
+                                    "{\n"
+                                    "    return 0;\n"
+                                    "}\n");
+    BUSTER_TEST(arguments, file_write(jit_private_path, BUSTER_SLICE_TO_BYTE_SLICE(jit_private_source)));
+    CompilerDriverResult jit_private_compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
+                                                                                             .source_path = jit_private_path,
+                                                                                             .target = target_native,
+                                                                                             .output_kind = COMPILER_DRIVER_OUTPUT_KIND_JIT,
+                                                                                         });
+    BUSTER_TEST(arguments, jit_private_compile.error == COMPILER_DRIVER_ERROR_INVALID_INPUT && !jit_private_compile.has_object);
+    BUSTER_STRING_TEST(arguments, jit_private_compile.diagnostic, S8("JIT entry point main must be exported"));
+
+    String8 jit_module_directory = buster_test_temporary_path(arguments->arena, S8("buster-driver-jit-modules"), S8(""));
+    String8 jit_module_root_path = string_format_z(arguments->arena, S8("{S8}/root.bbb"), jit_module_directory);
+    String8 jit_module_dependency_path = string_format_z(arguments->arena, S8("{S8}/dependency.bbb"), jit_module_directory);
+    os_make_directory(jit_module_directory);
+    String8 jit_module_root_source = S8("import dependency = \"dependency\";\n"
+                                        "code root[export] : fn[cc(c)] () s32\n"
+                                        "{\n"
+                                        "    return dependency.main();\n"
+                                        "}\n");
+    String8 jit_module_dependency_source = S8("code main[export] : fn[cc(c)] () s32\n"
+                                              "{\n"
+                                              "    return 0;\n"
+                                              "}\n");
+    BUSTER_TEST(arguments, file_write(jit_module_root_path, BUSTER_SLICE_TO_BYTE_SLICE(jit_module_root_source)));
+    BUSTER_TEST(arguments, file_write(jit_module_dependency_path, BUSTER_SLICE_TO_BYTE_SLICE(jit_module_dependency_source)));
+    CompilerDriverResult jit_non_root_compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
+                                                                                              .source_path = jit_module_root_path,
+                                                                                              .module_root = jit_module_directory,
+                                                                                              .target = target_native,
+                                                                                              .output_kind = COMPILER_DRIVER_OUTPUT_KIND_JIT,
+                                                                                          });
+    BUSTER_TEST(arguments, jit_non_root_compile.error == COMPILER_DRIVER_ERROR_INVALID_INPUT && !jit_non_root_compile.has_object);
+    BUSTER_STRING_TEST(arguments, jit_non_root_compile.diagnostic, S8("JIT entry point main was not found in the root module"));
+
     CompilerDriverResult compile = compiler_driver_compile(arguments->arena, (CompilerDriverOptions){
                                                                                  .source_path = source_path,
                                                                                  .output_path = output_path,

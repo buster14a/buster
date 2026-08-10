@@ -7,6 +7,15 @@
 BUSTER_V_IMPL OsState os_state;
 
 #if BUSTER_LINK_LIBC
+BUSTER_GLOBAL_LOCAL s32 buster_entry_point_exit_code = 0;
+BUSTER_GLOBAL_LOCAL bool buster_entry_point_exit_code_is_set = false;
+
+void entry_point_exit_code_set(s32 exit_code)
+{
+    buster_entry_point_exit_code = exit_code;
+    buster_entry_point_exit_code_is_set = true;
+}
+
 #if BUSTER_FUZZ_AVAILABLE
 extern int LLVMFuzzerRunDriver(int* argc, char*** argv, int (*callback)(const u8* pointer, size_t size));
 #if !BUSTER_SANITIZE
@@ -205,6 +214,8 @@ BUSTER_GLOBAL_LOCAL void restore_default_signal_handlers(void)
 
 BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOsList envp)
 {
+    buster_entry_point_exit_code = 0;
+    buster_entry_point_exit_code_is_set = false;
 #if !BUSTER_SANITIZE
     // Sanitizer runtimes install their own fault handlers with much richer
     // reports; only take over crash reporting in non-sanitized builds.
@@ -354,6 +365,12 @@ int main(int argc, char* argv[], char* envp[])
     result = 0;
 #else
     result = (int)buster_entry_point((StringOsList)argv, (StringOsList)envp);
+#endif
+#if !BUSTER_IOS && !BUSTER_ANDROID
+    if (buster_entry_point_exit_code_is_set)
+    {
+        result = (int)buster_entry_point_exit_code;
+    }
 #endif
     return result;
 }

@@ -55,6 +55,22 @@ typedef enum CompilerDriverCDialect
     COMPILER_DRIVER_C_DIALECT_COUNT,
 } CompilerDriverCDialect;
 
+typedef enum CompilerDriverOutputKind
+{
+    // Value zero preserves the existing compile-to-native-executable API.
+    COMPILER_DRIVER_OUTPUT_KIND_NATIVE_EXECUTABLE,
+    COMPILER_DRIVER_OUTPUT_KIND_JIT,
+    COMPILER_DRIVER_OUTPUT_KIND_COUNT,
+} CompilerDriverOutputKind;
+
+typedef enum CompilerDriverEntrySignature
+{
+    COMPILER_DRIVER_ENTRY_SIGNATURE_NONE,
+    COMPILER_DRIVER_ENTRY_SIGNATURE_S32_VOID,
+    COMPILER_DRIVER_ENTRY_SIGNATURE_S32_ARGC_ARGV_ENVP,
+    COMPILER_DRIVER_ENTRY_SIGNATURE_COUNT,
+} CompilerDriverEntrySignature;
+
 typedef struct CompilerDriverInvocation CompilerDriverInvocation;
 struct CompilerDriverInvocation
 {
@@ -106,10 +122,11 @@ struct CompilerDriverOptions
     String8 output_path;
     String8 module_root;
     Target target;
+    CompilerDriverOutputKind output_kind;
     bool debug_info;
     // A CodegenRegisterAllocatorMode value.
     u8 register_allocator;
-    u8 reserved[6];
+    u8 reserved[2];
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;
@@ -129,6 +146,7 @@ struct CompilerDriverResult
     CompilerDriverError error;
     CodegenError codegen_error;
     ObjectError object_error;
+    CompilerDriverEntrySignature entry_signature;
     u32 tokenizer_error_count;
     u32 tokenizer_warning_count;
     u32 parser_diagnostic_count;

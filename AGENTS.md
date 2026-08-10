@@ -839,6 +839,14 @@ has hard design constraints:
   deterministic internal names, duplicate definitions are diagnosed, and
   unresolved symbols are retained only when the final platform linker is
   allowed to satisfy them.
+- `ide jit <source.bbb> [--module-root=<path>] [-- <program args>...]` compiles
+  the complete Buster program directly into a host-native merged object, loads
+  code/read-only/writable sections with RX/R/RW page protections, and invokes
+  an exported C-convention `main` returning `s32`. The accepted entry forms are
+  `s32(void)` and `s32(s32|u32, u8**, u8**)`; the latter receives UTF-8 argv and
+  envp. The loader uses explicit function bindings for unresolved imports and
+  rejects foreign CPU features, TLS, external data imports, and unsupported
+  relocations before execution.
 - Canonical static-storage objects are `IrGlobal` values. Zero, integer, float,
   byte aggregate, and symbol-address initializers are materialized into
   read-only or writable object sections; mutable non-TLS zero objects use BSS,
@@ -1019,14 +1027,15 @@ Compiler (`src/buster/lib/compiler/`):
 | `codeview/codeview.{c,h}` | CodeView C13 emitter for Windows targets: `.debug$S` symbol/line/checksum/string subsections and `.debug$T`, with per-function `SECREL32`/`SECTION` relocation slots. |
 | `pdb/pdb.{c,h}` | PDB writer: MSF container plus the info, TPI, DBI, IPI, globals, publics, section-header, module and `/names` streams. Repackages CodeView modules and remaps checksum entries onto the PDB string table. |
 | `object/object.{c,h}` | Format-neutral sections, symbols, and relocations; ELF64, COFF, and Mach-O relocatable writers/readers; assembly printing; in-memory object linking. |
+| `jit/jit.{c,h}` | Host-native in-process object loader: explicit host-function bindings, import thunks, named symbol lookup, writable data, W^X finalization, and executable-memory lifetime management. TLS and external data imports are rejected explicitly. |
 | `link/link.{c,h}` | Multi-object section merging and symbol resolution; from-scratch libc-backed ELF64, PE32+, and Mach-O executable writers. |
-| `driver/driver.{c,h}` | End-to-end source-to-object compilation and libc-backed executable linking. The Clang-like `ide cc` path supports preprocessing, syntax checks, per-input C object emission for every supported target, and multi-translation-unit native executable construction through the format-neutral object merger for the currently lowered subset. |
+| `driver/driver.{c,h}` | End-to-end source-to-object compilation with either an in-memory JIT object result or libc-backed executable linking. The Clang-like `ide cc` path supports preprocessing, syntax checks, per-input C object emission for every supported target, and multi-translation-unit native executable construction through the format-neutral object merger for the currently lowered subset. |
 | `codegen/codegen.{c,h}`, `codegen/codegen_internal.h` | Direct typed-IR ABI translation, conservative register allocation, native x86-64/AArch64 emission, executable-memory support, and private codegen test seams. Tests live in `codegen_test.{c,h}`. |
 
 Applications and standalone tools:
 
 | Path | Contents |
 |---|---|
-| `apps/ide/ide.c` | Main application, the **only CMake executable target**, and the unity-build translation unit (the `BUSTER_UNITY_BUILD` include block at the top). |
+| `apps/ide/ide.c` | Main application, the **only CMake executable target**, and the unity-build translation unit (the `BUSTER_UNITY_BUILD` include block at the top). Its headless compiler commands include `ide compile`, `ide cc`, and host-native `ide jit`. |
 | `apps/disk_builder.c` | Standalone MBR/GPT disk-image builder. Not wired into CMake. |
 | `lib/sanitizer_coe_win.c` | Windows continue-on-error sanitizer shim (raw `WriteFile` to stderr, no CRT). |

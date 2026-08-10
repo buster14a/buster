@@ -12,6 +12,7 @@ BUSTER_F_DECL ProcessResult buster_fuzz_run(SliceString8 fuzz_arguments);
 #endif
 BUSTER_F_DECL ProcessResult process_arguments(void);
 BUSTER_F_DECL ProcessResult entry_point(void);
+BUSTER_F_DECL void entry_point_exit_code_set(s32 exit_code);
 BUSTER_F_DECL ProcessResult buster_argument_process(u64 argument_index);
 BUSTER_F_DECL bool update(void);
 BUSTER_F_DECL bool frame(void);
