@@ -12,6 +12,118 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-10i` (Linux x86_64, Zen 4 7940HS; the promotion/edge-contract
+pair `2026-08-09ap` specified, landed — and the third leg neither entry
+predicted, without which the pair measures as a regression. **Buster-built
+stage comparison, one frozen pre-change ide.c compiled as the fixed
+workload, executed instructions: FAST `48.849G` to `48.219G` (`-1.29%`),
+QUALITY `47.832G` — the first QUALITY win over FAST on the self-host
+corpus (pins 765 to 4,110) — canonical-built `76.380G`, so FAST stands at
+`-36.9%` and QUALITY at `-37.4%` against the canonical emitter. Text
+`-2.1%`. Every number below on the same frozen workload; the measurement
+band across repeat runs was `~20 K`.**)
+
+  (This entry was developed and measured against pre-`2026-08-10h` main
+  `3a4e001` and rebased onto the AArch64 merge afterwards; the letter
+  moved from `h` to `i` in the rebase, the same renumbering `2026-08-10g`
+  records. Correctness gates were re-run on the merged tree; the
+  measurements are as taken on the pre-merge base.)
+
+- **Stage-5 edge contracts, as specified.** A block's contract is the
+  register file it may assume at entry — owner and dirtiness per physical
+  register — fixed once when the block is scanned, satisfied by every
+  edge into it. Backward and statically-cold edges conform inline at
+  their terminator; forward edges retroactively when the successor fixes
+  its contract, full parallel-copy repair on single-successor jmp edges
+  and always-safe spills elsewhere, merged behind the in-order edit
+  stream by a stable sort. Cold blocks — switch targets, both targets of
+  a conditional whose successors both precede it — keep the old
+  write-back semantics. Returns stop writing back entirely: the frame
+  dies with them. Gated on `boundary_spills` as `2026-08-09ap` ordered:
+  **2,996 to 1,536 (`-48.7%`)** before promotion, instructions flat
+  (`+0.07%`) exactly as predicted, because a two-instruction temporary
+  has nothing to retain.
+- **Promotion, rebuilt from the `2026-08-09ap` recipe.** Scalar 4- or
+  8-byte locals whose every use is the place of a same-width load or
+  store become virtual registers; loads and stores lower to copies; the
+  address helper refuses promoted locals defensively. Correct on arrival
+  (all soaks byte-identical) and **`+2.8%` slower alone (`50.211G`)** —
+  worse than the `+3.4%` the reverted original measured, with boundary
+  spills no longer the story (22 K against the original's 26.7 K).
+- **The third leg: load aliasing.** A per-function profile diff (perf at
+  a fixed instruction period, symbolized per `perf script` +
+  `llvm-symbolizer` since buster ELFs carry no symtab) showed the cost
+  spread as a flat tax over every hot leaf — `ir_type_from_id` alone
+  `+17%` — and the disassembly showed why: the copy a promoted load
+  lowers to never coalesces, because its source is the local and the
+  local lives on. Every read was one instruction before and two after.
+  The fix: a load result whose every use sits in the load's own block
+  before the local's next store — or any load of a single-store local,
+  the saved-parameter shape that compilers read everywhere — shares the
+  local's virtual register outright and the load selects into nothing.
+  The block-local containment is what makes the layout reasoning sound
+  (a jump re-enters at a block head, never between a load and its use),
+  and the chain extends one level through IR_OPCODE_DEREFERENCE, whose
+  selection is the same plain copy: without that second sweep the copy
+  does not die, it just moves from the load to the address staging.
+  Aliasing bought back `1.18G` and is what turns the pair positive;
+  the deref extension alone was worth `778 M` of it.
+- **Two encoder clobbers the longer lifetimes surfaced, fixed in the
+  allocator's model.** `xchg` writes the swapped-out word back into the
+  value register, so `ATOMIC_STORE_XCHG`'s staged value is gone after
+  the row; the branchy unsigned/float conversions scribble RCX. Both
+  were latent for the same reason: before promotion every staged value
+  died at its row, so nothing ever read the leftover. The atomics
+  differential caught the first as a real miscompile (`atomic_ops`
+  returning 24 for 51 — the argument's register silently swapped with
+  uninitialized stack); the conversions were found by auditing every
+  constrained sequence for operand-register mutation. Any future
+  macro-op sequence needs the same audit before promotion-era vregs
+  flow through it.
+- **Measured on the final shape and reverted — do not retry as first
+  written.** A function-wide `next_call` horizon, so promoted locals
+  prefer callee-saved registers, loses `64 M`: the push/pop pairs of
+  the extra bindings outweigh the flush survivals, the same
+  over-binding `2026-08-09v` measured before the per-block crossing
+  heuristic existed. Carrying clean contract entries into blocks a back
+  edge reaches loses `20 M`: the loop reloads them every iteration
+  whether or not the body wants them. Both looked like fixes while the
+  copy tax was still misattributed to retention; only dirty entries
+  cross into loop headers, and clean entries carry everywhere else.
+- **The pressure corpus tells the stage-8 story, honestly.** On the
+  16-live-values fixture (driver: 200 iterations of the three bodies at
+  2,000 rounds), the pair is a regression: FAST `91.34M` to `98.53M`,
+  QUALITY `94.93M`, clang -O2 `47.54M`. The fixture overflows the
+  register file by design, and the local scan then rotates the whole
+  working set through the latch conform every iteration — the
+  disassembly shows a full register permutation per loop. QUALITY
+  beating FAST here and on the self-host corpus is the signature
+  `2026-08-09ap` predicted: the global layer finally has long-lived
+  values to hold. Recoloring and live-range splitting (stages 8/9) now
+  have their corpus and their headroom — the gap to clang is 2.0x on
+  pressure, and the remaining gap is assignment quality, not lowering.
+- **Allocator traffic on the final pair** (ide.c, FAST): reloads 86,615
+  / spills 96,507 / boundary_spills 21,829 / boundary_reloads 4,807 /
+  boundary_copies 3,052 / copies 59,853. The `CODEGEN_ALLOCATOR` line
+  now reports the boundary reload/copy splits. Boundary spills sit at
+  22 K because promotion multiplies the dirty values that cross edges;
+  the contracts absorbed what retention can absorb, and the residual is
+  eviction pressure inside blocks, which is stage-8 recoloring's target.
+- **Gates:** test_all green (28,643 unit, 31 module — the machine
+  differential suite caught the xchg miscompile), self-host fixed point
+  deterministic, all three soaks byte-identical against fresh canonical
+  references at every step, `test_all_combinations_ci` green before
+  push. One trap re-paid: a `-Wshadow` error left a stale Release
+  binary that measured as a perfect no-op — `ninja` the Release target
+  explicitly and check its exit before trusting any number.
+- Reference points for the next audit, buster-built stage comparison on
+  the frozen workload: canonical `76.380G`, **FAST `48.219G`
+  (`-36.9%`)**, **QUALITY `47.832G` (`-37.4%`)**, text 13,465,473
+  (canonical-era baseline 13,759,169). Pressure corpus: FAST `98.53M`,
+  QUALITY `94.93M`, clang `47.54M`. Volatile scalar locals are
+  indistinguishable from plain ones in IR and promote; the C frontend
+  does not carry the qualifier to LOAD/STORE, so a volatile-correctness
+  pass needs frontend work first, recorded here rather than fixed.
 `2026-08-10h` (Linux x86_64, Zen 4 7940HS; register-allocator stage 11 —
 the AArch64 machine backend, in four gated commits: the allocators
 target-parameterized with an x86-64 byte-identity proof, the scalar
@@ -109,7 +221,6 @@ path executes nothing under NONE.**)
   next lift by mass): stage 1 `5.6077 G` instructions / `1507202` tokens /
   `3720.620` per token, fixed point deterministic, fixture-corpus machine
   coverage 80 of 203, `ide bench` untouched (parser unchanged).
-
 `2026-08-10g` (Linux x86_64, Zen 4 7940HS; rebase onto main, and the
 numbers refreshed on the merged tree.)
 
