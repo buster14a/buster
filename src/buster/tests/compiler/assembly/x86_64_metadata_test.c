@@ -1168,14 +1168,14 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             S8("BSRINIT"), &bsr0_operand, 1, (BusterX86MetadataPhysicalAttributes){0}, ace_feature,
             BUSTER_ARRAY_LENGTH(ace_feature));
         source_bsr0_query.source_semantics = true;
-        BusterX86MetadataEmitResult source_bsr0_result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
-            .physical = source_bsr0_query,
-            .form_id = 30,
-            .output = (u8[32]){0},
-            .output_capacity = 32,
-            .relocations = (BusterX86MetadataRelocation[8]){0},
-            .relocation_capacity = 8,
-        });
+        BusterX86MetadataEmitQuery source_bsr0_emit_query = {0};
+        source_bsr0_emit_query.physical = source_bsr0_query;
+        source_bsr0_emit_query.form_id = 30;
+        source_bsr0_emit_query.output = (u8[32]){0};
+        source_bsr0_emit_query.output_capacity = 32;
+        source_bsr0_emit_query.relocations = (BusterX86MetadataRelocation[8]){0};
+        source_bsr0_emit_query.relocation_capacity = 8;
+        BusterX86MetadataEmitResult source_bsr0_result = buster_x86_metadata_emit_form(source_bsr0_emit_query);
         BUSTER_TEST(arguments, source_bsr0_result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS);
         BusterX86MetadataEmitResult fake_special_result = x86_64_metadata_test_emit_form(
             S8("BSRINIT"), 30, &fake_special_operand, 1, (BusterX86MetadataPhysicalAttributes){0}, ace_feature,
@@ -1192,36 +1192,30 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BusterX86MetadataPhysicalQuery include_implicit_query = x86_64_metadata_test_physical_query(
             S8("BSRINIT"), 0, 0, (BusterX86MetadataPhysicalAttributes){0}, ace_feature, BUSTER_ARRAY_LENGTH(ace_feature));
         include_implicit_query.include_implicit = true;
-        BusterX86MetadataEmitResult include_implicit_missing = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
-            .physical = include_implicit_query,
-            .form_id = 30,
-            .output = (u8[32]){0},
-            .output_capacity = 32,
-            .relocations = (BusterX86MetadataRelocation[8]){0},
-            .relocation_capacity = 8,
-        });
+        BusterX86MetadataEmitQuery include_implicit_emit_query = {0};
+        include_implicit_emit_query.physical = include_implicit_query;
+        include_implicit_emit_query.form_id = 30;
+        include_implicit_emit_query.output = (u8[32]){0};
+        include_implicit_emit_query.output_capacity = 32;
+        include_implicit_emit_query.relocations = (BusterX86MetadataRelocation[8]){0};
+        include_implicit_emit_query.relocation_capacity = 8;
+        BusterX86MetadataEmitResult include_implicit_missing = buster_x86_metadata_emit_form(include_implicit_emit_query);
         include_implicit_query.operands = &bsr0_operand;
         include_implicit_query.operand_count = 1;
-        BusterX86MetadataEmitResult include_implicit_explicit = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
-            .physical = include_implicit_query,
-            .form_id = 30,
-            .output = (u8[32]){0},
-            .output_capacity = 32,
-            .relocations = (BusterX86MetadataRelocation[8]){0},
-            .relocation_capacity = 8,
-        });
+        include_implicit_emit_query.physical = include_implicit_query;
+        BusterX86MetadataEmitResult include_implicit_explicit = buster_x86_metadata_emit_form(include_implicit_emit_query);
         BUSTER_TEST(arguments, include_implicit_missing.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
                                    include_implicit_explicit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS);
         BusterX86MetadataPhysicalQuery missing_feature_query = x86_64_metadata_test_physical_query(
             S8("BSRINIT"), 0, 0, (BusterX86MetadataPhysicalAttributes){0}, 0, 0);
-        BusterX86MetadataEmitResult missing_feature_result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
-            .physical = missing_feature_query,
-            .form_id = 30,
-            .output = (u8[32]){0},
-            .output_capacity = 32,
-            .relocations = (BusterX86MetadataRelocation[8]){0},
-            .relocation_capacity = 8,
-        });
+        BusterX86MetadataEmitQuery missing_feature_emit_query = {0};
+        missing_feature_emit_query.physical = missing_feature_query;
+        missing_feature_emit_query.form_id = 30;
+        missing_feature_emit_query.output = (u8[32]){0};
+        missing_feature_emit_query.output_capacity = 32;
+        missing_feature_emit_query.relocations = (BusterX86MetadataRelocation[8]){0};
+        missing_feature_emit_query.relocation_capacity = 8;
+        BusterX86MetadataEmitResult missing_feature_result = buster_x86_metadata_emit_form(missing_feature_emit_query);
         BUSTER_TEST(arguments, missing_feature_result.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE);
         BUSTER_TEST(arguments, buster_x86_metadata_test_fixed_bsrinit_no_zeroing());
 
