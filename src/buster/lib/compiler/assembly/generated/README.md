@@ -211,6 +211,19 @@ system rows; excluding system rows leaves 1,653 (1,490 canonical and 163
 aliases). Acceptance remains blocked pending semantic operand and
 system-register dictionaries plus LLVM cross-references.
 
+The importer resolves the class `regdiagram` first and applies each encoding
+as a sparse overlay. Binary cells are authoritative; empty overlay cells
+inherit the base bit (with a named empty cell retaining its source field),
+named symbolic cells are promoted to variable fields only for canonical
+Apple-M1 rows, and unnamed symbolic cells remain unresolved. `!=` box
+constraints are retained as constraints while their `colspan` positions are
+tracked one source bit at a time. This profile-scoped promotion removes the
+unresolved and explicit-unresolved masks from all 1,523 Apple-M1 canonical
+rows. Exactly 133 rows change, while the 22 M1 aliases, 129 non-M1 canonical
+rows, and 3 non-M1 aliases with source uncertainty retain their masks. The
+sorted `id + space + old_mask` identity digest is
+`c6062407c284feb7746a91214c67a739dcb70c8b763962ae1ff353036a231543`.
+
 The symmetric-difference gate is exact: all 17 PAuth-LR rows in the exclusion
 set must be `apple_m1: false`, and all 16 Armv8.5/crypto/special rows in the
 included set must be `apple_m1: true`; names missing from either set or present

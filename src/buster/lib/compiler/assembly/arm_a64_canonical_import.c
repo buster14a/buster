@@ -146,6 +146,9 @@ struct ArmA64CanonicalRow
     u32 field_mask;
     u32 unresolved_mask;
     u32 explicit_unresolved_mask;
+    /* Raw layout uncertainty before the profile-scoped named-box promotion.
+       This is importer audit state only and is intentionally not emitted. */
+    u32 source_unresolved_mask;
     u32 field_count;
     ArmA64Field fields[32];
     u32 box_count;
@@ -895,9 +898,19 @@ static void arm_a64_layout_apply_value(ArmA64Layout* layout, u32 bit, String8 va
     value = arm_a64_trim(value);
     if (!value.length)
     {
-        if (!overlay || layout->bits[bit].kind != ARM_A64_BIT_FIXED)
+        /* Encoding cells are a sparse overlay over the class regdiagram.  An
+           empty cell carries no new fixed value.  A named empty cell denotes
+           the source field carried by the base box (the historical XML form
+           used by BIC/ORR and similar split encodings), while an unnamed cell
+           inherits the base bit exactly. */
+        if (!overlay)
         {
             layout->bits[bit].kind = field.length ? ARM_A64_BIT_FIELD : ARM_A64_BIT_UNRESOLVED;
+            layout->bits[bit].field = field;
+        }
+        else if (field.length && layout->bits[bit].kind == ARM_A64_BIT_UNRESOLVED)
+        {
+            layout->bits[bit].kind = ARM_A64_BIT_FIELD;
             layout->bits[bit].field = field;
         }
         return;
@@ -918,7 +931,46 @@ static void arm_a64_layout_apply_value(ArmA64Layout* layout, u32 bit, String8 va
     }
 }
 
+static u32 arm_a64_layout_unresolved_mask(ArmA64Layout layout)
+{
+    u32 result = 0;
+    for (u32 bit = 0; bit < 32; bit += 1)
+    {
+        if (layout.bits[bit].kind == ARM_A64_BIT_UNRESOLVED) result |= UINT32_C(1) << bit;
+    }
+    return result;
+}
+
+static void arm_a64_layout_promote_named_symbols(ArmA64Layout* layout)
+{
+    for (u32 bit = 0; bit < 32; bit += 1)
+    {
+        ArmA64Bit* value = &layout->bits[bit];
+        /* The XML's x/N/Z/constraint tokens are variable field bits when
+           their box has a name.  Unnamed symbolic cells remain unresolved so
+           a later semantic pass can account for them explicitly. */
+        if (value->kind == ARM_A64_BIT_UNRESOLVED && value->field.length) value->kind = ARM_A64_BIT_FIELD;
+    }
+}
+
 static String8 arm_a64_xml_decode(Arena* arena, String8 value);
+
+static bool arm_a64_layout_apply_constraint(ArmA64Layout* layout, u32 bit_cursor, u32 colspan, String8 raw, String8 field, bool overlay)
+{
+    /* A constraint cell such as `!= 11xxx` describes one value constraint on
+       the whole box, not a literal cell whose text should be copied to every
+       bit.  Keep the constraint on ArmA64BoxConstraint, while assigning one
+       symbolic source bit per colspan position.  This also makes the
+       named-box promotion below independent of the textual constraint. */
+    if (!string_starts_with_sequence(raw, S8("!="))) return false;
+    String8 pattern = arm_a64_trim(string_slice(raw, 2, raw.length));
+    if (pattern.length != colspan) return false;
+    for (u32 offset = 0; offset < colspan; offset += 1)
+    {
+        arm_a64_layout_apply_value(layout, bit_cursor - offset, S8("x"), field, overlay);
+    }
+    return true;
+}
 
 static bool arm_a64_layout_box(Arena* arena, String8 text, ArmA64XmlTag box, ArmA64Layout* layout, bool overlay)
 {
@@ -1000,7 +1052,11 @@ static bool arm_a64_layout_box(Arena* arena, String8 text, ArmA64XmlTag box, Arm
             String8 fixed = string_slice(raw, 1, 2);
             for (u32 offset = 0; offset < colspan; offset += 1) arm_a64_layout_apply_value(layout, bit_cursor - offset, fixed, field, overlay);
         }
-        else if (raw.length == 1 || string_starts_with_sequence(raw, S8("!=")))
+        else if (string_starts_with_sequence(raw, S8("!=")))
+        {
+            if (!arm_a64_layout_apply_constraint(layout, bit_cursor, colspan, raw, field, overlay)) return false;
+        }
+        else if (raw.length == 1)
         {
             for (u32 offset = 0; offset < colspan; offset += 1) arm_a64_layout_apply_value(layout, bit_cursor - offset, raw, field, overlay);
         }
@@ -1036,6 +1092,49 @@ static bool arm_a64_layout_regdiagram(Arena* arena, String8 text, u64 start, u64
         }
     }
     return true;
+}
+
+static bool arm_a64_layout_self_test(void)
+{
+    ArmA64Layout layout;
+    arm_a64_layout_clear(&layout);
+
+    /* Base diagram values are retained by sparse encoding overlays. */
+    arm_a64_layout_apply_value(&layout, 31, S8("1"), (String8){0}, false);
+    arm_a64_layout_apply_value(&layout, 30, S8("x"), S8("Rn"), false);
+    arm_a64_layout_apply_value(&layout, 29, S8("x"), (String8){0}, false);
+    arm_a64_layout_apply_value(&layout, 31, (String8){0}, (String8){0}, true);
+    arm_a64_layout_apply_value(&layout, 30, (String8){0}, (String8){0}, true);
+    arm_a64_layout_apply_value(&layout, 29, (String8){0}, (String8){0}, true);
+    if (layout.bits[31].kind != ARM_A64_BIT_FIXED || layout.bits[31].value != 1 ||
+        layout.bits[30].kind != ARM_A64_BIT_UNRESOLVED || !string_equal(layout.bits[30].field, S8("Rn")) ||
+        layout.bits[29].kind != ARM_A64_BIT_UNRESOLVED || layout.bits[29].field.length)
+        return false;
+
+    /* Binary overlay cells are authoritative, including when the base bit
+       was symbolic.  A named symbolic cell is promotable to a source field;
+       unnamed symbols deliberately stay unresolved. */
+    arm_a64_layout_apply_value(&layout, 30, S8("0"), S8("Rn"), true);
+    arm_a64_layout_apply_value(&layout, 29, S8("x"), S8("Rm"), true);
+    if (layout.bits[30].kind != ARM_A64_BIT_FIXED || layout.bits[30].value != 0 ||
+        layout.bits[29].kind != ARM_A64_BIT_UNRESOLVED || !string_equal(layout.bits[29].field, S8("Rm")))
+        return false;
+
+    /* `!=` constraints are expanded one source bit per colspan position and
+       remain a constraint rather than becoming fixed bits. */
+    if (!arm_a64_layout_apply_constraint(&layout, 15, 4, S8("!= 11xx"), S8("cond"), true)) return false;
+    for (u32 offset = 0; offset < 4; offset += 1)
+    {
+        ArmA64Bit bit = layout.bits[15 - offset];
+        if (bit.kind != ARM_A64_BIT_UNRESOLVED || !string_equal(bit.field, S8("cond"))) return false;
+    }
+    arm_a64_layout_promote_named_symbols(&layout);
+    for (u32 offset = 0; offset < 4; offset += 1)
+    {
+        if (layout.bits[15 - offset].kind != ARM_A64_BIT_FIELD) return false;
+    }
+    if (layout.bits[29].kind != ARM_A64_BIT_FIELD || layout.bits[29].field.length != 2 || layout.bits[29].field.pointer[0] != 'R') return false;
+    return layout.bits[28].kind == ARM_A64_BIT_UNRESOLVED;
 }
 
 static String8 arm_a64_slice_normalize(Arena* arena, String8 text)
@@ -2652,6 +2751,80 @@ static void arm_a64_row_digest(Arena* arena, ArmA64CanonicalRow* row)
     arena_set_position(arena, mark);
 }
 
+typedef struct ArmA64LayoutResolutionStats ArmA64LayoutResolutionStats;
+struct ArmA64LayoutResolutionStats
+{
+    u32 selected_canonical;
+    u32 promoted_rows;
+    u32 source_m1_canonical_nonzero;
+    u32 source_m1_alias_nonzero;
+    u32 source_non_m1_canonical_nonzero;
+    u32 source_non_m1_alias_nonzero;
+    u8 changed_id_mask_sha256[32];
+};
+
+static void arm_a64_sha256_update_hex32(ArmA64Sha256* context, u32 value)
+{
+    static const char8 digits[] = "0123456789abcdef";
+    char8 buffer[10] = {'0', 'x', 0};
+    for (u32 index = 0; index < 8; index += 1) buffer[9 - index] = digits[(value >> (index * 4)) & 0xf];
+    arm_a64_sha256_update(context, (u8*)buffer, sizeof(buffer));
+}
+
+static bool arm_a64_validate_layout_resolution(ArmA64CanonicalRows rows, ArmA64LayoutResolutionStats* stats)
+{
+    memset(stats, 0, sizeof(*stats));
+    ArmA64Sha256 changed_sha;
+    arm_a64_sha256_init(&changed_sha);
+    u32 changed_count = 0;
+    for (u32 index = 0; index < rows.count; index += 1)
+    {
+        ArmA64CanonicalRow const* row = &rows.pointer[index];
+        bool canonical = string_equal(row->kind, S8("canonical"));
+        bool in_scope = row->apple_m1 && canonical;
+        bool source_nonzero = row->source_unresolved_mask != 0;
+        if (row->apple_m1 && canonical) stats->selected_canonical += 1;
+        if (source_nonzero)
+        {
+            if (row->apple_m1)
+            {
+                if (canonical) stats->source_m1_canonical_nonzero += 1;
+                else stats->source_m1_alias_nonzero += 1;
+            }
+            else if (canonical) stats->source_non_m1_canonical_nonzero += 1;
+            else stats->source_non_m1_alias_nonzero += 1;
+        }
+        if (!in_scope)
+        {
+            /* Aliases and non-M1 canonical rows retain the raw XML mask and
+               its explicit/unresolved distinction byte-for-byte. */
+            if (row->unresolved_mask != row->source_unresolved_mask || row->explicit_unresolved_mask != row->source_unresolved_mask)
+                return false;
+        }
+        else
+        {
+            if (row->unresolved_mask || row->explicit_unresolved_mask) return false;
+            if (source_nonzero)
+            {
+                stats->promoted_rows += 1;
+                if (changed_count) arm_a64_sha256_update(&changed_sha, (const u8*)"\n", 1);
+                changed_count += 1;
+                arm_a64_sha256_update(&changed_sha, (u8*)row->canonical_id.pointer, row->canonical_id.length);
+                arm_a64_sha256_update(&changed_sha, (const u8*)" ", 1);
+                arm_a64_sha256_update_hex32(&changed_sha, row->source_unresolved_mask);
+            }
+        }
+    }
+    arm_a64_sha256_final(&changed_sha, stats->changed_id_mask_sha256);
+    static const u8 expected_changed_sha256[32] = {
+        0xc6, 0x06, 0x24, 0x07, 0xc2, 0x84, 0xfe, 0xb7, 0x74, 0x6a, 0x91, 0x21, 0x4c, 0x67, 0xa7, 0x39,
+        0xdc, 0xb7, 0x0c, 0x8b, 0x76, 0x39, 0x62, 0xae, 0x1f, 0xf3, 0x53, 0x03, 0x6a, 0x23, 0x15, 0x43,
+    };
+    return stats->selected_canonical == 1523 && stats->promoted_rows == 133 && stats->source_m1_canonical_nonzero == 133 &&
+           stats->source_m1_alias_nonzero == 22 && stats->source_non_m1_canonical_nonzero == 129 && stats->source_non_m1_alias_nonzero == 3 &&
+           memcmp(stats->changed_id_mask_sha256, expected_changed_sha256, sizeof(expected_changed_sha256)) == 0;
+}
+
 static bool arm_a64_link_alias_preferences(Arena* arena, ArmA64CanonicalRows rows)
 {
     for (u32 index = 0; index < rows.count; index += 1)
@@ -2955,11 +3128,13 @@ static bool arm_a64_parse_page(Arena* arena, Arena* scratch, String8 source, Arm
             row->feature_tags = arm_a64_join_feature_tags(arena, class_tags, local_tags);
             row->status = string_starts_with_sequence(row->encoding_name, S8("UNALLOCATED")) ? S8("unallocated") :
                           (string_starts_with_sequence(row->encoding_name, S8("UDF_")) ? S8("undefined") : S8("defined"));
-            arm_a64_collect_fields(arena, row, layout);
-            if ((row->fixed_mask | row->field_mask | row->unresolved_mask) != UINT32_MAX) return false;
             bool feature_expression_valid = false;
             row->apple_m1 = arm_a64_feature_expression_evaluate(row->feature_expression, &feature_expression_valid);
             if (!feature_expression_valid) return false;
+            row->source_unresolved_mask = arm_a64_layout_unresolved_mask(layout);
+            if (row->apple_m1 && string_equal(row->kind, S8("canonical"))) arm_a64_layout_promote_named_symbols(&layout);
+            arm_a64_collect_fields(arena, row, layout);
+            if ((row->fixed_mask | row->field_mask | row->unresolved_mask) != UINT32_MAX) return false;
             arm_a64_row_digest(arena, row);
             if ((row->fixed_mask & row->field_mask) || (row->fixed_mask & row->unresolved_mask) || (row->field_mask & row->unresolved_mask) ||
                 (row->fixed_mask | row->field_mask | row->unresolved_mask) != UINT32_MAX)
@@ -2976,6 +3151,7 @@ static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, const
                                     u64 scalar_header_hash, u64 scalar_header_bytes, u32 scalar_form_count, u32 scalar_mnemonic_count,
                                     const u32 scalar_arity_counts[4], const u32 scalar_feature_counts[2],
                                     const u32 scalar_recipe_counts[12], const char* scalar_identity_sha256,
+                                    ArmA64LayoutResolutionStats layout_resolution,
                                     ArmA64CanonicalRows rows, u32 page_count, u32 instruction_pages, u32 alias_pages, u32 pseudocode_pages,
                                     u32 iclass_count, u32 regdiagram_count, u32 selected, u32 selected_canonical,
                                     u32 selected_alias, u32 selected_system, u32 selected_system_canonical, u32 selected_system_alias,
@@ -3006,6 +3182,21 @@ static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, const
     arena_append_string8(output, S8(", \"alias\": ")); arm_a64_append_u64(output, selected_non_system_alias);
     arena_append_string8(output, S8("}"));
     arena_append_string8(output, S8(", \"derivation\": \"LLVM AppleA14/HasV8_4aOps feature closure cross-checked against Arm XML; not a silicon claim\"},\n"));
+    arena_append_string8(output, S8("  \"layout_resolution\": {\"scope\": \"row.kind == canonical && row.apple_m1\", \"promoted_rows\": "));
+    arm_a64_append_u64(output, layout_resolution.promoted_rows);
+    arena_append_string8(output, S8(", \"selected_canonical\": "));
+    arm_a64_append_u64(output, layout_resolution.selected_canonical);
+    arena_append_string8(output, S8(", \"source_nonzero\": {\"m1_canonical\": "));
+    arm_a64_append_u64(output, layout_resolution.source_m1_canonical_nonzero);
+    arena_append_string8(output, S8(", \"m1_alias\": "));
+    arm_a64_append_u64(output, layout_resolution.source_m1_alias_nonzero);
+    arena_append_string8(output, S8(", \"non_m1_canonical\": "));
+    arm_a64_append_u64(output, layout_resolution.source_non_m1_canonical_nonzero);
+    arena_append_string8(output, S8(", \"non_m1_alias\": "));
+    arm_a64_append_u64(output, layout_resolution.source_non_m1_alias_nonzero);
+    arena_append_string8(output, S8("}, \"changed_id_mask_sha256\": "));
+    arm_a64_json_sha256(output, layout_resolution.changed_id_mask_sha256);
+    arena_append_string8(output, S8(", \"empty_overlay\": \"inherit\", \"named_symbol\": \"field\", \"unnamed_symbol\": \"unresolved\", \"colspan_constraints\": \"per-bit\"},\n"));
     arena_append_string8(output, S8("  \"artifact\": {\"file\": \"arm-a64-canonical.generated.jsonl\", \"bytes\": ")); arm_a64_append_u64(output, artifact_bytes);
     arena_append_string8(output, S8(", \"xxh64\": ")); arm_a64_json_hex(output, artifact_hash); arena_append_string8(output, S8("},\n"));
     arena_append_string8(output, S8("  \"fixed_spelling_artifact\": {\"file\": \"arm-a64-m1-fixed.generated.h\", \"bytes\": "));
@@ -3118,8 +3309,8 @@ static bool arm_a64_check_existing_outputs(Arena* arena, String8 output_director
                  arm_a64_check_file(scratch, scalar_header_path, scalar_header, "M1 scalar-integer header");
     ByteSlice readme = file_read(scratch, readme_path, (FileReadOptions){0});
     static const u8 expected_readme_section_sha256[32] = {
-        0x96, 0x1e, 0x7b, 0x74, 0xf6, 0x58, 0x89, 0x19, 0x1a, 0x9e, 0xfc, 0x86, 0xfe, 0xa7, 0x6d, 0x0d,
-        0x79, 0x68, 0x27, 0x68, 0x03, 0x59, 0x5f, 0x2a, 0x93, 0xbc, 0x6b, 0x4d, 0xf1, 0xf6, 0x5d, 0xdc,
+        0x41, 0x6e, 0xfb, 0x7d, 0x76, 0x5b, 0x43, 0xf9, 0x8f, 0x9b, 0x73, 0x4d, 0x27, 0x3e, 0x26, 0x49,
+        0xb0, 0xad, 0x12, 0xbc, 0x88, 0x0e, 0x0d, 0xca, 0x0b, 0x29, 0xdf, 0xd7, 0x28, 0x00, 0x0c, 0x36,
     };
     u8 readme_section_sha256[32] = {0};
     if (!readme.pointer || !readme.length || !arm_a64_readme_canonical_section_digest(readme, readme_section_sha256) ||
@@ -3227,6 +3418,11 @@ static bool arm_a64_append_fixed_header(Arena* output, ArmA64CanonicalRows rows)
 static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalImportOptions options)
 {
     if (!options.source_directory.length || !options.output_directory.length) return PROCESS_RESULT_FAILED;
+    if (!arm_a64_layout_self_test())
+    {
+        string_print(S8("error: Arm A64 layout overlay self-test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
     if (!arm_a64_sha256_self_test())
     {
         string_print(S8("error: Arm A64 SHA-256 self-test failed\n"));
@@ -3315,6 +3511,12 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
         return PROCESS_RESULT_FAILED;
     }
     qsort(rows.pointer, rows.count, sizeof(rows.pointer[0]), arm_a64_row_compare);
+    ArmA64LayoutResolutionStats layout_resolution = {0};
+    if (!arm_a64_validate_layout_resolution(rows, &layout_resolution))
+    {
+        string_print(S8("error: Arm A64 profile-scoped layout resolution census or changed-mask digest mismatch\n"));
+        return PROCESS_RESULT_FAILED;
+    }
     if (!arm_a64_validate_rows(rows))
     {
         string_print(S8("error: Arm A64 canonical IDs/digests or alias target links are not unique\n"));
@@ -3442,7 +3644,7 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
                             gpr_arity_counts, gpr_feature_counts,
                             buster_hash_64((u8*)scalar_header.pointer, scalar_header.length), scalar_header.length, scalar_form_count, scalar_mnemonic_count,
                             scalar_arity_counts, scalar_feature_counts, scalar_recipe_counts,
-                            "4429d9ab064a8e98561c794e8c5408a3922bc6a7f07a32015caaa9932ba2c484", rows, page_count,
+                            "4429d9ab064a8e98561c794e8c5408a3922bc6a7f07a32015caaa9932ba2c484", layout_resolution, rows, page_count,
                             instruction_pages, alias_pages, pseudocode_pages, iclass_count, regdiagram_count, selected, selected_canonical,
                             selected_alias, selected_system, selected_system_canonical, selected_system_alias, selected - selected_system,
                             selected_canonical - selected_system_canonical, selected_alias - selected_system_alias);
