@@ -29,7 +29,27 @@ CANONICAL_COUNT = 1695
 CANONICAL_DENOMINATOR = 1523
 ALIAS_DENOMINATOR = 172
 SOURCE_TREE_SHA256 = "0ee17fd2fe7ed165adda377d90f8f284d009e14d2300577f231c87ca6a45916d"
-SCHEMA_VERSION = 1
+# Version 2 adds typed VM program instructions and bounded program spans for
+# both transform programs and value-table PROGRAM atoms.  Consumers must not
+# treat a version-1 artifact (which only carried diagnostic JSON text) as
+# equivalent to this shape.
+SCHEMA_VERSION = 2
+
+PROGRAM_OP_VALUES = {
+    "field": 0,
+    "uint_concat": 1,
+    "sign_extend": 2,
+    "scale_mul": 3,
+    "scale_div": 4,
+    "scale_pow2": 5,
+    "add_const": 6,
+    "sub_from_const": 7,
+    "register_add_mod": 8,
+    "literal": 9,
+    "text_factor": 10,
+    "shared_decode": 11,
+}
+PROGRAM_OPERAND_KIND_VALUES = {"field": 0, "arrangement": 1, "literal": 2}
 
 # Operand flags are a public, snapshot-stable bitset.  Keep this list sorted
 # and explicit: assigning bits from the per-operand ``set`` order would make
@@ -262,6 +282,111 @@ def parse_formula_program(value: str) -> list[dict[str, Any]] | None:
     return program
 
 
+# These are the bounded numeric relations that are present in the pinned
+# Apple-M1 corpus.  Keep the source patterns deliberately narrow: ordinary
+# prose mentioning a shift/range is not a relation, while each selected
+# relation must either become a normalized VM program or an explicit gap.
+NUMERIC_UINT_RE = re.compile(
+    r"\b(?:\d+\s*-\s*)?(?:UInt|SInt)\s*\([^()]{1,120}\)(?:\s*[+-]\s*\d+)?",
+    re.I,
+)
+NUMERIC_BRANCH_TIMES4_RE = re.compile(
+    r'encoded\s+as\s+"(imm(?:9|14|19|26))"\s+times\s+4',
+    re.I,
+)
+NUMERIC_FCVT_SCALE_RE = re.compile(r'encoded\s+as\s+64\s+minus\s+"scale"', re.I)
+NUMERIC_REGISTER_MOD_RE = re.compile(
+    r'encoded\s+as\s+"(Rt|Rn)"\s+plus\s+([123])\s+modulo\s+32',
+    re.I,
+)
+
+
+def encodedin_program(encodedin: str | None, canonical_fields: set[str]) -> list[dict[str, Any]] | None:
+    """Normalize an ``encodedin`` field reference to a small VM program."""
+    value = norm(encodedin).strip()
+    if value.startswith("(") and value.endswith(")"):
+        value = norm(value[1:-1])
+    if not value:
+        return None
+    parts = [norm(part.strip(" '\"")) for part in re.split(r"\s*::\s*|\s*:(?!\d+\])\s*", value) if norm(part.strip(" '\""))]
+    if not parts:
+        return None
+    parsed: list[dict[str, Any]] = []
+    for part in parts:
+        match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(?:\[([0-9]+)(?::([0-9]+))?\])?", part)
+        if not match:
+            return None
+        name, high, low = match.groups()
+        # Keep the source binding honest.  The XML symbol can use a display
+        # name that is not an encoded field; in that case the relation is a
+        # residual rather than an invented field binding.
+        if name not in canonical_fields:
+            return None
+        item: dict[str, Any] = {"op": "field", "name": name}
+        if high is not None:
+            item.update({"high": int(high), "low": int(low if low is not None else high)})
+        parsed.append(item)
+    return parsed if len(parsed) == 1 else [{"op": "uint_concat", "parts": parsed}]
+
+
+def numeric_relation_descriptor(intro: str, encodedin: str | None, canonical_fields: set[str]) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+    """Return ``(normalized relation key, VM program)`` for selected XML prose."""
+    intro = intro or ""
+    base = encodedin_program(encodedin, canonical_fields)
+    if base is None:
+        # UInt formulas carry their own encoded field expression; the parser
+        # below validates the quoted body against the row's fields separately
+        # through the normalized formula shape.
+        base = []
+    uint_match = NUMERIC_UINT_RE.search(intro)
+    if uint_match:
+        formula = uint_match.group(0)
+        program = parse_formula_program(formula)
+        if program is None:
+            return {"kind": "integer_decode", "value": "unparsed"}, []
+        def fields_are_bound(value: Any) -> bool:
+            if isinstance(value, dict):
+                if value.get("op") == "field" and value.get("name") not in canonical_fields:
+                    return False
+                return all(fields_are_bound(item) for item in value.values())
+            if isinstance(value, list):
+                return all(fields_are_bound(item) for item in value)
+            return True
+        if not fields_are_bound(program):
+            return {"kind": "integer_decode", "value": "unparsed"}, []
+        adjustment: dict[str, Any] = {"kind": "integer_decode", "value": 0}
+        if re.search(r"\)\s*-\s*\d+\s*$", formula):
+            adjustment["kind"] = "sub_const"
+            adjustment["value"] = int(re.search(r"-\s*(\d+)\s*$", formula).group(1))
+        elif re.match(r"^\d+\s*-", formula):
+            adjustment["kind"] = "sub_from_const"
+            adjustment["value"] = int(re.match(r"^(\d+)", formula).group(1))
+        return adjustment, program
+    branch_match = NUMERIC_BRANCH_TIMES4_RE.search(intro)
+    if branch_match:
+        if not base:
+            return {"kind": "scale_mul", "value": 4}, []
+        field_name = branch_match.group(1).lower()
+        field_width = {"imm9": 9, "imm14": 14, "imm19": 19, "imm26": 26}[field_name]
+        return {"kind": "scale_mul", "value": 4}, base + [{"op": "sign_extend", "bits": field_width}, {"op": "scale_mul", "value": 4}]
+    if NUMERIC_FCVT_SCALE_RE.search(intro):
+        if not base:
+            return {"kind": "sub_from_const", "value": 64}, []
+        return {"kind": "sub_from_const", "value": 64}, base + [{"op": "sub_from_const", "value": 64}]
+    register_match = NUMERIC_REGISTER_MOD_RE.search(intro)
+    if register_match:
+        field_name, delta_text = register_match.groups()
+        # The relation is a register-number projection, not a bitwise
+        # arithmetic transform.  Keep it as a dedicated VM operation.
+        if norm(encodedin) != field_name or field_name not in canonical_fields:
+            return {"kind": "register_add_mod", "value": int(delta_text), "modulus": 32}, []
+        return (
+            {"kind": "register_add_mod", "value": int(delta_text), "modulus": 32},
+            [{"op": "register_add_mod", "field": field_name, "delta": int(delta_text), "modulus": 32}],
+        )
+    return None
+
+
 def program_text(program: list[dict[str, Any]] | None) -> str:
     return json.dumps(program or [], sort_keys=True, separators=(",", ":"))
 
@@ -387,6 +512,28 @@ def source_index(source: Path) -> tuple[dict[tuple[str, str], ET.Element], dict[
         for name, records in explanation_records(root, filename).items():
             explanations[(filename, name)].extend(records)
     return encodings, explanations
+
+
+def numeric_relation_source_keys(rows: list[dict[str, Any]], explanation_index: dict[tuple[str, str], list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Derive the selected numeric-relation corpus directly from source XML."""
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("kind") != "canonical":
+            continue
+        key = (row["iform_file"], row["encoding_name"])
+        fields = {field["name"] for field in row.get("fields", [])}
+        for explanation in explanation_index.get(key, []):
+            relation = numeric_relation_descriptor(explanation.get("intro", ""), explanation.get("encodedin"), fields)
+            if relation is None:
+                continue
+            descriptor, _ = relation
+            result.append({
+                "row_id": row["id"],
+                "operand_link": explanation.get("link") or "",
+                **descriptor,
+            })
+    result.sort(key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")))
+    return result
 
 
 def anchor_info(encoding: ET.Element) -> list[dict[str, Any]]:
@@ -537,6 +684,16 @@ def fields_from_expr(encodedin: str | None, canonical_fields: set[str]) -> tuple
 def transform_records(operand: dict[str, Any], explanations: list[dict[str, Any]], canonical_fields: set[str]) -> list[dict[str, Any]]:
     result = []
     for explanation_index, explanation in enumerate(explanations):
+        relation = numeric_relation_descriptor(explanation.get("intro", ""), explanation.get("encodedin"), canonical_fields)
+        relation_key = None
+        relation_program = None
+        if relation is not None:
+            relation_key, relation_program = relation
+            relation_key = {
+                "row_id": operand.get("form_id", ""),
+                "operand_link": operand.get("link", ""),
+                **relation_key,
+            }
         fields, transform = fields_from_expr(explanation.get("encodedin"), canonical_fields)
         if transform is not None:
             transform.update({"source": explanation_index})
@@ -545,16 +702,17 @@ def transform_records(operand: dict[str, Any], explanations: list[dict[str, Any]
             result.append({"kind": "overlay_required", "source": explanation_index, "reason": "unresolved_encodedin", "invertible": False})
         intro = explanation.get("intro", "")
         lower = intro.lower()
-        if re.search(r"\b(?:uint|sint)\s*\(", lower):
-            formula = re.search(r"(?:u?int|sint)\s*\([^)]{1,120}\)", intro, re.I)
-            program = parse_formula_program(formula.group(0)) if formula else None
-            if program is None:
-                result.append({"kind": "overlay_required", "source": explanation_index, "reason": "unparsed_integer_formula", "invertible": False})
+        if relation is not None:
+            if relation_program:
+                result.append({"kind": "integer_decode", "source": explanation_index, "program": relation_program, "relation_key": relation_key, "invertible": True})
             else:
-                result.append({"kind": "integer_decode", "source": explanation_index, "program": program, "invertible": True})
+                result.append({"kind": "overlay_required", "source": explanation_index, "reason": "unparsed_numeric_relation", "relation_key": relation_key, "invertible": False})
         if "/" in intro or "2^" in intro or "scale" in lower or "shift" in lower:
             factors = re.findall(r"(?:/[0-9]+|2\s*\^\s*-?[0-9]+|(?:left|right)?\s*shift(?:ed)?(?:\s+by)?\s*[0-9]+)", intro, re.I)
-            if factors:
+            # Selected numeric relations above already have a normalized VM
+            # program.  Do not append a presentation-only text transform for
+            # the same source explanation.
+            if factors and relation is None:
                 program = []
                 for factor in factors:
                     factor = norm(factor)
@@ -721,6 +879,10 @@ def load_rows(canonical: Path) -> list[dict[str, Any]]:
 
 def semantic_rows(rows: list[dict[str, Any]], source: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     encodings, explanation_index = source_index(source)
+    numeric_source_keys = numeric_relation_source_keys(rows, explanation_index)
+    numeric_source_signatures = [json.dumps(value, sort_keys=True, separators=(",", ":")) for value in numeric_source_keys]
+    if len(set(numeric_source_signatures)) != len(numeric_source_signatures):
+        raise RuntimeError("numeric relation source corpus contains duplicate row/operand keys")
     owners, owner_census = owner_sets([row for row in rows if row["kind"] == "canonical"])
     cross_labels, cross_census = cross_lens_sets(rows, owners)
     output = []
@@ -750,7 +912,7 @@ def semantic_rows(rows: list[dict[str, Any]], source: Path) -> tuple[list[dict[s
                         fields.append(field)
             source_indices = [index for index, x in enumerate(explanations) if x.get("link") == anchor.get("link")]
             operand_transform_first = len(transforms)
-            transforms.extend(transform_records({"link": anchor.get("link")}, matching, canonical_fields))
+            transforms.extend(transform_records({"form_id": row["id"], "link": anchor.get("link")}, matching, canonical_fields))
             operand = {
                 "position": anchor["position"],
                 "link": anchor.get("link"),
@@ -891,10 +1053,27 @@ def semantic_rows(rows: list[dict[str, Any]], source: Path) -> tuple[list[dict[s
     canonical_counts = {key: value for key, value in counts.items() if key != "alias"}
     parsed_vm_programs = sum(1 for row in output for transform in row.get("transforms", []) if "program" in transform)
     residual_overlay_rows = sum(1 for row in output if any(transform.get("kind") == "overlay_required" for transform in row.get("transforms", [])))
+    numeric_projected = []
+    numeric_residual = []
+    for row in output:
+        for transform in row.get("transforms", []):
+            relation_key = transform.get("relation_key")
+            if relation_key is None:
+                continue
+            numeric_projected.append(relation_key)
+            if transform.get("kind") == "overlay_required":
+                numeric_residual.append(relation_key)
+    numeric_projected_signatures = [json.dumps(value, sort_keys=True, separators=(",", ":")) for value in numeric_projected]
+    numeric_residual_signatures = [json.dumps(value, sort_keys=True, separators=(",", ":")) for value in numeric_residual]
+    if sorted(numeric_projected_signatures) != sorted(numeric_source_signatures):
+        missing = sorted(set(numeric_source_signatures) - set(numeric_projected_signatures))
+        extra = sorted(set(numeric_projected_signatures) - set(numeric_source_signatures))
+        raise RuntimeError(f"numeric relation source/projection mismatch: missing={missing[:3]!r} extra={extra[:3]!r}")
     unknown_role_operands = sum(1 for row in output for operand in row.get("operands", []) if operand.get("role") == "unknown" or operand.get("direction") == "unknown")
     no_anchor = [row for row in output if not row["operands"]]
     proven = [row for row in output if row.get("binding_confidence") == "proven-overlay"]
-    return output, {"owners": owner_census, "owner_counts": dict(sorted(counts.items())), "canonical_owner_counts": dict(sorted(canonical_counts.items())), "memory_modes": dict(sorted(mode_counts.items())), "semantic_kinds": dict(sorted(all_kinds.items())), "transform_kinds": dict(sorted(all_transforms.items())), "parsed_vm_programs": parsed_vm_programs, "residual_overlay_rows": residual_overlay_rows, "unknown_role_operands": unknown_role_operands, "ambiguous_role_operands": 0, "cross_lenses": cross_census, "proven_overlay_rows": len(proven), "proven_overlay_ids": [row["id"] for row in proven], "no_anchor_rows": len(no_anchor), "no_anchor_canonical_rows": sum(row["kind"] == "canonical" for row in no_anchor), "no_anchor_alias_rows": sum(row["kind"] == "alias" for row in no_anchor)}
+    relation_digest = hashlib.sha256(("\n".join(sorted(numeric_source_signatures)) + "\n").encode()).hexdigest()
+    return output, {"owners": owner_census, "owner_counts": dict(sorted(counts.items())), "canonical_owner_counts": dict(sorted(canonical_counts.items())), "memory_modes": dict(sorted(mode_counts.items())), "semantic_kinds": dict(sorted(all_kinds.items())), "transform_kinds": dict(sorted(all_transforms.items())), "parsed_vm_programs": parsed_vm_programs, "residual_overlay_rows": residual_overlay_rows, "unknown_role_operands": unknown_role_operands, "ambiguous_role_operands": 0, "cross_lenses": cross_census, "proven_overlay_rows": len(proven), "proven_overlay_ids": [row["id"] for row in proven], "no_anchor_rows": len(no_anchor), "no_anchor_canonical_rows": sum(row["kind"] == "canonical" for row in no_anchor), "no_anchor_alias_rows": sum(row["kind"] == "alias" for row in no_anchor), "numeric_relation_records": len(numeric_source_signatures), "numeric_relation_parsed": len(numeric_projected_signatures) - len(numeric_residual_signatures), "numeric_relation_residual": len(numeric_residual_signatures), "numeric_relation_source_key_sha256": relation_digest, "numeric_relation_source_keys": numeric_source_keys, "numeric_relation_projected_keys": numeric_projected, "numeric_relation_residual_keys": numeric_residual}
 
 
 def collect_strings(rows: list[dict[str, Any]]) -> tuple[dict[str, int], bytes]:
@@ -964,34 +1143,142 @@ def generate_header(rows: list[dict[str, Any]], census: dict[str, Any], path: Pa
     transform_parts: list[dict[str, int]] = []
     value_atoms: list[dict[str, Any]] = []
     value_entries: list[dict[str, int]] = []
-    table_cache: dict[str, tuple[int, int]] = {}
+    table_headers: list[dict[str, int]] = []
+    table_key_headers: list[int] = []
+    alias_descriptors: list[dict[str, Any]] = []
+    alias_condition_tokens: list[int] = []
+    alias_preference_condition_tokens: list[int] = []
+    alias_preferences: list[dict[str, Any]] = []
+    alias_form_ids: list[int] = []
+    constraint_descriptors: list[dict[str, Any]] = []
+    constraint_feature_tags: list[int] = []
+    constraint_program_tokens: list[int] = []
+    program_instructions: list[dict[str, Any]] = []
+    program_operands: list[dict[str, Any]] = []
     forms: list[dict[str, Any]] = []
     owner_values = {"fixed32": 0, "direct_gpr": 1, "scalar_integer": 2, "direct_simd": 3, "system": 4, "memory": 5, "general_nonmemory": 6, "complex_simd_fp": 7, "alias": 8}
     kind_values = {"gpr_register": 0, "gpr_width_selector": 1, "simd_register": 2, "simd_arrangement": 3, "simd_width_selector": 4, "simd_list": 5, "simd_lane": 6, "integer_immediate": 7, "fp_immediate": 8, "condition": 9, "nzcv_flags": 10, "shift": 11, "extend": 12, "rotate": 13, "memory_base": 14, "memory_offset": 15, "memory_data_register": 16, "label_fixup": 17, "system_register": 18, "system_operation": 19, "barrier_option": 20, "prefetch_operation": 21, "fixed_constant": 22, "other": 23, "simd_prefix_selector": 24}
     transform_values = {"concat": 0, "slice": 1, "integer_decode": 2, "text_transform": 3, "value_table": 4, "overlay_required": 5, "shared_decode": 6}
     status_values = {"defined": 0, "undefined": 1}
 
-    def append_atom(value: dict[str, Any]) -> dict[str, Any]:
+    no_program = 0xffffffff
+    no_field = 0xffffffff
+    no_slice = 0xffff
+
+    def append_program(program: list[dict[str, Any]] | None, field_defs: dict[str, int]) -> tuple[int, int]:
+        """Flatten one normalized VM program into typed, bounded records."""
+        if not program:
+            return no_program, 0
+        if not isinstance(program, list):
+            raise RuntimeError(f"normalized VM program is not a list: {program!r}")
+        first = len(program_instructions)
+        for operation in program:
+            if not isinstance(operation, dict) or operation.get("op") not in PROGRAM_OP_VALUES:
+                raise RuntimeError(f"unsupported normalized VM operation: {operation!r}")
+            op_name = operation["op"]
+            instruction = {
+                "op": PROGRAM_OP_VALUES[op_name], "field_offset": no_field,
+                "text_offset": offsets[""], "operand_first": 0,
+                "operand_count": 0, "value": 0, "high": no_slice,
+                "low": no_slice, "width": 0, "modulus": 0,
+            }
+            if op_name == "field":
+                name = operation.get("name")
+                if not isinstance(name, str) or name not in field_defs:
+                    raise RuntimeError(f"VM field is not bound to this form: {operation!r}")
+                instruction["field_offset"] = offsets[name]
+                if "high" in operation or "low" in operation:
+                    if not isinstance(operation.get("high"), int) or not isinstance(operation.get("low"), int):
+                        raise RuntimeError(f"VM field slice is malformed: {operation!r}")
+                    instruction["high"] = int(operation["high"])
+                    instruction["low"] = int(operation["low"])
+                    if instruction["low"] < 0 or instruction["high"] < instruction["low"] or instruction["high"] >= field_defs[name]:
+                        raise RuntimeError(f"VM field slice exceeds this form's field width: {operation!r}")
+                    instruction["width"] = instruction["high"] - instruction["low"] + 1
+            elif op_name == "uint_concat":
+                parts = operation.get("parts")
+                if not isinstance(parts, list) or not parts:
+                    raise RuntimeError(f"VM uint_concat has no parts: {operation!r}")
+                operand_first = len(program_operands)
+                for part in parts:
+                    if not isinstance(part, dict) or part.get("op") not in {"field", "literal"}:
+                        raise RuntimeError(f"VM uint_concat part is not a field/literal: {operation!r}")
+                    if part.get("op") == "literal":
+                        program_operands.append({"kind": PROGRAM_OPERAND_KIND_VALUES["literal"], "field_offset": no_field,
+                                                 "text_offset": offsets[""], "value": int(part.get("value", 0)), "high": no_slice, "low": no_slice, "width": 0})
+                        continue
+                    name = part.get("name")
+                    if not isinstance(name, str) or name not in field_defs:
+                        raise RuntimeError(f"VM concat field is not bound to this form: {part!r}")
+                    high = int(part["high"]) if "high" in part else no_slice
+                    low = int(part["low"]) if "low" in part else no_slice
+                    if high != no_slice and (low < 0 or high < low or high >= field_defs[name]):
+                        raise RuntimeError(f"VM concat field slice exceeds this form's field width: {part!r}")
+                    width = high - low + 1 if high != no_slice and low != no_slice else 0
+                    program_operands.append({"kind": PROGRAM_OPERAND_KIND_VALUES["field"], "field_offset": offsets[name],
+                                             "text_offset": offsets[""], "value": 0, "high": high, "low": low, "width": width})
+                instruction["operand_first"] = operand_first
+                instruction["operand_count"] = len(program_operands) - operand_first
+            elif op_name in {"sign_extend"}:
+                instruction["width"] = int(operation.get("bits", 0))
+            elif op_name in {"scale_mul", "scale_div", "scale_pow2", "add_const", "sub_from_const", "literal"}:
+                instruction["value"] = int(operation.get("value", 0))
+            elif op_name == "register_add_mod":
+                name = operation.get("field")
+                if not isinstance(name, str) or name not in field_defs:
+                    raise RuntimeError(f"VM register field is not bound to this form: {operation!r}")
+                instruction["field_offset"] = offsets[name]
+                instruction["value"] = int(operation.get("delta", 0))
+                instruction["modulus"] = int(operation.get("modulus", 0))
+            elif op_name == "text_factor":
+                value = operation.get("value")
+                if not isinstance(value, str) or value not in offsets:
+                    raise RuntimeError(f"VM text factor is missing from string pool: {operation!r}")
+                instruction["text_offset"] = offsets[value]
+            elif op_name == "shared_decode":
+                fields = operation.get("fields")
+                arrangements = operation.get("arrangements")
+                if not isinstance(fields, list) or not isinstance(arrangements, list):
+                    raise RuntimeError(f"VM shared decode is malformed: {operation!r}")
+                operand_first = len(program_operands)
+                for name in fields:
+                    if not isinstance(name, str) or name not in field_defs:
+                        raise RuntimeError(f"VM shared-decode field is not bound to this form: {name!r}")
+                    program_operands.append({"kind": PROGRAM_OPERAND_KIND_VALUES["field"], "field_offset": offsets[name],
+                                             "text_offset": offsets[""], "value": 0, "high": no_slice, "low": no_slice, "width": 0})
+                for arrangement in arrangements:
+                    if not isinstance(arrangement, (list, tuple)) or len(arrangement) != 2:
+                        raise RuntimeError(f"VM shared-decode arrangement is malformed: {arrangement!r}")
+                    selector, value = arrangement
+                    if not isinstance(selector, int) or not isinstance(value, str) or value not in offsets:
+                        raise RuntimeError(f"VM shared-decode arrangement is malformed: {arrangement!r}")
+                    program_operands.append({"kind": PROGRAM_OPERAND_KIND_VALUES["arrangement"], "field_offset": no_field,
+                                             "text_offset": offsets[value], "value": selector, "high": no_slice, "low": no_slice, "width": 0})
+                instruction["operand_first"] = operand_first
+                instruction["operand_count"] = len(program_operands) - operand_first
+            program_instructions.append(instruction)
+        return first, len(program_instructions) - first
+
+    def append_atom(value: dict[str, Any], field_defs: dict[str, int]) -> dict[str, Any]:
         kind = value.get("type")
         if kind == "integer":
-            return {"type": 0, "text_offset": offsets[""], "integer": int(value["value"])}
+            return {"type": 0, "text_offset": offsets[""], "integer": int(value["value"]), "program_first": no_program, "program_count": 0}
         type_values = {"bits": 1, "enum": 2, "expression": 3, "program": 4}
         if kind == "program":
             serialized = program_text(value.get("program"))
             if serialized not in offsets:
                 raise RuntimeError(f"normalized VM program missing from string pool: {value!r}")
-            return {"type": type_values[kind], "text_offset": offsets[serialized], "integer": 0}
+            program_first, program_count = append_program(value.get("program"), field_defs)
+            return {"type": type_values[kind], "text_offset": offsets[serialized], "integer": 0,
+                    "program_first": program_first, "program_count": program_count}
         if kind not in type_values or not isinstance(value.get("value"), str):
             raise RuntimeError(f"invalid normalized value atom: {value!r}")
         if value["value"] not in offsets:
             raise RuntimeError(f"normalized value missing from string pool: {value!r}")
-        return {"type": type_values[kind], "text_offset": offsets[value["value"]], "integer": 0}
+        return {"type": type_values[kind], "text_offset": offsets[value["value"]], "integer": 0,
+                "program_first": no_program, "program_count": 0}
 
-    def append_table(transform: dict[str, Any]) -> tuple[int, int]:
-        signature = json.dumps(transform.get("entries", []), sort_keys=True, separators=(",", ":"))
-        cached = table_cache.get(signature)
-        if cached is not None:
-            return cached
+    def append_table(transform: dict[str, Any], field_defs: dict[str, int]) -> tuple[int, int]:
         first = len(value_entries)
         entries = transform.get("entries", [])
         if transform.get("key_arity", 0) <= 0 or transform.get("result_arity") != 1:
@@ -1002,14 +1289,69 @@ def generate_header(rows: list[dict[str, Any]], census: dict[str, Any], path: Pa
             if len(key) != transform["key_arity"] or len(result) != 1:
                 raise RuntimeError(f"value-table key/result arity mismatch: {entry!r}")
             key_first = len(value_atoms)
-            value_atoms.extend(append_atom(atom) for atom in key)
+            value_atoms.extend(append_atom(atom, field_defs) for atom in key)
             result_first = len(value_atoms)
-            value_atoms.extend(append_atom(atom) for atom in result)
+            value_atoms.extend(append_atom(atom, field_defs) for atom in result)
             value_entries.append({"key_first": key_first, "result_first": result_first, "key_count": len(key), "result_count": 1})
-        table_cache[signature] = (first, len(entries))
         return first, len(entries)
 
     for form in rows:
+        constraint_feature_first = len(constraint_feature_tags)
+        for tag in form.get("constraints", {}).get("feature_tags", []):
+            if tag not in offsets:
+                raise RuntimeError(f"constraint feature tag missing from string pool: {tag!r}")
+            constraint_feature_tags.append(offsets[tag])
+        constraint_program_first = len(constraint_program_tokens)
+        for token in form.get("constraints", {}).get("program", []):
+            if token not in offsets:
+                raise RuntimeError(f"constraint token missing from string pool: {token!r}")
+            constraint_program_tokens.append(offsets[token])
+        constraint_descriptors.append({
+            "feature_first": constraint_feature_first,
+            "feature_count": len(constraint_feature_tags) - constraint_feature_first,
+            "program_first": constraint_program_first,
+            "program_count": len(constraint_program_tokens) - constraint_program_first,
+        })
+        alias = form.get("alias", {})
+        alias_condition_first = len(alias_condition_tokens)
+        for token in alias.get("condition_program", []):
+            if token not in offsets:
+                raise RuntimeError(f"alias condition token missing from string pool: {token!r}")
+            alias_condition_tokens.append(offsets[token])
+        alias_preference_condition_first = len(alias_preference_condition_tokens)
+        for token in alias.get("preference_condition_program", []):
+            if token not in offsets:
+                raise RuntimeError(f"alias preference condition token missing from string pool: {token!r}")
+            alias_preference_condition_tokens.append(offsets[token])
+        alias_preference_condition_count = len(alias_preference_condition_tokens) - alias_preference_condition_first
+        alias_preference_first = len(alias_preferences)
+        for preference in alias.get("preferences", []):
+            preference_condition_first = len(alias_preference_condition_tokens)
+            for token in preference.get("condition_program", []):
+                if token not in offsets:
+                    raise RuntimeError(f"alias preference token missing from string pool: {token!r}")
+                alias_preference_condition_tokens.append(offsets[token])
+            alias_preferences.append({
+                "alias_file": offsets[preference.get("alias_file") or ""],
+                "alias_id": offsets[preference.get("alias_id") or ""],
+                "condition_first": preference_condition_first,
+                "condition_count": len(alias_preference_condition_tokens) - preference_condition_first,
+                "rank": preference.get("rank") if preference.get("rank") is not None else -2147483648,
+            })
+        alias_descriptors.append({
+            "target_file": offsets[alias.get("target_file") or ""],
+            "target_id": offsets[alias.get("target_id") or ""],
+            "target_encoding_id": offsets[alias.get("target_encoding_id") or ""],
+            "condition_first": alias_condition_first,
+            "condition_count": len(alias_condition_tokens) - alias_condition_first,
+            "preference_condition_first": alias_preference_condition_first,
+            "preference_condition_count": alias_preference_condition_count,
+            "preference_rank": alias.get("preference_rank") if alias.get("preference_rank") is not None else -2147483648,
+            "preference_first": alias_preference_first,
+            "preference_count": len(alias_preferences) - alias_preference_first,
+        })
+        if form.get("kind") == "alias":
+            alias_form_ids.append(form["form_index"])
         form_field_first = len(fields)
         field_ids: dict[str, int] = {}
         for field in form.get("fields", []):
@@ -1024,6 +1366,7 @@ def generate_header(rows: list[dict[str, Any]], census: dict[str, Any], path: Pa
                 segments.append({"instruction_lsb": segment["instruction_lsb"], "width": width, "value_lsb": segment["value_lsb"]})
             field_ids[name] = len(fields)
             fields.append({"name": name, "source_mask": source_mask, "segment_first": segment_first, "segment_count": len(field.get("segments", [])), "width": sum(x["width"] for x in field.get("segments", []))})
+        field_defs = {field["name"]: field["width"] for field in fields[form_field_first:]}
         form_operand_first = len(operands)
         form_transform_first = len(transforms)
         for operand in form.get("operands", []):
@@ -1037,11 +1380,24 @@ def generate_header(rows: list[dict[str, Any]], census: dict[str, Any], path: Pa
                     if not isinstance(part, str) or part not in offsets:
                         raise RuntimeError(f"unknown concat part in {form['id']}: {part!r}")
                     transform_parts.append({"offset": offsets[part]})
-                value_first, value_count = append_table(transform) if transform.get("kind") == "value_table" else (0, 0)
+                value_first, value_count = append_table(transform, field_defs) if transform.get("kind") == "value_table" else (0, 0)
+                table_id = 0xffffffff
+                if transform.get("kind") == "value_table":
+                    table_id = len(table_headers)
+                    key_headers = transform.get("key_headers", [])
+                    if not key_headers or transform.get("result_header") not in offsets:
+                        raise RuntimeError(f"value-table header missing in {form['id']}: {transform!r}")
+                    key_first = len(table_key_headers)
+                    for header in key_headers:
+                        if header not in offsets:
+                            raise RuntimeError(f"value-table key header missing from string pool: {header!r}")
+                        table_key_headers.append(offsets[header])
+                    table_headers.append({"key_header_first": key_first, "key_header_count": len(key_headers), "result_header": offsets[transform["result_header"]]})
                 kind = transform_values.get(transform.get("kind"))
                 if kind is None:
                     raise RuntimeError(f"unknown transform kind in {form['id']}: {transform.get('kind')!r}")
-                transforms.append({"kind": kind, "source": transform.get("source", 0), "p0": transform.get("high", 0) if isinstance(transform.get("high", 0), int) else 0, "p1": transform.get("low", 0) if isinstance(transform.get("low", 0), int) else 0, "expression": program_text(transform.get("program")) if "program" in transform else transform.get("expression", ""), "part_first": part_first, "part_count": len(parts), "value_first": value_first, "value_count": value_count, "invertible": bool(transform.get("invertible"))})
+                program_first, program_count = append_program(transform.get("program"), field_defs) if "program" in transform else (no_program, 0)
+                transforms.append({"kind": kind, "source": transform.get("source", 0), "p0": transform.get("high", 0) if isinstance(transform.get("high", 0), int) else 0, "p1": transform.get("low", 0) if isinstance(transform.get("low", 0), int) else 0, "table_id": table_id, "expression": program_text(transform.get("program")) if "program" in transform else transform.get("expression", ""), "program_first": program_first, "program_count": program_count, "part_first": part_first, "part_count": len(parts), "value_first": value_first, "value_count": value_count, "invertible": bool(transform.get("invertible"))})
             kinds = operand.get("kinds", ["other"])
             kind_mask = 0
             for name in kinds:
@@ -1067,6 +1423,17 @@ def generate_header(rows: list[dict[str, Any]], census: dict[str, Any], path: Pa
                 raise RuntimeError(f"unknown operand classification status in {form['id']}: {classification_status!r}")
             operands.append({"form": form["form_index"], "position": operand["position"], "link": operand.get("link") or "", "symbol": operand.get("symbol") or "", "field_first": field_ids[references[0]] if references else 0xffffffff, "field_index_first": field_index_first, "field_count": len(references), "field_index_count": len(references), "transform_first": operand_transform_first, "transform_count": len(transforms) - operand_transform_first, "kind": kind_values[kinds[0]] if kinds else 23, "kind_mask": kind_mask, "flags": flags, "classification_status": CLASSIFICATION_STATUS_VALUES[classification_status], "role": operand.get("role") or "", "direction": operand.get("direction") or ""})
         forms.append({"id": form["form_index"], "source_digest": parse_hex(form.get("source_digest")), "name": form["id"], "mnemonic": form.get("mnemonic") or "", "assembly": form.get("assembly") or "", "owner": owner_values.get(form.get("owner"), 8), "kind": 0 if form.get("kind") == "canonical" else 1, "status": status_values.get(form.get("status"), 0), "fixed_mask": parse_hex(form.get("fixed_mask")), "fixed_value": parse_hex(form.get("fixed_value")), "field_first": form_field_first, "operand_first": form_operand_first, "transform_first": form_transform_first, "field_count": len(form.get("fields", [])), "operand_count": len(form.get("operands", [])), "transform_count": len(transforms) - form_transform_first, "raw_layout_resolved": bool(form.get("raw_layout_resolved"))})
+
+    typed_transform_program_count = sum(1 for transform in transforms if transform["program_count"] != 0)
+    typed_value_program_count = sum(1 for atom in value_atoms if atom["program_count"] != 0)
+    if typed_transform_program_count != census.get("parsed_vm_programs", 0):
+        raise RuntimeError(f"typed transform-program census mismatch: {typed_transform_program_count} != {census.get('parsed_vm_programs', 0)}")
+    if typed_transform_program_count != 372 or typed_value_program_count != 296:
+        raise RuntimeError(f"typed program census mismatch: transforms={typed_transform_program_count}, value_atoms={typed_value_program_count}")
+    census["typed_program_instructions"] = len(program_instructions)
+    census["typed_program_operands"] = len(program_operands)
+    census["typed_transform_programs"] = typed_transform_program_count
+    census["typed_value_program_atoms"] = typed_value_program_count
 
     def c_string(value: str) -> str:
         result = ['"']
@@ -1097,14 +1464,20 @@ def generate_header(rows: list[dict[str, Any]], census: dict[str, Any], path: Pa
     chunks = [pool[index:index + 3900] for index in range(0, len(pool), 3900)] or [b""]
     lines = [
         "/* Generated by arm_a64_semantic_generate.py; do not edit. */", "#ifndef BUSTER_AARCH64_SEMANTIC_GENERATED_H", "#define BUSTER_AARCH64_SEMANTIC_GENERATED_H", "#include <buster/lib/base.h>", "",
-        f"#define BUSTER_AARCH64_SEMANTIC_SCHEMA_VERSION {SCHEMA_VERSION}u", f"#define BUSTER_AARCH64_SEMANTIC_FORM_COUNT {len(forms)}u", f"#define BUSTER_AARCH64_SEMANTIC_FIELD_COUNT {len(fields)}u", f"#define BUSTER_AARCH64_SEMANTIC_SEGMENT_COUNT {len(segments)}u", f"#define BUSTER_AARCH64_SEMANTIC_FIELD_RECORD_BYTES 16u", f"#define BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE {len(field_blob())}u", f"#define BUSTER_AARCH64_SEMANTIC_SEGMENT_RECORD_BYTES 4u", f"#define BUSTER_AARCH64_SEMANTIC_SEGMENT_BLOB_SIZE {len(segment_blob())}u", f"#define BUSTER_AARCH64_SEMANTIC_OPERAND_COUNT {len(operands)}u", f"#define BUSTER_AARCH64_SEMANTIC_OPERAND_FIELD_INDEX_COUNT {len(operand_field_indices)}u", f"#define BUSTER_AARCH64_SEMANTIC_OPERAND_RECORD_BYTES 54u", f"#define BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE {len(operand_blob())}u", f"#define BUSTER_AARCH64_SEMANTIC_TRANSFORM_COUNT {len(transforms)}u", f"#define BUSTER_AARCH64_SEMANTIC_TRANSFORM_PART_COUNT {len(transform_parts)}u", f"#define BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_COUNT {len(value_entries)}u", f"#define BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_COUNT {len(value_atoms)}u", f"#define BUSTER_AARCH64_SEMANTIC_STRING_POOL_SIZE {len(pool)}u", "",
+        f"#define BUSTER_AARCH64_SEMANTIC_SCHEMA_VERSION {SCHEMA_VERSION}u", f"#define BUSTER_AARCH64_SEMANTIC_FORM_COUNT {len(forms)}u", f"#define BUSTER_AARCH64_SEMANTIC_FIELD_COUNT {len(fields)}u", f"#define BUSTER_AARCH64_SEMANTIC_SEGMENT_COUNT {len(segments)}u", f"#define BUSTER_AARCH64_SEMANTIC_FIELD_RECORD_BYTES 16u", f"#define BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE {len(field_blob())}u", f"#define BUSTER_AARCH64_SEMANTIC_SEGMENT_RECORD_BYTES 4u", f"#define BUSTER_AARCH64_SEMANTIC_SEGMENT_BLOB_SIZE {len(segment_blob())}u", f"#define BUSTER_AARCH64_SEMANTIC_OPERAND_COUNT {len(operands)}u", f"#define BUSTER_AARCH64_SEMANTIC_OPERAND_FIELD_INDEX_COUNT {len(operand_field_indices)}u", f"#define BUSTER_AARCH64_SEMANTIC_OPERAND_RECORD_BYTES 54u", f"#define BUSTER_AARCH64_SEMANTIC_OPERAND_BLOB_SIZE {len(operand_blob())}u", f"#define BUSTER_AARCH64_SEMANTIC_TRANSFORM_COUNT {len(transforms)}u", f"#define BUSTER_AARCH64_SEMANTIC_TRANSFORM_PART_COUNT {len(transform_parts)}u", f"#define BUSTER_AARCH64_SEMANTIC_PROGRAM_INSTRUCTION_COUNT {len(program_instructions)}u", f"#define BUSTER_AARCH64_SEMANTIC_PROGRAM_OPERAND_COUNT {len(program_operands)}u", f"#define BUSTER_AARCH64_SEMANTIC_PARSED_PROGRAM_COUNT {typed_transform_program_count}u", f"#define BUSTER_AARCH64_SEMANTIC_VALUE_PROGRAM_COUNT {typed_value_program_count}u", f"#define BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_COUNT {len(value_entries)}u", f"#define BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_COUNT {len(value_atoms)}u", f"#define BUSTER_AARCH64_SEMANTIC_TABLE_COUNT {len(table_headers)}u", f"#define BUSTER_AARCH64_SEMANTIC_TABLE_KEY_HEADER_COUNT {len(table_key_headers)}u", f"#define BUSTER_AARCH64_SEMANTIC_ALIAS_COUNT {len(alias_form_ids)}u", f"#define BUSTER_AARCH64_SEMANTIC_ALIAS_CONDITION_TOKEN_COUNT {len(alias_condition_tokens)}u", f"#define BUSTER_AARCH64_SEMANTIC_ALIAS_PREFERENCE_CONDITION_TOKEN_COUNT {len(alias_preference_condition_tokens)}u", f"#define BUSTER_AARCH64_SEMANTIC_ALIAS_PREFERENCE_COUNT {len(alias_preferences)}u", f"#define BUSTER_AARCH64_SEMANTIC_CONSTRAINT_COUNT {len(constraint_descriptors)}u", f"#define BUSTER_AARCH64_SEMANTIC_CONSTRAINT_FEATURE_TAG_COUNT {len(constraint_feature_tags)}u", f"#define BUSTER_AARCH64_SEMANTIC_CONSTRAINT_PROGRAM_TOKEN_COUNT {len(constraint_program_tokens)}u", f"#define BUSTER_AARCH64_SEMANTIC_STRING_POOL_SIZE {len(pool)}u", "",
         "typedef struct BusterA64SemanticGeneratedSegment BusterA64SemanticGeneratedSegment; struct BusterA64SemanticGeneratedSegment { u8 instruction_lsb; u8 width; u8 value_lsb; u8 reserved; };",
         "typedef struct BusterA64SemanticGeneratedField BusterA64SemanticGeneratedField; struct BusterA64SemanticGeneratedField { u32 name_offset; u32 source_mask; u32 segment_first; u16 segment_count; u8 width; u8 reserved; };",
         "typedef struct BusterA64SemanticGeneratedOperand BusterA64SemanticGeneratedOperand; struct BusterA64SemanticGeneratedOperand { u32 form_id; u32 link_offset; u32 symbol_offset; u32 field_first; u32 field_index_first; u32 transform_first; u32 kind_mask; u64 flags; u16 field_count; u16 field_index_count; u16 transform_count; u8 kind; u8 position; u8 classification_status; u8 reserved; u32 role_offset; u32 direction_offset; };",
         "typedef struct BusterA64SemanticGeneratedTransformPart BusterA64SemanticGeneratedTransformPart; struct BusterA64SemanticGeneratedTransformPart { u32 offset; };",
-        "typedef struct BusterA64SemanticGeneratedValueAtom BusterA64SemanticGeneratedValueAtom; struct BusterA64SemanticGeneratedValueAtom { u32 text_offset; s64 integer; u8 type; u8 reserved[7]; };",
+        "typedef struct BusterA64SemanticGeneratedValueAtom BusterA64SemanticGeneratedValueAtom; struct BusterA64SemanticGeneratedValueAtom { u32 text_offset; s64 integer; u32 program_first; u16 program_count; u8 type; u8 reserved[1]; };",
         "typedef struct BusterA64SemanticGeneratedValueEntry BusterA64SemanticGeneratedValueEntry; struct BusterA64SemanticGeneratedValueEntry { u32 key_first; u32 result_first; u16 key_count; u16 result_count; };",
-        "typedef struct BusterA64SemanticGeneratedTransform BusterA64SemanticGeneratedTransform; struct BusterA64SemanticGeneratedTransform { u32 expression_offset; u32 source; u32 p0; u32 p1; u32 part_first; u32 value_first; u16 part_count; u16 value_count; u8 kind; u8 invertible; u16 reserved; };",
+        "typedef struct BusterA64SemanticGeneratedProgramInstruction BusterA64SemanticGeneratedProgramInstruction; struct BusterA64SemanticGeneratedProgramInstruction { u32 field_offset; u32 text_offset; u32 operand_first; s32 value; u16 operand_count; u16 high; u16 low; u16 width; u16 modulus; u8 op; u8 reserved[3]; };",
+        "typedef struct BusterA64SemanticGeneratedProgramOperand BusterA64SemanticGeneratedProgramOperand; struct BusterA64SemanticGeneratedProgramOperand { u32 field_offset; u32 text_offset; s32 value; u16 high; u16 low; u16 width; u8 kind; u8 reserved; };",
+        "typedef struct BusterA64SemanticGeneratedTransform BusterA64SemanticGeneratedTransform; struct BusterA64SemanticGeneratedTransform { u32 expression_offset; u32 source; u32 p0; u32 p1; u32 table_id; u32 program_first; u32 part_first; u32 value_first; u16 program_count; u16 part_count; u16 value_count; u8 kind; u8 invertible; u16 reserved; };",
+        "typedef struct BusterA64SemanticGeneratedTableHeader BusterA64SemanticGeneratedTableHeader; struct BusterA64SemanticGeneratedTableHeader { u32 key_header_first; u16 key_header_count; u16 reserved; u32 result_header_offset; };",
+        "typedef struct BusterA64SemanticGeneratedAlias BusterA64SemanticGeneratedAlias; struct BusterA64SemanticGeneratedAlias { u32 target_file_offset; u32 target_id_offset; u32 target_encoding_id_offset; u32 condition_first; u32 preference_condition_first; u32 preference_first; u16 condition_count; u16 preference_condition_count; u16 preference_count; u16 reserved; s32 preference_rank; };",
+        "typedef struct BusterA64SemanticGeneratedAliasPreference BusterA64SemanticGeneratedAliasPreference; struct BusterA64SemanticGeneratedAliasPreference { u32 alias_file_offset; u32 alias_id_offset; u32 condition_first; u16 condition_count; u16 reserved; s32 rank; };",
+        "typedef struct BusterA64SemanticGeneratedConstraint BusterA64SemanticGeneratedConstraint; struct BusterA64SemanticGeneratedConstraint { u32 feature_first; u32 program_first; u16 feature_count; u16 program_count; };",
         "typedef struct BusterA64SemanticGeneratedForm BusterA64SemanticGeneratedForm; struct BusterA64SemanticGeneratedForm { u32 name_offset; u32 mnemonic_offset; u32 assembly_offset; u64 source_digest; u32 fixed_mask; u32 fixed_value; u32 field_first; u32 operand_first; u32 transform_first; u16 field_count; u16 operand_count; u16 transform_count; u8 owner; u8 kind; u8 raw_layout_resolved; u8 status; };", "",
     ]
     lines.append("static const char8 buster_a64_semantic_string_pool[] =")
@@ -1127,16 +1500,64 @@ def generate_header(rows: list[dict[str, Any]], census: dict[str, Any], path: Pa
     lines.extend(f"    {{{x['offset']}}}," for x in transform_parts)
     if not transform_parts: lines.append("    {0},")
     lines.append("};")
+    lines.append(f"static const BusterA64SemanticGeneratedProgramInstruction buster_a64_semantic_program_instructions[{max(1, len(program_instructions))}] = {{")
+    lines.extend(f"    {{{x['field_offset']}, {x['text_offset']}, {x['operand_first']}, {x['value']}, {x['operand_count']}, {x['high']}, {x['low']}, {x['width']}, {x['modulus']}, {x['op']}, {{0}}}}," for x in program_instructions)
+    if not program_instructions: lines.append("    {0},")
+    lines.append("};")
+    lines.append(f"static const BusterA64SemanticGeneratedProgramOperand buster_a64_semantic_program_operands[{max(1, len(program_operands))}] = {{")
+    lines.extend(f"    {{{x['field_offset']}, {x['text_offset']}, {x['value']}, {x['high']}, {x['low']}, {x['width']}, {x['kind']}, 0}}," for x in program_operands)
+    if not program_operands: lines.append("    {0},")
+    lines.append("};")
     lines.append(f"static const BusterA64SemanticGeneratedValueAtom buster_a64_semantic_value_atoms[{max(1, len(value_atoms))}] = {{")
-    lines.extend(f"    {{{x['text_offset']}, INT64_C({x['integer']}), {x['type']}, {{0}}}}," for x in value_atoms)
-    if not value_atoms: lines.append(f"    {{{offsets['']}, INT64_C(0), 0, {{0}}}},")
+    lines.extend(f"    {{{x['text_offset']}, INT64_C({x['integer']}), {x['program_first']}, {x['program_count']}, {x['type']}, {{0}}}}," for x in value_atoms)
+    if not value_atoms: lines.append(f"    {{{offsets['']}, INT64_C(0), 0xffffffff, 0, 0, {{0}}}},")
     lines.append("};")
     lines.append(f"static const BusterA64SemanticGeneratedValueEntry buster_a64_semantic_value_entries[{max(1, len(value_entries))}] = {{")
     lines.extend(f"    {{{x['key_first']}, {x['result_first']}, {x['key_count']}, {x['result_count']}}}," for x in value_entries)
     if not value_entries: lines.append("    {0, 0, 0, 0},")
     lines.append("};")
+    lines.append(f"static const BusterA64SemanticGeneratedTableHeader buster_a64_semantic_table_headers[{max(1, len(table_headers))}] = {{")
+    lines.extend(f"    {{{x['key_header_first']}, {x['key_header_count']}, 0, {x['result_header']}}}," for x in table_headers)
+    if not table_headers: lines.append("    {0, 0, 0, 0},")
+    lines.append("};")
+    lines.append(f"static const u32 buster_a64_semantic_table_key_headers[{max(1, len(table_key_headers))}] = {{")
+    lines.extend(f"    {value}," for value in table_key_headers)
+    if not table_key_headers: lines.append("    0,")
+    lines.append("};")
+    lines.append(f"static const BusterA64SemanticGeneratedAlias buster_a64_semantic_aliases[{max(1, len(alias_descriptors))}] = {{")
+    lines.extend(f"    {{{x['target_file']}, {x['target_id']}, {x['target_encoding_id']}, {x['condition_first']}, {x['preference_condition_first']}, {x['preference_first']}, {x['condition_count']}, {x['preference_condition_count']}, {x['preference_count']}, 0, {x['preference_rank']}}}," for x in alias_descriptors)
+    if not alias_descriptors: lines.append("    {0},")
+    lines.append("};")
+    lines.append(f"static const u32 buster_a64_semantic_alias_condition_tokens[{max(1, len(alias_condition_tokens))}] = {{")
+    lines.extend(f"    {value}," for value in alias_condition_tokens)
+    if not alias_condition_tokens: lines.append("    0,")
+    lines.append("};")
+    lines.append(f"static const u32 buster_a64_semantic_alias_preference_condition_tokens[{max(1, len(alias_preference_condition_tokens))}] = {{")
+    lines.extend(f"    {value}," for value in alias_preference_condition_tokens)
+    if not alias_preference_condition_tokens: lines.append("    0,")
+    lines.append("};")
+    lines.append(f"static const BusterA64SemanticGeneratedAliasPreference buster_a64_semantic_alias_preferences[{max(1, len(alias_preferences))}] = {{")
+    lines.extend(f"    {{{x['alias_file']}, {x['alias_id']}, {x['condition_first']}, {x['condition_count']}, 0, {x['rank']}}}," for x in alias_preferences)
+    if not alias_preferences: lines.append("    {0},")
+    lines.append("};")
+    lines.append(f"static const u32 buster_a64_semantic_alias_form_ids[{max(1, len(alias_form_ids))}] = {{")
+    lines.extend(f"    {value}," for value in alias_form_ids)
+    if not alias_form_ids: lines.append("    0,")
+    lines.append("};")
+    lines.append(f"static const BusterA64SemanticGeneratedConstraint buster_a64_semantic_constraints[{max(1, len(constraint_descriptors))}] = {{")
+    lines.extend(f"    {{{x['feature_first']}, {x['program_first']}, {x['feature_count']}, {x['program_count']}}}," for x in constraint_descriptors)
+    if not constraint_descriptors: lines.append("    {0},")
+    lines.append("};")
+    lines.append(f"static const u32 buster_a64_semantic_constraint_feature_tags[{max(1, len(constraint_feature_tags))}] = {{")
+    lines.extend(f"    {value}," for value in constraint_feature_tags)
+    if not constraint_feature_tags: lines.append("    0,")
+    lines.append("};")
+    lines.append(f"static const u32 buster_a64_semantic_constraint_program_tokens[{max(1, len(constraint_program_tokens))}] = {{")
+    lines.extend(f"    {value}," for value in constraint_program_tokens)
+    if not constraint_program_tokens: lines.append("    0,")
+    lines.append("};")
     lines.append(f"static const BusterA64SemanticGeneratedTransform buster_a64_semantic_transforms[{max(1, len(transforms))}] = {{")
-    lines.extend(f"    {{{offsets[x['expression']]}, {x['source']}, {x['p0']}, {x['p1']}, {x['part_first']}, {x['value_first']}, {x['part_count']}, {x['value_count']}, {x['kind']}, {1 if x['invertible'] else 0}, 0}}," for x in transforms)
+    lines.extend(f"    {{{offsets[x['expression']]}, {x['source']}, {x['p0']}, {x['p1']}, {x['table_id']}, {x['program_first']}, {x['part_first']}, {x['value_first']}, {x['program_count']}, {x['part_count']}, {x['value_count']}, {x['kind']}, {1 if x['invertible'] else 0}, 0}}," for x in transforms)
     if not transforms: lines.append("    {0},")
     lines.append("};")
     lines.append(f"static const BusterA64SemanticGeneratedForm buster_a64_semantic_forms[{max(1, len(forms))}] = {{")
@@ -1168,7 +1589,7 @@ def emit_report(rows: list[dict[str, Any]], census: dict[str, Any], path: Path) 
         "memory_modes": census["memory_modes"], "cross_lenses": census["cross_lenses"],
         "semantic_kinds": census["semantic_kinds"], "transform_kinds": census["transform_kinds"],
         "string_pool_bytes": census.get("string_pool_bytes", 0), "largest_strings": census.get("largest_strings", []),
-        "status": "binding_complete",
+        "status": "binding_complete" if not unsupported else "binding_with_residuals",
         "binding_complete_rows": len(rows) - len(unsupported),
         "canonical_binding_complete_rows": len(canonical) - sum(row in unsupported for row in canonical),
         "alias_binding_complete_rows": len(aliases) - sum(row in unsupported for row in aliases),
@@ -1177,7 +1598,15 @@ def emit_report(rows: list[dict[str, Any]], census: dict[str, Any], path: Path) 
         "alias_executable_semantic_rows": 0,
         "executable_semantics_status": "not-emitted",
         "parsed_vm_programs": census.get("parsed_vm_programs", 0),
+        "typed_transform_programs": census.get("typed_transform_programs", 0),
+        "typed_value_program_atoms": census.get("typed_value_program_atoms", 0),
+        "typed_program_instructions": census.get("typed_program_instructions", 0),
+        "typed_program_operands": census.get("typed_program_operands", 0),
         "residual_overlay_rows": census.get("residual_overlay_rows", 0),
+        "numeric_relation_records": census.get("numeric_relation_records", 0),
+        "numeric_relation_parsed": census.get("numeric_relation_parsed", 0),
+        "numeric_relation_residual": census.get("numeric_relation_residual", 0),
+        "numeric_relation_source_key_sha256": census.get("numeric_relation_source_key_sha256", ""),
         "operand_classification_status": "presentation-only",
         "unknown_role_operands": census.get("unknown_role_operands", 0),
         "ambiguous_role_operands": census.get("ambiguous_role_operands", 0),
@@ -1188,7 +1617,7 @@ def emit_report(rows: list[dict[str, Any]], census: dict[str, Any], path: Path) 
         "no_anchor_canonical_rows": census["no_anchor_canonical_rows"],
         "no_anchor_alias_rows": census["no_anchor_alias_rows"],
         "unsupported_or_gap_ids": [row["id"] for row in unsupported],
-        "invariants": {"canonical_plus_alias": len(rows) == 1695, "owner_partition": sum(census["canonical_owner_counts"].values()) == 1523, "memory_partition": sum(census["memory_modes"].values()) == 559, "all_source_links_accounted": all(row.get("encoding_name") for row in rows), "all_canonical_binding_complete": not any(row["kind"] == "canonical" for row in unsupported), "no_row_claims_executable_semantics": not any(row.get("executable_semantics") for row in rows), "classification_is_not_authoritative": all(row.get("operand_classification_status") == "presentation-only" for row in rows), "undefined_udf_only": len(undefined) == 1 and undefined[0]["id"].endswith(":UDF_only_perm_undef")},
+        "invariants": {"canonical_plus_alias": len(rows) == 1695, "owner_partition": sum(census["canonical_owner_counts"].values()) == 1523, "memory_partition": sum(census["memory_modes"].values()) == 559, "all_source_links_accounted": all(row.get("encoding_name") for row in rows), "all_canonical_binding_complete": not any(row["kind"] == "canonical" for row in unsupported), "no_row_claims_executable_semantics": not any(row.get("executable_semantics") for row in rows), "classification_is_not_authoritative": all(row.get("operand_classification_status") == "presentation-only" for row in rows), "undefined_udf_only": len(undefined) == 1 and undefined[0]["id"].endswith(":UDF_only_perm_undef"), "numeric_relation_source_projection_identity": census.get("numeric_relation_records", 0) == census.get("numeric_relation_parsed", 0) + census.get("numeric_relation_residual", 0), "residual_overlay_count_honest": census.get("residual_overlay_rows", 0) > 0 or census.get("numeric_relation_residual", 0) == 0},
     }
     path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     return len(path.read_bytes()), sha256(path)
@@ -1232,14 +1661,14 @@ def main() -> int:
     report_bytes, report_digest = emit_report(semantic, census, report)
     canonical = [row for row in semantic if row["kind"] == "canonical"]
     manifest_obj = {
-        "schema_version": SCHEMA_VERSION, "status": "binding_complete", "executable_semantics_status": "not-emitted",
+        "schema_version": SCHEMA_VERSION, "status": "binding_complete" if not any(transform.get("kind") == "overlay_required" for row in semantic for transform in row.get("transforms", [])) else "binding_with_residuals", "executable_semantics_status": "not-emitted",
         "canonical": {"sha256": CANONICAL_SHA256, "rows": CANONICAL_COUNT, "canonical_rows": CANONICAL_DENOMINATOR, "alias_rows": ALIAS_DENOMINATOR, "status_composition": {"defined": sum(row.get("status") == "defined" for row in canonical), "undefined": sum(row.get("status") == "undefined" for row in canonical), "undefined_ids": [row["id"] for row in canonical if row.get("status") == "undefined"]}},
         "source": {"release": "2026-06", "tree_sha256": SOURCE_TREE_SHA256, "directory": str(args.source), "raw_source_policy": "raw Arm XML is not vendored; obtain the pinned release from Arm and verify this tree SHA-256 before regeneration"},
         "artifacts": {"jsonl": {"file": jsonl.name, "bytes": json_bytes, "sha256": json_digest}, "header": {"file": header.name, "bytes": header.stat().st_size, "sha256": header_digest, "string_pool_bytes": pool_size}, "report": {"file": report.name, "bytes": report_bytes, "sha256": report_digest}},
         "string_pool_bytes": census.get("string_pool_bytes", pool_size), "largest_strings": census.get("largest_strings", []),
-        "owner_counts": census["owner_counts"], "canonical_owner_counts": census["canonical_owner_counts"], "memory_modes": census["memory_modes"], "cross_lenses": census["cross_lenses"], "transform_kinds": census["transform_kinds"], "parsed_vm_programs": census.get("parsed_vm_programs", 0), "residual_overlay_rows": census.get("residual_overlay_rows", 0), "operand_classification_status": "presentation-only", "unknown_role_operands": census.get("unknown_role_operands", 0), "ambiguous_role_operands": census.get("ambiguous_role_operands", 0),
-        "coverage": {"binding_complete_rows": len(semantic), "canonical_binding_complete_rows": len(canonical), "alias_binding_complete_rows": len(semantic) - len(canonical), "executable_semantic_rows": 0, "canonical_executable_semantic_rows": 0, "alias_executable_semantic_rows": 0, "proven_overlay_rows": census["proven_overlay_rows"], "no_anchor_rows": census["no_anchor_rows"], "unsupported_or_gap_rows": 0},
-        "invariants": {"canonical_plus_alias": True, "owner_partition": sum(census["canonical_owner_counts"].values()) == CANONICAL_DENOMINATOR, "memory_partition": sum(census["memory_modes"].values()) == 559, "all_rows_accounted": len(semantic) == CANONICAL_COUNT, "all_canonical_binding_complete": True, "no_row_claims_executable_semantics": not any(row.get("executable_semantics") for row in semantic), "classification_is_not_authoritative": True},
+        "owner_counts": census["owner_counts"], "canonical_owner_counts": census["canonical_owner_counts"], "memory_modes": census["memory_modes"], "cross_lenses": census["cross_lenses"], "transform_kinds": census["transform_kinds"], "parsed_vm_programs": census.get("parsed_vm_programs", 0), "typed_transform_programs": census.get("typed_transform_programs", 0), "typed_value_program_atoms": census.get("typed_value_program_atoms", 0), "typed_program_instructions": census.get("typed_program_instructions", 0), "typed_program_operands": census.get("typed_program_operands", 0), "residual_overlay_rows": census.get("residual_overlay_rows", 0), "numeric_relation_records": census.get("numeric_relation_records", 0), "numeric_relation_parsed": census.get("numeric_relation_parsed", 0), "numeric_relation_residual": census.get("numeric_relation_residual", 0), "numeric_relation_source_key_sha256": census.get("numeric_relation_source_key_sha256", ""), "operand_classification_status": "presentation-only", "unknown_role_operands": census.get("unknown_role_operands", 0), "ambiguous_role_operands": census.get("ambiguous_role_operands", 0),
+        "coverage": {"binding_complete_rows": len(semantic) - census.get("residual_overlay_rows", 0), "canonical_binding_complete_rows": len(canonical) - sum(1 for row in canonical if any(transform.get("kind") == "overlay_required" for transform in row.get("transforms", []))), "alias_binding_complete_rows": len(semantic) - len(canonical), "executable_semantic_rows": 0, "canonical_executable_semantic_rows": 0, "alias_executable_semantic_rows": 0, "proven_overlay_rows": census["proven_overlay_rows"], "no_anchor_rows": census["no_anchor_rows"], "unsupported_or_gap_rows": census.get("residual_overlay_rows", 0)},
+        "invariants": {"canonical_plus_alias": True, "owner_partition": sum(census["canonical_owner_counts"].values()) == CANONICAL_DENOMINATOR, "memory_partition": sum(census["memory_modes"].values()) == 559, "all_rows_accounted": len(semantic) == CANONICAL_COUNT, "all_canonical_binding_complete": not any(transform.get("kind") == "overlay_required" for row in canonical for transform in row.get("transforms", [])), "no_row_claims_executable_semantics": not any(row.get("executable_semantics") for row in semantic), "classification_is_not_authoritative": True, "numeric_relation_source_projection_identity": census.get("numeric_relation_records", 0) == census.get("numeric_relation_parsed", 0) + census.get("numeric_relation_residual", 0), "residual_overlay_count_honest": census.get("residual_overlay_rows", 0) > 0 or census.get("numeric_relation_residual", 0) == 0},
     }
     manifest_text = json.dumps(manifest_obj, indent=2, sort_keys=True) + "\n"
     if args.check and manifest.exists() and manifest.read_text() != manifest_text:

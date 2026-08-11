@@ -142,6 +142,32 @@ typedef enum BusterA64SemanticTransformKind
     BUSTER_A64_SEMANTIC_TRANSFORM_SHARED_DECODE,
 } BusterA64SemanticTransformKind;
 
+/* Typed operations emitted for every normalized VM program.  The generated
+ * expression string remains available as a diagnostic rendering, but C
+ * consumers can inspect these records without reparsing JSON. */
+typedef enum BusterA64SemanticProgramOp
+{
+    BUSTER_A64_SEMANTIC_PROGRAM_FIELD,
+    BUSTER_A64_SEMANTIC_PROGRAM_UINT_CONCAT,
+    BUSTER_A64_SEMANTIC_PROGRAM_SIGN_EXTEND,
+    BUSTER_A64_SEMANTIC_PROGRAM_SCALE_MUL,
+    BUSTER_A64_SEMANTIC_PROGRAM_SCALE_DIV,
+    BUSTER_A64_SEMANTIC_PROGRAM_SCALE_POW2,
+    BUSTER_A64_SEMANTIC_PROGRAM_ADD_CONST,
+    BUSTER_A64_SEMANTIC_PROGRAM_SUB_FROM_CONST,
+    BUSTER_A64_SEMANTIC_PROGRAM_REGISTER_ADD_MOD,
+    BUSTER_A64_SEMANTIC_PROGRAM_LITERAL,
+    BUSTER_A64_SEMANTIC_PROGRAM_TEXT_FACTOR,
+    BUSTER_A64_SEMANTIC_PROGRAM_SHARED_DECODE,
+} BusterA64SemanticProgramOp;
+
+typedef enum BusterA64SemanticProgramOperandKind
+{
+    BUSTER_A64_SEMANTIC_PROGRAM_OPERAND_FIELD,
+    BUSTER_A64_SEMANTIC_PROGRAM_OPERAND_ARRANGEMENT,
+    BUSTER_A64_SEMANTIC_PROGRAM_OPERAND_LITERAL,
+} BusterA64SemanticProgramOperandKind;
+
 typedef struct BusterA64SemanticSegment BusterA64SemanticSegment;
 struct BusterA64SemanticSegment
 {
@@ -203,6 +229,40 @@ struct BusterA64SemanticValueAtom
     u8 kind;
     s64 integer;
     BusterA64SemanticString text;
+    u32 program_first;
+    u16 program_count;
+};
+
+typedef struct BusterA64SemanticProgramInstruction BusterA64SemanticProgramInstruction;
+struct BusterA64SemanticProgramInstruction
+{
+    u32 id;
+    BusterA64SemanticString field;
+    BusterA64SemanticString text;
+    u32 operand_first;
+    u16 operand_count;
+    s32 value;
+    u16 high;
+    u16 low;
+    /* For a sliced field, width == high - low + 1.  An unsliced field uses
+     * high == low == UINT16_MAX and width == 0; resolve its full width from
+     * the owning form's field descriptor. */
+    u16 width;
+    u16 modulus;
+    u8 op;
+};
+
+typedef struct BusterA64SemanticProgramOperand BusterA64SemanticProgramOperand;
+struct BusterA64SemanticProgramOperand
+{
+    u32 id;
+    BusterA64SemanticString field;
+    BusterA64SemanticString text;
+    s32 value;
+    u16 high;
+    u16 low;
+    u16 width;
+    u8 kind;
 };
 
 typedef struct BusterA64SemanticValue BusterA64SemanticValue;
@@ -225,11 +285,60 @@ struct BusterA64SemanticTransform
     u32 p1;
     u32 part_first;
     u32 value_first;
+    u32 table_id;
+    u32 program_first;
     u16 part_count;
     u16 value_count;
+    u16 program_count;
     u8 kind;
     bool invertible;
     u16 reserved;
+};
+
+typedef struct BusterA64SemanticTableHeader BusterA64SemanticTableHeader;
+struct BusterA64SemanticTableHeader
+{
+    u32 id;
+    u32 key_header_first;
+    u16 key_header_count;
+    BusterA64SemanticString result_header;
+};
+
+typedef struct BusterA64SemanticAlias BusterA64SemanticAlias;
+struct BusterA64SemanticAlias
+{
+    u32 form_id;
+    BusterA64SemanticString target_file;
+    BusterA64SemanticString target_id;
+    BusterA64SemanticString target_encoding_id;
+    u32 condition_first;
+    u32 preference_condition_first;
+    u32 preference_first;
+    u16 condition_count;
+    u16 preference_condition_count;
+    u16 preference_count;
+    s32 preference_rank;
+};
+
+typedef struct BusterA64SemanticAliasPreference BusterA64SemanticAliasPreference;
+struct BusterA64SemanticAliasPreference
+{
+    u32 id;
+    BusterA64SemanticString alias_file;
+    BusterA64SemanticString alias_id;
+    u32 condition_first;
+    u16 condition_count;
+    s32 rank;
+};
+
+typedef struct BusterA64SemanticConstraint BusterA64SemanticConstraint;
+struct BusterA64SemanticConstraint
+{
+    u32 form_id;
+    u32 feature_first;
+    u32 program_first;
+    u16 feature_count;
+    u16 program_count;
 };
 
 typedef struct BusterA64SemanticForm BusterA64SemanticForm;
@@ -262,9 +371,22 @@ BUSTER_F_DECL u32 buster_a64_semantic_operand_count(void);
 BUSTER_F_DECL u32 buster_a64_semantic_operand_field_index_count(void);
 BUSTER_F_DECL u32 buster_a64_semantic_transform_count(void);
 BUSTER_F_DECL u32 buster_a64_semantic_transform_part_count(void);
+BUSTER_F_DECL u32 buster_a64_semantic_program_instruction_count(void);
+BUSTER_F_DECL u32 buster_a64_semantic_program_operand_count(void);
+BUSTER_F_DECL u32 buster_a64_semantic_parsed_program_count(void);
+BUSTER_F_DECL u32 buster_a64_semantic_value_program_count(void);
 BUSTER_F_DECL u32 buster_a64_semantic_value_count(void);
 BUSTER_F_DECL u32 buster_a64_semantic_value_atom_count(void);
 BUSTER_F_DECL u32 buster_a64_semantic_string_pool_size(void);
+BUSTER_F_DECL u32 buster_a64_semantic_table_header_count(void);
+BUSTER_F_DECL u32 buster_a64_semantic_table_key_header_count(void);
+BUSTER_F_DECL u32 buster_a64_semantic_alias_count(void);
+BUSTER_F_DECL u32 buster_a64_semantic_alias_condition_token_count(void);
+BUSTER_F_DECL u32 buster_a64_semantic_alias_preference_condition_token_count(void);
+BUSTER_F_DECL u32 buster_a64_semantic_alias_preference_count(void);
+BUSTER_F_DECL u32 buster_a64_semantic_constraint_count(void);
+BUSTER_F_DECL u32 buster_a64_semantic_constraint_feature_tag_count(void);
+BUSTER_F_DECL u32 buster_a64_semantic_constraint_program_token_count(void);
 
 BUSTER_F_DECL bool buster_a64_semantic_string(u32 offset, BusterA64SemanticString* result);
 BUSTER_F_DECL char8 buster_a64_semantic_string_byte(BusterA64SemanticString string, u32 index);
@@ -276,7 +398,25 @@ BUSTER_F_DECL bool buster_a64_semantic_operand_field_index(u32 operand_id, u32 o
 BUSTER_F_DECL bool buster_a64_semantic_transform(u32 id, BusterA64SemanticTransform* result);
 BUSTER_F_DECL bool buster_a64_semantic_transform_part(u32 id, u32 ordinal, BusterA64SemanticString* result);
 BUSTER_F_DECL bool buster_a64_semantic_transform_value(u32 id, u32 ordinal, BusterA64SemanticValue* result);
+BUSTER_F_DECL bool buster_a64_semantic_program_instruction(u32 id, BusterA64SemanticProgramInstruction* result);
+BUSTER_F_DECL bool buster_a64_semantic_program_operand(u32 id, u32 ordinal, BusterA64SemanticProgramOperand* result);
+BUSTER_F_DECL bool buster_a64_semantic_transform_program_instruction(u32 transform_id, u32 ordinal, BusterA64SemanticProgramInstruction* result);
 BUSTER_F_DECL bool buster_a64_semantic_value_atom(u32 id, BusterA64SemanticValueAtom* result);
+BUSTER_F_DECL bool buster_a64_semantic_value_atom_program_instruction(u32 atom_id, u32 ordinal, BusterA64SemanticProgramInstruction* result);
+BUSTER_F_DECL bool buster_a64_semantic_table_header(u32 id, BusterA64SemanticTableHeader* result);
+BUSTER_F_DECL bool buster_a64_semantic_table_key_header(u32 id, u32 ordinal, BusterA64SemanticString* result);
+BUSTER_F_DECL bool buster_a64_semantic_table_result_header(u32 id, BusterA64SemanticString* result);
+BUSTER_F_DECL bool buster_a64_semantic_transform_table_header(u32 transform_id, u32* table_id);
+BUSTER_F_DECL bool buster_a64_semantic_alias(u32 form_id, BusterA64SemanticAlias* result);
+BUSTER_F_DECL bool buster_a64_semantic_alias_descriptor(u32 form_id, BusterA64SemanticAlias* result);
+BUSTER_F_DECL bool buster_a64_semantic_alias_by_ordinal(u32 ordinal, BusterA64SemanticAlias* result);
+BUSTER_F_DECL bool buster_a64_semantic_alias_condition_token(u32 form_id, u32 ordinal, BusterA64SemanticString* result);
+BUSTER_F_DECL bool buster_a64_semantic_alias_preference_condition_token(u32 form_id, u32 ordinal, BusterA64SemanticString* result);
+BUSTER_F_DECL bool buster_a64_semantic_alias_preference(u32 form_id, u32 ordinal, BusterA64SemanticAliasPreference* result);
+BUSTER_F_DECL bool buster_a64_semantic_alias_preference_condition_token_by_id(u32 preference_id, u32 ordinal, BusterA64SemanticString* result);
+BUSTER_F_DECL bool buster_a64_semantic_constraint(u32 form_id, BusterA64SemanticConstraint* result);
+BUSTER_F_DECL bool buster_a64_semantic_constraint_feature_tag(u32 form_id, u32 ordinal, BusterA64SemanticString* result);
+BUSTER_F_DECL bool buster_a64_semantic_constraint_program_token(u32 form_id, u32 ordinal, BusterA64SemanticString* result);
 
 BUSTER_F_DECL bool buster_a64_semantic_find_form(String8 name, u32 ordinal, u32* id);
 BUSTER_F_DECL bool buster_a64_semantic_find_mnemonic(String8 mnemonic, u32 ordinal, u32* id);

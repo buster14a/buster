@@ -40,7 +40,9 @@
     "classification_is_not_authoritative": true,
     "memory_partition": true,
     "no_row_claims_executable_semantics": true,
+    "numeric_relation_source_projection_identity": true,
     "owner_partition": true,
+    "residual_overlay_count_honest": true,
     "undefined_udf_only": true
   },
   "largest_strings": [
@@ -101,6 +103,10 @@
   "no_anchor_alias_rows": 2,
   "no_anchor_canonical_rows": 32,
   "no_anchor_rows": 34,
+  "numeric_relation_parsed": 297,
+  "numeric_relation_records": 297,
+  "numeric_relation_residual": 0,
+  "numeric_relation_source_key_sha256": "4897e8638e75835301104b083194e778f2fd862aef41b8e21338e8079c8f77f8",
   "operand_classification_status": "presentation-only",
   "owner_counts": {
     "alias": 172,
@@ -113,7 +119,7 @@
     "scalar_integer": 72,
     "system": 18
   },
-  "parsed_vm_programs": 86,
+  "parsed_vm_programs": 372,
   "proven_overlay_ids": [
     "arm-a64@2026-06:FMAXNMV_asimdall_only_H",
     "arm-a64@2026-06:FMAXV_asimdall_only_H",
@@ -123,7 +129,7 @@
   "proven_overlay_rows": 4,
   "residual_overlay_rows": 0,
   "rows": 1695,
-  "schema_version": 1,
+  "schema_version": 2,
   "semantic_kinds": {
     "barrier_option": 7,
     "condition": 36,
@@ -160,15 +166,19 @@
       "arm-a64@2026-06:UDF_only_perm_undef"
     ]
   },
-  "string_pool_bytes": 234945,
+  "string_pool_bytes": 235630,
   "transform_kinds": {
     "concat": 898,
-    "integer_decode": 11,
+    "integer_decode": 297,
     "shared_decode": 4,
     "slice": 10,
     "text_transform": 71,
     "value_table": 1528
   },
+  "typed_program_instructions": 875,
+  "typed_program_operands": 602,
+  "typed_transform_programs": 372,
+  "typed_value_program_atoms": 296,
   "unknown_role_operands": 6268,
   "unsupported_or_gap_ids": []
 }

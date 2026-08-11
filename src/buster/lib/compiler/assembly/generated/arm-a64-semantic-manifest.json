@@ -2,20 +2,20 @@
   "ambiguous_role_operands": 0,
   "artifacts": {
     "header": {
-      "bytes": 1418551,
+      "bytes": 2939348,
       "file": "arm-a64-semantic.generated.h",
-      "sha256": "b3bf20ba318a63ecb0831d0889f166f5ac41e6d57a72b11e57dfe11f8586a534",
-      "string_pool_bytes": 234945
+      "sha256": "9838352a9f002c862088f7d4d5c047f98c50eb6dfcc56e6f81ef4da45b4d92c8",
+      "string_pool_bytes": 235630
     },
     "jsonl": {
-      "bytes": 6911464,
+      "bytes": 6988584,
       "file": "arm-a64-semantic.generated.jsonl",
-      "sha256": "ca4947359ffa53c963a5976a3df96a5ac5804c3c036c41ede92126be464f1853"
+      "sha256": "1f8ad9753e8bf03834c86bc744f4f4d8460b283fdb1056c00fcbdda71c0d0dc5"
     },
     "report": {
-      "bytes": 4654,
+      "bytes": 5108,
       "file": "arm-a64-semantic-report.json",
-      "sha256": "a333c3224cb65dac4f5ea770c987b2489d7c9d496fbe3bce47273b169fe7f94b"
+      "sha256": "240e13d6ccebcac914385203b6f9a814ae7214da36459e105035926d4fc28253"
     }
   },
   "canonical": {
@@ -72,7 +72,9 @@
     "classification_is_not_authoritative": true,
     "memory_partition": true,
     "no_row_claims_executable_semantics": true,
-    "owner_partition": true
+    "numeric_relation_source_projection_identity": true,
+    "owner_partition": true,
+    "residual_overlay_count_honest": true
   },
   "largest_strings": [
     {
@@ -129,6 +131,10 @@
     "general/pre": 20,
     "general/reg": 18
   },
+  "numeric_relation_parsed": 297,
+  "numeric_relation_records": 297,
+  "numeric_relation_residual": 0,
+  "numeric_relation_source_key_sha256": "4897e8638e75835301104b083194e778f2fd862aef41b8e21338e8079c8f77f8",
   "operand_classification_status": "presentation-only",
   "owner_counts": {
     "alias": 172,
@@ -141,24 +147,28 @@
     "scalar_integer": 72,
     "system": 18
   },
-  "parsed_vm_programs": 86,
+  "parsed_vm_programs": 372,
   "residual_overlay_rows": 0,
-  "schema_version": 1,
+  "schema_version": 2,
   "source": {
-    "directory": "../sources/arm-a64-2026-06",
+    "directory": "/home/david/Documents/Codex/2026-08-11/referenced-chatgpt-conversation-this-is-an-2/work/sources/arm-a64-2026-06",
     "raw_source_policy": "raw Arm XML is not vendored; obtain the pinned release from Arm and verify this tree SHA-256 before regeneration",
     "release": "2026-06",
     "tree_sha256": "0ee17fd2fe7ed165adda377d90f8f284d009e14d2300577f231c87ca6a45916d"
   },
   "status": "binding_complete",
-  "string_pool_bytes": 234945,
+  "string_pool_bytes": 235630,
   "transform_kinds": {
     "concat": 898,
-    "integer_decode": 11,
+    "integer_decode": 297,
     "shared_decode": 4,
     "slice": 10,
     "text_transform": 71,
     "value_table": 1528
   },
+  "typed_program_instructions": 875,
+  "typed_program_operands": 602,
+  "typed_transform_programs": 372,
+  "typed_value_program_atoms": 296,
   "unknown_role_operands": 6268
 }
