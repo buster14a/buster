@@ -2160,6 +2160,30 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_boolean_control_matches(Buster
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_fixed_bsrinit_no_zeroing(
+    BusterX86MetadataForm form, BusterX86MetadataPatternSemantics pattern)
+{
+    return buster_x86_metadata_string_input_equal(form.iclass.offset, S8("BSRINIT")) &&
+           buster_x86_metadata_string_input_equal(form.extension.offset, S8("ACE")) &&
+           buster_x86_metadata_string_input_equal(form.isa_set.offset, S8("ACE_1")) &&
+           form.prefix_kind == BUSTER_X86_METADATA_PREFIX_VEX &&
+           form.encoder_family == BUSTER_X86_METADATA_ENCODER_VEX && form.map == BUSTER_X86_METADATA_MAP_0F38 &&
+           form.mandatory_prefix == 0xf2 && form.mode_flags == BUSTER_X86_METADATA_MODE_64 &&
+           form.field_flags == (BUSTER_X86_METADATA_FIELD_MODRM | BUSTER_X86_METADATA_FIELD_REGISTER) &&
+           form.decorator_flags == 0 && form.apx_flags == 0 && form.amx_flags == 0 &&
+           pattern.prefix_kind == BUSTER_X86_METADATA_PREFIX_VEX && pattern.has_prefix_kind && pattern.no_rexr_prefix &&
+           pattern.zeroing_control == 1 && pattern.has_decorator_control && !pattern.has_bcrc && !pattern.has_ubit &&
+           !pattern.mask_control && !pattern.has_sae_control && !pattern.has_rounding_control && !pattern.rounding_length &&
+           pattern.opcode_count == 1 && pattern.opcode[0] == 0x49 && pattern.mandatory_prefix == 0xf2 &&
+           pattern.vector_length == 128 && pattern.has_explicit_vector_length && pattern.map == BUSTER_X86_METADATA_MAP_0F38 &&
+           pattern.mod_kind == BUSTER_X86_METADATA_PATTERN_MOD_REGISTER && pattern.reg_fixed == 0 &&
+           pattern.rm_fixed == BUSTER_X86_METADATA_PATTERN_FIXED_ANY && pattern.srm_fixed == BUSTER_X86_METADATA_PATTERN_FIXED_ANY &&
+           pattern.has_modrm && pattern.explicit_modrm && !pattern.has_sib && !pattern.has_memory && pattern.has_register &&
+           !pattern.has_dynamic_opcode && !pattern.has_srm_register && !pattern.has_unsupported_token &&
+           !pattern.immediate_count && !pattern.relative_count && !pattern.displacement_count && pattern.has_w && pattern.w == 1 &&
+           pattern.mode_control == BUSTER_X86_METADATA_PATTERN_MODE_64 && pattern.no_vector_source && pattern.has_prefix_control;
+}
+
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX86MetadataForm form,
                                                                           BusterX86MetadataPatternSemantics pattern)
 {
@@ -2243,20 +2267,17 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
         if (!address_supported) return BUSTER_X86_METADATA_BLOCKER_ADDRESSING_FIELDS;
     }
     // ACE-1's VEX BSRINIT row carries XED's ZEROING=0 selector even though
-    // VEX has no zeroing decorator.  The typed no_rexr_prefix contract and
-    // the zero-valued selector together express the fixed unmasked form; no
-    // decorator byte or caller attribute is accepted.  Other non-EVEX
-    // decorator controls remain schema blockers.
-    bool fixed_non_evex_no_zeroing = pattern.no_rexr_prefix && pattern.zeroing_control == 1 && !pattern.mask_control &&
-                                     !pattern.has_sae_control && !pattern.has_rounding_control;
-    if ((pattern.has_bcrc || pattern.has_ubit || pattern.has_rounding_control || pattern.mask_control || pattern.zeroing_control) &&
-        !fixed_non_evex_no_zeroing)
-    {
-        if (form.prefix_kind != BUSTER_X86_METADATA_PREFIX_EVEX)
-            return pattern.has_rounding_control || pattern.mask_control || pattern.zeroing_control
-                       ? BUSTER_X86_METADATA_BLOCKER_DECORATOR_FIELDS
-                       : BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
-    }
+    // VEX has no zeroing decorator.  Keep this exception tied to the exact
+    // architectural shape.  BCRC/UBIT and every EVEX decorator control are
+    // checked independently: no future non-EVEX row can inherit their bypass.
+    bool fixed_non_evex_no_zeroing = buster_x86_metadata_emit_fixed_bsrinit_no_zeroing(form, pattern);
+    if ((pattern.has_bcrc || pattern.has_ubit) && form.prefix_kind != BUSTER_X86_METADATA_PREFIX_EVEX)
+        return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
+    if ((pattern.has_rounding_control || pattern.mask_control || pattern.has_sae_control || pattern.rounding_length) &&
+        form.prefix_kind != BUSTER_X86_METADATA_PREFIX_EVEX)
+        return BUSTER_X86_METADATA_BLOCKER_DECORATOR_FIELDS;
+    if (pattern.zeroing_control && form.prefix_kind != BUSTER_X86_METADATA_PREFIX_EVEX && !fixed_non_evex_no_zeroing)
+        return BUSTER_X86_METADATA_BLOCKER_DECORATOR_FIELDS;
     if (pattern.has_decorator_control && form.prefix_kind != BUSTER_X86_METADATA_PREFIX_EVEX && !fixed_non_evex_no_zeroing)
         return BUSTER_X86_METADATA_BLOCKER_DECORATOR_FIELDS;
     if (pattern.has_sae_control && !(form.decorator_flags & BUSTER_X86_METADATA_DECORATOR_SAE))
@@ -8144,5 +8165,25 @@ bool buster_x86_metadata_test_eamode_alias_forms(u32 first_form_id, u32 second_f
     BusterX86MetadataForm second = {0};
     return buster_x86_metadata_form(first_form_id, &first) && buster_x86_metadata_form(second_form_id, &second) &&
            buster_x86_metadata_eamode_alias_forms(first, second);
+}
+
+bool buster_x86_metadata_test_fixed_bsrinit_no_zeroing(void)
+{
+    BusterX86MetadataForm form = {0};
+    BusterX86MetadataPatternSemantics pattern = {0};
+    if (!buster_x86_metadata_form(30, &form) || !buster_x86_metadata_emit_parse_pattern(form, &pattern) ||
+        !buster_x86_metadata_emit_fixed_bsrinit_no_zeroing(form, pattern))
+        return false;
+    BusterX86MetadataPatternSemantics bcrc = pattern;
+    BusterX86MetadataPatternSemantics ubit = pattern;
+    BusterX86MetadataForm non_bsrinit_form = form;
+    BusterX86MetadataForm other = {0};
+    if (!buster_x86_metadata_form(31, &other)) return false;
+    bcrc.has_bcrc = 1;
+    ubit.has_ubit = 1;
+    non_bsrinit_form.iclass = other.iclass;
+    return !buster_x86_metadata_emit_fixed_bsrinit_no_zeroing(form, bcrc) &&
+           !buster_x86_metadata_emit_fixed_bsrinit_no_zeroing(form, ubit) &&
+           !buster_x86_metadata_emit_fixed_bsrinit_no_zeroing(non_bsrinit_form, pattern);
 }
 #endif

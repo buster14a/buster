@@ -1223,6 +1223,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             .relocation_capacity = 8,
         });
         BUSTER_TEST(arguments, missing_feature_result.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE);
+        BUSTER_TEST(arguments, buster_x86_metadata_test_fixed_bsrinit_no_zeroing());
 
         // ACE_1 is the target feature for these rows.  AMX_TILE is the XED
         // category, and ACE is the extension spelling; neither substitutes

@@ -977,4 +977,5 @@ bool buster_x86_metadata_validate_patch(BusterX86MetadataValidationPatch patch,
 bool buster_x86_metadata_test_execution_mode_matches(u16 mode_flags, u8 coverage_class,
                                                                          bool include_not64, u8 execution_mode);
 bool buster_x86_metadata_test_eamode_alias_forms(u32 first_form_id, u32 second_form_id);
+bool buster_x86_metadata_test_fixed_bsrinit_no_zeroing(void);
 #endif
