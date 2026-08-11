@@ -14,6 +14,13 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         .cpu_arch = CPU_ARCH_X86_64,
         .os = OPERATING_SYSTEM_LINUX,
     };
+    Target sse4a_target = x86_target;
+    sse4a_target.cpu_model = CPU_MODEL_AMD_AMD_FAMILY_10;
+    sse4a_target.cpu_features_explicit = true;
+    sse4a_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+                                                                                          TARGET_CPU_FEATURE_X86_SSE3,
+                                                                                          TARGET_CPU_FEATURE_X86_SSE4A},
+                                                               3);
     Target virtualization_target = x86_target;
     virtualization_target.cpu_model = CPU_MODEL_BASELINE;
     virtualization_target.cpu_features_explicit = true;
@@ -4427,10 +4434,150 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    memcmp(metadata_unsigned_immediate_att.bytes.pointer, expected_unsigned_immediate,
                                           sizeof(expected_unsigned_immediate)) == 0);
 
+        {
+            Target metadata_target = sse4a_target;
+            u8 expected_extrq[] = {0x66, 0x0f, 0x78, 0xc0, 0x01, 0x02};
+            u8 expected_extrq_att[] = {0x66, 0x0f, 0x78, 0xc0, 0x02, 0x01};
+            u8 expected_insertq[] = {0xf2, 0x0f, 0x78, 0xc1, 0x01, 0x02};
+            u8 expected_insertq_att[] = {0xf2, 0x0f, 0x78, 0xc8, 0x02, 0x01};
+            Target intel_no_sse4a_target = x86_target;
+            intel_no_sse4a_target.cpu_model = CPU_MODEL_INTEL_HASWELL;
+            intel_no_sse4a_target.cpu_features_explicit = true;
+            intel_no_sse4a_target.cpu_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_HASWELL);
+            AssemblyEncodeResult metadata_sse4a_missing =
+                assembly_encode(arguments->arena, S8("extrq xmm0, 1, 2\ninsertq xmm0, xmm1, 1, 2\n"),
+                                (AssemblyEncodeOptions){.target = intel_no_sse4a_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            BUSTER_TEST(arguments, metadata_sse4a_missing.diagnostic_count == 2 && metadata_sse4a_missing.bytes.length == 0 &&
+                                       metadata_sse4a_missing.relocation_count == 0 && metadata_sse4a_missing.symbol_count == 0);
+            for (u32 diagnostic_index = 0; diagnostic_index < metadata_sse4a_missing.diagnostic_count; diagnostic_index += 1)
+            {
+                BUSTER_TEST(arguments, metadata_sse4a_missing.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+            }
+            AssemblyEncodeResult metadata_extrq_intel = assembly_encode(arguments->arena, S8("extrq xmm0, 1, 2\n"),
+                                                                        (AssemblyEncodeOptions){.target = metadata_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult metadata_insertq_intel = assembly_encode(arguments->arena, S8("insertq xmm0, xmm1, 1, 2\n"),
+                                                                          (AssemblyEncodeOptions){.target = metadata_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult metadata_extrq_att = assembly_encode(arguments->arena, S8("extrq $1, $2, %xmm0\n"),
+                                                                      (AssemblyEncodeOptions){.target = metadata_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            AssemblyEncodeResult metadata_insertq_att = assembly_encode(arguments->arena, S8("insertq $1, $2, %xmm0, %xmm1\n"),
+                                                                        (AssemblyEncodeOptions){.target = metadata_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            BUSTER_TEST(arguments, metadata_extrq_intel.diagnostic_count == 0 && metadata_extrq_intel.bytes.length == sizeof(expected_extrq) &&
+                                       memcmp(metadata_extrq_intel.bytes.pointer, expected_extrq, sizeof(expected_extrq)) == 0);
+            BUSTER_TEST(arguments, metadata_insertq_intel.diagnostic_count == 0 && metadata_insertq_intel.bytes.length == sizeof(expected_insertq) &&
+                                       memcmp(metadata_insertq_intel.bytes.pointer, expected_insertq, sizeof(expected_insertq)) == 0);
+            BUSTER_TEST(arguments, metadata_extrq_att.diagnostic_count == 0 && metadata_extrq_att.bytes.length == sizeof(expected_extrq_att) &&
+                                       memcmp(metadata_extrq_att.bytes.pointer, expected_extrq_att, sizeof(expected_extrq_att)) == 0);
+            BUSTER_TEST(arguments, metadata_insertq_att.diagnostic_count == 0 && metadata_insertq_att.bytes.length == sizeof(expected_insertq_att) &&
+                                       memcmp(metadata_insertq_att.bytes.pointer, expected_insertq_att, sizeof(expected_insertq_att)) == 0);
+
+            u8 expected_extrq_boundaries[] = {
+                0x66, 0x0f, 0x78, 0xc0, 0x00, 0x00, 0x66, 0x0f, 0x78, 0xc0, 0xff, 0xff,
+            };
+            AssemblyEncodeResult metadata_extrq_boundaries =
+                assembly_encode(arguments->arena, S8("extrq xmm0, 0, 0\nextrq xmm0, 255, 255\n"),
+                                (AssemblyEncodeOptions){.target = metadata_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            BUSTER_TEST(arguments,
+                        metadata_extrq_boundaries.diagnostic_count == 0 &&
+                            assembly_test_bytes_equal(metadata_extrq_boundaries.bytes, expected_extrq_boundaries, sizeof(expected_extrq_boundaries)) &&
+                            metadata_extrq_boundaries.relocation_count == 0 && metadata_extrq_boundaries.symbol_count == 0);
+
+            u8 expected_insertq_boundaries[] = {
+                0xf2, 0x0f, 0x78, 0xc1, 0x00, 0x00, 0xf2, 0x0f, 0x78, 0xc1, 0xff, 0xff,
+            };
+            AssemblyEncodeResult metadata_insertq_boundaries =
+                assembly_encode(arguments->arena, S8("insertq xmm0, xmm1, 0, 0\ninsertq xmm0, xmm1, 255, 255\n"),
+                                (AssemblyEncodeOptions){.target = metadata_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            BUSTER_TEST(arguments,
+                        metadata_insertq_boundaries.diagnostic_count == 0 &&
+                            assembly_test_bytes_equal(metadata_insertq_boundaries.bytes, expected_insertq_boundaries, sizeof(expected_insertq_boundaries)) &&
+                            metadata_insertq_boundaries.relocation_count == 0 && metadata_insertq_boundaries.symbol_count == 0);
+
+            AssemblyEncodeResult metadata_extrq_invalid = assembly_encode(arguments->arena, S8("extrq xmm0, -1, 0\nextrq xmm0, 0, 256\n"),
+                                                                          (AssemblyEncodeOptions){.target = metadata_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult metadata_insertq_invalid =
+                assembly_encode(arguments->arena, S8("insertq xmm0, xmm1, -1, 0\ninsertq xmm0, xmm1, 0, 256\n"),
+                                (AssemblyEncodeOptions){.target = metadata_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            BUSTER_TEST(arguments, metadata_extrq_invalid.diagnostic_count == 2 && metadata_extrq_invalid.bytes.length == 0 &&
+                                       metadata_extrq_invalid.relocation_count == 0 && metadata_extrq_invalid.symbol_count == 0);
+            BUSTER_TEST(arguments, metadata_insertq_invalid.diagnostic_count == 2 && metadata_insertq_invalid.bytes.length == 0 &&
+                                       metadata_insertq_invalid.relocation_count == 0 && metadata_insertq_invalid.symbol_count == 0);
+            for (u32 diagnostic_index = 0; diagnostic_index < 2; diagnostic_index += 1)
+            {
+                BUSTER_TEST(arguments, metadata_extrq_invalid.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION);
+                BUSTER_TEST(arguments, metadata_insertq_invalid.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION);
+            }
+
+            AssemblyEncodeResult metadata_extrq_shape = assembly_encode(arguments->arena, S8("extrq xmm0, 1\nextrq eax, 1, 2\n"),
+                                                                        (AssemblyEncodeOptions){.target = metadata_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult metadata_insertq_shape = assembly_encode(arguments->arena, S8("insertq xmm0, 1, 2\ninsertq rax, xmm1, 1, 2\n"),
+                                                                          (AssemblyEncodeOptions){.target = metadata_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            BUSTER_TEST(arguments, metadata_extrq_shape.diagnostic_count == 2 && metadata_extrq_shape.bytes.length == 0 &&
+                                       metadata_extrq_shape.relocation_count == 0 && metadata_extrq_shape.symbol_count == 0);
+            BUSTER_TEST(arguments, metadata_insertq_shape.diagnostic_count == 2 && metadata_insertq_shape.bytes.length == 0 &&
+                                       metadata_insertq_shape.relocation_count == 0 && metadata_insertq_shape.symbol_count == 0);
+            for (u32 diagnostic_index = 0; diagnostic_index < 2; diagnostic_index += 1)
+            {
+                BUSTER_TEST(arguments, metadata_extrq_shape.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+                BUSTER_TEST(arguments, metadata_insertq_shape.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+            }
+
+            u8 expected_extrq_symbols[] = {0x66, 0x0f, 0x78, 0xc0, 0x00, 0x00};
+            u8 expected_insertq_symbols[] = {0xf2, 0x0f, 0x78, 0xc1, 0x00, 0x00};
+            u8 expected_extrq_symbols_att[] = {0x66, 0x0f, 0x78, 0xc0, 0x00, 0x00};
+            u8 expected_insertq_symbols_att[] = {0xf2, 0x0f, 0x78, 0xc8, 0x00, 0x00};
+            AssemblyEncodeResult metadata_extrq_symbols = assembly_encode(arguments->arena, S8("extrq xmm0, extrq_lo, extrq_hi\n"),
+                                                                          (AssemblyEncodeOptions){.target = metadata_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult metadata_insertq_symbols =
+                assembly_encode(arguments->arena, S8("insertq xmm0, xmm1, insertq_lo, insertq_hi\n"),
+                                (AssemblyEncodeOptions){.target = metadata_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            BUSTER_TEST(arguments, metadata_extrq_symbols.diagnostic_count == 0 &&
+                                       assembly_test_bytes_equal(metadata_extrq_symbols.bytes, expected_extrq_symbols, sizeof(expected_extrq_symbols)) &&
+                                       metadata_extrq_symbols.symbol_count == 2 && metadata_extrq_symbols.relocation_count == 2);
+            BUSTER_TEST(arguments, metadata_insertq_symbols.diagnostic_count == 0 &&
+                                       assembly_test_bytes_equal(metadata_insertq_symbols.bytes, expected_insertq_symbols, sizeof(expected_insertq_symbols)) &&
+                                       metadata_insertq_symbols.symbol_count == 2 && metadata_insertq_symbols.relocation_count == 2);
+            BUSTER_TEST(arguments, metadata_extrq_symbols.relocations[0].offset == 4 && metadata_extrq_symbols.relocations[1].offset == 5 &&
+                                       metadata_extrq_symbols.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE8 &&
+                                       metadata_extrq_symbols.relocations[1].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE8 &&
+                                       string_equal(metadata_extrq_symbols.symbols[metadata_extrq_symbols.relocations[0].symbol].name, S8("extrq_lo")) &&
+                                       string_equal(metadata_extrq_symbols.symbols[metadata_extrq_symbols.relocations[1].symbol].name, S8("extrq_hi")));
+            BUSTER_TEST(arguments, metadata_insertq_symbols.relocations[0].offset == 4 && metadata_insertq_symbols.relocations[1].offset == 5 &&
+                                       metadata_insertq_symbols.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE8 &&
+                                       metadata_insertq_symbols.relocations[1].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE8 &&
+                                       string_equal(metadata_insertq_symbols.symbols[metadata_insertq_symbols.relocations[0].symbol].name, S8("insertq_lo")) &&
+                                       string_equal(metadata_insertq_symbols.symbols[metadata_insertq_symbols.relocations[1].symbol].name, S8("insertq_hi")));
+
+            AssemblyEncodeResult metadata_extrq_symbols_att =
+                assembly_encode(arguments->arena, S8("extrq $extrq_att_lo, $extrq_att_hi, %xmm0\n"),
+                                (AssemblyEncodeOptions){.target = metadata_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            AssemblyEncodeResult metadata_insertq_symbols_att =
+                assembly_encode(arguments->arena, S8("insertq $insertq_att_lo, $insertq_att_hi, %xmm0, %xmm1\n"),
+                                (AssemblyEncodeOptions){.target = metadata_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            BUSTER_TEST(arguments,
+                        metadata_extrq_symbols_att.diagnostic_count == 0 &&
+                            assembly_test_bytes_equal(metadata_extrq_symbols_att.bytes, expected_extrq_symbols_att, sizeof(expected_extrq_symbols_att)) &&
+                            metadata_extrq_symbols_att.symbol_count == 2 && metadata_extrq_symbols_att.relocation_count == 2);
+            BUSTER_TEST(arguments,
+                        metadata_insertq_symbols_att.diagnostic_count == 0 &&
+                            assembly_test_bytes_equal(metadata_insertq_symbols_att.bytes, expected_insertq_symbols_att, sizeof(expected_insertq_symbols_att)) &&
+                            metadata_insertq_symbols_att.symbol_count == 2 && metadata_insertq_symbols_att.relocation_count == 2);
+            BUSTER_TEST(arguments,
+                        metadata_extrq_symbols_att.relocations[0].offset == 4 && metadata_extrq_symbols_att.relocations[1].offset == 5 &&
+                            metadata_extrq_symbols_att.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE8 &&
+                            metadata_extrq_symbols_att.relocations[1].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE8 &&
+                            string_equal(metadata_extrq_symbols_att.symbols[metadata_extrq_symbols_att.relocations[0].symbol].name, S8("extrq_att_hi")) &&
+                            string_equal(metadata_extrq_symbols_att.symbols[metadata_extrq_symbols_att.relocations[1].symbol].name, S8("extrq_att_lo")));
+            BUSTER_TEST(arguments,
+                        metadata_insertq_symbols_att.relocations[0].offset == 4 && metadata_insertq_symbols_att.relocations[1].offset == 5 &&
+                            metadata_insertq_symbols_att.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE8 &&
+                            metadata_insertq_symbols_att.relocations[1].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE8 &&
+                            string_equal(metadata_insertq_symbols_att.symbols[metadata_insertq_symbols_att.relocations[0].symbol].name, S8("insertq_att_hi")) &&
+                            string_equal(metadata_insertq_symbols_att.symbols[metadata_insertq_symbols_att.relocations[1].symbol].name, S8("insertq_att_lo")));
+        }
+
         u8 expected_movq_exact[] = {0x0f, 0x6f, 0xc1};
-        AssemblyEncodeResult metadata_movq_exact_intel = assembly_encode(
-            arguments->arena, S8("movq mm0, mm1\n"),
-            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_movq_exact_intel =
+            assembly_encode(arguments->arena, S8("movq mm0, mm1\n"), (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
         AssemblyEncodeResult metadata_movq_exact_att = assembly_encode(
             arguments->arena, S8("movq %mm1, %mm0\n"),
             (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});

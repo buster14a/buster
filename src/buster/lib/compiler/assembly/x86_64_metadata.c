@@ -1107,7 +1107,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
         else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("UIMM")))
         {
             u32 immediate_index = pattern.immediate_count;
-            pattern.immediate_count += 1;
+            if (immediate_index < BUSTER_ARRAY_LENGTH(pattern.immediate_widths)) pattern.immediate_count += 1;
+            else pattern.has_unsupported_token = 1;
             u8 width = 0;
             u8 variable = 0;
             if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("UIMM8()")) ||
@@ -1137,7 +1138,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
         if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("SIMM")))
         {
             u32 immediate_index = pattern.immediate_count;
-            pattern.immediate_count += 1;
+            if (immediate_index < BUSTER_ARRAY_LENGTH(pattern.immediate_widths)) pattern.immediate_count += 1;
+            else pattern.has_unsupported_token = 1;
             u8 width = 0;
             u8 variable = 0;
             pattern.immediate_signed = 1;
@@ -4036,8 +4038,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
             }
         }
     }
-    bool enter_form = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("ENTER"));
-    if (pattern.immediate_count > 1 && (!enter_form || pattern.immediate_count != 2))
+    if (pattern.immediate_count > BUSTER_ARRAY_LENGTH(pattern.immediate_widths))
         return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
     u32 immediate_count = pattern.immediate_count ? pattern.immediate_count : immediate_binding ? 1 : 0;
     for (u32 immediate_index = 0; immediate_index < immediate_count; immediate_index += 1)
@@ -4577,8 +4578,7 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_coverage_structural_blocker(BusterX86
     if (pattern.unresolved_blocker) return pattern.unresolved_blocker;
     u8 control_blocker = buster_x86_metadata_emit_pattern_control_blocker(form, pattern);
     if (control_blocker != BUSTER_X86_METADATA_BLOCKER_NONE) return control_blocker;
-    bool enter_form = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("ENTER"));
-    if ((pattern.immediate_count > 1 && (!enter_form || pattern.immediate_count != 2)) || pattern.relative_count > 1)
+    if (pattern.immediate_count > BUSTER_ARRAY_LENGTH(pattern.immediate_widths) || pattern.relative_count > 1)
         return BUSTER_X86_METADATA_BLOCKER_IMMEDIATE_FIELDS;
     if (pattern.force_sib && !pattern.has_modrm) return BUSTER_X86_METADATA_BLOCKER_ADDRESSING_FIELDS;
     if ((form.field_flags & BUSTER_X86_METADATA_FIELD_SIB) && !(form.field_flags & BUSTER_X86_METADATA_FIELD_MODRM))

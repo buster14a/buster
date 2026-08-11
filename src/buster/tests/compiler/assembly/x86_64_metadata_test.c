@@ -2037,15 +2037,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        BUSTER_TEST(arguments, audit.emitted_count == 10035 && audit.blocked_count == 978 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10035 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 978);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10143 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 601);
+        BUSTER_TEST(arguments, audit.emitted_count == 10037 && audit.blocked_count == 976 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10037 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 976);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10145 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 599);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 293, 5, 1549, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1483, 192, 5, 1520, 176, 6586, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {329, 101, 0, 29, 0, 142, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1485, 192, 5, 1520, 176, 6586, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {327, 101, 0, 29, 0, 142, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2055,7 +2055,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10035, 268, 108, 99, 0, 296, 5, 2, 48, 152, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10037, 268, 108, 99, 0, 296, 5, 0, 48, 152, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -2971,6 +2971,97 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                                                  (BusterX86MetadataPhysicalAttributes){0}, wildcard,
                                                                  BUSTER_ARRAY_LENGTH(wildcard), bextr_bytes,
                                                                  BUSTER_ARRAY_LENGTH(bextr_bytes)));
+
+        {
+            // SSE4a EXTRQ/INSERTQ carry two ordered UIMM8 fields.  Keep the
+            // normalized metadata selection and direct emitter on the same
+            // table-driven path as every other immediate-bearing form.
+            BusterX86MetadataPhysicalOperand extrq_operands[3] = {
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 0, 128),
+                x86_64_metadata_test_physical_imm(1, 8),
+                x86_64_metadata_test_physical_imm(2, 8),
+            };
+            BusterX86MetadataPhysicalOperand insertq_operands[4] = {
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 0, 128),
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 1, 128),
+                x86_64_metadata_test_physical_imm(1, 8),
+                x86_64_metadata_test_physical_imm(2, 8),
+            };
+            u8 extrq_bytes[] = {0x66, 0x0f, 0x78, 0xc0, 0x01, 0x02};
+            u8 insertq_bytes[] = {0xf2, 0x0f, 0x78, 0xc1, 0x01, 0x02};
+            BusterX86MetadataPhysicalQuery extrq_query = x86_64_metadata_test_physical_query(
+                S8("EXTRQ"), extrq_operands, BUSTER_ARRAY_LENGTH(extrq_operands), (BusterX86MetadataPhysicalAttributes){0},
+                wildcard, BUSTER_ARRAY_LENGTH(wildcard));
+            BusterX86MetadataPhysicalQuery insertq_query = x86_64_metadata_test_physical_query(
+                S8("INSERTQ"), insertq_operands, BUSTER_ARRAY_LENGTH(insertq_operands), (BusterX86MetadataPhysicalAttributes){0},
+                wildcard, BUSTER_ARRAY_LENGTH(wildcard));
+            BusterX86MetadataSelectResult extrq_selection = buster_x86_metadata_select_form(extrq_query);
+            BusterX86MetadataSelectResult insertq_selection = buster_x86_metadata_select_form(insertq_query);
+            BUSTER_TEST(arguments, extrq_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && extrq_selection.form_id == 437 &&
+                                       extrq_selection.selected_byte_count == BUSTER_ARRAY_LENGTH(extrq_bytes));
+            BUSTER_TEST(arguments, insertq_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && insertq_selection.form_id == 439 &&
+                                       insertq_selection.selected_byte_count == BUSTER_ARRAY_LENGTH(insertq_bytes));
+            BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("EXTRQ"), 437, extrq_operands,
+                                                                     BUSTER_ARRAY_LENGTH(extrq_operands),
+                                                                     (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                     BUSTER_ARRAY_LENGTH(wildcard), extrq_bytes,
+                                                                     BUSTER_ARRAY_LENGTH(extrq_bytes)));
+            BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("INSERTQ"), 439, insertq_operands,
+                                                                     BUSTER_ARRAY_LENGTH(insertq_operands),
+                                                                     (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                     BUSTER_ARRAY_LENGTH(wildcard), insertq_bytes,
+                                                                     BUSTER_ARRAY_LENGTH(insertq_bytes)));
+
+            BusterX86MetadataPhysicalOperand extrq_lower[3] = {extrq_operands[0],
+                                                                x86_64_metadata_test_physical_imm(0, 8),
+                                                                x86_64_metadata_test_physical_imm(0, 8)};
+            BusterX86MetadataPhysicalOperand extrq_upper[3] = {extrq_operands[0],
+                                                                x86_64_metadata_test_physical_imm(255, 8),
+                                                                x86_64_metadata_test_physical_imm(255, 8)};
+            BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("EXTRQ"), 437, extrq_lower,
+                                                                     BUSTER_ARRAY_LENGTH(extrq_lower),
+                                                                     (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                     BUSTER_ARRAY_LENGTH(wildcard),
+                                                                     (u8 const[]){0x66, 0x0f, 0x78, 0xc0, 0x00, 0x00}, 6));
+            BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("EXTRQ"), 437, extrq_upper,
+                                                                     BUSTER_ARRAY_LENGTH(extrq_upper),
+                                                                     (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                     BUSTER_ARRAY_LENGTH(wildcard),
+                                                                     (u8 const[]){0x66, 0x0f, 0x78, 0xc0, 0xff, 0xff}, 6));
+            BusterX86MetadataPhysicalOperand extrq_negative[3] = {extrq_operands[0],
+                                                                    x86_64_metadata_test_physical_imm(-1, 8),
+                                                                    extrq_operands[2]};
+            BusterX86MetadataPhysicalOperand extrq_overflow[3] = {extrq_operands[0],
+                                                                    extrq_operands[1],
+                                                                    x86_64_metadata_test_physical_imm(256, 8)};
+            BusterX86MetadataEmitResult extrq_negative_result = x86_64_metadata_test_emit_form(
+                S8("EXTRQ"), 437, extrq_negative, BUSTER_ARRAY_LENGTH(extrq_negative),
+                (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+            BusterX86MetadataEmitResult extrq_overflow_result = x86_64_metadata_test_emit_form(
+                S8("EXTRQ"), 437, extrq_overflow, BUSTER_ARRAY_LENGTH(extrq_overflow),
+                (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+            BUSTER_TEST(arguments, extrq_negative_result.status == BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE &&
+                                       extrq_negative_result.diagnostic_value == -1);
+            BUSTER_TEST(arguments, extrq_overflow_result.status == BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE &&
+                                       extrq_overflow_result.diagnostic_value == 256);
+
+            BusterX86MetadataPhysicalOperand insertq_wrong_count[3] = {insertq_operands[0], insertq_operands[1], insertq_operands[2]};
+            BusterX86MetadataPhysicalOperand insertq_wrong_type[4] = {
+                insertq_operands[0], x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 64),
+                insertq_operands[2], insertq_operands[3],
+            };
+            BusterX86MetadataPhysicalQuery insertq_count_query = x86_64_metadata_test_physical_query(
+                S8("INSERTQ"), insertq_wrong_count, BUSTER_ARRAY_LENGTH(insertq_wrong_count),
+                (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard));
+            BusterX86MetadataPhysicalQuery insertq_type_query = x86_64_metadata_test_physical_query(
+                S8("INSERTQ"), insertq_wrong_type, BUSTER_ARRAY_LENGTH(insertq_wrong_type),
+                (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard));
+            BusterX86MetadataSelectResult insertq_count_selection = buster_x86_metadata_select_form(insertq_count_query);
+            BusterX86MetadataSelectResult insertq_type_selection = buster_x86_metadata_select_form(insertq_type_query);
+            BUSTER_TEST(arguments, insertq_count_selection.status == BUSTER_X86_METADATA_ENCODE_WRONG_OPERAND_COUNT);
+            BUSTER_TEST(arguments, insertq_type_selection.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH &&
+                                       insertq_type_selection.diagnostic_operand == 1);
+        }
 
         BusterX86MetadataPhysicalOperand vmov_operands[2] = {
             x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 0, 128),

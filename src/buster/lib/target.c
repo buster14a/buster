@@ -536,6 +536,10 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSE3);
     }
     bool amd_family_10_or_newer = model >= CPU_MODEL_AMD_AMD_FAMILY_10 && model <= CPU_MODEL_AMD_ZEN_5;
+    if (amd_family_10_or_newer)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSE4A);
+    }
     bool amd_bmi1 = model == CPU_MODEL_AMD_BT_2 || (model >= CPU_MODEL_AMD_BD_2 && model <= CPU_MODEL_AMD_ZEN_5);
     bool intel_popcnt = (model >= CPU_MODEL_INTEL_NEHALEM && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
                         (model >= CPU_MODEL_INTEL_SILVERMONT && model <= CPU_MODEL_INTEL_TREMONT) ||
@@ -813,6 +817,7 @@ bool target_cpu_features_are_valid(Target target)
         TARGET_CPU_FEATURE_X86_3DNOWA, TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_LWP,
         TARGET_CPU_FEATURE_X86_TBM, TARGET_CPU_FEATURE_X86_XOP, TARGET_CPU_FEATURE_X86_IBT,
         TARGET_CPU_FEATURE_X86_CLDEMOTE, TARGET_CPU_FEATURE_X86_PREFETCHI, TARGET_CPU_FEATURE_X86_SHSTK,
+        TARGET_CPU_FEATURE_X86_SSE4A,
         TARGET_CPU_FEATURE_X86_VMX, TARGET_CPU_FEATURE_X86_SVM, TARGET_CPU_FEATURE_X86_ENQCMD,
         TARGET_CPU_FEATURE_X86_FRED, TARGET_CPU_FEATURE_X86_HRESET, TARGET_CPU_FEATURE_X86_INVLPGB,
         TARGET_CPU_FEATURE_X86_INVPCID, TARGET_CPU_FEATURE_X86_KEYLOCKER, TARGET_CPU_FEATURE_X86_LKGS,
@@ -851,6 +856,11 @@ bool target_cpu_features_are_valid(Target target)
     }
     if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE3) &&
         !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2))
+    {
+        return false;
+    }
+    if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE4A) &&
+        !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE3))
     {
         return false;
     }
@@ -1077,6 +1087,7 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("snp"), .feature = TARGET_CPU_FEATURE_X86_SNP, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sse2"), .feature = TARGET_CPU_FEATURE_X86_SSE2, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sse3"), .feature = TARGET_CPU_FEATURE_X86_SSE3, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("sse4a"), .feature = TARGET_CPU_FEATURE_X86_SSE4A, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("svm"), .feature = TARGET_CPU_FEATURE_X86_SVM, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("tbm"), .feature = TARGET_CPU_FEATURE_X86_TBM, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("tdx"), .feature = TARGET_CPU_FEATURE_X86_TDX, .arch = CPU_ARCH_X86_64},

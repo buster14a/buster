@@ -128,6 +128,12 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
     bool apx_state = has_osxsave && (input.xcr0 & (UINT64_C(0x80000))) != 0;
     if (input.maximum_extended_leaf >= UINT32_C(0x80000001))
     {
+        // CPUID.80000001H:ECX[6] advertises AMD SSE4a. This extension has no
+        // OS-managed state, so it remains usable when AVX state is disabled.
+        if (input.extended_basic.ecx & (UINT32_C(0x40)))
+        {
+            result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSE4A);
+        }
         if (input.extended_basic.edx & (UINT32_C(0x80000000)))
         {
             result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_3DNOW);

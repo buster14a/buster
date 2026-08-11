@@ -339,6 +339,10 @@ typedef enum TargetCpuFeature
     TARGET_CPU_FEATURE_X86_WRMSRNS,
     TARGET_CPU_FEATURE_X86_XSAVE,
     TARGET_CPU_FEATURE_X86_XSAVES,
+    // AMD SSE4a is enumerated by CPUID.80000001H:ECX[6]. Keep this new
+    // feature after the existing IDs so serialized feature bitsets retain
+    // their established layout.
+    TARGET_CPU_FEATURE_X86_SSE4A,
     TARGET_CPU_FEATURE_COUNT,
 } TargetCpuFeature;
 
