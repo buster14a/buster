@@ -3889,6 +3889,13 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
                 query.attributes.rounding_mode != BUSTER_X86_METADATA_ROUNDING_NONE)
                    ? 1
                    : 0;
+        // XED's fixed-round rows encode EVEX.b=1 even when the source form
+        // has no caller-visible SAE or rounding decorator.  Keep ordinary
+        // decorator validation above authoritative, but carry this parsed
+        // fixed-round/BCRC contract into the prefix bits generically.
+        if (pattern.has_bcrc && pattern.bcrc_value == 1 && pattern.rounding_length && !pattern.has_sae_control &&
+            !pattern.has_rounding_control)
+            b = 1;
         if (pattern.has_bcrc && b != pattern.bcrc_value)
             return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
         u8 p0 = 0;

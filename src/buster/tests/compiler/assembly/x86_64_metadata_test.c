@@ -2037,15 +2037,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        BUSTER_TEST(arguments, audit.emitted_count == 10039 && audit.blocked_count == 974 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10039 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 974);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10147 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 597);
+        BUSTER_TEST(arguments, audit.emitted_count == 10043 && audit.blocked_count == 970 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10043 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 970);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10151 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 593);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 293, 5, 1549, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1485, 192, 5, 1522, 176, 6586, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {327, 101, 0, 27, 0, 142, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1485, 192, 5, 1522, 176, 6590, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {327, 101, 0, 27, 0, 138, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2055,7 +2055,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10039, 268, 108, 99, 0, 296, 3, 0, 48, 152, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10043, 268, 108, 99, 0, 292, 3, 0, 48, 152, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -3154,6 +3154,79 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             S8("VADDPH"), 4480, fixed_round_len512_wrong_width, 3, fixed_round_len512_rounding, wildcard,
             BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
         BUSTER_TEST(arguments, fixed_round_len512_wrong_width_result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS);
+
+        // Fixed-round/BCRC=1 EVEX rows carry EVEX.b=1 without a caller
+        // visible SAE or rounding decorator.  These four metadata-level
+        // oracles cover both AVX10.2 BF16 conversions and the AVX-512 integer
+        // conversions. llvm-mc confirms the opcode and non-b prefix fields
+        // through the BCRC=0 siblings; XED's fixed-round contract supplies
+        // the otherwise caller-inexpressible EVEX.b=1 variant here.
+        BusterX86MetadataPhysicalOperand fixed_round_bf16_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 1, 512),
+        };
+        u8 fixed_round_bf16_ibs_bytes[] = {0x62, 0xf5, 0x7f, 0x58, 0x68, 0xc1};
+        u8 fixed_round_bf16_iubs_bytes[] = {0x62, 0xf5, 0x7f, 0x58, 0x6a, 0xc1};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTTBF162IBS"), 4190,
+                                                                 fixed_round_bf16_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), fixed_round_bf16_ibs_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(fixed_round_bf16_ibs_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTTBF162IUBS"), 4197,
+                                                                 fixed_round_bf16_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), fixed_round_bf16_iubs_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(fixed_round_bf16_iubs_bytes)));
+
+        BusterX86MetadataPhysicalOperand fixed_round_dq2pd_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM, 1, 256),
+        };
+        u8 fixed_round_dq2pd_bytes[] = {0x62, 0xf1, 0x7e, 0x58, 0xe6, 0xc1};
+        u8 fixed_round_udq2pd_bytes[] = {0x62, 0xf1, 0x7e, 0x58, 0x7a, 0xc1};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTDQ2PD"), 6986,
+                                                                 fixed_round_dq2pd_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), fixed_round_dq2pd_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(fixed_round_dq2pd_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTUDQ2PD"), 7122,
+                                                                 fixed_round_dq2pd_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), fixed_round_udq2pd_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(fixed_round_udq2pd_bytes)));
+
+        // BCRC=0 remains an ordinary b=0 EVEX control, and explicit
+        // decorators remain rejected by forms that do not advertise them.
+        u8 ordinary_bf16_bytes[] = {0x62, 0xf5, 0x7f, 0x48, 0x68, 0xc1};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTTBF162IBS"), 4189,
+                                                                 fixed_round_bf16_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), ordinary_bf16_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(ordinary_bf16_bytes)));
+        BusterX86MetadataPhysicalAttributes explicit_sae = {
+            .decorator_flags = BUSTER_X86_METADATA_DECORATOR_SAE,
+            .sae = true,
+        };
+        BusterX86MetadataPhysicalAttributes explicit_rounding = {
+            .decorator_flags = BUSTER_X86_METADATA_DECORATOR_ROUNDING,
+            .rounding_mode = BUSTER_X86_METADATA_ROUNDING_DOWN,
+        };
+        BusterX86MetadataEmitResult fixed_round_sae = x86_64_metadata_test_emit_form(
+            S8("VCVTDQ2PD"), 6986, fixed_round_dq2pd_operands, 2, explicit_sae, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult fixed_round_rounding = x86_64_metadata_test_emit_form(
+            S8("VCVTDQ2PD"), 6986, fixed_round_dq2pd_operands, 2, explicit_rounding, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataPhysicalOperand explicit_rounding_form_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 1, 512),
+        };
+        BusterX86MetadataEmitResult missing_rounding_control = x86_64_metadata_test_emit_form(
+            S8("VCVTDQ2PS"), 6989, explicit_rounding_form_operands, 2,
+            (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BUSTER_TEST(arguments, fixed_round_sae.status == BUSTER_X86_METADATA_ENCODE_DECORATOR &&
+                                   fixed_round_rounding.status == BUSTER_X86_METADATA_ENCODE_DECORATOR &&
+                                   missing_rounding_control.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION);
 
         BusterX86MetadataPhysicalOperand apx_operands[2] = {
             x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
