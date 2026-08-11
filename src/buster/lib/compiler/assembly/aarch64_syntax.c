@@ -34,6 +34,7 @@ typedef enum BusterAarch64SyntaxMatchBacktrackKind
 {
     BUSTER_AARCH64_SYNTAX_MATCH_BACKTRACK_ALT,
     BUSTER_AARCH64_SYNTAX_MATCH_BACKTRACK_OPTIONAL,
+    BUSTER_AARCH64_SYNTAX_MATCH_BACKTRACK_ANCHOR,
 } BusterAarch64SyntaxMatchBacktrackKind;
 
 typedef struct BusterAarch64SyntaxMatchBacktrack BusterAarch64SyntaxMatchBacktrack;
@@ -47,6 +48,8 @@ struct BusterAarch64SyntaxMatchBacktrack
     u32 node_index;
     u32 next_branch;
     u32 branch_count;
+    u64 next_cursor;
+    u64 minimum_cursor;
 };
 
 typedef struct BusterAarch64SyntaxMatchMachine BusterAarch64SyntaxMatchMachine;
@@ -699,36 +702,75 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_record_choice(BusterAarch64
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_capture_span(BusterAarch64SyntaxMatchMachine* machine, u32 node_index,
+                                                                    u64 start, u64 end)
+{
+    if (!machine || !machine->input.pointer || start >= end || end > machine->input.length ||
+        machine->capture_count >= BUSTER_AARCH64_SYNTAX_GENERATED_MAX_ANCHOR_OPERANDS)
+        return false;
+    u32 occurrence = machine->capture_count;
+    machine->captures[occurrence] = (BusterAarch64SyntaxCapture){
+        .node_index = node_index,
+        .occurrence = occurrence,
+        .spelling = {.pointer = machine->input.pointer + start, .length = end - start},
+    };
+    machine->capture_count = occurrence + 1;
+    machine->cursor = end;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_anchor_end(BusterAarch64SyntaxMatchMachine* machine, u64 start, u64* end,
+                                                                  bool* splittable)
+{
+    if (!machine || !end || !splittable || !machine->input.pointer || start >= machine->input.length) return false;
+    u64 cursor = start;
+    *splittable = machine->input.pointer[start] != '<';
+    if (!*splittable)
+    {
+        cursor += 1;
+        while (cursor < machine->input.length && machine->input.pointer[cursor] != '>') cursor += 1;
+        if (cursor >= machine->input.length) return false;
+        *end = cursor + 1;
+        return true;
+    }
+    while (cursor < machine->input.length)
+    {
+        char8 character = machine->input.pointer[cursor];
+        if (character == ' ' || character == '\t' || character == ',' || character == '[' || character == ']' ||
+            character == '{' || character == '}' || character == '(' || character == ')' || character == '|' ||
+            character == '!' || character == '.')
+            break;
+        cursor += 1;
+    }
+    if (cursor == start) return false;
+    *end = cursor;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_anchor(BusterAarch64SyntaxMatchMachine* machine, u32 node_index,
                                                               BusterAarch64SyntaxNode node)
 {
-    if (!machine || !machine->input.pointer || machine->cursor >= machine->input.length ||
-        machine->capture_count >= BUSTER_AARCH64_SYNTAX_GENERATED_MAX_ANCHOR_OPERANDS) return false;
+    if (!machine || machine->capture_count >= BUSTER_AARCH64_SYNTAX_GENERATED_MAX_ANCHOR_OPERANDS) return false;
     u64 start = machine->cursor;
-    if (machine->input.pointer[machine->cursor] == '<')
+    u64 end = 0;
+    bool splittable = false;
+    if (!buster_aarch64_syntax_match_anchor_end(machine, start, &end, &splittable)) return false;
+    if (splittable && end > start + 1)
     {
-        machine->cursor += 1;
-        while (machine->cursor < machine->input.length && machine->input.pointer[machine->cursor] != '>') machine->cursor += 1;
-        if (machine->cursor >= machine->input.length) return false;
-        machine->cursor += 1;
+        if (machine->backtrack_count >= BUSTER_AARCH64_SYNTAX_GENERATED_MAX_BACKTRACK_FRAMES) return false;
+        machine->backtracks[machine->backtrack_count++] = (BusterAarch64SyntaxMatchBacktrack){
+            .kind = BUSTER_AARCH64_SYNTAX_MATCH_BACKTRACK_ANCHOR,
+            .cursor = start,
+            .capture_count = machine->capture_count,
+            .choice_count = machine->choice_count,
+            .task_count = machine->task_count,
+            .node_index = node_index,
+            .next_cursor = end - 1,
+            .minimum_cursor = start,
+        };
     }
-    else
-    {
-        while (machine->cursor < machine->input.length)
-        {
-            char8 character = machine->input.pointer[machine->cursor];
-            if (character == ' ' || character == '\t' || character == ',' || character == '[' || character == ']' ||
-                character == '{' || character == '}' || character == '(' || character == ')' || character == '|' ||
-                character == '!' || character == '.') break;
-            machine->cursor += 1;
-        }
-        if (machine->cursor == start) return false;
-    }
-    machine->captures[machine->capture_count++] = (BusterAarch64SyntaxCapture){
-        .node_index = node_index, .occurrence = machine->capture_count - 1,
-        .spelling = {.pointer = machine->input.pointer + start, .length = machine->cursor - start}};
     BUSTER_UNUSED(node);
-    return true;
+    return buster_aarch64_syntax_match_capture_span(machine, node_index, start, end);
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_setup_branch(BusterAarch64SyntaxMatchMachine* machine,
@@ -760,7 +802,22 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_backtrack(BusterAarch64Synt
         machine->capture_count = frame.capture_count;
         machine->choice_count = frame.choice_count;
         machine->task_count = frame.task_count;
-        if (frame.kind == BUSTER_AARCH64_SYNTAX_MATCH_BACKTRACK_OPTIONAL)
+        if (frame.kind == BUSTER_AARCH64_SYNTAX_MATCH_BACKTRACK_ANCHOR)
+        {
+            if (frame.next_cursor > frame.minimum_cursor)
+            {
+                u64 candidate_end = frame.next_cursor;
+                if (candidate_end > frame.minimum_cursor + 1)
+                {
+                    if (machine->backtrack_count >= BUSTER_AARCH64_SYNTAX_GENERATED_MAX_BACKTRACK_FRAMES) return false;
+                    BusterAarch64SyntaxMatchBacktrack next = frame;
+                    next.next_cursor = candidate_end - 1;
+                    machine->backtracks[machine->backtrack_count++] = next;
+                }
+                if (buster_aarch64_syntax_match_capture_span(machine, frame.node_index, frame.cursor, candidate_end)) return true;
+            }
+        }
+        else if (frame.kind == BUSTER_AARCH64_SYNTAX_MATCH_BACKTRACK_OPTIONAL)
         {
             if (buster_aarch64_syntax_match_record_choice(machine, frame.node_index, 0)) return true;
         }
@@ -988,7 +1045,9 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_process_node(BusterAarch64S
                    buster_aarch64_syntax_print_emit(machine, node.text) && buster_aarch64_syntax_print_emit(machine, S8(">"));
         }
         if (occurrence >= machine->request.capture_count) return false;
-        return buster_aarch64_syntax_print_emit(machine, machine->request.captures[occurrence].spelling);
+        BusterAarch64SyntaxCapture capture = machine->request.captures[occurrence];
+        if (capture.node_index != index || capture.occurrence != occurrence) return false;
+        return buster_aarch64_syntax_print_emit(machine, capture.spelling);
     }
     if (node.kind == BUSTER_AARCH64_SYNTAX_SEQ || node.kind == BUSTER_AARCH64_SYNTAX_MEM ||
         node.kind == BUSTER_AARCH64_SYNTAX_LIST || node.kind == BUSTER_AARCH64_SYNTAX_LANE)
@@ -1193,7 +1252,8 @@ BUSTER_F_DECL bool buster_aarch64_syntax_validate(void)
             if (!buster_aarch64_syntax_child_range_valid(node.child_first, node.child_count)) return false;
         }
         if (anchors != row.anchor_count || choices > BUSTER_AARCH64_SYNTAX_GENERATED_MAX_CHOICE_COUNT ||
-            choices > BUSTER_AARCH64_SYNTAX_GENERATED_MAX_BACKTRACK_FRAMES)
+            choices > BUSTER_AARCH64_SYNTAX_GENERATED_MAX_BACKTRACK_FRAMES ||
+            anchors > BUSTER_AARCH64_SYNTAX_GENERATED_MAX_BACKTRACK_FRAMES - choices)
             return false;
         expected_node_first += row.node_count;
     }

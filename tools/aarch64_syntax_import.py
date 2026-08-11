@@ -589,7 +589,11 @@ def generate(source: Path, header: Path, jsonl: Path, manifest: Path) -> None:
         "max_choice_count": max(choice_count(root) for root in roots),
         "max_assembly_bytes": max(len(row["assembly"].encode("utf-8")) for row in rows),
         "max_work_items": max(len(flatten(root)) for root in roots) * 4 + 16,
-        "max_backtrack_frames": max(choice_count(root) for root in roots) + 4,
+        # Anchor captures may need bounded span-splitting when adjacent
+        # wildcard operands share one concrete token.  Reserve one frame per
+        # possible choice and anchor, plus a small structural margin.
+        "max_backtrack_frames": max(choice_count(root) + sum(node.kind == K_ANCHOR for node in flatten(root))
+                                     for root in roots) + 4,
         "input_digest": input_digest,
         "id_digest": id_digest,
         "kind_digest": kind_digest,
@@ -612,7 +616,7 @@ def generate(source: Path, header: Path, jsonl: Path, manifest: Path) -> None:
                        "max_optional_depth": 2, "max_delimiter_nesting": 3,
                        "max_top_level_comma_groups": 5, "max_anchor_operands": 10,
                        "max_choice_count": 4, "max_assembly_bytes": 74,
-                       "max_work_items": 132, "max_backtrack_frames": 8,
+                       "max_work_items": 132, "max_backtrack_frames": 15,
                        "generic_shape_count": GENERIC_SHAPE_COUNT, "exact_shape_count": EXACT_SHAPE_COUNT,
                        "generic_shape_digest": GENERIC_SHAPE_DIGEST, "generic_row_digest": GENERIC_ROW_DIGEST,
                        "exact_shape_digest": EXACT_SHAPE_DIGEST, "exact_row_digest": EXACT_ROW_DIGEST}

@@ -85,7 +85,7 @@ UnitTestResult aarch64_syntax_tests(UnitTestArguments* arguments)
                          stats.max_optional_depth == 2 && stats.max_delimiter_nesting == 3 &&
                          stats.max_top_level_comma_groups == 5 && stats.max_anchor_operands == 10 &&
                          stats.max_choice_count == 4 && stats.max_assembly_bytes == 74 &&
-                         stats.max_work_items == 132 && stats.max_backtrack_frames == 8);
+                         stats.max_work_items == 132 && stats.max_backtrack_frames == 15);
     BUSTER_TEST(arguments, buster_aarch64_syntax_validate());
 
     BusterAarch64SyntaxRow first = {0};
@@ -227,6 +227,11 @@ UnitTestResult aarch64_syntax_tests(UnitTestArguments* arguments)
                          nested_optional_row, S8("ADDS <Wd>, <Wn|WSP>, <Wm>{, <extend> {#<amount>"), 0));
     BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(nested_optional_row,
                                                                           S8("ADDS w0, w0, w0, lsl #0")));
+    u32 adjacent_adds_row = 0;
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("ADDS <Xd>, <Xn|SP>, <R><m>{, <extend> {#<amount>}}"),
+                                                             &adjacent_adds_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(adjacent_adds_row, S8("ADDS x0, x0, x0")));
+    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(adjacent_adds_row, S8("adds x0, x0, x0"), &direct_match));
     BusterAarch64SyntaxCapture nested_rollback_captures[10] = {{.spelling = S8("keep")}};
     BusterAarch64SyntaxChoice nested_rollback_choices[4] = {{.node_index = 31, .value = 41}};
     BusterAarch64SyntaxMatchResult nested_rollback = {
@@ -260,6 +265,51 @@ UnitTestResult aarch64_syntax_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("RET {<Xn>}"), &ret_row));
     BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(ret_row, S8("RET ")));
     BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(ret_row, S8("RET x0")));
+
+    /* Every adjacent-anchor family in the pinned census gets a concrete
+     * round-trip.  The matcher must split one token into bounded captures
+     * rather than letting the first wildcard consume the entire token. */
+    u32 addv_adjacent_row = 0;
+    u32 fabd_adjacent_row = 0;
+    u32 sqrshrn_adjacent_row = 0;
+    u32 sqdmlal_adjacent_row = 0;
+    u32 dup_adjacent_row = 0;
+    u32 tbnz_adjacent_row = 0;
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("ADDV <V><d>, <Vn>.<T>"), &addv_adjacent_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("FABD <V><d>, <V><n>, <V><m>"), &fabd_adjacent_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("SQRSHRN <Vb><d>, <Va><n>, #<shift>"), &sqrshrn_adjacent_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("SQDMLAL <Va><d>, <Vb><n>, <Vb><m>"), &sqdmlal_adjacent_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("DUP <Vd>.<T>, <R><n>"), &dup_adjacent_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("TBNZ <R><t>, #<imm>, <label>"), &tbnz_adjacent_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(addv_adjacent_row, S8("ADDV v0, v1.4s")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(fabd_adjacent_row, S8("FABD v0, v1, v2")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(sqrshrn_adjacent_row, S8("SQRSHRN v0, v1, #0")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(sqdmlal_adjacent_row, S8("SQDMLAL v0, v1, v2")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(dup_adjacent_row, S8("DUP v0.4s, x1")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(tbnz_adjacent_row, S8("TBNZ x0, #0, label")));
+
+    BusterAarch64SyntaxCapture malformed_capture[10] = {0};
+    BusterAarch64SyntaxChoice malformed_choice[4] = {0};
+    BusterAarch64SyntaxMatchResult malformed_match = {
+        .captures = malformed_capture, .capture_capacity = 10, .choices = malformed_choice, .choice_capacity = 4,
+    };
+    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(ret_row, S8("RET x0"), &malformed_match));
+    malformed_capture[0].node_index = UINT32_MAX;
+    char8 malformed_capture_output[32];
+    memset(malformed_capture_output, 0x6b, sizeof(malformed_capture_output));
+    BusterAarch64SyntaxOutput malformed_capture_sink = {
+        .pointer = malformed_capture_output, .length = 2, .capacity = sizeof(malformed_capture_output),
+    };
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_print_concrete_row(ret_row,
+                                                                       (BusterAarch64SyntaxPrintRequest){
+                                                                           .captures = malformed_capture,
+                                                                           .capture_count = malformed_match.capture_count,
+                                                                           .choices = malformed_choice,
+                                                                           .choice_count = malformed_match.choice_count,
+                                                                       },
+                                                                       &malformed_capture_sink) &&
+                         malformed_capture_sink.length == 2 && malformed_capture_output[0] == 0x6b &&
+                         malformed_capture_output[1] == 0x6b);
 
     /* Undersized arrays, malformed spans and output overflow are transactional:
      * all pre-existing caller state and bytes remain untouched. */
