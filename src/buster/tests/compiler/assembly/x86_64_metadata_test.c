@@ -2058,15 +2058,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        BUSTER_TEST(arguments, audit.emitted_count == 10241 && audit.blocked_count == 772 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10241 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 772);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10349 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 395);
+        BUSTER_TEST(arguments, audit.emitted_count == 10289 && audit.blocked_count == 724 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10289 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 724);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10397 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 347);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 199, 5, 1643, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1485, 192, 5, 1643, 176, 6667, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {327, 7, 0, 0, 0, 61, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1485, 192, 5, 1643, 176, 6715, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {327, 7, 0, 0, 0, 13, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2076,11 +2076,52 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10241, 268, 108, 99, 0, 198, 3, 0, 48, 48, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10289, 268, 108, 99, 0, 198, 3, 0, 0, 48, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
         BUSTER_TEST(arguments, blocker_counts_match);
+
+        // The raw APXEVEX source carries ND=1 on 778 rows.  XED annotates
+        // APX_NDD on 730 of them, while the 48 IMULZU/SET*ZU rows omit the
+        // attribute and must be inferred from the pattern itself.  Every
+        // ND=1 row must nevertheless expose the same NDD semantic flag, and
+        // ND=0 APXEVEX rows must not acquire it through this inference.
+        u32 apx_nd1_count = 0;
+        u32 apx_nd1_declared_count = 0;
+        u32 apx_nd1_inferred_count = 0;
+        u32 apx_nd1_inferred_emitted_count = 0;
+        u32 apx_nd1_inferred_imul_count = 0;
+        u32 apx_nd1_inferred_setcc_count = 0;
+        u32 apx_nd1_missing_flag_count = 0;
+        u32 apx_nd0_unexpected_ndd_count = 0;
+        for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
+        {
+            BusterX86MetadataForm form = {0};
+            if (!buster_x86_metadata_form(form_id, &form) || !x86_64_metadata_test_string_equal(form.extension, S8("APXEVEX"))) continue;
+            bool has_nd1 = x86_64_metadata_test_pattern_has_token(form.pattern, S8("ND=1"));
+            bool has_nd0 = x86_64_metadata_test_pattern_has_token(form.pattern, S8("ND=0"));
+            bool has_ndd_attribute = x86_64_metadata_test_string_contains(form.attributes, S8("APX_NDD"));
+            bool has_ndd_flag = (form.apx_flags & BUSTER_X86_METADATA_APX_NDD) != 0;
+            if (has_nd1)
+            {
+                apx_nd1_count += 1;
+                apx_nd1_declared_count += has_ndd_attribute;
+                apx_nd1_inferred_count += !has_ndd_attribute;
+                if (!has_ndd_attribute)
+                {
+                    apx_nd1_inferred_emitted_count += ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED;
+                    apx_nd1_inferred_imul_count += x86_64_metadata_test_string_equal(form.iclass, S8("IMUL"));
+                    apx_nd1_inferred_setcc_count += x86_64_metadata_test_string_contains(form.iclass, S8("SET"));
+                }
+                apx_nd1_missing_flag_count += !has_ndd_flag;
+            }
+            if (has_nd0 && !has_ndd_attribute) apx_nd0_unexpected_ndd_count += has_ndd_flag;
+        }
+        BUSTER_TEST(arguments, apx_nd1_count == 778 && apx_nd1_declared_count == 730 && apx_nd1_inferred_count == 48 &&
+                                   apx_nd1_inferred_emitted_count == 48 && apx_nd1_inferred_imul_count == 16 &&
+                                   apx_nd1_inferred_setcc_count == 32 && apx_nd1_missing_flag_count == 0 &&
+                                   apx_nd0_unexpected_ndd_count == 0);
 
         static struct
         {
@@ -2343,7 +2384,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, privileged_total == 109 && privileged_valid64 == 90 && privileged_valid64_capable == 90 &&
                                    privileged_valid64_blocked == 0 && privileged_not64 == 19);
         BUSTER_TEST(arguments, apx_total == 2465);
-        BUSTER_TEST(arguments, apx_emitted == 2417 && apx_blocked == 48);
+        BUSTER_TEST(arguments, apx_emitted == 2465 && apx_blocked == 0);
         BUSTER_TEST(arguments, apx_scc_total == 640 && apx_scc_emitted == 640);
         BUSTER_TEST(arguments, evex_r4_total == 97 && evex_r4_emitted == 97);
         BUSTER_TEST(arguments, dfv_total == 640 && dfv_scc_total == 640 && dfv_scc_semantics_consistent);
@@ -2872,6 +2913,36 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                    cmovo_rex2_result.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && cmovo_rex2_result.byte_count == 4 &&
                                    x86_64_metadata_test_bytes_equal(cmovo_rex2_bytes, cmovo_rex2_result.byte_count,
                                                                     (u8[]){0xd5, 0xd8, 0x40, 0xc1}, 4));
+
+        // APX NDD forms whose raw source omits the APX_NDD attribute still
+        // encode through the same typed semantic flag inferred from ND=1.
+        BusterX86MetadataPhysicalOperand imul_ndd_operands[3] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 16, 32),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 17, 32),
+            x86_64_metadata_test_physical_imm(5, 32),
+        };
+        BusterX86MetadataPhysicalAttributes apx_ndd_attributes = {.apx_flags = BUSTER_X86_METADATA_APX_NDD};
+        u8 imul_ndd_bytes[] = {0x62, 0xec, 0x7c, 0x18, 0x6b, 0xc1, 0x05};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("IMUL"), 1789, imul_ndd_operands,
+                                                                 BUSTER_ARRAY_LENGTH(imul_ndd_operands), apx_ndd_attributes,
+                                                                 wildcard, BUSTER_ARRAY_LENGTH(wildcard), imul_ndd_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(imul_ndd_bytes)));
+        BusterX86MetadataEmitResult imul_ndd_missing_attribute = x86_64_metadata_test_emit_form(
+            S8("IMUL"), 1789, imul_ndd_operands, BUSTER_ARRAY_LENGTH(imul_ndd_operands),
+            (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BUSTER_TEST(arguments, imul_ndd_missing_attribute.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION);
+
+        BusterX86MetadataPhysicalOperand setb_ndd_reg =
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 16, 8);
+        u8 setb_ndd_reg_bytes[] = {0x62, 0xfc, 0x7c, 0x18, 0x42, 0xc0};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("SETB"), 2393, &setb_ndd_reg, 1, apx_ndd_attributes,
+                                                                 wildcard, BUSTER_ARRAY_LENGTH(wildcard), setb_ndd_reg_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(setb_ndd_reg_bytes)));
+        BusterX86MetadataPhysicalOperand setb_ndd_mem = x86_64_metadata_test_physical_mem_base(0, 8, 0);
+        u8 setb_ndd_mem_bytes[] = {0x62, 0xf4, 0x7c, 0x18, 0x42, 0x00};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("SETB"), 2394, &setb_ndd_mem, 1, apx_ndd_attributes,
+                                                                 wildcard, BUSTER_ARRAY_LENGTH(wildcard), setb_ndd_mem_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(setb_ndd_mem_bytes)));
 
         BusterX86MetadataPhysicalOperand vaddps_operands[3] = {
             x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 0, 128),

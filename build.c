@@ -11895,6 +11895,14 @@ BUSTER_GLOBAL_LOCAL bool xed_import_normalize_record(XedGeneratedForm* form, Xed
     {
         form->apx_flags |= XED_GENERATED_APX | XED_GENERATED_APX_NDD;
     }
+    // APX's raw metadata uses ND=1 for the NDD destination encoding, while
+    // the APX_NDD attribute is omitted on the IMULZU/SET*ZU rows.  Infer the
+    // semantic flag from the raw APXEVEX pattern rather than maintaining a
+    // mnemonic-specific exception list.  Keep ND=0 and non-APX rows unchanged.
+    if (string_equal(record->extension, S8("APXEVEX")) && xed_import_pattern_has_token(record->pattern, S8("ND=1")))
+    {
+        form->apx_flags |= XED_GENERATED_APX | XED_GENERATED_APX_NDD;
+    }
 
     if (form->fixed_byte_count >= 2 && form->map == XED_GENERATED_MAP_LEGACY && form->fixed_bytes[0] == 0x0f)
     {
@@ -13173,7 +13181,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_validate_artifact(Arena* arena, String8
 BUSTER_GLOBAL_LOCAL bool assembly_import_validate_checked_in_x86(Arena* arena, String8* artifacts)
 {
     bool artifact_checks = assembly_import_validate_artifact(arena, artifacts[0], 4660881, S8("ba80aa3be0eb2e6f")) &&
-                           assembly_import_validate_artifact(arena, artifacts[1], 6052140, S8("caad84c07e497cba")) &&
+                           assembly_import_validate_artifact(arena, artifacts[1], 6052140, S8("d2fd59db30361ad5")) &&
                            assembly_import_validate_artifact(arena, artifacts[2], 389599, S8("2064976d2bb2c565"));
     bool invariant_checks = assembly_import_line_count(artifacts[0]) == 11013 &&
                             string_contains(artifacts[1], S8("#define BUSTER_X86_GENERATED_FORM_COUNT 11013")) &&
@@ -18306,6 +18314,41 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
     result = result && xed_import_normalize_record(&apx_ndd_form, &apx_ndd_record, 0, &bad_token, &bad_operand) &&
              (apx_ndd_form.apx_flags & (XED_GENERATED_APX | XED_GENERATED_APX_NDD)) ==
                  (XED_GENERATED_APX | XED_GENERATED_APX_NDD);
+
+    // APX_NDD is also encoded by raw APXEVEX metadata that omits the
+    // attribute and carries only ND=1 in its pattern.  Keep this inference
+    // generic and make sure neither ND=0 nor a non-APX extension can acquire
+    // the semantic flag accidentally.
+    XedImportRecord apx_ndd_pattern_record = normalized_record;
+    apx_ndd_pattern_record.extension = S8("APXEVEX");
+    apx_ndd_pattern_record.attributes = (String8){0};
+    apx_ndd_pattern_record.pattern =
+        S8("EVV 0x6B VNP MAP4 MOD[0b11] MOD=3 UBIT=1 REG[rrr] RM[nnn] ND=1 NF=0 VL128 mode64 NOEVSR ZEROING=0 EVAPX() SIMMz()");
+    XedGeneratedForm apx_ndd_pattern_form = {0};
+    bad_token = (String8){0};
+    bad_operand = false;
+    result = result && xed_import_normalize_record(&apx_ndd_pattern_form, &apx_ndd_pattern_record, 0, &bad_token, &bad_operand) &&
+             (apx_ndd_pattern_form.apx_flags & (XED_GENERATED_APX | XED_GENERATED_APX_NDD)) ==
+                 (XED_GENERATED_APX | XED_GENERATED_APX_NDD);
+
+    XedImportRecord apx_nd0_pattern_record = apx_ndd_pattern_record;
+    apx_nd0_pattern_record.pattern =
+        S8("EVV 0x6B VNP MAP4 MOD[0b11] MOD=3 UBIT=1 REG[rrr] RM[nnn] ND=0 NF=0 VL128 mode64 NOEVSR ZEROING=0 EVAPX() SIMMz()");
+    XedGeneratedForm apx_nd0_pattern_form = {0};
+    bad_token = (String8){0};
+    bad_operand = false;
+    result = result && xed_import_normalize_record(&apx_nd0_pattern_form, &apx_nd0_pattern_record, 0, &bad_token, &bad_operand) &&
+             (apx_nd0_pattern_form.apx_flags & XED_GENERATED_APX) != 0 &&
+             (apx_nd0_pattern_form.apx_flags & XED_GENERATED_APX_NDD) == 0;
+
+    XedImportRecord non_apx_nd1_pattern_record = apx_ndd_pattern_record;
+    non_apx_nd1_pattern_record.extension = S8("APX_F");
+    XedGeneratedForm non_apx_nd1_pattern_form = {0};
+    bad_token = (String8){0};
+    bad_operand = false;
+    result = result && xed_import_normalize_record(&non_apx_nd1_pattern_form, &non_apx_nd1_pattern_record, 0, &bad_token,
+                                                    &bad_operand) &&
+             (non_apx_nd1_pattern_form.apx_flags & XED_GENERATED_APX_NDD) == 0;
 
     XedImportRecord bad_pattern_record = normalized_record;
     bad_pattern_record.pattern = S8("BOGUS_PATTERN_TOKEN");
