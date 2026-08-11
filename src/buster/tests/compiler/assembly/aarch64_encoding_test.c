@@ -21,6 +21,102 @@ struct A64EncodingCase
     u32 word;
 };
 
+// Independent llvm-mc 22.1.8 byte oracle for the direct Arm XML projection.
+// The production rows intentionally contain no oracle words; this table is
+// keyed by both the pinned Arm row ID and source digest so row reordering or a
+// digest collision cannot silently turn the structural encoder into its own
+// oracle.
+typedef struct A64M1GprOracle A64M1GprOracle;
+struct A64M1GprOracle
+{
+    String8 arm_row_id;
+    u64 arm_row_digest;
+    u32 word;
+};
+
+static A64M1GprOracle const a64_m1_gpr_oracles[] = {
+    {S8_INITIALIZER("arm-a64@2026-06:ADCS_32_addsub_carry"), UINT64_C(0xd1551f6f480968d2), UINT32_C(0x3a030041)},
+    {S8_INITIALIZER("arm-a64@2026-06:ADCS_64_addsub_carry"), UINT64_C(0xfcb081d1d648e435), UINT32_C(0xba030041)},
+    {S8_INITIALIZER("arm-a64@2026-06:ADC_32_addsub_carry"), UINT64_C(0xc0a727c601476e45), UINT32_C(0x1a030041)},
+    {S8_INITIALIZER("arm-a64@2026-06:ADC_64_addsub_carry"), UINT64_C(0x18e0df3f58428a04), UINT32_C(0x9a030041)},
+    {S8_INITIALIZER("arm-a64@2026-06:ASRV_32_dp_2src"), UINT64_C(0x9c17d31983922fbf), UINT32_C(0x1ac32841)},
+    {S8_INITIALIZER("arm-a64@2026-06:ASRV_64_dp_2src"), UINT64_C(0xf6c86b3ce111a358), UINT32_C(0x9ac32841)},
+    {S8_INITIALIZER("arm-a64@2026-06:AUTDA_64P_dp_1src"), UINT64_C(0x37f3371997683e7c), UINT32_C(0xdac11be1)},
+    {S8_INITIALIZER("arm-a64@2026-06:AUTDB_64P_dp_1src"), UINT64_C(0x5c21067cadb97f83), UINT32_C(0xdac11fe1)},
+    {S8_INITIALIZER("arm-a64@2026-06:AUTDZA_64Z_dp_1src"), UINT64_C(0xf40872610f95ef93), UINT32_C(0xdac13be1)},
+    {S8_INITIALIZER("arm-a64@2026-06:AUTDZB_64Z_dp_1src"), UINT64_C(0x6137df9b25844a68), UINT32_C(0xdac13fe1)},
+    {S8_INITIALIZER("arm-a64@2026-06:AUTIA_64P_dp_1src"), UINT64_C(0x3e1b3b5148461c7c), UINT32_C(0xdac113e1)},
+    {S8_INITIALIZER("arm-a64@2026-06:AUTIB_64P_dp_1src"), UINT64_C(0xd2b63c0598cd60a4), UINT32_C(0xdac117e1)},
+    {S8_INITIALIZER("arm-a64@2026-06:AUTIZA_64Z_dp_1src"), UINT64_C(0x7267e4a85985f225), UINT32_C(0xdac133e1)},
+    {S8_INITIALIZER("arm-a64@2026-06:AUTIZB_64Z_dp_1src"), UINT64_C(0xf0c58377089a64f5), UINT32_C(0xdac137e1)},
+    {S8_INITIALIZER("arm-a64@2026-06:BLRAAZ_64_branch_reg"), UINT64_C(0x427d7e0c95b50b65), UINT32_C(0xd63f083f)},
+    {S8_INITIALIZER("arm-a64@2026-06:BLRAA_64P_branch_reg"), UINT64_C(0x4eb447fc25dcb4c9), UINT32_C(0xd73f083f)},
+    {S8_INITIALIZER("arm-a64@2026-06:BLRABZ_64_branch_reg"), UINT64_C(0x5ec3a3c52c9f01df), UINT32_C(0xd63f0c3f)},
+    {S8_INITIALIZER("arm-a64@2026-06:BLRAB_64P_branch_reg"), UINT64_C(0x86bba71a204b1199), UINT32_C(0xd73f0c3f)},
+    {S8_INITIALIZER("arm-a64@2026-06:BLR_64_branch_reg"), UINT64_C(0xcf15e3f6a408975c), UINT32_C(0xd63f0020)},
+    {S8_INITIALIZER("arm-a64@2026-06:BRAAZ_64_branch_reg"), UINT64_C(0xd8258b43a9f952cf), UINT32_C(0xd61f083f)},
+    {S8_INITIALIZER("arm-a64@2026-06:BRAA_64P_branch_reg"), UINT64_C(0x6da23f3365bdf9a1), UINT32_C(0xd71f083f)},
+    {S8_INITIALIZER("arm-a64@2026-06:BRABZ_64_branch_reg"), UINT64_C(0x361c7914e93866ad), UINT32_C(0xd61f0c3f)},
+    {S8_INITIALIZER("arm-a64@2026-06:BRAB_64P_branch_reg"), UINT64_C(0xbfeea1c25a0e1bd2), UINT32_C(0xd71f0c3f)},
+    {S8_INITIALIZER("arm-a64@2026-06:BR_64_branch_reg"), UINT64_C(0xb20f7a587332bc0c), UINT32_C(0xd61f0020)},
+    {S8_INITIALIZER("arm-a64@2026-06:CLS_32_dp_1src"), UINT64_C(0xdd5c61303d5b0bd7), UINT32_C(0x5ac01441)},
+    {S8_INITIALIZER("arm-a64@2026-06:CLS_64_dp_1src"), UINT64_C(0x605d789d67b247e5), UINT32_C(0xdac01441)},
+    {S8_INITIALIZER("arm-a64@2026-06:CLZ_32_dp_1src"), UINT64_C(0xe9d5b47786509875), UINT32_C(0x5ac01041)},
+    {S8_INITIALIZER("arm-a64@2026-06:CLZ_64_dp_1src"), UINT64_C(0x3874a9867eb2bd4a), UINT32_C(0xdac01041)},
+    {S8_INITIALIZER("arm-a64@2026-06:CRC32B_32C_dp_2src"), UINT64_C(0x2c200a4733aa2d05), UINT32_C(0x1ac34041)},
+    {S8_INITIALIZER("arm-a64@2026-06:CRC32CB_32C_dp_2src"), UINT64_C(0xc13f8adf90f58f49), UINT32_C(0x1ac35041)},
+    {S8_INITIALIZER("arm-a64@2026-06:CRC32CH_32C_dp_2src"), UINT64_C(0xc5e4e9cf1d3283a0), UINT32_C(0x1ac35441)},
+    {S8_INITIALIZER("arm-a64@2026-06:CRC32CW_32C_dp_2src"), UINT64_C(0xc2d70b2d26125e1b), UINT32_C(0x1ac35841)},
+    {S8_INITIALIZER("arm-a64@2026-06:CRC32CX_64C_dp_2src"), UINT64_C(0x7221b56c58861bcc), UINT32_C(0x9ac35c41)},
+    {S8_INITIALIZER("arm-a64@2026-06:CRC32H_32C_dp_2src"), UINT64_C(0x97606a60a8dae441), UINT32_C(0x1ac34441)},
+    {S8_INITIALIZER("arm-a64@2026-06:CRC32W_32C_dp_2src"), UINT64_C(0xfb5adce732938f9), UINT32_C(0x1ac34841)},
+    {S8_INITIALIZER("arm-a64@2026-06:CRC32X_64C_dp_2src"), UINT64_C(0x577efbbeabd91a91), UINT32_C(0x9ac34c41)},
+    {S8_INITIALIZER("arm-a64@2026-06:LSLV_32_dp_2src"), UINT64_C(0xb43c04ea8527c479), UINT32_C(0x1ac32041)},
+    {S8_INITIALIZER("arm-a64@2026-06:LSLV_64_dp_2src"), UINT64_C(0x807e017963c88882), UINT32_C(0x9ac32041)},
+    {S8_INITIALIZER("arm-a64@2026-06:LSRV_32_dp_2src"), UINT64_C(0xae90e1861e1e3432), UINT32_C(0x1ac32441)},
+    {S8_INITIALIZER("arm-a64@2026-06:LSRV_64_dp_2src"), UINT64_C(0x466906b42af8104e), UINT32_C(0x9ac32441)},
+    {S8_INITIALIZER("arm-a64@2026-06:MADD_32A_dp_3src"), UINT64_C(0x3a1e6468f861d589), UINT32_C(0x1b031041)},
+    {S8_INITIALIZER("arm-a64@2026-06:MADD_64A_dp_3src"), UINT64_C(0x337e0a030c060b4d), UINT32_C(0x9b031041)},
+    {S8_INITIALIZER("arm-a64@2026-06:MSUB_32A_dp_3src"), UINT64_C(0xde2077b187f931ea), UINT32_C(0x1b039041)},
+    {S8_INITIALIZER("arm-a64@2026-06:MSUB_64A_dp_3src"), UINT64_C(0xe46508a1977d55fb), UINT32_C(0x9b039041)},
+    {S8_INITIALIZER("arm-a64@2026-06:PACDA_64P_dp_1src"), UINT64_C(0xbebaacea783a689e), UINT32_C(0xdac10be1)},
+    {S8_INITIALIZER("arm-a64@2026-06:PACDB_64P_dp_1src"), UINT64_C(0xd5236ec08e09812d), UINT32_C(0xdac10fe1)},
+    {S8_INITIALIZER("arm-a64@2026-06:PACDZA_64Z_dp_1src"), UINT64_C(0xc83b224304fda4a0), UINT32_C(0xdac12be1)},
+    {S8_INITIALIZER("arm-a64@2026-06:PACDZB_64Z_dp_1src"), UINT64_C(0x82d17a60e72ac2ea), UINT32_C(0xdac12fe1)},
+    {S8_INITIALIZER("arm-a64@2026-06:PACGA_64P_dp_2src"), UINT64_C(0xddc151453b0a5f2b), UINT32_C(0x9adf3041)},
+    {S8_INITIALIZER("arm-a64@2026-06:PACIA_64P_dp_1src"), UINT64_C(0xec20eefbd54d577), UINT32_C(0xdac103e1)},
+    {S8_INITIALIZER("arm-a64@2026-06:PACIB_64P_dp_1src"), UINT64_C(0x2ee8cbc37762d41a), UINT32_C(0xdac107e1)},
+    {S8_INITIALIZER("arm-a64@2026-06:PACIZA_64Z_dp_1src"), UINT64_C(0xff8b1e3fbdc86aec), UINT32_C(0xdac123e1)},
+    {S8_INITIALIZER("arm-a64@2026-06:PACIZB_64Z_dp_1src"), UINT64_C(0x1b0ef85cb6dcf078), UINT32_C(0xdac127e1)},
+    {S8_INITIALIZER("arm-a64@2026-06:RBIT_32_dp_1src"), UINT64_C(0xa445e0a3a42bfa1e), UINT32_C(0x5ac00041)},
+    {S8_INITIALIZER("arm-a64@2026-06:RBIT_64_dp_1src"), UINT64_C(0x9daabf3e434d80d8), UINT32_C(0xdac00041)},
+    {S8_INITIALIZER("arm-a64@2026-06:REV16_32_dp_1src"), UINT64_C(0xdbb0dfaabdeb7a76), UINT32_C(0x5ac00441)},
+    {S8_INITIALIZER("arm-a64@2026-06:REV16_64_dp_1src"), UINT64_C(0x1414b425a944fa65), UINT32_C(0xdac00441)},
+    {S8_INITIALIZER("arm-a64@2026-06:REV32_64_dp_1src"), UINT64_C(0x573247d13b39e10b), UINT32_C(0xdac00841)},
+    {S8_INITIALIZER("arm-a64@2026-06:REV_32_dp_1src"), UINT64_C(0xeb95cd3e80209f25), UINT32_C(0x5ac00841)},
+    {S8_INITIALIZER("arm-a64@2026-06:REV_64_dp_1src"), UINT64_C(0xf81c77ef89c62607), UINT32_C(0xdac00c41)},
+    {S8_INITIALIZER("arm-a64@2026-06:RORV_32_dp_2src"), UINT64_C(0x29121d282296d4a4), UINT32_C(0x1ac32c41)},
+    {S8_INITIALIZER("arm-a64@2026-06:RORV_64_dp_2src"), UINT64_C(0xbf9de012e36567b9), UINT32_C(0x9ac32c41)},
+    {S8_INITIALIZER("arm-a64@2026-06:SBCS_32_addsub_carry"), UINT64_C(0x7b0707c2a50d31c4), UINT32_C(0x7a030041)},
+    {S8_INITIALIZER("arm-a64@2026-06:SBCS_64_addsub_carry"), UINT64_C(0xf5e747731966b76), UINT32_C(0xfa030041)},
+    {S8_INITIALIZER("arm-a64@2026-06:SBC_32_addsub_carry"), UINT64_C(0xdee58d39ff6b0e38), UINT32_C(0x5a030041)},
+    {S8_INITIALIZER("arm-a64@2026-06:SBC_64_addsub_carry"), UINT64_C(0x9a7e8f67f51c9d6f), UINT32_C(0xda030041)},
+    {S8_INITIALIZER("arm-a64@2026-06:SDIV_32_dp_2src"), UINT64_C(0xf36d7cf80886295c), UINT32_C(0x1ac30c41)},
+    {S8_INITIALIZER("arm-a64@2026-06:SDIV_64_dp_2src"), UINT64_C(0xd133fbacf31cfb6a), UINT32_C(0x9ac30c41)},
+    {S8_INITIALIZER("arm-a64@2026-06:SETF16_only_setf"), UINT64_C(0x336d4f0ea92ae737), UINT32_C(0x3a00482d)},
+    {S8_INITIALIZER("arm-a64@2026-06:SETF8_only_setf"), UINT64_C(0xb69158ca23ff9ea9), UINT32_C(0x3a00082d)},
+    {S8_INITIALIZER("arm-a64@2026-06:SMADDL_64WA_dp_3src"), UINT64_C(0x4fd4647e75534a62), UINT32_C(0x9b231041)},
+    {S8_INITIALIZER("arm-a64@2026-06:SMSUBL_64WA_dp_3src"), UINT64_C(0x7f2bf7de683c5bf7), UINT32_C(0x9b239041)},
+    {S8_INITIALIZER("arm-a64@2026-06:SMULH_64_dp_3src"), UINT64_C(0x6e03844dbe92c7d), UINT32_C(0x9b437c41)},
+    {S8_INITIALIZER("arm-a64@2026-06:UDIV_32_dp_2src"), UINT64_C(0xc8006fe4f008ffae), UINT32_C(0x1ac30841)},
+    {S8_INITIALIZER("arm-a64@2026-06:UDIV_64_dp_2src"), UINT64_C(0x5808cb4a9fb4596a), UINT32_C(0x9ac30841)},
+    {S8_INITIALIZER("arm-a64@2026-06:UMADDL_64WA_dp_3src"), UINT64_C(0x2e11ff73e2b1ae99), UINT32_C(0x9ba31041)},
+    {S8_INITIALIZER("arm-a64@2026-06:UMSUBL_64WA_dp_3src"), UINT64_C(0xa53489734bf5453b), UINT32_C(0x9ba39041)},
+    {S8_INITIALIZER("arm-a64@2026-06:UMULH_64_dp_3src"), UINT64_C(0xdd77d750117334ca), UINT32_C(0x9bc37c41)},
+    {S8_INITIALIZER("arm-a64@2026-06:XPACD_64Z_dp_1src"), UINT64_C(0x93035be96f05987b), UINT32_C(0xdac147e1)},
+    {S8_INITIALIZER("arm-a64@2026-06:XPACI_64Z_dp_1src"), UINT64_C(0x4f27d053e6e24a94), UINT32_C(0xdac143e1)},
+};
+
 BUSTER_GLOBAL_LOCAL bool a64_encoding_metadata_string_equal(BusterAarch64MetadataString string, char const* expected)
 {
     if (!expected)
@@ -1385,6 +1481,191 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     u32 zero_field_word = 0;
     BUSTER_TEST(arguments, buster_aarch64_metadata_raw_encode(229, 0, 0, &zero_field_word) && zero_field_word == UINT32_C(0xd50323bf));
     BUSTER_TEST(arguments, buster_aarch64_metadata_raw_decode(229, zero_field_word, 0, 0));
+
+    // Every direct-GPR projection row is checked against an independent
+    // llvm-mc literal keyed by its Arm row identity and source digest.  The
+    // production encoder must remain independent of the packed metadata path.
+    Target gpr_target = a64_encoding_m1_target(true);
+    BUSTER_TEST(arguments, buster_aarch64_arm_m1_gpr_target(gpr_target));
+    BUSTER_TEST(arguments, buster_aarch64_arm_m1_gpr_form_count() == BUSTER_ARRAY_LENGTH(a64_m1_gpr_oracles) &&
+                               buster_aarch64_arm_m1_gpr_form_count() == 80);
+    buster_aarch64_metadata_test_reset_packed_access_counter();
+    u32 direct_operand_positions = 0;
+    for (u32 form_index = 0; form_index < buster_aarch64_arm_m1_gpr_form_count(); form_index += 1)
+    {
+        BusterAarch64ArmM1GprForm form = {0};
+        BUSTER_TEST(arguments, buster_aarch64_arm_m1_gpr_form(form_index, &form));
+        if (!form.mnemonic.pointer || !form.arm_row_id.pointer)
+        {
+            continue;
+        }
+        A64M1GprOracle const* oracle = 0;
+        for (u32 oracle_index = 0; oracle_index < BUSTER_ARRAY_LENGTH(a64_m1_gpr_oracles); oracle_index += 1)
+        {
+            A64M1GprOracle const* candidate = a64_m1_gpr_oracles + oracle_index;
+            if (candidate->arm_row_digest == form.arm_row_digest && string_equal(candidate->arm_row_id, form.arm_row_id))
+            {
+                oracle = candidate;
+                break;
+            }
+        }
+        BUSTER_TEST(arguments, oracle != 0 && form.operand_count >= 1 && form.operand_count <= 4);
+        if (!oracle || form.operand_count > 4)
+        {
+            continue;
+        }
+        A64GprOperand operands[4] = {0};
+        u32 sp_operand_index = UINT32_MAX;
+        for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+        {
+            BusterAarch64ArmM1GprOperand descriptor = form.operands[operand_index];
+            operands[operand_index] = (A64GprOperand){
+                .index = (u8)(operand_index + 1),
+                .width = descriptor.width,
+            };
+            if (descriptor.register31_role == A64_GPR_REGISTER31_SP)
+            {
+                operands[operand_index].index = 31;
+                operands[operand_index].stack_pointer = true;
+                sp_operand_index = operand_index;
+            }
+        }
+        direct_operand_positions += form.operand_count;
+        u32 found_form = UINT32_MAX;
+        u32 word = 0;
+        BUSTER_TEST(arguments, buster_aarch64_arm_m1_gpr_find_form(form.mnemonic, operands, form.operand_count, &found_form) &&
+                               found_form == form_index && buster_aarch64_arm_m1_gpr_encode(gpr_target, form_index, operands,
+                                                                                              form.operand_count, &word) &&
+                               word == oracle->word);
+        u32 mnemonic_word = 0;
+        BUSTER_TEST(arguments, buster_aarch64_arm_m1_gpr_encode_mnemonic(gpr_target, form.mnemonic, operands, form.operand_count,
+                                                                          &mnemonic_word) &&
+                               mnemonic_word == oracle->word);
+        // Exhaustive register-31 matrix: each visible operand is tested as
+        // its architectural ZR/SP role, the opposite role is rejected, and a
+        // W/X width flip is rejected. Other operands retain the ordinary
+        // values used by the independent oracle vector above.
+        for (u32 position = 0; position < form.operand_count; position += 1)
+        {
+            A64GprOperand register31_operands[4] = {0};
+            for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1) register31_operands[operand_index] = operands[operand_index];
+            bool stack_pointer = form.operands[position].register31_role == A64_GPR_REGISTER31_SP;
+            register31_operands[position].index = 31;
+            register31_operands[position].stack_pointer = stack_pointer;
+            u32 expected_register31_word = form.fixed_value;
+            for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+            {
+                expected_register31_word |= (u32)register31_operands[operand_index].index << form.operands[operand_index].bit_lsb;
+            }
+            BUSTER_TEST(arguments, buster_aarch64_arm_m1_gpr_encode(gpr_target, form_index, register31_operands,
+                                                                      form.operand_count, &word) && word == expected_register31_word);
+            A64GprOperand opposite_role_operands[4] = {0};
+            for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1) opposite_role_operands[operand_index] = register31_operands[operand_index];
+            opposite_role_operands[position].stack_pointer = !stack_pointer;
+            BUSTER_TEST(arguments, !buster_aarch64_arm_m1_gpr_encode(gpr_target, form_index, opposite_role_operands,
+                                                                       form.operand_count, &word));
+            A64GprOperand width_flip_operands[4] = {0};
+            for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1) width_flip_operands[operand_index] = register31_operands[operand_index];
+            width_flip_operands[position].width = width_flip_operands[position].width == 32 ? 64 : 32;
+            BUSTER_TEST(arguments, !buster_aarch64_arm_m1_gpr_encode(gpr_target, form_index, width_flip_operands,
+                                                                       form.operand_count, &word));
+        }
+        if (sp_operand_index != UINT32_MAX)
+        {
+            A64GprOperand wrong_role_operands[4] = {0};
+            for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1) wrong_role_operands[operand_index] = operands[operand_index];
+            wrong_role_operands[sp_operand_index].index = 31;
+            wrong_role_operands[sp_operand_index].stack_pointer = false;
+            BUSTER_TEST(arguments, !buster_aarch64_arm_m1_gpr_encode(gpr_target, form_index, wrong_role_operands, form.operand_count, &word));
+        }
+        A64GprOperand bad_reserved = operands[0];
+        bad_reserved.reserved = 1;
+        A64GprOperand invalid_operands[4] = {0};
+        for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1) invalid_operands[operand_index] = operands[operand_index];
+        invalid_operands[0] = bad_reserved;
+        BUSTER_TEST(arguments, !buster_aarch64_arm_m1_gpr_encode(gpr_target, form_index, invalid_operands, form.operand_count, &word));
+        if (form.required_feature != TARGET_CPU_FEATURE_NONE)
+        {
+            Target missing = gpr_target;
+            missing.cpu_features = target_cpu_features_remove(missing.cpu_features, form.required_feature);
+            BUSTER_TEST(arguments, !buster_aarch64_arm_m1_gpr_encode(missing, form_index, operands, form.operand_count, &word));
+        }
+    }
+    Target non_m1_target = gpr_target;
+    non_m1_target.cpu_model = CPU_MODEL_BASELINE;
+    BUSTER_TEST(arguments, !buster_aarch64_arm_m1_gpr_target(non_m1_target));
+    BUSTER_TEST(arguments, direct_operand_positions == 189);
+    BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == 0);
+
+    // Fourteen rows are also present in the pre-existing named production
+    // plan. Match those plans by instruction bit position (not field order)
+    // and require bit-for-bit equality with the direct projection.
+    static struct
+    {
+        u32 production_form_id;
+        String8 mnemonic;
+        u8 width;
+        u8 operand_count;
+    } const direct_production_overlaps[] = {
+        {BUSTER_AARCH64_GENERATED_FORM_ASRVWR, S8_INITIALIZER("asrv"), 32, 3},
+        {BUSTER_AARCH64_GENERATED_FORM_ASRVXR, S8_INITIALIZER("asrv"), 64, 3},
+        {BUSTER_AARCH64_GENERATED_FORM_LSLVWR, S8_INITIALIZER("lslv"), 32, 3},
+        {BUSTER_AARCH64_GENERATED_FORM_LSLVXR, S8_INITIALIZER("lslv"), 64, 3},
+        {BUSTER_AARCH64_GENERATED_FORM_LSRVWR, S8_INITIALIZER("lsrv"), 32, 3},
+        {BUSTER_AARCH64_GENERATED_FORM_LSRVXR, S8_INITIALIZER("lsrv"), 64, 3},
+        {BUSTER_AARCH64_GENERATED_FORM_MADDWRRR, S8_INITIALIZER("madd"), 32, 4},
+        {BUSTER_AARCH64_GENERATED_FORM_MADDXRRR, S8_INITIALIZER("madd"), 64, 4},
+        {BUSTER_AARCH64_GENERATED_FORM_MSUBWRRR, S8_INITIALIZER("msub"), 32, 4},
+        {BUSTER_AARCH64_GENERATED_FORM_MSUBXRRR, S8_INITIALIZER("msub"), 64, 4},
+        {BUSTER_AARCH64_GENERATED_FORM_SDIVWR, S8_INITIALIZER("sdiv"), 32, 3},
+        {BUSTER_AARCH64_GENERATED_FORM_SDIVXR, S8_INITIALIZER("sdiv"), 64, 3},
+        {BUSTER_AARCH64_GENERATED_FORM_UDIVWR, S8_INITIALIZER("udiv"), 32, 3},
+        {BUSTER_AARCH64_GENERATED_FORM_UDIVXR, S8_INITIALIZER("udiv"), 64, 3},
+    };
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(direct_production_overlaps) == 14);
+    buster_aarch64_metadata_test_reset_packed_access_counter();
+    for (u32 overlap_index = 0; overlap_index < BUSTER_ARRAY_LENGTH(direct_production_overlaps); overlap_index += 1)
+    {
+        u32 production_form_id = direct_production_overlaps[overlap_index].production_form_id;
+        u8 width = direct_production_overlaps[overlap_index].width;
+        u32 operand_count = direct_production_overlaps[overlap_index].operand_count;
+        A64GprOperand direct_operands[4] = {0};
+        for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
+        {
+            direct_operands[operand_index] = (A64GprOperand){.index = (u8)(operand_index + 1), .width = width};
+        }
+        u32 direct_form_index = UINT32_MAX;
+        BusterAarch64ArmM1GprForm direct_form = {0};
+        BUSTER_TEST(arguments, buster_aarch64_arm_m1_gpr_find_form(direct_production_overlaps[overlap_index].mnemonic, direct_operands,
+                                                                    operand_count, &direct_form_index) &&
+                                   buster_aarch64_arm_m1_gpr_form(direct_form_index, &direct_form));
+        u16 plan_index = buster_aarch64_generated_production_plan_index(production_form_id);
+        BusterAarch64GeneratedProductionForm const* plan = buster_aarch64_generated_production_form_at(plan_index);
+        u32 field_values[8] = {0};
+        bool mapped = plan != 0 && plan->field_count == operand_count;
+        if (mapped)
+        {
+            for (u32 field_index = 0; field_index < plan->field_count; field_index += 1)
+            {
+                BusterAarch64GeneratedProductionField const* field =
+                    buster_aarch64_generated_production_field_at(plan->field_first + field_index);
+                BusterAarch64GeneratedProductionSegment const* segment =
+                    field && field->segment_count == 1 ? buster_aarch64_generated_production_segment_at(field->segment_first) : 0;
+                u32 operand_index = UINT32_MAX;
+                for (u32 candidate = 0; candidate < operand_count; candidate += 1)
+                {
+                    if (direct_form.operands[candidate].bit_lsb == (segment ? segment->instruction_lsb : UINT8_MAX)) operand_index = candidate;
+                }
+                if (!field || !segment || operand_index == UINT32_MAX) mapped = false;
+                else field_values[field_index] = direct_operands[operand_index].index;
+            }
+        }
+        u32 production_word = 0, direct_word = 0;
+        BUSTER_TEST(arguments, mapped && buster_aarch64_production_raw_encode(production_form_id, field_values, plan->field_count, &production_word) &&
+                                   buster_aarch64_arm_m1_gpr_encode(gpr_target, direct_form_index, direct_operands, operand_count, &direct_word) &&
+                                   production_word == direct_word);
+    }
+    BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == 0);
 
     return result;
 }

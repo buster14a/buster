@@ -1740,6 +1740,249 @@ static bool arm_a64_validate_rows(ArmA64CanonicalRows rows)
     return true;
 }
 
+typedef struct ArmA64GprProjectionOperand ArmA64GprProjectionOperand;
+struct ArmA64GprProjectionOperand
+{
+    u8 width;
+    u8 bit_lsb;
+    u8 register31_role;
+};
+
+typedef struct ArmA64GprProjectionRow ArmA64GprProjectionRow;
+struct ArmA64GprProjectionRow
+{
+    ArmA64CanonicalRow* row;
+    String8 mnemonic;
+    ArmA64GprProjectionOperand operands[4];
+    u32 operand_count;
+};
+
+static bool arm_a64_gpr_operand_token(String8 token, u8* width, u8* register31_role, String8* base)
+{
+    token = arm_a64_trim(token);
+    u64 separator = BUSTER_STRING_NO_MATCH;
+    for (u64 index = 0; index < token.length; index += 1)
+    {
+        if (token.pointer[index] == '|')
+        {
+            if (separator != BUSTER_STRING_NO_MATCH) return false;
+            separator = index;
+        }
+    }
+    String8 first = separator == BUSTER_STRING_NO_MATCH ? token : string_slice(token, 0, separator);
+    String8 second = separator == BUSTER_STRING_NO_MATCH ? (String8){0} : string_slice(token, separator + 1, token.length);
+    if (first.length != 2 || (first.pointer[0] != 'W' && first.pointer[0] != 'X') ||
+        (first.pointer[1] != 'd' && first.pointer[1] != 'n' && first.pointer[1] != 'm' && first.pointer[1] != 'a' && first.pointer[1] != 's' &&
+         first.pointer[1] != 't'))
+    {
+        return false;
+    }
+    if (second.length && !string_equal(second, S8("SP"))) return false;
+    if (width) *width = first.pointer[0] == 'W' ? 32 : 64;
+    if (register31_role) *register31_role = second.length ? 1 : 0;
+    if (base) *base = first;
+    return true;
+}
+
+static bool arm_a64_gpr_row_parse(ArmA64CanonicalRow* row, ArmA64GprProjectionRow* result)
+{
+    if (!row || !result || !row->apple_m1 || row->system || !string_equal(row->kind, S8("canonical")) || !string_equal(row->status, S8("defined")) ||
+        row->unresolved_mask ||
+        !row->assembly.length || row->field_count > 4 || row->fixed_value & ~row->fixed_mask || row->field_mask != ~row->fixed_mask)
+    {
+        return false;
+    }
+    String8 assembly = row->assembly;
+    u64 position = 0;
+    while (position < assembly.length && !character_is_space(assembly.pointer[position])) position += 1;
+    String8 mnemonic = arm_a64_trim(string_slice(assembly, 0, position));
+    if (!mnemonic.length) return false;
+    ArmA64GprProjectionRow projection = {.row = row, .mnemonic = mnemonic};
+    u32 field_used = 0;
+    while (position < assembly.length)
+    {
+        while (position < assembly.length && character_is_space(assembly.pointer[position])) position += 1;
+        if (position >= assembly.length) break;
+        if (assembly.pointer[position] != '<' || projection.operand_count == 4) return false;
+        u64 token_start = ++position;
+        while (position < assembly.length && assembly.pointer[position] != '>') position += 1;
+        if (position >= assembly.length) return false;
+        String8 token = string_slice(assembly, token_start, position++);
+        u8 width = 0, register31_role = 0;
+        String8 base = {0};
+        if (!arm_a64_gpr_operand_token(token, &width, &register31_role, &base)) return false;
+        String8 wanted_name = {0};
+        char8 wanted_buffer[4] = {'R', base.pointer[1], 0, 0};
+        wanted_name = (String8){.pointer = wanted_buffer, .length = 2};
+        u32 field_index = UINT32_MAX;
+        for (u32 index = 0; index < row->field_count; index += 1)
+        {
+            if (string_equal(row->fields[index].name, wanted_name))
+            {
+                field_index = index;
+                break;
+            }
+        }
+        if (field_index == UINT32_MAX || (field_used & (UINT32_C(1) << field_index))) return false;
+        ArmA64Field field = row->fields[field_index];
+        if (field.segment_count != 1 || field.bit_count != 5 || field.segments[0].width != 5 || field.segments[0].value_lsb != 0)
+        {
+            return false;
+        }
+        field_used |= UINT32_C(1) << field_index;
+        projection.operands[projection.operand_count++] = (ArmA64GprProjectionOperand){
+            .width = width,
+            .bit_lsb = field.segments[0].instruction_lsb,
+            .register31_role = register31_role,
+        };
+        while (position < assembly.length && character_is_space(assembly.pointer[position])) position += 1;
+        if (position >= assembly.length) break;
+        if (assembly.pointer[position++] != ',') return false;
+        while (position < assembly.length && character_is_space(assembly.pointer[position])) position += 1;
+        if (position >= assembly.length || assembly.pointer[position] != '<') return false;
+    }
+    if (!projection.operand_count || projection.operand_count != row->field_count || field_used != (UINT32_C(1) << row->field_count) - 1u)
+    {
+        return false;
+    }
+    // The parser above consumes every visible token. Any literal text left in
+    // the template would be an immediate, memory, label, alias, or system
+    // operand and therefore cannot enter this direct-GPR projection.
+    u32 used_bits = row->fixed_mask;
+    for (u32 index = 0; index < projection.operand_count; index += 1)
+    {
+        ArmA64GprProjectionOperand operand = projection.operands[index];
+        if (operand.bit_lsb > 27 || used_bits & (UINT32_C(0x1f) << operand.bit_lsb)) return false;
+        used_bits |= UINT32_C(0x1f) << operand.bit_lsb;
+    }
+    if (used_bits != UINT32_MAX || (row->field_mask & ~used_bits)) return false;
+    if (!(row->feature_expression.length == 0 || string_equal(row->feature_expression, S8("FEAT_CRC32")) ||
+          string_equal(row->feature_expression, S8("FEAT_FlagM")) || string_equal(row->feature_expression, S8("FEAT_PAuth"))))
+    {
+        return false;
+    }
+    *result = projection;
+    return true;
+}
+
+static bool arm_a64_gpr_projection(Arena* arena, ArmA64CanonicalRows rows, ArmA64GprProjectionRow** rows_out, u32* count_out)
+{
+    ArmA64GprProjectionRow* projection = arena_allocate(arena, ArmA64GprProjectionRow, 80);
+    u32 count = 0;
+    for (u32 index = 0; index < rows.count; index += 1)
+    {
+        ArmA64CanonicalRow* row = &rows.pointer[index];
+        if (!row->apple_m1 || row->system || !string_equal(row->kind, S8("canonical"))) continue;
+        ArmA64GprProjectionRow candidate = {0};
+        if (!arm_a64_gpr_row_parse(row, &candidate)) continue;
+        // Production lookup is ASCII-case-insensitive, but keep the checked-in
+        // projection's spelling canonical and deterministic (lowercase).
+        u64 mnemonic_mark = arena->position;
+        for (u64 character_index = 0; character_index < candidate.mnemonic.length; character_index += 1)
+        {
+            char8 character = candidate.mnemonic.pointer[character_index];
+            if (character >= 'A' && character <= 'Z') character = (char8)(character + ('a' - 'A'));
+            arena_append_char8(arena, character);
+        }
+        candidate.mnemonic = (String8){.pointer = (char8*)arm_a64_arena_pointer(arena, mnemonic_mark), .length = candidate.mnemonic.length};
+        if (count >= 80) return false;
+        projection[count++] = candidate;
+    }
+    if (count != 80) return false;
+    u32 arity[5] = {0}, feature[4] = {0};
+    u32 mnemonic_count = 0;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        ArmA64GprProjectionRow candidate = projection[index];
+        arity[candidate.operand_count] += 1;
+        u32 feature_index = 3;
+        if (!candidate.row->feature_expression.length) feature_index = 0;
+        else if (string_equal(candidate.row->feature_expression, S8("FEAT_CRC32"))) feature_index = 1;
+        else if (string_equal(candidate.row->feature_expression, S8("FEAT_FlagM"))) feature_index = 2;
+        feature[feature_index] += 1;
+        bool seen = false;
+        for (u32 prior = 0; prior < index; prior += 1) seen |= string_equal(projection[prior].mnemonic, candidate.mnemonic);
+        if (!seen) mnemonic_count += 1;
+    }
+    if (arity[1] != 18 || arity[2] != 23 || arity[3] != 31 || arity[4] != 8 || feature[0] != 43 || feature[1] != 8 || feature[2] != 2 ||
+        feature[3] != 27 || mnemonic_count != 63)
+    {
+        return false;
+    }
+    *rows_out = projection;
+    *count_out = count;
+    return true;
+}
+
+static String8 arm_a64_gpr_feature_name(String8 expression)
+{
+    if (!expression.length) return S8("TARGET_CPU_FEATURE_NONE");
+    if (string_equal(expression, S8("FEAT_CRC32"))) return S8("TARGET_CPU_FEATURE_AARCH64_CRC");
+    if (string_equal(expression, S8("FEAT_FlagM"))) return S8("TARGET_CPU_FEATURE_AARCH64_FLAGM");
+    if (string_equal(expression, S8("FEAT_PAuth"))) return S8("TARGET_CPU_FEATURE_AARCH64_PAUTH");
+    return (String8){0};
+}
+
+static bool arm_a64_append_gpr_header(Arena* output, ArmA64GprProjectionRow* rows, u32 count)
+{
+    arena_append_string8(output, S8("/* Generated by import_arm_a64_metadata from the pinned Arm XML; do not edit. */\n"
+                                   "#ifndef BUSTER_AARCH64_ARM_M1_GPR_GENERATED_H\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_GPR_GENERATED_H\n"
+                                   "#include <buster/lib/base.h>\n"
+                                   "#include <buster/lib/target.h>\n\n"
+                                   "typedef enum BusterAarch64ArmM1GprRegister31Role {\n"
+                                   "    BUSTER_AARCH64_ARM_M1_GPR_31_ZR,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_GPR_31_SP,\n"
+                                   "} BusterAarch64ArmM1GprRegister31Role;\n\n"
+                                   "typedef struct BusterAarch64ArmM1GprGeneratedOperand BusterAarch64ArmM1GprGeneratedOperand;\n"
+                                   "struct BusterAarch64ArmM1GprGeneratedOperand {\n"
+                                   "    u8 width;\n    u8 bit_lsb;\n    u8 register31_role;\n    u8 reserved;\n};\n\n"
+                                   "typedef struct BusterAarch64ArmM1GprGeneratedForm BusterAarch64ArmM1GprGeneratedForm;\n"
+                                   "struct BusterAarch64ArmM1GprGeneratedForm {\n"
+                                   "    const char* mnemonic;\n    const char* arm_row_id;\n    u64 arm_row_digest;\n    u32 fixed_mask;\n    u32 fixed_value;\n    TargetCpuFeature required_feature;\n    u8 operand_count;\n    u8 reserved[3];\n    BusterAarch64ArmM1GprGeneratedOperand operands[4];\n};\n\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_GPR_FORM_COUNT 80u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_GPR_MNEMONIC_COUNT 63u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_GPR_ARITY_1_COUNT 18u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_GPR_ARITY_2_COUNT 23u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_GPR_ARITY_3_COUNT 31u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_GPR_ARITY_4_COUNT 8u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_GPR_BASELINE_COUNT 43u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_GPR_CRC32_COUNT 8u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_GPR_FLAGM_COUNT 2u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_GPR_PAUTH_COUNT 27u\n\n"
+                                   "static const BusterAarch64ArmM1GprGeneratedForm buster_aarch64_arm_m1_gpr_generated_forms[] = {\n"));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        ArmA64GprProjectionRow candidate = rows[index];
+        arena_append_string8(output, S8("    {\n        .mnemonic = "));
+        arm_a64_c_string(output, candidate.mnemonic);
+        arena_append_string8(output, S8(", .arm_row_id = "));
+        arm_a64_c_string(output, candidate.row->canonical_id);
+        arena_append_string8(output, S8(", .arm_row_digest = UINT64_C("));
+        arm_a64_hex_append(output, candidate.row->digest);
+        arena_append_string8(output, S8("),\n        .fixed_mask = UINT32_C("));
+        arm_a64_hex32_append(output, candidate.row->fixed_mask);
+        arena_append_string8(output, S8("), .fixed_value = UINT32_C("));
+        arm_a64_hex32_append(output, candidate.row->fixed_value);
+        arena_append_string8(output, S8("),\n        .required_feature = "));
+        arena_append_string8(output, arm_a64_gpr_feature_name(candidate.row->feature_expression));
+        arena_append_string8(output, S8(", .operand_count = "));
+        arm_a64_append_u64(output, candidate.operand_count);
+        arena_append_string8(output, S8("u,\n        .operands = {\n"));
+        for (u32 operand_index = 0; operand_index < candidate.operand_count; operand_index += 1)
+        {
+            ArmA64GprProjectionOperand operand = candidate.operands[operand_index];
+            arena_append_string8(output, S8("            {.width = ")); arm_a64_append_u64(output, operand.width);
+            arena_append_string8(output, S8("u, .bit_lsb = ")); arm_a64_append_u64(output, operand.bit_lsb);
+            arena_append_string8(output, operand.register31_role ? S8("u, .register31_role = BUSTER_AARCH64_ARM_M1_GPR_31_SP},\n")
+                                                                  : S8("u, .register31_role = BUSTER_AARCH64_ARM_M1_GPR_31_ZR},\n"));
+        }
+        arena_append_string8(output, S8("        },\n    },\n"));
+    }
+    arena_append_string8(output, S8("};\nBUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(buster_aarch64_arm_m1_gpr_generated_forms) == BUSTER_AARCH64_ARM_M1_GPR_FORM_COUNT);\n#endif\n"));
+    return true;
+}
+
 static bool arm_a64_validate_symmetric_difference(ArmA64CanonicalRows rows)
 {
     static const char* excluded[] = {
@@ -2155,6 +2398,8 @@ static bool arm_a64_parse_page(Arena* arena, Arena* scratch, String8 source, Arm
 
 static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, const u8 source_tree_sha256[32], u32 source_file_count, u64 artifact_hash,
                                     u64 artifact_bytes, u64 fixed_header_hash, u64 fixed_header_bytes,
+                                    u64 gpr_header_hash, u64 gpr_header_bytes, u32 gpr_form_count, u32 gpr_mnemonic_count,
+                                    const u32 gpr_arity_counts[4], const u32 gpr_feature_counts[4],
                                     ArmA64CanonicalRows rows, u32 page_count, u32 instruction_pages, u32 alias_pages, u32 pseudocode_pages,
                                     u32 iclass_count, u32 regdiagram_count, u32 selected, u32 selected_canonical,
                                     u32 selected_alias, u32 selected_system, u32 selected_system_canonical, u32 selected_system_alias,
@@ -2191,6 +2436,20 @@ static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, const
     arm_a64_append_u64(output, fixed_header_bytes);
     arena_append_string8(output, S8(", \"xxh64\": ")); arm_a64_json_hex(output, fixed_header_hash);
     arena_append_string8(output, S8(", \"count\": 34, \"canonical\": 32, \"alias\": 2, \"system\": 17, \"non_system\": 17},\n"));
+    arena_append_string8(output, S8("  \"direct_gpr_artifact\": {\"file\": \"arm-a64-m1-gpr.generated.h\", \"bytes\": "));
+    arm_a64_append_u64(output, gpr_header_bytes);
+    arena_append_string8(output, S8(", \"xxh64\": ")); arm_a64_json_hex(output, gpr_header_hash);
+    arena_append_string8(output, S8(", \"forms\": ")); arm_a64_append_u64(output, gpr_form_count);
+    arena_append_string8(output, S8(", \"mnemonics\": ")); arm_a64_append_u64(output, gpr_mnemonic_count);
+    arena_append_string8(output, S8(", \"arity\": {\"1\": ")); arm_a64_append_u64(output, gpr_arity_counts[0]);
+    arena_append_string8(output, S8(", \"2\": ")); arm_a64_append_u64(output, gpr_arity_counts[1]);
+    arena_append_string8(output, S8(", \"3\": ")); arm_a64_append_u64(output, gpr_arity_counts[2]);
+    arena_append_string8(output, S8(", \"4\": ")); arm_a64_append_u64(output, gpr_arity_counts[3]);
+    arena_append_string8(output, S8("}, \"features\": {\"baseline\": ")); arm_a64_append_u64(output, gpr_feature_counts[0]);
+    arena_append_string8(output, S8(", \"crc32\": ")); arm_a64_append_u64(output, gpr_feature_counts[1]);
+    arena_append_string8(output, S8(", \"flagm\": ")); arm_a64_append_u64(output, gpr_feature_counts[2]);
+    arena_append_string8(output, S8(", \"pauth\": ")); arm_a64_append_u64(output, gpr_feature_counts[3]);
+    arena_append_string8(output, S8("}, \"unresolved_mask\": \"0x00000000\"},\n"));
     arena_append_string8(output, S8("  \"symmetric_difference\": {\"count\": 33, \"excluded_pauth_lr\": 17, \"included_special\": 16, \"inventory\": ["));
     static const char* excluded[] = {"AUTIA171615_64LR_dp_1src","AUTIASPPCR_64LRR_dp_1src","AUTIASPPC_only_dp_1src_imm","AUTIB171615_64LR_dp_1src","AUTIBSPPCR_64LRR_dp_1src","AUTIBSPPC_only_dp_1src_imm","PACIA171615_64LR_dp_1src","PACIASPPC_64LR_dp_1src","PACIB171615_64LR_dp_1src","PACIBSPPC_64LR_dp_1src","PACM_HI_hints","PACNBIASPPC_64LR_dp_1src","PACNBIBSPPC_64LR_dp_1src","RETAASPPCR_64M_branch_reg","RETABSPPCR_64M_branch_reg","RETAASPPC_only_miscbranch","RETABSPPC_only_miscbranch"};
     static const char* included[] = {"ESB_HI_hints","CFP_SYS_CR_systeminstrs","CPP_SYS_CR_systeminstrs","DVP_SYS_CR_systeminstrs","SHA1C_QSV_cryptosha3","SHA1H_SS_cryptosha2","SHA1M_QSV_cryptosha3","SHA1P_QSV_cryptosha3","SHA1SU0_VVV_cryptosha3","SHA1SU1_VV_cryptosha2","SHA512H2_QQV_cryptosha512_3","SHA512H_QQV_cryptosha512_3","SHA512SU0_VV2_cryptosha512_2","SHA512SU1_VVV2_cryptosha512_3","AXFLAG_M_pstate","XAFLAG_M_pstate"};
@@ -2239,21 +2498,23 @@ static bool arm_a64_readme_canonical_section_digest(ByteSlice readme, u8 digest[
     return true;
 }
 
-static bool arm_a64_check_existing_outputs(Arena* arena, String8 output_directory, String8 artifact, String8 manifest, String8 fixed_header)
+static bool arm_a64_check_existing_outputs(Arena* arena, String8 output_directory, String8 artifact, String8 manifest, String8 fixed_header, String8 gpr_header)
 {
     TemporalArena scratch_scope = scratch_begin(&arena, 1);
     Arena* scratch = scratch_scope.arena;
     String8 artifact_path = path_join(scratch, output_directory, S8("arm-a64-canonical.generated.jsonl"));
     String8 manifest_path = path_join(scratch, output_directory, S8("arm-a64-canonical-manifest.json"));
     String8 fixed_header_path = path_join(scratch, output_directory, S8("arm-a64-m1-fixed.generated.h"));
+    String8 gpr_header_path = path_join(scratch, output_directory, S8("arm-a64-m1-gpr.generated.h"));
     String8 readme_path = path_join(scratch, output_directory, S8("README.md"));
     bool valid = arm_a64_check_file(scratch, artifact_path, artifact, "canonical artifact") &&
                  arm_a64_check_file(scratch, manifest_path, manifest, "canonical manifest") &&
-                 arm_a64_check_file(scratch, fixed_header_path, fixed_header, "M1 fixed-spelling header");
+                 arm_a64_check_file(scratch, fixed_header_path, fixed_header, "M1 fixed-spelling header") &&
+                 arm_a64_check_file(scratch, gpr_header_path, gpr_header, "M1 direct-GPR header");
     ByteSlice readme = file_read(scratch, readme_path, (FileReadOptions){0});
     static const u8 expected_readme_section_sha256[32] = {
-        0xd4, 0x7f, 0x48, 0x4c, 0x07, 0xfa, 0x22, 0xaf, 0x45, 0x8c, 0x69, 0xad, 0x5f, 0xc3, 0xc9, 0xe6,
-        0x81, 0xb6, 0x09, 0xc7, 0xa8, 0x6d, 0x7d, 0x27, 0x59, 0x16, 0x75, 0x1a, 0xef, 0x9c, 0xf2, 0xed,
+        0x60, 0x8c, 0x48, 0x1f, 0x5f, 0x8a, 0x0a, 0x04, 0xfb, 0xa3, 0x18, 0xf6, 0xfd, 0xff, 0xe5, 0x7e,
+        0x4a, 0x9f, 0x11, 0x0a, 0x5f, 0xdc, 0x2e, 0xad, 0x64, 0x20, 0x5f, 0x3c, 0xf0, 0xfd, 0x5e, 0x52,
     };
     u8 readme_section_sha256[32] = {0};
     if (!readme.pointer || !readme.length || !arm_a64_readme_canonical_section_digest(readme, readme_section_sha256) ||
@@ -2496,10 +2757,49 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
         return PROCESS_RESULT_FAILED;
     }
     String8 fixed_header = (String8){.pointer = (char8*)arm_a64_arena_pointer(output_arena, fixed_header_mark), .length = output_arena->position - fixed_header_mark};
+    ArmA64GprProjectionRow* gpr_rows = 0;
+    u32 gpr_form_count = 0;
+    if (!arm_a64_gpr_projection(arena, rows, &gpr_rows, &gpr_form_count))
+    {
+        string_print(S8("error: Arm A64 direct-GPR projection census or header emission mismatch\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    u64 gpr_header_mark = output_arena->position;
+    if (!arm_a64_append_gpr_header(output_arena, gpr_rows, gpr_form_count))
+    {
+        string_print(S8("error: Arm A64 direct-GPR projection header emission mismatch\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 gpr_header = (String8){.pointer = (char8*)arm_a64_arena_pointer(output_arena, gpr_header_mark), .length = output_arena->position - gpr_header_mark};
+    u32 gpr_arity_counts[4] = {0};
+    u32 gpr_feature_counts[4] = {0};
+    u32 gpr_mnemonic_count = 0;
+    for (u32 gpr_index = 0; gpr_index < gpr_form_count; gpr_index += 1)
+    {
+        ArmA64GprProjectionRow candidate = gpr_rows[gpr_index];
+        if (candidate.operand_count >= 1 && candidate.operand_count <= 4) gpr_arity_counts[candidate.operand_count - 1] += 1;
+        bool seen_mnemonic = false;
+        for (u32 prior = 0; prior < gpr_index; prior += 1)
+        {
+            if (string_equal(gpr_rows[prior].mnemonic, candidate.mnemonic))
+            {
+                seen_mnemonic = true;
+                break;
+            }
+        }
+        if (!seen_mnemonic) gpr_mnemonic_count += 1;
+        u32 feature_index = 3;
+        if (!candidate.row->feature_expression.length) feature_index = 0;
+        else if (string_equal(candidate.row->feature_expression, S8("FEAT_CRC32"))) feature_index = 1;
+        else if (string_equal(candidate.row->feature_expression, S8("FEAT_FlagM"))) feature_index = 2;
+        gpr_feature_counts[feature_index] += 1;
+    }
     u64 manifest_mark = output_arena->position;
     arm_a64_append_manifest(output_arena, source_tree_digest, source_tree_sha256, source_file_count,
                             buster_hash_64((u8*)artifact.pointer, artifact.length), artifact.length,
-                            buster_hash_64((u8*)fixed_header.pointer, fixed_header.length), fixed_header.length, rows, page_count,
+                            buster_hash_64((u8*)fixed_header.pointer, fixed_header.length), fixed_header.length,
+                            buster_hash_64((u8*)gpr_header.pointer, gpr_header.length), gpr_header.length, gpr_form_count, gpr_mnemonic_count,
+                            gpr_arity_counts, gpr_feature_counts, rows, page_count,
                             instruction_pages, alias_pages, pseudocode_pages, iclass_count, regdiagram_count, selected, selected_canonical,
                             selected_alias, selected_system, selected_system_canonical, selected_system_alias, selected - selected_system,
                             selected_canonical - selected_system_canonical, selected_alias - selected_system_alias);
@@ -2507,16 +2807,17 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
     String8 artifact_path = path_join(arena, options.output_directory, S8("arm-a64-canonical.generated.jsonl"));
     String8 manifest_path = path_join(arena, options.output_directory, S8("arm-a64-canonical-manifest.json"));
     String8 fixed_header_path = path_join(arena, options.output_directory, S8("arm-a64-m1-fixed.generated.h"));
+    String8 gpr_header_path = path_join(arena, options.output_directory, S8("arm-a64-m1-gpr.generated.h"));
     if (arm_a64_check_mode_enabled())
     {
-        if (!arm_a64_check_existing_outputs(arena, options.output_directory, artifact, manifest, fixed_header)) return PROCESS_RESULT_FAILED;
-        string_print(S8("Arm A64 checked-in canonical artifacts, M1 fixed spellings, and README.md canonical section match deterministic import output: {S8}\n"),
+        if (!arm_a64_check_existing_outputs(arena, options.output_directory, artifact, manifest, fixed_header, gpr_header)) return PROCESS_RESULT_FAILED;
+        string_print(S8("Arm A64 checked-in canonical artifacts, M1 fixed spellings, direct-GPR forms, and README.md canonical section match deterministic import output: {S8}\n"),
                      options.output_directory);
         return PROCESS_RESULT_SUCCESS;
     }
     make_directory_recursive(arena, options.output_directory);
     if (!file_write(artifact_path, BUSTER_SLICE_TO_BYTE_SLICE(artifact)) || !file_write(manifest_path, BUSTER_SLICE_TO_BYTE_SLICE(manifest)) ||
-        !file_write(fixed_header_path, BUSTER_SLICE_TO_BYTE_SLICE(fixed_header)))
+        !file_write(fixed_header_path, BUSTER_SLICE_TO_BYTE_SLICE(fixed_header)) || !file_write(gpr_header_path, BUSTER_SLICE_TO_BYTE_SLICE(gpr_header)))
     {
         string_print(S8("error: failed to write Arm A64 canonical artifacts\n"));
         return PROCESS_RESULT_FAILED;

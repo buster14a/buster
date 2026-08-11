@@ -287,6 +287,62 @@ BUSTER_F_DECL bool buster_aarch64_arm_m1_fixed_lookup(String8 spelling, BusterAa
 BUSTER_F_DECL bool buster_aarch64_arm_m1_fixed_target(Target target);
 BUSTER_F_DECL bool buster_aarch64_arm_m1_fixed_supported_for_target(BusterAarch64ArmM1FixedSpelling fixed, Target target);
 
+// Compact direct-register projection imported from the pinned Arm XML.  These
+// forms are intentionally independent of the packed LLVM metadata above: the
+// direct encoder reads only the checked-in generated rows and accepts at most
+// four scalar W/X GPR operands.
+typedef enum A64GprRegister31Role
+{
+    A64_GPR_REGISTER31_ZR,
+    A64_GPR_REGISTER31_SP,
+} A64GprRegister31Role;
+
+typedef struct A64GprOperand A64GprOperand;
+struct A64GprOperand
+{
+    u8 index;
+    u8 width;
+    bool stack_pointer;
+    u8 reserved;
+};
+
+typedef struct BusterAarch64ArmM1GprOperand BusterAarch64ArmM1GprOperand;
+struct BusterAarch64ArmM1GprOperand
+{
+    u8 width;
+    u8 bit_lsb;
+    u8 register31_role;
+    u8 reserved;
+};
+
+typedef struct BusterAarch64ArmM1GprForm BusterAarch64ArmM1GprForm;
+struct BusterAarch64ArmM1GprForm
+{
+    String8 mnemonic;
+    String8 arm_row_id;
+    u64 arm_row_digest;
+    u32 fixed_mask;
+    u32 fixed_value;
+    TargetCpuFeature required_feature;
+    u8 operand_count;
+    BusterAarch64ArmM1GprOperand operands[4];
+};
+
+BUSTER_F_DECL u32 buster_aarch64_arm_m1_gpr_form_count(void);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_gpr_form(u32 form_index, BusterAarch64ArmM1GprForm* result);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_gpr_target(Target target);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_gpr_find_form(String8 mnemonic, A64GprOperand const* operands, u32 operand_count,
+                                                      u32* form_index);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_gpr_encode(Target target, u32 form_index, A64GprOperand const* operands, u32 operand_count,
+                                                    u32* word);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_gpr_encode_mnemonic(Target target, String8 mnemonic, A64GprOperand const* operands,
+                                                             u32 operand_count, u32* word);
+// Short aliases used by assembler-side code and tests.
+BUSTER_F_DECL bool a64_arm_m1_gpr_find_form(String8 mnemonic, A64GprOperand const* operands, u32 operand_count, u32* form_index);
+BUSTER_F_DECL bool a64_arm_m1_gpr_encode(Target target, u32 form_index, A64GprOperand const* operands, u32 operand_count, u32* word);
+BUSTER_F_DECL bool a64_arm_m1_gpr_encode_mnemonic(Target target, String8 mnemonic, A64GprOperand const* operands, u32 operand_count,
+                                                  u32* word);
+
 // Coverage classification is independent from raw bit-layout completeness.
 // Keep these values aligned with the generated snapshot while exposing a
 // stable public vocabulary to semantic encoder and test layers.

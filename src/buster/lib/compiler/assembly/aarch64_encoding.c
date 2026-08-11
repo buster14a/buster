@@ -1,4 +1,5 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#include <buster/lib/string.h>
 
 #if BUSTER_COMPILER_CLANG
 #pragma clang diagnostic push
@@ -17,6 +18,20 @@
 #endif
 #include <buster/lib/compiler/assembly/generated/aarch64-production-plan.generated.h>
 #include <buster/lib/compiler/assembly/generated/arm-a64-m1-fixed.generated.h>
+#include <buster/lib/compiler/assembly/generated/arm-a64-m1-gpr.generated.h>
+
+BUSTER_CT_CHECK((u32)A64_GPR_REGISTER31_ZR == (u32)BUSTER_AARCH64_ARM_M1_GPR_31_ZR);
+BUSTER_CT_CHECK((u32)A64_GPR_REGISTER31_SP == (u32)BUSTER_AARCH64_ARM_M1_GPR_31_SP);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_GPR_FORM_COUNT == 80);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_GPR_MNEMONIC_COUNT == 63);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_GPR_ARITY_1_COUNT == 18);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_GPR_ARITY_2_COUNT == 23);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_GPR_ARITY_3_COUNT == 31);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_GPR_ARITY_4_COUNT == 8);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_GPR_BASELINE_COUNT == 43);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_GPR_CRC32_COUNT == 8);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_GPR_FLAGM_COUNT == 2);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_GPR_PAUTH_COUNT == 27);
 
 BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_COVERAGE_DIRECT == (u32)BUSTER_AARCH64_GENERATED_COVERAGE_DIRECT);
 BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_COVERAGE_NORMALIZED == (u32)BUSTER_AARCH64_GENERATED_COVERAGE_NORMALIZED);
@@ -671,6 +686,221 @@ bool buster_aarch64_arm_m1_fixed_supported_for_target(BusterAarch64ArmM1FixedSpe
 {
     return buster_aarch64_arm_m1_fixed_target(target) &&
            (fixed.required_feature == TARGET_CPU_FEATURE_NONE || target_cpu_feature_has(target, fixed.required_feature));
+}
+
+BUSTER_GLOBAL_LOCAL char a64_gpr_ascii_lower(char value)
+{
+    return value >= 'A' && value <= 'Z' ? (char)(value + ('a' - 'A')) : value;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_gpr_string_equal(String8 string, char const* literal)
+{
+    if (!string.pointer || !string.length || !literal)
+    {
+        return false;
+    }
+    u64 index = 0;
+    while (literal[index])
+    {
+        if (index >= string.length || a64_gpr_ascii_lower((char)string.pointer[index]) != a64_gpr_ascii_lower(literal[index]))
+        {
+            return false;
+        }
+        index += 1;
+    }
+    return index == string.length;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_gpr_generated_form_valid(BusterAarch64ArmM1GprGeneratedForm const* form)
+{
+    if (!form || !form->mnemonic || !form->arm_row_id || !form->arm_row_digest || !form->operand_count || form->operand_count > 4 ||
+        (form->fixed_value & ~form->fixed_mask) || (form->reserved[0] | form->reserved[1] | form->reserved[2]) ||
+        (form->required_feature != TARGET_CPU_FEATURE_NONE && form->required_feature != TARGET_CPU_FEATURE_AARCH64_CRC &&
+         form->required_feature != TARGET_CPU_FEATURE_AARCH64_FLAGM && form->required_feature != TARGET_CPU_FEATURE_AARCH64_PAUTH))
+    {
+        return false;
+    }
+    u32 used = form->fixed_mask;
+    for (u32 index = 0; index < form->operand_count; index += 1)
+    {
+        BusterAarch64ArmM1GprGeneratedOperand operand = form->operands[index];
+        if ((operand.width != 32 && operand.width != 64) || operand.bit_lsb >= 32 || operand.bit_lsb > 27 || operand.reserved ||
+            (operand.register31_role != BUSTER_AARCH64_ARM_M1_GPR_31_ZR && operand.register31_role != BUSTER_AARCH64_ARM_M1_GPR_31_SP))
+        {
+            return false;
+        }
+        u32 field_mask = UINT32_C(0x1f) << operand.bit_lsb;
+        if (used & field_mask)
+        {
+            return false;
+        }
+        used |= field_mask;
+    }
+    for (u32 index = form->operand_count; index < 4; index += 1)
+    {
+        BusterAarch64ArmM1GprGeneratedOperand operand = form->operands[index];
+        if (operand.width || operand.bit_lsb || operand.register31_role || operand.reserved)
+        {
+            return false;
+        }
+    }
+    // The imported projection is deliberately a full direct-register form:
+    // every non-fixed bit is one of the operand fields.
+    return used == UINT32_MAX;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_gpr_operand_valid(BusterAarch64ArmM1GprGeneratedOperand expected, A64GprOperand actual)
+{
+    if ((actual.width != 32 && actual.width != 64) || actual.index > 31 || actual.reserved || (actual.index != 31 && actual.stack_pointer))
+    {
+        return false;
+    }
+    if (actual.width != expected.width)
+    {
+        return false;
+    }
+    if (actual.index == 31 && (actual.stack_pointer ? A64_GPR_REGISTER31_SP : A64_GPR_REGISTER31_ZR) != expected.register31_role)
+    {
+        return false;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_gpr_target_valid(Target target)
+{
+    return target.cpu_arch == CPU_ARCH_AARCH64 && a64_metadata_target_is_m1_profile(target) && target_cpu_features_are_valid(target);
+}
+
+u32 buster_aarch64_arm_m1_gpr_form_count(void)
+{
+    return BUSTER_AARCH64_ARM_M1_GPR_FORM_COUNT;
+}
+
+bool buster_aarch64_arm_m1_gpr_form(u32 form_index, BusterAarch64ArmM1GprForm* result)
+{
+    if (!result || form_index >= BUSTER_AARCH64_ARM_M1_GPR_FORM_COUNT)
+    {
+        return false;
+    }
+    BusterAarch64ArmM1GprGeneratedForm const* form = buster_aarch64_arm_m1_gpr_generated_forms + form_index;
+    if (!a64_gpr_generated_form_valid(form))
+    {
+        return false;
+    }
+    *result = (BusterAarch64ArmM1GprForm){
+        .mnemonic = string_from_pointer((char8*)form->mnemonic),
+        .arm_row_id = string_from_pointer((char8*)form->arm_row_id),
+        .arm_row_digest = form->arm_row_digest,
+        .fixed_mask = form->fixed_mask,
+        .fixed_value = form->fixed_value,
+        .required_feature = form->required_feature,
+        .operand_count = form->operand_count,
+    };
+    for (u32 index = 0; index < form->operand_count; index += 1)
+    {
+        result->operands[index] = (BusterAarch64ArmM1GprOperand){
+            .width = form->operands[index].width,
+            .bit_lsb = form->operands[index].bit_lsb,
+            .register31_role = form->operands[index].register31_role,
+        };
+    }
+    return true;
+}
+
+bool buster_aarch64_arm_m1_gpr_target(Target target)
+{
+    return a64_gpr_target_valid(target);
+}
+
+bool buster_aarch64_arm_m1_gpr_find_form(String8 mnemonic, A64GprOperand const* operands, u32 operand_count, u32* form_index)
+{
+    if (!form_index || !mnemonic.pointer || !mnemonic.length || operand_count > 4 || (operand_count && !operands))
+    {
+        return false;
+    }
+    u32 found = UINT32_MAX;
+    for (u32 index = 0; index < BUSTER_AARCH64_ARM_M1_GPR_FORM_COUNT; index += 1)
+    {
+        BusterAarch64ArmM1GprGeneratedForm const* form = buster_aarch64_arm_m1_gpr_generated_forms + index;
+        if (!a64_gpr_generated_form_valid(form) || !a64_gpr_string_equal(mnemonic, form->mnemonic) || form->operand_count != operand_count)
+        {
+            continue;
+        }
+        bool match = true;
+        for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
+        {
+            if (!a64_gpr_operand_valid(form->operands[operand_index], operands[operand_index]))
+            {
+                match = false;
+                break;
+            }
+        }
+        if (match)
+        {
+            if (found != UINT32_MAX)
+            {
+                // Distinct rows must differ in width/role/arity.  Treat any
+                // accidental ambiguity as a malformed generated projection.
+                return false;
+            }
+            found = index;
+        }
+    }
+    if (found == UINT32_MAX)
+    {
+        return false;
+    }
+    *form_index = found;
+    return true;
+}
+
+bool buster_aarch64_arm_m1_gpr_encode(Target target, u32 form_index, A64GprOperand const* operands, u32 operand_count, u32* word)
+{
+    if (!word || !a64_gpr_target_valid(target) || form_index >= BUSTER_AARCH64_ARM_M1_GPR_FORM_COUNT)
+    {
+        return false;
+    }
+    BusterAarch64ArmM1GprGeneratedForm const* form = buster_aarch64_arm_m1_gpr_generated_forms + form_index;
+    if (!a64_gpr_generated_form_valid(form) ||
+        (form->required_feature != TARGET_CPU_FEATURE_NONE && !target_cpu_feature_has(target, form->required_feature)) ||
+        operand_count != form->operand_count || (operand_count && !operands))
+    {
+        return false;
+    }
+    u32 result = form->fixed_value;
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        if (!a64_gpr_operand_valid(form->operands[index], operands[index]))
+        {
+            return false;
+        }
+        result |= (u32)operands[index].index << form->operands[index].bit_lsb;
+    }
+    *word = result;
+    return true;
+}
+
+bool buster_aarch64_arm_m1_gpr_encode_mnemonic(Target target, String8 mnemonic, A64GprOperand const* operands, u32 operand_count,
+                                               u32* word)
+{
+    u32 form_index = UINT32_MAX;
+    return buster_aarch64_arm_m1_gpr_find_form(mnemonic, operands, operand_count, &form_index) &&
+           buster_aarch64_arm_m1_gpr_encode(target, form_index, operands, operand_count, word);
+}
+
+bool a64_arm_m1_gpr_find_form(String8 mnemonic, A64GprOperand const* operands, u32 operand_count, u32* form_index)
+{
+    return buster_aarch64_arm_m1_gpr_find_form(mnemonic, operands, operand_count, form_index);
+}
+
+bool a64_arm_m1_gpr_encode(Target target, u32 form_index, A64GprOperand const* operands, u32 operand_count, u32* word)
+{
+    return buster_aarch64_arm_m1_gpr_encode(target, form_index, operands, operand_count, word);
+}
+
+bool a64_arm_m1_gpr_encode_mnemonic(Target target, String8 mnemonic, A64GprOperand const* operands, u32 operand_count, u32* word)
+{
+    return buster_aarch64_arm_m1_gpr_encode_mnemonic(target, mnemonic, operands, operand_count, word);
 }
 
 BusterAarch64MetadataCounts buster_aarch64_metadata_counts(void)

@@ -225,10 +225,22 @@ fixed (`fixed_mask == 0xffffffff`, with no field or unresolved bits). It keeps
 32 canonical rows and the two `PSSBB`/`SSBB` aliases, including each Arm row
 ID, digest, and required target feature for provenance and explicit feature
 subtraction. The manifest records the fixed header's byte count and XXH64 as
-well as the canonical JSONL identity. Regeneration writes all three Arm
-artifacts to the requested output directory.
+well as the canonical JSONL identity.
 
-Regenerate into a separate directory and compare all three output files byte-for-
+It also emits `arm-a64-m1-gpr.generated.h`, a compact direct-register
+projection of the canonical Arm XML. The projection is structurally selected
+from non-system Apple-M1 canonical rows whose templates contain only one to
+four scalar W/X registers (with an optional `|SP` role for register 31), whose
+fields are one contiguous five-bit segment, and whose masks cover all 32 bits.
+The checked-in census is 80 forms, 63 mnemonics, arities 18/23/31/8, and
+feature counts baseline/CRC32/FlagM/PAuth 43/8/2/27. Generated rows preserve
+the visible operand order, fixed mask/value, required target feature, Arm row
+ID, and a deterministic source digest; the runtime encoder does not depend on
+LLVM packed metadata or oracle words. The manifest records this header's
+bytes/XXH64 and semantic census. Regeneration writes all four Arm artifacts to
+the requested output directory.
+
+Regenerate into a separate directory and compare all four output files byte-for-
 byte across two runs:
 
 ```sh
@@ -239,15 +251,16 @@ byte across two runs:
 
 The importer rejects source-tree mutations before emitting artifacts and
 rejects duplicate canonical IDs/digests or unresolved alias targets. Run the
-command twice into separate directories and byte-compare all three generated
+command twice into separate directories and byte-compare all four generated
 files (the SHA-256/FNV source identity, SHA-256 `abc` known vector, bounded
-feature-parser tests, and symmetric-difference gate provide in-process
-verification).
+feature-parser tests, direct-GPR structural census, and symmetric-difference
+gate provide in-process verification).
 
 For a checked-in drift audit, point the importer at the generated directory
 with `BUSTER_ARM_A64_CHECK=1`. This performs the full parse and compares the
-would-be JSONL, manifest, and fixed-spelling header bytes plus the bounded
-canonical README section SHA-256, then exits without writing anything.
+would-be JSONL, manifest, fixed-spelling header, and direct-GPR header bytes
+plus the bounded canonical README section SHA-256, then exits without writing
+anything.
 Unrelated README sections may be edited without changing importer source:
 
 ```sh

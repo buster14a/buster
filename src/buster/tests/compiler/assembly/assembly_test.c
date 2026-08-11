@@ -7,6 +7,99 @@ BUSTER_GLOBAL_LOCAL bool assembly_test_bytes_equal(ByteSlice actual, u8 const* e
                                                                      memcmp(actual.pointer, expected, expected_count) == 0));
 }
 
+// End-to-end direct-GPR corpus.  Sources use ordinary W/X registers (the
+// public encoder matrix below separately exercises register-31 roles), and
+// every expected byte is an independent llvm-mc 22.1.8 literal.
+typedef struct AssemblyA64M1GprCorpusCase AssemblyA64M1GprCorpusCase;
+struct AssemblyA64M1GprCorpusCase
+{
+    String8 source;
+    u8 bytes[4];
+};
+
+static AssemblyA64M1GprCorpusCase const assembly_a64_m1_gpr_corpus[] = {
+    {S8_INITIALIZER("adcs w1, w2, w3\n"), {65, 0, 3, 58}},
+    {S8_INITIALIZER("adcs x1, x2, x3\n"), {65, 0, 3, 186}},
+    {S8_INITIALIZER("adc w1, w2, w3\n"), {65, 0, 3, 26}},
+    {S8_INITIALIZER("adc x1, x2, x3\n"), {65, 0, 3, 154}},
+    {S8_INITIALIZER("asrv w1, w2, w3\n"), {65, 40, 195, 26}},
+    {S8_INITIALIZER("asrv x1, x2, x3\n"), {65, 40, 195, 154}},
+    {S8_INITIALIZER("autda x1, x2\n"), {65, 24, 193, 218}},
+    {S8_INITIALIZER("autdb x1, x2\n"), {65, 28, 193, 218}},
+    {S8_INITIALIZER("autdza x1\n"), {225, 59, 193, 218}},
+    {S8_INITIALIZER("autdzb x1\n"), {225, 63, 193, 218}},
+    {S8_INITIALIZER("autia x1, x2\n"), {65, 16, 193, 218}},
+    {S8_INITIALIZER("autib x1, x2\n"), {65, 20, 193, 218}},
+    {S8_INITIALIZER("autiza x1\n"), {225, 51, 193, 218}},
+    {S8_INITIALIZER("autizb x1\n"), {225, 55, 193, 218}},
+    {S8_INITIALIZER("blraaz x1\n"), {63, 8, 63, 214}},
+    {S8_INITIALIZER("blraa x1, x2\n"), {34, 8, 63, 215}},
+    {S8_INITIALIZER("blrabz x1\n"), {63, 12, 63, 214}},
+    {S8_INITIALIZER("blrab x1, x2\n"), {34, 12, 63, 215}},
+    {S8_INITIALIZER("blr x1\n"), {32, 0, 63, 214}},
+    {S8_INITIALIZER("braaz x1\n"), {63, 8, 31, 214}},
+    {S8_INITIALIZER("braa x1, x2\n"), {34, 8, 31, 215}},
+    {S8_INITIALIZER("brabz x1\n"), {63, 12, 31, 214}},
+    {S8_INITIALIZER("brab x1, x2\n"), {34, 12, 31, 215}},
+    {S8_INITIALIZER("br x1\n"), {32, 0, 31, 214}},
+    {S8_INITIALIZER("cls w1, w2\n"), {65, 20, 192, 90}},
+    {S8_INITIALIZER("cls x1, x2\n"), {65, 20, 192, 218}},
+    {S8_INITIALIZER("clz w1, w2\n"), {65, 16, 192, 90}},
+    {S8_INITIALIZER("clz x1, x2\n"), {65, 16, 192, 218}},
+    {S8_INITIALIZER("crc32b w1, w2, w3\n"), {65, 64, 195, 26}},
+    {S8_INITIALIZER("crc32cb w1, w2, w3\n"), {65, 80, 195, 26}},
+    {S8_INITIALIZER("crc32ch w1, w2, w3\n"), {65, 84, 195, 26}},
+    {S8_INITIALIZER("crc32cw w1, w2, w3\n"), {65, 88, 195, 26}},
+    {S8_INITIALIZER("crc32cx w1, w2, x3\n"), {65, 92, 195, 154}},
+    {S8_INITIALIZER("crc32h w1, w2, w3\n"), {65, 68, 195, 26}},
+    {S8_INITIALIZER("crc32w w1, w2, w3\n"), {65, 72, 195, 26}},
+    {S8_INITIALIZER("crc32x w1, w2, x3\n"), {65, 76, 195, 154}},
+    {S8_INITIALIZER("lslv w1, w2, w3\n"), {65, 32, 195, 26}},
+    {S8_INITIALIZER("lslv x1, x2, x3\n"), {65, 32, 195, 154}},
+    {S8_INITIALIZER("lsrv w1, w2, w3\n"), {65, 36, 195, 26}},
+    {S8_INITIALIZER("lsrv x1, x2, x3\n"), {65, 36, 195, 154}},
+    {S8_INITIALIZER("madd w1, w2, w3, w4\n"), {65, 16, 3, 27}},
+    {S8_INITIALIZER("madd x1, x2, x3, x4\n"), {65, 16, 3, 155}},
+    {S8_INITIALIZER("msub w1, w2, w3, w4\n"), {65, 144, 3, 27}},
+    {S8_INITIALIZER("msub x1, x2, x3, x4\n"), {65, 144, 3, 155}},
+    {S8_INITIALIZER("pacda x1, x2\n"), {65, 8, 193, 218}},
+    {S8_INITIALIZER("pacdb x1, x2\n"), {65, 12, 193, 218}},
+    {S8_INITIALIZER("pacdza x1\n"), {225, 43, 193, 218}},
+    {S8_INITIALIZER("pacdzb x1\n"), {225, 47, 193, 218}},
+    {S8_INITIALIZER("pacga x1, x2, x3\n"), {65, 48, 195, 154}},
+    {S8_INITIALIZER("pacia x1, x2\n"), {65, 0, 193, 218}},
+    {S8_INITIALIZER("pacib x1, x2\n"), {65, 4, 193, 218}},
+    {S8_INITIALIZER("paciza x1\n"), {225, 35, 193, 218}},
+    {S8_INITIALIZER("pacizb x1\n"), {225, 39, 193, 218}},
+    {S8_INITIALIZER("rbit w1, w2\n"), {65, 0, 192, 90}},
+    {S8_INITIALIZER("rbit x1, x2\n"), {65, 0, 192, 218}},
+    {S8_INITIALIZER("rev16 w1, w2\n"), {65, 4, 192, 90}},
+    {S8_INITIALIZER("rev16 x1, x2\n"), {65, 4, 192, 218}},
+    {S8_INITIALIZER("rev32 x1, x2\n"), {65, 8, 192, 218}},
+    {S8_INITIALIZER("rev w1, w2\n"), {65, 8, 192, 90}},
+    {S8_INITIALIZER("rev x1, x2\n"), {65, 12, 192, 218}},
+    {S8_INITIALIZER("rorv w1, w2, w3\n"), {65, 44, 195, 26}},
+    {S8_INITIALIZER("rorv x1, x2, x3\n"), {65, 44, 195, 154}},
+    {S8_INITIALIZER("sbcs w1, w2, w3\n"), {65, 0, 3, 122}},
+    {S8_INITIALIZER("sbcs x1, x2, x3\n"), {65, 0, 3, 250}},
+    {S8_INITIALIZER("sbc w1, w2, w3\n"), {65, 0, 3, 90}},
+    {S8_INITIALIZER("sbc x1, x2, x3\n"), {65, 0, 3, 218}},
+    {S8_INITIALIZER("sdiv w1, w2, w3\n"), {65, 12, 195, 26}},
+    {S8_INITIALIZER("sdiv x1, x2, x3\n"), {65, 12, 195, 154}},
+    {S8_INITIALIZER("setf16 w1\n"), {45, 72, 0, 58}},
+    {S8_INITIALIZER("setf8 w1\n"), {45, 8, 0, 58}},
+    {S8_INITIALIZER("smaddl x1, w2, w3, x4\n"), {65, 16, 35, 155}},
+    {S8_INITIALIZER("smsubl x1, w2, w3, x4\n"), {65, 144, 35, 155}},
+    {S8_INITIALIZER("smulh x1, x2, x3\n"), {65, 124, 67, 155}},
+    {S8_INITIALIZER("udiv w1, w2, w3\n"), {65, 8, 195, 26}},
+    {S8_INITIALIZER("udiv x1, x2, x3\n"), {65, 8, 195, 154}},
+    {S8_INITIALIZER("umaddl x1, w2, w3, x4\n"), {65, 16, 163, 155}},
+    {S8_INITIALIZER("umsubl x1, w2, w3, x4\n"), {65, 144, 163, 155}},
+    {S8_INITIALIZER("umulh x1, x2, x3\n"), {65, 124, 195, 155}},
+    {S8_INITIALIZER("xpacd x1\n"), {225, 71, 193, 218}},
+    {S8_INITIALIZER("xpaci x1\n"), {225, 67, 193, 218}},
+};
+
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2401,6 +2494,60 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_fixed_generic.diagnostic_count == 2 &&
                                aarch64_fixed_generic.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
                                aarch64_fixed_generic.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
+
+    AssemblyEncodeResult aarch64_direct_gpr = assembly_encode(
+        arguments->arena,
+        S8("adcs w1, w2, w3\n"
+           "madd x1, x2, x3, x4\n"
+           "smaddl x1, w2, w3, x4\n"
+           "blraa x1, sp\n"
+           "pacia x1, sp\n"
+           "autiza xzr\n"
+           "setf8 w1\n"
+           "crc32w w1, w2, w3\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    static u8 const expected_aarch64_direct_gpr[] = {
+        0x41, 0x00, 0x03, 0x3a,
+        0x41, 0x10, 0x03, 0x9b,
+        0x41, 0x10, 0x23, 0x9b,
+        0x3f, 0x08, 0x3f, 0xd7,
+        0xe1, 0x03, 0xc1, 0xda,
+        0xff, 0x33, 0xc1, 0xda,
+        0x2d, 0x08, 0x00, 0x3a,
+        0x41, 0x48, 0xc3, 0x1a,
+    };
+    BUSTER_TEST(arguments, aarch64_direct_gpr.diagnostic_count == 0 &&
+                               aarch64_direct_gpr.bytes.length == sizeof(expected_aarch64_direct_gpr) &&
+                               memcmp(aarch64_direct_gpr.bytes.pointer, expected_aarch64_direct_gpr,
+                                      sizeof(expected_aarch64_direct_gpr)) == 0);
+    AssemblyEncodeResult aarch64_direct_gpr_bad = assembly_encode(
+        arguments->arena,
+        S8("madd x1, w2, x3, x4\n"
+           "adcs w31, w2, w3\n"
+           "pacia x1, xzr\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    BUSTER_TEST(arguments, aarch64_direct_gpr_bad.diagnostic_count == 3 && aarch64_direct_gpr_bad.bytes.length == 0);
+    Target aarch64_m1_no_crc = aarch64_m1_explicit_target;
+    aarch64_m1_no_crc.cpu_features = target_cpu_features_remove(aarch64_m1_no_crc.cpu_features, TARGET_CPU_FEATURE_AARCH64_CRC);
+    AssemblyEncodeResult aarch64_direct_gpr_no_crc = assembly_encode(
+        arguments->arena, S8("crc32w w1, w2, w3\n"), (AssemblyEncodeOptions){.target = aarch64_m1_no_crc});
+    BUSTER_TEST(arguments, aarch64_direct_gpr_no_crc.diagnostic_count == 1 &&
+                               aarch64_direct_gpr_no_crc.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    AssemblyEncodeResult aarch64_direct_gpr_no_pauth = assembly_encode(
+        arguments->arena, S8("blraa x1, sp\n"), (AssemblyEncodeOptions){.target = aarch64_m1_no_pauth});
+    BUSTER_TEST(arguments, aarch64_direct_gpr_no_pauth.diagnostic_count == 1 &&
+                               aarch64_direct_gpr_no_pauth.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    AssemblyEncodeResult aarch64_direct_gpr_generic = assembly_encode(
+        arguments->arena, S8("adcs w1, w2, w3\n"), (AssemblyEncodeOptions){.target = aarch64_target});
+    BUSTER_TEST(arguments, aarch64_direct_gpr_generic.diagnostic_count == 1 &&
+                               aarch64_direct_gpr_generic.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_m1_gpr_corpus) == 80);
+    for (u32 corpus_index = 0; corpus_index < BUSTER_ARRAY_LENGTH(assembly_a64_m1_gpr_corpus); corpus_index += 1)
+    {
+        AssemblyA64M1GprCorpusCase const* test_case = assembly_a64_m1_gpr_corpus + corpus_index;
+        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, test_case->source, (AssemblyEncodeOptions){.target = aarch64_m1_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, test_case->bytes, sizeof(test_case->bytes)));
+    }
 
     String8 split_operands[6] = {0};
     u32 split_operand_count = 0;

@@ -328,6 +328,7 @@ struct AssemblyRegister
     u16 width;
     AssemblyRegisterClass class;
     bool high_byte;
+    bool stack_pointer;
 };
 
 typedef struct AssemblyMemory AssemblyMemory;
@@ -380,6 +381,7 @@ typedef enum AssemblyEncodingKind
 {
     ASSEMBLY_ENCODING_HANDWRITTEN,
     ASSEMBLY_ENCODING_AARCH64_FIXED_WORD,
+    ASSEMBLY_ENCODING_AARCH64_M1_GPR,
 } AssemblyEncodingKind;
 
 struct AssemblyInstruction
@@ -405,6 +407,7 @@ struct AssemblyInstruction
     u16 metadata_reserved;
     u32 metadata_form_id;
     u32 fixed_word;
+    u32 aarch64_gpr_form_index;
     String8 metadata_mnemonic;
     u8 metadata_address_size;
     u8 metadata_reserved_address[3];
@@ -597,6 +600,50 @@ BUSTER_GLOBAL_LOCAL bool assembly_word_equal(String8 left, String8 right)
             return false;
         }
     }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_gpr_register_parse(String8 text, AssemblyRegister* result)
+{
+    if (!result || !text.pointer || !text.length)
+    {
+        return false;
+    }
+    text = assembly_trim(text);
+    if (assembly_word_equal(text, S8("sp")) || assembly_word_equal(text, S8("wsp")))
+    {
+        *result = (AssemblyRegister){.index = 31, .width = assembly_word_equal(text, S8("wsp")) ? 32u : 64u,
+                                    .class = ASSEMBLY_REGISTER_GPR, .stack_pointer = true};
+        return true;
+    }
+    if (assembly_word_equal(text, S8("wzr")) || assembly_word_equal(text, S8("xzr")))
+    {
+        *result = (AssemblyRegister){.index = 31, .width = assembly_word_equal(text, S8("wzr")) ? 32u : 64u,
+                                    .class = ASSEMBLY_REGISTER_GPR};
+        return true;
+    }
+    if (text.length < 2 || (assembly_ascii_lower(text.pointer[0]) != 'w' && assembly_ascii_lower(text.pointer[0]) != 'x'))
+    {
+        return false;
+    }
+    u32 index = 0;
+    for (u64 position = 1; position < text.length; position += 1)
+    {
+        char8 value = text.pointer[position];
+        if (value < '0' || value > '9' || index > 31)
+        {
+            return false;
+        }
+        index = index * 10u + (u32)(value - '0');
+    }
+    // Arm's architectural spelling for register 31 is WZR/XZR/WSP/SP.  A
+    // literal W31/X31 is never accepted by this front door.
+    if (index > 30)
+    {
+        return false;
+    }
+    *result = (AssemblyRegister){.index = (u8)index, .width = assembly_ascii_lower(text.pointer[0]) == 'w' ? 32u : 64u,
+                                .class = ASSEMBLY_REGISTER_GPR};
     return true;
 }
 
@@ -2083,7 +2130,34 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
         }
         else
         {
-            return false;
+            // The canonical direct-GPR projection is target-gated. Keep the
+            // mnemonic known even when an explicit feature subtraction later
+            // rejects the selected row, so diagnostics distinguish unsupported
+            // features from malformed operands.
+            if (!buster_aarch64_arm_m1_gpr_target(target)) return false;
+            u32 form_count = buster_aarch64_arm_m1_gpr_form_count();
+            u8 operand_count = 0;
+            bool found = false;
+            for (u32 form_index = 0; form_index < form_count; form_index += 1)
+            {
+                BusterAarch64ArmM1GprForm form = {0};
+                if (!buster_aarch64_arm_m1_gpr_form(form_index, &form) || !assembly_word_equal(mnemonic, form.mnemonic)) continue;
+                if (!found)
+                {
+                    operand_count = form.operand_count;
+                    found = true;
+                }
+                else if (operand_count != form.operand_count)
+                {
+                    return false;
+                }
+            }
+            if (!found) return false;
+            *result = (AssemblyInstructionInfo){
+                .opcode = ASSEMBLY_OPCODE_COUNT,
+                .operand_count = operand_count,
+                .encoding_kind = ASSEMBLY_ENCODING_AARCH64_M1_GPR,
+            };
         }
         return true;
     }
@@ -5820,7 +5894,15 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
             text.pointer += 1;
             text.length -= 1;
         }
-        if (target.cpu_arch == CPU_ARCH_X86_64 && !att_immediate && assembly_register_parse(text, syntax, &operand->reg))
+        if (target.cpu_arch == CPU_ARCH_AARCH64 && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_GPR)
+        {
+            if (!assembly_aarch64_gpr_register_parse(text, &operand->reg))
+            {
+                break;
+            }
+            operand->kind = ASSEMBLY_OPERAND_REGISTER;
+        }
+        else if (target.cpu_arch == CPU_ARCH_X86_64 && !att_immediate && assembly_register_parse(text, syntax, &operand->reg))
         {
             if (syntax == ASSEMBLY_SYNTAX_ATT && branch && !indirect)
             {
@@ -5874,6 +5956,52 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         return;
     }
     instruction.operand_count = parsed_operand_count;
+    if (target.cpu_arch == CPU_ARCH_AARCH64 && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_GPR)
+    {
+        A64GprOperand gpr_operands[4] = {0};
+        if (parsed_operand_count > BUSTER_ARRAY_LENGTH(gpr_operands))
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                (u32)operands.length, S8("invalid instruction operands"));
+            return;
+        }
+        for (u32 operand_index = 0; operand_index < parsed_operand_count; operand_index += 1)
+        {
+            AssemblyOperand operand = instruction.operands[operand_index];
+            if (operand.kind != ASSEMBLY_OPERAND_REGISTER || operand.reg.class != ASSEMBLY_REGISTER_GPR)
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                    (u32)operands.length, S8("invalid instruction operands"));
+                return;
+            }
+            gpr_operands[operand_index] = (A64GprOperand){
+                .index = operand.reg.index,
+                .width = (u8)operand.reg.width,
+                .stack_pointer = operand.reg.stack_pointer,
+            };
+        }
+        u32 form_index = UINT32_MAX;
+        if (!buster_aarch64_arm_m1_gpr_find_form(mnemonic, gpr_operands, parsed_operand_count, &form_index))
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                (u32)operands.length, S8("invalid instruction operands"));
+            return;
+        }
+        BusterAarch64ArmM1GprForm form = {0};
+        if (!buster_aarch64_arm_m1_gpr_form(form_index, &form))
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                (u32)operands.length, S8("invalid instruction operands"));
+            return;
+        }
+        if (form.required_feature != TARGET_CPU_FEATURE_NONE && !target_cpu_feature_has(target, form.required_feature))
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
+                                S8("instruction requires an enabled AArch64 target feature"));
+            return;
+        }
+        instruction.aarch64_gpr_form_index = form_index;
+    }
     if (target.cpu_arch == CPU_ARCH_X86_64 && info.amd_form && syntax == ASSEMBLY_SYNTAX_ATT)
     {
         for (u32 left = 0; left < parsed_operand_count / 2; left += 1)
@@ -6158,7 +6286,8 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
     else
     {
         instruction.size = 4;
-        if (instruction.operand_count && instruction.operands[0].kind != ASSEMBLY_OPERAND_EXPRESSION)
+        if (instruction.encoding_kind != ASSEMBLY_ENCODING_AARCH64_M1_GPR && instruction.operand_count &&
+            instruction.operands[0].kind != ASSEMBLY_OPERAND_EXPRESSION)
         {
             assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
                                 (u32)operands.length, S8("invalid AArch64 operand form"));
@@ -9676,6 +9805,28 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
         if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_FIXED_WORD)
         {
             assembly_emit_u32(builder, instruction->fixed_word);
+            continue;
+        }
+        if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_GPR)
+        {
+            A64GprOperand gpr_operands[4] = {0};
+            for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+            {
+                AssemblyOperand operand = instruction->operands[operand_index];
+                gpr_operands[operand_index] = (A64GprOperand){
+                    .index = operand.reg.index,
+                    .width = (u8)operand.reg.width,
+                    .stack_pointer = operand.reg.stack_pointer,
+                };
+            }
+            u32 word = 0;
+            if (!a64_arm_m1_gpr_encode(builder->target, instruction->aarch64_gpr_form_index, gpr_operands, instruction->operand_count, &word))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
+                                    S8("AArch64 instruction could not be encoded"));
+                return;
+            }
+            assembly_emit_u32(builder, word);
             continue;
         }
         if (instruction->lock_prefix)
