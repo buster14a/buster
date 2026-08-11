@@ -2747,11 +2747,181 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10581, 268, 108, 44, 0, 12, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10585, 268, 108, 40, 0, 12, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
         BUSTER_TEST(arguments, blocker_counts_match);
+
+        // The moffs OVERRIDE_SEG0 cohort is deliberately closed over the
+        // four A0-A3 MOV rows.  MASKMOVQ/MASKMOVDQU carry the same source
+        // token but use an implicit-DI memory topology and must remain
+        // pattern-blocked until that separate schema is modeled.
+        static u32 const moffs_ids[] = {9891, 9892, 9893, 9894};
+        static u32 const implicit_di_ids[] = {10395, 10408};
+        bool moffs_rows_exact = true;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(moffs_ids); index += 1)
+        {
+            u32 form_id = moffs_ids[index];
+            BusterX86MetadataForm form = {0};
+            bool retrieved = buster_x86_metadata_form(form_id, &form);
+            moffs_rows_exact &= retrieved && form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                form.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY &&
+                                x86_64_metadata_test_pattern_has_token(form.pattern, S8("MEMDISPv()")) &&
+                                x86_64_metadata_test_pattern_has_token(form.pattern, S8("OVERRIDE_SEG0()")) &&
+                                ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
+                                ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_NONE && ledger[form_id].encoder_capable;
+        }
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(implicit_di_ids); index += 1)
+        {
+            u32 form_id = implicit_di_ids[index];
+            BusterX86MetadataForm form = {0};
+            bool retrieved = buster_x86_metadata_form(form_id, &form);
+            moffs_rows_exact &= retrieved && form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                x86_64_metadata_test_pattern_has_token(form.pattern, S8("OVERRIDE_SEG0()")) &&
+                                ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
+                                ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS &&
+                                !ledger[form_id].encoder_capable;
+        }
+        u32 moffs_token_count = 0;
+        for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
+        {
+            BusterX86MetadataForm form = {0};
+            if (buster_x86_metadata_form(form_id, &form) &&
+                x86_64_metadata_test_pattern_has_token(form.pattern, S8("MEMDISPv()")))
+                moffs_token_count += 1;
+        }
+        moffs_rows_exact &= moffs_token_count == 4;
+        BUSTER_TEST(arguments, moffs_rows_exact);
+
+        String8 wildcard[1] = {S8("*")};
+        BusterX86MetadataPhysicalOperand moffs8 = {
+            .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+            .width = 8,
+            .memory = {
+                .displacement = INT64_C(0x1122334455667788),
+                .address_size = 64,
+                .scale = 1,
+                .has_displacement = true,
+            },
+        };
+        BusterX86MetadataPhysicalOperand moffs64 = moffs8;
+        moffs64.width = 64;
+        u8 moffs_bytes_a0[] = {0xa0, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11};
+        u8 moffs_bytes_a1[] = {0xa1, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11};
+        u8 moffs_bytes_a2[] = {0xa2, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11};
+        u8 moffs_bytes_a3[] = {0xa3, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11};
+
+        // Exercise the public select/emit front door with an absolute
+        // address outside ModRM's signed-32-bit range.  The source query
+        // has only its visible memory operand; the accumulator and segment
+        // operands are implicit/supplemental in the moffs schema.
+        BusterX86MetadataPhysicalOperand front_moffs = moffs8;
+        front_moffs.memory.has_segment = true;
+        front_moffs.memory.segment = BUSTER_X86_METADATA_SEGMENT_ES;
+        BusterX86MetadataPhysicalQuery front_query = x86_64_metadata_test_physical_query(
+            S8("MOV"), &front_moffs, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard));
+        BusterX86MetadataSelectResult front_selection = buster_x86_metadata_select_form(front_query);
+        BusterX86MetadataPhysicalOperand explicit_moffs[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 8), front_moffs,
+        };
+        BusterX86MetadataPhysicalQuery explicit_query = x86_64_metadata_test_physical_query(
+            S8("MOV"), explicit_moffs, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard));
+        explicit_query.source_semantics = true;
+        BusterX86MetadataSelectResult explicit_selection = buster_x86_metadata_select_form(explicit_query);
+        u8 explicit_bytes[32] = {0};
+        BusterX86MetadataEmitResult explicit_emit = buster_x86_metadata_emit_form(
+            (BusterX86MetadataEmitQuery){.physical = explicit_query, .form_id = 9891, .output = explicit_bytes,
+                                         .output_capacity = BUSTER_ARRAY_LENGTH(explicit_bytes)});
+        u8 front_bytes[16] = {0};
+        BusterX86MetadataRelocation front_relocations[1] = {0};
+        BusterX86MetadataEmitResult front_emit = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = front_query,
+            .form_id = front_selection.form_id,
+            .output = front_bytes,
+            .output_capacity = BUSTER_ARRAY_LENGTH(front_bytes),
+            .relocations = front_relocations,
+            .relocation_capacity = BUSTER_ARRAY_LENGTH(front_relocations),
+        });
+        u8 front_expected[] = {0x26, 0xa0, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11};
+        BUSTER_TEST(arguments, front_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   front_selection.form_id == 9891 && front_selection.candidate_count >= 2 &&
+                                   front_selection.diagnostic_operand == 0 && front_selection.diagnostic_value == 0 &&
+                                   explicit_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   explicit_selection.form_id == 9891 && explicit_selection.candidate_count >= 1 &&
+                                   explicit_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && explicit_emit.byte_count == 10 &&
+                                   front_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && front_emit.byte_count == 10 &&
+                                   front_emit.relocation_count == 0 &&
+                                   front_emit.diagnostic_operand == 0 && front_emit.diagnostic_value == 0 &&
+                                   x86_64_metadata_test_bytes_equal(front_bytes, front_emit.byte_count, front_expected,
+                                                                     BUSTER_ARRAY_LENGTH(front_expected)));
+
+        bool moffs_bytes_exact = x86_64_metadata_test_emit_exact(S8("MOV"), 9891, &moffs8, 1,
+                                                                  (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                  BUSTER_ARRAY_LENGTH(wildcard), moffs_bytes_a0,
+                                                                  BUSTER_ARRAY_LENGTH(moffs_bytes_a0));
+        moffs_bytes_exact &= x86_64_metadata_test_emit_exact(S8("MOV"), 9892, &moffs64, 1,
+                                                             (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                             BUSTER_ARRAY_LENGTH(wildcard), moffs_bytes_a1,
+                                                             BUSTER_ARRAY_LENGTH(moffs_bytes_a1));
+        moffs_bytes_exact &= x86_64_metadata_test_emit_exact(S8("MOV"), 9893, &moffs8, 1,
+                                                             (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                             BUSTER_ARRAY_LENGTH(wildcard), moffs_bytes_a2,
+                                                             BUSTER_ARRAY_LENGTH(moffs_bytes_a2));
+        moffs_bytes_exact &= x86_64_metadata_test_emit_exact(S8("MOV"), 9894, &moffs64, 1,
+                                                             (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                             BUSTER_ARRAY_LENGTH(wildcard), moffs_bytes_a3,
+                                                             BUSTER_ARRAY_LENGTH(moffs_bytes_a3));
+        BUSTER_TEST(arguments, moffs_bytes_exact);
+
+        BusterX86MetadataPhysicalOperand segment_moffs = moffs8;
+        segment_moffs.memory.has_segment = true;
+        segment_moffs.memory.segment = BUSTER_X86_METADATA_SEGMENT_ES;
+        u8 segment_moffs_bytes[] = {0x26, 0xa0, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("MOV"), 9891, &segment_moffs, 1,
+                                                                  (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                  BUSTER_ARRAY_LENGTH(wildcard), segment_moffs_bytes,
+                                                                  BUSTER_ARRAY_LENGTH(segment_moffs_bytes)));
+        BusterX86MetadataEmitResult segment_rep = x86_64_metadata_test_emit_form(
+            S8("MOV"), 9891, &segment_moffs, 1, (BusterX86MetadataPhysicalAttributes){.rep = true}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[32]){0}, 32, 0, 0);
+        BUSTER_TEST(arguments, segment_rep.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION &&
+                                   segment_rep.byte_count == 0 && segment_rep.relocation_count == 0 &&
+                                   segment_rep.diagnostic_operand == 0 && segment_rep.diagnostic_value == 0);
+
+        BusterX86MetadataPhysicalOperand address32_moffs = moffs64;
+        address32_moffs.memory.address_size = 32;
+        address32_moffs.memory.displacement = 0x12345678;
+        BusterX86MetadataPhysicalQuery address32_query = x86_64_metadata_test_physical_query(
+            S8("MOV"), &address32_moffs, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard));
+        address32_query.address_size = 32;
+        u8 address32_bytes[16] = {0};
+        BusterX86MetadataEmitResult address32_emit = buster_x86_metadata_emit_form(
+            (BusterX86MetadataEmitQuery){.physical = address32_query, .form_id = 9892, .output = address32_bytes,
+                                         .output_capacity = BUSTER_ARRAY_LENGTH(address32_bytes)});
+        BUSTER_TEST(arguments, address32_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && address32_emit.byte_count == 6 &&
+                                   x86_64_metadata_test_bytes_equal(address32_bytes, address32_emit.byte_count,
+                                                                     (u8[]){0x67, 0xa1, 0x78, 0x56, 0x34, 0x12}, 6));
+
+        BusterX86MetadataPhysicalOperand symbol_moffs = moffs64;
+        symbol_moffs.memory.displacement = 0;
+        symbol_moffs.memory.addend = 7;
+        symbol_moffs.memory.symbol = S8("moffs_target");
+        symbol_moffs.memory.has_symbol = true;
+        u8 symbol_bytes[16] = {0};
+        BusterX86MetadataRelocation symbol_relocations[2] = {0};
+        BusterX86MetadataEmitResult symbol_emit = x86_64_metadata_test_emit_form(
+            S8("MOV"), 9894, &symbol_moffs, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), symbol_bytes, BUSTER_ARRAY_LENGTH(symbol_bytes), symbol_relocations,
+            BUSTER_ARRAY_LENGTH(symbol_relocations));
+        BUSTER_TEST(arguments, symbol_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && symbol_emit.byte_count == 9 &&
+                                   symbol_emit.relocation_count == 1 && symbol_relocations[0].offset == 1 &&
+                                   symbol_relocations[0].width == 8 &&
+                                   symbol_relocations[0].kind == BUSTER_X86_METADATA_RELOCATION_ABSOLUTE64 &&
+                                   symbol_relocations[0].addend == 7);
 
         // MPXMODE is a deliberately closed raw-pattern cohort.  Keep the
         // snapshot-local IDs and signatures explicit so a regenerated table

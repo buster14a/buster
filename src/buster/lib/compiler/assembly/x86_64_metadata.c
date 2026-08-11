@@ -827,6 +827,14 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_coverage_allowed(BusterX86Gene
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_feature_input_allows_apx(BusterX86MetadataFeatureInput input);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_segment_override(BusterX86MetadataForm form,
                                                                                 BusterX86MetadataPatternSemantics pattern);
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_is_moffs(BusterX86MetadataForm form,
+                                                            BusterX86MetadataPatternSemantics pattern);
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_is_moffs_supplemental(BusterX86MetadataForm form,
+                                                                         BusterX86MetadataPatternSemantics pattern,
+                                                                         BusterX86MetadataOperand metadata);
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_moffs_source_accumulator(BusterX86MetadataPhysicalQuery query,
+                                                                            BusterX86MetadataForm form,
+                                                                            BusterX86MetadataPatternSemantics pattern);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_string_has(BusterX86MetadataString string, String8 needle);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_df64(BusterX86MetadataForm form,
                                                                   BusterX86MetadataPatternSemantics pattern);
@@ -1276,6 +1284,17 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             pattern.has_memory = 1;
             if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("DISPv()"))) pattern.displacement_width = 4;
             else pattern.has_unsupported_token = 1;
+            continue;
+        }
+        if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("MEMDISPv()")))
+        {
+            // moffs encodings carry an absolute offset directly after the
+            // opcode rather than a ModRM displacement.  Keep the source
+            // token typed so the narrow MOV A0-A3 cohort can share the
+            // ordinary memory operand and relocation plumbing without
+            // widening this to implicit-DI forms such as MASKMOV.
+            pattern.displacement_count += 1;
+            pattern.has_memory = 1;
             continue;
         }
         if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("V0F"))) pattern.map = BUSTER_X86_METADATA_MAP_0F;
@@ -2624,6 +2643,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_bind_form(BusterX86MetadataPhy
 {
     BusterX86MetadataPatternSemantics pattern = {0};
     bool pattern_valid = buster_x86_metadata_emit_parse_pattern(form, &pattern);
+    bool moffs_form = pattern_valid && buster_x86_metadata_emit_is_moffs(form, pattern);
+    bool moffs_source_accumulator = pattern_valid &&
+                                    buster_x86_metadata_emit_moffs_source_accumulator(query, form, pattern);
     u32 actual_index = 0;
     u32 count = 0;
     bool form_vsib = (form.field_flags & BUSTER_X86_METADATA_FIELD_VSIB) != 0;
@@ -2649,7 +2671,12 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_bind_form(BusterX86MetadataPhy
         if (!buster_x86_metadata_operand(form.id, operand_index, &metadata)) return false;
         if (pattern_valid)
             metadata.field_source = buster_x86_metadata_emit_effective_field_source_pattern(metadata, pattern);
-        if (!query.include_implicit && !metadata.visible &&
+        bool moffs_fixed_accumulator = moffs_source_accumulator &&
+                                       ((metadata.kind == BUSTER_X86_METADATA_OPERAND_BASE && !metadata.visible) ||
+                                        (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER && !metadata.visible &&
+                                         metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_FIXED));
+        if (moffs_form && buster_x86_metadata_emit_is_moffs_supplemental(form, pattern, metadata) && !moffs_fixed_accumulator) continue;
+        if (!query.include_implicit && !metadata.visible && !moffs_fixed_accumulator &&
             !buster_x86_metadata_emit_explicit_fixed_implicit_operand(query, form, metadata, actual_index))
             continue;
         bool mask_default = buster_x86_metadata_emit_is_writemask_operand(metadata) &&
@@ -2734,6 +2761,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_bind_form(BusterX86MetadataPhy
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_count(BusterX86MetadataPhysicalQuery query,
                                                                       BusterX86MetadataForm form, u32* count)
 {
+    BusterX86MetadataPatternSemantics pattern = {0};
+    bool pattern_valid = buster_x86_metadata_emit_parse_pattern(form, &pattern);
+    bool moffs_form = pattern_valid && buster_x86_metadata_emit_is_moffs(form, pattern);
+    bool moffs_source_accumulator = pattern_valid &&
+                                    buster_x86_metadata_emit_moffs_source_accumulator(query, form, pattern);
     u32 result = 0;
     u32 actual_index = 0;
     bool form_vsib = (form.field_flags & BUSTER_X86_METADATA_FIELD_VSIB) != 0;
@@ -2755,7 +2787,12 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_count(BusterX86Me
     {
         BusterX86MetadataOperand metadata = {0};
         if (!buster_x86_metadata_operand(form.id, operand_index, &metadata)) return false;
-        if (!query.include_implicit && !metadata.visible &&
+        bool moffs_fixed_accumulator = moffs_source_accumulator &&
+                                       ((metadata.kind == BUSTER_X86_METADATA_OPERAND_BASE && !metadata.visible) ||
+                                        (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER && !metadata.visible &&
+                                         metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_FIXED));
+        if (moffs_form && buster_x86_metadata_emit_is_moffs_supplemental(form, pattern, metadata) && !moffs_fixed_accumulator) continue;
+        if (!query.include_implicit && !metadata.visible && !moffs_fixed_accumulator &&
             !buster_x86_metadata_emit_explicit_fixed_implicit_operand(query, form, metadata, actual_index))
             continue;
         bool mask_default = buster_x86_metadata_emit_is_writemask_operand(metadata) &&
@@ -2860,6 +2897,45 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_equal(BusterX86MetadataSt
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_is_moffs(BusterX86MetadataForm form,
+                                                            BusterX86MetadataPatternSemantics pattern)
+{
+    // The source snapshot uses MEMDISPv() for the four legacy MOV moffs
+    // forms.  Keep this predicate deliberately closed: MASKMOV has an
+    // implicit DI memory operand and must not inherit moffs' absolute-offset
+    // path merely because it also carries OVERRIDE_SEG0().
+    return buster_x86_metadata_string_input_equal(form.iclass.offset, S8("MOV")) && pattern.opcode_count == 1 &&
+           pattern.opcode[0] >= 0xa0 && pattern.opcode[0] <= 0xa3 && pattern.has_memory && !pattern.has_modrm &&
+           !pattern.has_sib && pattern.displacement_count == 1 && !pattern.immediate_count && !pattern.relative_count;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_is_moffs_supplemental(BusterX86MetadataForm form,
+                                                                         BusterX86MetadataPatternSemantics pattern,
+                                                                         BusterX86MetadataOperand metadata)
+{
+    return buster_x86_metadata_emit_is_moffs(form, pattern) &&
+           (metadata.kind == BUSTER_X86_METADATA_OPERAND_BASE || metadata.kind == BUSTER_X86_METADATA_OPERAND_SEGMENT ||
+            metadata.kind == BUSTER_X86_METADATA_OPERAND_PSEUDO ||
+            (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER && !metadata.visible &&
+             metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_FIXED));
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_moffs_source_accumulator(BusterX86MetadataPhysicalQuery query,
+                                                                            BusterX86MetadataForm form,
+                                                                            BusterX86MetadataPatternSemantics pattern)
+{
+    // The public physical API normally supplies visible operands only.  The
+    // assembly front door also retains the explicitly written accumulator for
+    // MOV moffs, so bind exactly one extra register to the schema's fixed BASE
+    // operand while leaving the ordinary metadata query contract unchanged.
+    if (!query.source_semantics || !buster_x86_metadata_emit_is_moffs(form, pattern) || query.operand_count != 2 || !query.operands)
+        return false;
+    return (query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+            query.operands[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY) ||
+           (query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+            query.operands[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER);
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_segment_override(BusterX86MetadataForm form,
                                                                                 BusterX86MetadataPatternSemantics pattern)
 {
@@ -2871,7 +2947,14 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_segment_override(Bus
                          ((pattern.opcode[0] >= 0xA4 && pattern.opcode[0] <= 0xA7) ||
                           (pattern.opcode[0] >= 0xAA && pattern.opcode[0] <= 0xAF) ||
                           (pattern.opcode[0] >= 0x6C && pattern.opcode[0] <= 0x6F));
-    if ((!string_category || !string_opcode) && !xlat) return false;
+    if (!buster_x86_metadata_emit_is_moffs(form, pattern) && ((!string_category || !string_opcode) && !xlat)) return false;
+    if (buster_x86_metadata_emit_is_moffs(form, pattern))
+    {
+        // moffs has no ModRM/SIB or trailing fields; its one displacement is
+        // written directly after the opcode by the byte emitter below.
+        return !pattern.trailing_count && !pattern.has_modrm && !pattern.has_sib && pattern.displacement_count == 1 &&
+               !pattern.immediate_count && !pattern.relative_count;
+    }
     if (pattern.trailing_count || pattern.has_modrm || pattern.has_sib || pattern.displacement_count ||
         pattern.immediate_count || pattern.relative_count || !pattern.has_memory)
         return false;
@@ -4046,6 +4129,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     BusterX86MetadataPatternSemantics pattern = {0};
     if (!buster_x86_metadata_emit_parse_pattern(form, &pattern)) return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
     if (pattern.unresolved_blocker) return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
+    bool moffs_form = buster_x86_metadata_emit_is_moffs(form, pattern);
     if (query.attributes.branch_hint != BUSTER_X86_METADATA_BRANCH_HINT_NONE && !pattern.has_branch_hint_control)
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if (pattern.has_branch_hint_control && (query.attributes.lock || query.attributes.rep || query.attributes.repne))
@@ -4235,9 +4319,26 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
             return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
         if (!memory.address_size) memory.address_size = query.address_size ? query.address_size : 64;
         bool address32_absolute = memory.address_size == 32 && !memory.rip_relative && !memory.has_base;
-        if (!memory.has_symbol && (memory.rip_relative || !memory.has_base) &&
+        if (moffs_form)
+        {
+            // moffs is an absolute offset, not a ModRM address.  Its width
+            // follows the selected address size, and base/index/RIP-relative
+            // shapes are deliberately rejected so this path cannot widen to
+            // the implicit-DI MASKMOV rows.
+            if ((memory.address_size != 16 && memory.address_size != 32 && memory.address_size != 64) ||
+                memory.has_base || memory.has_index || memory.rip_relative || memory.vsib || memory.scale > 1)
+                return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
+        }
+        if (!moffs_form && !memory.has_symbol && (memory.rip_relative || !memory.has_base) &&
             (memory.displacement < INT32_MIN ||
              (address32_absolute ? memory.displacement > (s64)UINT32_MAX : memory.displacement > INT32_MAX)))
+        {
+            if (diagnostic_value) *diagnostic_value = memory.displacement;
+            return BUSTER_X86_METADATA_ENCODE_DISPLACEMENT_RANGE;
+        }
+        if (moffs_form && !memory.has_symbol && memory.address_size != 64 &&
+            (memory.displacement < 0 ||
+             (memory.address_size == 16 ? memory.displacement > UINT16_MAX : memory.displacement > (s64)UINT32_MAX)))
         {
             if (diagnostic_value) *diagnostic_value = memory.displacement;
             return BUSTER_X86_METADATA_ENCODE_DISPLACEMENT_RANGE;
@@ -4269,7 +4370,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     if (uses_apx_egpr && !buster_x86_metadata_feature_input_allows_apx(query.features))
         return BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
     BusterX86MetadataAddressEncoding address = {0};
-    if (has_memory && !buster_x86_metadata_emit_address(memory, form, pattern, &address))
+    if (has_memory && !moffs_form && !buster_x86_metadata_emit_address(memory, form, pattern, &address))
         return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
 
     // The register-register 0x87 XCHG form is schema-proven symmetric:
@@ -4652,6 +4753,19 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     for (u32 index = opcode_start; index < pattern.opcode_count; index += 1)
     {
         if (!buster_x86_metadata_emit_write_byte(scratch, pattern.opcode[index])) return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
+    }
+    if (moffs_form)
+    {
+        u8 width = (u8)(memory.address_size / 8);
+        if (memory.has_symbol)
+        {
+            u8 kind = buster_x86_metadata_emit_absolute_address_relocation_kind(width, memory.address_size == 32);
+            if (!buster_x86_metadata_emit_relocation(scratch, memory.symbol, kind, width, memory_relocation_addend))
+                return BUSTER_X86_METADATA_ENCODE_RELOCATION_CAPACITY;
+            if (!buster_x86_metadata_emit_write_le(scratch, 0, width)) return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
+        }
+        else if (!buster_x86_metadata_emit_write_le(scratch, (u64)memory.displacement, width))
+            return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
     }
     if (pattern.has_modrm)
     {
@@ -5269,6 +5383,7 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_coverage_structural_blocker(BusterX86
     if (!buster_x86_metadata_emit_parse_pattern(form, &pattern)) return BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
     if (!pattern.opcode_count) return BUSTER_X86_METADATA_BLOCKER_OPCODE_FIELDS;
     if (pattern.unresolved_blocker) return pattern.unresolved_blocker;
+    bool moffs_form = buster_x86_metadata_emit_is_moffs(form, pattern);
     u8 control_blocker = buster_x86_metadata_emit_pattern_control_blocker(form, pattern);
     if (control_blocker != BUSTER_X86_METADATA_BLOCKER_NONE) return control_blocker;
     if (pattern.immediate_count > BUSTER_ARRAY_LENGTH(pattern.immediate_widths) || pattern.relative_count > 1)
@@ -5280,6 +5395,7 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_coverage_structural_blocker(BusterX86
     {
         BusterX86MetadataOperand operand = {0};
         if (!buster_x86_metadata_operand(form.id, operand_index, &operand)) return BUSTER_X86_METADATA_BLOCKER_OPERAND_SEMANTICS;
+        if (moffs_form && buster_x86_metadata_emit_is_moffs_supplemental(form, pattern, operand)) continue;
         if (pattern.no_vector_source && buster_x86_metadata_emit_effective_field_source(operand) == BUSTER_X86_METADATA_FIELD_SOURCE_VVVV)
             return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
         if (!operand.visible) continue;
@@ -5395,6 +5511,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_canonical_query(BusterX86M
 {
     BusterX86MetadataPatternSemantics pattern = {0};
     if (!buster_x86_metadata_emit_parse_pattern(form, &pattern) || pattern.unresolved_blocker) return false;
+    bool moffs_form = buster_x86_metadata_emit_is_moffs(form, pattern);
     if (form.iclass.length >= 128) return false;
     for (u32 index = 0; index < form.iclass.length; index += 1)
     {
@@ -5411,6 +5528,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_canonical_query(BusterX86M
     {
         BusterX86MetadataOperand metadata = {0};
         if (!buster_x86_metadata_operand(form.id, operand_index, &metadata)) return false;
+        if (moffs_form && buster_x86_metadata_emit_is_moffs_supplemental(form, pattern, metadata)) continue;
         if (!metadata.visible) continue;
         if (operand_count >= 16) return false;
         if (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER)
@@ -5431,10 +5549,10 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_canonical_query(BusterX86M
             BusterX86MetadataPhysicalMemory memory = {
                 .address_size = address_size,
                 .scale = 1,
-                .has_base = true,
+                .has_base = !moffs_form,
                 .has_index = vsib,
                 .vsib = vsib,
-                .has_displacement = (form.field_flags & BUSTER_X86_METADATA_FIELD_DISPLACEMENT) != 0,
+                .has_displacement = moffs_form || (form.field_flags & BUSTER_X86_METADATA_FIELD_DISPLACEMENT) != 0,
                 .base = {.index = 0, .width = address_size, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
             };
             // BNDLDX/BNDSTX carry three distinct fixed ModRM modes.  Their

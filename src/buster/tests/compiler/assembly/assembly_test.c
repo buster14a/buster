@@ -367,6 +367,27 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                x86_absolute_memory.relocations[0].addend == 8 &&
                                x86_absolute_memory.relocations[0].kind == ASSEMBLY_RELOCATION_X86_32);
 
+    // MOV moffs is the one legacy absolute-memory encoding whose accumulator
+    // is implicit in the opcode.  Keep the accumulator written in source so
+    // the assembly front door binds AL/RAX and direction to A0/A2 exactly;
+    // the 64-bit address is deliberately outside ModRM's signed-32 range.
+    String8 x86_moffs_source =
+        S8("mov al, byte ptr es:[0x155667788]\n"
+           "mov byte ptr es:[0x155667788], al\n");
+    AssemblyEncodeResult x86_moffs = assembly_encode(
+        arguments->arena, x86_moffs_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_x86_moffs[] = {
+        0x26, 0xa0, 0x88, 0x77, 0x66, 0x55, 0x01, 0x00, 0x00, 0x00,
+        0x26, 0xa2, 0x88, 0x77, 0x66, 0x55, 0x01, 0x00, 0x00, 0x00,
+    };
+    BUSTER_TEST(arguments, x86_moffs.diagnostic_count == 0 &&
+                               x86_moffs.bytes.length == sizeof(expected_x86_moffs) &&
+                               memcmp(x86_moffs.bytes.pointer, expected_x86_moffs, sizeof(expected_x86_moffs)) == 0);
+    AssemblyEncodeResult x86_moffs_wrong_accumulator = assembly_encode(
+        arguments->arena, S8("mov bl, byte ptr es:[0x155667788]\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_moffs_wrong_accumulator.diagnostic_count != 0 && x86_moffs_wrong_accumulator.bytes.length == 0);
+
     u8 expected_x86_adc_sbb[] = {
         0x10, 0xd8,
         0x66, 0x11, 0xc8,
