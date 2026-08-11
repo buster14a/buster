@@ -4892,8 +4892,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
         {
             return result;
         }
-        bool function_symbol = (kind == 0 && (reference_kind == 1 || reference_kind == 5)) ||
-                               (kind == 0x0e && section_kinds[section_number - 1] == OBJECT_SECTION_TEXT);
+        // Undefined symbols are intrinsically ambiguous until a relocation
+        // proves their use as a function.  PAGE/PAGEOFF references can name
+        // either a function address or data, so only a BRANCH26 relocation
+        // below upgrades an undefined symbol to OBJECT_SYMBOL_FUNCTION.
+        bool function_symbol = kind == 0x0e && section_kinds[section_number - 1] == OBJECT_SECTION_TEXT;
         result.symbols[destination_index] = (ObjectSymbol){
             .name = string_duplicate_arena(arena, name, false),
             .value = section_value,
@@ -9129,14 +9132,12 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
         object_write_u32_at(&buffer, offset, symbol_name_offsets[symbol]);
         buffer.bytes[offset + 4] = source->section == OBJECT_SECTION_UNDEFINED ? 0x01 : (u8)(0x0e | (source->global ? 1 : 0));
         buffer.bytes[offset + 5] = source->section == OBJECT_SECTION_UNDEFINED ? 0 : (u8)(source->section + 1);
-        // Preserve the standard Mach-O reference kind: lazy undefined
-        // symbols are function imports, non-lazy undefined symbols remain
-        // data, and all defined symbols use REFERENCE_FLAG_DEFINED (2).
-        // Mach-O has no separate defined-function bit; the reader uses the
-        // canonical __text section to retain the object model's function kind.
-        u16 reference_kind = source->section == OBJECT_SECTION_UNDEFINED
-                                 ? (source->kind == OBJECT_SYMBOL_FUNCTION ? 1 : 0)
-                                 : 2;
+        // Undefined symbols use REFERENCE_FLAG_UNDEFINED_NON_LAZY (0).
+        // REFERENCE_FLAG_UNDEFINED_LAZY (1) is reserved for symbols reached
+        // through a lazy-symbol-pointer section, which this object model does
+        // not synthesize.  Mach-O has no separate defined-function bit; the
+        // reader uses the canonical __text section to retain that kind.
+        u16 reference_kind = source->section == OBJECT_SECTION_UNDEFINED ? 0 : 2;
         object_write_u16_at(&buffer, offset + 6, reference_kind);
         object_write_u64_at(&buffer, offset + 8, source->value + (source->section == OBJECT_SECTION_UNDEFINED ? 0 : section_addresses[source->section]));
     }

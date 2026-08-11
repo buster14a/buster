@@ -2514,6 +2514,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                     .length = sizeof(aarch64_mach_function_roundtrip_instructions)},
         aarch64_mach_function_roundtrip_symbols, BUSTER_ARRAY_LENGTH(aarch64_mach_function_roundtrip_symbols),
         aarch64_mach_function_roundtrip_relocations, BUSTER_ARRAY_LENGTH(aarch64_mach_function_roundtrip_relocations));
+    NativeExecutableLinkResult aarch64_mach_function_in_memory_link = link_native_executable(
+        arguments->arena, &aarch64_mach_function_roundtrip_object, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    BUSTER_TEST(arguments, aarch64_mach_function_in_memory_link.error == LINK_ERROR_NONE);
     ObjectArtifact aarch64_mach_function_roundtrip_artifact =
         object_write(arguments->arena, &aarch64_mach_function_roundtrip_object, OBJECT_FORMAT_MACH_O64);
     ObjectFile aarch64_mach_function_roundtrip_read = object_read(
@@ -2522,10 +2525,10 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_mach_function_roundtrip_artifact.error == OBJECT_ERROR_NONE &&
                                aarch64_mach_function_roundtrip_read.error == OBJECT_ERROR_NONE &&
                                aarch64_mach_function_roundtrip_read.symbol_count >= 2 &&
-                               aarch64_mach_function_roundtrip_read.symbols[1].kind == OBJECT_SYMBOL_FUNCTION);
+                               aarch64_mach_function_roundtrip_read.symbols[1].kind == OBJECT_SYMBOL_DATA);
     NativeExecutableLinkResult aarch64_mach_function_roundtrip_link = link_native_executable(
         arguments->arena, &aarch64_mach_function_roundtrip_read, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
-    BUSTER_TEST(arguments, aarch64_mach_function_roundtrip_link.error == LINK_ERROR_NONE);
+    BUSTER_TEST(arguments, aarch64_mach_function_roundtrip_link.error != LINK_ERROR_NONE);
     aarch64_mach_function_roundtrip_symbols[1].kind = OBJECT_SYMBOL_DATA;
     ObjectArtifact aarch64_mach_data_roundtrip_artifact =
         object_write(arguments->arena, &aarch64_mach_function_roundtrip_object, OBJECT_FORMAT_MACH_O64);
@@ -2539,6 +2542,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                aarch64_mach_data_roundtrip_read.symbols[1].kind == OBJECT_SYMBOL_DATA &&
                                aarch64_mach_data_roundtrip_link.error != LINK_ERROR_NONE);
     aarch64_mach_function_roundtrip_symbols[1].kind = OBJECT_SYMBOL_FUNCTION;
+    aarch64_mach_function_roundtrip_read.symbols[1].kind = OBJECT_SYMBOL_FUNCTION;
     aarch64_mach_function_roundtrip_read.relocations[0].addend = INT64_MAX;
     NativeExecutableLinkResult aarch64_mach_page_overflow = link_native_executable(
         arguments->arena, &aarch64_mach_function_roundtrip_read, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
@@ -2548,6 +2552,37 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         arguments->arena, &aarch64_mach_function_roundtrip_read, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
     BUSTER_TEST(arguments, aarch64_mach_page_underflow.error == LINK_ERROR_RELOCATION);
     aarch64_mach_function_roundtrip_read.relocations[0].addend = 0;
+
+    // A serialized PAGE-only reference remains ambiguous, but a coexisting
+    // BRANCH26 relocation safely upgrades the imported symbol to a function.
+    u32 saved_branch_assisted_instruction = aarch64_mach_function_roundtrip_instructions[2];
+    ObjectRelocation aarch64_mach_branch_assisted_relocations[] = {
+        aarch64_mach_function_roundtrip_relocations[0],
+        aarch64_mach_function_roundtrip_relocations[1],
+        {
+            .offset = 2 * sizeof(u32),
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 1,
+            .kind = OBJECT_RELOCATION_AARCH64_CALL26,
+        },
+    };
+    aarch64_mach_function_roundtrip_instructions[2] = UINT32_C(0x94000000);
+    ObjectFile aarch64_mach_branch_assisted_object = aarch64_mach_function_roundtrip_object;
+    aarch64_mach_branch_assisted_object.relocations = aarch64_mach_branch_assisted_relocations;
+    aarch64_mach_branch_assisted_object.relocation_count = BUSTER_ARRAY_LENGTH(aarch64_mach_branch_assisted_relocations);
+    ObjectArtifact aarch64_mach_branch_assisted_artifact =
+        object_write(arguments->arena, &aarch64_mach_branch_assisted_object, OBJECT_FORMAT_MACH_O64);
+    ObjectFile aarch64_mach_branch_assisted_read = object_read(
+        arguments->arena, aarch64_mach_branch_assisted_artifact.bytes,
+        (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS});
+    BUSTER_TEST(arguments, aarch64_mach_branch_assisted_artifact.error == OBJECT_ERROR_NONE &&
+                               aarch64_mach_branch_assisted_read.error == OBJECT_ERROR_NONE &&
+                               aarch64_mach_branch_assisted_read.symbol_count >= 2 &&
+                               aarch64_mach_branch_assisted_read.symbols[1].kind == OBJECT_SYMBOL_FUNCTION);
+    NativeExecutableLinkResult aarch64_mach_branch_assisted_link = link_native_executable(
+        arguments->arena, &aarch64_mach_branch_assisted_read, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    BUSTER_TEST(arguments, aarch64_mach_branch_assisted_link.error == LINK_ERROR_NONE);
+    aarch64_mach_function_roundtrip_instructions[2] = saved_branch_assisted_instruction;
 
     // PAGE21/PAGEOFF12 are independent fixups.  Exercise LLVM's unsigned
     // LD/ST scaling (including Q registers), non-matching ADD registers,

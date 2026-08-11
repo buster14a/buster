@@ -709,7 +709,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         }
     }
     BUSTER_TEST(arguments, aarch64_mach_n_desc_valid && aarch64_mach_n_desc[0] == 2 && aarch64_mach_n_desc[1] == 2 &&
-                               aarch64_mach_n_desc[2] == 2 && aarch64_mach_n_desc[3] == 1 && aarch64_mach_n_desc[4] == 2);
+                               aarch64_mach_n_desc[2] == 2 && aarch64_mach_n_desc[3] == 0 && aarch64_mach_n_desc[4] == 2);
     u32 aarch64_jump_instruction = UINT32_C(0x14000000);
     memcpy(aarch64_text + 4, &aarch64_jump_instruction, sizeof(aarch64_jump_instruction));
     relocation.kind = OBJECT_RELOCATION_AARCH64_JUMP26;
@@ -967,7 +967,9 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     if (direct_page_roundtrip.error == OBJECT_ERROR_NONE && direct_page_roundtrip.relocation_count == 2)
     {
         BUSTER_TEST(arguments, direct_page_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 &&
-                                   direct_page_roundtrip.relocations[1].kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12);
+                                   direct_page_roundtrip.relocations[1].kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 &&
+                                   direct_page_roundtrip.symbol_count >= 1 &&
+                                   direct_page_roundtrip.symbols[0].kind == OBJECT_SYMBOL_DATA);
         BUSTER_TEST(arguments, direct_page_roundtrip.relocations[0].offset == 0 && direct_page_roundtrip.relocations[1].offset == sizeof(u32));
     }
     u64 direct_page_symbol_offset = object_test_mach_symbol_offset(direct_page_mach.bytes, 0);
@@ -976,7 +978,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     {
         memcpy(&direct_page_n_desc, direct_page_mach.bytes.pointer + direct_page_symbol_offset + 6, sizeof(direct_page_n_desc));
     }
-    BUSTER_TEST(arguments, direct_page_n_desc == 1);
+    BUSTER_TEST(arguments, direct_page_n_desc == 0);
     ObjectArtifact unknown_reference_kind = object_write(arguments->arena, &direct_page_object, OBJECT_FORMAT_MACH_O64);
     u64 unknown_reference_symbol = object_test_mach_symbol_offset(unknown_reference_kind.bytes, 0);
     if (unknown_reference_symbol != UINT64_MAX && unknown_reference_symbol + 8 <= unknown_reference_kind.bytes.length)
