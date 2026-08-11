@@ -2189,7 +2189,8 @@ static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, const
     arena_append_string8(output, S8(", \"xxh64\": ")); arm_a64_json_hex(output, artifact_hash); arena_append_string8(output, S8("},\n"));
     arena_append_string8(output, S8("  \"fixed_spelling_artifact\": {\"file\": \"arm-a64-m1-fixed.generated.h\", \"bytes\": "));
     arm_a64_append_u64(output, fixed_header_bytes);
-    arena_append_string8(output, S8(", \"xxh64\": ")); arm_a64_json_hex(output, fixed_header_hash); arena_append_string8(output, S8("},\n"));
+    arena_append_string8(output, S8(", \"xxh64\": ")); arm_a64_json_hex(output, fixed_header_hash);
+    arena_append_string8(output, S8(", \"count\": 34, \"canonical\": 32, \"alias\": 2, \"system\": 17, \"non_system\": 17},\n"));
     arena_append_string8(output, S8("  \"symmetric_difference\": {\"count\": 33, \"excluded_pauth_lr\": 17, \"included_special\": 16, \"inventory\": ["));
     static const char* excluded[] = {"AUTIA171615_64LR_dp_1src","AUTIASPPCR_64LRR_dp_1src","AUTIASPPC_only_dp_1src_imm","AUTIB171615_64LR_dp_1src","AUTIBSPPCR_64LRR_dp_1src","AUTIBSPPC_only_dp_1src_imm","PACIA171615_64LR_dp_1src","PACIASPPC_64LR_dp_1src","PACIB171615_64LR_dp_1src","PACIBSPPC_64LR_dp_1src","PACM_HI_hints","PACNBIASPPC_64LR_dp_1src","PACNBIBSPPC_64LR_dp_1src","RETAASPPCR_64M_branch_reg","RETABSPPCR_64M_branch_reg","RETAASPPC_only_miscbranch","RETABSPPC_only_miscbranch"};
     static const char* included[] = {"ESB_HI_hints","CFP_SYS_CR_systeminstrs","CPP_SYS_CR_systeminstrs","DVP_SYS_CR_systeminstrs","SHA1C_QSV_cryptosha3","SHA1H_SS_cryptosha2","SHA1M_QSV_cryptosha3","SHA1P_QSV_cryptosha3","SHA1SU0_VVV_cryptosha3","SHA1SU1_VV_cryptosha2","SHA512H2_QQV_cryptosha512_3","SHA512H_QQV_cryptosha512_3","SHA512SU0_VV2_cryptosha512_2","SHA512SU1_VVV2_cryptosha512_3","AXFLAG_M_pstate","XAFLAG_M_pstate"};
