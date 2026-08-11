@@ -3,6 +3,9 @@
 
 #if BUSTER_INCLUDE_TESTS
 
+BUSTER_F_DECL bool buster_aarch64_syntax_test_generated_row_fields_valid(u32 index, u32 encoding_offset,
+                                                                          u32 encoding_length);
+
 typedef struct Aarch64SyntaxTestRows Aarch64SyntaxTestRows;
 struct Aarch64SyntaxTestRows
 {
@@ -93,6 +96,48 @@ UnitTestResult aarch64_syntax_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !buster_aarch64_syntax_row(counts.row_count, &first));
     BUSTER_TEST(arguments, !buster_aarch64_syntax_node(counts.node_count, (BusterAarch64SyntaxNode*)&first));
     BUSTER_TEST(arguments, !buster_aarch64_syntax_string(counts.string_pool_bytes, 1, &first.assembly));
+    BUSTER_TEST(arguments, buster_aarch64_syntax_test_generated_row_fields_valid(0, counts.string_pool_bytes, 0));
+    BUSTER_TEST(arguments, counts.string_pool_bytes != 0 &&
+                         buster_aarch64_syntax_test_generated_row_fields_valid(0, counts.string_pool_bytes - 1, 1));
+    BUSTER_TEST(arguments, counts.string_pool_bytes != UINT32_MAX &&
+                         !buster_aarch64_syntax_test_generated_row_fields_valid(0, counts.string_pool_bytes + 1, 0));
+    BUSTER_TEST(arguments, counts.string_pool_bytes != UINT32_MAX &&
+                         !buster_aarch64_syntax_test_generated_row_fields_valid(0, 0, counts.string_pool_bytes + 1));
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_test_generated_row_fields_valid(0, UINT32_MAX, 0));
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_test_generated_row_fields_valid(0, UINT32_MAX - 1, 2));
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_test_generated_row_fields_valid(0, 0, UINT32_MAX));
+    BusterAarch64SyntaxRow rejected_row = first;
+    BusterAarch64SyntaxRow rejected_row_before = rejected_row;
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_row(counts.row_count, &rejected_row) &&
+                         memcmp(&rejected_row, &rejected_row_before, sizeof(rejected_row)) == 0);
+    BusterAarch64SyntaxCapture rejected_captures[1] = {{.spelling = S8("row-sentinel")}};
+    BusterAarch64SyntaxCapture rejected_captures_before[1];
+    memcpy(rejected_captures_before, rejected_captures, sizeof(rejected_captures_before));
+    BusterAarch64SyntaxChoice rejected_choices[1] = {{.node_index = 17, .value = 23}};
+    BusterAarch64SyntaxChoice rejected_choices_before[1];
+    memcpy(rejected_choices_before, rejected_choices, sizeof(rejected_choices_before));
+    BusterAarch64SyntaxMatchResult rejected_match = {
+        .captures = rejected_captures, .capture_capacity = 1, .capture_count = 1,
+        .choices = rejected_choices, .choice_capacity = 1, .choice_count = 1, .consumed = 31,
+    };
+    BusterAarch64SyntaxMatchResult rejected_match_before = rejected_match;
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(counts.row_count, first.assembly, &rejected_match) &&
+                         rejected_match.capture_count == rejected_match_before.capture_count &&
+                         rejected_match.choice_count == rejected_match_before.choice_count &&
+                         rejected_match.consumed == rejected_match_before.consumed &&
+                         memcmp(rejected_captures, rejected_captures_before, sizeof(rejected_captures)) == 0 &&
+                         memcmp(rejected_choices, rejected_choices_before, sizeof(rejected_choices)) == 0);
+    char8 rejected_output_bytes[16];
+    memset(rejected_output_bytes, 0x5c, sizeof(rejected_output_bytes));
+    char8 rejected_output_before[16];
+    memcpy(rejected_output_before, rejected_output_bytes, sizeof(rejected_output_before));
+    BusterAarch64SyntaxOutput rejected_output = {
+        .pointer = rejected_output_bytes, .length = 3, .capacity = sizeof(rejected_output_bytes),
+    };
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_print_row(counts.row_count, (BusterAarch64SyntaxPrintRequest){0},
+                                                             &rejected_output) &&
+                         rejected_output.length == 3 &&
+                         memcmp(rejected_output_bytes, rejected_output_before, sizeof(rejected_output_bytes)) == 0);
     BusterAarch64SyntaxMnemonicRange nop_range = {0};
     BUSTER_TEST(arguments, buster_aarch64_syntax_mnemonic_lookup(S8("aDd"), &nop_range) && nop_range.candidate_count != 0);
     BUSTER_TEST(arguments, !buster_aarch64_syntax_mnemonic_lookup(S8("not-a-mnemonic"), &nop_range));

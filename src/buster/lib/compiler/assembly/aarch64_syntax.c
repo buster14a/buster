@@ -290,18 +290,38 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_generated_node_valid(u32 index)
            node.child_count <= BUSTER_AARCH64_SYNTAX_GENERATED_CHILD_INDEX_COUNT - node.child_first;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_generated_row_fields_valid(BusterAarch64SyntaxGeneratedRow row);
+
 BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_generated_row_valid(u32 index)
 {
     if (index >= BUSTER_AARCH64_SYNTAX_GENERATED_ROW_COUNT) return false;
     BusterAarch64SyntaxGeneratedRow row = {0};
     if (!buster_aarch64_syntax_generated_row_at(index, &row)) return false;
+    return buster_aarch64_syntax_generated_row_fields_valid(row);
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_generated_row_fields_valid(BusterAarch64SyntaxGeneratedRow row)
+{
     return row.node_first <= BUSTER_AARCH64_SYNTAX_GENERATED_NODE_COUNT &&
            row.node_count <= BUSTER_AARCH64_SYNTAX_GENERATED_NODE_COUNT - row.node_first &&
            buster_aarch64_syntax_pool_range_valid(row.id_offset, row.id_length) &&
            buster_aarch64_syntax_pool_range_valid(row.assembly_offset, row.assembly_length) &&
            buster_aarch64_syntax_pool_range_valid(row.mnemonic_offset, row.mnemonic_length) &&
+           buster_aarch64_syntax_pool_range_valid(row.encoding_offset, row.encoding_length) &&
            row.anchor_min <= row.anchor_max && row.anchor_max <= row.anchor_count;
 }
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL bool buster_aarch64_syntax_test_generated_row_fields_valid(u32 index, u32 encoding_offset,
+                                                                          u32 encoding_length)
+{
+    BusterAarch64SyntaxGeneratedRow row = {0};
+    if (!buster_aarch64_syntax_generated_row_at(index, &row)) return false;
+    row.encoding_offset = encoding_offset;
+    row.encoding_length = encoding_length;
+    return buster_aarch64_syntax_generated_row_fields_valid(row);
+}
+#endif
 
 BUSTER_F_DECL u32 buster_aarch64_syntax_schema_version(void)
 {
