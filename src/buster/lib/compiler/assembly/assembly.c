@@ -6046,7 +6046,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
 
 BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, String8* names, u32 capacity)
 {
-    static TargetCpuFeature const feature_bits[] = {
+    static TargetCpuFeature const x86_feature_bits[] = {
         TARGET_CPU_FEATURE_X86_SSE2,
         TARGET_CPU_FEATURE_X86_AVX,
         TARGET_CPU_FEATURE_X86_AVX2,
@@ -6155,14 +6155,48 @@ BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, Strin
         TARGET_CPU_FEATURE_X86_XSAVES,
         TARGET_CPU_FEATURE_X86_ACE_1,
     };
-    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(feature_bits) == (u32)TARGET_CPU_FEATURE_COUNT - 3);
-    if (!names || capacity < BUSTER_ARRAY_LENGTH(feature_bits))
+    static TargetCpuFeature const aarch64_feature_bits[] = {
+        TARGET_CPU_FEATURE_AARCH64_NEON,
+        TARGET_CPU_FEATURE_AARCH64_V8_4A,
+        TARGET_CPU_FEATURE_AARCH64_AES,
+        TARGET_CPU_FEATURE_AARCH64_ALTNZCV,
+        TARGET_CPU_FEATURE_AARCH64_CCDP,
+        TARGET_CPU_FEATURE_AARCH64_CCPP,
+        TARGET_CPU_FEATURE_AARCH64_COMPLXNUM,
+        TARGET_CPU_FEATURE_AARCH64_CRC,
+        TARGET_CPU_FEATURE_AARCH64_DOTPROD,
+        TARGET_CPU_FEATURE_AARCH64_FLAGM,
+        TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
+        TARGET_CPU_FEATURE_AARCH64_FP16FML,
+        TARGET_CPU_FEATURE_AARCH64_FPTOINT,
+        TARGET_CPU_FEATURE_AARCH64_FULLFP16,
+        TARGET_CPU_FEATURE_AARCH64_JSCONV,
+        TARGET_CPU_FEATURE_AARCH64_LSE,
+        TARGET_CPU_FEATURE_AARCH64_PAUTH,
+        TARGET_CPU_FEATURE_AARCH64_PERFMON,
+        TARGET_CPU_FEATURE_AARCH64_PREDRES,
+        TARGET_CPU_FEATURE_AARCH64_RAS,
+        TARGET_CPU_FEATURE_AARCH64_RCPC,
+        TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO,
+        TARGET_CPU_FEATURE_AARCH64_RDM,
+        TARGET_CPU_FEATURE_AARCH64_SB,
+        TARGET_CPU_FEATURE_AARCH64_SHA2,
+        TARGET_CPU_FEATURE_AARCH64_SHA3,
+        TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT,
+        TARGET_CPU_FEATURE_AARCH64_SSBS,
+    };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(x86_feature_bits) + BUSTER_ARRAY_LENGTH(aarch64_feature_bits) ==
+                    (u32)TARGET_CPU_FEATURE_COUNT - 2);
+    TargetCpuFeature const* feature_bits = target.cpu_arch == CPU_ARCH_AARCH64 ? aarch64_feature_bits : x86_feature_bits;
+    u32 feature_bit_count = target.cpu_arch == CPU_ARCH_AARCH64 ? BUSTER_ARRAY_LENGTH(aarch64_feature_bits)
+                                                                : BUSTER_ARRAY_LENGTH(x86_feature_bits);
+    if (!names || capacity < feature_bit_count)
     {
         return 0;
     }
     TargetCpuFeatures effective = target_cpu_features_effective(target);
     u32 count = 0;
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(feature_bits); index += 1)
+    for (u32 index = 0; index < feature_bit_count; index += 1)
     {
         if (target_cpu_features_contains(effective, feature_bits[index]))
         {

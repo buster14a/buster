@@ -725,6 +725,77 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(TARGET_CPU_FEATURE_X86_CX16), S8("cx16"));
     BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(TARGET_CPU_FEATURE_X86_SSE4A), S8("sse4a"));
     BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(TARGET_CPU_FEATURE_X86_ACE_1), S8("ace-1"));
+
+    struct
+    {
+        String8 name;
+        TargetCpuFeature feature;
+    } apple_m1_feature_names[] = {
+        {S8("aes"), TARGET_CPU_FEATURE_AARCH64_AES},
+        {S8("altnzcv"), TARGET_CPU_FEATURE_AARCH64_ALTNZCV},
+        {S8("ccdp"), TARGET_CPU_FEATURE_AARCH64_CCDP},
+        {S8("ccpp"), TARGET_CPU_FEATURE_AARCH64_CCPP},
+        {S8("complxnum"), TARGET_CPU_FEATURE_AARCH64_COMPLXNUM},
+        {S8("crc"), TARGET_CPU_FEATURE_AARCH64_CRC},
+        {S8("dotprod"), TARGET_CPU_FEATURE_AARCH64_DOTPROD},
+        {S8("flagm"), TARGET_CPU_FEATURE_AARCH64_FLAGM},
+        {S8("fp-armv8"), TARGET_CPU_FEATURE_AARCH64_FP_ARMV8},
+        {S8("fp16fml"), TARGET_CPU_FEATURE_AARCH64_FP16FML},
+        {S8("fptoint"), TARGET_CPU_FEATURE_AARCH64_FPTOINT},
+        {S8("fullfp16"), TARGET_CPU_FEATURE_AARCH64_FULLFP16},
+        {S8("jsconv"), TARGET_CPU_FEATURE_AARCH64_JSCONV},
+        {S8("lse"), TARGET_CPU_FEATURE_AARCH64_LSE},
+        {S8("neon"), TARGET_CPU_FEATURE_AARCH64_NEON},
+        {S8("pauth"), TARGET_CPU_FEATURE_AARCH64_PAUTH},
+        {S8("perfmon"), TARGET_CPU_FEATURE_AARCH64_PERFMON},
+        {S8("predres"), TARGET_CPU_FEATURE_AARCH64_PREDRES},
+        {S8("ras"), TARGET_CPU_FEATURE_AARCH64_RAS},
+        {S8("rcpc"), TARGET_CPU_FEATURE_AARCH64_RCPC},
+        {S8("rcpc-immo"), TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO},
+        {S8("rdm"), TARGET_CPU_FEATURE_AARCH64_RDM},
+        {S8("sb"), TARGET_CPU_FEATURE_AARCH64_SB},
+        {S8("sha2"), TARGET_CPU_FEATURE_AARCH64_SHA2},
+        {S8("sha3"), TARGET_CPU_FEATURE_AARCH64_SHA3},
+        {S8("specrestrict"), TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT},
+        {S8("ssbs"), TARGET_CPU_FEATURE_AARCH64_SSBS},
+        {S8("v8.4a"), TARGET_CPU_FEATURE_AARCH64_V8_4A},
+    };
+    TargetCpuFeature apple_m1_features_array[BUSTER_ARRAY_LENGTH(apple_m1_feature_names)];
+    for (u32 feature_index = 0; feature_index < BUSTER_ARRAY_LENGTH(apple_m1_feature_names); feature_index += 1)
+    {
+        apple_m1_features_array[feature_index] = apple_m1_feature_names[feature_index].feature;
+        BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_AARCH64, apple_m1_feature_names[feature_index].name) == apple_m1_feature_names[feature_index].feature);
+        BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(apple_m1_feature_names[feature_index].feature), apple_m1_feature_names[feature_index].name);
+    }
+    BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("aes")) == TARGET_CPU_FEATURE_X86_AES);
+    BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_AARCH64, S8("avx2")) == TARGET_CPU_FEATURE_NONE);
+    BUSTER_TEST(arguments, target_cpu_feature_names_are_sorted());
+
+    TargetCpuFeatures apple_m1_expected = target_cpu_features_from_array(apple_m1_features_array, BUSTER_ARRAY_LENGTH(apple_m1_features_array));
+    TargetCpuFeatures apple_m1_default = target_cpu_features_default(CPU_ARCH_AARCH64, CPU_MODEL_A64_APPLE_M1);
+    BUSTER_TEST(arguments, target_cpu_features_equal(apple_m1_default, apple_m1_expected));
+    Target apple_m1_target = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_A64_APPLE_M1,
+        .os = OPERATING_SYSTEM_MACOS,
+    };
+    BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(apple_m1_target), apple_m1_expected));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(apple_m1_target));
+    BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, apple_m1_target),
+                       S8("aes,altnzcv,ccdp,ccpp,complxnum,crc,dotprod,flagm,fp-armv8,fp16fml,fptoint,fullfp16,jsconv,lse,neon,pauth,perfmon,predres,ras,rcpc,rcpc-immo,rdm,sb,sha2,sha3,specrestrict,ssbs,v8.4a"));
+    BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_default(CPU_ARCH_AARCH64, CPU_MODEL_A64_GENERIC),
+                                                     target_cpu_features_singleton(TARGET_CPU_FEATURE_AARCH64_NEON)));
+    Target invalid_aarch64_x86_feature = apple_m1_target;
+    invalid_aarch64_x86_feature.cpu_features_explicit = true;
+    invalid_aarch64_x86_feature.cpu_features = target_cpu_features_add(apple_m1_expected, TARGET_CPU_FEATURE_X86_AES);
+    BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_aarch64_x86_feature));
+    Target invalid_x86_aarch64_feature = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .cpu_features_explicit = true,
+        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_AARCH64_AES}, 2),
+    };
+    BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_x86_aarch64_feature));
 #if BUSTER_CPU_ARCH_X86_64
     X86_64CpuFeatureInput full_cpuid = {
         .maximum_basic_leaf = 0x29,

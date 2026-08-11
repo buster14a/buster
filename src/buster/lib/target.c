@@ -524,6 +524,39 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
 {
     if (arch == CPU_ARCH_AARCH64)
     {
+        if (model == CPU_MODEL_A64_APPLE_M1)
+        {
+            return target_cpu_features_from_array((TargetCpuFeature const[]){
+                TARGET_CPU_FEATURE_AARCH64_V8_4A,
+                TARGET_CPU_FEATURE_AARCH64_AES,
+                TARGET_CPU_FEATURE_AARCH64_ALTNZCV,
+                TARGET_CPU_FEATURE_AARCH64_CCDP,
+                TARGET_CPU_FEATURE_AARCH64_CCPP,
+                TARGET_CPU_FEATURE_AARCH64_COMPLXNUM,
+                TARGET_CPU_FEATURE_AARCH64_CRC,
+                TARGET_CPU_FEATURE_AARCH64_DOTPROD,
+                TARGET_CPU_FEATURE_AARCH64_FLAGM,
+                TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
+                TARGET_CPU_FEATURE_AARCH64_FP16FML,
+                TARGET_CPU_FEATURE_AARCH64_FPTOINT,
+                TARGET_CPU_FEATURE_AARCH64_FULLFP16,
+                TARGET_CPU_FEATURE_AARCH64_JSCONV,
+                TARGET_CPU_FEATURE_AARCH64_LSE,
+                TARGET_CPU_FEATURE_AARCH64_NEON,
+                TARGET_CPU_FEATURE_AARCH64_PAUTH,
+                TARGET_CPU_FEATURE_AARCH64_PERFMON,
+                TARGET_CPU_FEATURE_AARCH64_PREDRES,
+                TARGET_CPU_FEATURE_AARCH64_RAS,
+                TARGET_CPU_FEATURE_AARCH64_RCPC,
+                TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO,
+                TARGET_CPU_FEATURE_AARCH64_RDM,
+                TARGET_CPU_FEATURE_AARCH64_SB,
+                TARGET_CPU_FEATURE_AARCH64_SHA2,
+                TARGET_CPU_FEATURE_AARCH64_SHA3,
+                TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT,
+                TARGET_CPU_FEATURE_AARCH64_SSBS,
+            }, 28);
+        }
         return target_cpu_features_singleton(TARGET_CPU_FEATURE_AARCH64_NEON);
     }
     if (arch != CPU_ARCH_X86_64)
@@ -790,7 +823,38 @@ bool target_cpu_features_are_valid(Target target)
     TargetCpuFeatures features = target.cpu_features;
     if (target.cpu_arch == CPU_ARCH_AARCH64)
     {
-        return target_cpu_features_subset(features, target_cpu_features_singleton(TARGET_CPU_FEATURE_AARCH64_NEON));
+        TargetCpuFeature const known_feature_list[] = {
+            TARGET_CPU_FEATURE_AARCH64_V8_4A,
+            TARGET_CPU_FEATURE_AARCH64_AES,
+            TARGET_CPU_FEATURE_AARCH64_ALTNZCV,
+            TARGET_CPU_FEATURE_AARCH64_CCDP,
+            TARGET_CPU_FEATURE_AARCH64_CCPP,
+            TARGET_CPU_FEATURE_AARCH64_COMPLXNUM,
+            TARGET_CPU_FEATURE_AARCH64_CRC,
+            TARGET_CPU_FEATURE_AARCH64_DOTPROD,
+            TARGET_CPU_FEATURE_AARCH64_FLAGM,
+            TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
+            TARGET_CPU_FEATURE_AARCH64_FP16FML,
+            TARGET_CPU_FEATURE_AARCH64_FPTOINT,
+            TARGET_CPU_FEATURE_AARCH64_FULLFP16,
+            TARGET_CPU_FEATURE_AARCH64_JSCONV,
+            TARGET_CPU_FEATURE_AARCH64_LSE,
+            TARGET_CPU_FEATURE_AARCH64_NEON,
+            TARGET_CPU_FEATURE_AARCH64_PAUTH,
+            TARGET_CPU_FEATURE_AARCH64_PERFMON,
+            TARGET_CPU_FEATURE_AARCH64_PREDRES,
+            TARGET_CPU_FEATURE_AARCH64_RAS,
+            TARGET_CPU_FEATURE_AARCH64_RCPC,
+            TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO,
+            TARGET_CPU_FEATURE_AARCH64_RDM,
+            TARGET_CPU_FEATURE_AARCH64_SB,
+            TARGET_CPU_FEATURE_AARCH64_SHA2,
+            TARGET_CPU_FEATURE_AARCH64_SHA3,
+            TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT,
+            TARGET_CPU_FEATURE_AARCH64_SSBS,
+        };
+        TargetCpuFeatures known = target_cpu_features_from_array(known_feature_list, (u32)BUSTER_ARRAY_LENGTH(known_feature_list));
+        return target_cpu_features_subset(features, known);
     }
     if (target.cpu_arch != CPU_ARCH_X86_64)
     {
@@ -1031,14 +1095,17 @@ struct TargetCpuFeatureName
     CpuArch arch;
 };
 
-// Kept in bytewise name order so verbose output is stable without sorting or
-// allocating one node per feature.
+// Kept in nondecreasing bytewise name order so verbose output is stable
+// without sorting or allocating one node per feature.  Names can repeat when
+// separate architectures expose the same spelling (for example, `aes`).
 BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("3dnow"), .feature = TARGET_CPU_FEATURE_X86_3DNOW, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("3dnowa"), .feature = TARGET_CPU_FEATURE_X86_3DNOWA, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("ace-1"), .feature = TARGET_CPU_FEATURE_X86_ACE_1, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("adx"), .feature = TARGET_CPU_FEATURE_X86_ADX, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("aes"), .feature = TARGET_CPU_FEATURE_AARCH64_AES, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("aes"), .feature = TARGET_CPU_FEATURE_X86_AES, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("altnzcv"), .feature = TARGET_CPU_FEATURE_AARCH64_ALTNZCV, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("amx-avx512"), .feature = TARGET_CPU_FEATURE_X86_AMX_AVX512, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("amx-bf16"), .feature = TARGET_CPU_FEATURE_X86_AMX_BF16, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("amx-complex"), .feature = TARGET_CPU_FEATURE_X86_AMX_COMPLEX, .arch = CPU_ARCH_X86_64},
@@ -1080,23 +1147,35 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("avx512vpopcntdq"), .feature = TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("bmi1"), .feature = TARGET_CPU_FEATURE_X86_BMI1, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("bmi2"), .feature = TARGET_CPU_FEATURE_X86_BMI2, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("ccdp"), .feature = TARGET_CPU_FEATURE_AARCH64_CCDP, .arch = CPU_ARCH_AARCH64},
+    {.name = S8_INITIALIZER("ccpp"), .feature = TARGET_CPU_FEATURE_AARCH64_CCPP, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("cldemote"), .feature = TARGET_CPU_FEATURE_X86_CLDEMOTE, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("clflushopt"), .feature = TARGET_CPU_FEATURE_X86_CLFLUSHOPT, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("clwb"), .feature = TARGET_CPU_FEATURE_X86_CLWB, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("complxnum"), .feature = TARGET_CPU_FEATURE_AARCH64_COMPLXNUM, .arch = CPU_ARCH_AARCH64},
+    {.name = S8_INITIALIZER("crc"), .feature = TARGET_CPU_FEATURE_AARCH64_CRC, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("cx16"), .feature = TARGET_CPU_FEATURE_X86_CX16, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("dotprod"), .feature = TARGET_CPU_FEATURE_AARCH64_DOTPROD, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("enqcmd"), .feature = TARGET_CPU_FEATURE_X86_ENQCMD, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("f16c"), .feature = TARGET_CPU_FEATURE_X86_F16C, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("flagm"), .feature = TARGET_CPU_FEATURE_AARCH64_FLAGM, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("fma"), .feature = TARGET_CPU_FEATURE_X86_FMA, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("fma4"), .feature = TARGET_CPU_FEATURE_X86_FMA4, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("fp-armv8"), .feature = TARGET_CPU_FEATURE_AARCH64_FP_ARMV8, .arch = CPU_ARCH_AARCH64},
+    {.name = S8_INITIALIZER("fp16fml"), .feature = TARGET_CPU_FEATURE_AARCH64_FP16FML, .arch = CPU_ARCH_AARCH64},
+    {.name = S8_INITIALIZER("fptoint"), .feature = TARGET_CPU_FEATURE_AARCH64_FPTOINT, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("fred"), .feature = TARGET_CPU_FEATURE_X86_FRED, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("fsgsbase"), .feature = TARGET_CPU_FEATURE_X86_FSGSBASE, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("fullfp16"), .feature = TARGET_CPU_FEATURE_AARCH64_FULLFP16, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("gfni"), .feature = TARGET_CPU_FEATURE_X86_GFNI, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("hreset"), .feature = TARGET_CPU_FEATURE_X86_HRESET, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("ibt"), .feature = TARGET_CPU_FEATURE_X86_IBT, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("invlpgb"), .feature = TARGET_CPU_FEATURE_X86_INVLPGB, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("invpcid"), .feature = TARGET_CPU_FEATURE_X86_INVPCID, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("jsconv"), .feature = TARGET_CPU_FEATURE_AARCH64_JSCONV, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("keylocker"), .feature = TARGET_CPU_FEATURE_X86_KEYLOCKER, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("lkgs"), .feature = TARGET_CPU_FEATURE_X86_LKGS, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("lse"), .feature = TARGET_CPU_FEATURE_AARCH64_LSE, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("lwp"), .feature = TARGET_CPU_FEATURE_X86_LWP, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("lzcnt"), .feature = TARGET_CPU_FEATURE_X86_LZCNT, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("monitor"), .feature = TARGET_CPU_FEATURE_X86_MONITOR, .arch = CPU_ARCH_X86_64},
@@ -1106,22 +1185,34 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("msr-imm"), .feature = TARGET_CPU_FEATURE_X86_MSR_IMM, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("msrlist"), .feature = TARGET_CPU_FEATURE_X86_MSRLIST, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("neon"), .feature = TARGET_CPU_FEATURE_AARCH64_NEON, .arch = CPU_ARCH_AARCH64},
+    {.name = S8_INITIALIZER("pauth"), .feature = TARGET_CPU_FEATURE_AARCH64_PAUTH, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("pbndkb"), .feature = TARGET_CPU_FEATURE_X86_PBNDKB, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("pclmul"), .feature = TARGET_CPU_FEATURE_X86_PCLMUL, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("pconfig"), .feature = TARGET_CPU_FEATURE_X86_PCONFIG, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("perfmon"), .feature = TARGET_CPU_FEATURE_AARCH64_PERFMON, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("pku"), .feature = TARGET_CPU_FEATURE_X86_PKU, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("popcnt"), .feature = TARGET_CPU_FEATURE_X86_POPCNT, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("predres"), .feature = TARGET_CPU_FEATURE_AARCH64_PREDRES, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("prefetchi"), .feature = TARGET_CPU_FEATURE_X86_PREFETCHI, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("prefetchwt1"), .feature = TARGET_CPU_FEATURE_X86_PREFETCHWT1, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("ptwrite"), .feature = TARGET_CPU_FEATURE_X86_PTWRITE, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("ras"), .feature = TARGET_CPU_FEATURE_AARCH64_RAS, .arch = CPU_ARCH_AARCH64},
+    {.name = S8_INITIALIZER("rcpc"), .feature = TARGET_CPU_FEATURE_AARCH64_RCPC, .arch = CPU_ARCH_AARCH64},
+    {.name = S8_INITIALIZER("rcpc-immo"), .feature = TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO, .arch = CPU_ARCH_AARCH64},
+    {.name = S8_INITIALIZER("rdm"), .feature = TARGET_CPU_FEATURE_AARCH64_RDM, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("rdrand"), .feature = TARGET_CPU_FEATURE_X86_RDRAND, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("rdseed"), .feature = TARGET_CPU_FEATURE_X86_RDSEED, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("rtm"), .feature = TARGET_CPU_FEATURE_X86_RTM, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("sb"), .feature = TARGET_CPU_FEATURE_AARCH64_SB, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("serialize"), .feature = TARGET_CPU_FEATURE_X86_SERIALIZE, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sgx"), .feature = TARGET_CPU_FEATURE_X86_SGX, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("sha2"), .feature = TARGET_CPU_FEATURE_AARCH64_SHA2, .arch = CPU_ARCH_AARCH64},
+    {.name = S8_INITIALIZER("sha3"), .feature = TARGET_CPU_FEATURE_AARCH64_SHA3, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("shstk"), .feature = TARGET_CPU_FEATURE_X86_SHSTK, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("smap"), .feature = TARGET_CPU_FEATURE_X86_SMAP, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("snp"), .feature = TARGET_CPU_FEATURE_X86_SNP, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("specrestrict"), .feature = TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT, .arch = CPU_ARCH_AARCH64},
+    {.name = S8_INITIALIZER("ssbs"), .feature = TARGET_CPU_FEATURE_AARCH64_SSBS, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("sse2"), .feature = TARGET_CPU_FEATURE_X86_SSE2, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sse3"), .feature = TARGET_CPU_FEATURE_X86_SSE3, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sse4.1"), .feature = TARGET_CPU_FEATURE_X86_SSE4_1, .arch = CPU_ARCH_X86_64},
@@ -1133,6 +1224,7 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("tdx"), .feature = TARGET_CPU_FEATURE_X86_TDX, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("tsxldtrk"), .feature = TARGET_CPU_FEATURE_X86_TSXLDTRK, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("uintr"), .feature = TARGET_CPU_FEATURE_X86_UINTR, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("v8.4a"), .feature = TARGET_CPU_FEATURE_AARCH64_V8_4A, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("vaes"), .feature = TARGET_CPU_FEATURE_X86_VAES, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("vmx"), .feature = TARGET_CPU_FEATURE_X86_VMX, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("vpclmulqdq"), .feature = TARGET_CPU_FEATURE_X86_VPCLMULQDQ, .arch = CPU_ARCH_X86_64},
@@ -1162,7 +1254,7 @@ bool target_cpu_feature_names_are_sorted(void)
 {
     for (u32 index = 1; index < BUSTER_ARRAY_LENGTH(target_cpu_feature_names); index += 1)
     {
-        if (target_cpu_feature_name_compare(target_cpu_feature_names[index - 1].name, target_cpu_feature_names[index].name) >= 0)
+        if (target_cpu_feature_name_compare(target_cpu_feature_names[index - 1].name, target_cpu_feature_names[index].name) > 0)
             return false;
     }
     return true;
