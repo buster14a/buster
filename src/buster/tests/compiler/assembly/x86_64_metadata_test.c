@@ -4648,7 +4648,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                                                  BUSTER_ARRAY_LENGTH(wildcard), (u8[]){0x3e, 0x74, 0x7f}, 3));
         BusterX86MetadataPhysicalOperand jz_short_below = x86_64_metadata_test_physical_relative(-129, 8);
         BusterX86MetadataPhysicalOperand jz_short_above = x86_64_metadata_test_physical_relative(128, 8);
-        BUSTER_TEST(arguments, x86_64_metadata_test_emit_form(
+        BUSTER_TEST(arguments, buster_x86_metadata_emit_form(
                                    (BusterX86MetadataEmitQuery){.physical = x86_64_metadata_test_physical_query(
                                                                     S8("JZ"), &jz_short_below, 1, not_taken, wildcard,
                                                                     BUSTER_ARRAY_LENGTH(wildcard)),
