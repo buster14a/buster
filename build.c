@@ -13497,6 +13497,70 @@ struct Aarch64GeneratedTableStats
     u64 coverage_bytes;
 };
 
+// Apple M1 is deliberately represented as a profile over the pinned LLVM
+// records rather than as an informal post-processing filter.  This is a
+// provisional LLVM-predicate denominator until the raw aliases and official
+// Arm XML have been validated independently.  The true-predicate closure is
+// derived from AppleA14/HasV8_4aOps in LLVM 22.1.8; it includes
+// HasRCPC_IMMO for the Armv8.4-A LDAPUR/STLUR unscaled immediate forms.
+#define AARCH64_APPLE_M1_PROFILE_NAME S8("apple-m1")
+#define AARCH64_APPLE_M1_PROFILE_VERSION S8("1")
+#define AARCH64_APPLE_M1_PROFILE_SOURCE_IDENTITY S8("llvmorg-22.1.8-reduced-jsonl")
+
+typedef struct Aarch64AppleM1ProfileStats Aarch64AppleM1ProfileStats;
+struct Aarch64AppleM1ProfileStats
+{
+    u64 row_count;
+    u64 in_profile_count;
+    u64 excluded_count;
+    u64 in_profile_class_counts[AARCH64_IMPORT_COVERAGE_COUNT];
+    u64 excluded_class_counts[AARCH64_IMPORT_COVERAGE_COUNT];
+    u64 excluded_predicate_count;
+    u64 artifact_bytes;
+};
+
+BUSTER_GLOBAL_LOCAL String8 aarch64_apple_m1_profile_predicate_names[] = {
+    S8_INITIALIZER("HasAES"),       S8_INITIALIZER("HasAltNZCV"),             S8_INITIALIZER("HasCRC"),
+    S8_INITIALIZER("HasComplxNum"), S8_INITIALIZER("HasDotProd"),             S8_INITIALIZER("HasEL3"),
+    S8_INITIALIZER("HasFP16FML"),  S8_INITIALIZER("HasFPARMv8"),              S8_INITIALIZER("HasFRInt3264"),
+    S8_INITIALIZER("HasFlagM"),    S8_INITIALIZER("HasFullFP16"),             S8_INITIALIZER("HasJS"),
+    S8_INITIALIZER("HasLOR"),      S8_INITIALIZER("HasLSE"),                  S8_INITIALIZER("HasNEON"),
+    S8_INITIALIZER("HasNEONandIsStreamingSafe"), S8_INITIALIZER("HasPAuth"),   S8_INITIALIZER("HasRCPC"),
+    S8_INITIALIZER("HasRCPC_IMMO"), S8_INITIALIZER("HasRDM"),                  S8_INITIALIZER("HasSB"),
+    S8_INITIALIZER("HasSHA2"),     S8_INITIALIZER("HasSHA3"),                 S8_INITIALIZER("HasTRACEV8_4"),
+};
+
+BUSTER_GLOBAL_LOCAL bool aarch64_apple_m1_predicate_allowed(String8 name)
+{
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(aarch64_apple_m1_profile_predicate_names); index += 1)
+    {
+        if (string_equal(name, aarch64_apple_m1_profile_predicate_names[index]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_apple_m1_record_in_profile(Aarch64ImportRecord* record, u64* excluded_predicate_count)
+{
+    bool in_profile = record->parse_reason != AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE;
+    u64 excluded = 0;
+    for (Aarch64ImportPredicate* predicate = record->first_predicate; predicate; predicate = predicate->next)
+    {
+        if (!aarch64_apple_m1_predicate_allowed(predicate->name))
+        {
+            in_profile = false;
+            excluded += 1;
+        }
+    }
+    if (excluded_predicate_count)
+    {
+        *excluded_predicate_count = excluded;
+    }
+    return in_profile;
+}
+
 BUSTER_GLOBAL_LOCAL bool aarch64_import_acceptance_ready(Aarch64GeneratedTableStats stats)
 {
     return stats.coverage_counts[AARCH64_IMPORT_COVERAGE_RESERVED_UNENCODABLE] == 0 &&
@@ -17454,6 +17518,150 @@ BUSTER_GLOBAL_LOCAL bool aarch64_generated_emit_missing_inventory(Arena* output,
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL void aarch64_apple_m1_profile_append_predicates(Arena* output, Aarch64ImportRecord* record)
+{
+    arena_append_char8(output, '[');
+    bool first = true;
+    for (Aarch64ImportPredicate* predicate = record->first_predicate; predicate; predicate = predicate->next)
+    {
+        if (!first)
+        {
+            arena_append_char8(output, ',');
+        }
+        first = false;
+        arena_append_json_string(output, predicate->name);
+    }
+    arena_append_char8(output, ']');
+}
+
+BUSTER_GLOBAL_LOCAL u64 aarch64_apple_m1_profile_append_excluded_predicates(Arena* output, Aarch64ImportRecord* record)
+{
+    u64 excluded_count = 0;
+    bool first = true;
+    arena_append_char8(output, '[');
+    for (Aarch64ImportPredicate* predicate = record->first_predicate; predicate; predicate = predicate->next)
+    {
+        if (aarch64_apple_m1_predicate_allowed(predicate->name))
+        {
+            continue;
+        }
+        if (!first)
+        {
+            arena_append_char8(output, ',');
+        }
+        first = false;
+        arena_append_json_string(output, predicate->name);
+        excluded_count += 1;
+    }
+    arena_append_char8(output, ']');
+    return excluded_count;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_apple_m1_profile_append_row(Arena* output, Aarch64ImportRecord* record,
+                                                              Aarch64AppleM1ProfileStats* stats)
+{
+    char hash_buffer[32];
+    u64 excluded_predicate_count = 0;
+    bool in_profile = aarch64_apple_m1_record_in_profile(record, &excluded_predicate_count);
+    if (record->coverage_class >= AARCH64_IMPORT_COVERAGE_COUNT || record->source_hash == 0 || record->name_hash == 0)
+    {
+        return false;
+    }
+    arena_append_string8(output, S8("{\"profile\":\"apple-m1\",\"profile_version\":\"1\",\"name\":"));
+    arena_append_json_string(output, record->name);
+    arena_append_string8(output, S8(",\"source_hash\":"));
+    int hash_length = snprintf(hash_buffer, sizeof(hash_buffer), "\"%016llx\"", (unsigned long long)record->source_hash);
+    if (hash_length <= 0)
+    {
+        return false;
+    }
+    arena_append_string8(output, (String8){.pointer = (char8*)hash_buffer, .length = (u64)hash_length});
+    arena_append_string8(output, S8(",\"name_hash\":"));
+    hash_length = snprintf(hash_buffer, sizeof(hash_buffer), "\"%016llx\"", (unsigned long long)record->name_hash);
+    if (hash_length <= 0)
+    {
+        return false;
+    }
+    arena_append_string8(output, (String8){.pointer = (char8*)hash_buffer, .length = (u64)hash_length});
+    arena_append_string8(output, S8(",\"normalized_form_id\":"));
+    xed_generated_append_decimal(output, record->normalized_form_id);
+    arena_append_string8(output, S8(",\"classification\":"));
+    xed_generated_append_decimal(output, record->coverage_class);
+    arena_append_string8(output, S8(",\"reason_id\":"));
+    xed_generated_append_decimal(output, record->reason_id);
+    arena_append_string8(output, S8(",\"encoder_family\":"));
+    xed_generated_append_decimal(output, record->encoder_family);
+    arena_append_string8(output, S8(",\"test_class\":"));
+    xed_generated_append_decimal(output, record->test_class);
+    arena_append_string8(output, S8(",\"predicates\":"));
+    aarch64_apple_m1_profile_append_predicates(output, record);
+    if (in_profile)
+    {
+        arena_append_string8(output, S8(",\"in_profile\":true,\"exclusion_reason\":\"none\",\"excluded_predicates\":[]}\n"));
+    }
+    else
+    {
+        arena_append_string8(output, S8(",\"in_profile\":false,\"exclusion_reason\":"));
+        arena_append_json_string(output, record->parse_reason == AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE ? S8("unknown_predicate") :
+                                                                                                      S8("non_m1_predicate"));
+        arena_append_string8(output, S8(",\"excluded_predicates\":"));
+        aarch64_apple_m1_profile_append_excluded_predicates(output, record);
+        if (record->parse_reason == AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE)
+        {
+            // A malformed/unknown predicate expression is excluded even when
+            // the parser could not retain a predicate node.
+            arena_append_string8(output, S8(",\"predicate_parse_error\":true}\n"));
+        }
+        else
+        {
+            arena_append_string8(output, S8("}\n"));
+        }
+    }
+
+    stats->row_count += 1;
+    stats->excluded_predicate_count += excluded_predicate_count;
+    if (in_profile)
+    {
+        stats->in_profile_count += 1;
+        stats->in_profile_class_counts[record->coverage_class] += 1;
+    }
+    else
+    {
+        stats->excluded_count += 1;
+        stats->excluded_class_counts[record->coverage_class] += 1;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_apple_m1_profile_emit(Arena* output, Aarch64ImportRecordList records,
+                                                         Aarch64AppleM1ProfileStats* stats)
+{
+    memset(stats, 0, sizeof(*stats));
+    for (Aarch64ImportRecord* record = records.first; record; record = record->next)
+    {
+        if (!aarch64_apple_m1_profile_append_row(output, record, stats))
+        {
+            return false;
+        }
+    }
+    if (stats->row_count != records.count || stats->in_profile_count + stats->excluded_count != stats->row_count)
+    {
+        return false;
+    }
+    stats->artifact_bytes = arena_buffer_size(output);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_apple_m1_profile_acceptance_ready(Aarch64AppleM1ProfileStats stats)
+{
+    // Rows requiring unsupported/reserved schema work are still unresolved in
+    // the M1 denominator.  Rows outside the profile are explicit exclusions
+    // and therefore never participate in this gate.
+    return stats.in_profile_class_counts[AARCH64_IMPORT_COVERAGE_RESERVED_UNENCODABLE] == 0 &&
+           stats.in_profile_class_counts[AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN] == 0 &&
+           stats.in_profile_class_counts[AARCH64_IMPORT_COVERAGE_UNCLASSIFIED] == 0;
+}
+
 BUSTER_GLOBAL_LOCAL void aarch64_import_self_test_append_record(Arena* output, String8 name, u32 mode, String8 assembly,
                                                                  String8 out, String8 in, String8 predicates)
 {
@@ -17608,6 +17816,10 @@ struct AssemblyImportFullManifestData
     String8 aarch64_alias_source_identity;
     String8 aarch64_inventory_checksum;
     u64 aarch64_inventory_bytes;
+    String8 aarch64_m1_profile_source_identity;
+    String8 aarch64_m1_profile_source_checksum;
+    String8 aarch64_m1_profile_checksum;
+    Aarch64AppleM1ProfileStats aarch64_m1_profile;
     String8 llvm_input_kind;
     String8 llvm_source_identity;
     String8 llvm_raw_snapshot_provenance;
@@ -17623,7 +17835,7 @@ BUSTER_GLOBAL_LOCAL String8 assembly_import_format_full_manifest(Arena* arena, A
     return string_format(
         arena,
         S8("{{\n"
-           "  \"schema_version\": 4,\n"
+           "  \"schema_version\": 5,\n"
            "  \"generation_mode\": \"{S8}\",\n"
            "  \"acceptance_status\": \"{S8}\",\n"
            "  \"checksum_algorithm\": \"xxh64\",\n"
@@ -17684,6 +17896,24 @@ BUSTER_GLOBAL_LOCAL String8 assembly_import_format_full_manifest(Arena* arena, A
            "    \"alias_count\": {u64},\n"
            "    \"missing_field_inventory\": {{\"artifact\": \"aarch64-missing-fields.generated.jsonl\", \"checksum\": \"{S8}\", \"bytes\": {u64}, \"classification_filter\": [\"RESERVED/UNENCODABLE\", \"UNSUPPORTED_TOKEN\"], \"reserved_unencodable_count\": {u64}, \"unsupported_token_count\": {u64}, \"unclassified_count\": {u64}}}\n"
            "  }},\n"
+           "  \"apple_m1_profile\": {{\n"
+           "    \"name\": \"apple-m1\",\n"
+           "    \"version\": \"1\",\n"
+           "    \"source_identity\": \"{S8}\",\n"
+           "    \"source_checksum\": \"{S8}\",\n"
+           "    \"artifact\": \"aarch64-apple-m1-profile.generated.jsonl\",\n"
+           "    \"artifact_checksum\": \"{S8}\",\n"
+           "    \"artifact_bytes\": {u64},\n"
+           "    \"row_count\": {u64},\n"
+           "    \"in_profile_count\": {u64},\n"
+           "    \"excluded_count\": {u64},\n"
+           "    \"excluded_predicate_count\": {u64},\n"
+           "    \"classification_counts\": {{\"DIRECT\": {u64}, \"NORMALIZED\": {u64}, \"ALIAS\": {u64}, \"PRIVILEGED/SYSTEM\": {u64}, \"RESERVED/UNENCODABLE\": {u64}, \"UNSUPPORTED_TOKEN\": {u64}, \"UNCLASSIFIED\": {u64}}},\n"
+           "    \"excluded_classification_counts\": {{\"DIRECT\": {u64}, \"NORMALIZED\": {u64}, \"ALIAS\": {u64}, \"PRIVILEGED/SYSTEM\": {u64}, \"RESERVED/UNENCODABLE\": {u64}, \"UNSUPPORTED_TOKEN\": {u64}, \"UNCLASSIFIED\": {u64}},\n"
+           "    \"predicate_policy\": [\"HasAES\", \"HasAltNZCV\", \"HasCRC\", \"HasComplxNum\", \"HasDotProd\", \"HasEL3\", \"HasFP16FML\", \"HasFPARMv8\", \"HasFRInt3264\", \"HasFlagM\", \"HasFullFP16\", \"HasJS\", \"HasLOR\", \"HasLSE\", \"HasNEON\", \"HasNEONandIsStreamingSafe\", \"HasPAuth\", \"HasRCPC\", \"HasRCPC_IMMO\", \"HasRDM\", \"HasSB\", \"HasSHA2\", \"HasSHA3\", \"HasTRACEV8_4\"],\n"
+           "    \"arm_xml_evidence\": {{\"status\": \"independent-cross-check-only\", \"source\": \"official-arm-a64-isa-data-not-vendored\", \"candidate_count\": 4623, \"selected_count\": 1695, \"canonical_count\": 1523, \"alias_count\": 172, \"selected_excluding_system_count\": 1653, \"canonical_excluding_system_count\": 1490, \"alias_excluding_system_count\": 163}},\n"
+           "    \"status\": \"provisional-audit\"\n"
+           "  }},\n"
            "  \"llvm\": {{\n"
            "    \"source_url\": \"https://github.com/llvm/llvm-project\",\n"
            "    \"release\": \"llvmorg-22.1.8\",\n"
@@ -17728,6 +17958,16 @@ BUSTER_GLOBAL_LOCAL String8 assembly_import_format_full_manifest(Arena* arena, A
         data.aarch64_stats.test_counts[6], data.aarch64_stats.test_counts[7], data.aarch64_alias_source_identity,
         data.aarch64_stats.coverage_counts[2], data.aarch64_inventory_checksum, data.aarch64_inventory_bytes,
         data.aarch64_stats.coverage_counts[4], data.aarch64_stats.coverage_counts[5], data.aarch64_stats.coverage_counts[6],
+        data.aarch64_m1_profile_source_identity, data.aarch64_m1_profile_source_checksum, data.aarch64_m1_profile_checksum,
+        data.aarch64_m1_profile.artifact_bytes, data.aarch64_m1_profile.row_count, data.aarch64_m1_profile.in_profile_count,
+        data.aarch64_m1_profile.excluded_count, data.aarch64_m1_profile.excluded_predicate_count,
+        data.aarch64_m1_profile.in_profile_class_counts[0], data.aarch64_m1_profile.in_profile_class_counts[1],
+        data.aarch64_m1_profile.in_profile_class_counts[2], data.aarch64_m1_profile.in_profile_class_counts[3],
+        data.aarch64_m1_profile.in_profile_class_counts[4], data.aarch64_m1_profile.in_profile_class_counts[5],
+        data.aarch64_m1_profile.in_profile_class_counts[6], data.aarch64_m1_profile.excluded_class_counts[0],
+        data.aarch64_m1_profile.excluded_class_counts[1], data.aarch64_m1_profile.excluded_class_counts[2],
+        data.aarch64_m1_profile.excluded_class_counts[3], data.aarch64_m1_profile.excluded_class_counts[4],
+        data.aarch64_m1_profile.excluded_class_counts[5], data.aarch64_m1_profile.excluded_class_counts[6],
         data.llvm_input_kind, data.llvm_source_identity, data.llvm_raw_snapshot_provenance, data.llvm_input_checksum,
         data.llvm_normalized_input_checksum, data.llvm_output_checksum, data.llvm_instruction_count);
 }
@@ -17798,6 +18038,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_manifest_format_self_test(Arena* arena)
         .aarch64_alias_source_identity = S8("alias-source-identity"),
         .aarch64_inventory_checksum = S8("inventory-checksum"),
         .aarch64_inventory_bytes = 17,
+        .aarch64_m1_profile_source_identity = S8("llvmorg-22.1.8-reduced-jsonl"),
+        .aarch64_m1_profile_source_checksum = S8("profile-source-checksum"),
+        .aarch64_m1_profile_checksum = S8("profile-checksum"),
         .llvm_input_kind = S8("llvm_tblgen_json"),
         .llvm_source_identity = S8("llvm-source-identity"),
         .llvm_raw_snapshot_provenance = S8("true"),
@@ -17856,21 +18099,33 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_manifest_format_self_test(Arena* arena)
     data.aarch64_stats.string_pool_bytes = 1010;
     data.aarch64_stats.header_bytes = 1011;
     data.aarch64_stats.coverage_bytes = 1012;
+    data.aarch64_m1_profile.row_count = 1100;
+    data.aarch64_m1_profile.in_profile_count = 1101;
+    data.aarch64_m1_profile.excluded_count = 1102;
+    data.aarch64_m1_profile.excluded_predicate_count = 1103;
+    data.aarch64_m1_profile.artifact_bytes = 1104;
+    for (u32 index = 0; index < AARCH64_IMPORT_COVERAGE_COUNT; index += 1)
+    {
+        data.aarch64_m1_profile.in_profile_class_counts[index] = 1110 + index;
+        data.aarch64_m1_profile.excluded_class_counts[index] = 1120 + index;
+    }
 
     String8 manifest = assembly_import_format_full_manifest(arena, data);
     String8 root = manifest;
     String8 xed = {0};
     String8 generated = {0};
     String8 aarch64_generated = {0};
+    String8 apple_m1_profile = {0};
     String8 llvm = {0};
     bool result = json_raw_object_find(root, S8("xed"), &xed) && json_raw_object_find(root, S8("generated"), &generated) &&
-                  json_raw_object_find(root, S8("aarch64_generated"), &aarch64_generated) && json_raw_object_find(root, S8("llvm"), &llvm);
+                  json_raw_object_find(root, S8("aarch64_generated"), &aarch64_generated) &&
+                  json_raw_object_find(root, S8("apple_m1_profile"), &apple_m1_profile) && json_raw_object_find(root, S8("llvm"), &llvm);
     String8 root_values[] = {
-        S8("4"), assembly_import_manifest_raw_string(arena, data.generation_mode), assembly_import_manifest_raw_string(arena, data.acceptance_status),
-        S8("\"xxh64\""), xed, generated, aarch64_generated, llvm,
+        S8("5"), assembly_import_manifest_raw_string(arena, data.generation_mode), assembly_import_manifest_raw_string(arena, data.acceptance_status),
+        S8("\"xxh64\""), xed, generated, aarch64_generated, apple_m1_profile, llvm,
     };
     String8 root_keys[] = {S8("schema_version"), S8("generation_mode"), S8("acceptance_status"), S8("checksum_algorithm"), S8("xed"),
-                           S8("generated"), S8("aarch64_generated"), S8("llvm")};
+                           S8("generated"), S8("aarch64_generated"), S8("apple_m1_profile"), S8("llvm")};
     AssemblyImportManifestFieldExpectation root_expected[BUSTER_ARRAY_LENGTH(root_keys)] = {0};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(root_expected); index += 1)
     {
@@ -18038,6 +18293,53 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_manifest_format_self_test(Arena* arena)
              assembly_import_manifest_expect_fields(aarch64_tests, aarch64_test_expected, BUSTER_ARRAY_LENGTH(aarch64_test_expected)) &&
              assembly_import_manifest_expect_fields(inventory, inventory_expected, BUSTER_ARRAY_LENGTH(inventory_expected));
 
+    String8 profile_classification = {0};
+    String8 profile_excluded_classification = {0};
+    String8 profile_arm_xml_evidence = {0};
+    result = result && json_raw_object_find(apple_m1_profile, S8("classification_counts"), &profile_classification) &&
+             json_raw_object_find(apple_m1_profile, S8("excluded_classification_counts"), &profile_excluded_classification) &&
+             json_raw_object_find(apple_m1_profile, S8("arm_xml_evidence"), &profile_arm_xml_evidence);
+    String8 profile_keys[] = {S8("name"), S8("version"), S8("source_identity"), S8("source_checksum"), S8("artifact"),
+                             S8("artifact_checksum"), S8("artifact_bytes"), S8("row_count"), S8("in_profile_count"),
+                             S8("excluded_count"), S8("excluded_predicate_count"), S8("classification_counts"),
+                             S8("excluded_classification_counts"), S8("predicate_policy"), S8("arm_xml_evidence"), S8("status")};
+    AssemblyImportManifestFieldExpectation profile_expected[BUSTER_ARRAY_LENGTH(profile_keys)] = {
+        {.key = profile_keys[0], .raw_value = S8("\"apple-m1\"")},
+        {.key = profile_keys[1], .raw_value = S8("\"1\"")},
+        {.key = profile_keys[2], .raw_value = assembly_import_manifest_raw_string(arena, data.aarch64_m1_profile_source_identity)},
+        {.key = profile_keys[3], .raw_value = assembly_import_manifest_raw_string(arena, data.aarch64_m1_profile_source_checksum)},
+        {.key = profile_keys[4], .raw_value = S8("\"aarch64-apple-m1-profile.generated.jsonl\"")},
+        {.key = profile_keys[5], .raw_value = assembly_import_manifest_raw_string(arena, data.aarch64_m1_profile_checksum)},
+        {.key = profile_keys[6], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_m1_profile.artifact_bytes)},
+        {.key = profile_keys[7], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_m1_profile.row_count)},
+        {.key = profile_keys[8], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_m1_profile.in_profile_count)},
+        {.key = profile_keys[9], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_m1_profile.excluded_count)},
+        {.key = profile_keys[10], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_m1_profile.excluded_predicate_count)},
+        {.key = profile_keys[11], .raw_value = profile_classification},
+        {.key = profile_keys[12], .raw_value = profile_excluded_classification},
+        {.key = profile_keys[13], .raw_value = S8("[\"HasAES\", \"HasAltNZCV\", \"HasCRC\", \"HasComplxNum\", \"HasDotProd\", \"HasEL3\", \"HasFP16FML\", \"HasFPARMv8\", \"HasFRInt3264\", \"HasFlagM\", \"HasFullFP16\", \"HasJS\", \"HasLOR\", \"HasLSE\", \"HasNEON\", \"HasNEONandIsStreamingSafe\", \"HasPAuth\", \"HasRCPC\", \"HasRCPC_IMMO\", \"HasRDM\", \"HasSB\", \"HasSHA2\", \"HasSHA3\", \"HasTRACEV8_4\"]")},
+        {.key = profile_keys[14], .raw_value = profile_arm_xml_evidence},
+        {.key = profile_keys[15], .raw_value = S8("\"provisional-audit\"")},
+    };
+    String8 profile_classification_keys[] = {S8("DIRECT"), S8("NORMALIZED"), S8("ALIAS"), S8("PRIVILEGED/SYSTEM"),
+                                             S8("RESERVED/UNENCODABLE"), S8("UNSUPPORTED_TOKEN"), S8("UNCLASSIFIED")};
+    AssemblyImportManifestFieldExpectation profile_classification_expected[BUSTER_ARRAY_LENGTH(profile_classification_keys)] = {0};
+    AssemblyImportManifestFieldExpectation profile_excluded_classification_expected[BUSTER_ARRAY_LENGTH(profile_classification_keys)] = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(profile_classification_keys); index += 1)
+    {
+        profile_classification_expected[index] = (AssemblyImportManifestFieldExpectation){
+            .key = profile_classification_keys[index], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_m1_profile.in_profile_class_counts[index])};
+        profile_excluded_classification_expected[index] = (AssemblyImportManifestFieldExpectation){
+            .key = profile_classification_keys[index], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_m1_profile.excluded_class_counts[index])};
+    }
+    result = result && assembly_import_manifest_expect_fields(apple_m1_profile, profile_expected, BUSTER_ARRAY_LENGTH(profile_expected)) &&
+             assembly_import_manifest_expect_fields(profile_classification, profile_classification_expected,
+                                                    BUSTER_ARRAY_LENGTH(profile_classification_expected)) &&
+             assembly_import_manifest_expect_fields(profile_excluded_classification, profile_excluded_classification_expected,
+                                                    BUSTER_ARRAY_LENGTH(profile_excluded_classification_expected)) &&
+             string_equal(profile_arm_xml_evidence,
+                          S8("{\"status\": \"independent-cross-check-only\", \"source\": \"official-arm-a64-isa-data-not-vendored\", \"candidate_count\": 4623, \"selected_count\": 1695, \"canonical_count\": 1523, \"alias_count\": 172, \"selected_excluding_system_count\": 1653, \"canonical_excluding_system_count\": 1490, \"alias_excluding_system_count\": 163}"));
+
     String8 llvm_keys[] = {S8("source_url"), S8("release"), S8("commit"), S8("license"), S8("input_kind"), S8("source_identity"),
                            S8("raw_snapshot_provenance"), S8("input_checksum"), S8("normalized_input_checksum"), S8("output_checksum"),
                            S8("instruction_count")};
@@ -18095,7 +18397,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
     Arena* schema_b = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8)});
     Arena* coverage_a = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(2)});
     Arena* coverage_b = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(2)});
-    if (!arena || !output || !schema_a || !schema_b || !coverage_a || !coverage_b)
+    Arena* profile_a = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(4)});
+    Arena* profile_b = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(4)});
+    if (!arena || !output || !schema_a || !schema_b || !coverage_a || !coverage_b || !profile_a || !profile_b)
     {
         if (arena)
         {
@@ -18120,6 +18424,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
         if (coverage_b)
         {
             arena_destroy(coverage_b, 1);
+        }
+        if (profile_a)
+        {
+            arena_destroy(profile_a, 1);
+        }
+        if (profile_b)
+        {
+            arena_destroy(profile_b, 1);
         }
         return false;
     }
@@ -18404,6 +18716,12 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
     Aarch64GeneratedTableStats blocked_stats = {0};
     blocked_stats.coverage_counts[AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN] = 1;
     result = result && !aarch64_import_acceptance_ready(blocked_stats);
+    Aarch64AppleM1ProfileStats blocked_m1_profile = {0};
+    blocked_m1_profile.in_profile_class_counts[AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN] = 1;
+    result = result && !aarch64_apple_m1_profile_acceptance_ready(blocked_m1_profile);
+    blocked_m1_profile.in_profile_class_counts[AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN] = 0;
+    blocked_m1_profile.excluded_class_counts[AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN] = 1;
+    result = result && aarch64_apple_m1_profile_acceptance_ready(blocked_m1_profile);
     XedGeneratedFormList normalized_forms = {.pointer = &normalized_form, .length = 1};
     XedGeneratedTableStats schema_stats_a = {0};
     XedGeneratedTableStats schema_stats_b = {0};
@@ -18504,6 +18822,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
     Aarch64ImportRecord* malformed_record = aarch64_import_self_test_find_record(synthetic_records, S8("Malformed"));
     Aarch64ImportRecord* malformed_template = aarch64_import_self_test_find_record(synthetic_records, S8("MalformedTemplate"));
     Aarch64ImportVariable* branch_field = branch ? aarch64_import_variable_find(branch, S8("addr")) : 0;
+    Aarch64AppleM1ProfileStats profile_stats_a = {0};
+    Aarch64AppleM1ProfileStats profile_stats_b = {0};
+    bool profile_generated_a = aarch64_apple_m1_profile_emit(profile_a, synthetic_records, &profile_stats_a);
+    bool profile_generated_b = aarch64_apple_m1_profile_emit(profile_b, synthetic_records, &profile_stats_b);
     result = result && normal && alias && normal2 && predicate_guard_a && predicate_guard_b && branch && memory && simd_lane && sve_predicate && sme_system && reserved_variable && unknown_field && conflict && malformed_record &&
              malformed_template &&
              ((normal->coverage_class == AARCH64_IMPORT_COVERAGE_DIRECT && alias->coverage_class == AARCH64_IMPORT_COVERAGE_ALIAS) ||
@@ -18526,7 +18848,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
              unknown_field->reason_id == AARCH64_IMPORT_REASON_UNKNOWN_FIELD &&
              conflict->reason_id == AARCH64_IMPORT_REASON_CONFLICTING_BIT_ASSIGNMENT &&
              malformed_record->reason_id == AARCH64_IMPORT_REASON_MALFORMED_DAG &&
-             malformed_template->reason_id == AARCH64_IMPORT_REASON_MALFORMED_TEMPLATE;
+             malformed_template->reason_id == AARCH64_IMPORT_REASON_MALFORMED_TEMPLATE &&
+             profile_generated_a && profile_generated_b &&
+             string_equal(assembly_import_arena_contents(profile_a), assembly_import_arena_contents(profile_b)) &&
+             profile_stats_a.row_count == synthetic_records.count && profile_stats_a.in_profile_count + profile_stats_a.excluded_count == synthetic_records.count &&
+             profile_stats_a.excluded_count == 4 && profile_stats_a.in_profile_count == 11 &&
+             profile_stats_a.row_count == profile_stats_b.row_count && profile_stats_a.in_profile_count == profile_stats_b.in_profile_count &&
+             profile_stats_a.excluded_count == profile_stats_b.excluded_count;
 
     arena_reset_to_start(schema_a);
     arena_reset_to_start(schema_b);
@@ -18558,6 +18886,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
 
     arena_destroy(coverage_b, 1);
     arena_destroy(coverage_a, 1);
+    arena_destroy(profile_b, 1);
+    arena_destroy(profile_a, 1);
     arena_destroy(schema_b, 1);
     arena_destroy(schema_a, 1);
     arena_destroy(output, 1);
@@ -18754,8 +19084,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
     Arena* generated_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
     Arena* coverage_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
     Arena* inventory_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8)});
+    Arena* profile_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(16)});
     Arena* scratch = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
-    if (!aarch64_output || !generated_output || !coverage_output || !inventory_output || !scratch)
+    if (!aarch64_output || !generated_output || !coverage_output || !inventory_output || !profile_output || !scratch)
     {
         if (scratch)
         {
@@ -18768,6 +19099,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
         if (inventory_output)
         {
             arena_destroy(inventory_output, 1);
+        }
+        if (profile_output)
+        {
+            arena_destroy(profile_output, 1);
         }
         if (generated_output)
         {
@@ -18791,6 +19126,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
     }
     Aarch64ImportRecordList records = {0};
     Aarch64GeneratedTableStats stats = {0};
+    Aarch64AppleM1ProfileStats profile_stats = {0};
     bool reduced_provenance_valid = false;
     if (result == PROCESS_RESULT_SUCCESS)
     {
@@ -18808,13 +19144,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
                 string_print(S8("error: failed to generate AArch64 metadata tables or coverage contains UNCLASSIFIED rows\n"));
                 result = PROCESS_RESULT_FAILED;
             }
-            else if (!aarch64_import_acceptance_ready(stats))
+            else if (!aarch64_apple_m1_profile_emit(profile_output, records, &profile_stats))
             {
-                string_print(options.audit ? S8("audit: AArch64 metadata acceptance blocked: RESERVED/UNENCODABLE={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}; inventory output was generated\n") :
-                             S8("error: AArch64 metadata acceptance blocked: RESERVED/UNENCODABLE={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}; use --audit only for inventory output\n"),
-                             stats.coverage_counts[AARCH64_IMPORT_COVERAGE_RESERVED_UNENCODABLE],
-                             stats.coverage_counts[AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN],
-                             stats.coverage_counts[AARCH64_IMPORT_COVERAGE_UNCLASSIFIED]);
+                string_print(S8("error: failed to generate deterministic Apple M1 profile inventory\n"));
+                result = PROCESS_RESULT_FAILED;
+            }
+            else if (!aarch64_apple_m1_profile_acceptance_ready(profile_stats))
+            {
+                string_print(options.audit ? S8("audit: Apple M1 metadata acceptance blocked: in-profile RESERVED/UNENCODABLE={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}; non-M1 rows are explicit exclusions\n") :
+                             S8("error: Apple M1 metadata acceptance blocked: in-profile RESERVED/UNENCODABLE={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}; use --audit only for inventory output\n"),
+                             profile_stats.in_profile_class_counts[AARCH64_IMPORT_COVERAGE_RESERVED_UNENCODABLE],
+                             profile_stats.in_profile_class_counts[AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN],
+                             profile_stats.in_profile_class_counts[AARCH64_IMPORT_COVERAGE_UNCLASSIFIED]);
                 if (!options.audit)
                 {
                     result = PROCESS_RESULT_FAILED;
@@ -18946,11 +19287,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
             String8 generated_content = assembly_import_arena_contents(generated_output);
             String8 coverage_content = assembly_import_arena_contents(coverage_output);
             String8 inventory_content = assembly_import_arena_contents(inventory_output);
+            String8 profile_content = assembly_import_arena_contents(profile_output);
             String8 reduced_input_checksum = assembly_import_checksum(arena, input);
             String8 normalized_input_checksum = assembly_import_checksum(arena, aarch64_content);
             String8 output_checksum = assembly_import_checksum(arena, aarch64_content);
             String8 generated_checksum = assembly_import_checksum(arena, generated_content);
             String8 coverage_checksum = assembly_import_checksum(arena, coverage_content);
+            String8 profile_checksum = assembly_import_checksum(arena, profile_content);
             String8 xed_input_checksum = assembly_import_checksum(arena, xed_content[0]);
             String8 xed_header_checksum = assembly_import_checksum(arena, xed_content[1]);
             String8 xed_coverage_checksum = assembly_import_checksum(arena, xed_content[2]);
@@ -18962,7 +19305,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
                                      assembly_import_jsonl_unique_field(arena, xed_content[0], S8("iform"), &xed_iform_count,
                                                                         &xed_missing_iform_count);
             String8 generation_mode = options.audit ? S8("audit") : S8("acceptance");
-            String8 acceptance_status = aarch64_import_acceptance_ready(stats) && reduced_provenance_valid ? S8("ready") : S8("blocked");
+            String8 acceptance_status = aarch64_apple_m1_profile_acceptance_ready(profile_stats) && reduced_provenance_valid ? S8("ready") : S8("blocked");
             String8 reduced_source_identity = reduced_provenance_valid ? S8("checked-in-reduced-jsonl") : S8("unverified-reduced-jsonl");
             String8 raw_snapshot_provenance = S8("false");
             if (!xed_counts_valid)
@@ -18996,6 +19339,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
                 .aarch64_alias_source_identity = S8("not-present-in-reduced-jsonl"),
                 .aarch64_inventory_checksum = inventory_checksum,
                 .aarch64_inventory_bytes = inventory_content.length,
+                .aarch64_m1_profile_source_identity = AARCH64_APPLE_M1_PROFILE_SOURCE_IDENTITY,
+                .aarch64_m1_profile_source_checksum = reduced_input_checksum,
+                .aarch64_m1_profile_checksum = profile_checksum,
+                .aarch64_m1_profile = profile_stats,
                 .llvm_input_kind = S8("reduced_jsonl"),
                 .llvm_source_identity = reduced_source_identity,
                 .llvm_raw_snapshot_provenance = raw_snapshot_provenance,
@@ -19013,6 +19360,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
                 !assembly_import_write(arena, options.output_directory, S8("aarch64-assembly.generated.h"), generated_content) ||
                 !assembly_import_write(arena, options.output_directory, S8("aarch64-coverage.generated.inc"), coverage_content) ||
                 !assembly_import_write(arena, options.output_directory, S8("aarch64-missing-fields.generated.jsonl"), inventory_content) ||
+                !assembly_import_write(arena, options.output_directory, S8("aarch64-apple-m1-profile.generated.jsonl"), profile_content) ||
                 !assembly_import_write(arena, options.output_directory, S8("manifest.json"), manifest))
             {
                 result = PROCESS_RESULT_FAILED;
@@ -19031,6 +19379,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
     file_map_unmap(aarch64_map);
     arena_destroy(scratch, 1);
     arena_destroy(inventory_output, 1);
+    arena_destroy(profile_output, 1);
     arena_destroy(coverage_output, 1);
     arena_destroy(generated_output, 1);
     arena_destroy(aarch64_output, 1);
@@ -19073,11 +19422,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
     Arena* aarch64_generated_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
     Arena* aarch64_generated_coverage_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
     Arena* aarch64_inventory_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8)});
+    Arena* aarch64_m1_profile_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(16)});
     Arena* aarch64_generated_scratch = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
     Arena* xed_config_checksum_input = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(32)});
     Arena* xed_checksum_input = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
     if (!xed_output || !generated_output || !coverage_output || !aarch64_output || !aarch64_generated_output ||
-        !aarch64_generated_coverage_output || !aarch64_inventory_output || !aarch64_generated_scratch || !xed_config_checksum_input ||
+        !aarch64_generated_coverage_output || !aarch64_inventory_output || !aarch64_m1_profile_output || !aarch64_generated_scratch || !xed_config_checksum_input ||
         !xed_checksum_input)
     {
         string_print(S8("error: failed to reserve assembly importer arenas\n"));
@@ -19108,6 +19458,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
         if (aarch64_inventory_output)
         {
             arena_destroy(aarch64_inventory_output, 1);
+        }
+        if (aarch64_m1_profile_output)
+        {
+            arena_destroy(aarch64_m1_profile_output, 1);
         }
         if (aarch64_generated_scratch)
         {
@@ -19229,6 +19583,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
     String8 aarch64_json = {0};
     Aarch64ImportRecordList aarch64_records = {0};
     Aarch64GeneratedTableStats aarch64_generated_stats = {0};
+    Aarch64AppleM1ProfileStats aarch64_m1_profile_stats = {0};
     bool aarch64_raw_provenance_valid = false;
     bool aarch64_alias_source = false;
     if (result == PROCESS_RESULT_SUCCESS)
@@ -19283,13 +19638,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
                         string_print(S8("error: failed to generate AArch64 metadata tables or coverage contains UNCLASSIFIED rows\n"));
                         result = PROCESS_RESULT_FAILED;
                     }
-                    else if (!aarch64_import_acceptance_ready(aarch64_generated_stats))
+                    else if (!aarch64_apple_m1_profile_emit(aarch64_m1_profile_output, aarch64_records, &aarch64_m1_profile_stats))
                     {
-                        string_print(options.audit ? S8("audit: AArch64 metadata acceptance blocked: RESERVED/UNENCODABLE={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}; inventory output was generated\n") :
-                                     S8("error: AArch64 metadata acceptance blocked: RESERVED/UNENCODABLE={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}; use --audit only for inventory output\n"),
-                                     aarch64_generated_stats.coverage_counts[AARCH64_IMPORT_COVERAGE_RESERVED_UNENCODABLE],
-                                     aarch64_generated_stats.coverage_counts[AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN],
-                                     aarch64_generated_stats.coverage_counts[AARCH64_IMPORT_COVERAGE_UNCLASSIFIED]);
+                        string_print(S8("error: failed to generate deterministic Apple M1 profile inventory\n"));
+                        result = PROCESS_RESULT_FAILED;
+                    }
+                    else if (!aarch64_apple_m1_profile_acceptance_ready(aarch64_m1_profile_stats))
+                    {
+                        string_print(options.audit ? S8("audit: Apple M1 metadata acceptance blocked: in-profile RESERVED/UNENCODABLE={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}; non-M1 rows are explicit exclusions\n") :
+                                     S8("error: Apple M1 metadata acceptance blocked: in-profile RESERVED/UNENCODABLE={u64} UNSUPPORTED_TOKEN={u64} UNCLASSIFIED={u64}; use --audit only for inventory output\n"),
+                                     aarch64_m1_profile_stats.in_profile_class_counts[AARCH64_IMPORT_COVERAGE_RESERVED_UNENCODABLE],
+                                     aarch64_m1_profile_stats.in_profile_class_counts[AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN],
+                                     aarch64_m1_profile_stats.in_profile_class_counts[AARCH64_IMPORT_COVERAGE_UNCLASSIFIED]);
                         if (!options.audit)
                         {
                             result = PROCESS_RESULT_FAILED;
@@ -19318,6 +19678,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
         String8 aarch64_generated_content = assembly_import_arena_contents(aarch64_generated_output);
         String8 aarch64_generated_coverage_content = assembly_import_arena_contents(aarch64_generated_coverage_output);
         String8 aarch64_inventory_content = assembly_import_arena_contents(aarch64_inventory_output);
+        String8 aarch64_m1_profile_content = assembly_import_arena_contents(aarch64_m1_profile_output);
         String8 xed_config_checksum = assembly_import_checksum(arena, assembly_import_arena_contents(xed_config_checksum_input));
         String8 xed_input_checksum = assembly_import_checksum(arena, assembly_import_arena_contents(xed_checksum_input));
         String8 aarch64_input_checksum = assembly_import_checksum(arena, aarch64_json);
@@ -19329,8 +19690,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
         String8 aarch64_generated_output_checksum = assembly_import_checksum(arena, aarch64_generated_content);
         String8 aarch64_generated_coverage_checksum = assembly_import_checksum(arena, aarch64_generated_coverage_content);
         String8 aarch64_inventory_checksum = assembly_import_checksum(arena, aarch64_inventory_content);
+        String8 aarch64_m1_profile_checksum = assembly_import_checksum(arena, aarch64_m1_profile_content);
         String8 generation_mode = options.audit ? S8("audit") : S8("acceptance");
-        String8 acceptance_status = aarch64_import_acceptance_ready(aarch64_generated_stats) && aarch64_raw_provenance_valid && !aarch64_alias_source
+        String8 acceptance_status = aarch64_apple_m1_profile_acceptance_ready(aarch64_m1_profile_stats) && aarch64_raw_provenance_valid && !aarch64_alias_source
                                         ? S8("ready")
                                         : S8("blocked");
         String8 aarch64_source_identity = aarch64_raw_provenance_valid ? S8("llvmorg-22.1.8-pinned-raw-json") : S8("unverified-full-json");
@@ -19370,6 +19732,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
             .aarch64_alias_source_identity = alias_source_identity,
             .aarch64_inventory_checksum = aarch64_inventory_checksum,
             .aarch64_inventory_bytes = aarch64_inventory_content.length,
+            .aarch64_m1_profile_source_identity = aarch64_source_identity,
+            .aarch64_m1_profile_source_checksum = aarch64_input_checksum,
+            .aarch64_m1_profile_checksum = aarch64_m1_profile_checksum,
+            .aarch64_m1_profile = aarch64_m1_profile_stats,
             .llvm_input_kind = llvm_input_kind,
             .llvm_source_identity = aarch64_source_identity,
             .llvm_raw_snapshot_provenance = raw_snapshot_provenance,
@@ -19388,6 +19754,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
             !assembly_import_write(arena, options.output_directory, S8("aarch64-assembly.generated.h"), aarch64_generated_content) ||
             !assembly_import_write(arena, options.output_directory, S8("aarch64-coverage.generated.inc"), aarch64_generated_coverage_content) ||
             !assembly_import_write(arena, options.output_directory, S8("aarch64-missing-fields.generated.jsonl"), aarch64_inventory_content) ||
+            !assembly_import_write(arena, options.output_directory, S8("aarch64-apple-m1-profile.generated.jsonl"), aarch64_m1_profile_content) ||
             !assembly_import_write(arena, options.output_directory, S8("manifest.json"), manifest))
         {
             result = PROCESS_RESULT_FAILED;
@@ -19425,6 +19792,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
     arena_destroy(aarch64_output, 1);
     arena_destroy(aarch64_generated_scratch, 1);
     arena_destroy(aarch64_inventory_output, 1);
+    arena_destroy(aarch64_m1_profile_output, 1);
     arena_destroy(aarch64_generated_coverage_output, 1);
     arena_destroy(aarch64_generated_output, 1);
     arena_destroy(coverage_output, 1);

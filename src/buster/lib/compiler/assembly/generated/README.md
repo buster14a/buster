@@ -7,7 +7,9 @@ x86-64 metadata ABI and bounded lookup layer, while the current assembler
 encoder does not yet consume its encoding fields. The AArch64 tables remain an
 audit artifact: the acceptance importer fails closed while any record lacks an
 exact proven schema, and the current assembler runtime does not consume them
-yet.
+yet. The Apple M1 profile is emitted as a separate, deterministic JSONL
+projection over the pinned AArch64 records; it is provisional until raw LLVM
+aliases and the official Arm XML are independently validated.
 
 - `x86_64-xed.jsonl`, `x86_64-assembly.generated.h`, and
   `x86_64-coverage.generated.inc` are the existing checked-in XED artifacts.
@@ -48,8 +50,13 @@ yet.
   classification, encoder family, test class, and reason ID.
 - `aarch64-missing-fields.generated.jsonl` is the exact machine-readable audit
   inventory for every RESERVED/UNENCODABLE or UNSUPPORTED_TOKEN row.
+- `aarch64-apple-m1-profile.generated.jsonl` is the self-describing Apple M1
+  profile projection. Every source row is retained with an explicit
+  in-profile/excluded decision, stable source/name hashes, normalized form ID,
+  classification, and the predicates that caused an exclusion.
 - `manifest.json` records provenance, checksums, sizes, counts, table totals,
-  lookup totals, alias boundaries, and the acceptance status.
+  lookup totals, alias boundaries, the M1 predicate policy, and acceptance
+  status.
 
 ## Pinned snapshot and current status
 
@@ -70,9 +77,9 @@ checksum of the normalized JSONL emitted by the importer.
 
 The current audit output has 7,491 coverage rows, 7,491 canonical forms,
 22,631 fields, 23,037 segments, 26,262 operands, 7,854 predicate uses, and
-116 distinct predicate features. The flat-chunk header is 3,974,975 bytes
-(checksum `378dfee753bda56b`), the flat-chunk coverage include is 301,471
-bytes (checksum `a10e73399b8a8b75`), and the sorted string pool is 337,490
+116 distinct predicate features. The flat-chunk header is 3,951,261 bytes
+(checksum `6a66326fc028ed49`), the flat-chunk coverage include is 299,898
+bytes (checksum `251decd3edac8470`), and the sorted string pool is 337,490
 bytes. Lookup
 indexes contain 1,557 mnemonic ranges and candidates for all 7,491 records;
 the proven-signature index contains 4,310 ranges and 4,310 candidates.
@@ -98,6 +105,43 @@ The inventory contains 3,181 rows, is 581,211 bytes, and has checksum
 form ID, classification, family, test class, and exact reason ID. The
 acceptance command fails with these rows present; `--audit` is the deliberate
 report mode and does not certify completeness.
+
+### Apple M1 profile
+
+The checked-in Apple M1 projection is a provisional, LLVM-derived profile. Its
+predicate policy is the exact 24-feature closure from the pinned LLVM
+AppleA14/HasV8_4aOps definition: HasAES, HasAltNZCV, HasCRC, HasComplxNum,
+HasDotProd, HasEL3, HasFP16FML, HasFPARMv8, HasFRInt3264, HasFlagM,
+HasFullFP16, HasJS, HasLOR, HasLSE, HasNEON, HasNEONandIsStreamingSafe,
+HasPAuth, HasRCPC, HasRCPC_IMMO, HasRDM, HasSB, HasSHA2, HasSHA3, and
+HasTRACEV8_4 (the FEAT_TRF closure). HasLOR and FEAT_TRF are intentional
+AppleA14 additions: the independent closure audit attributes eight non-system
+forms to FEAT_LOR and one system TSB form to FEAT_TRF. An empty predicate list
+is the baseline; unknown predicates and any predicate outside this set are
+explicit exclusions, never silent support.
+
+For the 7,491 checked-in LLVM rows this produces 2,899 provisional in-profile
+rows and 4,592 explicit exclusions (4,961 excluded predicate occurrences).
+The in-profile classification counts are
+DIRECT=22, NORMALIZED=1,921, PRIVILEGED/SYSTEM=17,
+RESERVED/UNENCODABLE=2, UNSUPPORTED_TOKEN=937, with ALIAS=0 and
+UNCLASSIFIED=0. The exclusion counts are DIRECT=15, NORMALIZED=2,329,
+PRIVILEGED/SYSTEM=6, RESERVED/UNENCODABLE=145, UNSUPPORTED_TOKEN=2,097,
+with ALIAS=0 and UNCLASSIFIED=0. The profile acceptance gate is therefore
+blocked by the two in-profile reserved rows and 937 in-profile unsupported
+rows; non-M1 extensions (for example SVE/SVE2, SME/SME2, MTE, BF16, I8MM,
+and BTI) remain explicit exclusions and do not inflate that denominator.
+The emitted profile is 2,537,270 bytes with checksum `a7bb762e2d781972`.
+
+The HasRCPC_IMMO member is intentional: the pinned source tags the
+LDAPUR*/STLUR* unscaled-immediate forms with HasRCPC_IMMO. Dropping it would
+misclassify Armv8.4-A load-acquire/store-release forms that are part of the M1
+closure. This predicate-derived count is not the independent Arm XML count.
+The official Arm A64 ISA audit selected 1,695 of 4,623 candidate rows
+(1,523 canonical and 172 aliases), or 1,653 rows after excluding system
+instructions (1,490 canonical and 163 aliases). Those XML figures are
+cross-check evidence only; the proprietary raw XML is not vendored and is not
+used to claim that the LLVM profile is complete.
 
 The reduced source does not contain an `AArch64InstAlias` class, so its alias
 count is honestly zero and no alias preservation is claimed. The full raw
@@ -127,7 +171,8 @@ those checkouts, generate the checked-in audit artifact with:
 ```
 
 Run the audit command twice into separate directories and byte-compare every
-artifact, including `aarch64-missing-fields.generated.jsonl` and `manifest.json`.
+artifact, including `aarch64-apple-m1-profile.generated.jsonl`,
+`aarch64-missing-fields.generated.jsonl`, and `manifest.json`.
 The importer also verifies that the copied XED artifacts have their expected
 bytes, checksums, line count, and generated-count macros; a one-byte mutation
 fails provenance validation. The current local audit generation takes about

@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "generation_mode": "audit",
   "acceptance_status": "blocked",
   "checksum_algorithm": "xxh64",
@@ -59,6 +59,24 @@
     "alias_source": "not-present-in-reduced-jsonl",
     "alias_count": 0,
     "missing_field_inventory": {"artifact": "aarch64-missing-fields.generated.jsonl", "checksum": "951f5fb99507e0ce", "bytes": 581211, "classification_filter": ["RESERVED/UNENCODABLE", "UNSUPPORTED_TOKEN"], "reserved_unencodable_count": 147, "unsupported_token_count": 3034, "unclassified_count": 0}
+  },
+  "apple_m1_profile": {
+    "name": "apple-m1",
+    "version": "1",
+    "source_identity": "llvmorg-22.1.8-reduced-jsonl",
+    "source_checksum": "f2e553abd71696e5",
+    "artifact": "aarch64-apple-m1-profile.generated.jsonl",
+    "artifact_checksum": "a7bb762e2d781972",
+    "artifact_bytes": 2537270,
+    "row_count": 7491,
+    "in_profile_count": 2899,
+    "excluded_count": 4592,
+    "excluded_predicate_count": 4961,
+    "classification_counts": {"DIRECT": 22, "NORMALIZED": 1921, "ALIAS": 0, "PRIVILEGED/SYSTEM": 17, "RESERVED/UNENCODABLE": 2, "UNSUPPORTED_TOKEN": 937, "UNCLASSIFIED": 0},
+    "excluded_classification_counts": {"DIRECT": 15, "NORMALIZED": 2329, "ALIAS": 0, "PRIVILEGED/SYSTEM": 6, "RESERVED/UNENCODABLE": 145, "UNSUPPORTED_TOKEN": 2097, "UNCLASSIFIED": 0},
+    "predicate_policy": ["HasAES", "HasAltNZCV", "HasCRC", "HasComplxNum", "HasDotProd", "HasEL3", "HasFP16FML", "HasFPARMv8", "HasFRInt3264", "HasFlagM", "HasFullFP16", "HasJS", "HasLOR", "HasLSE", "HasNEON", "HasNEONandIsStreamingSafe", "HasPAuth", "HasRCPC", "HasRCPC_IMMO", "HasRDM", "HasSB", "HasSHA2", "HasSHA3", "HasTRACEV8_4"],
+    "arm_xml_evidence": {"status": "independent-cross-check-only", "source": "official-arm-a64-isa-data-not-vendored", "candidate_count": 4623, "selected_count": 1695, "canonical_count": 1523, "alias_count": 172, "selected_excluding_system_count": 1653, "canonical_excluding_system_count": 1490, "alias_excluding_system_count": 163},
+    "status": "provisional-audit"
   },
   "llvm": {
     "source_url": "https://github.com/llvm/llvm-project",
