@@ -14,6 +14,7 @@ struct Aarch64SyntaxTestAnchorState
     u32 selected_branch;
     u32 optional_present;
     u32 fail_print;
+    u32 concrete_profile;
 };
 
 BUSTER_GLOBAL_LOCAL u64 aarch64_syntax_test_checkpoint(void* user)
@@ -78,6 +79,16 @@ BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_print_anchor(void* user, BusterAarc
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_print_anchor_malicious(void* user, BusterAarch64SyntaxAnchor anchor, String8* spelling)
+{
+    BUSTER_UNUSED(anchor);
+    Aarch64SyntaxTestAnchorState* state = (Aarch64SyntaxTestAnchorState*)user;
+    if (!spelling) return false;
+    if (state) state->transactional_value = 88;
+    *spelling = (String8){.pointer = 0, .length = 2};
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_select_alternative(void* user, BusterAarch64SyntaxNode node, u32 branch_count,
                                                                   u32* branch_index)
 {
@@ -106,7 +117,30 @@ BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_print_anchor_concrete(void* user, B
         state->transactional_value = 77;
         return false;
     }
-    if (anchor.spelling.length >= 1 && anchor.spelling.pointer[0] == 'W') *spelling = S8("w0");
+    if (state && state->concrete_profile == 1)
+    {
+        if (anchor.occurrence == 0) *spelling = S8("w0");
+        else if (anchor.occurrence == 1) *spelling = S8("w1");
+        else if (anchor.occurrence == 2) *spelling = S8("x2");
+        else *spelling = S8("0");
+    }
+    else if (state && state->concrete_profile == 2)
+    {
+        if (anchor.occurrence == 0) *spelling = S8("v0");
+        else if (anchor.occurrence == 1) *spelling = S8("4s");
+        else if (anchor.occurrence == 2) *spelling = S8("v1");
+        else if (anchor.occurrence == 3) *spelling = S8("4s");
+        else *spelling = S8("x2");
+    }
+    else if (state && state->concrete_profile == 3)
+    {
+        if (anchor.occurrence == 0) *spelling = S8("v0");
+        else if (anchor.occurrence == 1) *spelling = S8("4s");
+        else if (anchor.occurrence == 2) *spelling = S8("v1");
+        else if (anchor.occurrence == 3) *spelling = S8("s");
+        else *spelling = S8("0");
+    }
+    else if (anchor.spelling.length >= 1 && anchor.spelling.pointer[0] == 'W') *spelling = S8("w0");
     else if (anchor.spelling.length >= 1 && anchor.spelling.pointer[0] == 'X') *spelling = S8("x0");
     else if (anchor.spelling.length >= 1 && anchor.spelling.pointer[0] == 'V') *spelling = S8("v0");
     else if (anchor.spelling.length == 1 && anchor.spelling.pointer[0] == 'R') *spelling = S8("x0");
@@ -151,9 +185,11 @@ UnitTestResult aarch64_syntax_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, counts.mnemonic_optional_suffix_count == 55 && counts.mnemonic_condition_count == 1 &&
                          counts.fixed_numeric_literal_count == 273);
     BUSTER_STRING_TEST(arguments, buster_aarch64_syntax_input_digest(),
-                       S8("7dccd8605bfe3f3f738e8e070468625ae364c97c7901b119631b2f54396243ac"));
-    BUSTER_TEST(arguments, stats.generic_shape_count == 181 && stats.exact_shape_count == 1635 && stats.max_total_ast_nodes == 29 &&
-                         stats.max_non_lit_non_seq_nodes == 14 && stats.max_optional_depth == 2 && stats.max_delimiter_nesting == 3 &&
+                       S8("eea16d7f094badc65614aed988621f48aca5495890847294bb29decc4be1c31c"));
+    BUSTER_STRING_TEST(arguments, buster_aarch64_syntax_source_digest(),
+                       S8("8485c5c61835d5394d325757ab2964890e8bdfea304c6faa8fd4c23e4c7aabec"));
+    BUSTER_TEST(arguments, stats.generic_shape_count == 1165 && stats.exact_shape_count == 1635 && stats.max_total_ast_nodes == 29 &&
+                         stats.max_non_lit_non_seq_nodes == 13 && stats.max_optional_depth == 2 && stats.max_delimiter_nesting == 3 &&
                          stats.max_top_level_comma_groups == 5 && stats.max_anchor_operands == 10);
     BUSTER_TEST(arguments, buster_aarch64_syntax_validate());
 
@@ -196,6 +232,18 @@ UnitTestResult aarch64_syntax_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, print_failures == 0 && match_failures == 0);
     BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(0, S8("abs <Vd>.<T>, <Vn>.<T>"), callbacks));
     BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(1, S8("aBs d<d>, D<n>"), callbacks));
+    BUSTER_TEST(arguments, counts.mnemonic_range_count == 695);
+    BusterAarch64SyntaxMnemonicRange fixed_prefix_range = {0};
+    BUSTER_TEST(arguments, buster_aarch64_syntax_mnemonic_lookup(S8("ABS"), &fixed_prefix_range) &&
+                         buster_aarch64_syntax_mnemonic_lookup(S8("BRK"), &fixed_prefix_range) &&
+                         buster_aarch64_syntax_mnemonic_lookup(S8("CFP"), &fixed_prefix_range) &&
+                         buster_aarch64_syntax_mnemonic_lookup(S8("SYS"), &fixed_prefix_range) &&
+                         buster_aarch64_syntax_mnemonic_lookup(S8("TSB"), &fixed_prefix_range));
+    BusterAarch64SyntaxNode mnemonic_node = {0};
+    BUSTER_TEST(arguments, buster_aarch64_syntax_node(first.node_first + 1, &mnemonic_node) &&
+                         mnemonic_node.kind == BUSTER_AARCH64_SYNTAX_MNEMONIC &&
+                         mnemonic_node.text.length == S8("ABS ").length &&
+                         memcmp(mnemonic_node.text.pointer, S8("ABS ").pointer, (size_t)mnemonic_node.text.length) == 0);
     u32 condition_row = 0;
     BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("B.<cond> <label>"), S8("B"), &condition_row));
     BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(condition_row, S8("b.<cond> <label>"), callbacks));
@@ -227,6 +275,9 @@ UnitTestResult aarch64_syntax_tests(UnitTestArguments* arguments)
     String8 nested_partial = S8("ADDS <Wd>, <Wn|WSP>, <Wm>{, <extend> {#<amount>");
     BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(nested_optional_row, nested_partial, nested_callbacks) &&
                          nested_state.transactional_value == 0);
+    u32 modifier_row = 0;
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("BIC <Vd>.<T>, #<imm8>{, LSL #<amount>}"), S8("BIC"), &modifier_row));
+    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(modifier_row, S8("bic <Vd>.<T>, #<imm8>{, lSl #<amount>}"), callbacks));
 
     u32 list_row = 0;
     BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("LD1 { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>]"), S8("LD1"), &list_row));
@@ -275,17 +326,20 @@ UnitTestResult aarch64_syntax_tests(UnitTestArguments* arguments)
                          memcmp(concrete_output.pointer, S8("ADDS w0, w0, w0, lsl #0").pointer, (size_t)concrete_output.length) == 0);
     concrete_output.length = 0;
     concrete_state.optional_present = 0;
+    concrete_state.concrete_profile = 1;
     BUSTER_TEST(arguments, buster_aarch64_syntax_print_concrete_row(writeback_row, concrete_callbacks, &concrete_output) &&
-                         concrete_output.length == S8("LDP w0, w0, [x0, #0]!").length &&
-                         memcmp(concrete_output.pointer, S8("LDP w0, w0, [x0, #0]!").pointer, (size_t)concrete_output.length) == 0);
+                         concrete_output.length == S8("LDP w0, w1, [x2, #0]!").length &&
+                         memcmp(concrete_output.pointer, S8("LDP w0, w1, [x2, #0]!").pointer, (size_t)concrete_output.length) == 0);
     concrete_output.length = 0;
+    concrete_state.concrete_profile = 2;
     BUSTER_TEST(arguments, buster_aarch64_syntax_print_concrete_row(list_row, concrete_callbacks, &concrete_output) &&
-                         concrete_output.length == S8("LD1 { v0.4s, v0.4s }, [x0]").length &&
-                         memcmp(concrete_output.pointer, S8("LD1 { v0.4s, v0.4s }, [x0]").pointer, (size_t)concrete_output.length) == 0);
+                         concrete_output.length == S8("LD1 { v0.4s, v1.4s }, [x2]").length &&
+                         memcmp(concrete_output.pointer, S8("LD1 { v0.4s, v1.4s }, [x2]").pointer, (size_t)concrete_output.length) == 0);
     concrete_output.length = 0;
+    concrete_state.concrete_profile = 3;
     BUSTER_TEST(arguments, buster_aarch64_syntax_print_concrete_row(lane_row, concrete_callbacks, &concrete_output) &&
-                         concrete_output.length == S8("DUP v0.4s, v0.4s[0]").length &&
-                         memcmp(concrete_output.pointer, S8("DUP v0.4s, v0.4s[0]").pointer, (size_t)concrete_output.length) == 0);
+                         concrete_output.length == S8("DUP v0.4s, v1.s[0]").length &&
+                         memcmp(concrete_output.pointer, S8("DUP v0.4s, v1.s[0]").pointer, (size_t)concrete_output.length) == 0);
     concrete_output.length = 1;
     concrete_bytes[0] = 'y';
     concrete_state.fail_print = 1;
@@ -293,6 +347,15 @@ UnitTestResult aarch64_syntax_tests(UnitTestArguments* arguments)
     concrete_state.transactional_value = 0;
     BUSTER_TEST(arguments, !buster_aarch64_syntax_print_concrete_row(nested_optional_row, concrete_callbacks, &concrete_output) &&
                          concrete_output.length == 1 && concrete_bytes[0] == 'y' && concrete_state.transactional_value == 0);
+    Aarch64SyntaxTestAnchorState malicious_state = {0};
+    BusterAarch64SyntaxCallbacks malicious_callbacks = callbacks;
+    malicious_callbacks.print_anchor = &aarch64_syntax_test_print_anchor_malicious;
+    malicious_callbacks.user = &malicious_state;
+    concrete_output.length = 1;
+    concrete_bytes[0] = 'z';
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_print_row(0, malicious_callbacks, &concrete_output) &&
+                         concrete_output.length == 1 && concrete_bytes[0] == 'z' && malicious_state.transactional_value == 0 &&
+                         malicious_state.restore_count != 0);
     return result;
 }
 

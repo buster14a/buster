@@ -76,6 +76,8 @@ struct BusterAarch64SyntaxGeneratedRow
     u32 assembly_length;
     u32 mnemonic_offset;
     u32 mnemonic_length;
+    u32 encoding_offset;
+    u32 encoding_length;
     u32 anchor_count;
     u32 anchor_min;
     u32 anchor_max;
@@ -120,6 +122,7 @@ struct BusterAarch64SyntaxRow
     String8 id;
     String8 assembly;
     String8 mnemonic;
+    String8 encoding_name;
 };
 
 typedef struct BusterAarch64SyntaxMnemonicRange BusterAarch64SyntaxMnemonicRange;
@@ -211,6 +214,7 @@ struct BusterAarch64SyntaxStats
 BUSTER_F_DECL u32 buster_aarch64_syntax_schema_version(void);
 BUSTER_F_DECL BusterAarch64SyntaxCounts buster_aarch64_syntax_counts(void);
 BUSTER_F_DECL BusterAarch64SyntaxStats buster_aarch64_syntax_stats(void);
+BUSTER_F_DECL String8 buster_aarch64_syntax_source_digest(void);
 BUSTER_F_DECL String8 buster_aarch64_syntax_input_digest(void);
 BUSTER_F_DECL String8 buster_aarch64_syntax_generic_shape_digest(void);
 BUSTER_F_DECL String8 buster_aarch64_syntax_generic_row_digest(void);
