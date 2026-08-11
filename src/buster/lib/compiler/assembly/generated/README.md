@@ -223,8 +223,10 @@ The same importer emits `arm-a64-m1-fixed.generated.h`, a deterministic
 34-row spelling-to-word table for Apple-M1 rows whose Arm masks are fully
 fixed (`fixed_mask == 0xffffffff`, with no field or unresolved bits). It keeps
 32 canonical rows and the two `PSSBB`/`SSBB` aliases, including each Arm row
-ID and digest for provenance. Regeneration writes all three Arm artifacts to
-the requested output directory.
+ID, digest, and required target feature for provenance and explicit feature
+subtraction. The manifest records the fixed header's byte count and XXH64 as
+well as the canonical JSONL identity. Regeneration writes all three Arm
+artifacts to the requested output directory.
 
 Regenerate into a separate directory and compare all three output files byte-for-
 byte across two runs:

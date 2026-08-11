@@ -624,7 +624,11 @@ bool buster_aarch64_arm_m1_fixed_spelling(u32 index, BusterAarch64ArmM1FixedSpel
     BusterAarch64ArmM1GeneratedFixedRow const* row = buster_aarch64_arm_m1_generated_fixed_rows + index;
     u32 spelling_length = a64_fixed_row_string_length(row->spelling);
     u32 row_id_length = a64_fixed_row_string_length(row->arm_row_id);
-    if (!spelling_length || !row_id_length || (row->word & ~BUSTER_AARCH64_ARM_M1_FIXED_MASK) || row->canonical == row->alias)
+    bool required_feature_valid = row->required_feature == TARGET_CPU_FEATURE_NONE ||
+                                  (row->required_feature >= TARGET_CPU_FEATURE_AARCH64_V8_4A &&
+                                   row->required_feature < TARGET_CPU_FEATURE_COUNT);
+    if (!spelling_length || !row_id_length || (row->word & ~BUSTER_AARCH64_ARM_M1_FIXED_MASK) || row->canonical == row->alias ||
+        !required_feature_valid)
     {
         return false;
     }
@@ -633,6 +637,7 @@ bool buster_aarch64_arm_m1_fixed_spelling(u32 index, BusterAarch64ArmM1FixedSpel
         .arm_row_id = {.pointer = (char8*)row->arm_row_id, .length = row_id_length},
         .word = row->word,
         .arm_row_digest = row->arm_row_digest,
+        .required_feature = row->required_feature,
         .canonical = row->canonical,
         .alias = row->alias,
         .system = row->system,
@@ -659,7 +664,13 @@ bool buster_aarch64_arm_m1_fixed_lookup(String8 spelling, BusterAarch64ArmM1Fixe
 
 bool buster_aarch64_arm_m1_fixed_target(Target target)
 {
-    return target.cpu_arch == CPU_ARCH_AARCH64 && a64_metadata_target_is_m1_profile(target);
+    return target.cpu_arch == CPU_ARCH_AARCH64 && a64_metadata_target_is_m1_profile(target) && target_cpu_features_are_valid(target);
+}
+
+bool buster_aarch64_arm_m1_fixed_supported_for_target(BusterAarch64ArmM1FixedSpelling fixed, Target target)
+{
+    return buster_aarch64_arm_m1_fixed_target(target) &&
+           (fixed.required_feature == TARGET_CPU_FEATURE_NONE || target_cpu_feature_has(target, fixed.required_feature));
 }
 
 BusterAarch64MetadataCounts buster_aarch64_metadata_counts(void)

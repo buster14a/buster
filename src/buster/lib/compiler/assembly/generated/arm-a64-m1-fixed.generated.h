@@ -2,6 +2,7 @@
 #ifndef BUSTER_AARCH64_ARM_M1_FIXED_GENERATED_H
 #define BUSTER_AARCH64_ARM_M1_FIXED_GENERATED_H
 #include <buster/lib/base.h>
+#include <buster/lib/target.h>
 
 typedef struct BusterAarch64ArmM1GeneratedFixedRow BusterAarch64ArmM1GeneratedFixedRow;
 struct BusterAarch64ArmM1GeneratedFixedRow
@@ -10,6 +11,7 @@ struct BusterAarch64ArmM1GeneratedFixedRow
     const char* arm_row_id;
     u32 word;
     u64 arm_row_digest;
+    TargetCpuFeature required_feature;
     bool canonical;
     bool alias;
     bool system;
@@ -24,40 +26,40 @@ struct BusterAarch64ArmM1GeneratedFixedRow
 #define BUSTER_AARCH64_ARM_M1_FIXED_MASK UINT32_C(0xffffffff)
 
 static const BusterAarch64ArmM1GeneratedFixedRow buster_aarch64_arm_m1_generated_fixed_rows[] = {
-    {"AUTIA1716", "arm-a64@2026-06:AUTIA1716_HI_hints", UINT32_C(0xd503219f), UINT64_C(0xefb27a8829041858), true, false, false, 0},
-    {"AUTIASP", "arm-a64@2026-06:AUTIASP_HI_hints", UINT32_C(0xd50323bf), UINT64_C(0x563e5337e95037c8), true, false, false, 0},
-    {"AUTIAZ", "arm-a64@2026-06:AUTIAZ_HI_hints", UINT32_C(0xd503239f), UINT64_C(0x3b2162463284163b), true, false, false, 0},
-    {"AUTIB1716", "arm-a64@2026-06:AUTIB1716_HI_hints", UINT32_C(0xd50321df), UINT64_C(0xef413b33019b5154), true, false, false, 0},
-    {"AUTIBSP", "arm-a64@2026-06:AUTIBSP_HI_hints", UINT32_C(0xd50323ff), UINT64_C(0xc24e0c31db8c07b6), true, false, false, 0},
-    {"AUTIBZ", "arm-a64@2026-06:AUTIBZ_HI_hints", UINT32_C(0xd50323df), UINT64_C(0xff7a557019ed0c15), true, false, false, 0},
-    {"AXFLAG", "arm-a64@2026-06:AXFLAG_M_pstate", UINT32_C(0xd500405f), UINT64_C(0x9a1098969eadbf1b), true, false, true, 0},
-    {"CFINV", "arm-a64@2026-06:CFINV_M_pstate", UINT32_C(0xd500401f), UINT64_C(0x7c6494a34efc7074), true, false, true, 0},
-    {"CSDB", "arm-a64@2026-06:CSDB_HI_hints", UINT32_C(0xd503229f), UINT64_C(0xeb5fc198be338b4a), true, false, true, 0},
-    {"DRPS", "arm-a64@2026-06:DRPS_64E_branch_reg", UINT32_C(0xd6bf03e0), UINT64_C(0x2ec2197eddbee02e), true, false, true, 0},
-    {"ERETAA", "arm-a64@2026-06:ERETAA_64E_branch_reg", UINT32_C(0xd69f0bff), UINT64_C(0x49992ba5e5de1e00), true, false, false, 0},
-    {"ERETAB", "arm-a64@2026-06:ERETAB_64E_branch_reg", UINT32_C(0xd69f0fff), UINT64_C(0xb72a8d3c14e2390c), true, false, false, 0},
-    {"ERET", "arm-a64@2026-06:ERET_64E_branch_reg", UINT32_C(0xd69f03e0), UINT64_C(0xf9516304bbfb8c5e), true, false, true, 0},
-    {"ESB", "arm-a64@2026-06:ESB_HI_hints", UINT32_C(0xd503221f), UINT64_C(0xbfde8544ad7fd2fa), true, false, true, 0},
-    {"NOP", "arm-a64@2026-06:NOP_HI_hints", UINT32_C(0xd503201f), UINT64_C(0x3b01271fe0dfcf46), true, false, true, 0},
-    {"PACIA1716", "arm-a64@2026-06:PACIA1716_HI_hints", UINT32_C(0xd503211f), UINT64_C(0xfa1150156926b746), true, false, false, 0},
-    {"PACIASP", "arm-a64@2026-06:PACIASP_HI_hints", UINT32_C(0xd503233f), UINT64_C(0x10a9ef48de927cf7), true, false, false, 0},
-    {"PACIAZ", "arm-a64@2026-06:PACIAZ_HI_hints", UINT32_C(0xd503231f), UINT64_C(0xf316663792336172), true, false, false, 0},
-    {"PACIB1716", "arm-a64@2026-06:PACIB1716_HI_hints", UINT32_C(0xd503215f), UINT64_C(0xff545796c103918b), true, false, false, 0},
-    {"PACIBSP", "arm-a64@2026-06:PACIBSP_HI_hints", UINT32_C(0xd503237f), UINT64_C(0xf9b7fd3f3db149ac), true, false, false, 0},
-    {"PACIBZ", "arm-a64@2026-06:PACIBZ_HI_hints", UINT32_C(0xd503235f), UINT64_C(0x55f9cf2a51d6529b), true, false, false, 0},
-    {"PSSBB", "arm-a64@2026-06:PSSBB_DSB_BO_barriers", UINT32_C(0xd503349f), UINT64_C(0x9e6e759013b7466e), false, true, true, 0},
-    {"RETAA", "arm-a64@2026-06:RETAA_64E_branch_reg", UINT32_C(0xd65f0bff), UINT64_C(0x954058a92951882), true, false, false, 0},
-    {"RETAB", "arm-a64@2026-06:RETAB_64E_branch_reg", UINT32_C(0xd65f0fff), UINT64_C(0x36a796e9b30d7c67), true, false, false, 0},
-    {"SB", "arm-a64@2026-06:SB_only_barriers", UINT32_C(0xd50330ff), UINT64_C(0xc86254b066d190fe), true, false, true, 0},
-    {"SEVL", "arm-a64@2026-06:SEVL_HI_hints", UINT32_C(0xd50320bf), UINT64_C(0xd906cce54ea67a0), true, false, true, 0},
-    {"SEV", "arm-a64@2026-06:SEV_HI_hints", UINT32_C(0xd503209f), UINT64_C(0xff8b2b9798e3a6f5), true, false, true, 0},
-    {"SSBB", "arm-a64@2026-06:SSBB_DSB_BO_barriers", UINT32_C(0xd503309f), UINT64_C(0xa367b96ae742f2a8), false, true, true, 0},
-    {"TSB CSYNC", "arm-a64@2026-06:TSB_HC_hints", UINT32_C(0xd503225f), UINT64_C(0xcd0cf0852ff7a7dc), true, false, true, 0},
-    {"WFE", "arm-a64@2026-06:WFE_HI_hints", UINT32_C(0xd503205f), UINT64_C(0xe8e98d89711dbbdc), true, false, true, 0},
-    {"WFI", "arm-a64@2026-06:WFI_HI_hints", UINT32_C(0xd503207f), UINT64_C(0x210a4c58e84c8a08), true, false, true, 0},
-    {"XAFLAG", "arm-a64@2026-06:XAFLAG_M_pstate", UINT32_C(0xd500403f), UINT64_C(0x26c8f3cddcd55c54), true, false, true, 0},
-    {"XPACLRI", "arm-a64@2026-06:XPACLRI_HI_hints", UINT32_C(0xd50320ff), UINT64_C(0x2329fb25fbc74c54), true, false, false, 0},
-    {"YIELD", "arm-a64@2026-06:YIELD_HI_hints", UINT32_C(0xd503203f), UINT64_C(0x9605e6ab9956281b), true, false, true, 0},
+    {"AUTIA1716", "arm-a64@2026-06:AUTIA1716_HI_hints", UINT32_C(0xd503219f), UINT64_C(0xefb27a8829041858), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"AUTIASP", "arm-a64@2026-06:AUTIASP_HI_hints", UINT32_C(0xd50323bf), UINT64_C(0x563e5337e95037c8), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"AUTIAZ", "arm-a64@2026-06:AUTIAZ_HI_hints", UINT32_C(0xd503239f), UINT64_C(0x3b2162463284163b), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"AUTIB1716", "arm-a64@2026-06:AUTIB1716_HI_hints", UINT32_C(0xd50321df), UINT64_C(0xef413b33019b5154), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"AUTIBSP", "arm-a64@2026-06:AUTIBSP_HI_hints", UINT32_C(0xd50323ff), UINT64_C(0xc24e0c31db8c07b6), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"AUTIBZ", "arm-a64@2026-06:AUTIBZ_HI_hints", UINT32_C(0xd50323df), UINT64_C(0xff7a557019ed0c15), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"AXFLAG", "arm-a64@2026-06:AXFLAG_M_pstate", UINT32_C(0xd500405f), UINT64_C(0x9a1098969eadbf1b), TARGET_CPU_FEATURE_AARCH64_ALTNZCV, true, false, true, 0},
+    {"CFINV", "arm-a64@2026-06:CFINV_M_pstate", UINT32_C(0xd500401f), UINT64_C(0x7c6494a34efc7074), TARGET_CPU_FEATURE_AARCH64_FLAGM, true, false, true, 0},
+    {"CSDB", "arm-a64@2026-06:CSDB_HI_hints", UINT32_C(0xd503229f), UINT64_C(0xeb5fc198be338b4a), TARGET_CPU_FEATURE_NONE, true, false, true, 0},
+    {"DRPS", "arm-a64@2026-06:DRPS_64E_branch_reg", UINT32_C(0xd6bf03e0), UINT64_C(0x2ec2197eddbee02e), TARGET_CPU_FEATURE_NONE, true, false, true, 0},
+    {"ERETAA", "arm-a64@2026-06:ERETAA_64E_branch_reg", UINT32_C(0xd69f0bff), UINT64_C(0x49992ba5e5de1e00), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"ERETAB", "arm-a64@2026-06:ERETAB_64E_branch_reg", UINT32_C(0xd69f0fff), UINT64_C(0xb72a8d3c14e2390c), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"ERET", "arm-a64@2026-06:ERET_64E_branch_reg", UINT32_C(0xd69f03e0), UINT64_C(0xf9516304bbfb8c5e), TARGET_CPU_FEATURE_NONE, true, false, true, 0},
+    {"ESB", "arm-a64@2026-06:ESB_HI_hints", UINT32_C(0xd503221f), UINT64_C(0xbfde8544ad7fd2fa), TARGET_CPU_FEATURE_AARCH64_RAS, true, false, true, 0},
+    {"NOP", "arm-a64@2026-06:NOP_HI_hints", UINT32_C(0xd503201f), UINT64_C(0x3b01271fe0dfcf46), TARGET_CPU_FEATURE_NONE, true, false, true, 0},
+    {"PACIA1716", "arm-a64@2026-06:PACIA1716_HI_hints", UINT32_C(0xd503211f), UINT64_C(0xfa1150156926b746), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"PACIASP", "arm-a64@2026-06:PACIASP_HI_hints", UINT32_C(0xd503233f), UINT64_C(0x10a9ef48de927cf7), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"PACIAZ", "arm-a64@2026-06:PACIAZ_HI_hints", UINT32_C(0xd503231f), UINT64_C(0xf316663792336172), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"PACIB1716", "arm-a64@2026-06:PACIB1716_HI_hints", UINT32_C(0xd503215f), UINT64_C(0xff545796c103918b), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"PACIBSP", "arm-a64@2026-06:PACIBSP_HI_hints", UINT32_C(0xd503237f), UINT64_C(0xf9b7fd3f3db149ac), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"PACIBZ", "arm-a64@2026-06:PACIBZ_HI_hints", UINT32_C(0xd503235f), UINT64_C(0x55f9cf2a51d6529b), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"PSSBB", "arm-a64@2026-06:PSSBB_DSB_BO_barriers", UINT32_C(0xd503349f), UINT64_C(0x9e6e759013b7466e), TARGET_CPU_FEATURE_NONE, false, true, true, 0},
+    {"RETAA", "arm-a64@2026-06:RETAA_64E_branch_reg", UINT32_C(0xd65f0bff), UINT64_C(0x954058a92951882), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"RETAB", "arm-a64@2026-06:RETAB_64E_branch_reg", UINT32_C(0xd65f0fff), UINT64_C(0x36a796e9b30d7c67), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"SB", "arm-a64@2026-06:SB_only_barriers", UINT32_C(0xd50330ff), UINT64_C(0xc86254b066d190fe), TARGET_CPU_FEATURE_AARCH64_SB, true, false, true, 0},
+    {"SEVL", "arm-a64@2026-06:SEVL_HI_hints", UINT32_C(0xd50320bf), UINT64_C(0xd906cce54ea67a0), TARGET_CPU_FEATURE_NONE, true, false, true, 0},
+    {"SEV", "arm-a64@2026-06:SEV_HI_hints", UINT32_C(0xd503209f), UINT64_C(0xff8b2b9798e3a6f5), TARGET_CPU_FEATURE_NONE, true, false, true, 0},
+    {"SSBB", "arm-a64@2026-06:SSBB_DSB_BO_barriers", UINT32_C(0xd503309f), UINT64_C(0xa367b96ae742f2a8), TARGET_CPU_FEATURE_NONE, false, true, true, 0},
+    {"TSB CSYNC", "arm-a64@2026-06:TSB_HC_hints", UINT32_C(0xd503225f), UINT64_C(0xcd0cf0852ff7a7dc), TARGET_CPU_FEATURE_AARCH64_TRACEV8_4, true, false, true, 0},
+    {"WFE", "arm-a64@2026-06:WFE_HI_hints", UINT32_C(0xd503205f), UINT64_C(0xe8e98d89711dbbdc), TARGET_CPU_FEATURE_NONE, true, false, true, 0},
+    {"WFI", "arm-a64@2026-06:WFI_HI_hints", UINT32_C(0xd503207f), UINT64_C(0x210a4c58e84c8a08), TARGET_CPU_FEATURE_NONE, true, false, true, 0},
+    {"XAFLAG", "arm-a64@2026-06:XAFLAG_M_pstate", UINT32_C(0xd500403f), UINT64_C(0x26c8f3cddcd55c54), TARGET_CPU_FEATURE_AARCH64_ALTNZCV, true, false, true, 0},
+    {"XPACLRI", "arm-a64@2026-06:XPACLRI_HI_hints", UINT32_C(0xd50320ff), UINT64_C(0x2329fb25fbc74c54), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false, 0},
+    {"YIELD", "arm-a64@2026-06:YIELD_HI_hints", UINT32_C(0xd503203f), UINT64_C(0x9605e6ab9956281b), TARGET_CPU_FEATURE_NONE, true, false, true, 0},
 };
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(buster_aarch64_arm_m1_generated_fixed_rows) == BUSTER_AARCH64_ARM_M1_FIXED_SPELLING_COUNT);
 

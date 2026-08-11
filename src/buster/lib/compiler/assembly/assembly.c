@@ -2097,7 +2097,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_fixed_instruction_lookup(Target target
         return false;
     }
     BusterAarch64ArmM1FixedSpelling fixed = {0};
-    if (!buster_aarch64_arm_m1_fixed_lookup(statement, &fixed))
+    if (!buster_aarch64_arm_m1_fixed_lookup(statement, &fixed) ||
+        !buster_aarch64_arm_m1_fixed_supported_for_target(fixed, target))
     {
         return false;
     }
@@ -5584,13 +5585,15 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_size(AssemblyInstruction* inst
 BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder* builder, String8 statement, u32 line, u32 column,
                                                                  u64 offset, Target target, AssemblySyntax syntax)
 {
+    String8 full_statement = assembly_trim(statement);
     u8 lock_prefix = false;
     u64 lock_end = 0;
     while (lock_end < statement.length && !assembly_space(statement.pointer[lock_end]))
     {
         lock_end += 1;
     }
-    if (lock_end < statement.length && assembly_word_equal(string_slice(statement, 0, lock_end), S8("lock")))
+    if (target.cpu_arch == CPU_ARCH_X86_64 && lock_end < statement.length &&
+        assembly_word_equal(string_slice(statement, 0, lock_end), S8("lock")))
     {
         lock_prefix = true;
         statement = assembly_trim(string_slice(statement, lock_end, statement.length));
@@ -5617,7 +5620,6 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
     }
     String8 mnemonic = {.pointer = statement.pointer, .length = mnemonic_end};
     String8 operands = assembly_trim((String8){.pointer = statement.pointer + mnemonic_end, .length = statement.length - mnemonic_end});
-    String8 full_statement = assembly_trim(statement);
     u8 leading_rounding = 0;
     u8 leading_sae = false;
     if (target.cpu_arch == CPU_ARCH_X86_64 && operands.length && operands.pointer[0] == '{')

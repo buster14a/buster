@@ -456,45 +456,46 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
         char const* spelling;
         u32 word;
         u64 digest;
+        TargetCpuFeature required_feature;
         bool canonical;
         bool alias;
         bool system;
     };
     static A64FixedExpected const fixed_expected[] = {
-        {"AUTIA1716", UINT32_C(0xd503219f), UINT64_C(0x4c2656c391a4966c), true, false, false},
-        {"AUTIASP", UINT32_C(0xd50323bf), UINT64_C(0x5567e863f3d616e0), true, false, false},
-        {"AUTIAZ", UINT32_C(0xd503239f), UINT64_C(0x9699c5ffd43a6808), true, false, false},
-        {"AUTIB1716", UINT32_C(0xd50321df), UINT64_C(0xacf7c54eec74b3c3), true, false, false},
-        {"AUTIBSP", UINT32_C(0xd50323ff), UINT64_C(0x939a92d709d81a66), true, false, false},
-        {"AUTIBZ", UINT32_C(0xd50323df), UINT64_C(0x6119a8e8b5ff8a15), true, false, false},
-        {"AXFLAG", UINT32_C(0xd500405f), UINT64_C(0x49c394281e2fc2f5), true, false, true},
-        {"CFINV", UINT32_C(0xd500401f), UINT64_C(0x25ca8e13c465633d), true, false, true},
-        {"CSDB", UINT32_C(0xd503229f), UINT64_C(0x182068db72f77b13), true, false, true},
-        {"DRPS", UINT32_C(0xd6bf03e0), UINT64_C(0x95ef2ef129769bd4), true, false, true},
-        {"ERETAA", UINT32_C(0xd69f0bff), UINT64_C(0x2a7f1e76dd24adb9), true, false, false},
-        {"ERETAB", UINT32_C(0xd69f0fff), UINT64_C(0xe6e709b5613a2b09), true, false, false},
-        {"ERET", UINT32_C(0xd69f03e0), UINT64_C(0xab3ab861cc573c94), true, false, true},
-        {"ESB", UINT32_C(0xd503221f), UINT64_C(0x72f940bfcf15dff), true, false, true},
-        {"NOP", UINT32_C(0xd503201f), UINT64_C(0xea53054d40adc052), true, false, true},
-        {"PACIA1716", UINT32_C(0xd503211f), UINT64_C(0x5b904b5fd7060d08), true, false, false},
-        {"PACIASP", UINT32_C(0xd503233f), UINT64_C(0xce9b6d29440e3fdf), true, false, false},
-        {"PACIAZ", UINT32_C(0xd503231f), UINT64_C(0x6fdf88f4d5dadad9), true, false, false},
-        {"PACIB1716", UINT32_C(0xd503215f), UINT64_C(0x31f30b69302bbf8), true, false, false},
-        {"PACIBSP", UINT32_C(0xd503237f), UINT64_C(0x30fbc69814916509), true, false, false},
-        {"PACIBZ", UINT32_C(0xd503235f), UINT64_C(0x7dd3b3468d22f0be), true, false, false},
-        {"PSSBB", UINT32_C(0xd503349f), UINT64_C(0x417057ed639e7b26), false, true, true},
-        {"RETAA", UINT32_C(0xd65f0bff), UINT64_C(0x66f4f4eb4f669ae9), true, false, false},
-        {"RETAB", UINT32_C(0xd65f0fff), UINT64_C(0xceaceb4ec61650c7), true, false, false},
-        {"SB", UINT32_C(0xd50330ff), UINT64_C(0x8cc3feea57025837), true, false, true},
-        {"SEVL", UINT32_C(0xd50320bf), UINT64_C(0xd0d6393b6e21b729), true, false, true},
-        {"SEV", UINT32_C(0xd503209f), UINT64_C(0x35a28a4c138c7f53), true, false, true},
-        {"SSBB", UINT32_C(0xd503309f), UINT64_C(0x4e30d76289b575ab), false, true, true},
-        {"TSB CSYNC", UINT32_C(0xd503225f), UINT64_C(0x42334eece1165443), true, false, true},
-        {"WFE", UINT32_C(0xd503205f), UINT64_C(0x3e02f75540bdf550), true, false, true},
-        {"WFI", UINT32_C(0xd503207f), UINT64_C(0x270d238e9531f5a3), true, false, true},
-        {"XAFLAG", UINT32_C(0xd500403f), UINT64_C(0xdf00807b13d10f08), true, false, true},
-        {"XPACLRI", UINT32_C(0xd50320ff), UINT64_C(0x423e63bdcef213ee), true, false, false},
-        {"YIELD", UINT32_C(0xd503203f), UINT64_C(0xd48ce72c3fefa9cc), true, false, true},
+        {"AUTIA1716", UINT32_C(0xd503219f), UINT64_C(0xefb27a8829041858), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"AUTIASP", UINT32_C(0xd50323bf), UINT64_C(0x563e5337e95037c8), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"AUTIAZ", UINT32_C(0xd503239f), UINT64_C(0x3b2162463284163b), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"AUTIB1716", UINT32_C(0xd50321df), UINT64_C(0xef413b33019b5154), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"AUTIBSP", UINT32_C(0xd50323ff), UINT64_C(0xc24e0c31db8c07b6), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"AUTIBZ", UINT32_C(0xd50323df), UINT64_C(0xff7a557019ed0c15), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"AXFLAG", UINT32_C(0xd500405f), UINT64_C(0x9a1098969eadbf1b), TARGET_CPU_FEATURE_AARCH64_ALTNZCV, true, false, true},
+        {"CFINV", UINT32_C(0xd500401f), UINT64_C(0x7c6494a34efc7074), TARGET_CPU_FEATURE_AARCH64_FLAGM, true, false, true},
+        {"CSDB", UINT32_C(0xd503229f), UINT64_C(0xeb5fc198be338b4a), TARGET_CPU_FEATURE_NONE, true, false, true},
+        {"DRPS", UINT32_C(0xd6bf03e0), UINT64_C(0x2ec2197eddbee02e), TARGET_CPU_FEATURE_NONE, true, false, true},
+        {"ERETAA", UINT32_C(0xd69f0bff), UINT64_C(0x49992ba5e5de1e00), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"ERETAB", UINT32_C(0xd69f0fff), UINT64_C(0xb72a8d3c14e2390c), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"ERET", UINT32_C(0xd69f03e0), UINT64_C(0xf9516304bbfb8c5e), TARGET_CPU_FEATURE_NONE, true, false, true},
+        {"ESB", UINT32_C(0xd503221f), UINT64_C(0xbfde8544ad7fd2fa), TARGET_CPU_FEATURE_AARCH64_RAS, true, false, true},
+        {"NOP", UINT32_C(0xd503201f), UINT64_C(0x3b01271fe0dfcf46), TARGET_CPU_FEATURE_NONE, true, false, true},
+        {"PACIA1716", UINT32_C(0xd503211f), UINT64_C(0xfa1150156926b746), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"PACIASP", UINT32_C(0xd503233f), UINT64_C(0x10a9ef48de927cf7), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"PACIAZ", UINT32_C(0xd503231f), UINT64_C(0xf316663792336172), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"PACIB1716", UINT32_C(0xd503215f), UINT64_C(0xff545796c103918b), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"PACIBSP", UINT32_C(0xd503237f), UINT64_C(0xf9b7fd3f3db149ac), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"PACIBZ", UINT32_C(0xd503235f), UINT64_C(0x55f9cf2a51d6529b), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"PSSBB", UINT32_C(0xd503349f), UINT64_C(0x9e6e759013b7466e), TARGET_CPU_FEATURE_NONE, false, true, true},
+        {"RETAA", UINT32_C(0xd65f0bff), UINT64_C(0x954058a92951882), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"RETAB", UINT32_C(0xd65f0fff), UINT64_C(0x36a796e9b30d7c67), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"SB", UINT32_C(0xd50330ff), UINT64_C(0xc86254b066d190fe), TARGET_CPU_FEATURE_AARCH64_SB, true, false, true},
+        {"SEVL", UINT32_C(0xd50320bf), UINT64_C(0xd906cce54ea67a0), TARGET_CPU_FEATURE_NONE, true, false, true},
+        {"SEV", UINT32_C(0xd503209f), UINT64_C(0xff8b2b9798e3a6f5), TARGET_CPU_FEATURE_NONE, true, false, true},
+        {"SSBB", UINT32_C(0xd503309f), UINT64_C(0xa367b96ae742f2a8), TARGET_CPU_FEATURE_NONE, false, true, true},
+        {"TSB CSYNC", UINT32_C(0xd503225f), UINT64_C(0xcd0cf0852ff7a7dc), TARGET_CPU_FEATURE_AARCH64_TRACEV8_4, true, false, true},
+        {"WFE", UINT32_C(0xd503205f), UINT64_C(0xe8e98d89711dbbdc), TARGET_CPU_FEATURE_NONE, true, false, true},
+        {"WFI", UINT32_C(0xd503207f), UINT64_C(0x210a4c58e84c8a08), TARGET_CPU_FEATURE_NONE, true, false, true},
+        {"XAFLAG", UINT32_C(0xd500403f), UINT64_C(0x26c8f3cddcd55c54), TARGET_CPU_FEATURE_AARCH64_ALTNZCV, true, false, true},
+        {"XPACLRI", UINT32_C(0xd50320ff), UINT64_C(0x2329fb25fbc74c54), TARGET_CPU_FEATURE_AARCH64_PAUTH, true, false, false},
+        {"YIELD", UINT32_C(0xd503203f), UINT64_C(0x9605e6ab9956281b), TARGET_CPU_FEATURE_NONE, true, false, true},
     };
     BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_spelling_count() == BUSTER_ARRAY_LENGTH(fixed_expected));
     u32 fixed_canonical_count = 0;
@@ -506,6 +507,7 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_spelling(fixed_index, &fixed));
         BUSTER_TEST(arguments, string_equal(fixed.spelling, string_from_pointer((char8*)fixed_expected[fixed_index].spelling)) &&
                                   fixed.word == fixed_expected[fixed_index].word && fixed.arm_row_digest == fixed_expected[fixed_index].digest &&
+                                  fixed.required_feature == fixed_expected[fixed_index].required_feature &&
                                   fixed.canonical == fixed_expected[fixed_index].canonical && fixed.alias == fixed_expected[fixed_index].alias &&
                                   fixed.system == fixed_expected[fixed_index].system);
         BusterAarch64ArmM1FixedSpelling looked_up_fixed = {0};
@@ -531,6 +533,39 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     Target x86_m1_arch = fixed_m1_target;
     x86_m1_arch.cpu_arch = CPU_ARCH_X86_64;
     BUSTER_TEST(arguments, !buster_aarch64_arm_m1_fixed_target(x86_m1_arch));
+    Target fixed_explicit_target = a64_encoding_m1_target(true);
+    TargetCpuFeature removable_fixed_features[] = {
+        TARGET_CPU_FEATURE_AARCH64_ALTNZCV,
+        TARGET_CPU_FEATURE_AARCH64_PAUTH,
+        TARGET_CPU_FEATURE_AARCH64_RAS,
+        TARGET_CPU_FEATURE_AARCH64_SB,
+        TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
+    };
+    for (u32 feature_index = 0; feature_index < BUSTER_ARRAY_LENGTH(removable_fixed_features); feature_index += 1)
+    {
+        Target without_feature = fixed_explicit_target;
+        without_feature.cpu_features = target_cpu_features_remove(without_feature.cpu_features, removable_fixed_features[feature_index]);
+        BUSTER_TEST(arguments, target_cpu_features_are_valid(without_feature));
+        for (u32 fixed_index = 0; fixed_index < BUSTER_ARRAY_LENGTH(fixed_expected); fixed_index += 1)
+        {
+            BusterAarch64ArmM1FixedSpelling candidate = {0};
+            BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_spelling(fixed_index, &candidate));
+            BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_supported_for_target(candidate, without_feature) ==
+                                      (candidate.required_feature != removable_fixed_features[feature_index]));
+        }
+    }
+    Target without_flagm = fixed_explicit_target;
+    without_flagm.cpu_features = target_cpu_features_remove(without_flagm.cpu_features, TARGET_CPU_FEATURE_AARCH64_ALTNZCV);
+    without_flagm.cpu_features = target_cpu_features_remove(without_flagm.cpu_features, TARGET_CPU_FEATURE_AARCH64_FLAGM);
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(without_flagm));
+    for (u32 fixed_index = 0; fixed_index < BUSTER_ARRAY_LENGTH(fixed_expected); fixed_index += 1)
+    {
+        BusterAarch64ArmM1FixedSpelling candidate = {0};
+        BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_spelling(fixed_index, &candidate));
+        bool feature_available = candidate.required_feature != TARGET_CPU_FEATURE_AARCH64_FLAGM &&
+                                 candidate.required_feature != TARGET_CPU_FEATURE_AARCH64_ALTNZCV;
+        BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_supported_for_target(candidate, without_flagm) == feature_available);
+    }
 
     // Target-aware predicate evaluation is the authority behind the legacy
     // Apple-M1 enum classifier. Explicit feature subtraction remains valid and

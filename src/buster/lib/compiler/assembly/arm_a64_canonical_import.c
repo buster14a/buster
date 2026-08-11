@@ -2153,7 +2153,8 @@ static bool arm_a64_parse_page(Arena* arena, Arena* scratch, String8 source, Arm
     return true;
 }
 
-static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, const u8 source_tree_sha256[32], u32 source_file_count, u64 artifact_hash, u64 artifact_bytes,
+static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, const u8 source_tree_sha256[32], u32 source_file_count, u64 artifact_hash,
+                                    u64 artifact_bytes, u64 fixed_header_hash, u64 fixed_header_bytes,
                                     ArmA64CanonicalRows rows, u32 page_count, u32 instruction_pages, u32 alias_pages, u32 pseudocode_pages,
                                     u32 iclass_count, u32 regdiagram_count, u32 selected, u32 selected_canonical,
                                     u32 selected_alias, u32 selected_system, u32 selected_system_canonical, u32 selected_system_alias,
@@ -2186,6 +2187,9 @@ static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, const
     arena_append_string8(output, S8(", \"derivation\": \"LLVM AppleA14/HasV8_4aOps feature closure cross-checked against Arm XML; not a silicon claim\"},\n"));
     arena_append_string8(output, S8("  \"artifact\": {\"file\": \"arm-a64-canonical.generated.jsonl\", \"bytes\": ")); arm_a64_append_u64(output, artifact_bytes);
     arena_append_string8(output, S8(", \"xxh64\": ")); arm_a64_json_hex(output, artifact_hash); arena_append_string8(output, S8("},\n"));
+    arena_append_string8(output, S8("  \"fixed_spelling_artifact\": {\"file\": \"arm-a64-m1-fixed.generated.h\", \"bytes\": "));
+    arm_a64_append_u64(output, fixed_header_bytes);
+    arena_append_string8(output, S8(", \"xxh64\": ")); arm_a64_json_hex(output, fixed_header_hash); arena_append_string8(output, S8("},\n"));
     arena_append_string8(output, S8("  \"symmetric_difference\": {\"count\": 33, \"excluded_pauth_lr\": 17, \"included_special\": 16, \"inventory\": ["));
     static const char* excluded[] = {"AUTIA171615_64LR_dp_1src","AUTIASPPCR_64LRR_dp_1src","AUTIASPPC_only_dp_1src_imm","AUTIB171615_64LR_dp_1src","AUTIBSPPCR_64LRR_dp_1src","AUTIBSPPC_only_dp_1src_imm","PACIA171615_64LR_dp_1src","PACIASPPC_64LR_dp_1src","PACIB171615_64LR_dp_1src","PACIBSPPC_64LR_dp_1src","PACM_HI_hints","PACNBIASPPC_64LR_dp_1src","PACNBIBSPPC_64LR_dp_1src","RETAASPPCR_64M_branch_reg","RETABSPPCR_64M_branch_reg","RETAASPPC_only_miscbranch","RETABSPPC_only_miscbranch"};
     static const char* included[] = {"ESB_HI_hints","CFP_SYS_CR_systeminstrs","CPP_SYS_CR_systeminstrs","DVP_SYS_CR_systeminstrs","SHA1C_QSV_cryptosha3","SHA1H_SS_cryptosha2","SHA1M_QSV_cryptosha3","SHA1P_QSV_cryptosha3","SHA1SU0_VVV_cryptosha3","SHA1SU1_VV_cryptosha2","SHA512H2_QQV_cryptosha512_3","SHA512H_QQV_cryptosha512_3","SHA512SU0_VV2_cryptosha512_2","SHA512SU1_VVV2_cryptosha512_3","AXFLAG_M_pstate","XAFLAG_M_pstate"};
@@ -2247,8 +2251,8 @@ static bool arm_a64_check_existing_outputs(Arena* arena, String8 output_director
                  arm_a64_check_file(scratch, fixed_header_path, fixed_header, "M1 fixed-spelling header");
     ByteSlice readme = file_read(scratch, readme_path, (FileReadOptions){0});
     static const u8 expected_readme_section_sha256[32] = {
-        0xf8, 0x06, 0xc3, 0x24, 0xc9, 0x76, 0x48, 0xd2, 0xd6, 0xed, 0xfa, 0x21, 0xc7, 0x00, 0xf3, 0xd3,
-        0x89, 0x06, 0xed, 0x05, 0xf8, 0xc3, 0xb4, 0x09, 0xc5, 0xa0, 0xd7, 0x27, 0x0a, 0x95, 0x43, 0x11,
+        0xd4, 0x7f, 0x48, 0x4c, 0x07, 0xfa, 0x22, 0xaf, 0x45, 0x8c, 0x69, 0xad, 0x5f, 0xc3, 0xc9, 0xe6,
+        0x81, 0xb6, 0x09, 0xc7, 0xa8, 0x6d, 0x7d, 0x27, 0x59, 0x16, 0x75, 0x1a, 0xef, 0x9c, 0xf2, 0xed,
     };
     u8 readme_section_sha256[32] = {0};
     if (!readme.pointer || !readme.length || !arm_a64_readme_canonical_section_digest(readme, readme_section_sha256) ||
@@ -2259,6 +2263,18 @@ static bool arm_a64_check_existing_outputs(Arena* arena, String8 output_director
     }
     scratch_end(scratch_scope);
     return valid;
+}
+
+static String8 arm_a64_fixed_target_feature_name(String8 expression)
+{
+    if (!expression.length) return S8("TARGET_CPU_FEATURE_NONE");
+    if (string_equal(expression, S8("FEAT_FlagM"))) return S8("TARGET_CPU_FEATURE_AARCH64_FLAGM");
+    if (string_equal(expression, S8("FEAT_FlagM2"))) return S8("TARGET_CPU_FEATURE_AARCH64_ALTNZCV");
+    if (string_equal(expression, S8("FEAT_PAuth"))) return S8("TARGET_CPU_FEATURE_AARCH64_PAUTH");
+    if (string_equal(expression, S8("FEAT_RAS"))) return S8("TARGET_CPU_FEATURE_AARCH64_RAS");
+    if (string_equal(expression, S8("FEAT_SB"))) return S8("TARGET_CPU_FEATURE_AARCH64_SB");
+    if (string_equal(expression, S8("FEAT_TRF"))) return S8("TARGET_CPU_FEATURE_AARCH64_TRACEV8_4");
+    return (String8){0};
 }
 
 static bool arm_a64_append_fixed_header(Arena* output, ArmA64CanonicalRows rows)
@@ -2273,6 +2289,7 @@ static bool arm_a64_append_fixed_header(Arena* output, ArmA64CanonicalRows rows)
         ArmA64CanonicalRow const* row = &rows.pointer[index];
         if (!row->apple_m1 || row->fixed_mask != UINT32_MAX || row->field_mask != 0 || row->unresolved_mask != 0) continue;
         if (!row->assembly.length || !row->canonical_id.length || !row->digest ||
+            !arm_a64_fixed_target_feature_name(row->feature_expression).length ||
             (!string_equal(row->kind, S8("canonical")) && !string_equal(row->kind, S8("alias"))))
         {
             return false;
@@ -2288,7 +2305,8 @@ static bool arm_a64_append_fixed_header(Arena* output, ArmA64CanonicalRows rows)
     arena_append_string8(output, S8("/* Generated by build import_arm_a64_metadata from arm-a64-canonical.generated.jsonl; do not edit. */\n"
                                    "#ifndef BUSTER_AARCH64_ARM_M1_FIXED_GENERATED_H\n"
                                    "#define BUSTER_AARCH64_ARM_M1_FIXED_GENERATED_H\n"
-                                   "#include <buster/lib/base.h>\n\n"
+                                   "#include <buster/lib/base.h>\n"
+                                   "#include <buster/lib/target.h>\n\n"
                                    "typedef struct BusterAarch64ArmM1GeneratedFixedRow BusterAarch64ArmM1GeneratedFixedRow;\n"
                                    "struct BusterAarch64ArmM1GeneratedFixedRow\n"
                                    "{\n"
@@ -2296,6 +2314,7 @@ static bool arm_a64_append_fixed_header(Arena* output, ArmA64CanonicalRows rows)
                                    "    const char* arm_row_id;\n"
                                    "    u32 word;\n"
                                    "    u64 arm_row_digest;\n"
+                                   "    TargetCpuFeature required_feature;\n"
                                    "    bool canonical;\n"
                                    "    bool alias;\n"
                                    "    bool system;\n"
@@ -2327,7 +2346,9 @@ static bool arm_a64_append_fixed_header(Arena* output, ArmA64CanonicalRows rows)
         arm_a64_hex32_append(output, row->fixed_value);
         arena_append_string8(output, S8("), UINT64_C("));
         arm_a64_hex_append(output, row->digest);
-        arena_append_string8(output, row->kind.length && string_equal(row->kind, S8("canonical")) ? S8("), true, false, ") : S8("), false, true, "));
+        arena_append_string8(output, S8("), "));
+        arena_append_string8(output, arm_a64_fixed_target_feature_name(row->feature_expression));
+        arena_append_string8(output, row->kind.length && string_equal(row->kind, S8("canonical")) ? S8(", true, false, ") : S8(", false, true, "));
         arena_append_string8(output, row->system ? S8("true, 0},\n") : S8("false, 0},\n"));
         emitted += 1;
     }
@@ -2467,13 +2488,6 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
                      selected, selected_canonical, selected_alias, selected_system, selected_system_canonical, selected_system_alias);
         return PROCESS_RESULT_FAILED;
     }
-    String8 manifest = {0};
-    u64 manifest_mark = output_arena->position;
-    arm_a64_append_manifest(output_arena, source_tree_digest, source_tree_sha256, source_file_count, buster_hash_64((u8*)artifact.pointer, artifact.length), artifact.length,
-                            rows, page_count, instruction_pages, alias_pages, pseudocode_pages, iclass_count, regdiagram_count, selected, selected_canonical,
-                            selected_alias, selected_system, selected_system_canonical, selected_system_alias, selected - selected_system,
-                            selected_canonical - selected_system_canonical, selected_alias - selected_system_alias);
-    manifest = (String8){.pointer = (char8*)arm_a64_arena_pointer(output_arena, manifest_mark), .length = output_arena->position - manifest_mark};
     u64 fixed_header_mark = output_arena->position;
     if (!arm_a64_append_fixed_header(output_arena, rows))
     {
@@ -2481,6 +2495,14 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
         return PROCESS_RESULT_FAILED;
     }
     String8 fixed_header = (String8){.pointer = (char8*)arm_a64_arena_pointer(output_arena, fixed_header_mark), .length = output_arena->position - fixed_header_mark};
+    u64 manifest_mark = output_arena->position;
+    arm_a64_append_manifest(output_arena, source_tree_digest, source_tree_sha256, source_file_count,
+                            buster_hash_64((u8*)artifact.pointer, artifact.length), artifact.length,
+                            buster_hash_64((u8*)fixed_header.pointer, fixed_header.length), fixed_header.length, rows, page_count,
+                            instruction_pages, alias_pages, pseudocode_pages, iclass_count, regdiagram_count, selected, selected_canonical,
+                            selected_alias, selected_system, selected_system_canonical, selected_system_alias, selected - selected_system,
+                            selected_canonical - selected_system_canonical, selected_alias - selected_system_alias);
+    String8 manifest = {.pointer = (char8*)arm_a64_arena_pointer(output_arena, manifest_mark), .length = output_arena->position - manifest_mark};
     String8 artifact_path = path_join(arena, options.output_directory, S8("arm-a64-canonical.generated.jsonl"));
     String8 manifest_path = path_join(arena, options.output_directory, S8("arm-a64-canonical-manifest.json"));
     String8 fixed_header_path = path_join(arena, options.output_directory, S8("arm-a64-m1-fixed.generated.h"));

@@ -2374,6 +2374,28 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_fixed_bad_token.diagnostic_count == 2 &&
                                aarch64_fixed_bad_token.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
                                aarch64_fixed_bad_token.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
+    AssemblyEncodeResult aarch64_fixed_bad_prefix = assembly_encode(
+        arguments->arena, S8("lock AUTIASP\n"), (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    BUSTER_TEST(arguments, aarch64_fixed_bad_prefix.diagnostic_count == 1 && aarch64_fixed_bad_prefix.bytes.length == 0 &&
+                               aarch64_fixed_bad_prefix.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
+    Target aarch64_m1_explicit_target = aarch64_m1_target;
+    aarch64_m1_explicit_target.cpu_features_explicit = true;
+    aarch64_m1_explicit_target.cpu_features = target_cpu_features_default(CPU_ARCH_AARCH64, CPU_MODEL_A64_APPLE_M1);
+    Target aarch64_m1_no_pauth = aarch64_m1_explicit_target;
+    aarch64_m1_no_pauth.cpu_features = target_cpu_features_remove(aarch64_m1_no_pauth.cpu_features, TARGET_CPU_FEATURE_AARCH64_PAUTH);
+    AssemblyEncodeResult aarch64_fixed_no_pauth = assembly_encode(
+        arguments->arena, S8("RETAA\nNOP\n"), (AssemblyEncodeOptions){.target = aarch64_m1_no_pauth});
+    BUSTER_TEST(arguments, aarch64_fixed_no_pauth.diagnostic_count == 1 && aarch64_fixed_no_pauth.bytes.length == 4 &&
+                               aarch64_fixed_no_pauth.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
+                               memcmp(aarch64_fixed_no_pauth.bytes.pointer, expected_aarch64_fixed, 4) == 0);
+    Target aarch64_m1_no_trace = aarch64_m1_explicit_target;
+    aarch64_m1_no_trace.cpu_features =
+        target_cpu_features_remove(aarch64_m1_no_trace.cpu_features, TARGET_CPU_FEATURE_AARCH64_TRACEV8_4);
+    AssemblyEncodeResult aarch64_fixed_no_trace = assembly_encode(
+        arguments->arena, S8("TSB CSYNC\nNOP\n"), (AssemblyEncodeOptions){.target = aarch64_m1_no_trace});
+    BUSTER_TEST(arguments, aarch64_fixed_no_trace.diagnostic_count == 1 && aarch64_fixed_no_trace.bytes.length == 4 &&
+                               aarch64_fixed_no_trace.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
+                               memcmp(aarch64_fixed_no_trace.bytes.pointer, expected_aarch64_fixed, 4) == 0);
     AssemblyEncodeResult aarch64_fixed_generic = assembly_encode(
         arguments->arena, S8("AUTIASP\nRETAA\n"), (AssemblyEncodeOptions){.target = aarch64_target});
     BUSTER_TEST(arguments, aarch64_fixed_generic.diagnostic_count == 2 &&

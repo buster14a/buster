@@ -264,6 +264,7 @@ struct BusterAarch64ArmM1FixedSpelling
     String8 arm_row_id;
     u32 word;
     u64 arm_row_digest;
+    TargetCpuFeature required_feature;
     bool canonical;
     bool alias;
     bool system;
@@ -273,6 +274,7 @@ BUSTER_F_DECL u32 buster_aarch64_arm_m1_fixed_spelling_count(void);
 BUSTER_F_DECL bool buster_aarch64_arm_m1_fixed_spelling(u32 index, BusterAarch64ArmM1FixedSpelling* result);
 BUSTER_F_DECL bool buster_aarch64_arm_m1_fixed_lookup(String8 spelling, BusterAarch64ArmM1FixedSpelling* result);
 BUSTER_F_DECL bool buster_aarch64_arm_m1_fixed_target(Target target);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_fixed_supported_for_target(BusterAarch64ArmM1FixedSpelling fixed, Target target);
 
 // Coverage classification is independent from raw bit-layout completeness.
 // Keep these values aligned with the generated snapshot while exposing a
