@@ -2498,9 +2498,9 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_emit_generated_opcode(MachineA64Encoder* en
                                                               : BUSTER_AARCH64_GENERATED_FORM_MSUBXRRR;
         u32 divide_fields[] = {operand0, operand1, operand2};
         // Production fields are ordered Rd, Rn, Ra, Rm while the assembly
-        // spelling is Rd, Rn, Rm, Ra.  Remainder therefore computes
-        // n - (n / m) * m as {d, n, d, m}.
-        u32 subtract_fields[] = {operand0, operand1, operand0, operand2};
+        // spelling is Rd, Rn, Rm, Ra.  DIV has already placed n / m in d,
+        // so MSUB must spell `d, d, m, n`: n - (n / m) * m.
+        u32 subtract_fields[] = {operand0, operand0, operand1, operand2};
         return machine_a64_emit_generated_form(encoder, divide_form_id, divide_fields, BUSTER_ARRAY_LENGTH(divide_fields)) &&
                machine_a64_emit_generated_form(encoder, subtract_form_id, subtract_fields, BUSTER_ARRAY_LENGTH(subtract_fields));
     }
