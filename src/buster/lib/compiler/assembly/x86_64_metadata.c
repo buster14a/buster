@@ -756,6 +756,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_query_string_valid(String8 string);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_resolution_query_valid(BusterX86MetadataResolveQuery query, u32* error_detail);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_feature_available(BusterX86GeneratedForm form,
                                                                        BusterX86MetadataFeatureInput features);
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_form_declared_execution_mode(BusterX86GeneratedForm form, bool legacy_repeat_cohort);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_execution_mode_matches(BusterX86GeneratedForm form,
                                                                            BusterX86MetadataResolveQuery query);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_coverage_allowed(BusterX86GeneratedForm form,
@@ -4972,6 +4973,14 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_canonical_query(BusterX86M
         attributes.dfv = 0;
     }
     features[0] = S8("*");
+    bool legacy_repeat_cohort = pattern.rep_control != 0 &&
+                                form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                form.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY &&
+                                buster_x86_metadata_string_input_equal(form.extension.offset, S8("BASE"));
+    u8 execution_mode = buster_x86_metadata_form_declared_execution_mode((BusterX86GeneratedForm){
+        .coverage_class = form.coverage_class,
+        .mode_flags = form.mode_flags,
+    }, legacy_repeat_cohort);
     *query = (BusterX86MetadataPhysicalQuery){
         .mnemonic = mnemonic,
         .operands = operands,
@@ -4979,7 +4988,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_canonical_query(BusterX86M
         .features = {.names = features, .count = 1},
         .attributes = attributes,
         .address_size = address_size,
-        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+        .execution_mode = execution_mode,
         .include_privileged = form.coverage_class == BUSTER_X86_METADATA_COVERAGE_PRIVILEGED,
         .include_not64 = form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64 ||
                          (form.mode_flags & BUSTER_X86_METADATA_MODE_NOT64) != 0,
@@ -7061,6 +7070,25 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_has_non64_mode(BusterX86Genera
            (mode_bits && !(mode_bits & BUSTER_X86_GENERATED_MODE_64));
 }
 
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_form_declared_execution_mode(BusterX86GeneratedForm form, bool legacy_repeat_cohort)
+{
+    u16 mode_bits = form.mode_flags &
+                    (BUSTER_X86_GENERATED_MODE_16 | BUSTER_X86_GENERATED_MODE_32 | BUSTER_X86_GENERATED_MODE_64 |
+                     BUSTER_X86_GENERATED_MODE_NOT64);
+    // The legacy string-repeat rows are audited in their declared execution
+    // mode.  Multi-mode rows retain the ordinary 64-bit canonical query;
+    // NOT64 rows are rejected by the structural gate before this helper is
+    // reached.  This keeps the default x86-64 resolver strict while allowing
+    // the coverage ledger to prove the bytes of this exact 16/32-bit cohort.
+    if (legacy_repeat_cohort && (mode_bits & BUSTER_X86_GENERATED_MODE_16) &&
+        !(mode_bits & (BUSTER_X86_GENERATED_MODE_32 | BUSTER_X86_GENERATED_MODE_64 | BUSTER_X86_GENERATED_MODE_NOT64)))
+        return BUSTER_X86_METADATA_EXECUTION_MODE_16;
+    if (legacy_repeat_cohort && (mode_bits & BUSTER_X86_GENERATED_MODE_32) &&
+        !(mode_bits & (BUSTER_X86_GENERATED_MODE_16 | BUSTER_X86_GENERATED_MODE_64 | BUSTER_X86_GENERATED_MODE_NOT64)))
+        return BUSTER_X86_METADATA_EXECUTION_MODE_32;
+    return BUSTER_X86_METADATA_EXECUTION_MODE_64;
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_execution_mode_matches(BusterX86GeneratedForm form,
                                                                            BusterX86MetadataResolveQuery query)
 {
@@ -7074,6 +7102,12 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_execution_mode_matches(BusterX
     if (query.include_not64) return true;
     if (explicit_not64) return false;
     if (query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64 && has_explicit_mode && !has_64) return false;
+    if (query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_16 && has_explicit_mode &&
+        !(mode_bits & BUSTER_X86_GENERATED_MODE_16))
+        return false;
+    if (query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_32 && has_explicit_mode &&
+        !(mode_bits & BUSTER_X86_GENERATED_MODE_32))
+        return false;
     // No execution-mode bits means that the generated row carries no mode
     // restriction; coverage and the remaining metadata filters still apply.
     return true;

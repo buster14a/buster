@@ -200,6 +200,11 @@ typedef enum BusterX86MetadataExecutionMode
     // this value only says not to prefer the MODE_64 bit when inspecting a
     // deliberately widened snapshot query.
     BUSTER_X86_METADATA_EXECUTION_MODE_ANY,
+    // Legacy execution modes are explicit inspection/encoding modes.  They
+    // select forms whose XED row is declared MODE_16 or MODE_32 without
+    // widening those rows into the x86-64 front door.
+    BUSTER_X86_METADATA_EXECUTION_MODE_16,
+    BUSTER_X86_METADATA_EXECUTION_MODE_32,
     BUSTER_X86_METADATA_EXECUTION_MODE_COUNT,
 } BusterX86MetadataExecutionMode;
 
