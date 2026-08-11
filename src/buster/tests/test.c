@@ -231,9 +231,9 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
 };
 
 #if BUSTER_CPU_ARCH_X86_64
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 34);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 35);
 #else
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 33);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 34);
 #endif
 #endif
 
