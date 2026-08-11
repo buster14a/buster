@@ -298,16 +298,16 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_form_predicates_supported(BusterAarch64Gen
         return false;
     }
     // The importer omits malformed predicate expressions from the retained
-    // predicate list, so the reason byte is the only runtime evidence that
-    // the expression was not valid.  Fail closed for every AArch64 target,
-    // not only the Apple-M1 membership branch below.
-    if (form.reason_id == BUSTER_AARCH64_GENERATED_REASON_UNKNOWN_PREDICATE)
+    // predicate list, so the independent profile-flags bit is the runtime
+    // evidence that the expression was not valid. Fail closed for every
+    // AArch64 target, not only the Apple-M1 membership branch below.
+    if (form.profile_flags & BUSTER_AARCH64_GENERATED_FORM_FLAG_PREDICATE_PARSE_ERROR)
     {
         return false;
     }
     TargetCpuFeatures features = target_cpu_features_effective(target);
     bool m1_profile = a64_metadata_target_is_m1_profile(target);
-    if (m1_profile && !form.apple_m1_profile_member)
+    if (m1_profile && !(form.profile_flags & BUSTER_AARCH64_GENERATED_FORM_FLAG_APPLE_M1_PROFILE_MEMBER))
     {
         // Membership is importer-derived and records parser failures that
         // cannot be reconstructed from the retained predicate strings.
@@ -351,7 +351,8 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_form_predicates_supported(BusterAarch64Gen
 
 BUSTER_GLOBAL_LOCAL bool a64_metadata_form_m1_predicates(BusterAarch64GeneratedForm form)
 {
-    return form.apple_m1_profile_member && a64_metadata_form_predicates_supported(form, a64_metadata_apple_m1_target());
+    return (form.profile_flags & BUSTER_AARCH64_GENERATED_FORM_FLAG_APPLE_M1_PROFILE_MEMBER) &&
+           a64_metadata_form_predicates_supported(form, a64_metadata_apple_m1_target());
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_metadata_form_and_layout(u32 form_id, BusterAarch64GeneratedForm* form, bool* raw_layout_complete)
@@ -498,8 +499,10 @@ bool buster_aarch64_metadata_form(u32 form_id, BusterAarch64MetadataForm* result
         .address_base_index = form.address_base_index,
         .address_offset_index = form.address_offset_index,
         .raw_layout_complete = raw_layout_complete,
-        .apple_m1_profile_member = form.apple_m1_profile_member,
-        .provisionally_apple_m1 = form.apple_m1_profile_member && a64_metadata_form_predicates_supported(form, a64_metadata_apple_m1_target()),
+        .apple_m1_profile_member = (form.profile_flags & BUSTER_AARCH64_GENERATED_FORM_FLAG_APPLE_M1_PROFILE_MEMBER) != 0,
+        .predicate_parse_error = (form.profile_flags & BUSTER_AARCH64_GENERATED_FORM_FLAG_PREDICATE_PARSE_ERROR) != 0,
+        .provisionally_apple_m1 = (form.profile_flags & BUSTER_AARCH64_GENERATED_FORM_FLAG_APPLE_M1_PROFILE_MEMBER) &&
+                                  a64_metadata_form_predicates_supported(form, a64_metadata_apple_m1_target()),
     };
     return true;
 }

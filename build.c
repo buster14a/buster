@@ -13458,6 +13458,7 @@ struct Aarch64ImportRecord
     u8 reason_id;
     u8 parse_reason;
     u8 has_alternatives;
+    u8 predicate_parse_error;
     u32 null_bits_seen;
     u32 scalar_var_bits_seen;
     u64 name_hash;
@@ -13532,52 +13533,54 @@ BUSTER_GLOBAL_LOCAL String8 aarch64_apple_m1_profile_predicate_names[] = {
 };
 
 // These are the only LLVM AArch64 records whose Inst list uses null for an
-// architecturally fixed-zero bit in the checked-in snapshot.  A null is not
+// architecturally fixed bit in the checked-in snapshot.  A null is not
 // generally proof of a fixed bit: rows outside this allowlist remain schema
-// errors and stay out of the raw-layout denominator.  The masks are kept
-// here, next to the profile policy, so regeneration cannot silently broaden
-// the inference.
-typedef struct Aarch64ImportFixedZeroOverlay Aarch64ImportFixedZeroOverlay;
-struct Aarch64ImportFixedZeroOverlay
+// errors and stay out of the raw-layout denominator.  The exact mask/value
+// pairs are kept here, next to the profile policy, so regeneration cannot
+// silently broaden the inference.  The STXR/STLXR rows encode Rt2 as XZR/WZR
+// (0b11111), rather than as a zero-valued field.
+typedef struct Aarch64ImportFixedOverlay Aarch64ImportFixedOverlay;
+struct Aarch64ImportFixedOverlay
 {
     String8 name;
     u32 instruction_mask;
+    u32 fixed_value;
 };
 
-BUSTER_GLOBAL_LOCAL Aarch64ImportFixedZeroOverlay aarch64_import_fixed_zero_overlays[] = {
-    {S8_INITIALIZER("DUPv16i8gpr"), (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20)},
-    {S8_INITIALIZER("DUPv2i32gpr"), (UINT32_C(1) << 19) | (UINT32_C(1) << 20)},
-    {S8_INITIALIZER("DUPv2i64gpr"), UINT32_C(1) << 20},
-    {S8_INITIALIZER("DUPv4i16gpr"), (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20)},
-    {S8_INITIALIZER("DUPv4i32gpr"), (UINT32_C(1) << 19) | (UINT32_C(1) << 20)},
-    {S8_INITIALIZER("DUPv8i16gpr"), (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20)},
-    {S8_INITIALIZER("DUPv8i8gpr"), (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20)},
-    {S8_INITIALIZER("FCMPDri"), (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20)},
-    {S8_INITIALIZER("FCMPEDri"), (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20)},
-    {S8_INITIALIZER("FCMPEHri"), (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20)},
-    {S8_INITIALIZER("FCMPESri"), (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20)},
-    {S8_INITIALIZER("FCMPHri"), (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20)},
-    {S8_INITIALIZER("FCMPSri"), (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20)},
-    {S8_INITIALIZER("INSvi16lane"), UINT32_C(1) << 11},
-    {S8_INITIALIZER("INSvi32lane"), (UINT32_C(1) << 11) | (UINT32_C(1) << 12)},
-    {S8_INITIALIZER("INSvi64lane"), (UINT32_C(1) << 11) | (UINT32_C(1) << 12) | (UINT32_C(1) << 13)},
-    {S8_INITIALIZER("STLXRB"), (UINT32_C(1) << 10) | (UINT32_C(1) << 11) | (UINT32_C(1) << 12) | (UINT32_C(1) << 13) | (UINT32_C(1) << 14)},
-    {S8_INITIALIZER("STLXRH"), (UINT32_C(1) << 10) | (UINT32_C(1) << 11) | (UINT32_C(1) << 12) | (UINT32_C(1) << 13) | (UINT32_C(1) << 14)},
-    {S8_INITIALIZER("STLXRW"), (UINT32_C(1) << 10) | (UINT32_C(1) << 11) | (UINT32_C(1) << 12) | (UINT32_C(1) << 13) | (UINT32_C(1) << 14)},
-    {S8_INITIALIZER("STLXRX"), (UINT32_C(1) << 10) | (UINT32_C(1) << 11) | (UINT32_C(1) << 12) | (UINT32_C(1) << 13) | (UINT32_C(1) << 14)},
-    {S8_INITIALIZER("STXRB"), (UINT32_C(1) << 10) | (UINT32_C(1) << 11) | (UINT32_C(1) << 12) | (UINT32_C(1) << 13) | (UINT32_C(1) << 14)},
-    {S8_INITIALIZER("STXRH"), (UINT32_C(1) << 10) | (UINT32_C(1) << 11) | (UINT32_C(1) << 12) | (UINT32_C(1) << 13) | (UINT32_C(1) << 14)},
-    {S8_INITIALIZER("STXRW"), (UINT32_C(1) << 10) | (UINT32_C(1) << 11) | (UINT32_C(1) << 12) | (UINT32_C(1) << 13) | (UINT32_C(1) << 14)},
-    {S8_INITIALIZER("STXRX"), (UINT32_C(1) << 10) | (UINT32_C(1) << 11) | (UINT32_C(1) << 12) | (UINT32_C(1) << 13) | (UINT32_C(1) << 14)},
+BUSTER_GLOBAL_LOCAL Aarch64ImportFixedOverlay aarch64_import_fixed_overlays[] = {
+    {S8_INITIALIZER("DUPv16i8gpr"), (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20), 0},
+    {S8_INITIALIZER("DUPv2i32gpr"), (UINT32_C(1) << 19) | (UINT32_C(1) << 20), 0},
+    {S8_INITIALIZER("DUPv2i64gpr"), UINT32_C(1) << 20, 0},
+    {S8_INITIALIZER("DUPv4i16gpr"), (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20), 0},
+    {S8_INITIALIZER("DUPv4i32gpr"), (UINT32_C(1) << 19) | (UINT32_C(1) << 20), 0},
+    {S8_INITIALIZER("DUPv8i16gpr"), (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20), 0},
+    {S8_INITIALIZER("DUPv8i8gpr"), (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20), 0},
+    {S8_INITIALIZER("FCMPDri"), (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20), 0},
+    {S8_INITIALIZER("FCMPEDri"), (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20), 0},
+    {S8_INITIALIZER("FCMPEHri"), (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20), 0},
+    {S8_INITIALIZER("FCMPESri"), (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20), 0},
+    {S8_INITIALIZER("FCMPHri"), (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20), 0},
+    {S8_INITIALIZER("FCMPSri"), (UINT32_C(1) << 16) | (UINT32_C(1) << 17) | (UINT32_C(1) << 18) | (UINT32_C(1) << 19) | (UINT32_C(1) << 20), 0},
+    {S8_INITIALIZER("INSvi16lane"), UINT32_C(1) << 11, 0},
+    {S8_INITIALIZER("INSvi32lane"), (UINT32_C(1) << 11) | (UINT32_C(1) << 12), 0},
+    {S8_INITIALIZER("INSvi64lane"), (UINT32_C(1) << 11) | (UINT32_C(1) << 12) | (UINT32_C(1) << 13), 0},
+    {S8_INITIALIZER("STLXRB"), UINT32_C(0x00007c00), UINT32_C(0x00007c00)},
+    {S8_INITIALIZER("STLXRH"), UINT32_C(0x00007c00), UINT32_C(0x00007c00)},
+    {S8_INITIALIZER("STLXRW"), UINT32_C(0x00007c00), UINT32_C(0x00007c00)},
+    {S8_INITIALIZER("STLXRX"), UINT32_C(0x00007c00), UINT32_C(0x00007c00)},
+    {S8_INITIALIZER("STXRB"), UINT32_C(0x00007c00), UINT32_C(0x00007c00)},
+    {S8_INITIALIZER("STXRH"), UINT32_C(0x00007c00), UINT32_C(0x00007c00)},
+    {S8_INITIALIZER("STXRW"), UINT32_C(0x00007c00), UINT32_C(0x00007c00)},
+    {S8_INITIALIZER("STXRX"), UINT32_C(0x00007c00), UINT32_C(0x00007c00)},
 };
 
-BUSTER_GLOBAL_LOCAL u32 aarch64_import_fixed_zero_overlay(String8 name)
+BUSTER_GLOBAL_LOCAL Aarch64ImportFixedOverlay const* aarch64_import_fixed_overlay(String8 name)
 {
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(aarch64_import_fixed_zero_overlays); index += 1)
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(aarch64_import_fixed_overlays); index += 1)
     {
-        if (string_equal(name, aarch64_import_fixed_zero_overlays[index].name))
+        if (string_equal(name, aarch64_import_fixed_overlays[index].name))
         {
-            return aarch64_import_fixed_zero_overlays[index].instruction_mask;
+            return &aarch64_import_fixed_overlays[index];
         }
     }
     return 0;
@@ -13618,9 +13621,19 @@ BUSTER_GLOBAL_LOCAL bool aarch64_apple_m1_predicate_allowed(String8 name)
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool aarch64_apple_m1_record_has_sme_custom_gate(Aarch64ImportRecord* record)
+{
+    return string_equal(record->name, S8("MSRpstatesvcrImm1"));
+}
+
 BUSTER_GLOBAL_LOCAL bool aarch64_apple_m1_record_in_profile(Aarch64ImportRecord* record, u64* excluded_predicate_count)
 {
-    bool in_profile = record->parse_reason != AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE;
+    // LLVM's SVCROperand custom parser gates MSRpstatesvcrImm1 on SME even
+    // though the reduced row has an empty Predicates list.  Apple M1 has no
+    // SME, so this row is an explicit denominator exclusion rather than an
+    // inferred baseline form.
+    bool in_profile = !record->predicate_parse_error && record->parse_reason != AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE &&
+                      !aarch64_apple_m1_record_has_sme_custom_gate(record);
     u64 excluded = 0;
     for (Aarch64ImportPredicate* predicate = record->first_predicate; predicate; predicate = predicate->next)
     {
@@ -13764,6 +13777,9 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_inst(Arena* arena, Aarch64ImportRe
         {
             break;
         }
+        // Keep every instruction-bit mask explicitly bounded.  Malformed
+        // oversized Inst arrays must fail closed without shifting by 32+.
+        u32 instruction_bit_mask = bit < 32 ? (UINT32_C(1) << bit) : 0;
         if (bit >= 32)
         {
             record->parse_reason = AARCH64_IMPORT_REASON_UNKNOWN_FIELD;
@@ -13799,7 +13815,7 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_inst(Arena* arena, Aarch64ImportRe
                 else
                 {
                     Aarch64ImportVariable* variable = aarch64_import_variable_find_or_add(arena, record, variable_name);
-                    if ((record->fixed_mask | record->variable_instruction_mask) & (1u << bit) ||
+                    if ((record->fixed_mask | record->variable_instruction_mask) & instruction_bit_mask ||
                         variable->source_mask & (1u << value_bit))
                     {
                         record->parse_reason = AARCH64_IMPORT_REASON_CONFLICTING_BIT_ASSIGNMENT;
@@ -13807,36 +13823,36 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_inst(Arena* arena, Aarch64ImportRe
                     else
                     {
                         aarch64_import_variable_add_bit(arena, variable, (u8)bit, (u8)value_bit);
-                        record->variable_instruction_mask |= 1u << bit;
+                        record->variable_instruction_mask |= instruction_bit_mask;
                     }
                 }
             }
             else if (string_equal(kind, S8("var")))
             {
                 Aarch64ImportVariable* variable = aarch64_import_variable_find_or_add(arena, record, variable_name);
-                record->scalar_var_bits_seen |= UINT32_C(1) << bit;
+                record->scalar_var_bits_seen |= instruction_bit_mask;
                 if (aarch64_import_scalar_var_allowed(record->name, bit, variable_name))
                 {
-                    if ((record->fixed_mask | record->variable_instruction_mask) & (1u << bit) || variable->source_mask & 1u)
+                    if ((record->fixed_mask | record->variable_instruction_mask) & instruction_bit_mask || variable->source_mask & 1u)
                     {
                         record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_CONFLICTING_BIT_ASSIGNMENT;
                     }
                     else
                     {
                         aarch64_import_variable_add_bit(arena, variable, (u8)bit, 0);
-                        record->variable_instruction_mask |= 1u << bit;
+                        record->variable_instruction_mask |= instruction_bit_mask;
                     }
                 }
                 else
                 {
                     variable->unmapped = 1;
-                    if ((record->fixed_mask | record->variable_instruction_mask) & (1u << bit))
+                    if ((record->fixed_mask | record->variable_instruction_mask) & instruction_bit_mask)
                     {
                         record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_CONFLICTING_BIT_ASSIGNMENT;
                     }
                     else
                     {
-                        record->variable_instruction_mask |= 1u << bit;
+                        record->variable_instruction_mask |= instruction_bit_mask;
                         record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_UNMAPPED_VARIABLE;
                     }
                 }
@@ -13851,11 +13867,13 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_inst(Arena* arena, Aarch64ImportRe
             u32 value = 0;
             if (string_equal(raw, S8("null")))
             {
-                record->null_bits_seen |= UINT32_C(1) << bit;
-                u32 fixed_zero_overlay = aarch64_import_fixed_zero_overlay(record->name);
-                if ((fixed_zero_overlay & (UINT32_C(1) << bit)) && !(record->variable_instruction_mask & (UINT32_C(1) << bit)))
+                record->null_bits_seen |= instruction_bit_mask;
+                Aarch64ImportFixedOverlay const* fixed_overlay = aarch64_import_fixed_overlay(record->name);
+                if (fixed_overlay && (fixed_overlay->instruction_mask & instruction_bit_mask) &&
+                    !(record->variable_instruction_mask & instruction_bit_mask))
                 {
-                    record->fixed_mask |= UINT32_C(1) << bit;
+                    record->fixed_mask |= instruction_bit_mask;
+                    record->fixed_value |= fixed_overlay->fixed_value & instruction_bit_mask;
                 }
                 else
                 {
@@ -13866,14 +13884,14 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_inst(Arena* arena, Aarch64ImportRe
             {
                 record->parse_reason = AARCH64_IMPORT_REASON_UNKNOWN_FIELD;
             }
-            else if (record->variable_instruction_mask & (1u << bit))
+            else if (record->variable_instruction_mask & instruction_bit_mask)
             {
                 record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_CONFLICTING_BIT_ASSIGNMENT;
             }
             else if (bit < 32)
             {
-                record->fixed_mask |= 1u << bit;
-                record->fixed_value |= value << bit;
+                record->fixed_mask |= instruction_bit_mask;
+                record->fixed_value |= value ? instruction_bit_mask : 0;
             }
         }
         bit += 1;
@@ -14527,6 +14545,12 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_dag(Arena* arena, Aarch64ImportRec
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL void aarch64_import_predicate_parse_error(Aarch64ImportRecord* record)
+{
+    record->predicate_parse_error = 1;
+    aarch64_import_reason_set(record, AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE);
+}
+
 BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_predicates(Arena* arena, Aarch64ImportRecord* record)
 {
     JsonParser parser = {.text = record->predicates_json};
@@ -14543,14 +14567,14 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_predicates(Arena* arena, Aarch64Im
         {
             if (!json_raw_object_find(raw, S8("def"), &name_raw))
             {
-                record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE;
+                aarch64_import_predicate_parse_error(record);
                 continue;
             }
         }
         String8 name = {0};
         if (!aarch64_import_decode_json_string(arena, name_raw, &name) || !aarch64_import_ascii_identifier(name))
         {
-            record->parse_reason = record->parse_reason ? record->parse_reason : AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE;
+            aarch64_import_predicate_parse_error(record);
             continue;
         }
         Aarch64ImportPredicate* predicate = arena_allocate(arena, Aarch64ImportPredicate, 1);
@@ -14567,6 +14591,10 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_predicates(Arena* arena, Aarch64Im
         record->predicate_count += 1;
     }
     json_skip_whitespace(&parser);
+    if (!valid || parser.index != parser.text.length)
+    {
+        aarch64_import_predicate_parse_error(record);
+    }
     return valid && parser.index == parser.text.length;
 }
 
@@ -15454,7 +15482,7 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_normalized(Arena* arena, String8 j
 
 BUSTER_GLOBAL_LOCAL bool aarch64_import_record_is_valid_for_alias(Aarch64ImportRecord* record)
 {
-    return record->parse_reason == AARCH64_IMPORT_REASON_NONE;
+    return record->parse_reason == AARCH64_IMPORT_REASON_NONE && !record->predicate_parse_error;
 }
 
 BUSTER_GLOBAL_LOCAL void aarch64_import_normalize_records(Aarch64ImportRecordList* records)
@@ -15519,18 +15547,21 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_validate_m1_raw_closure(Aarch64ImportRec
 {
     u32 members = 0;
     u32 complete = 0;
-    u32 overlay_occurrences[BUSTER_ARRAY_LENGTH(aarch64_import_fixed_zero_overlays)] = {0};
+    u32 overlay_occurrences[BUSTER_ARRAY_LENGTH(aarch64_import_fixed_overlays)] = {0};
     u32 scalar_var_occurrences[2] = {0};
+    u32 m1_scalar_var_occurrences = 0;
     bool valid = true;
     for (Aarch64ImportRecord* record = records.first; record; record = record->next)
     {
-        u32 overlay = aarch64_import_fixed_zero_overlay(record->name);
-        for (u32 overlay_index = 0; overlay_index < BUSTER_ARRAY_LENGTH(aarch64_import_fixed_zero_overlays); overlay_index += 1)
+        Aarch64ImportFixedOverlay const* overlay = aarch64_import_fixed_overlay(record->name);
+        for (u32 overlay_index = 0; overlay_index < BUSTER_ARRAY_LENGTH(aarch64_import_fixed_overlays); overlay_index += 1)
         {
-            if (string_equal(record->name, aarch64_import_fixed_zero_overlays[overlay_index].name))
+            if (string_equal(record->name, aarch64_import_fixed_overlays[overlay_index].name))
             {
                 overlay_occurrences[overlay_index] += 1;
-                valid = valid && record->null_bits_seen == overlay;
+                valid = valid && record->null_bits_seen == overlay->instruction_mask &&
+                        (record->fixed_mask & overlay->instruction_mask) == overlay->instruction_mask &&
+                        (record->fixed_value & overlay->instruction_mask) == overlay->fixed_value;
             }
         }
         u32 scalar_var_expected = aarch64_import_scalar_var_expected_mask(record->name);
@@ -15544,12 +15575,17 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_validate_m1_raw_closure(Aarch64ImportRec
         if (in_profile)
         {
             members += 1;
+            if (scalar_var_expected)
+            {
+                m1_scalar_var_occurrences += 1;
+            }
             // This is deliberately a bit-layout check only.  It must not be
             // read as semantic encoder coverage: many rows retain an
             // UNSUPPORTED_TOKEN or an unproven transform reason.
             bool layout_complete = record->fixed_value == (record->fixed_value & record->fixed_mask) &&
                                     (record->fixed_mask | record->variable_instruction_mask) == UINT32_MAX;
-            valid = valid && record->null_bits_seen == overlay && record->scalar_var_bits_seen == scalar_var_expected;
+            valid = valid && record->null_bits_seen == (overlay ? overlay->instruction_mask : 0) &&
+                    record->scalar_var_bits_seen == scalar_var_expected;
             complete += layout_complete;
         }
     }
@@ -15557,7 +15593,8 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_validate_m1_raw_closure(Aarch64ImportRec
     {
         valid = valid && overlay_occurrences[index] == 1;
     }
-    valid = valid && scalar_var_occurrences[0] == 1 && scalar_var_occurrences[1] == 1 && members == 2899 && complete == 2899;
+    valid = valid && scalar_var_occurrences[0] == 1 && scalar_var_occurrences[1] == 1 && m1_scalar_var_occurrences == 1 && members == 2898 &&
+            complete == 2898;
     if (member_count)
     {
         *member_count = members;
@@ -16060,7 +16097,9 @@ BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_preamble(Arena* output)
                             "#ifndef BUSTER_AARCH64_ASSEMBLY_GENERATED_H\n"
                             "#define BUSTER_AARCH64_ASSEMBLY_GENERATED_H\n"
                             "#include <buster/lib/base.h>\n\n"
-                            "#define BUSTER_AARCH64_GENERATED_SCHEMA_VERSION 5\n"
+                            "#define BUSTER_AARCH64_GENERATED_SCHEMA_VERSION 6\n"
+                            "#define BUSTER_AARCH64_GENERATED_FORM_FLAG_APPLE_M1_PROFILE_MEMBER 1u\n"
+                            "#define BUSTER_AARCH64_GENERATED_FORM_FLAG_PREDICATE_PARSE_ERROR 2u\n"
                             "// Packed metadata is consumed by the AArch64 runtime; coverage fields remain audit/provenance data.\n\n"
                             "typedef enum BusterAarch64GeneratedCoverageClass {\n"
                             "    BUSTER_AARCH64_GENERATED_COVERAGE_DIRECT,\n"
@@ -16203,7 +16242,7 @@ BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_preamble(Arena* output)
                             "    u32 field_first; u32 operand_first; u32 predicate_first; u32 normalized_form_id;\n"
                             "    u16 field_count; u16 operand_count; u16 predicate_count; u16 reserved0;\n"
                             "    u32 fixed_mask; u32 fixed_value; u8 coverage_class; u8 encoder_family; u8 test_class; u8 reason_id;\n"
-                            "    u8 asm_flags; u8 address_kind; u8 address_flags; u8 apple_m1_profile_member;\n"
+                            "    u8 asm_flags; u8 address_kind; u8 address_flags; u8 profile_flags;\n"
                             "    u16 address_base_index; u16 address_offset_index;\n"
                             "};\n\n"
                             "typedef struct BusterAarch64GeneratedCoverage BusterAarch64GeneratedCoverage;\n"
@@ -16517,7 +16556,8 @@ BUSTER_GLOBAL_LOCAL bool aarch64_generated_emit_packed_tables(Arena* output, Are
                 aarch64_generated_blob_append_u8(&forms, record->test_class) && aarch64_generated_blob_append_u8(&forms, record->reason_id) &&
                 aarch64_generated_blob_append_u8(&forms, record->has_alternatives) && aarch64_generated_blob_append_u8(&forms, record->address_kind) &&
                 aarch64_generated_blob_append_u8(&forms, record->address_flags) &&
-                aarch64_generated_blob_append_u8(&forms, aarch64_apple_m1_record_in_profile(record, 0) ? 1u : 0u) &&
+                aarch64_generated_blob_append_u8(&forms, (aarch64_apple_m1_record_in_profile(record, 0) ? 1u : 0u) |
+                                                           (record->predicate_parse_error ? 2u : 0u)) &&
                 aarch64_generated_blob_append_u16(&forms, record->address_base_index) && aarch64_generated_blob_append_u16(&forms, record->address_offset_index);
     }
     for (u32 index = 0; valid && index < mnemonic_count; index += 1)
@@ -17763,11 +17803,13 @@ BUSTER_GLOBAL_LOCAL bool aarch64_apple_m1_profile_append_row(Arena* output, Aarc
     else
     {
         arena_append_string8(output, S8(",\"in_profile\":false,\"exclusion_reason\":"));
-        arena_append_json_string(output, record->parse_reason == AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE ? S8("unknown_predicate") :
-                                                                                                      S8("non_m1_predicate"));
+        String8 exclusion_reason = record->predicate_parse_error  ? S8("unknown_predicate") :
+                                   aarch64_apple_m1_record_has_sme_custom_gate(record) ? S8("custom_operand_requires_sme") :
+                                                                                           S8("non_m1_predicate");
+        arena_append_json_string(output, exclusion_reason);
         arena_append_string8(output, S8(",\"excluded_predicates\":"));
         aarch64_apple_m1_profile_append_excluded_predicates(output, record);
-        if (record->parse_reason == AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE)
+        if (record->predicate_parse_error)
         {
             // A malformed/unknown predicate expression is excluded even when
             // the parser could not retain a predicate node.
@@ -17907,7 +17949,8 @@ BUSTER_GLOBAL_LOCAL void aarch64_import_self_test_append_record(Arena* output, S
     arena_append_string8(output, S8("{\"name\":"));
     arena_append_json_string(output, name);
     arena_append_string8(output, S8(",\"inst\":["));
-    for (u32 bit = 0; bit < 32; bit += 1)
+    u32 instruction_count = mode == 8 ? 33 : 32;
+    for (u32 bit = 0; bit < instruction_count; bit += 1)
     {
         if (bit)
         {
@@ -19044,6 +19087,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
     aarch64_import_self_test_append_record(output, S8("PredicateGuardA"), 0, S8("nop"), S8("(outs)"), S8("(ins)"), S8("[\"FeatureGuardA\"]"));
     aarch64_import_self_test_append_record(output, S8("PredicateGuardB"), 0, S8("nop"), S8("(outs)"), S8("(ins)"), S8("[\"FeatureGuardB\"]"));
     aarch64_import_self_test_append_record(output, S8("UnknownPredicate"), 0, S8("nop"), S8("(outs)"), S8("(ins)"), S8("[{\"malformed\":\"predicate\"}]"));
+    aarch64_import_self_test_append_record(output, S8("PredicateParseErrorEarlier"), 5, S8("nop"), S8("(outs)"), S8("(ins)"),
+                                            S8("[{\"malformed\":\"predicate\"}]"));
     aarch64_import_self_test_append_record(output, S8("Branch"), 1, S8("b\t$addr"), S8("(outs)"),
                                             S8("(ins am_b_target:$addr)"), S8("[]"));
     aarch64_import_self_test_append_record(output, S8("Memory"), 0, S8("ldr\t$Rt, [$Rn, $offset]"), S8("(outs GPR32:$Rt)"),
@@ -19062,7 +19107,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
     aarch64_import_self_test_append_record(output, S8("MalformedTemplate"), 0, S8("bad {"), S8("(outs)"), S8("(ins)"), S8("[]"));
     String8 synthetic_jsonl = assembly_import_arena_contents(output);
     Aarch64ImportRecordList synthetic_records = {0};
-    result = result && aarch64_import_parse_normalized(arena, synthetic_jsonl, &synthetic_records) && synthetic_records.count == 16;
+    result = result && aarch64_import_parse_normalized(arena, synthetic_jsonl, &synthetic_records) && synthetic_records.count == 17;
     aarch64_import_normalize_records(&synthetic_records);
     Aarch64ImportRecord* normal = aarch64_import_self_test_find_record(synthetic_records, S8("Normal"));
     Aarch64ImportRecord* alias = aarch64_import_self_test_find_record(synthetic_records, S8("Alias"));
@@ -19070,6 +19115,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
     Aarch64ImportRecord* predicate_guard_a = aarch64_import_self_test_find_record(synthetic_records, S8("PredicateGuardA"));
     Aarch64ImportRecord* predicate_guard_b = aarch64_import_self_test_find_record(synthetic_records, S8("PredicateGuardB"));
     Aarch64ImportRecord* unknown_predicate = aarch64_import_self_test_find_record(synthetic_records, S8("UnknownPredicate"));
+    Aarch64ImportRecord* predicate_parse_error_earlier = aarch64_import_self_test_find_record(synthetic_records, S8("PredicateParseErrorEarlier"));
     Aarch64ImportRecord* branch = aarch64_import_self_test_find_record(synthetic_records, S8("Branch"));
     Aarch64ImportRecord* memory = aarch64_import_self_test_find_record(synthetic_records, S8("Memory"));
     Aarch64ImportRecord* simd_lane = aarch64_import_self_test_find_record(synthetic_records, S8("SimdLane"));
@@ -19081,11 +19127,28 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
     Aarch64ImportRecord* malformed_record = aarch64_import_self_test_find_record(synthetic_records, S8("Malformed"));
     Aarch64ImportRecord* malformed_template = aarch64_import_self_test_find_record(synthetic_records, S8("MalformedTemplate"));
     Aarch64ImportVariable* branch_field = branch ? aarch64_import_variable_find(branch, S8("addr")) : 0;
+    // Exercise the oversized-Inst fail-closed path directly: parse_record
+    // rejects malformed rows, so keep this synthetic row out of the normal
+    // profile fixture while still proving that no shift by 32+ occurs.
+    Arena* oversized_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1)});
+    bool oversized_inst_safe = false;
+    if (oversized_output)
+    {
+        aarch64_import_self_test_append_record(oversized_output, S8("OversizedInst"), 8, S8("nop"), S8("(outs)"), S8("(ins)"), S8("[]"));
+        String8 oversized_line = assembly_import_arena_contents(oversized_output);
+        String8 oversized_inst_json = {0};
+        Aarch64ImportRecord oversized_record = {.name = S8("OversizedInst")};
+        bool oversized_json_found = json_raw_object_find(oversized_line, S8("inst"), &oversized_inst_json);
+        oversized_record.inst_json = oversized_inst_json;
+        bool oversized_parse = oversized_json_found && aarch64_import_parse_inst(arena, &oversized_record);
+        oversized_inst_safe = oversized_json_found && !oversized_parse && oversized_record.parse_reason == AARCH64_IMPORT_REASON_UNKNOWN_FIELD;
+        arena_destroy(oversized_output, 1);
+    }
     Aarch64AppleM1ProfileStats profile_stats_a = {0};
     Aarch64AppleM1ProfileStats profile_stats_b = {0};
     bool profile_generated_a = aarch64_apple_m1_profile_emit(profile_a, synthetic_records, &profile_stats_a);
     bool profile_generated_b = aarch64_apple_m1_profile_emit(profile_b, synthetic_records, &profile_stats_b);
-    result = result && normal && alias && normal2 && predicate_guard_a && predicate_guard_b && unknown_predicate && branch && memory && simd_lane && sve_predicate && sme_system && reserved_variable && unknown_field && conflict && malformed_record &&
+    result = result && oversized_inst_safe && normal && alias && normal2 && predicate_guard_a && predicate_guard_b && unknown_predicate && predicate_parse_error_earlier && branch && memory && simd_lane && sve_predicate && sme_system && reserved_variable && unknown_field && conflict && malformed_record &&
              malformed_template &&
              ((normal->coverage_class == AARCH64_IMPORT_COVERAGE_DIRECT && alias->coverage_class == AARCH64_IMPORT_COVERAGE_ALIAS) ||
               (normal->coverage_class == AARCH64_IMPORT_COVERAGE_ALIAS && alias->coverage_class == AARCH64_IMPORT_COVERAGE_DIRECT)) &&
@@ -19095,8 +19158,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
              predicate_guard_a->first_predicate && predicate_guard_b->first_predicate &&
              string_equal(predicate_guard_a->first_predicate->name, S8("FeatureGuardA")) &&
              string_equal(predicate_guard_b->first_predicate->name, S8("FeatureGuardB")) &&
-             unknown_predicate->reason_id == AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE &&
+             unknown_predicate->predicate_parse_error && predicate_parse_error_earlier->predicate_parse_error && predicate_parse_error_earlier->parse_reason != AARCH64_IMPORT_REASON_NONE &&
              !aarch64_apple_m1_record_in_profile(unknown_predicate, 0) &&
+             !aarch64_apple_m1_record_in_profile(predicate_parse_error_earlier, 0) &&
              branch_field->relocation == AARCH64_IMPORT_RELOC_BRANCH26 && branch_field->shift == 2 &&
              memory->address_kind == AARCH64_IMPORT_ADDRESS_BASE_OFFSET && memory->test_class == AARCH64_IMPORT_TEST_MEMORY &&
              (simd_lane->first_operand && (simd_lane->first_operand->flags & AARCH64_IMPORT_OPERAND_FLAG_LIST)) &&
@@ -19113,13 +19177,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
              profile_generated_a && profile_generated_b &&
              string_equal(assembly_import_arena_contents(profile_a), assembly_import_arena_contents(profile_b)) &&
              profile_stats_a.row_count == synthetic_records.count && profile_stats_a.in_profile_count + profile_stats_a.excluded_count == synthetic_records.count &&
-             profile_stats_a.excluded_count == 5 && profile_stats_a.in_profile_count == 11 &&
+             profile_stats_a.excluded_count == 6 && profile_stats_a.in_profile_count == 11 &&
              profile_stats_a.row_count == profile_stats_b.row_count && profile_stats_a.in_profile_count == profile_stats_b.in_profile_count &&
              profile_stats_a.excluded_count == profile_stats_b.excluded_count &&
              string_contains(assembly_import_arena_contents(profile_a), S8("\"name\":\"UnknownPredicate\"")) &&
              string_contains(assembly_import_arena_contents(profile_a), S8("\"exclusion_reason\":\"unknown_predicate\"")) &&
+             string_contains(assembly_import_arena_contents(profile_a), S8("\"name\":\"PredicateParseErrorEarlier\"")) &&
              string_contains(assembly_import_arena_contents(profile_a), S8("\"predicate_parse_error\":true"));
-
     arena_reset_to_start(schema_a);
     arena_reset_to_start(schema_b);
     arena_reset_to_start(coverage_a);
@@ -19132,7 +19196,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
              string_equal(assembly_import_arena_contents(coverage_a), assembly_import_arena_contents(coverage_b)) &&
              aarch64_stats_a.coverage_counts[AARCH64_IMPORT_COVERAGE_UNCLASSIFIED] == 0 &&
              aarch64_stats_a.coverage_counts[AARCH64_IMPORT_COVERAGE_ALIAS] == 1 &&
-             aarch64_stats_a.reason_counts[AARCH64_IMPORT_REASON_UNKNOWN_FIELD] == 1 &&
+             aarch64_stats_a.reason_counts[AARCH64_IMPORT_REASON_UNKNOWN_FIELD] == 2 &&
              aarch64_stats_a.mnemonic_candidate_count == synthetic_records.count && aarch64_stats_a.mnemonic_range_count < aarch64_stats_a.mnemonic_candidate_count &&
              aarch64_stats_a.signature_candidate_count >= 2 && aarch64_stats_a.signature_range_count < aarch64_stats_a.signature_candidate_count &&
              string_contains(assembly_import_arena_contents(schema_a), S8("FeatureGuardA")) &&
@@ -19147,7 +19211,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
              !string_contains(assembly_import_arena_contents(schema_a), S8("sizeof(blob)")) &&
              !string_contains(assembly_import_arena_contents(schema_a), S8("(blob)[")) &&
              string_contains(assembly_import_arena_contents(schema_a), S8("UINT32_MAX"));
-
     arena_destroy(coverage_b, 1);
     arena_destroy(coverage_a, 1);
     arena_destroy(profile_b, 1);
@@ -19437,6 +19500,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
                 {
                     result = PROCESS_RESULT_FAILED;
                 }
+            }
+            else if (!options.audit && !aarch64_apple_m1_profile_acceptance_ready(profile_stats, false, false, false))
+            {
+                string_print(S8("error: Apple M1 metadata acceptance is blocked by unverified denominator, alias, or Arm evidence; use --audit only for inventory output\n"));
+                result = PROCESS_RESULT_FAILED;
             }
             if (result == PROCESS_RESULT_SUCCESS)
             {
@@ -19956,6 +20024,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
                         {
                             result = PROCESS_RESULT_FAILED;
                         }
+                    }
+                    else if (!options.audit && !aarch64_apple_m1_profile_acceptance_ready(aarch64_m1_profile_stats, false, false, false))
+                    {
+                        string_print(S8("error: Apple M1 metadata acceptance is blocked by unverified denominator, alias, or Arm evidence; use --audit only for inventory output\n"));
+                        result = PROCESS_RESULT_FAILED;
                     }
                     if (result == PROCESS_RESULT_SUCCESS)
                     {

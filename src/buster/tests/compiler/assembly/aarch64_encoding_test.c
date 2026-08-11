@@ -373,10 +373,10 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     // exact shape counts and M1 policy census here so a regenerated table
     // cannot silently change the denominator.
     BusterAarch64MetadataCounts metadata_counts = buster_aarch64_metadata_counts();
-    BUSTER_TEST(arguments, buster_aarch64_metadata_schema_version() == 5);
+    BUSTER_TEST(arguments, buster_aarch64_metadata_schema_version() == 6);
     BUSTER_TEST(arguments, metadata_counts.form_count == 7491 && metadata_counts.field_count == 22631 && metadata_counts.segment_count == 23039 &&
                               metadata_counts.operand_count == 26262 && metadata_counts.predicate_count == 7854 && metadata_counts.string_pool_size == 337490);
-    BUSTER_TEST(arguments, metadata_counts.apple_m1_supported_count == 2899 && metadata_counts.apple_m1_raw_layout_complete_count == 2899 &&
+    BUSTER_TEST(arguments, metadata_counts.apple_m1_supported_count == 2898 && metadata_counts.apple_m1_raw_layout_complete_count == 2898 &&
                               metadata_counts.apple_m1_raw_layout_incomplete_count == 0);
 
     // Target-aware predicate evaluation is the authority behind the legacy
@@ -435,7 +435,7 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     {
         BusterAarch64MetadataForm form = {0};
         BUSTER_TEST(arguments, buster_aarch64_metadata_form(form_id, &form));
-        if (form.reason_id == BUSTER_AARCH64_METADATA_REASON_UNKNOWN_PREDICATE)
+        if (form.predicate_parse_error)
         {
             unknown_predicate_form_count += 1;
             BUSTER_TEST(arguments, !buster_aarch64_metadata_form_supported_for_target(form_id, generic_aarch64_target));
@@ -515,7 +515,7 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, (raw_word & form.fixed_mask) == form.fixed_value);
         }
     }
-    BUSTER_TEST(arguments, raw_layout_complete_count == 7346 && m1_count == 2899 && m1_raw_layout_complete_count == 2899);
+    BUSTER_TEST(arguments, raw_layout_complete_count == 7346 && m1_count == 2898 && m1_raw_layout_complete_count == 2898);
     BUSTER_TEST(arguments, found_in_profile_unsupported_token_raw_layout);
 
     // Every raw-layout gap in the pinned LLVM snapshot is covered by an
@@ -542,7 +542,13 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
             }
             BUSTER_TEST(arguments, !m1_raw_closure_found[closure_index]);
             m1_raw_closure_found[closure_index] = true;
-            BUSTER_TEST(arguments, form.apple_m1_profile_member && form.raw_layout_complete);
+            bool expected_m1_member = !a64_encoding_metadata_string_equal(form.name, "MSRpstatesvcrImm1");
+            BUSTER_TEST(arguments, form.apple_m1_profile_member == expected_m1_member && form.raw_layout_complete);
+            if (closure_index >= 16 && closure_index < 24)
+            {
+                BUSTER_TEST(arguments, (form.fixed_mask & UINT32_C(0x00007c00)) == UINT32_C(0x00007c00) &&
+                                          (form.fixed_value & UINT32_C(0x00007c00)) == UINT32_C(0x00007c00));
+            }
             if (closure_index >= 24)
             {
                 BusterAarch64MetadataField scalar_field = {0};
@@ -569,6 +575,55 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     {
         BUSTER_TEST(arguments, m1_raw_closure_found[closure_index]);
     }
+
+    // Differential raw words for the corrected Rt2=XZR/WZR fixed field.
+    static struct
+    {
+        char const* name;
+        u32 word;
+    } const exclusive_store_cases[] = {
+        {"STLXRB", UINT32_C(0x0802fc83)},
+        {"STXRX", UINT32_C(0xc8027c83)},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(exclusive_store_cases); case_index += 1)
+    {
+        bool found = false;
+        for (u32 form_id = 0; form_id < metadata_counts.form_count; form_id += 1)
+        {
+            BusterAarch64MetadataForm form = {0};
+            BUSTER_TEST(arguments, buster_aarch64_metadata_form(form_id, &form));
+            if (!a64_encoding_metadata_string_equal(form.name, exclusive_store_cases[case_index].name))
+            {
+                continue;
+            }
+            found = true;
+            u32 values[] = {3, 4, 2};
+            u32 word = 0;
+            BUSTER_TEST(arguments, form.field_count == BUSTER_ARRAY_LENGTH(values) &&
+                                      buster_aarch64_metadata_raw_encode(form_id, values, BUSTER_ARRAY_LENGTH(values), &word) &&
+                                      word == exclusive_store_cases[case_index].word);
+            u32 raw_decoded[3] = {0};
+            BUSTER_TEST(arguments, buster_aarch64_metadata_raw_decode(form_id, word, raw_decoded, BUSTER_ARRAY_LENGTH(raw_decoded)) &&
+                                      raw_decoded[0] == values[0] && raw_decoded[1] == values[1] && raw_decoded[2] == values[2]);
+            break;
+        }
+        BUSTER_TEST(arguments, found);
+    }
+
+    bool found_svcr = false;
+    for (u32 form_id = 0; form_id < metadata_counts.form_count; form_id += 1)
+    {
+        BusterAarch64MetadataForm form = {0};
+        BUSTER_TEST(arguments, buster_aarch64_metadata_form(form_id, &form));
+        if (a64_encoding_metadata_string_equal(form.name, "MSRpstatesvcrImm1"))
+        {
+            found_svcr = true;
+            BUSTER_TEST(arguments, !form.apple_m1_profile_member && !form.provisionally_apple_m1 &&
+                                      !buster_aarch64_metadata_form_supported_for_target(form_id, m1_target) && form.raw_layout_complete);
+            break;
+        }
+    }
+    BUSTER_TEST(arguments, found_svcr);
 
     // Differential words checked against llvm-mc 22.1.8. The values are raw
     // source-field values in generated field order, not semantic operands.

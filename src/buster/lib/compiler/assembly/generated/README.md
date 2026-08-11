@@ -81,8 +81,8 @@ checksum of the normalized JSONL emitted by the importer.
 
 The current audit output has 7,491 coverage rows, 7,491 canonical forms,
 22,631 fields, 23,039 segments, 26,262 operands, 7,854 predicate uses, and
-116 distinct predicate features. The flat-chunk header is 3,951,958 bytes
-(checksum `21ff206904cdbd7a`), the flat-chunk coverage include is 299,898
+116 distinct predicate features. The flat-chunk header is 3,952,086 bytes
+(checksum `140b1ad11ef9116d`), the flat-chunk coverage include is 299,898
 bytes (checksum `ec5065a9b4503e40`), and the sorted string pool is 337,490
 bytes. Lookup
 indexes contain 1,557 mnemonic ranges and candidates for all 7,491 records;
@@ -124,20 +124,28 @@ forms to FEAT_LOR and one system TSB form to FEAT_TRF. An empty predicate list
 is the baseline; unknown predicates and any predicate outside this set are
 explicit exclusions, never silent support.
 
-For the 7,491 checked-in LLVM rows this produces 2,899 provisional in-profile
-rows and 4,592 explicit exclusions (4,961 excluded predicate occurrences).
+For the 7,491 checked-in LLVM rows this produces 2,898 provisional in-profile
+rows and 4,593 explicit exclusions (4,961 excluded predicate occurrences).
 The in-profile classification counts are
-DIRECT=22, NORMALIZED=1,942, PRIVILEGED/SYSTEM=19,
+DIRECT=22, NORMALIZED=1,942, PRIVILEGED/SYSTEM=18,
 RESERVED/UNENCODABLE=0, UNSUPPORTED_TOKEN=916, with ALIAS=0 and
 UNCLASSIFIED=0. The exclusion counts are DIRECT=15, NORMALIZED=2,329,
-PRIVILEGED/SYSTEM=6, RESERVED/UNENCODABLE=145, UNSUPPORTED_TOKEN=2,097,
+PRIVILEGED/SYSTEM=7, RESERVED/UNENCODABLE=145, UNSUPPORTED_TOKEN=2,097,
 with ALIAS=0 and UNCLASSIFIED=0. The profile acceptance gate is therefore
 blocked by 916 in-profile unsupported rows; non-M1 extensions (for example
 SVE/SVE2, SME/SME2, MTE, BF16, I8MM, and BTI) remain explicit exclusions and
-do not inflate that denominator. Raw layout closure is complete for all 2,899
-in-profile rows (2,899/2,899); this is a bit-layout guarantee, not semantic
-encoder coverage. The emitted profile is 2,537,249 bytes with checksum
-`ad73d60fbca76b9c`.
+do not inflate that denominator. `MSRpstatesvcrImm1` is excluded by the
+explicit `SVCROperand` SME custom-parser gate despite its empty LLVM
+`Predicates` list; its deterministic profile exclusion reason is
+`custom_operand_requires_sme`, and it remains raw-layout complete. Raw layout
+closure is complete for all 2,898 in-profile rows (2,898/2,898); this is a
+bit-layout guarantee, not semantic encoder coverage. The emitted profile is
+2,537,262 bytes with checksum `05e3912bebea41d3`.
+
+The MRS/MSR system forms with immediate operands remain in the M1 denominator
+when their feature predicates permit them. Their operand-value semantics are
+not yet validated by the raw-layout closure and remain a separate runtime
+validation task.
 
 The HasRCPC_IMMO member is intentional: the pinned source tags the
 LDAPUR*/STLUR* unscaled-immediate forms with HasRCPC_IMMO. Dropping it would

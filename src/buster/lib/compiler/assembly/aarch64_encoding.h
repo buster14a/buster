@@ -209,9 +209,14 @@ struct BusterAarch64MetadataForm
     // Exact importer decision for the pinned Apple-M1 profile.  This is not
     // semantic encoder readiness; target-feature evaluation remains separate.
     bool apple_m1_profile_member;
+    // Independent predicate-expression validity bit.  A malformed predicate
+    // may coexist with an earlier parse reason, so callers must not infer it
+    // from reason_id.
+    bool predicate_parse_error;
     bool provisionally_apple_m1;
     u8 reserved2[1];
 };
+BUSTER_CT_CHECK(sizeof(BusterAarch64MetadataForm) == 128);
 
 typedef struct BusterAarch64MetadataCounts BusterAarch64MetadataCounts;
 struct BusterAarch64MetadataCounts
