@@ -2977,6 +2977,7 @@ BUSTER_GLOBAL_LOCAL bool a64_typed_scalar_output_arguments_valid(
         (operand_capacity && !operands) || (modifier_capacity && !modifiers) ||
         a64_typed_output_ranges_overlap(operands, operand_bytes, operand_count, sizeof(*operand_count)) ||
         a64_typed_output_ranges_overlap(modifiers, modifier_bytes, modifier_count, sizeof(*modifier_count)) ||
+        a64_typed_output_ranges_overlap(operand_count, sizeof(*operand_count), modifier_count, sizeof(*modifier_count)) ||
         a64_typed_output_ranges_overlap(operands, operand_bytes, modifiers, modifier_bytes) ||
         a64_typed_output_ranges_overlap(operands, operand_bytes, modifier_count, sizeof(*modifier_count)) ||
         a64_typed_output_ranges_overlap(modifiers, modifier_bytes, operand_count, sizeof(*operand_count)))

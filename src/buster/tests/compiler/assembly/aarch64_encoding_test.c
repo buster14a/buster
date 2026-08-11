@@ -2571,6 +2571,118 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
                                immutable_scalar_operand_count == UINT32_C(0x2468ace0) &&
                                immutable_scalar_modifier_count == UINT32_C(0xdeadbeef));
 
+    // Count outputs are independent transactional destinations.  Identical
+    // or partially overlapping count pointers must be rejected before either
+    // count (or any other output) is read or written.
+    u32 overlap_scalar_form = UINT32_MAX;
+    u32 overlap_scalar_word = 0;
+    bool overlap_scalar_representative_found = false;
+    for (u32 scalar_index = 0; scalar_index < buster_aarch64_arm_m1_scalar_integer_form_count() &&
+                                      !overlap_scalar_representative_found;
+         scalar_index += 1)
+    {
+        BusterAarch64ArmM1ScalarIntegerForm scalar_form = {0};
+        if (!buster_aarch64_arm_m1_scalar_integer_form(scalar_index, &scalar_form) ||
+            scalar_form.recipe == BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_UDF)
+        {
+            continue;
+        }
+        for (u32 canonical_index = 0; canonical_index < buster_aarch64_canonical_form_count(); canonical_index += 1)
+        {
+            BusterAarch64CanonicalFormInfo info = {0};
+            if (buster_aarch64_canonical_form(canonical_index, &info) && info.arm_row_digest == scalar_form.arm_row_digest)
+            {
+                overlap_scalar_form = scalar_index;
+                overlap_scalar_word = info.representative_word;
+                overlap_scalar_representative_found = true;
+                break;
+            }
+        }
+    }
+    bool scalar_count_pointer_alias_rejected = overlap_scalar_representative_found;
+    if (overlap_scalar_representative_found)
+    {
+        A64ScalarIntOperand alias_operands[4];
+        A64ScalarIntOperand alias_operands_saved[4];
+        A64ScalarIntModifier alias_modifier;
+        A64ScalarIntModifier alias_modifier_saved;
+        memset(alias_operands, 0xa5, sizeof(alias_operands));
+        memset(alias_modifier.reserved, 0x5a, sizeof(alias_modifier.reserved));
+        alias_modifier.amount = UINT64_C(0x1122334455667788);
+        alias_modifier.kind = A64_SCALAR_INT_MODIFIER_EXTEND;
+        alias_modifier.value = A64_SCALAR_INT_EXTEND_SXTX;
+        alias_modifier.present = true;
+        memcpy(alias_operands_saved, alias_operands, sizeof(alias_operands));
+        alias_modifier_saved = alias_modifier;
+
+        u32 identical_count = UINT32_C(0x13579bdf);
+        u32 identical_count_saved = identical_count;
+        u32 form_sentinel = UINT32_C(0x2468ace0);
+        u32 form_sentinel_saved = form_sentinel;
+        scalar_count_pointer_alias_rejected = scalar_count_pointer_alias_rejected &&
+                                              !buster_aarch64_arm_m1_scalar_integer_decode_form(
+                                                  canonical_target, overlap_scalar_form, overlap_scalar_word, alias_operands,
+                                                  BUSTER_ARRAY_LENGTH(alias_operands), &identical_count, &alias_modifier, 1,
+                                                  &identical_count) &&
+                                              identical_count == identical_count_saved && form_sentinel == form_sentinel_saved &&
+                                              memcmp(alias_operands, alias_operands_saved, sizeof(alias_operands)) == 0 &&
+                                              memcmp(&alias_modifier, &alias_modifier_saved, sizeof(alias_modifier)) == 0;
+
+        u8 partial_count_bytes[sizeof(u32) * 2 + 1];
+        u8 partial_count_bytes_saved[sizeof(partial_count_bytes)];
+        for (u32 byte_index = 0; byte_index < BUSTER_ARRAY_LENGTH(partial_count_bytes); byte_index += 1)
+        {
+            partial_count_bytes[byte_index] = (u8)(0x30 + byte_index);
+        }
+        memcpy(partial_count_bytes_saved, partial_count_bytes, sizeof(partial_count_bytes));
+        u32* partial_operand_count = (u32*)(void*)(partial_count_bytes + 0);
+        u32* partial_modifier_count = (u32*)(void*)(partial_count_bytes + 1);
+        form_sentinel = UINT32_C(0x89abcdef);
+        form_sentinel_saved = form_sentinel;
+        scalar_count_pointer_alias_rejected = scalar_count_pointer_alias_rejected &&
+                                              !buster_aarch64_arm_m1_scalar_integer_decode_form(
+                                                  canonical_target, overlap_scalar_form, overlap_scalar_word, alias_operands,
+                                                  BUSTER_ARRAY_LENGTH(alias_operands), partial_operand_count, &alias_modifier, 1,
+                                                  partial_modifier_count) &&
+                                              form_sentinel == form_sentinel_saved &&
+                                              memcmp(alias_operands, alias_operands_saved, sizeof(alias_operands)) == 0 &&
+                                              memcmp(&alias_modifier, &alias_modifier_saved, sizeof(alias_modifier)) == 0 &&
+                                              memcmp(partial_count_bytes, partial_count_bytes_saved, sizeof(partial_count_bytes)) == 0;
+
+        u32 word_first_form_sentinel = UINT32_C(0xabcdef01);
+        u32 word_first_form_saved = word_first_form_sentinel;
+        identical_count = UINT32_C(0x10203040);
+        identical_count_saved = identical_count;
+        scalar_count_pointer_alias_rejected = scalar_count_pointer_alias_rejected &&
+                                              !buster_aarch64_arm_m1_scalar_integer_decode(
+                                                  canonical_target, overlap_scalar_word, &word_first_form_sentinel, alias_operands,
+                                                  BUSTER_ARRAY_LENGTH(alias_operands), &identical_count, &alias_modifier, 1,
+                                                  &identical_count) &&
+                                              word_first_form_sentinel == word_first_form_saved && identical_count == identical_count_saved &&
+                                              memcmp(alias_operands, alias_operands_saved, sizeof(alias_operands)) == 0 &&
+                                              memcmp(&alias_modifier, &alias_modifier_saved, sizeof(alias_modifier)) == 0;
+
+        for (u32 byte_index = 0; byte_index < BUSTER_ARRAY_LENGTH(partial_count_bytes); byte_index += 1)
+        {
+            partial_count_bytes[byte_index] = (u8)(0x60 + byte_index);
+        }
+        memcpy(partial_count_bytes_saved, partial_count_bytes, sizeof(partial_count_bytes));
+        partial_operand_count = (u32*)(void*)(partial_count_bytes + 0);
+        partial_modifier_count = (u32*)(void*)(partial_count_bytes + 1);
+        word_first_form_sentinel = UINT32_C(0x76543210);
+        word_first_form_saved = word_first_form_sentinel;
+        scalar_count_pointer_alias_rejected = scalar_count_pointer_alias_rejected &&
+                                              !buster_aarch64_arm_m1_scalar_integer_decode(
+                                                  canonical_target, overlap_scalar_word, &word_first_form_sentinel, alias_operands,
+                                                  BUSTER_ARRAY_LENGTH(alias_operands), partial_operand_count, &alias_modifier, 1,
+                                                  partial_modifier_count) &&
+                                              word_first_form_sentinel == word_first_form_saved &&
+                                              memcmp(alias_operands, alias_operands_saved, sizeof(alias_operands)) == 0 &&
+                                              memcmp(&alias_modifier, &alias_modifier_saved, sizeof(alias_modifier)) == 0 &&
+                                              memcmp(partial_count_bytes, partial_count_bytes_saved, sizeof(partial_count_bytes)) == 0;
+    }
+    BUSTER_TEST(arguments, scalar_count_pointer_alias_rejected);
+
     return result;
 }
 
