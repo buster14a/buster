@@ -11,6 +11,27 @@ struct A64EncodingCase
     u32 word;
 };
 
+BUSTER_GLOBAL_LOCAL bool a64_encoding_metadata_string_equal(BusterAarch64MetadataString string, char const* expected)
+{
+    if (!expected)
+    {
+        return false;
+    }
+    u32 index = 0;
+    for (;; index += 1)
+    {
+        char actual = (char)buster_aarch64_metadata_string_byte(string, index);
+        if (actual != expected[index])
+        {
+            return false;
+        }
+        if (!expected[index])
+        {
+            return true;
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL bool a64_encoding_round_trip(A64EncodingCase test)
 {
     u32 encoded = 0;
@@ -331,6 +352,141 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !a64_condition_invert(14, &inverse));
     BUSTER_TEST(arguments, !a64_condition_invert(15, &inverse));
     BUSTER_TEST(arguments, !a64_condition_invert(0, 0));
+
+    // The checked-in packed snapshot is part of the runtime ABI. Keep the
+    // exact shape counts and M1 policy census here so a regenerated table
+    // cannot silently change the denominator.
+    BusterAarch64MetadataCounts metadata_counts = buster_aarch64_metadata_counts();
+    BUSTER_TEST(arguments, buster_aarch64_metadata_schema_version() == 4);
+    BUSTER_TEST(arguments, metadata_counts.form_count == 7491 && metadata_counts.field_count == 22631 && metadata_counts.segment_count == 23037 &&
+                              metadata_counts.operand_count == 26262 && metadata_counts.predicate_count == 7854 && metadata_counts.string_pool_size == 337490);
+    BUSTER_TEST(arguments, metadata_counts.apple_m1_supported_count == 2899 && metadata_counts.apple_m1_complete_count == 2873 &&
+                              metadata_counts.apple_m1_incomplete_count == 26);
+
+    u32 complete_count = 0;
+    u32 m1_count = 0;
+    u32 m1_complete_count = 0;
+    for (u32 form_id = 0; form_id < metadata_counts.form_count; form_id += 1)
+    {
+        BusterAarch64MetadataForm form = {0};
+        BUSTER_TEST(arguments, buster_aarch64_metadata_form(form_id, &form) && form.id == form_id && form.normalized_form_id < metadata_counts.form_count);
+        BUSTER_TEST(arguments, form.name.length != 0 && form.mnemonic.length != 0);
+        if (form.complete)
+        {
+            complete_count += 1;
+        }
+        if (form.provisionally_apple_m1)
+        {
+            m1_count += 1;
+            if (form.complete)
+            {
+                m1_complete_count += 1;
+            }
+        }
+        for (u32 field_index = 0; field_index < form.field_count; field_index += 1)
+        {
+            BusterAarch64MetadataField field = {0};
+            BUSTER_TEST(arguments, buster_aarch64_metadata_field(form_id, field_index, &field) && field.id == form.field_first + field_index);
+            for (u32 segment_index = 0; segment_index < field.segment_count; segment_index += 1)
+            {
+                BusterAarch64MetadataSegment segment = {0};
+                BUSTER_TEST(arguments, buster_aarch64_metadata_segment(form_id, field_index, segment_index, &segment) &&
+                                          segment.id == field.segment_first + segment_index);
+            }
+        }
+        for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+        {
+            BusterAarch64MetadataOperand operand = {0};
+            BUSTER_TEST(arguments, buster_aarch64_metadata_operand(form_id, operand_index, &operand) && operand.id == form.operand_first + operand_index);
+        }
+        for (u32 predicate_index = 0; predicate_index < form.predicate_count; predicate_index += 1)
+        {
+            BusterAarch64MetadataString predicate = {0};
+            BUSTER_TEST(arguments, buster_aarch64_metadata_predicate(form_id, predicate_index, &predicate) && predicate.length != 0);
+        }
+        if (form.complete)
+        {
+            u32 values[8] = {0};
+            u32 decoded_values[8] = {0};
+            for (u32 field_index = 0; field_index < form.field_count; field_index += 1)
+            {
+                BusterAarch64MetadataField field = {0};
+                BUSTER_TEST(arguments, buster_aarch64_metadata_field(form_id, field_index, &field));
+                values[field_index] = field.source_mask & (0x9e3779b9u ^ (form_id * 0x45d9f3bu) ^ (field_index * 0x27d4eb2du));
+            }
+            u32 raw_word = 0;
+            BUSTER_TEST(arguments, buster_aarch64_metadata_raw_encode(form_id, values, form.field_count, &raw_word));
+            BUSTER_TEST(arguments, buster_aarch64_metadata_raw_decode(form_id, raw_word, decoded_values, form.field_count));
+            for (u32 field_index = 0; field_index < form.field_count; field_index += 1)
+            {
+                BUSTER_TEST(arguments, decoded_values[field_index] == values[field_index]);
+            }
+            BUSTER_TEST(arguments, (raw_word & form.fixed_mask) == form.fixed_value);
+        }
+    }
+    BUSTER_TEST(arguments, complete_count == 7320 && m1_count == 2899 && m1_complete_count == 2873);
+
+    // Differential words checked against llvm-mc 22.1.8. The values are raw
+    // source-field values in generated field order, not semantic operands.
+    static struct
+    {
+        u32 form_id;
+        u32 field_count;
+        u32 values[4];
+        u32 word;
+        char const* name;
+    } const llvm_mc_cases[] = {
+        {85, 4, {3, 4, 0, 5}, UINT32_C(0x0b050083), "ADDWrs"},
+        {463, 2, {0, 2}, UINT32_C(0x54000040), "Bcc"},
+        {3463, 3, {1, 2, 2}, UINT32_C(0xf9400841), "LDRXui"},
+        {1162, 3, {0, 1, 2}, UINT32_C(0x1e222820), "FADDSrr"},
+        {162, 2, {0, 1}, UINT32_C(0x4e284820), "AESErr"},
+        {3114, 3, {4, 5, 3}, UINT32_C(0xb82300a4), "LDADDW"},
+        {229, 0, {0}, UINT32_C(0xd50323bf), "AUTIASP"},
+        {3124, 3, {1, 2, UINT32_C(0x1f8)}, UINT32_C(0x195f8041), "LDAPURBi"},
+        {3131, 3, {1, 2, 0x10}, UINT32_C(0xd9410041), "LDAPURXi"},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(llvm_mc_cases); index += 1)
+    {
+        u32 metadata_encoded = 0;
+        BusterAarch64MetadataForm form = {0};
+        BUSTER_TEST(arguments, buster_aarch64_metadata_form(llvm_mc_cases[index].form_id, &form) &&
+                              a64_encoding_metadata_string_equal(form.name, llvm_mc_cases[index].name));
+        BUSTER_TEST(arguments, buster_aarch64_metadata_raw_encode(llvm_mc_cases[index].form_id, llvm_mc_cases[index].values,
+                                                                   llvm_mc_cases[index].field_count, &metadata_encoded) &&
+                              metadata_encoded == llvm_mc_cases[index].word);
+        u32 decoded_values[4] = {0};
+        BUSTER_TEST(arguments, buster_aarch64_metadata_raw_decode(llvm_mc_cases[index].form_id, metadata_encoded, decoded_values,
+                                                                   llvm_mc_cases[index].field_count));
+        for (u32 field_index = 0; field_index < llvm_mc_cases[index].field_count; field_index += 1)
+        {
+            BUSTER_TEST(arguments, decoded_values[field_index] == llvm_mc_cases[index].values[field_index]);
+        }
+    }
+
+    // Bounded rejection coverage for null, wrong-count, overflow, fixed-bit,
+    // unsupported-target, incomplete, and out-of-range metadata requests.
+    BusterAarch64MetadataForm metadata_form = {0};
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_form(metadata_counts.form_count, &metadata_form));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_form(0, 0));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_field(0, UINT32_MAX, 0));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_segment(0, 0, UINT32_MAX, 0));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_operand(0, UINT32_MAX, 0));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_predicate(0, UINT32_MAX, 0));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_form_supported(0, BUSTER_AARCH64_METADATA_TARGET_COUNT));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_form_provisionally_apple_m1_supported(metadata_counts.form_count));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_form_is_complete(3854));
+    u32 rejection_decoded_values[4] = {0};
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_encode(3854, 0, 2, &encoded));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_encode(85, 0, 4, &encoded));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_encode(85, (u32 const[]){32, 0, 0, 0}, 4, &encoded));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_encode(85, (u32 const[]){3, 4, 0, 5}, 3, &encoded));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_encode(85, (u32 const[]){3, 4, 0, 5}, 4, 0));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_decode(85,
+                                                              UINT32_C(0x0b050083) ^ UINT32_C(0x80000000),
+                                                              rejection_decoded_values, 4));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_decode(85, UINT32_C(0x0b050083), rejection_decoded_values, 3));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_decode(85, UINT32_C(0x0b050083), 0, 4));
 
     return result;
 }

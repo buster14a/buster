@@ -1,6 +1,618 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 
+#if BUSTER_COMPILER_CLANG
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Woverlength-strings"
+#pragma clang diagnostic ignored "-Wimplicit-int-conversion"
+#pragma clang diagnostic ignored "-Wsign-conversion"
+#elif BUSTER_COMPILER_GCC
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Woverlength-strings"
+#endif
+#include <buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h>
+#if BUSTER_COMPILER_CLANG
+#pragma clang diagnostic pop
+#elif BUSTER_COMPILER_GCC
+#pragma GCC diagnostic pop
+#endif
+
 #define A64_NO_PC_RELATIVE_OPERAND UINT8_MAX
+
+#define A64_METADATA_FIELD_UNMAPPED BUSTER_AARCH64_GENERATED_FIELD_UNMAPPED
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_count_range_valid(u32 total, u32 first, u32 count)
+{
+    return first <= total && count <= total - first;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_string_descriptor(u32 offset, BusterAarch64MetadataString* result)
+{
+    if (!result || offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE)
+    {
+        return false;
+    }
+    u32 length = 0;
+    while (offset + length < BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE)
+    {
+        if (!buster_aarch64_generated_string_byte((u64)offset + length))
+        {
+            *result = (BusterAarch64MetadataString){.offset = offset, .length = length};
+            return true;
+        }
+        length += 1;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_string_equals(u32 offset, char const* literal)
+{
+    if (!literal || offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE)
+    {
+        return false;
+    }
+    u32 index = 0;
+    for (;; index += 1)
+    {
+        char8 actual = buster_aarch64_generated_string_byte((u64)offset + index);
+        char expected = literal[index];
+        if ((char)actual != expected)
+        {
+            return false;
+        }
+        if (!expected)
+        {
+            return true;
+        }
+        if (offset + index >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE - 1)
+        {
+            return false;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u32 a64_metadata_width_mask(u8 width)
+{
+    return width == 32 ? UINT32_MAX : (width ? (UINT32_C(1) << width) - 1u : 0);
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_generated_form(u32 form_id, BusterAarch64GeneratedForm* result)
+{
+    if (!result || form_id >= BUSTER_AARCH64_GENERATED_FORM_COUNT)
+    {
+        return false;
+    }
+    BusterAarch64GeneratedForm form = buster_aarch64_generated_form_at(form_id);
+    // normalized_form_id is the generated canonical row identity.  It also
+    // prevents a zero-valued malformed accessor result from masquerading as
+    // form zero.
+    if (form.normalized_form_id != form_id || form.name_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE ||
+        form.mnemonic_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE || form.asm_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE ||
+        form.out_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE || form.in_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE ||
+        !a64_metadata_count_range_valid(BUSTER_AARCH64_GENERATED_FIELD_COUNT, form.field_first, form.field_count) ||
+        !a64_metadata_count_range_valid(BUSTER_AARCH64_GENERATED_OPERAND_COUNT, form.operand_first, form.operand_count) ||
+        !a64_metadata_count_range_valid(BUSTER_AARCH64_GENERATED_PREDICATE_COUNT, form.predicate_first, form.predicate_count))
+    {
+        return false;
+    }
+    *result = form;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_generated_field(u32 field_id, BusterAarch64GeneratedField* result)
+{
+    if (!result || field_id >= BUSTER_AARCH64_GENERATED_FIELD_COUNT)
+    {
+        return false;
+    }
+    BusterAarch64GeneratedField field = buster_aarch64_generated_field_at(field_id);
+    if (field.name_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE ||
+        !a64_metadata_count_range_valid(BUSTER_AARCH64_GENERATED_SEGMENT_COUNT, field.segment_first, field.segment_count))
+    {
+        return false;
+    }
+    *result = field;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_generated_segment(u32 segment_id, BusterAarch64GeneratedBitSegment* result)
+{
+    if (!result || segment_id >= BUSTER_AARCH64_GENERATED_SEGMENT_COUNT)
+    {
+        return false;
+    }
+    // The generated accessor is bounded; structural value checks are done by
+    // the raw-layout validator so descriptor inspection can still expose a
+    // malformed segment to an audit caller.
+    *result = buster_aarch64_generated_segment_at(segment_id);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_form_layout_complete(u32 form_id, BusterAarch64GeneratedForm* form_result)
+{
+    BusterAarch64GeneratedForm form = {0};
+    if (!a64_metadata_generated_form(form_id, &form))
+    {
+        return false;
+    }
+    if (form.fixed_value & ~form.fixed_mask)
+    {
+        return false;
+    }
+    u32 instruction_used = form.fixed_mask;
+    for (u32 field_index = 0; field_index < form.field_count; field_index += 1)
+    {
+        BusterAarch64GeneratedField field = {0};
+        if (!a64_metadata_generated_field(form.field_first + field_index, &field) || !field.segment_count || !field.source_mask || !field.width ||
+            field.width > 32 || (field.flags & A64_METADATA_FIELD_UNMAPPED))
+        {
+            return false;
+        }
+        u32 source_used = 0;
+        for (u32 segment_index = 0; segment_index < field.segment_count; segment_index += 1)
+        {
+            BusterAarch64GeneratedBitSegment segment = {0};
+            if (!a64_metadata_generated_segment(field.segment_first + segment_index, &segment) || !segment.width || segment.width > 32 ||
+                segment.instruction_lsb >= 32 || segment.value_lsb >= 32 || (u32)segment.instruction_lsb + segment.width > 32 ||
+                (u32)segment.value_lsb + segment.width > 32)
+            {
+                return false;
+            }
+            u32 segment_mask = a64_metadata_width_mask(segment.width);
+            u32 source_segment_mask = segment_mask << segment.value_lsb;
+            u32 instruction_segment_mask = segment_mask << segment.instruction_lsb;
+            if ((source_used & source_segment_mask) || (instruction_used & instruction_segment_mask))
+            {
+                return false;
+            }
+            source_used |= source_segment_mask;
+            instruction_used |= instruction_segment_mask;
+        }
+        if (source_used != field.source_mask || (field.source_mask & ~a64_metadata_width_mask(field.width)))
+        {
+            return false;
+        }
+    }
+    if (instruction_used != UINT32_MAX)
+    {
+        return false;
+    }
+    if (form_result)
+    {
+        *form_result = form;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_form_m1_predicates(BusterAarch64GeneratedForm form)
+{
+    static char const* const true_predicates[] = {
+        "HasAES",       "HasAltNZCV",   "HasCRC",      "HasComplxNum", "HasDotProd",  "HasEL3",       "HasFP16FML",
+        "HasFPARMv8",   "HasFRInt3264", "HasFlagM",    "HasFullFP16",  "HasJS",       "HasLOR",       "HasLSE",
+        "HasNEON",      "HasNEONandIsStreamingSafe",  "HasPAuth",     "HasRCPC",      "HasRCPC_IMMO", "HasRDM",
+        "HasSB",        "HasSHA2",      "HasSHA3",      "HasTRACEV8_4",
+    };
+    for (u32 predicate_index = 0; predicate_index < form.predicate_count; predicate_index += 1)
+    {
+        u32 offset = buster_aarch64_generated_predicate_at(form.predicate_first + predicate_index);
+        bool known = false;
+        for (u32 true_index = 0; true_index < BUSTER_ARRAY_LENGTH(true_predicates); true_index += 1)
+        {
+            if (a64_metadata_string_equals(offset, true_predicates[true_index]))
+            {
+                known = true;
+                break;
+            }
+        }
+        if (!known)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_form_and_layout(u32 form_id, BusterAarch64GeneratedForm* form, bool* complete)
+{
+    BusterAarch64GeneratedForm generated = {0};
+    if (!a64_metadata_generated_form(form_id, &generated))
+    {
+        return false;
+    }
+    bool is_complete = a64_metadata_form_layout_complete(form_id, 0);
+    if (form)
+    {
+        *form = generated;
+    }
+    if (complete)
+    {
+        *complete = is_complete;
+    }
+    return true;
+}
+
+u32 buster_aarch64_metadata_schema_version(void)
+{
+    return BUSTER_AARCH64_GENERATED_SCHEMA_VERSION;
+}
+
+u32 buster_aarch64_metadata_form_count(void)
+{
+    return BUSTER_AARCH64_GENERATED_FORM_COUNT;
+}
+
+u32 buster_aarch64_metadata_field_count(void)
+{
+    return BUSTER_AARCH64_GENERATED_FIELD_COUNT;
+}
+
+u32 buster_aarch64_metadata_segment_count(void)
+{
+    return BUSTER_AARCH64_GENERATED_SEGMENT_COUNT;
+}
+
+u32 buster_aarch64_metadata_operand_count(void)
+{
+    return BUSTER_AARCH64_GENERATED_OPERAND_COUNT;
+}
+
+u32 buster_aarch64_metadata_predicate_count(void)
+{
+    return BUSTER_AARCH64_GENERATED_PREDICATE_COUNT;
+}
+
+u32 buster_aarch64_metadata_string_pool_size(void)
+{
+    return BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE;
+}
+
+BusterAarch64MetadataCounts buster_aarch64_metadata_counts(void)
+{
+    BusterAarch64MetadataCounts result = {
+        .form_count = buster_aarch64_metadata_form_count(),
+        .field_count = buster_aarch64_metadata_field_count(),
+        .segment_count = buster_aarch64_metadata_segment_count(),
+        .operand_count = buster_aarch64_metadata_operand_count(),
+        .predicate_count = buster_aarch64_metadata_predicate_count(),
+        .string_pool_size = buster_aarch64_metadata_string_pool_size(),
+    };
+    for (u32 form_id = 0; form_id < BUSTER_AARCH64_GENERATED_FORM_COUNT; form_id += 1)
+    {
+        BusterAarch64GeneratedForm form = {0};
+        if (!a64_metadata_generated_form(form_id, &form) || !a64_metadata_form_m1_predicates(form))
+        {
+            continue;
+        }
+        result.apple_m1_supported_count += 1;
+        if (a64_metadata_form_layout_complete(form_id, 0))
+        {
+            result.apple_m1_complete_count += 1;
+        }
+    }
+    result.apple_m1_incomplete_count = result.apple_m1_supported_count - result.apple_m1_complete_count;
+    return result;
+}
+
+u8 buster_aarch64_metadata_string_byte(BusterAarch64MetadataString string, u32 index)
+{
+    if (index >= string.length || string.offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE ||
+        index >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE - string.offset)
+    {
+        return 0;
+    }
+    return (u8)buster_aarch64_generated_string_byte((u64)string.offset + index);
+}
+
+bool buster_aarch64_metadata_string(u32 offset, BusterAarch64MetadataString* result)
+{
+    return a64_metadata_string_descriptor(offset, result);
+}
+
+bool buster_aarch64_metadata_form(u32 form_id, BusterAarch64MetadataForm* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    BusterAarch64GeneratedForm form = {0};
+    bool complete = false;
+    if (!a64_metadata_form_and_layout(form_id, &form, &complete))
+    {
+        return false;
+    }
+    BusterAarch64MetadataString strings[5] = {0};
+    if (!a64_metadata_string_descriptor(form.name_offset, strings + 0) || !a64_metadata_string_descriptor(form.mnemonic_offset, strings + 1) ||
+        !a64_metadata_string_descriptor(form.asm_offset, strings + 2) || !a64_metadata_string_descriptor(form.out_offset, strings + 3) ||
+        !a64_metadata_string_descriptor(form.in_offset, strings + 4))
+    {
+        return false;
+    }
+    *result = (BusterAarch64MetadataForm){
+        .id = form_id,
+        .source_hash = form.source_hash,
+        .name_hash = form.name_hash,
+        .signature_hash = form.signature_hash,
+        .name = strings[0],
+        .mnemonic = strings[1],
+        .assembly = strings[2],
+        .output_operands = strings[3],
+        .input_operands = strings[4],
+        .field_first = form.field_first,
+        .operand_first = form.operand_first,
+        .predicate_first = form.predicate_first,
+        .normalized_form_id = form.normalized_form_id,
+        .field_count = form.field_count,
+        .operand_count = form.operand_count,
+        .predicate_count = form.predicate_count,
+        .fixed_mask = form.fixed_mask,
+        .fixed_value = form.fixed_value,
+        .coverage_class = form.coverage_class,
+        .encoder_family = form.encoder_family,
+        .test_class = form.test_class,
+        .reason_id = form.reason_id,
+        .assembly_flags = form.asm_flags,
+        .address_kind = form.address_kind,
+        .address_flags = form.address_flags,
+        .address_base_index = form.address_base_index,
+        .address_offset_index = form.address_offset_index,
+        .complete = complete,
+        .provisionally_apple_m1 = a64_metadata_form_m1_predicates(form),
+    };
+    return true;
+}
+
+bool buster_aarch64_metadata_field(u32 form_id, u32 field_index, BusterAarch64MetadataField* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    BusterAarch64GeneratedForm form = {0};
+    if (!a64_metadata_generated_form(form_id, &form) || field_index >= form.field_count)
+    {
+        return false;
+    }
+    BusterAarch64GeneratedField field = {0};
+    if (!a64_metadata_generated_field(form.field_first + field_index, &field))
+    {
+        return false;
+    }
+    BusterAarch64MetadataString name = {0};
+    if (!a64_metadata_string_descriptor(field.name_offset, &name))
+    {
+        return false;
+    }
+    *result = (BusterAarch64MetadataField){
+        .id = form.field_first + field_index,
+        .name = name,
+        .segment_first = field.segment_first,
+        .source_mask = field.source_mask,
+        .width = field.width,
+        .segment_count = field.segment_count,
+        .transform = field.transform,
+        .relocation = field.relocation,
+        .relocation_end = field.relocation_end,
+        .shift = field.shift,
+        .flags = field.flags,
+    };
+    return true;
+}
+
+bool buster_aarch64_metadata_segment(u32 form_id, u32 field_index, u32 segment_index, BusterAarch64MetadataSegment* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    BusterAarch64GeneratedForm form = {0};
+    if (!a64_metadata_generated_form(form_id, &form) || field_index >= form.field_count)
+    {
+        return false;
+    }
+    BusterAarch64GeneratedField field = {0};
+    if (!a64_metadata_generated_field(form.field_first + field_index, &field) || segment_index >= field.segment_count)
+    {
+        return false;
+    }
+    BusterAarch64GeneratedBitSegment segment = {0};
+    if (!a64_metadata_generated_segment(field.segment_first + segment_index, &segment))
+    {
+        return false;
+    }
+    *result = (BusterAarch64MetadataSegment){
+        .id = field.segment_first + segment_index,
+        .instruction_lsb = segment.instruction_lsb,
+        .width = segment.width,
+        .value_lsb = segment.value_lsb,
+    };
+    return true;
+}
+
+bool buster_aarch64_metadata_operand(u32 form_id, u32 operand_index, BusterAarch64MetadataOperand* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    BusterAarch64GeneratedForm form = {0};
+    if (!a64_metadata_generated_form(form_id, &form) || operand_index >= form.operand_count)
+    {
+        return false;
+    }
+    BusterAarch64GeneratedOperand operand = buster_aarch64_generated_operand_at(form.operand_first + operand_index);
+    if (operand.syntax_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE || operand.type_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE ||
+        operand.name_offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE)
+    {
+        return false;
+    }
+    BusterAarch64MetadataString strings[3] = {0};
+    if (!a64_metadata_string_descriptor(operand.syntax_offset, strings + 0) || !a64_metadata_string_descriptor(operand.type_offset, strings + 1) ||
+        !a64_metadata_string_descriptor(operand.name_offset, strings + 2))
+    {
+        return false;
+    }
+    *result = (BusterAarch64MetadataOperand){
+        .id = form.operand_first + operand_index,
+        .syntax = strings[0],
+        .type = strings[1],
+        .name = strings[2],
+        .field_index = operand.field_index,
+        .immediate_min = operand.immediate_min,
+        .immediate_max = operand.immediate_max,
+        .register_width = operand.register_width,
+        .tied_to = operand.tied_to,
+        .address_base_index = operand.address_base_index,
+        .address_offset_index = operand.address_offset_index,
+        .direction = operand.direction,
+        .kind = operand.kind,
+        .flags = operand.flags,
+        .scale = operand.scale,
+        .immediate_flags = operand.immediate_flags,
+        .address_kind = operand.address_kind,
+        .address_flags = operand.address_flags,
+    };
+    return true;
+}
+
+bool buster_aarch64_metadata_predicate(u32 form_id, u32 predicate_index, BusterAarch64MetadataString* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    BusterAarch64GeneratedForm form = {0};
+    if (!a64_metadata_generated_form(form_id, &form) || predicate_index >= form.predicate_count)
+    {
+        return false;
+    }
+    return a64_metadata_string_descriptor(buster_aarch64_generated_predicate_at(form.predicate_first + predicate_index), result);
+}
+
+bool buster_aarch64_metadata_form_supported(u32 form_id, BusterAarch64MetadataTarget target)
+{
+    BusterAarch64GeneratedForm form = {0};
+    if (target >= BUSTER_AARCH64_METADATA_TARGET_COUNT || !a64_metadata_generated_form(form_id, &form))
+    {
+        return false;
+    }
+    switch (target)
+    {
+    case BUSTER_AARCH64_METADATA_TARGET_APPLE_M1:
+        return a64_metadata_form_m1_predicates(form);
+    case BUSTER_AARCH64_METADATA_TARGET_COUNT:
+        return false;
+    }
+    return false;
+}
+
+bool buster_aarch64_metadata_form_provisionally_apple_m1_supported(u32 form_id)
+{
+    return buster_aarch64_metadata_form_supported(form_id, BUSTER_AARCH64_METADATA_TARGET_APPLE_M1);
+}
+
+bool buster_aarch64_metadata_form_is_complete(u32 form_id)
+{
+    return a64_metadata_form_layout_complete(form_id, 0);
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_raw_layout(u32 form_id, BusterAarch64GeneratedForm* form_result)
+{
+    return a64_metadata_form_layout_complete(form_id, form_result);
+}
+
+bool buster_aarch64_metadata_raw_encode(u32 form_id, u32 const* field_values, u32 field_count, u32* word)
+{
+    if (!word)
+    {
+        return false;
+    }
+    BusterAarch64GeneratedForm form = {0};
+    if (!a64_metadata_raw_layout(form_id, &form) || field_count != form.field_count || (field_count && !field_values))
+    {
+        return false;
+    }
+    u32 result = form.fixed_value;
+    for (u32 field_index = 0; field_index < form.field_count; field_index += 1)
+    {
+        BusterAarch64GeneratedField field = {0};
+        if (!a64_metadata_generated_field(form.field_first + field_index, &field) || (field_values[field_index] & ~field.source_mask))
+        {
+            return false;
+        }
+        u32 source_value = field_values[field_index];
+        for (u32 segment_index = 0; segment_index < field.segment_count; segment_index += 1)
+        {
+            BusterAarch64GeneratedBitSegment segment = {0};
+            if (!a64_metadata_generated_segment(field.segment_first + segment_index, &segment))
+            {
+                return false;
+            }
+            u32 mask = a64_metadata_width_mask(segment.width);
+            result |= ((source_value >> segment.value_lsb) & mask) << segment.instruction_lsb;
+        }
+    }
+    if ((result & form.fixed_mask) != form.fixed_value)
+    {
+        return false;
+    }
+    *word = result;
+    return true;
+}
+
+bool buster_aarch64_metadata_raw_decode(u32 form_id, u32 word, u32* field_values, u32 field_count)
+{
+    BusterAarch64GeneratedForm form = {0};
+    if (!field_values || !a64_metadata_raw_layout(form_id, &form) || field_count != form.field_count ||
+        (word & form.fixed_mask) != form.fixed_value)
+    {
+        return false;
+    }
+    for (u32 field_index = 0; field_index < form.field_count; field_index += 1)
+    {
+        BusterAarch64GeneratedField field = {0};
+        if (!a64_metadata_generated_field(form.field_first + field_index, &field))
+        {
+            return false;
+        }
+        u32 source_value = 0;
+        for (u32 segment_index = 0; segment_index < field.segment_count; segment_index += 1)
+        {
+            BusterAarch64GeneratedBitSegment segment = {0};
+            if (!a64_metadata_generated_segment(field.segment_first + segment_index, &segment))
+            {
+                return false;
+            }
+            u32 mask = a64_metadata_width_mask(segment.width);
+            source_value |= ((word >> segment.instruction_lsb) & mask) << segment.value_lsb;
+        }
+        field_values[field_index] = source_value;
+    }
+    return true;
+}
+
+u32 a64_generated_form_count(void)
+{
+    return buster_aarch64_metadata_form_count();
+}
+
+u32 a64_generated_field_count(void)
+{
+    return buster_aarch64_metadata_field_count();
+}
+
+bool a64_generated_form(u32 form_id, BusterAarch64MetadataForm* result)
+{
+    return buster_aarch64_metadata_form(form_id, result);
+}
+
+bool a64_generated_raw_encode(u32 form_id, u32 const* field_values, u32 field_count, u32* word)
+{
+    return buster_aarch64_metadata_raw_encode(form_id, field_values, field_count, word);
+}
+
+bool a64_generated_raw_decode(u32 form_id, u32 word, u32* field_values, u32 field_count)
+{
+    return buster_aarch64_metadata_raw_decode(form_id, word, field_values, field_count);
+}
 
 BUSTER_GLOBAL_LOCAL A64OpcodeDescriptor const a64_opcode_descriptors[A64_OPCODE_COUNT] = {
     [A64_OPCODE_NOP] =
