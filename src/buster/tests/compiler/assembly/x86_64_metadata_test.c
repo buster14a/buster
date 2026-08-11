@@ -2328,20 +2328,18 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        // This combined residual-control cluster adds eleven normalized rows
-        // from dcfeae35 on top of the existing eight fixed NOT16 rows: LEA,
-        // NOP, PAUSE, two XCHG forms, and the six AMD/HSW no-F3 BSR/BSF
-        // duplicates (which share ordinary opcodes with the canonical rows
-        // but must remain selectable without F3).
-        BUSTER_TEST(arguments, audit.emitted_count == 10547 && audit.blocked_count == 466 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10547 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 466);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10655 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 89);
+        // The residual-control base adds eleven rows and plain not_refining
+        // adds five more (RDRAND, RDSEED, XSTORE, and both MOVBE forms) on
+        // top of the eight fixed NOT16 rows, for a combined +16 delta.
+        BUSTER_TEST(arguments, audit.emitted_count == 10552 && audit.blocked_count == 461 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10552 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 461);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10660 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 84);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 199, 5, 1643, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1737, 195, 5, 1643, 176, 6718, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {75, 4, 0, 0, 0, 10, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1742, 195, 5, 1643, 176, 6718, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {70, 4, 0, 0, 0, 10, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2351,7 +2349,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10547, 268, 108, 56, 0, 34, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10552, 268, 108, 51, 0, 34, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -2479,6 +2477,97 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                          ledger[11005].disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
                          ledger[11005].blocker == BUSTER_X86_METADATA_BLOCKER_NONE && ledger[11005].encoder_capable;
         BUSTER_TEST(arguments, not16_count == 8 && not16_inventory && adjacency);
+        // These are the five additional normalized LEGACY rows whose plain
+        // not_refining controls are architecturally selectable here.  The
+        // six not_refining_f3 BSR/BSF rows are already covered by the
+        // residual-control base commit and are deliberately not duplicated.
+        static u32 const not_refining_ids[] = {8839, 8840, 9002, 10976, 10977};
+        u32 parsed_not_refining = 0;
+        bool refining_controls_exact = true;
+        for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
+        {
+            BusterX86MetadataForm form = {0};
+            if (!buster_x86_metadata_form(form_id, &form)) continue;
+            bool has_not_refining = x86_64_metadata_test_pattern_has_token(form.pattern, S8("not_refining"));
+            if (!has_not_refining) continue;
+            bool listed_plain = false;
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(not_refining_ids); index += 1)
+                listed_plain |= form_id == not_refining_ids[index];
+            bool normalized_legacy = form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                     form.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY;
+            bool expected_emitted = listed_plain;
+            bool row_exact = normalized_legacy == expected_emitted && ledger[form_id].encoder_capable == expected_emitted &&
+                              ledger[form_id].disposition == (expected_emitted
+                                                                  ? BUSTER_X86_METADATA_COVERAGE_EMITTED
+                                                                  : BUSTER_X86_METADATA_COVERAGE_BLOCKED);
+            refining_controls_exact &= row_exact;
+            parsed_not_refining += has_not_refining;
+        }
+        BUSTER_TEST(arguments, parsed_not_refining == 5);
+        BUSTER_TEST(arguments, refining_controls_exact);
+
+        // Byte oracles: llvm-mc -triple=x86_64 -show-encoding for the
+        // canonical operands synthesized by x86_64_metadata_test_build_gate_query.
+        struct
+        {
+            u32 form_id;
+            u8 bytes[8];
+            u8 byte_count;
+        } const refining_byte_cases[] = {
+            {8839, {0x48, 0x0f, 0xc7, 0xf0}, 4},
+            {8840, {0x48, 0x0f, 0xc7, 0xf8}, 4},
+            {9002, {0x0f, 0xa7, 0xc0}, 3},
+            {10976, {0x48, 0x0f, 0x38, 0xf0, 0x00}, 5},
+            {10977, {0x48, 0x0f, 0x38, 0xf1, 0x00}, 5},
+        };
+        String8 wildcard[1] = {S8("*")};
+        bool refining_bytes_exact = true;
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(refining_byte_cases); case_index += 1)
+        {
+            u32 form_id = refining_byte_cases[case_index].form_id;
+            BusterX86MetadataPhysicalOperand operands[16] = {0};
+            char8 mnemonic_buffer[128] = {0};
+            BusterX86MetadataPhysicalQuery query = {0};
+            bool built = x86_64_metadata_test_build_gate_query(form_id, &query, operands, mnemonic_buffer);
+            query.features.names = wildcard;
+            query.features.count = BUSTER_ARRAY_LENGTH(wildcard);
+            u8 output[32] = {0};
+            BusterX86MetadataRelocation relocations[2] = {0};
+            BusterX86MetadataEmitResult emitted = built
+                ? buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                      .physical = query,
+                      .form_id = form_id,
+                      .output = output,
+                      .output_capacity = BUSTER_ARRAY_LENGTH(output),
+                      .relocations = relocations,
+                      .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+                  })
+                : (BusterX86MetadataEmitResult){0};
+            refining_bytes_exact &= built && emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                    emitted.relocation_count == 0 && emitted.byte_count == refining_byte_cases[case_index].byte_count &&
+                                    x86_64_metadata_test_bytes_equal(output, emitted.byte_count,
+                                                                      refining_byte_cases[case_index].bytes,
+                                                                      refining_byte_cases[case_index].byte_count);
+        }
+        BUSTER_TEST(arguments, refining_bytes_exact);
+
+        BusterX86MetadataPhysicalOperand wrong_operands[16] = {0};
+        char8 wrong_mnemonic_buffer[128] = {0};
+        BusterX86MetadataPhysicalQuery wrong_query = {0};
+        bool wrong_built = x86_64_metadata_test_build_gate_query(8839, &wrong_query, wrong_operands, wrong_mnemonic_buffer);
+        wrong_query.features.names = wildcard;
+        wrong_query.features.count = BUSTER_ARRAY_LENGTH(wildcard);
+        wrong_query.attributes.rep = true;
+        u8 wrong_output[32] = {0};
+        BusterX86MetadataEmitResult wrong_result = wrong_built
+            ? buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                  .physical = wrong_query,
+                  .form_id = 8839,
+                  .output = wrong_output,
+                  .output_capacity = BUSTER_ARRAY_LENGTH(wrong_output),
+              })
+            : (BusterX86MetadataEmitResult){0};
+        BUSTER_TEST(arguments, wrong_built && wrong_result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS && wrong_result.byte_count == 0);
 
         // The raw APXEVEX source carries ND=1 on 778 rows.  XED annotates
         // APX_NDD on 730 of them, while the 48 IMULZU/SET*ZU rows omit the

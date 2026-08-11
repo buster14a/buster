@@ -1590,6 +1590,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("rex2_refining_prefix")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("rexw_prefix")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("no_refining_prefix")) ||
+                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("not_refining")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("osz_refining_prefix")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("66_prefix")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("f2_refining_prefix")) ||
@@ -1603,7 +1604,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             pattern.has_prefix_control = 1;
             if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("FORCE64()")))
                 pattern.has_force64_control = 1;
-            if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("no_refining_prefix")))
+            if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("no_refining_prefix")) ||
+                buster_x86_metadata_emit_token_equal(token_buffer, length, S8("not_refining")))
                 pattern.forbid_mandatory_prefix = 1;
             else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("not_refining_f3")))
                 pattern.rep_not_f3 = 1;
