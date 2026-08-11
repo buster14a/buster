@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/codegen/machine_test.h>
 #if BUSTER_INCLUDE_TESTS
 
+#include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/ir/ir.h>
@@ -1920,6 +1921,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         .cpu_arch = CPU_ARCH_AARCH64,
         .os = OPERATING_SYSTEM_LINUX,
     };
+    // The following memory and scalar cases enter through the exact helpers
+    // used by the machine encoder. None may fall back to packed audit data.
+    buster_aarch64_metadata_test_reset_packed_access_counter();
+
     // Differential coverage for the generated unsigned memory wrapper used
     // by frame and aggregate-copy emission. Each form is checked at offset
     // zero and at the architectural imm12 limit, with the old hand-encoded
@@ -2069,6 +2074,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                             memcmp(bytes, generated_machine_cases[case_index].expected, byte_count) == 0,
                         string_format(arguments->arena, S8("a64 generated machine opcode {S8}"), generated_machine_cases[case_index].name));
     }
+    BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == 0);
     IrProgram* machine_a64_program = machine_test_compile_c(arguments->arena, S8("machine-stage11.c"), machine_c_source_base, machine_a64_target);
     BUSTER_TEST(arguments, machine_a64_program != 0);
     if (machine_a64_program && machine_a64_program->module_count)

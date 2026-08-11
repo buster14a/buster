@@ -833,6 +833,17 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, buster_aarch64_production_plan_field_count() == production_field_total &&
                               buster_aarch64_production_plan_segment_count() == production_segment_total);
 
+    // Positive control: prove the test-only counter is live before relying on
+    // it to reject packed-metadata access in the production wrapper below.
+    BusterAarch64MetadataForm packed_control_form = {0};
+    u32 packed_control_values[8] = {0};
+    u32 packed_control_word = 0;
+    BUSTER_TEST(arguments, buster_aarch64_metadata_form(production_forms[0].form_id, &packed_control_form));
+    buster_aarch64_metadata_test_reset_packed_access_counter();
+    BUSTER_TEST(arguments, buster_aarch64_metadata_raw_encode(production_forms[0].form_id, packed_control_values,
+                                                               packed_control_form.field_count, &packed_control_word));
+    BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() > 0);
+
     // The fast production path must remain independent of the packed/base64
     // metadata accessors. Build inputs directly from the generated plan and
     // encode every named form after resetting the test-only counter; a future
@@ -865,7 +876,7 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
             }
         }
         u32 word = 0;
-        BUSTER_TEST(arguments, buster_aarch64_production_raw_encode(plan->form_id, values, plan->field_count, &word));
+        BUSTER_TEST(arguments, a64_generated_production_raw_encode(plan->form_id, values, plan->field_count, &word));
     }
     BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == 0);
     u32 fast_values[8] = {0};
