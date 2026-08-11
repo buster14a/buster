@@ -169,6 +169,7 @@ UnitTestResult aarch64_semantics_tests(UnitTestArguments* arguments)
     BusterA64SemanticValueAtom invalid_atom = {.id = 1, .kind = 2, .integer = 3, .text = {4, 5}};
     BusterA64SemanticValueAtom invalid_atom_before = invalid_atom;
     BUSTER_TEST(arguments, !buster_a64_semantic_value_atom(UINT32_MAX, &invalid_atom) && memcmp(&invalid_atom, &invalid_atom_before, sizeof(invalid_atom)) == 0);
+    BUSTER_TEST(arguments, buster_a64_semantic_string_byte((BusterA64SemanticString){1, UINT32_MAX}, UINT32_MAX - 1) == 0);
     return result;
 }
 

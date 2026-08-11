@@ -148,7 +148,7 @@ bool buster_a64_semantic_string(u32 offset, BusterA64SemanticString* result)
 char8 buster_a64_semantic_string_byte(BusterA64SemanticString string, u32 index)
 {
     if (string.offset >= BUSTER_AARCH64_SEMANTIC_STRING_POOL_SIZE || index >= string.length) return 0;
-    if (string.offset + index >= BUSTER_AARCH64_SEMANTIC_STRING_POOL_SIZE) return 0;
+    if (index >= BUSTER_AARCH64_SEMANTIC_STRING_POOL_SIZE - string.offset) return 0;
     return buster_a64_semantic_string_pool[string.offset + index];
 }
 
