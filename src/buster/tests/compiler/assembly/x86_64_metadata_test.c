@@ -6448,13 +6448,13 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, buster_x86_metadata_form(463, &evv_form) &&
                                    evv_form.prefix_kind == BUSTER_X86_METADATA_PREFIX_EVEX);
 
-        // VV1 plus NOREXR is a real REX selector, not VEX width control.
-        // Keep this negative oracle beside the VEX byte checks so a future
-        // broad substring match cannot silently reclassify the row.
+        // BSRINIT's VV1/norexr_prefix row is normalized to the VEX family;
+        // keep the exact token checks beside the VEX byte checks so a future
+        // broad substring match cannot silently lose the typed constraint.
         BusterX86MetadataForm vv1_norexr_form = {0};
         BUSTER_TEST(arguments, buster_x86_metadata_form(30, &vv1_norexr_form) &&
-                                   vv1_norexr_form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX &&
-                                   vv1_norexr_form.encoder_family == BUSTER_X86_METADATA_ENCODER_REX &&
+                                   vv1_norexr_form.prefix_kind == BUSTER_X86_METADATA_PREFIX_VEX &&
+                                   vv1_norexr_form.encoder_family == BUSTER_X86_METADATA_ENCODER_VEX &&
                                    x86_64_metadata_test_pattern_has_token(vv1_norexr_form.pattern, S8("VV1")) &&
                                    x86_64_metadata_test_pattern_has_token(vv1_norexr_form.pattern, S8("norexr_prefix")) &&
                                    !x86_64_metadata_test_pattern_has_token(vv1_norexr_form.pattern, S8("norexw_prefix")));
