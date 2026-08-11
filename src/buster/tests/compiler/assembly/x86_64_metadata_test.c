@@ -2080,15 +2080,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        BUSTER_TEST(arguments, audit.emitted_count == 10292 && audit.blocked_count == 721 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10292 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 721);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10400 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 344);
+        BUSTER_TEST(arguments, audit.emitted_count == 10340 && audit.blocked_count == 673 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10340 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 673);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10448 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 296);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 199, 5, 1643, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1485, 192, 5, 1643, 176, 6718, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {327, 7, 0, 0, 0, 10, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1533, 192, 5, 1643, 176, 6718, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {279, 7, 0, 0, 0, 10, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2098,7 +2098,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10292, 268, 108, 99, 0, 198, 0, 0, 0, 48, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10340, 268, 108, 99, 0, 198, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -3175,6 +3175,87 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, insertq_count_selection.status == BUSTER_X86_METADATA_ENCODE_WRONG_OPERAND_COUNT);
             BUSTER_TEST(arguments, insertq_type_selection.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH &&
                                        insertq_type_selection.diagnostic_operand == 1);
+        }
+
+        {
+            // x87 stack-register forms keep ST(0) in ModRM.reg and encode
+            // the visible ST(i) operand in ModRM.rm.  These direct metadata
+            // oracles cover the representative legacy opcodes and prove
+            // that the topology inference is independent of the mnemonic.
+            struct
+            {
+                String8 mnemonic;
+                u32 form_id;
+                u16 index;
+                u8 bytes[2];
+            } const x87_cases[] = {
+                {S8("FADD"), 9084, 0, {0xd8, 0xc0}},
+                {S8("FADD"), 9084, 1, {0xd8, 0xc1}},
+                {S8("FCOM"), 9088, 2, {0xd8, 0xd2}},
+                {S8("FSTP"), 9102, 2, {0xdd, 0xda}},
+                {S8("FLD"), 9122, 3, {0xd9, 0xc3}},
+                {S8("FXCH"), 9123, 2, {0xd9, 0xca}},
+                {S8("FCMOVB"), 9162, 1, {0xda, 0xc1}},
+                {S8("FUCOMI"), 9181, 1, {0xdb, 0xe9}},
+                {S8("FADDP"), 9226, 2, {0xde, 0xc2}},
+                {S8("FFREE"), 9214, 4, {0xdd, 0xc4}},
+                {S8("FUCOMIP"), 9243, 1, {0xdf, 0xe9}},
+                {S8("FCOMIP"), 9244, 1, {0xdf, 0xf1}},
+            };
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(x87_cases); case_index += 1)
+            {
+                BusterX86MetadataPhysicalOperand x87_operand = x86_64_metadata_test_physical_reg(
+                    BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL, x87_cases[case_index].index, 80);
+                BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(
+                                           x87_cases[case_index].mnemonic, x87_cases[case_index].form_id, &x87_operand, 1,
+                                           (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard),
+                                           x87_cases[case_index].bytes, BUSTER_ARRAY_LENGTH(x87_cases[case_index].bytes)));
+            }
+
+            BusterX86MetadataPhysicalOperand st0 =
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL, 0, 80);
+            BusterX86MetadataPhysicalOperand st8 =
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL, 8, 80);
+            BusterX86MetadataPhysicalOperand wrong_width =
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL, 0, 64);
+            BusterX86MetadataPhysicalOperand wrong_class =
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64);
+            BusterX86MetadataPhysicalOperand memory = x86_64_metadata_test_physical_mem_base(0, 80, 0);
+            BusterX86MetadataEmitResult st8_result = x86_64_metadata_test_emit_form(
+                S8("FADD"), 9084, &st8, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+            BusterX86MetadataEmitResult wrong_width_result = x86_64_metadata_test_emit_form(
+                S8("FADD"), 9084, &wrong_width, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+            BusterX86MetadataEmitResult wrong_class_result = x86_64_metadata_test_emit_form(
+                S8("FADD"), 9084, &wrong_class, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+            BusterX86MetadataEmitResult memory_result = x86_64_metadata_test_emit_form(
+                S8("FADD"), 9084, &memory, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+            BusterX86MetadataEmitResult wrong_count_result = x86_64_metadata_test_emit_form(
+                S8("FADD"), 9084, 0, 0, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+            BusterX86MetadataEmitResult wrong_mnemonic_result = x86_64_metadata_test_emit_form(
+                S8("FMUL"), 9084, &st0, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+            BUSTER_TEST(arguments, st8_result.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
+            BUSTER_TEST(arguments, wrong_width_result.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
+            BUSTER_TEST(arguments, wrong_class_result.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
+            BUSTER_TEST(arguments, memory_result.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
+            BUSTER_TEST(arguments, wrong_count_result.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
+            BUSTER_TEST(arguments, wrong_mnemonic_result.status == BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM);
+
+            // The topology rule is SPECIAL-only: a fixed REG ordinary form
+            // still binds its non-SPECIAL operand exactly as before.
+            BusterX86MetadataPhysicalOperand mov_imm_operands[2] = {
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 3, 8),
+                x86_64_metadata_test_physical_imm(0x7f, 8),
+            };
+            BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(
+                                       S8("MOV"), 9531, mov_imm_operands, BUSTER_ARRAY_LENGTH(mov_imm_operands),
+                                       (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard),
+                                       (u8 const[]){0xc6, 0xc3, 0x7f}, 3));
         }
 
         BusterX86MetadataPhysicalOperand vmov_operands[2] = {

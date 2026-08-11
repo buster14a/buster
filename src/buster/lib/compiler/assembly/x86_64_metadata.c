@@ -2123,7 +2123,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_operand_matches(BusterX86Metad
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_fixed_register_matches(BusterX86MetadataOperand metadata,
                                                                           BusterX86MetadataPhysicalOperand physical);
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_effective_field_source(BusterX86MetadataOperand metadata);
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_is_x87_operand(BusterX86MetadataOperand metadata);
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_effective_field_source_pattern(BusterX86MetadataOperand metadata,
+                                                                                 BusterX86MetadataPatternSemantics pattern);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_contains(BusterX86MetadataString atom, String8 needle);
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_equal(BusterX86MetadataString atom, String8 literal);
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_is_writemask_operand(BusterX86MetadataOperand metadata)
 {
@@ -2172,6 +2176,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_bind_form(BusterX86MetadataPhy
     {
         BusterX86MetadataOperand metadata = {0};
         if (!buster_x86_metadata_operand(form.id, operand_index, &metadata)) return false;
+        if (pattern_valid)
+            metadata.field_source = buster_x86_metadata_emit_effective_field_source_pattern(metadata, pattern);
         if (!query.include_implicit && !metadata.visible) continue;
         bool mask_default = buster_x86_metadata_emit_is_writemask_operand(metadata) &&
                             (actual_index >= query.operand_count ||
@@ -2218,6 +2224,13 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_bind_form(BusterX86MetadataPhy
             return false;
         }
         if (!buster_x86_metadata_emit_fixed_register_matches(metadata, physical))
+        {
+            if (diagnostic_operand) *diagnostic_operand = operand_index;
+            return false;
+        }
+        if (buster_x86_metadata_emit_is_x87_operand(metadata) &&
+            (physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER || physical.reg.width != 80 ||
+             physical.reg.index >= 8))
         {
             if (diagnostic_operand) *diagnostic_operand = operand_index;
             return false;
@@ -2320,6 +2333,38 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_effective_field_source(BusterX86
     if (metadata.kind == BUSTER_X86_METADATA_OPERAND_IMMEDIATE) return BUSTER_X86_METADATA_FIELD_SOURCE_IMMEDIATE;
     if (metadata.kind == BUSTER_X86_METADATA_OPERAND_RELATIVE) return BUSTER_X86_METADATA_FIELD_SOURCE_RELATIVE;
     return metadata.field_source;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_is_x87_operand(BusterX86MetadataOperand metadata)
+{
+    if (metadata.kind != BUSTER_X86_METADATA_OPERAND_REGISTER ||
+        metadata.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL)
+        return false;
+    return buster_x86_metadata_emit_atom_equal(metadata.atom, S8("X87()")) ||
+           buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_ST0")) ||
+           buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_ST1")) ||
+           buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_ST2")) ||
+           buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_ST3")) ||
+           buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_ST4")) ||
+           buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_ST5")) ||
+           buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_ST6")) ||
+           buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_ST7"));
+}
+
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_effective_field_source_pattern(BusterX86MetadataOperand metadata,
+                                                                                 BusterX86MetadataPatternSemantics pattern)
+{
+    u8 field_source = buster_x86_metadata_emit_effective_field_source(metadata);
+    // XED describes x87 stack operands as REG even though the encoding keeps
+    // the fixed ST(0) selector in ModRM.reg and carries the visible ST(i) in
+    // ModRM.rm.  Infer that topology from the pattern, rather than naming
+    // individual x87 instructions.
+    if (buster_x86_metadata_emit_is_x87_operand(metadata) &&
+        field_source == BUSTER_X86_METADATA_FIELD_SOURCE_REG &&
+        pattern.reg_fixed != BUSTER_X86_METADATA_PATTERN_FIXED_ANY &&
+        pattern.rm_fixed == BUSTER_X86_METADATA_PATTERN_FIXED_ANY)
+        field_source = BUSTER_X86_METADATA_FIELD_SOURCE_RM;
+    return field_source;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_equal(BusterX86MetadataString atom, String8 literal)
@@ -4688,6 +4733,7 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_coverage_width(u16 flags, u8 physica
     if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_32) return 32;
     if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_16) return 16;
     if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_8) return 8;
+    if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_80) return 80;
     if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_128) return 128;
     if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_256) return 256;
     if (flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_512) return 512;
