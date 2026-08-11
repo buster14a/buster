@@ -10997,6 +10997,37 @@ BUSTER_GLOBAL_LOCAL bool xed_import_pattern_token_known(String8 token)
            xed_import_pattern_assignment_known(token) || xed_import_pattern_word_known(token);
 }
 
+BUSTER_GLOBAL_LOCAL bool xed_import_pattern_has_token(String8 pattern, String8 wanted)
+{
+    if (!wanted.length)
+    {
+        return false;
+    }
+    u64 start = 0;
+    while (start < pattern.length)
+    {
+        while (start < pattern.length && character_is_space(pattern.pointer[start]))
+        {
+            start += 1;
+        }
+        if (start == pattern.length)
+        {
+            break;
+        }
+        u64 end = start;
+        while (end < pattern.length && !character_is_space(pattern.pointer[end]))
+        {
+            end += 1;
+        }
+        if (string_equal(string_slice(pattern, start, end), wanted))
+        {
+            return true;
+        }
+        start = end;
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL u8 xed_import_tuple_kind(String8 name)
 {
     if (string_equal(name, S8("NELEM_FULL")) || string_equal(name, S8("NELEM_FULLMEM")) ||
@@ -11900,15 +11931,17 @@ BUSTER_GLOBAL_LOCAL bool xed_import_normalize_record(XedGeneratedForm* form, Xed
     {
         form->encoder_family = XED_GENERATED_ENCODER_EVEX;
     }
-    // A handful of AVX broadcast forms combine the VEX selector with
-    // NOREXW.  The legacy summary pass sees NOREXW after VV1 and records a
-    // REX prefix; repair both the prefix and encoder family so the metadata
-    // ledger agrees with the byte emitter.  Restrict this repair to EMX
-    // broadcast rows so unrelated XED NOREXW forms retain their existing
-    // schema classification.
+    // VV1 selects VEX, while the exact REX width-control tokens refine the
+    // operand width without changing that encoding family.  The legacy
+    // summary pass sees either token after VV1 and records a REX prefix;
+    // repair both fields so the metadata ledger agrees with the byte
+    // emitter.  Keep NOREXR out of this rule: it is a distinct REX selector.
+    // Requiring VV1 also leaves legacy rows unchanged.
     if (form->prefix_kind == XED_GENERATED_PREFIX_REX &&
-        string_contains(record->pattern, S8("VV1")) && string_contains(record->pattern, S8("norexw_prefix")) &&
-        string_contains(record->operands, S8("EMX_BROADCAST_")))
+        xed_import_pattern_has_token(record->pattern, S8("VV1")) &&
+        (xed_import_pattern_has_token(record->pattern, S8("rexw_prefix")) ||
+         xed_import_pattern_has_token(record->pattern, S8("norexw_prefix"))) &&
+        !xed_import_pattern_has_token(record->pattern, S8("norexr_prefix")))
     {
         form->prefix_kind = XED_GENERATED_PREFIX_VEX;
         form->encoder_family = XED_GENERATED_ENCODER_VEX;
@@ -13140,8 +13173,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_validate_artifact(Arena* arena, String8
 BUSTER_GLOBAL_LOCAL bool assembly_import_validate_checked_in_x86(Arena* arena, String8* artifacts)
 {
     bool artifact_checks = assembly_import_validate_artifact(arena, artifacts[0], 4660881, S8("ba80aa3be0eb2e6f")) &&
-                           assembly_import_validate_artifact(arena, artifacts[1], 6052140, S8("e98baa1bfee63fb0")) &&
-                           assembly_import_validate_artifact(arena, artifacts[2], 389599, S8("9135826a2cca621a"));
+                           assembly_import_validate_artifact(arena, artifacts[1], 6052140, S8("caad84c07e497cba")) &&
+                           assembly_import_validate_artifact(arena, artifacts[2], 389599, S8("2064976d2bb2c565"));
     bool invariant_checks = assembly_import_line_count(artifacts[0]) == 11013 &&
                             string_contains(artifacts[1], S8("#define BUSTER_X86_GENERATED_FORM_COUNT 11013")) &&
                             string_contains(artifacts[1], S8("#define BUSTER_X86_GENERATED_COVERAGE_COUNT 11013"));
@@ -18167,6 +18200,39 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
              (emx_broadcast_form.operands[2].access & XED_GENERATED_ACCESS_IMPLICIT) != 0 &&
              !emx_broadcast_form.operands[2].visible &&
              (emx_broadcast_form.decorator_flags & XED_GENERATED_DECORATOR_BROADCAST) == 0;
+
+    XedImportRecord vv1_rexw_record = emx_broadcast_record;
+    vv1_rexw_record.iclass = S8("VCVTSD2SI");
+    vv1_rexw_record.iform = S8("VCVTSD2SI_GPR64i64_MEMf64");
+    vv1_rexw_record.operands = S8("REG0=VGPR64_R():w:q:i64 MEM0:r:q:f64");
+    vv1_rexw_record.pattern = S8("VV1 0x2D VF2 V0F mode64 rexw_prefix MOD[mm] MOD!=3 REG[rrr] RM[nnn] MODRM()");
+    XedGeneratedForm vv1_rexw_form = {0};
+    bad_token = (String8){0};
+    bad_operand = false;
+    result = result && xed_import_pattern_has_token(vv1_rexw_record.pattern, S8("VV1")) &&
+             xed_import_pattern_has_token(vv1_rexw_record.pattern, S8("rexw_prefix")) &&
+             !xed_import_pattern_has_token(vv1_rexw_record.pattern, S8("norexr_prefix")) &&
+             xed_import_normalize_record(&vv1_rexw_form, &vv1_rexw_record, 0, &bad_token, &bad_operand) &&
+             vv1_rexw_form.prefix_kind == XED_GENERATED_PREFIX_VEX &&
+             vv1_rexw_form.encoder_family == XED_GENERATED_ENCODER_VEX;
+
+    XedImportRecord vv1_norexr_record = vv1_rexw_record;
+    vv1_norexr_record.pattern = S8("VV1 0x2D VF2 V0F mode64 norexr_prefix MOD[mm] MOD!=3 REG[rrr] RM[nnn] MODRM()");
+    XedGeneratedForm vv1_norexr_form = {0};
+    bad_token = (String8){0};
+    bad_operand = false;
+    result = result && xed_import_normalize_record(&vv1_norexr_form, &vv1_norexr_record, 0, &bad_token, &bad_operand) &&
+             vv1_norexr_form.prefix_kind == XED_GENERATED_PREFIX_REX &&
+             vv1_norexr_form.encoder_family == XED_GENERATED_ENCODER_REX;
+
+    XedImportRecord legacy_rexw_record = vv1_rexw_record;
+    legacy_rexw_record.pattern = S8("0x2D VF2 V0F mode64 rexw_prefix MOD[mm] MOD!=3 REG[rrr] RM[nnn] MODRM()");
+    XedGeneratedForm legacy_rexw_form = {0};
+    bad_token = (String8){0};
+    bad_operand = false;
+    result = result && xed_import_normalize_record(&legacy_rexw_form, &legacy_rexw_record, 0, &bad_token, &bad_operand) &&
+             legacy_rexw_form.prefix_kind == XED_GENERATED_PREFIX_REX &&
+             legacy_rexw_form.encoder_family == XED_GENERATED_ENCODER_REX;
 
     XedImportRecord tdpbf16ps_record = {
         .source = S8("amx-spr/amx-spr-isa.xed.txt"),

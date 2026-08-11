@@ -2058,15 +2058,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        BUSTER_TEST(arguments, audit.emitted_count == 10151 && audit.blocked_count == 862 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10151 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 862);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10259 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 485);
+        BUSTER_TEST(arguments, audit.emitted_count == 10241 && audit.blocked_count == 772 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10241 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 772);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10349 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 395);
 
-        u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 289, 5, 1553, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1485, 192, 5, 1553, 176, 6667, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {327, 97, 0, 0, 0, 61, 0, 0};
+        u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 199, 5, 1643, 176, 6728, 49, 24};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1485, 192, 5, 1643, 176, 6667, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {327, 7, 0, 0, 0, 61, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2076,7 +2076,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10151, 268, 108, 99, 0, 288, 3, 0, 48, 48, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10241, 268, 108, 99, 0, 198, 3, 0, 48, 48, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -4024,6 +4024,17 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BusterX86MetadataForm evv_form = {0};
         BUSTER_TEST(arguments, buster_x86_metadata_form(463, &evv_form) &&
                                    evv_form.prefix_kind == BUSTER_X86_METADATA_PREFIX_EVEX);
+
+        // VV1 plus NOREXR is a real REX selector, not VEX width control.
+        // Keep this negative oracle beside the VEX byte checks so a future
+        // broad substring match cannot silently reclassify the row.
+        BusterX86MetadataForm vv1_norexr_form = {0};
+        BUSTER_TEST(arguments, buster_x86_metadata_form(30, &vv1_norexr_form) &&
+                                   vv1_norexr_form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX &&
+                                   vv1_norexr_form.encoder_family == BUSTER_X86_METADATA_ENCODER_REX &&
+                                   x86_64_metadata_test_pattern_has_token(vv1_norexr_form.pattern, S8("VV1")) &&
+                                   x86_64_metadata_test_pattern_has_token(vv1_norexr_form.pattern, S8("norexr_prefix")) &&
+                                   !x86_64_metadata_test_pattern_has_token(vv1_norexr_form.pattern, S8("norexw_prefix")));
 
 
         BusterX86MetadataPhysicalQuery system_query = x86_64_metadata_test_physical_query(

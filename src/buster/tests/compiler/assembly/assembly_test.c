@@ -1378,6 +1378,30 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, unsupported_avx2.diagnostic_count == 1 &&
                                unsupported_avx2.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
 
+    // LLVM byte oracles for the VV1 width-control rows.  The 32/64-bit
+    // conversion pairs exercise NOREXW/REXW, while the extract pairs cover
+    // the same metadata rule in a different opcode family.
+    String8 x86_vv1_width_intel_source =
+        S8("vcvtsd2si rax, qword ptr [rbx]\n"
+           "vcvtsd2si eax, qword ptr [rbx]\n"
+           "vcvtsi2sd xmm0, xmm1, rax\n"
+           "vcvtsi2sd xmm0, xmm1, eax\n"
+           "vpextrq qword ptr [rbx], xmm0, 1\n"
+           "vpextrd dword ptr [rbx], xmm0, 1\n");
+    u8 expected_x86_vv1_width[] = {
+        0xc4, 0xe1, 0xfb, 0x2d, 0x03,
+        0xc5, 0xfb, 0x2d, 0x03,
+        0xc4, 0xe1, 0xf3, 0x2a, 0xc0,
+        0xc5, 0xf3, 0x2a, 0xc0,
+        0xc4, 0xe3, 0xf9, 0x16, 0x03, 0x01,
+        0xc4, 0xe3, 0x79, 0x16, 0x03, 0x01,
+    };
+    AssemblyEncodeResult x86_vv1_width_intel = assembly_encode(
+        arguments->arena, x86_vv1_width_intel_source,
+        (AssemblyEncodeOptions){.target = x86_avx2_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_vv1_width_intel.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(x86_vv1_width_intel.bytes, expected_x86_vv1_width,
+                                                         BUSTER_ARRAY_LENGTH(expected_x86_vv1_width)));
     Target x86_bit_atomic_target = x86_target;
     x86_bit_atomic_target.cpu_model = CPU_MODEL_BASELINE;
     x86_bit_atomic_target.cpu_features_explicit = true;
