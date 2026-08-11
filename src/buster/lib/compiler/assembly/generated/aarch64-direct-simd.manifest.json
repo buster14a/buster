@@ -1,0 +1,3219 @@
+{
+  "canonical_sha256": "8485c5c61835d5394d325757ab2964890e8bdfea304c6faa8fd4c23e4c7aabec",
+  "cross_owner_gap_count": 8,
+  "cross_owner_gaps": [
+    {
+      "encoding_name": "BIC_asimdimm_L_hl",
+      "id": "arm-a64@2026-06:BIC_asimdimm_L_hl",
+      "reason": "cmode-dependent AdvSIMD immediate transform is owned by complex_simd_fp, outside the direct_simd denominator",
+      "semantic_form_id": 72,
+      "source_digest": "0xa056525b222e5510",
+      "status": "cross_owner_gap"
+    },
+    {
+      "encoding_name": "BIC_asimdimm_L_sl",
+      "id": "arm-a64@2026-06:BIC_asimdimm_L_sl",
+      "reason": "cmode-dependent AdvSIMD immediate transform is owned by complex_simd_fp, outside the direct_simd denominator",
+      "semantic_form_id": 73,
+      "source_digest": "0x697ab80c6ad90af2",
+      "status": "cross_owner_gap"
+    },
+    {
+      "encoding_name": "MOVI_asimdimm_L_hl",
+      "id": "arm-a64@2026-06:MOVI_asimdimm_L_hl",
+      "reason": "cmode-dependent AdvSIMD immediate transform is owned by complex_simd_fp, outside the direct_simd denominator",
+      "semantic_form_id": 1022,
+      "source_digest": "0x53702c4452a3a89d",
+      "status": "cross_owner_gap"
+    },
+    {
+      "encoding_name": "MOVI_asimdimm_L_sl",
+      "id": "arm-a64@2026-06:MOVI_asimdimm_L_sl",
+      "reason": "cmode-dependent AdvSIMD immediate transform is owned by complex_simd_fp, outside the direct_simd denominator",
+      "semantic_form_id": 1023,
+      "source_digest": "0xba42aa7e81edb36b",
+      "status": "cross_owner_gap"
+    },
+    {
+      "encoding_name": "MOVI_asimdimm_M_sm",
+      "id": "arm-a64@2026-06:MOVI_asimdimm_M_sm",
+      "reason": "cmode-dependent AdvSIMD immediate transform is owned by complex_simd_fp, outside the direct_simd denominator",
+      "semantic_form_id": 1024,
+      "source_digest": "0x21a6b376eb7eea5b",
+      "status": "cross_owner_gap"
+    },
+    {
+      "encoding_name": "MVNI_asimdimm_L_hl",
+      "id": "arm-a64@2026-06:MVNI_asimdimm_L_hl",
+      "reason": "cmode-dependent AdvSIMD immediate transform is owned by complex_simd_fp, outside the direct_simd denominator",
+      "semantic_form_id": 1057,
+      "source_digest": "0x5ad4192b9eac1c7d",
+      "status": "cross_owner_gap"
+    },
+    {
+      "encoding_name": "MVNI_asimdimm_L_sl",
+      "id": "arm-a64@2026-06:MVNI_asimdimm_L_sl",
+      "reason": "cmode-dependent AdvSIMD immediate transform is owned by complex_simd_fp, outside the direct_simd denominator",
+      "semantic_form_id": 1058,
+      "source_digest": "0xa882c9306192dd99",
+      "status": "cross_owner_gap"
+    },
+    {
+      "encoding_name": "MVNI_asimdimm_M_sm",
+      "id": "arm-a64@2026-06:MVNI_asimdimm_M_sm",
+      "reason": "cmode-dependent AdvSIMD immediate transform is owned by complex_simd_fp, outside the direct_simd denominator",
+      "semantic_form_id": 1059,
+      "source_digest": "0xaa8157cd9193fb2",
+      "status": "cross_owner_gap"
+    }
+  ],
+  "denominator_sha256": "e4fb3407ffefd2e592a09471958a5996139bc0e966b5043e4d48e3ebe7d0a805",
+  "denominator_sha256_computed": "e4fb3407ffefd2e592a09471958a5996139bc0e966b5043e4d48e3ebe7d0a805",
+  "executable_row_count": 390,
+  "max_operands": 8,
+  "metadata_corrections": [
+    {
+      "family": "TBL/TBX",
+      "operand_presentation_kind": "simd_lane",
+      "reason": "Vm.<Ta> is an index vector; the encoding has no numeric element-lane field",
+      "semantic_form_ids": [
+        1566,
+        1567,
+        1568,
+        1569,
+        1571,
+        1572,
+        1573,
+        1574
+      ],
+      "typed_kind": "simd_vector"
+    }
+  ],
+  "owner": "direct_simd",
+  "row_count": 390,
+  "rows": [
+    {
+      "id": "arm-a64@2026-06:ABS_asimdmisc_R",
+      "row_index": 0,
+      "semantic_form_id": 0,
+      "source_digest": "0xfea2e56971759532",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:ABS_asisdmisc_R",
+      "row_index": 1,
+      "semantic_form_id": 1,
+      "source_digest": "0x29cfa5a7b75f135a",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:ADDP_asimdsame_only",
+      "row_index": 2,
+      "semantic_form_id": 7,
+      "source_digest": "0xabb728ab3eaf08aa",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:ADDP_asisdpair_only",
+      "row_index": 3,
+      "semantic_form_id": 8,
+      "source_digest": "0x98b8e2d558091216",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:ADDV_asimdall_only",
+      "row_index": 4,
+      "semantic_form_id": 15,
+      "source_digest": "0x1ab2788d7662a6a1",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:ADD_asimdsame_only",
+      "row_index": 5,
+      "semantic_form_id": 22,
+      "source_digest": "0x979101fa1dd62d38",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:ADD_asisdsame_only",
+      "row_index": 6,
+      "semantic_form_id": 23,
+      "source_digest": "0x1f1182a2f55aaad9",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:AESD_B_cryptoaes",
+      "row_index": 7,
+      "semantic_form_id": 26,
+      "source_digest": "0x6cacc320d32f7696",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:AESE_B_cryptoaes",
+      "row_index": 8,
+      "semantic_form_id": 27,
+      "source_digest": "0x64d13665bc040990",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:AESIMC_B_cryptoaes",
+      "row_index": 9,
+      "semantic_form_id": 28,
+      "source_digest": "0xafd75da1d5d14815",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:AESMC_B_cryptoaes",
+      "row_index": 10,
+      "semantic_form_id": 29,
+      "source_digest": "0x6a644c32fd7849e2",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:AND_asimdsame_only",
+      "row_index": 11,
+      "semantic_form_id": 38,
+      "source_digest": "0x52df93db3d4db99d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:BCAX_VVV16_crypto4",
+      "row_index": 12,
+      "semantic_form_id": 61,
+      "source_digest": "0xfab88050fa075b6f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:BIC_asimdsame_only",
+      "row_index": 13,
+      "semantic_form_id": 74,
+      "source_digest": "0x70338c1f69cbc030",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:BIF_asimdsame_only",
+      "row_index": 14,
+      "semantic_form_id": 75,
+      "source_digest": "0x9213cc7938be02c1",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:BIT_asimdsame_only",
+      "row_index": 15,
+      "semantic_form_id": 76,
+      "source_digest": "0x16db4b3233bce730",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:BSL_asimdsame_only",
+      "row_index": 16,
+      "semantic_form_id": 89,
+      "source_digest": "0x8820b97199de36f3",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:CLS_asimdmisc_R",
+      "row_index": 17,
+      "semantic_form_id": 137,
+      "source_digest": "0xc9168638e385e157",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:CLZ_asimdmisc_R",
+      "row_index": 18,
+      "semantic_form_id": 140,
+      "source_digest": "0xb1fe309be6bba71",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:CMEQ_asimdsame_only",
+      "row_index": 19,
+      "semantic_form_id": 142,
+      "source_digest": "0x4bcb414feaab1fcd",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:CMEQ_asisdsame_only",
+      "row_index": 20,
+      "semantic_form_id": 144,
+      "source_digest": "0xf0069bc3f3d78400",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:CMGE_asimdsame_only",
+      "row_index": 21,
+      "semantic_form_id": 146,
+      "source_digest": "0x25ce34475d72334d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:CMGE_asisdsame_only",
+      "row_index": 22,
+      "semantic_form_id": 148,
+      "source_digest": "0x6eacba4e96135495",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:CMGT_asimdsame_only",
+      "row_index": 23,
+      "semantic_form_id": 150,
+      "source_digest": "0xadc2e6aa5173fc0",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:CMGT_asisdsame_only",
+      "row_index": 24,
+      "semantic_form_id": 152,
+      "source_digest": "0x92e7ff05957ea047",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:CMHI_asimdsame_only",
+      "row_index": 25,
+      "semantic_form_id": 153,
+      "source_digest": "0x87794c35ce3a68d0",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:CMHI_asisdsame_only",
+      "row_index": 26,
+      "semantic_form_id": 154,
+      "source_digest": "0xaa949f7d1f29089a",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:CMHS_asimdsame_only",
+      "row_index": 27,
+      "semantic_form_id": 155,
+      "source_digest": "0x3bb8226d654e604d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:CMHS_asisdsame_only",
+      "row_index": 28,
+      "semantic_form_id": 156,
+      "source_digest": "0xab6a959d4a8cbef3",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:CMTST_asimdsame_only",
+      "row_index": 29,
+      "semantic_form_id": 173,
+      "source_digest": "0xe637c1caae107056",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:CMTST_asisdsame_only",
+      "row_index": 30,
+      "semantic_form_id": 174,
+      "source_digest": "0x4a1317795dfc29c9",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:CNT_asimdmisc_R",
+      "row_index": 31,
+      "semantic_form_id": 177,
+      "source_digest": "0x79f29c4b7493d8fc",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:DUP_asimdins_DR_r",
+      "row_index": 32,
+      "semantic_form_id": 207,
+      "source_digest": "0xe6799413838aec2f",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:EOR3_VVV16_crypto4",
+      "row_index": 33,
+      "semantic_form_id": 213,
+      "source_digest": "0x9a2c72cc6e6d8045",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:EOR_asimdsame_only",
+      "row_index": 34,
+      "semantic_form_id": 218,
+      "source_digest": "0xa6d57e7ad7709737",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FABD_asimdsame_only",
+      "row_index": 35,
+      "semantic_form_id": 226,
+      "source_digest": "0x3aaa3148c5355eb8",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FABD_asimdsamefp16_only",
+      "row_index": 36,
+      "semantic_form_id": 227,
+      "source_digest": "0xeccb3d01478f107a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FABD_asisdsame_only",
+      "row_index": 37,
+      "semantic_form_id": 228,
+      "source_digest": "0x2cdab270dc0ab4a2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FABD_asisdsamefp16_only",
+      "row_index": 38,
+      "semantic_form_id": 229,
+      "source_digest": "0x8459dce91a7b0745",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FABS_D_floatdp1",
+      "row_index": 39,
+      "semantic_form_id": 230,
+      "source_digest": "0x39e725dee11116b4",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FABS_H_floatdp1",
+      "row_index": 40,
+      "semantic_form_id": 231,
+      "source_digest": "0x45758f3e89ff2d7c",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FABS_S_floatdp1",
+      "row_index": 41,
+      "semantic_form_id": 232,
+      "source_digest": "0xf59a9698b7dd189a",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FABS_asimdmisc_R",
+      "row_index": 42,
+      "semantic_form_id": 233,
+      "source_digest": "0x36f968f48051514a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FABS_asimdmiscfp16_R",
+      "row_index": 43,
+      "semantic_form_id": 234,
+      "source_digest": "0x4a4040d9c77df4e6",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FACGE_asimdsame_only",
+      "row_index": 44,
+      "semantic_form_id": 235,
+      "source_digest": "0x4f2647a83e1148e2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FACGE_asimdsamefp16_only",
+      "row_index": 45,
+      "semantic_form_id": 236,
+      "source_digest": "0x7dfd30a750682261",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FACGE_asisdsame_only",
+      "row_index": 46,
+      "semantic_form_id": 237,
+      "source_digest": "0x5b5c70d9b7166913",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FACGE_asisdsamefp16_only",
+      "row_index": 47,
+      "semantic_form_id": 238,
+      "source_digest": "0x867bd108f2152b89",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FACGT_asimdsame_only",
+      "row_index": 48,
+      "semantic_form_id": 239,
+      "source_digest": "0x19ad4ce0297dd364",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FACGT_asimdsamefp16_only",
+      "row_index": 49,
+      "semantic_form_id": 240,
+      "source_digest": "0x1c3144f7e9fc3d66",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FACGT_asisdsame_only",
+      "row_index": 50,
+      "semantic_form_id": 241,
+      "source_digest": "0x7c16f71cfba82dd1",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FACGT_asisdsamefp16_only",
+      "row_index": 51,
+      "semantic_form_id": 242,
+      "source_digest": "0xb492e8579be4e6c5",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FADDP_asimdsame_only",
+      "row_index": 52,
+      "semantic_form_id": 243,
+      "source_digest": "0xef5ccee40ed3b7a9",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FADDP_asimdsamefp16_only",
+      "row_index": 53,
+      "semantic_form_id": 244,
+      "source_digest": "0xe8ad7e0069b990e6",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FADDP_asisdpair_only_H",
+      "row_index": 54,
+      "semantic_form_id": 245,
+      "source_digest": "0x8b9efc88b9785f10",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FADDP_asisdpair_only_SD",
+      "row_index": 55,
+      "semantic_form_id": 246,
+      "source_digest": "0xc08216e60faa00f1",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FADD_D_floatdp2",
+      "row_index": 56,
+      "semantic_form_id": 247,
+      "source_digest": "0x24fe9bae9c51ccd5",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FADD_H_floatdp2",
+      "row_index": 57,
+      "semantic_form_id": 248,
+      "source_digest": "0xfd3ed77c6e43d89d",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FADD_S_floatdp2",
+      "row_index": 58,
+      "semantic_form_id": 249,
+      "source_digest": "0xacf2c43a6428088e",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FADD_asimdsame_only",
+      "row_index": 59,
+      "semantic_form_id": 250,
+      "source_digest": "0xc9074ffe725f66e2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FADD_asimdsamefp16_only",
+      "row_index": 60,
+      "semantic_form_id": 251,
+      "source_digest": "0x2129a5001b94b178",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCMEQ_asimdsame_only",
+      "row_index": 61,
+      "semantic_form_id": 261,
+      "source_digest": "0x8dd7fb0e6e2d0e90",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCMEQ_asimdsamefp16_only",
+      "row_index": 62,
+      "semantic_form_id": 262,
+      "source_digest": "0x928c0820e962783c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCMEQ_asisdsame_only",
+      "row_index": 63,
+      "semantic_form_id": 265,
+      "source_digest": "0xbc6537df310541d3",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCMEQ_asisdsamefp16_only",
+      "row_index": 64,
+      "semantic_form_id": 266,
+      "source_digest": "0xa717cf4ad6ae012f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCMGE_asimdsame_only",
+      "row_index": 65,
+      "semantic_form_id": 269,
+      "source_digest": "0x3d5884765339045f",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCMGE_asimdsamefp16_only",
+      "row_index": 66,
+      "semantic_form_id": 270,
+      "source_digest": "0x947d5d7aedb1f102",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCMGE_asisdsame_only",
+      "row_index": 67,
+      "semantic_form_id": 273,
+      "source_digest": "0xa4523fd8a661e9c3",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCMGE_asisdsamefp16_only",
+      "row_index": 68,
+      "semantic_form_id": 274,
+      "source_digest": "0x1a7a6e28137b76cd",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCMGT_asimdsame_only",
+      "row_index": 69,
+      "semantic_form_id": 277,
+      "source_digest": "0x1046056aa1eb048e",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCMGT_asimdsamefp16_only",
+      "row_index": 70,
+      "semantic_form_id": 278,
+      "source_digest": "0xe27fd863ab16906f",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCMGT_asisdsame_only",
+      "row_index": 71,
+      "semantic_form_id": 281,
+      "source_digest": "0xcd717cac1550eac6",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCMGT_asisdsamefp16_only",
+      "row_index": 72,
+      "semantic_form_id": 282,
+      "source_digest": "0x176d7f8bff8af329",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCMPE_D_floatcmp",
+      "row_index": 73,
+      "semantic_form_id": 294,
+      "source_digest": "0x619a154570b3b61a",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCMPE_H_floatcmp",
+      "row_index": 74,
+      "semantic_form_id": 296,
+      "source_digest": "0x4fc3e86312b40b5a",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCMPE_S_floatcmp",
+      "row_index": 75,
+      "semantic_form_id": 298,
+      "source_digest": "0x713b8bd2f7c3198f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCMP_D_floatcmp",
+      "row_index": 76,
+      "semantic_form_id": 300,
+      "source_digest": "0xc980d99c3ea0fd5b",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCMP_H_floatcmp",
+      "row_index": 77,
+      "semantic_form_id": 302,
+      "source_digest": "0x88b52875afab530c",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCMP_S_floatcmp",
+      "row_index": 78,
+      "semantic_form_id": 304,
+      "source_digest": "0x806ab6babb1e173b",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCSEL_D_floatsel",
+      "row_index": 79,
+      "semantic_form_id": 305,
+      "source_digest": "0x334422a1dbe54a6a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCSEL_H_floatsel",
+      "row_index": 80,
+      "semantic_form_id": 306,
+      "source_digest": "0x942ac11ca7582058",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCSEL_S_floatsel",
+      "row_index": 81,
+      "semantic_form_id": 307,
+      "source_digest": "0x39955c862311f855",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAS_32D_float2int",
+      "row_index": 82,
+      "semantic_form_id": 308,
+      "source_digest": "0xbd156ab773e3db2d",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAS_32H_float2int",
+      "row_index": 83,
+      "semantic_form_id": 309,
+      "source_digest": "0x913328683e893c88",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAS_32S_float2int",
+      "row_index": 84,
+      "semantic_form_id": 310,
+      "source_digest": "0xac161d00b51920b9",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAS_64D_float2int",
+      "row_index": 85,
+      "semantic_form_id": 311,
+      "source_digest": "0x5eda5c8f175dd96e",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAS_64H_float2int",
+      "row_index": 86,
+      "semantic_form_id": 312,
+      "source_digest": "0xedf3d0506bbe827a",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAS_64S_float2int",
+      "row_index": 87,
+      "semantic_form_id": 313,
+      "source_digest": "0x27af20ba2edd15e5",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAS_asimdmisc_R",
+      "row_index": 88,
+      "semantic_form_id": 314,
+      "source_digest": "0x4f0d4aa444a703c3",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAS_asimdmiscfp16_R",
+      "row_index": 89,
+      "semantic_form_id": 315,
+      "source_digest": "0xb136a8c538688714",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAS_asisdmisc_R",
+      "row_index": 90,
+      "semantic_form_id": 316,
+      "source_digest": "0xe28363804fefc9c0",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAS_asisdmiscfp16_R",
+      "row_index": 91,
+      "semantic_form_id": 317,
+      "source_digest": "0xd33905a6110a18df",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAU_32D_float2int",
+      "row_index": 92,
+      "semantic_form_id": 318,
+      "source_digest": "0x3e813e6b1e499209",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAU_32H_float2int",
+      "row_index": 93,
+      "semantic_form_id": 319,
+      "source_digest": "0x4de0c9e8dfb514c1",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAU_32S_float2int",
+      "row_index": 94,
+      "semantic_form_id": 320,
+      "source_digest": "0x68d8a09a27183810",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAU_64D_float2int",
+      "row_index": 95,
+      "semantic_form_id": 321,
+      "source_digest": "0x7dede17ec2c4de3b",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAU_64H_float2int",
+      "row_index": 96,
+      "semantic_form_id": 322,
+      "source_digest": "0xe474e9242969ced3",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAU_64S_float2int",
+      "row_index": 97,
+      "semantic_form_id": 323,
+      "source_digest": "0x232bd56f2551067c",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAU_asimdmisc_R",
+      "row_index": 98,
+      "semantic_form_id": 324,
+      "source_digest": "0xb808fc3eabf4f50c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAU_asimdmiscfp16_R",
+      "row_index": 99,
+      "semantic_form_id": 325,
+      "source_digest": "0xb619bd066b0e781c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAU_asisdmisc_R",
+      "row_index": 100,
+      "semantic_form_id": 326,
+      "source_digest": "0x7f592e0d916f94ad",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTAU_asisdmiscfp16_R",
+      "row_index": 101,
+      "semantic_form_id": 327,
+      "source_digest": "0xbd26a7e9e85cefab",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTL_asimdmisc_L",
+      "row_index": 102,
+      "semantic_form_id": 328,
+      "source_digest": "0x3605be7c9c5b5cdf",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMS_32D_float2int",
+      "row_index": 103,
+      "semantic_form_id": 329,
+      "source_digest": "0xdb999f823dcbeadf",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMS_32H_float2int",
+      "row_index": 104,
+      "semantic_form_id": 330,
+      "source_digest": "0x5f900df11447d8eb",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMS_32S_float2int",
+      "row_index": 105,
+      "semantic_form_id": 331,
+      "source_digest": "0x826eae4d5959097f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMS_64D_float2int",
+      "row_index": 106,
+      "semantic_form_id": 332,
+      "source_digest": "0x754d122a7c6bc2a0",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMS_64H_float2int",
+      "row_index": 107,
+      "semantic_form_id": 333,
+      "source_digest": "0x698365a178984a2",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMS_64S_float2int",
+      "row_index": 108,
+      "semantic_form_id": 334,
+      "source_digest": "0xf7f4b327317ab2ae",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMS_asimdmisc_R",
+      "row_index": 109,
+      "semantic_form_id": 335,
+      "source_digest": "0x767f993e91beca8c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMS_asimdmiscfp16_R",
+      "row_index": 110,
+      "semantic_form_id": 336,
+      "source_digest": "0x7fac83040ecaea0",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMS_asisdmisc_R",
+      "row_index": 111,
+      "semantic_form_id": 337,
+      "source_digest": "0x7e414c84de226956",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMS_asisdmiscfp16_R",
+      "row_index": 112,
+      "semantic_form_id": 338,
+      "source_digest": "0x3218cf33b9dd8b1a",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMU_32D_float2int",
+      "row_index": 113,
+      "semantic_form_id": 339,
+      "source_digest": "0xb09a743c1e19bdaa",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMU_32H_float2int",
+      "row_index": 114,
+      "semantic_form_id": 340,
+      "source_digest": "0x9b695075d37a1cc9",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMU_32S_float2int",
+      "row_index": 115,
+      "semantic_form_id": 341,
+      "source_digest": "0xe28fc4f972b3218c",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMU_64D_float2int",
+      "row_index": 116,
+      "semantic_form_id": 342,
+      "source_digest": "0xecddac8715a29697",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMU_64H_float2int",
+      "row_index": 117,
+      "semantic_form_id": 343,
+      "source_digest": "0xa12cdfe13344872e",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMU_64S_float2int",
+      "row_index": 118,
+      "semantic_form_id": 344,
+      "source_digest": "0xe650588e5f4c16c2",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMU_asimdmisc_R",
+      "row_index": 119,
+      "semantic_form_id": 345,
+      "source_digest": "0xffc905d99c80d9ff",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMU_asimdmiscfp16_R",
+      "row_index": 120,
+      "semantic_form_id": 346,
+      "source_digest": "0x9b8dcd4d4c67f572",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMU_asisdmisc_R",
+      "row_index": 121,
+      "semantic_form_id": 347,
+      "source_digest": "0xb87eb2968e288a18",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTMU_asisdmiscfp16_R",
+      "row_index": 122,
+      "semantic_form_id": 348,
+      "source_digest": "0xba3b6d125a310c48",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNS_32D_float2int",
+      "row_index": 123,
+      "semantic_form_id": 349,
+      "source_digest": "0xc6547e16a34ec087",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNS_32H_float2int",
+      "row_index": 124,
+      "semantic_form_id": 350,
+      "source_digest": "0xebb8428412bf2a40",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNS_32S_float2int",
+      "row_index": 125,
+      "semantic_form_id": 351,
+      "source_digest": "0x4a8d8be66b5be011",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNS_64D_float2int",
+      "row_index": 126,
+      "semantic_form_id": 352,
+      "source_digest": "0x4b41ddf39c44a620",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNS_64H_float2int",
+      "row_index": 127,
+      "semantic_form_id": 353,
+      "source_digest": "0xad2efe69a1bda08b",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNS_64S_float2int",
+      "row_index": 128,
+      "semantic_form_id": 354,
+      "source_digest": "0x534c61c03a514586",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNS_asimdmisc_R",
+      "row_index": 129,
+      "semantic_form_id": 355,
+      "source_digest": "0xdfee5c10fef16fc2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNS_asimdmiscfp16_R",
+      "row_index": 130,
+      "semantic_form_id": 356,
+      "source_digest": "0xb209c6c5774ff80a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNS_asisdmisc_R",
+      "row_index": 131,
+      "semantic_form_id": 357,
+      "source_digest": "0x504f5bfe4c27d8dd",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNS_asisdmiscfp16_R",
+      "row_index": 132,
+      "semantic_form_id": 358,
+      "source_digest": "0x7fcee0c14317c554",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNU_32D_float2int",
+      "row_index": 133,
+      "semantic_form_id": 359,
+      "source_digest": "0x920564d643ec86be",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNU_32H_float2int",
+      "row_index": 134,
+      "semantic_form_id": 360,
+      "source_digest": "0xc1d9e16f602eaa9f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNU_32S_float2int",
+      "row_index": 135,
+      "semantic_form_id": 361,
+      "source_digest": "0x54458195fb9c7e24",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNU_64D_float2int",
+      "row_index": 136,
+      "semantic_form_id": 362,
+      "source_digest": "0xc955d5b1ad9e93d5",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNU_64H_float2int",
+      "row_index": 137,
+      "semantic_form_id": 363,
+      "source_digest": "0xaf4e5e6e9f530f6f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNU_64S_float2int",
+      "row_index": 138,
+      "semantic_form_id": 364,
+      "source_digest": "0xc2f38acbbc52f90d",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNU_asimdmisc_R",
+      "row_index": 139,
+      "semantic_form_id": 365,
+      "source_digest": "0x160364019fbe3017",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNU_asimdmiscfp16_R",
+      "row_index": 140,
+      "semantic_form_id": 366,
+      "source_digest": "0xe4f9a16c98f48e48",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNU_asisdmisc_R",
+      "row_index": 141,
+      "semantic_form_id": 367,
+      "source_digest": "0x2fb59014ba5842cd",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTNU_asisdmiscfp16_R",
+      "row_index": 142,
+      "semantic_form_id": 368,
+      "source_digest": "0xe01aa9b9b96b7005",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTN_asimdmisc_N",
+      "row_index": 143,
+      "semantic_form_id": 369,
+      "source_digest": "0x3fe51307652789ca",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPS_32D_float2int",
+      "row_index": 144,
+      "semantic_form_id": 370,
+      "source_digest": "0xf6ba85f257737b99",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPS_32H_float2int",
+      "row_index": 145,
+      "semantic_form_id": 371,
+      "source_digest": "0x181471a6b42d7cba",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPS_32S_float2int",
+      "row_index": 146,
+      "semantic_form_id": 372,
+      "source_digest": "0xa6082cd58100786d",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPS_64D_float2int",
+      "row_index": 147,
+      "semantic_form_id": 373,
+      "source_digest": "0x52c5892d0d1d2e46",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPS_64H_float2int",
+      "row_index": 148,
+      "semantic_form_id": 374,
+      "source_digest": "0x3e34fdfe3f8990a8",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPS_64S_float2int",
+      "row_index": 149,
+      "semantic_form_id": 375,
+      "source_digest": "0x626cef0816527810",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPS_asimdmisc_R",
+      "row_index": 150,
+      "semantic_form_id": 376,
+      "source_digest": "0x1983dc9ac834295f",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPS_asimdmiscfp16_R",
+      "row_index": 151,
+      "semantic_form_id": 377,
+      "source_digest": "0x3b232c20144a7a63",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPS_asisdmisc_R",
+      "row_index": 152,
+      "semantic_form_id": 378,
+      "source_digest": "0x3aa3182e68a6a6b7",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPS_asisdmiscfp16_R",
+      "row_index": 153,
+      "semantic_form_id": 379,
+      "source_digest": "0x25cadafa07a55199",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPU_32D_float2int",
+      "row_index": 154,
+      "semantic_form_id": 380,
+      "source_digest": "0x4207dbdaa7a5dde5",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPU_32H_float2int",
+      "row_index": 155,
+      "semantic_form_id": 381,
+      "source_digest": "0xb3005f0eaa49f0ba",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPU_32S_float2int",
+      "row_index": 156,
+      "semantic_form_id": 382,
+      "source_digest": "0x1321ee9f6aa27348",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPU_asimdmisc_R",
+      "row_index": 157,
+      "semantic_form_id": 386,
+      "source_digest": "0x9a182456d9e9844b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPU_asimdmiscfp16_R",
+      "row_index": 158,
+      "semantic_form_id": 387,
+      "source_digest": "0xced186bb58e64235",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPU_asisdmisc_R",
+      "row_index": 159,
+      "semantic_form_id": 388,
+      "source_digest": "0x2ea736741a06abb2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTPU_asisdmiscfp16_R",
+      "row_index": 160,
+      "semantic_form_id": 389,
+      "source_digest": "0x248924da93c591b0",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTXN_asisdmisc_N",
+      "row_index": 161,
+      "semantic_form_id": 391,
+      "source_digest": "0xbbe797249dd7b649",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTZS_asimdmisc_R",
+      "row_index": 162,
+      "semantic_form_id": 404,
+      "source_digest": "0xddc649248bf1c3b0",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTZS_asimdmiscfp16_R",
+      "row_index": 163,
+      "semantic_form_id": 405,
+      "source_digest": "0x7f64b5f5a04de3cf",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTZS_asisdmisc_R",
+      "row_index": 164,
+      "semantic_form_id": 407,
+      "source_digest": "0x3b2e1ec87178fbdc",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTZS_asisdmiscfp16_R",
+      "row_index": 165,
+      "semantic_form_id": 408,
+      "source_digest": "0x825ae0de120e1dc4",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTZU_asimdmisc_R",
+      "row_index": 166,
+      "semantic_form_id": 422,
+      "source_digest": "0x179616cd50c5f96c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTZU_asimdmiscfp16_R",
+      "row_index": 167,
+      "semantic_form_id": 423,
+      "source_digest": "0x93592f920a7f5cb8",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTZU_asisdmisc_R",
+      "row_index": 168,
+      "semantic_form_id": 425,
+      "source_digest": "0xf219ada0644460b4",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FCVTZU_asisdmiscfp16_R",
+      "row_index": 169,
+      "semantic_form_id": 426,
+      "source_digest": "0xa919d8c00e6398fb",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FDIV_asimdsame_only",
+      "row_index": 170,
+      "semantic_form_id": 437,
+      "source_digest": "0xd58ce4db7021007b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FDIV_asimdsamefp16_only",
+      "row_index": 171,
+      "semantic_form_id": 438,
+      "source_digest": "0xfbeb22d5f375f8f7",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMAXNMP_asimdsame_only",
+      "row_index": 172,
+      "semantic_form_id": 443,
+      "source_digest": "0xaa8ad07d6b1a44df",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMAXNMP_asimdsamefp16_only",
+      "row_index": 173,
+      "semantic_form_id": 444,
+      "source_digest": "0x9a12fcb3977ce62",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMAXNMP_asisdpair_only_H",
+      "row_index": 174,
+      "semantic_form_id": 445,
+      "source_digest": "0x5bbbd15e32be1737",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FMAXNMP_asisdpair_only_SD",
+      "row_index": 175,
+      "semantic_form_id": 446,
+      "source_digest": "0xe7a94c880401404",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMAXNMV_asimdall_only_H",
+      "row_index": 176,
+      "semantic_form_id": 447,
+      "source_digest": "0xb3cb9d859362f633",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMAXNMV_asimdall_only_SD",
+      "row_index": 177,
+      "semantic_form_id": 448,
+      "source_digest": "0xd828dd77e54a4811",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FMAXNM_asimdsame_only",
+      "row_index": 178,
+      "semantic_form_id": 452,
+      "source_digest": "0x32995800a2aa37c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMAXNM_asimdsamefp16_only",
+      "row_index": 179,
+      "semantic_form_id": 453,
+      "source_digest": "0x7b4c9bac157b5dcd",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMAXP_asimdsame_only",
+      "row_index": 180,
+      "semantic_form_id": 454,
+      "source_digest": "0x32e4c02aa4111d01",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMAXP_asimdsamefp16_only",
+      "row_index": 181,
+      "semantic_form_id": 455,
+      "source_digest": "0x813457895f7ce0d7",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMAXP_asisdpair_only_H",
+      "row_index": 182,
+      "semantic_form_id": 456,
+      "source_digest": "0x4625fcdc5f7b28f4",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FMAXP_asisdpair_only_SD",
+      "row_index": 183,
+      "semantic_form_id": 457,
+      "source_digest": "0xc4f84bdaed7c70c8",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMAXV_asimdall_only_H",
+      "row_index": 184,
+      "semantic_form_id": 458,
+      "source_digest": "0x21b9304dfa220ddd",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMAXV_asimdall_only_SD",
+      "row_index": 185,
+      "semantic_form_id": 459,
+      "source_digest": "0xef5540e4a2cff8aa",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FMAX_asimdsame_only",
+      "row_index": 186,
+      "semantic_form_id": 463,
+      "source_digest": "0x5c9a075a71ddf8e2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMAX_asimdsamefp16_only",
+      "row_index": 187,
+      "semantic_form_id": 464,
+      "source_digest": "0xfaedf05cf068bf28",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMINNMP_asimdsame_only",
+      "row_index": 188,
+      "semantic_form_id": 465,
+      "source_digest": "0xfd2d346edbeea54e",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMINNMP_asimdsamefp16_only",
+      "row_index": 189,
+      "semantic_form_id": 466,
+      "source_digest": "0xe80336897c9a357b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMINNMP_asisdpair_only_H",
+      "row_index": 190,
+      "semantic_form_id": 467,
+      "source_digest": "0x25afbf2d1bc84bca",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FMINNMP_asisdpair_only_SD",
+      "row_index": 191,
+      "semantic_form_id": 468,
+      "source_digest": "0xe914f361850bc373",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMINNMV_asimdall_only_H",
+      "row_index": 192,
+      "semantic_form_id": 469,
+      "source_digest": "0x5b53da56a57e00d1",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMINNMV_asimdall_only_SD",
+      "row_index": 193,
+      "semantic_form_id": 470,
+      "source_digest": "0xd548a439440da4",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FMINNM_asimdsame_only",
+      "row_index": 194,
+      "semantic_form_id": 474,
+      "source_digest": "0xda4ddf33c1ba749c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMINNM_asimdsamefp16_only",
+      "row_index": 195,
+      "semantic_form_id": 475,
+      "source_digest": "0x995312a626c3649d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMINP_asimdsame_only",
+      "row_index": 196,
+      "semantic_form_id": 476,
+      "source_digest": "0x4cd117eb363e2c78",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMINP_asimdsamefp16_only",
+      "row_index": 197,
+      "semantic_form_id": 477,
+      "source_digest": "0xbd6d714d8112f81c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMINP_asisdpair_only_H",
+      "row_index": 198,
+      "semantic_form_id": 478,
+      "source_digest": "0x97d575f7b14405de",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FMINP_asisdpair_only_SD",
+      "row_index": 199,
+      "semantic_form_id": 479,
+      "source_digest": "0x82de85dfb92fb794",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMINV_asimdall_only_H",
+      "row_index": 200,
+      "semantic_form_id": 480,
+      "source_digest": "0xde29ff8b23c707f9",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMINV_asimdall_only_SD",
+      "row_index": 201,
+      "semantic_form_id": 481,
+      "source_digest": "0x9c8ee383cb4fa15",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FMIN_asimdsame_only",
+      "row_index": 202,
+      "semantic_form_id": 485,
+      "source_digest": "0x4056d40a70119de7",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMIN_asimdsamefp16_only",
+      "row_index": 203,
+      "semantic_form_id": 486,
+      "source_digest": "0x302b657ec3312835",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMLAL2_asimdsame_F",
+      "row_index": 204,
+      "semantic_form_id": 488,
+      "source_digest": "0x7cd436e3f3d6fb58",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMLAL_asimdsame_F",
+      "row_index": 205,
+      "semantic_form_id": 490,
+      "source_digest": "0x424770611f6d4571",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMLA_asimdsame_only",
+      "row_index": 206,
+      "semantic_form_id": 493,
+      "source_digest": "0x30d357ec711cb60",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMLA_asimdsamefp16_only",
+      "row_index": 207,
+      "semantic_form_id": 494,
+      "source_digest": "0x7508cce16fcae6ee",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMLSL2_asimdsame_F",
+      "row_index": 208,
+      "semantic_form_id": 498,
+      "source_digest": "0x3a930821d594548d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMLSL_asimdsame_F",
+      "row_index": 209,
+      "semantic_form_id": 500,
+      "source_digest": "0x7c64660496445a9d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMLS_asimdsame_only",
+      "row_index": 210,
+      "semantic_form_id": 503,
+      "source_digest": "0x6e7257ac7fc0f865",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMLS_asimdsamefp16_only",
+      "row_index": 211,
+      "semantic_form_id": 504,
+      "source_digest": "0xc58e155ad85cea11",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMULX_asimdsame_only",
+      "row_index": 212,
+      "semantic_form_id": 531,
+      "source_digest": "0xe14549b23ddf379a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMULX_asimdsamefp16_only",
+      "row_index": 213,
+      "semantic_form_id": 532,
+      "source_digest": "0x60d5d68fc850b2b6",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMULX_asisdsame_only",
+      "row_index": 214,
+      "semantic_form_id": 535,
+      "source_digest": "0x895575d4b935c180",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMULX_asisdsamefp16_only",
+      "row_index": 215,
+      "semantic_form_id": 536,
+      "source_digest": "0x7ff0b8514e7d3c1f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FMUL_asimdsame_only",
+      "row_index": 216,
+      "semantic_form_id": 542,
+      "source_digest": "0x25d9ffffdd7ad3f9",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FMUL_asimdsamefp16_only",
+      "row_index": 217,
+      "semantic_form_id": 543,
+      "source_digest": "0xf4732ebe28fd191a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FNEG_asimdmisc_R",
+      "row_index": 218,
+      "semantic_form_id": 549,
+      "source_digest": "0x7c47809c17721785",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FNEG_asimdmiscfp16_R",
+      "row_index": 219,
+      "semantic_form_id": 550,
+      "source_digest": "0x70d53a80b294b29d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRECPE_asimdmisc_R",
+      "row_index": 220,
+      "semantic_form_id": 560,
+      "source_digest": "0x8b1d46d53534e1fe",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRECPE_asimdmiscfp16_R",
+      "row_index": 221,
+      "semantic_form_id": 561,
+      "source_digest": "0x366d8fabc5069f22",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRECPE_asisdmisc_R",
+      "row_index": 222,
+      "semantic_form_id": 562,
+      "source_digest": "0x374ec904f3062ae6",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRECPE_asisdmiscfp16_R",
+      "row_index": 223,
+      "semantic_form_id": 563,
+      "source_digest": "0xffc3781afb276d9c",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FRECPS_asimdsame_only",
+      "row_index": 224,
+      "semantic_form_id": 564,
+      "source_digest": "0x1cb2a8b2ae0d2f70",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRECPS_asimdsamefp16_only",
+      "row_index": 225,
+      "semantic_form_id": 565,
+      "source_digest": "0x3110ab89b094849e",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRECPS_asisdsame_only",
+      "row_index": 226,
+      "semantic_form_id": 566,
+      "source_digest": "0xb1e49304d1f0d40e",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRECPS_asisdsamefp16_only",
+      "row_index": 227,
+      "semantic_form_id": 567,
+      "source_digest": "0x170d5536e6987b00",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FRECPX_asisdmisc_R",
+      "row_index": 228,
+      "semantic_form_id": 568,
+      "source_digest": "0x8562c49063307536",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRECPX_asisdmiscfp16_R",
+      "row_index": 229,
+      "semantic_form_id": 569,
+      "source_digest": "0x342fb1bb0ad35c21",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FRINT32X_asimdmisc_R",
+      "row_index": 230,
+      "semantic_form_id": 572,
+      "source_digest": "0x418e0ab118cb28ba",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINT32Z_asimdmisc_R",
+      "row_index": 231,
+      "semantic_form_id": 575,
+      "source_digest": "0x8dede1d564313c59",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINT64X_asimdmisc_R",
+      "row_index": 232,
+      "semantic_form_id": 578,
+      "source_digest": "0x956ff9b673405173",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINT64Z_asimdmisc_R",
+      "row_index": 233,
+      "semantic_form_id": 581,
+      "source_digest": "0x89795480cfdf8cbf",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINTA_asimdmisc_R",
+      "row_index": 234,
+      "semantic_form_id": 585,
+      "source_digest": "0xd48a38e1f599a8ee",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINTA_asimdmiscfp16_R",
+      "row_index": 235,
+      "semantic_form_id": 586,
+      "source_digest": "0x998c3ba836d019ad",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINTI_asimdmisc_R",
+      "row_index": 236,
+      "semantic_form_id": 590,
+      "source_digest": "0xe5f3251e48a70096",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINTI_asimdmiscfp16_R",
+      "row_index": 237,
+      "semantic_form_id": 591,
+      "source_digest": "0x5cd7cb8b6a8bc14f",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINTM_asimdmisc_R",
+      "row_index": 238,
+      "semantic_form_id": 595,
+      "source_digest": "0x3bf81ea4d008a284",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINTM_asimdmiscfp16_R",
+      "row_index": 239,
+      "semantic_form_id": 596,
+      "source_digest": "0x71761da42f61fc7d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINTN_asimdmisc_R",
+      "row_index": 240,
+      "semantic_form_id": 600,
+      "source_digest": "0x40032043f93745e1",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINTN_asimdmiscfp16_R",
+      "row_index": 241,
+      "semantic_form_id": 601,
+      "source_digest": "0x8400e2d2506998f3",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINTP_asimdmisc_R",
+      "row_index": 242,
+      "semantic_form_id": 605,
+      "source_digest": "0x28f5938a3a2d53bc",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINTP_asimdmiscfp16_R",
+      "row_index": 243,
+      "semantic_form_id": 606,
+      "source_digest": "0x6a3f308b38e353fd",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINTX_asimdmisc_R",
+      "row_index": 244,
+      "semantic_form_id": 610,
+      "source_digest": "0x9f66931cf6d997e6",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINTX_asimdmiscfp16_R",
+      "row_index": 245,
+      "semantic_form_id": 611,
+      "source_digest": "0x11f79f67515d515e",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINTZ_asimdmisc_R",
+      "row_index": 246,
+      "semantic_form_id": 615,
+      "source_digest": "0x6a39a1e2e0ce2ac",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRINTZ_asimdmiscfp16_R",
+      "row_index": 247,
+      "semantic_form_id": 616,
+      "source_digest": "0x18e04695e73b015b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRSQRTE_asimdmisc_R",
+      "row_index": 248,
+      "semantic_form_id": 617,
+      "source_digest": "0x7d706c36b4a336c5",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRSQRTE_asimdmiscfp16_R",
+      "row_index": 249,
+      "semantic_form_id": 618,
+      "source_digest": "0xd187ef754b422465",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRSQRTE_asisdmisc_R",
+      "row_index": 250,
+      "semantic_form_id": 619,
+      "source_digest": "0xa8946616cf3a7d68",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRSQRTE_asisdmiscfp16_R",
+      "row_index": 251,
+      "semantic_form_id": 620,
+      "source_digest": "0x1c1e583fb0130ded",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FRSQRTS_asimdsame_only",
+      "row_index": 252,
+      "semantic_form_id": 621,
+      "source_digest": "0x13b28e427f1a5244",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRSQRTS_asimdsamefp16_only",
+      "row_index": 253,
+      "semantic_form_id": 622,
+      "source_digest": "0x516f45fa0fa4ea2e",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRSQRTS_asisdsame_only",
+      "row_index": 254,
+      "semantic_form_id": 623,
+      "source_digest": "0x992ba276d9a1e1c1",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FRSQRTS_asisdsamefp16_only",
+      "row_index": 255,
+      "semantic_form_id": 624,
+      "source_digest": "0xe3de087e1013a456",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:FSQRT_asimdmisc_R",
+      "row_index": 256,
+      "semantic_form_id": 628,
+      "source_digest": "0x18e5419a44ba4bc6",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FSQRT_asimdmiscfp16_R",
+      "row_index": 257,
+      "semantic_form_id": 629,
+      "source_digest": "0xcf0fa69ade73f29b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FSUB_asimdsame_only",
+      "row_index": 258,
+      "semantic_form_id": 633,
+      "source_digest": "0x9ac4a4e9274ed9d4",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:FSUB_asimdsamefp16_only",
+      "row_index": 259,
+      "semantic_form_id": 634,
+      "source_digest": "0x113061a7dd458da8",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:MLA_asimdsame_only",
+      "row_index": 260,
+      "semantic_form_id": 1015,
+      "source_digest": "0xbd3bad278da7cdcb",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:MLS_asimdsame_only",
+      "row_index": 261,
+      "semantic_form_id": 1017,
+      "source_digest": "0xfb9748a5a5710377",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:MUL_asimdsame_only",
+      "row_index": 262,
+      "semantic_form_id": 1056,
+      "source_digest": "0xa2bd52b89d3535ba",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:NEG_asimdmisc_R",
+      "row_index": 263,
+      "semantic_form_id": 1067,
+      "source_digest": "0x2ecfb0df2a6f90aa",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:NEG_asisdmisc_R",
+      "row_index": 264,
+      "semantic_form_id": 1068,
+      "source_digest": "0x6f2db5cd0e80e8df",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:NOT_asimdmisc_R",
+      "row_index": 265,
+      "semantic_form_id": 1074,
+      "source_digest": "0xb4fad81197ef56dd",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:ORN_asimdsame_only",
+      "row_index": 266,
+      "semantic_form_id": 1077,
+      "source_digest": "0xfb87dd553345428c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:ORR_asimdsame_only",
+      "row_index": 267,
+      "semantic_form_id": 1084,
+      "source_digest": "0xc6e29afad4e09fb3",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:PMUL_asimdsame_only",
+      "row_index": 268,
+      "semantic_form_id": 1101,
+      "source_digest": "0x56afa97474589285",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:RAX1_VVV2_cryptosha512_3",
+      "row_index": 269,
+      "semantic_form_id": 1108,
+      "source_digest": "0xd81c13f95e34182a",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:RBIT_asimdmisc_R",
+      "row_index": 270,
+      "semantic_form_id": 1111,
+      "source_digest": "0x15375b291dd8409f",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:REV16_asimdmisc_R",
+      "row_index": 271,
+      "semantic_form_id": 1117,
+      "source_digest": "0x85e55f83cf9406e7",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:REV32_asimdmisc_R",
+      "row_index": 272,
+      "semantic_form_id": 1119,
+      "source_digest": "0x6be39e0e8b2edb2c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:REV64_asimdmisc_R",
+      "row_index": 273,
+      "semantic_form_id": 1121,
+      "source_digest": "0x6c9ec232f3f8bb00",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SABA_asimdsame_only",
+      "row_index": 274,
+      "semantic_form_id": 1134,
+      "source_digest": "0x255a60ff7d6455c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SABD_asimdsame_only",
+      "row_index": 275,
+      "semantic_form_id": 1136,
+      "source_digest": "0x2a073ca005a3dba8",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SADALP_asimdmisc_P",
+      "row_index": 276,
+      "semantic_form_id": 1137,
+      "source_digest": "0xce7ba83208138d21",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SADDLP_asimdmisc_P",
+      "row_index": 277,
+      "semantic_form_id": 1138,
+      "source_digest": "0x7a84faace4a630d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SADDLV_asimdall_only",
+      "row_index": 278,
+      "semantic_form_id": 1139,
+      "source_digest": "0xd46ae4672b69f63b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SCVTF_asimdmisc_R",
+      "row_index": 279,
+      "semantic_form_id": 1165,
+      "source_digest": "0x8a77ea4691e7f089",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SCVTF_asimdmiscfp16_R",
+      "row_index": 280,
+      "semantic_form_id": 1166,
+      "source_digest": "0x64b916004f70de18",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SCVTF_asisdmisc_R",
+      "row_index": 281,
+      "semantic_form_id": 1168,
+      "source_digest": "0x8fbf3a3a185ff928",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SCVTF_asisdmiscfp16_R",
+      "row_index": 282,
+      "semantic_form_id": 1169,
+      "source_digest": "0x6d3cba1f48df4b78",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SDOT_asimdsame2_D",
+      "row_index": 283,
+      "semantic_form_id": 1174,
+      "source_digest": "0x1aab66d054562284",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SHA1C_QSV_cryptosha3",
+      "row_index": 284,
+      "semantic_form_id": 1179,
+      "source_digest": "0xc8bf61c1fbc4c68b",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SHA1H_SS_cryptosha2",
+      "row_index": 285,
+      "semantic_form_id": 1180,
+      "source_digest": "0x527117bcf01c589e",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SHA1M_QSV_cryptosha3",
+      "row_index": 286,
+      "semantic_form_id": 1181,
+      "source_digest": "0xfe21fb23ee0af9be",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SHA1P_QSV_cryptosha3",
+      "row_index": 287,
+      "semantic_form_id": 1182,
+      "source_digest": "0x6df8cac602cb80f6",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SHA1SU0_VVV_cryptosha3",
+      "row_index": 288,
+      "semantic_form_id": 1183,
+      "source_digest": "0xe03e17b03ab0e566",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SHA1SU1_VV_cryptosha2",
+      "row_index": 289,
+      "semantic_form_id": 1184,
+      "source_digest": "0x91788958671acea8",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SHA256H2_QQV_cryptosha3",
+      "row_index": 290,
+      "semantic_form_id": 1185,
+      "source_digest": "0x470540cee6a27190",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SHA256H_QQV_cryptosha3",
+      "row_index": 291,
+      "semantic_form_id": 1186,
+      "source_digest": "0x4d874cec7b60b7a5",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SHA256SU0_VV_cryptosha2",
+      "row_index": 292,
+      "semantic_form_id": 1187,
+      "source_digest": "0x24d8b3ad23b8860c",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SHA256SU1_VVV_cryptosha3",
+      "row_index": 293,
+      "semantic_form_id": 1188,
+      "source_digest": "0xd1c2681e9bf85abd",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SHA512H2_QQV_cryptosha512_3",
+      "row_index": 294,
+      "semantic_form_id": 1189,
+      "source_digest": "0xe2ea4e3019bc6fa6",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SHA512H_QQV_cryptosha512_3",
+      "row_index": 295,
+      "semantic_form_id": 1190,
+      "source_digest": "0xb2b7deeed318433f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SHA512SU0_VV2_cryptosha512_2",
+      "row_index": 296,
+      "semantic_form_id": 1191,
+      "source_digest": "0xe6d957574d81e0ab",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SHA512SU1_VVV2_cryptosha512_3",
+      "row_index": 297,
+      "semantic_form_id": 1192,
+      "source_digest": "0xf5ea9d105f875216",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SHADD_asimdsame_only",
+      "row_index": 298,
+      "semantic_form_id": 1193,
+      "source_digest": "0x56a53606b665014e",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SHSUB_asimdsame_only",
+      "row_index": 299,
+      "semantic_form_id": 1198,
+      "source_digest": "0x39c9b1410b025abb",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SMAXP_asimdsame_only",
+      "row_index": 300,
+      "semantic_form_id": 1202,
+      "source_digest": "0x96a7284d46141654",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SMAXV_asimdall_only",
+      "row_index": 301,
+      "semantic_form_id": 1203,
+      "source_digest": "0xcd22f3f3d228016c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SMAX_asimdsame_only",
+      "row_index": 302,
+      "semantic_form_id": 1204,
+      "source_digest": "0xcf65af24d13a372d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SMINP_asimdsame_only",
+      "row_index": 303,
+      "semantic_form_id": 1206,
+      "source_digest": "0xee0b782bb1ced160",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SMINV_asimdall_only",
+      "row_index": 304,
+      "semantic_form_id": 1207,
+      "source_digest": "0x2364eda2023802a2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SMIN_asimdsame_only",
+      "row_index": 305,
+      "semantic_form_id": 1208,
+      "source_digest": "0xffbd05abeecb35f",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQABS_asimdmisc_R",
+      "row_index": 306,
+      "semantic_form_id": 1221,
+      "source_digest": "0x1e0368865d6eb3a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQABS_asisdmisc_R",
+      "row_index": 307,
+      "semantic_form_id": 1222,
+      "source_digest": "0x660ca7bdaac17cb2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQADD_asimdsame_only",
+      "row_index": 308,
+      "semantic_form_id": 1223,
+      "source_digest": "0x29c051de1594276",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQADD_asisdsame_only",
+      "row_index": 309,
+      "semantic_form_id": 1224,
+      "source_digest": "0x1a9c9e4a34277770",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQDMLAL_asisddiff_only",
+      "row_index": 310,
+      "semantic_form_id": 1227,
+      "source_digest": "0xa880474b2d693e03",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQDMLSL_asisddiff_only",
+      "row_index": 311,
+      "semantic_form_id": 1231,
+      "source_digest": "0xf39ad3663eebb936",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQDMULH_asimdsame_only",
+      "row_index": 312,
+      "semantic_form_id": 1234,
+      "source_digest": "0x346d5eefb9e601d8",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQDMULH_asisdsame_only",
+      "row_index": 313,
+      "semantic_form_id": 1236,
+      "source_digest": "0x1efd908db4f500ed",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQDMULL_asisddiff_only",
+      "row_index": 314,
+      "semantic_form_id": 1239,
+      "source_digest": "0x5eaf349cfe4c58fa",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQNEG_asimdmisc_R",
+      "row_index": 315,
+      "semantic_form_id": 1241,
+      "source_digest": "0x4e67ba58c5625519",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQNEG_asisdmisc_R",
+      "row_index": 316,
+      "semantic_form_id": 1242,
+      "source_digest": "0x9bf194cfa4c92757",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQRDMLAH_asimdsame2_only",
+      "row_index": 317,
+      "semantic_form_id": 1244,
+      "source_digest": "0x3557225a108dda38",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQRDMLAH_asisdsame2_only",
+      "row_index": 318,
+      "semantic_form_id": 1246,
+      "source_digest": "0x26cc7e6837d3c6f",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQRDMLSH_asimdsame2_only",
+      "row_index": 319,
+      "semantic_form_id": 1248,
+      "source_digest": "0x3b0c5137f14528a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQRDMLSH_asisdsame2_only",
+      "row_index": 320,
+      "semantic_form_id": 1250,
+      "source_digest": "0x8f3f8e995448cec5",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQRDMULH_asimdsame_only",
+      "row_index": 321,
+      "semantic_form_id": 1252,
+      "source_digest": "0x19232e7906dcef5c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQRDMULH_asisdsame_only",
+      "row_index": 322,
+      "semantic_form_id": 1254,
+      "source_digest": "0x9f8fd10fed120f41",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQRSHL_asimdsame_only",
+      "row_index": 323,
+      "semantic_form_id": 1255,
+      "source_digest": "0x47afcf98abce1c03",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQRSHL_asisdsame_only",
+      "row_index": 324,
+      "semantic_form_id": 1256,
+      "source_digest": "0x750b011252e13008",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQSHL_asimdsame_only",
+      "row_index": 325,
+      "semantic_form_id": 1263,
+      "source_digest": "0x45c2d983039f5b3d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQSHL_asisdsame_only",
+      "row_index": 326,
+      "semantic_form_id": 1265,
+      "source_digest": "0x5516341c51784243",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQSUB_asimdsame_only",
+      "row_index": 327,
+      "semantic_form_id": 1271,
+      "source_digest": "0x2380f016e7cfa4b6",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQSUB_asisdsame_only",
+      "row_index": 328,
+      "semantic_form_id": 1272,
+      "source_digest": "0xc6f9093527fd096b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQXTN_asisdmisc_N",
+      "row_index": 329,
+      "semantic_form_id": 1274,
+      "source_digest": "0xaba6357972b5fd03",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SQXTUN_asisdmisc_N",
+      "row_index": 330,
+      "semantic_form_id": 1276,
+      "source_digest": "0x947ecbd12b6c0cf8",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SRHADD_asimdsame_only",
+      "row_index": 331,
+      "semantic_form_id": 1277,
+      "source_digest": "0xb30bf50e9939be60",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SRSHL_asimdsame_only",
+      "row_index": 332,
+      "semantic_form_id": 1280,
+      "source_digest": "0x786f9a5f46bfbded",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SRSHL_asisdsame_only",
+      "row_index": 333,
+      "semantic_form_id": 1281,
+      "source_digest": "0xa6d21f66dfad9d87",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SSHL_asimdsame_only",
+      "row_index": 334,
+      "semantic_form_id": 1288,
+      "source_digest": "0x1357836e8376cb69",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SSHL_asisdsame_only",
+      "row_index": 335,
+      "semantic_form_id": 1289,
+      "source_digest": "0x45fc861e6aaa921f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SUB_asimdsame_only",
+      "row_index": 336,
+      "semantic_form_id": 1537,
+      "source_digest": "0x9353fa8f698b9abb",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SUB_asisdsame_only",
+      "row_index": 337,
+      "semantic_form_id": 1538,
+      "source_digest": "0x5d1dde1d88b9da52",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:SUQADD_asimdmisc_R",
+      "row_index": 338,
+      "semantic_form_id": 1539,
+      "source_digest": "0x84b681f778c42b07",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:SUQADD_asisdmisc_R",
+      "row_index": 339,
+      "semantic_form_id": 1540,
+      "source_digest": "0x7e96fdf6e945102a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:TBL_asimdtbl_L1_1",
+      "row_index": 340,
+      "semantic_form_id": 1566,
+      "source_digest": "0x7217285bada5df77",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:TBL_asimdtbl_L2_2",
+      "row_index": 341,
+      "semantic_form_id": 1567,
+      "source_digest": "0xb78a5bd0b06eeb02",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:TBL_asimdtbl_L3_3",
+      "row_index": 342,
+      "semantic_form_id": 1568,
+      "source_digest": "0x1d93f8d9ed2b6dd8",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:TBL_asimdtbl_L4_4",
+      "row_index": 343,
+      "semantic_form_id": 1569,
+      "source_digest": "0xf24e509b0a9d450",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:TBX_asimdtbl_L1_1",
+      "row_index": 344,
+      "semantic_form_id": 1571,
+      "source_digest": "0x804d68c24266e3c4",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:TBX_asimdtbl_L2_2",
+      "row_index": 345,
+      "semantic_form_id": 1572,
+      "source_digest": "0xe298fbaad2ea6fd7",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:TBX_asimdtbl_L3_3",
+      "row_index": 346,
+      "semantic_form_id": 1573,
+      "source_digest": "0x9f7c68cc37209c0f",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:TBX_asimdtbl_L4_4",
+      "row_index": 347,
+      "semantic_form_id": 1574,
+      "source_digest": "0x2050b49463e72e5a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:TRN1_asimdperm_only",
+      "row_index": 348,
+      "semantic_form_id": 1577,
+      "source_digest": "0xfdcca525def047b1",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:TRN2_asimdperm_only",
+      "row_index": 349,
+      "semantic_form_id": 1578,
+      "source_digest": "0xca6a439cf2f40ac5",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UABA_asimdsame_only",
+      "row_index": 350,
+      "semantic_form_id": 1585,
+      "source_digest": "0xf0cb82f41d6dc1e1",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UABD_asimdsame_only",
+      "row_index": 351,
+      "semantic_form_id": 1587,
+      "source_digest": "0x9ea80ca1d9ca4225",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UADALP_asimdmisc_P",
+      "row_index": 352,
+      "semantic_form_id": 1588,
+      "source_digest": "0x40d028b170dad417",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UADDLP_asimdmisc_P",
+      "row_index": 353,
+      "semantic_form_id": 1589,
+      "source_digest": "0xc0aeb2fe0e2bccfc",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UADDLV_asimdall_only",
+      "row_index": 354,
+      "semantic_form_id": 1590,
+      "source_digest": "0xc96fa72535596354",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UCVTF_asimdmisc_R",
+      "row_index": 355,
+      "semantic_form_id": 1611,
+      "source_digest": "0xa058985515bdf85f",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UCVTF_asimdmiscfp16_R",
+      "row_index": 356,
+      "semantic_form_id": 1612,
+      "source_digest": "0x936bee54d99e33c6",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UCVTF_asisdmisc_R",
+      "row_index": 357,
+      "semantic_form_id": 1614,
+      "source_digest": "0x8a8e6b7c5213fb44",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UCVTF_asisdmiscfp16_R",
+      "row_index": 358,
+      "semantic_form_id": 1615,
+      "source_digest": "0xfa9f851b4423665f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:UDOT_asimdsame2_D",
+      "row_index": 359,
+      "semantic_form_id": 1621,
+      "source_digest": "0xd40495bc9d9aacdf",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UHADD_asimdsame_only",
+      "row_index": 360,
+      "semantic_form_id": 1622,
+      "source_digest": "0x89b06ba4427f41f8",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UHSUB_asimdsame_only",
+      "row_index": 361,
+      "semantic_form_id": 1623,
+      "source_digest": "0xeb24f4f933a10649",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UMAXP_asimdsame_only",
+      "row_index": 362,
+      "semantic_form_id": 1625,
+      "source_digest": "0x88396959a1584569",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UMAXV_asimdall_only",
+      "row_index": 363,
+      "semantic_form_id": 1626,
+      "source_digest": "0xf4d19c38ba513cd6",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UMAX_asimdsame_only",
+      "row_index": 364,
+      "semantic_form_id": 1627,
+      "source_digest": "0x5d011a59ed0fcda6",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UMINP_asimdsame_only",
+      "row_index": 365,
+      "semantic_form_id": 1628,
+      "source_digest": "0x7d288f64c26fc2e9",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UMINV_asimdall_only",
+      "row_index": 366,
+      "semantic_form_id": 1629,
+      "source_digest": "0xf3ad2c5933a3eee9",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UMIN_asimdsame_only",
+      "row_index": 367,
+      "semantic_form_id": 1630,
+      "source_digest": "0x5d3c83c451dba6ec",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UQADD_asimdsame_only",
+      "row_index": 368,
+      "semantic_form_id": 1643,
+      "source_digest": "0x96647d47d1a1270f",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UQADD_asisdsame_only",
+      "row_index": 369,
+      "semantic_form_id": 1644,
+      "source_digest": "0xad945432490cc5ce",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UQRSHL_asimdsame_only",
+      "row_index": 370,
+      "semantic_form_id": 1645,
+      "source_digest": "0x8a4d6a781a47059e",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UQRSHL_asisdsame_only",
+      "row_index": 371,
+      "semantic_form_id": 1646,
+      "source_digest": "0x2ccfbaab1d5abafe",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UQSHL_asimdsame_only",
+      "row_index": 372,
+      "semantic_form_id": 1649,
+      "source_digest": "0x95df4b1ce0427959",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UQSHL_asisdsame_only",
+      "row_index": 373,
+      "semantic_form_id": 1651,
+      "source_digest": "0x72614e0c7f4a79c1",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UQSUB_asimdsame_only",
+      "row_index": 374,
+      "semantic_form_id": 1655,
+      "source_digest": "0xbbc800b133a7127e",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UQSUB_asisdsame_only",
+      "row_index": 375,
+      "semantic_form_id": 1656,
+      "source_digest": "0xe3c397989fe6f97",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UQXTN_asisdmisc_N",
+      "row_index": 376,
+      "semantic_form_id": 1658,
+      "source_digest": "0xe02de395147ccab2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:URECPE_asimdmisc_R",
+      "row_index": 377,
+      "semantic_form_id": 1659,
+      "source_digest": "0xc780556f4e2be721",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:URHADD_asimdsame_only",
+      "row_index": 378,
+      "semantic_form_id": 1660,
+      "source_digest": "0xd1292fa78044db86",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:URSHL_asimdsame_only",
+      "row_index": 379,
+      "semantic_form_id": 1661,
+      "source_digest": "0x639d8d3a8e981983",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:URSHL_asisdsame_only",
+      "row_index": 380,
+      "semantic_form_id": 1662,
+      "source_digest": "0xdb7da3f6ffe90b86",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:URSQRTE_asimdmisc_R",
+      "row_index": 381,
+      "semantic_form_id": 1665,
+      "source_digest": "0x96a3cec81c08ba35",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:USHL_asimdsame_only",
+      "row_index": 382,
+      "semantic_form_id": 1669,
+      "source_digest": "0x679d133d69c5b677",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:USHL_asisdsame_only",
+      "row_index": 383,
+      "semantic_form_id": 1670,
+      "source_digest": "0x21a8b95b0103cf0e",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "id": "arm-a64@2026-06:USQADD_asimdmisc_R",
+      "row_index": 384,
+      "semantic_form_id": 1673,
+      "source_digest": "0x89f1219b62f3c332",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:USQADD_asisdmisc_R",
+      "row_index": 385,
+      "semantic_form_id": 1674,
+      "source_digest": "0xb5cc5f5476fff9cb",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UZP1_asimdperm_only",
+      "row_index": 386,
+      "semantic_form_id": 1682,
+      "source_digest": "0xe5927756c402582",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:UZP2_asimdperm_only",
+      "row_index": 387,
+      "semantic_form_id": 1683,
+      "source_digest": "0x2bebf3b6290a4e95",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:ZIP1_asimdperm_only",
+      "row_index": 388,
+      "semantic_form_id": 1693,
+      "source_digest": "0x7afbf184fc26aab8",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "id": "arm-a64@2026-06:ZIP2_asimdperm_only",
+      "row_index": 389,
+      "semantic_form_id": 1694,
+      "source_digest": "0xda9df4e645b716cd",
+      "status": "executable",
+      "transform_bearing": true
+    }
+  ],
+  "schema_version": 1,
+  "target": "apple-m1",
+  "transform_row_count": 263
+}
