@@ -249,6 +249,8 @@ BUSTER_F_DECL bool buster_aarch64_syntax_validate(void);
 /* Transactional syntax matcher and display/concrete printers.  All traversal
  * uses bounded caller-independent work stacks; no user code is dispatched.
  * The matcher captures wildcard spans and records branch/optional choices.
+ * Adjacent SIMD prefix/index anchors compose vector arrangements into the
+ * index capture while retaining scalar register spellings.
  * Concrete capture records must retain their matched node index and
  * occurrence; malformed, duplicate, missing, or out-of-range records fail
  * before output is committed.

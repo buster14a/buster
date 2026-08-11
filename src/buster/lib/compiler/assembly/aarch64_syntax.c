@@ -747,6 +747,55 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_anchor_end(BusterAarch64Syn
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_anchor_is_vector_composite(BusterAarch64SyntaxMatchMachine* machine,
+                                                                                  u32 node_index, u64 start,
+                                                                                  BusterAarch64SyntaxNode node,
+                                                                                  bool* vector_prefix)
+{
+    /* Some Arm SIMD rows decompose an arranged register into adjacent
+     * prefix/index anchors (for example <V><d>).  A scalar prefix (s0/h0)
+     * remains an ordinary adjacent pair; only a vector prefix (v0.4s) owns
+     * the arrangement suffix on its index capture. */
+    if (!machine || !vector_prefix || machine->capture_count == 0 || node.kind != BUSTER_AARCH64_SYNTAX_ANCHOR ||
+        node.text.length != 1 || (node.text.pointer[0] != 'd' && node.text.pointer[0] != 'n' && node.text.pointer[0] != 'm'))
+        return false;
+    BusterAarch64SyntaxCapture previous_capture = machine->captures[machine->capture_count - 1];
+    BusterAarch64SyntaxNode previous_node = {0};
+    if (!buster_aarch64_syntax_node(previous_capture.node_index, &previous_node) ||
+        previous_node.kind != BUSTER_AARCH64_SYNTAX_ANCHOR || previous_node.text.length < 1 || previous_node.text.pointer[0] != 'V' ||
+        !previous_capture.spelling.pointer || previous_capture.spelling.pointer + previous_capture.spelling.length !=
+                                                      machine->input.pointer + start)
+        return false;
+    *vector_prefix = previous_capture.spelling.length == 1 &&
+                     buster_aarch64_syntax_ascii_fold((u8)previous_capture.spelling.pointer[0]) == 'V';
+    BUSTER_UNUSED(node_index);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_anchor_vector_suffix(BusterAarch64SyntaxMatchMachine* machine, u64 start,
+                                                                            u64 base_end, u64* end)
+{
+    if (!machine || !end || !machine->input.pointer || base_end >= machine->input.length ||
+        machine->input.pointer[base_end] != '.')
+        return false;
+    u64 cursor = base_end + 1;
+    bool alphanumeric = false;
+    while (cursor < machine->input.length)
+    {
+        char8 character = machine->input.pointer[cursor];
+        if (character == ' ' || character == '\t' || character == ',' || character == '[' || character == ']' ||
+            character == '{' || character == '}' || character == '(' || character == ')' || character == '|' ||
+            character == '!' || character == '.')
+            break;
+        alphanumeric |= (character >= '0' && character <= '9') || (character >= 'a' && character <= 'z') ||
+                        (character >= 'A' && character <= 'Z');
+        cursor += 1;
+    }
+    if (cursor == base_end + 1 || !alphanumeric || cursor <= start) return false;
+    *end = cursor;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_anchor(BusterAarch64SyntaxMatchMachine* machine, u32 node_index,
                                                               BusterAarch64SyntaxNode node)
 {
@@ -755,6 +804,15 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_anchor(BusterAarch64SyntaxM
     u64 end = 0;
     bool splittable = false;
     if (!buster_aarch64_syntax_match_anchor_end(machine, start, &end, &splittable)) return false;
+    bool vector_composite = false;
+    bool vector_prefix = false;
+    vector_composite = buster_aarch64_syntax_match_anchor_is_vector_composite(machine, node_index, start, node, &vector_prefix);
+    if (vector_composite && vector_prefix)
+    {
+        u64 suffix_end = 0;
+        if (!buster_aarch64_syntax_match_anchor_vector_suffix(machine, start, end, &suffix_end)) return false;
+        end = suffix_end;
+    }
     if (splittable && end > start + 1)
     {
         if (machine->backtrack_count >= BUSTER_AARCH64_SYNTAX_GENERATED_MAX_BACKTRACK_FRAMES) return false;

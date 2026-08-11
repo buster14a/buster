@@ -281,12 +281,74 @@ UnitTestResult aarch64_syntax_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("SQDMLAL <Va><d>, <Vb><n>, <Vb><m>"), &sqdmlal_adjacent_row));
     BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("DUP <Vd>.<T>, <R><n>"), &dup_adjacent_row));
     BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("TBNZ <R><t>, #<imm>, <label>"), &tbnz_adjacent_row));
-    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(addv_adjacent_row, S8("ADDV v0, v1.4s")));
-    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(fabd_adjacent_row, S8("FABD v0, v1, v2")));
-    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(sqrshrn_adjacent_row, S8("SQRSHRN v0, v1, #0")));
-    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(sqdmlal_adjacent_row, S8("SQDMLAL v0, v1, v2")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(addv_adjacent_row, S8("ADDV h0, v1.8h")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(fabd_adjacent_row, S8("FABD s0, s1, s2")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(sqrshrn_adjacent_row,
+                                                                          S8("SQRSHRN v0.4h, v1.4s, #0")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(sqdmlal_adjacent_row,
+                                                                          S8("SQDMLAL v0.4s, v1.4h, v2.4h")));
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(addv_adjacent_row, S8("ADDV v0, v1.4s"), 0));
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(fabd_adjacent_row, S8("FABD v0, v1, v2"), 0));
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(sqrshrn_adjacent_row, S8("SQRSHRN v0, v1, #0"), 0));
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(sqdmlal_adjacent_row, S8("SQDMLAL v0, v1, v2"), 0));
     BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(dup_adjacent_row, S8("DUP v0.4s, x1")));
     BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(tbnz_adjacent_row, S8("TBNZ x0, #0, label")));
+
+    u32 sqrdmlah_elem_row = 0;
+    u32 sqrdmlah_same_row = 0;
+    u32 sqrdmlsh_elem_row = 0;
+    u32 sqrdmlsh_same_row = 0;
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(
+                             S8("SQRDMLAH <V><d>, <V><n>, V<m>.<Ts>[<index>]"), &sqrdmlah_elem_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("SQRDMLAH <V><d>, <V><n>, <V><m>"), &sqrdmlah_same_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(
+                             S8("SQRDMLSH <V><d>, <V><n>, V<m>.<Ts>[<index>]"), &sqrdmlsh_elem_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("SQRDMLSH <V><d>, <V><n>, <V><m>"), &sqrdmlsh_same_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(
+                             sqrdmlah_elem_row, S8("SQRDMLAH v0.4s, v1.4s, V2.s[0]")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(
+                             sqrdmlah_elem_row, S8("SQRDMLAH v31.8h, v30.8h, V29.h[0]")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(
+                             sqrdmlah_same_row, S8("SQRDMLAH v0.4s, v1.4s, v2.4s")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(
+                             sqrdmlah_same_row, S8("SQRDMLAH v31.8h, v30.8h, v29.8h")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(
+                             sqrdmlsh_elem_row, S8("SQRDMLSH v0.4s, v1.4s, V2.s[0]")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(
+                             sqrdmlsh_elem_row, S8("SQRDMLSH v31.8h, v30.8h, V29.h[0]")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(
+                             sqrdmlsh_same_row, S8("SQRDMLSH v0.4s, v1.4s, v2.4s")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(
+                             sqrdmlsh_same_row, S8("SQRDMLSH v31.8h, v30.8h, v29.8h")));
+    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(
+                             sqrdmlah_elem_row, S8("SQRDMLAH v0.4s, v1.4s, v2.s[0]"), &direct_match));
+    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(
+                             sqrdmlah_same_row, S8("SQRDMLAH v0.8h, v1.8h, v2.8h"), &direct_match));
+    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(
+                             sqrdmlsh_elem_row, S8("SQRDMLSH v0.4s, v1.4s, v2.s[0]"), &direct_match));
+    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(
+                             sqrdmlsh_same_row, S8("SQRDMLSH v0.8h, v1.8h, v2.8h"), &direct_match));
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(sqrdmlah_elem_row, S8("SQRDMLAH v0, v1, v2.s[0]"), 0));
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(sqrdmlah_same_row, S8("SQRDMLAH v0, v1, v2"), 0));
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(sqrdmlsh_elem_row, S8("SQRDMLSH v0, v1, v2.s[0]"), 0));
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(sqrdmlsh_same_row, S8("SQRDMLSH v0, v1, v2"), 0));
+    BusterAarch64SyntaxCapture arranged_short_captures[6] = {{.spelling = S8("keep")}};
+    BusterAarch64SyntaxChoice arranged_short_choices[4] = {{.node_index = 97, .value = 101}};
+    BusterAarch64SyntaxMatchResult arranged_short_match = {
+        .captures = arranged_short_captures,
+        .capture_capacity = 5,
+        .capture_count = 3,
+        .choices = arranged_short_choices,
+        .choice_capacity = 4,
+        .choice_count = 1,
+        .consumed = 123,
+    };
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(sqrdmlah_same_row, S8("SQRDMLAH v0.4s, v1.4s, v2.4s"),
+                                                            &arranged_short_match) &&
+                             arranged_short_match.capture_count == 3 && arranged_short_match.choice_count == 1 &&
+                             arranged_short_match.consumed == 123 &&
+                             aarch64_syntax_test_string_equal(arranged_short_captures[0].spelling, S8("keep")) &&
+                             arranged_short_choices[0].node_index == 97 && arranged_short_choices[0].value == 101);
 
     BusterAarch64SyntaxCapture malformed_capture[10] = {0};
     BusterAarch64SyntaxChoice malformed_choice[4] = {0};
