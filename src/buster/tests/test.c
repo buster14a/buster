@@ -584,6 +584,12 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_failure_self_test(UnitTestAr
 BatchTestResult library_tests(UnitTestArguments* arguments)
 {
     BatchTestResult result = {0};
+    if (!arguments || !arguments->arena || !arguments->show)
+    {
+        result.unit_test_count = 1;
+        return result;
+    }
+
     // Some test modules intentionally leave a resident lane gang available
     // for later work on their selected context. Fill every compiler-global
     // read-only table before the first module can create those workers.
