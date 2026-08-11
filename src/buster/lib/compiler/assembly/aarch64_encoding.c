@@ -1185,6 +1185,62 @@ BUSTER_GLOBAL_LOCAL A64OpcodeDescriptor const a64_opcode_descriptors[A64_OPCODE_
             .pc_relative_operand = 1,
             .pc_relative_layout = A64_PC_RELATIVE_ADRP,
         },
+    [A64_OPCODE_ADR] =
+        {
+            .fixed_mask = UINT32_C(0x9f000000),
+            .fixed_value = UINT32_C(0x10000000),
+            .operand_count = 2,
+            .pc_relative_operand = 1,
+            .pc_relative_layout = A64_PC_RELATIVE_ADR,
+        },
+    [A64_OPCODE_CBZ_W] =
+        {
+            .fixed_mask = UINT32_C(0xff000000),
+            .fixed_value = UINT32_C(0x34000000),
+            .operand_count = 2,
+            .pc_relative_operand = 1,
+            .pc_relative_layout = A64_PC_RELATIVE_IMM19,
+        },
+    [A64_OPCODE_CBNZ_W] =
+        {
+            .fixed_mask = UINT32_C(0xff000000),
+            .fixed_value = UINT32_C(0x35000000),
+            .operand_count = 2,
+            .pc_relative_operand = 1,
+            .pc_relative_layout = A64_PC_RELATIVE_IMM19,
+        },
+    [A64_OPCODE_CBZ_X] =
+        {
+            .fixed_mask = UINT32_C(0xff000000),
+            .fixed_value = UINT32_C(0xb4000000),
+            .operand_count = 2,
+            .pc_relative_operand = 1,
+            .pc_relative_layout = A64_PC_RELATIVE_IMM19,
+        },
+    [A64_OPCODE_CBNZ_X] =
+        {
+            .fixed_mask = UINT32_C(0xff000000),
+            .fixed_value = UINT32_C(0xb5000000),
+            .operand_count = 2,
+            .pc_relative_operand = 1,
+            .pc_relative_layout = A64_PC_RELATIVE_IMM19,
+        },
+    [A64_OPCODE_TBZ] =
+        {
+            .fixed_mask = UINT32_C(0x7f000000),
+            .fixed_value = UINT32_C(0x36000000),
+            .operand_count = 3,
+            .pc_relative_operand = 2,
+            .pc_relative_layout = A64_PC_RELATIVE_IMM14,
+        },
+    [A64_OPCODE_TBNZ] =
+        {
+            .fixed_mask = UINT32_C(0x7f000000),
+            .fixed_value = UINT32_C(0x37000000),
+            .operand_count = 3,
+            .pc_relative_operand = 2,
+            .pc_relative_layout = A64_PC_RELATIVE_IMM14,
+        },
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(a64_opcode_descriptors) == A64_OPCODE_COUNT);
@@ -1195,7 +1251,42 @@ A64OpcodeDescriptor const* a64_opcode_descriptor(A64Opcode opcode)
     {
         return 0;
     }
-    return a64_opcode_descriptors + opcode;
+    A64OpcodeDescriptor const* descriptor = a64_opcode_descriptors + opcode;
+    // Keep malformed table rows inert.  The descriptor is the trust boundary
+    // for all three entry points below, so an invalid row must never be used
+    // to shift or mask caller-controlled values.
+    if (descriptor->fixed_value & ~descriptor->fixed_mask || descriptor->operand_count > A64_MC_MAX_OPERANDS)
+    {
+        return 0;
+    }
+    bool has_pc_relative_operand = descriptor->pc_relative_operand != A64_NO_PC_RELATIVE_OPERAND;
+    if (has_pc_relative_operand && descriptor->pc_relative_operand >= descriptor->operand_count)
+    {
+        return 0;
+    }
+    if (!has_pc_relative_operand && descriptor->pc_relative_layout != A64_PC_RELATIVE_NONE)
+    {
+        return 0;
+    }
+    if (has_pc_relative_operand)
+    {
+        // Every supported layout has a symmetric insert/extract pair. Keep
+        // this explicit so an accidentally added enum value cannot make
+        // patching accept a layout with no implementation.
+        switch ((A64PCRelativeLayout)descriptor->pc_relative_layout)
+        {
+        case A64_PC_RELATIVE_IMM26:
+        case A64_PC_RELATIVE_IMM19:
+        case A64_PC_RELATIVE_ADRP:
+        case A64_PC_RELATIVE_IMM14:
+        case A64_PC_RELATIVE_ADR:
+            break;
+        case A64_PC_RELATIVE_NONE:
+        case A64_PC_RELATIVE_LAYOUT_COUNT:
+            return 0;
+        }
+    }
+    return descriptor;
 }
 
 bool a64_signed_scaled_immediate_encode(s64 value, u8 bits, u8 scale_log2, u32* encoded)
@@ -1275,8 +1366,22 @@ BUSTER_GLOBAL_LOCAL bool a64_pc_relative_insert(A64PCRelativeLayout layout, u32 
         }
         *patched = (word & ~UINT32_C(0x00ffffe0)) | (immediate << 5);
         return true;
+    case A64_PC_RELATIVE_IMM14:
+        if (!a64_signed_scaled_immediate_encode(displacement, 14, 2, &immediate))
+        {
+            return false;
+        }
+        *patched = (word & ~UINT32_C(0x0007ffe0)) | (immediate << 5);
+        return true;
     case A64_PC_RELATIVE_ADRP:
         if (!a64_signed_scaled_immediate_encode(displacement, 21, 12, &immediate))
+        {
+            return false;
+        }
+        *patched = (word & ~UINT32_C(0x60ffffe0)) | ((immediate & 3) << 29) | (((immediate >> 2) & UINT32_C(0x7ffff)) << 5);
+        return true;
+    case A64_PC_RELATIVE_ADR:
+        if (!a64_signed_scaled_immediate_encode(displacement, 21, 0, &immediate))
         {
             return false;
         }
@@ -1300,9 +1405,15 @@ BUSTER_GLOBAL_LOCAL bool a64_pc_relative_extract(A64PCRelativeLayout layout, u32
     case A64_PC_RELATIVE_IMM19:
         immediate = (word >> 5) & UINT32_C(0x7ffff);
         return a64_signed_scaled_immediate_decode(immediate, 19, 2, displacement);
+    case A64_PC_RELATIVE_IMM14:
+        immediate = (word >> 5) & UINT32_C(0x3fff);
+        return a64_signed_scaled_immediate_decode(immediate, 14, 2, displacement);
     case A64_PC_RELATIVE_ADRP:
         immediate = ((word >> 29) & 3) | (((word >> 5) & UINT32_C(0x7ffff)) << 2);
         return a64_signed_scaled_immediate_decode(immediate, 21, 12, displacement);
+    case A64_PC_RELATIVE_ADR:
+        immediate = ((word >> 29) & 3) | (((word >> 5) & UINT32_C(0x7ffff)) << 2);
+        return a64_signed_scaled_immediate_decode(immediate, 21, 0, displacement);
     case A64_PC_RELATIVE_NONE:
     case A64_PC_RELATIVE_LAYOUT_COUNT:
         return false;
@@ -1336,13 +1447,15 @@ bool a64_mc_encode(A64MCInst const* instruction, u32* word)
         break;
     case A64_OPCODE_B:
     case A64_OPCODE_BL:
-        if (!a64_mc_operand(instruction, 0, A64_MC_OPERAND_PC_RELATIVE, &value) || !a64_pc_relative_insert(A64_PC_RELATIVE_IMM26, result, value, &result))
+        if (!a64_mc_operand(instruction, 0, A64_MC_OPERAND_PC_RELATIVE, &value) ||
+            !a64_pc_relative_insert((A64PCRelativeLayout)descriptor->pc_relative_layout, result, value, &result))
         {
             return false;
         }
         break;
     case A64_OPCODE_B_COND:
-        if (!a64_mc_operand(instruction, 0, A64_MC_OPERAND_PC_RELATIVE, &value) || !a64_pc_relative_insert(A64_PC_RELATIVE_IMM19, result, value, &result) ||
+        if (!a64_mc_operand(instruction, 0, A64_MC_OPERAND_PC_RELATIVE, &value) ||
+            !a64_pc_relative_insert((A64PCRelativeLayout)descriptor->pc_relative_layout, result, value, &result) ||
             !a64_mc_operand(instruction, 1, A64_MC_OPERAND_IMMEDIATE, &value) || value < 0 || value > 15)
         {
             return false;
@@ -1364,7 +1477,8 @@ bool a64_mc_encode(A64MCInst const* instruction, u32* word)
             return false;
         }
         result |= (u32)value;
-        if (!a64_mc_operand(instruction, 1, A64_MC_OPERAND_PC_RELATIVE, &value) || !a64_pc_relative_insert(A64_PC_RELATIVE_IMM19, result, value, &result))
+        if (!a64_mc_operand(instruction, 1, A64_MC_OPERAND_PC_RELATIVE, &value) ||
+            !a64_pc_relative_insert((A64PCRelativeLayout)descriptor->pc_relative_layout, result, value, &result))
         {
             return false;
         }
@@ -1375,7 +1489,54 @@ bool a64_mc_encode(A64MCInst const* instruction, u32* word)
             return false;
         }
         result |= (u32)value;
-        if (!a64_mc_operand(instruction, 1, A64_MC_OPERAND_PC_RELATIVE, &value) || !a64_pc_relative_insert(A64_PC_RELATIVE_ADRP, result, value, &result))
+        if (!a64_mc_operand(instruction, 1, A64_MC_OPERAND_PC_RELATIVE, &value) ||
+            !a64_pc_relative_insert((A64PCRelativeLayout)descriptor->pc_relative_layout, result, value, &result))
+        {
+            return false;
+        }
+        break;
+    case A64_OPCODE_ADR:
+        if (!a64_mc_operand(instruction, 0, A64_MC_OPERAND_REGISTER, &value) || value < 0 || value > 31)
+        {
+            return false;
+        }
+        result |= (u32)value;
+        if (!a64_mc_operand(instruction, 1, A64_MC_OPERAND_PC_RELATIVE, &value) ||
+            !a64_pc_relative_insert((A64PCRelativeLayout)descriptor->pc_relative_layout, result, value, &result))
+        {
+            return false;
+        }
+        break;
+    case A64_OPCODE_CBZ_W:
+    case A64_OPCODE_CBNZ_W:
+    case A64_OPCODE_CBZ_X:
+    case A64_OPCODE_CBNZ_X:
+        if (!a64_mc_operand(instruction, 0, A64_MC_OPERAND_REGISTER, &value) || value < 0 || value > 31)
+        {
+            return false;
+        }
+        result |= (u32)value;
+        if (!a64_mc_operand(instruction, 1, A64_MC_OPERAND_PC_RELATIVE, &value) ||
+            !a64_pc_relative_insert((A64PCRelativeLayout)descriptor->pc_relative_layout, result, value, &result))
+        {
+            return false;
+        }
+        break;
+    case A64_OPCODE_TBZ:
+    case A64_OPCODE_TBNZ:
+        if (!a64_mc_operand(instruction, 0, A64_MC_OPERAND_REGISTER, &value) || value < 0 || value > 31)
+        {
+            return false;
+        }
+        result |= (u32)value;
+        if (!a64_mc_operand(instruction, 1, A64_MC_OPERAND_IMMEDIATE, &value) || value < 0 || value > 63)
+        {
+            return false;
+        }
+        result |= ((u32)value & 0x1f) << 19;
+        result |= ((u32)value >> 5) << 31;
+        if (!a64_mc_operand(instruction, 2, A64_MC_OPERAND_PC_RELATIVE, &value) ||
+            !a64_pc_relative_insert((A64PCRelativeLayout)descriptor->pc_relative_layout, result, value, &result))
         {
             return false;
         }
@@ -1404,7 +1565,8 @@ bool a64_mc_decode(u32 word, A64MCInst* instruction)
     // seed for the generated decoder's priority table.
     static A64Opcode const decode_order[] = {
         A64_OPCODE_NOP,  A64_OPCODE_RET, A64_OPCODE_BR, A64_OPCODE_BLR, A64_OPCODE_B_COND, A64_OPCODE_LDR_LITERAL_64,
-        A64_OPCODE_ADRP, A64_OPCODE_BL,  A64_OPCODE_B,
+        A64_OPCODE_ADRP, A64_OPCODE_ADR, A64_OPCODE_CBZ_W, A64_OPCODE_CBNZ_W, A64_OPCODE_CBZ_X, A64_OPCODE_CBNZ_X,
+        A64_OPCODE_TBZ,   A64_OPCODE_TBNZ, A64_OPCODE_BL, A64_OPCODE_B,
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(decode_order); index += 1)
     {
@@ -1422,14 +1584,14 @@ bool a64_mc_decode(u32 word, A64MCInst* instruction)
             break;
         case A64_OPCODE_B:
         case A64_OPCODE_BL:
-            if (!a64_pc_relative_extract(A64_PC_RELATIVE_IMM26, word, &displacement))
+            if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
             {
                 return false;
             }
             result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
             break;
         case A64_OPCODE_B_COND:
-            if (!a64_pc_relative_extract(A64_PC_RELATIVE_IMM19, word, &displacement))
+            if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
             {
                 return false;
             }
@@ -1445,7 +1607,7 @@ bool a64_mc_decode(u32 word, A64MCInst* instruction)
         }
         break;
         case A64_OPCODE_LDR_LITERAL_64:
-            if (!a64_pc_relative_extract(A64_PC_RELATIVE_IMM19, word, &displacement))
+            if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
             {
                 return false;
             }
@@ -1453,13 +1615,45 @@ bool a64_mc_decode(u32 word, A64MCInst* instruction)
             result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
             break;
         case A64_OPCODE_ADRP:
-            if (!a64_pc_relative_extract(A64_PC_RELATIVE_ADRP, word, &displacement))
+            if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
             {
                 return false;
             }
             result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, word & 31);
             result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
             break;
+        case A64_OPCODE_ADR:
+            if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
+            {
+                return false;
+            }
+            result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, word & 31);
+            result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
+            break;
+        case A64_OPCODE_CBZ_W:
+        case A64_OPCODE_CBNZ_W:
+        case A64_OPCODE_CBZ_X:
+        case A64_OPCODE_CBNZ_X:
+            if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
+            {
+                return false;
+            }
+            result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, word & 31);
+            result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
+            break;
+        case A64_OPCODE_TBZ:
+        case A64_OPCODE_TBNZ:
+        {
+            if (!a64_pc_relative_extract((A64PCRelativeLayout)descriptor->pc_relative_layout, word, &displacement))
+            {
+                return false;
+            }
+            u32 bit = ((word >> 31) & 1) << 5 | ((word >> 19) & 0x1f);
+            result.operands[0] = a64_mc_operand_make(A64_MC_OPERAND_REGISTER, word & 31);
+            result.operands[1] = a64_mc_operand_make(A64_MC_OPERAND_IMMEDIATE, bit);
+            result.operands[2] = a64_mc_operand_make(A64_MC_OPERAND_PC_RELATIVE, displacement);
+        }
+        break;
         case A64_OPCODE_INVALID:
         case A64_OPCODE_COUNT:
             return false;
@@ -1575,6 +1769,29 @@ bool a64_adrp_encode(u32 destination_register, u64 instruction_address, u64 targ
                 {.value = displacement, .kind = A64_MC_OPERAND_PC_RELATIVE},
             },
         .opcode = A64_OPCODE_ADRP,
+        .operand_count = 2,
+    };
+    return a64_mc_encode(&instruction, word);
+}
+
+bool a64_adr_encode(u32 destination_register, u64 instruction_address, u64 target_address, u32* word)
+{
+    if (!word || destination_register > 31)
+    {
+        return false;
+    }
+    s64 displacement = 0;
+    if (!a64_pc_relative_displacement(target_address, instruction_address, 0, &displacement))
+    {
+        return false;
+    }
+    A64MCInst instruction = {
+        .operands =
+            {
+                {.value = destination_register, .kind = A64_MC_OPERAND_REGISTER},
+                {.value = displacement, .kind = A64_MC_OPERAND_PC_RELATIVE},
+            },
+        .opcode = A64_OPCODE_ADR,
         .operand_count = 2,
     };
     return a64_mc_encode(&instruction, word);

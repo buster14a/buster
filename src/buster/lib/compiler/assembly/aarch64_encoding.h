@@ -20,6 +20,13 @@ enum
     A64_OPCODE_BLR,
     A64_OPCODE_LDR_LITERAL_64,
     A64_OPCODE_ADRP,
+    A64_OPCODE_ADR,
+    A64_OPCODE_CBZ_W,
+    A64_OPCODE_CBNZ_W,
+    A64_OPCODE_CBZ_X,
+    A64_OPCODE_CBNZ_X,
+    A64_OPCODE_TBZ,
+    A64_OPCODE_TBNZ,
     A64_OPCODE_COUNT,
 };
 
@@ -41,7 +48,7 @@ struct A64MCOperand
 };
 BUSTER_CT_CHECK(sizeof(A64MCOperand) == 16);
 
-#define A64_MC_MAX_OPERANDS 2
+#define A64_MC_MAX_OPERANDS 3
 
 typedef struct A64MCInst A64MCInst;
 struct A64MCInst
@@ -51,7 +58,7 @@ struct A64MCInst
     u8 operand_count;
     u8 reserved[5];
 };
-BUSTER_CT_CHECK(sizeof(A64MCInst) == 40);
+BUSTER_CT_CHECK(sizeof(A64MCInst) == 56);
 
 typedef enum A64PCRelativeLayout
 {
@@ -59,6 +66,8 @@ typedef enum A64PCRelativeLayout
     A64_PC_RELATIVE_IMM26,
     A64_PC_RELATIVE_IMM19,
     A64_PC_RELATIVE_ADRP,
+    A64_PC_RELATIVE_IMM14,
+    A64_PC_RELATIVE_ADR,
     A64_PC_RELATIVE_LAYOUT_COUNT,
 } A64PCRelativeLayout;
 
@@ -97,9 +106,11 @@ BUSTER_F_DECL bool a64_pc_relative_patch(A64Opcode opcode, u32 word, s64 displac
 // small, valid architectural displacement.
 BUSTER_F_DECL bool a64_pc_relative_displacement(u64 target, u64 place, s64 addend, s64* displacement);
 
-// ADRP uses page addresses and a split signed imm21. This helper performs the
-// page rounding and checked subtraction without relying on signed overflow.
+// ADRP uses page addresses and a split signed imm21; ADR uses byte addresses
+// with the same split field. These helpers perform checked subtraction without
+// relying on signed overflow.
 BUSTER_F_DECL bool a64_adrp_encode(u32 destination_register, u64 instruction_address, u64 target_address, u32* word);
+BUSTER_F_DECL bool a64_adr_encode(u32 destination_register, u64 instruction_address, u64 target_address, u32* word);
 
 // Architectural condition values 0..13 form inverse pairs. AL/NV are valid
 // four-bit fields but have no conditional inverse for relaxation.

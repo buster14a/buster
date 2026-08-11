@@ -162,8 +162,8 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
         },
         {
             .instruction =
-                {
-                    .operands =
+            {
+                .operands =
                         {
                             {.value = 4, .kind = A64_MC_OPERAND_PC_RELATIVE},
                             {.value = 0, .kind = A64_MC_OPERAND_IMMEDIATE},
@@ -305,10 +305,221 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
                 },
             .word = UINT32_C(0xd0000009),
         },
+        {
+            .instruction =
+                {
+                    .operands =
+                        {
+                            {.value = 0, .kind = A64_MC_OPERAND_REGISTER},
+                            {.value = 0, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                        },
+                    .opcode = A64_OPCODE_ADR,
+                    .operand_count = 2,
+                },
+            .word = UINT32_C(0x10000000),
+        },
+        {
+            .instruction =
+                {
+                    .operands =
+                        {
+                            {.value = 1, .kind = A64_MC_OPERAND_REGISTER},
+                            {.value = 4, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                        },
+                    .opcode = A64_OPCODE_ADR,
+                    .operand_count = 2,
+                },
+            .word = UINT32_C(0x10000021),
+        },
+        {
+            .instruction =
+                {
+                    .operands =
+                        {
+                            {.value = 31, .kind = A64_MC_OPERAND_REGISTER},
+                            {.value = -1048576, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                        },
+                    .opcode = A64_OPCODE_ADR,
+                    .operand_count = 2,
+                },
+            .word = UINT32_C(0x1080001f),
+        },
+        {
+            .instruction =
+                {
+                    .operands =
+                        {
+                            {.value = 0, .kind = A64_MC_OPERAND_REGISTER},
+                            {.value = 1048572, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                        },
+                    .opcode = A64_OPCODE_CBZ_W,
+                    .operand_count = 2,
+                },
+            .word = UINT32_C(0x347fffe0),
+        },
+        {
+            .instruction =
+                {
+                    .operands =
+                        {
+                            {.value = 31, .kind = A64_MC_OPERAND_REGISTER},
+                            {.value = -1048576, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                        },
+                    .opcode = A64_OPCODE_CBNZ_W,
+                    .operand_count = 2,
+                },
+            .word = UINT32_C(0x3580001f),
+        },
+        {
+            .instruction =
+                {
+                    .operands =
+                        {
+                            {.value = 2, .kind = A64_MC_OPERAND_REGISTER},
+                            {.value = 1048572, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                        },
+                    .opcode = A64_OPCODE_CBZ_X,
+                    .operand_count = 2,
+                },
+            .word = UINT32_C(0xb47fffe2),
+        },
+        {
+            .instruction =
+                {
+                    .operands =
+                        {
+                            {.value = 3, .kind = A64_MC_OPERAND_REGISTER},
+                            {.value = -1048576, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                        },
+                    .opcode = A64_OPCODE_CBNZ_X,
+                    .operand_count = 2,
+                },
+            .word = UINT32_C(0xb5800003),
+        },
+        {
+            .instruction =
+                {
+                    .operands =
+                        {
+                            {.value = 0, .kind = A64_MC_OPERAND_REGISTER},
+                            {.value = 0, .kind = A64_MC_OPERAND_IMMEDIATE},
+                            {.value = 32764, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                        },
+                    .opcode = A64_OPCODE_TBZ,
+                    .operand_count = 3,
+                },
+            .word = UINT32_C(0x3603ffe0),
+        },
+        {
+            .instruction =
+                {
+                    .operands =
+                        {
+                            {.value = 31, .kind = A64_MC_OPERAND_REGISTER},
+                            {.value = 31, .kind = A64_MC_OPERAND_IMMEDIATE},
+                            {.value = -32768, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                        },
+                    .opcode = A64_OPCODE_TBZ,
+                    .operand_count = 3,
+                },
+            .word = UINT32_C(0x36fc001f),
+        },
+        {
+            .instruction =
+                {
+                    .operands =
+                        {
+                            {.value = 0, .kind = A64_MC_OPERAND_REGISTER},
+                            {.value = 32, .kind = A64_MC_OPERAND_IMMEDIATE},
+                            {.value = 4, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                        },
+                    .opcode = A64_OPCODE_TBZ,
+                    .operand_count = 3,
+                },
+            .word = UINT32_C(0xb6000020),
+        },
+        {
+            .instruction =
+                {
+                    .operands =
+                        {
+                            {.value = 31, .kind = A64_MC_OPERAND_REGISTER},
+                            {.value = 63, .kind = A64_MC_OPERAND_IMMEDIATE},
+                            {.value = -4, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                        },
+                    .opcode = A64_OPCODE_TBNZ,
+                    .operand_count = 3,
+                },
+            .word = UINT32_C(0xb7ffffff),
+        },
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
     {
         BUSTER_TEST(arguments, a64_encoding_round_trip(cases[index]));
+    }
+    // Exercise every legal TBZ/TBNZ bit selector and register spelling. The
+    // high bit is the architectural width discriminator, so this also covers
+    // the W (0..31) and X (32..63) domains without a second opcode family.
+    static A64Opcode const bit_branch_opcodes[] = {A64_OPCODE_TBZ, A64_OPCODE_TBNZ};
+    for (u32 bit = 0; bit < 64; bit += 1)
+    {
+        for (u32 opcode_index = 0; opcode_index < BUSTER_ARRAY_LENGTH(bit_branch_opcodes); opcode_index += 1)
+        {
+            A64MCInst exhaustive = {
+                .operands =
+                    {
+                        {.value = bit & 31, .kind = A64_MC_OPERAND_REGISTER},
+                        {.value = bit, .kind = A64_MC_OPERAND_IMMEDIATE},
+                        {.value = 0, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                    },
+                .opcode = bit_branch_opcodes[opcode_index],
+                .operand_count = 3,
+            };
+            u32 exhaustive_word = 0;
+            A64EncodingCase exhaustive_case = {.instruction = exhaustive, .word = 0};
+            bool exhaustive_encoded = a64_mc_encode(&exhaustive, &exhaustive_word);
+            exhaustive_case.word = exhaustive_word;
+            BUSTER_TEST(arguments, exhaustive_encoded && a64_encoding_round_trip(exhaustive_case));
+        }
+    }
+    // Every architectural register is accepted by the four CBZ/CBNZ width
+    // forms and ADR; the descriptors must not accidentally reserve XZR/WZR.
+    static A64Opcode const register_branch_opcodes[] = {A64_OPCODE_CBZ_W, A64_OPCODE_CBNZ_W, A64_OPCODE_CBZ_X, A64_OPCODE_CBNZ_X};
+    for (u32 register_number = 0; register_number < 32; register_number += 1)
+    {
+        for (u32 opcode_index = 0; opcode_index < BUSTER_ARRAY_LENGTH(register_branch_opcodes); opcode_index += 1)
+        {
+            A64MCInst exhaustive = {
+                .operands =
+                    {
+                        {.value = register_number, .kind = A64_MC_OPERAND_REGISTER},
+                        {.value = 0, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                    },
+                .opcode = register_branch_opcodes[opcode_index],
+                .operand_count = 2,
+            };
+            A64MCInst exhaustive_decoded = {0};
+            u32 exhaustive_encoded = 0;
+            u32 exhaustive_reencoded = 0;
+            BUSTER_TEST(arguments, a64_mc_encode(&exhaustive, &exhaustive_encoded) && a64_mc_decode(exhaustive_encoded, &exhaustive_decoded) &&
+                                      a64_mc_encode(&exhaustive_decoded, &exhaustive_reencoded) && exhaustive_encoded == exhaustive_reencoded &&
+                                      exhaustive_decoded.operands[0].value == (s64)register_number);
+        }
+        A64MCInst exhaustive = {
+            .operands =
+                {
+                    {.value = register_number, .kind = A64_MC_OPERAND_REGISTER},
+                    {.value = 0, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                },
+            .opcode = A64_OPCODE_ADR,
+            .operand_count = 2,
+        };
+        A64MCInst exhaustive_decoded = {0};
+        u32 exhaustive_encoded = 0;
+        u32 exhaustive_reencoded = 0;
+        BUSTER_TEST(arguments, a64_mc_encode(&exhaustive, &exhaustive_encoded) && a64_mc_decode(exhaustive_encoded, &exhaustive_decoded) &&
+                                  a64_mc_encode(&exhaustive_decoded, &exhaustive_reencoded) && exhaustive_encoded == exhaustive_reencoded &&
+                                  exhaustive_decoded.operands[0].value == (s64)register_number);
     }
     BUSTER_TEST(arguments, !a64_opcode_descriptor(A64_OPCODE_INVALID));
     BUSTER_TEST(arguments, !a64_opcode_descriptor(A64_OPCODE_COUNT));
@@ -359,6 +570,82 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !a64_pc_relative_patch(A64_OPCODE_B, UINT32_C(0x14000000), INT64_C(1) << 27, &patched));
     BUSTER_TEST(arguments, !a64_pc_relative_patch(A64_OPCODE_B, UINT32_C(0x14000000), 2, &patched));
     BUSTER_TEST(arguments, !a64_pc_relative_patch(A64_OPCODE_B, UINT32_C(0x14000000), 0, 0));
+
+    // The new M1 branch forms use the same checked insertion path. Patching
+    // must retain every fixed and non-relocation bit (register, TBZ bit, and
+    // the opcode's width/condition bits).
+    BUSTER_TEST(arguments, a64_pc_relative_patch(A64_OPCODE_ADR, UINT32_C(0x1000001f), -4, &patched) && patched == UINT32_C(0x10ffffff));
+    BUSTER_TEST(arguments, a64_pc_relative_patch(A64_OPCODE_CBZ_W, UINT32_C(0x3400001f), 4, &patched) && patched == UINT32_C(0x3400003f));
+    BUSTER_TEST(arguments, a64_pc_relative_patch(A64_OPCODE_CBNZ_X, UINT32_C(0xb5000003), -4, &patched) && patched == UINT32_C(0xb5ffffe3));
+    BUSTER_TEST(arguments, a64_pc_relative_patch(A64_OPCODE_TBZ, UINT32_C(0x360c001f), 32764, &patched) && patched == UINT32_C(0x360bffff));
+    BUSTER_TEST(arguments, a64_pc_relative_patch(A64_OPCODE_TBNZ, UINT32_C(0xb7fc001f), -32768, &patched) && patched == UINT32_C(0xb7fc001f));
+    BUSTER_TEST(arguments, !a64_pc_relative_patch(A64_OPCODE_ADR, UINT32_C(0x90000000), 0, &patched));
+    BUSTER_TEST(arguments, !a64_pc_relative_patch(A64_OPCODE_CBZ_W, UINT32_C(0xb4000000), 0, &patched));
+    BUSTER_TEST(arguments, !a64_pc_relative_patch(A64_OPCODE_TBZ, UINT32_C(0x37000000), 0, &patched));
+    BUSTER_TEST(arguments, !a64_pc_relative_patch(A64_OPCODE_ADR, UINT32_C(0x10000000), INT64_C(1) << 20, &patched));
+    BUSTER_TEST(arguments, !a64_pc_relative_patch(A64_OPCODE_ADR, UINT32_C(0x10000000), -((INT64_C(1) << 20) + 1), &patched));
+    BUSTER_TEST(arguments, !a64_pc_relative_patch(A64_OPCODE_CBZ_W, UINT32_C(0x34000000), INT64_C(1) << 20, &patched));
+    BUSTER_TEST(arguments, !a64_pc_relative_patch(A64_OPCODE_CBZ_W, UINT32_C(0x34000000), -(INT64_C(1) << 20) - 4, &patched));
+    BUSTER_TEST(arguments, !a64_pc_relative_patch(A64_OPCODE_TBZ, UINT32_C(0x36000000), INT64_C(32768), &patched));
+    BUSTER_TEST(arguments, !a64_pc_relative_patch(A64_OPCODE_TBZ, UINT32_C(0x36000000), -INT64_C(32772), &patched));
+
+    invalid = (A64MCInst){
+        .operands =
+            {
+                {.value = 32, .kind = A64_MC_OPERAND_REGISTER},
+                {.value = 0, .kind = A64_MC_OPERAND_PC_RELATIVE},
+            },
+        .opcode = A64_OPCODE_ADR,
+        .operand_count = 2,
+    };
+    BUSTER_TEST(arguments, !a64_mc_encode(&invalid, &encoded));
+    invalid.operands[0].value = 0;
+    invalid.operands[1].value = INT64_C(1) << 20;
+    BUSTER_TEST(arguments, !a64_mc_encode(&invalid, &encoded));
+    invalid = (A64MCInst){
+        .operands =
+            {
+                {.value = 0, .kind = A64_MC_OPERAND_REGISTER},
+                {.value = 0, .kind = A64_MC_OPERAND_PC_RELATIVE},
+            },
+        .opcode = A64_OPCODE_CBZ_X,
+        .operand_count = 2,
+    };
+    invalid.operands[0].value = -1;
+    BUSTER_TEST(arguments, !a64_mc_encode(&invalid, &encoded));
+    invalid.operands[0].value = 0;
+    invalid.operands[1].value = 1;
+    BUSTER_TEST(arguments, !a64_mc_encode(&invalid, &encoded));
+    invalid = (A64MCInst){
+        .operands =
+            {
+                {.value = 0, .kind = A64_MC_OPERAND_REGISTER},
+                {.value = 64, .kind = A64_MC_OPERAND_IMMEDIATE},
+                {.value = 0, .kind = A64_MC_OPERAND_PC_RELATIVE},
+            },
+        .opcode = A64_OPCODE_TBZ,
+        .operand_count = 3,
+    };
+    BUSTER_TEST(arguments, !a64_mc_encode(&invalid, &encoded));
+    invalid.operands[1].value = -1;
+    BUSTER_TEST(arguments, !a64_mc_encode(&invalid, &encoded));
+    invalid.operands[1].value = 0;
+    invalid.operands[2].value = 2;
+    BUSTER_TEST(arguments, !a64_mc_encode(&invalid, &encoded));
+    invalid.operands[2].value = 0;
+    invalid.operands[0].value = 32;
+    BUSTER_TEST(arguments, !a64_mc_encode(&invalid, &encoded));
+    invalid.operands[0].value = 0;
+    invalid.operand_count = 2;
+    BUSTER_TEST(arguments, !a64_mc_encode(&invalid, &encoded));
+
+    BUSTER_TEST(arguments, a64_adr_encode(1, UINT64_C(0x1000), UINT64_C(0x1004), &encoded) && encoded == UINT32_C(0x10000021));
+    BUSTER_TEST(arguments, a64_adr_encode(31, UINT64_C(0x100000), 0, &encoded) && encoded == UINT32_C(0x1080001f));
+    BUSTER_TEST(arguments, a64_adr_encode(0, 0, UINT64_C(0xfffff), &encoded) && encoded == UINT32_C(0x707fffe0));
+    BUSTER_TEST(arguments, !a64_adr_encode(0, 0, UINT64_C(0x100000), &encoded));
+    BUSTER_TEST(arguments, !a64_adr_encode(0, UINT64_C(0x100001), 0, &encoded));
+    BUSTER_TEST(arguments, !a64_adr_encode(32, 0, 0, &encoded));
+    BUSTER_TEST(arguments, !a64_adr_encode(0, 0, 0, 0));
 
     BUSTER_TEST(arguments, a64_adrp_encode(9, UINT64_C(0x1000), UINT64_C(0x3000), &encoded) && encoded == UINT32_C(0xd0000009));
     BUSTER_TEST(arguments, a64_adrp_encode(9, UINT64_C(0x3000), UINT64_C(0x1000), &encoded) && encoded == UINT32_C(0xd0ffffe9));
