@@ -1665,6 +1665,17 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, a64_none_executable.error == CODEGEN_ERROR_NONE);
         typedef s64 MachineTestA64Call2(s64, s64);
         typedef s64 MachineTestA64Call7(s64, s64, s64, s64, s64, s64, s64);
+        typedef s64 MachineTestA64Call3(s64, s64, s64);
+        // Matches the corpus Big layout; returned through the X8 hidden
+        // pointer, which the host compiler stages for a struct-returning
+        // call — identical under AAPCS64 and the Darwin convention.
+        typedef struct MachineTestA64Big
+        {
+            s64 a;
+            s64 b;
+            s64 c;
+        } MachineTestA64Big;
+        typedef MachineTestA64Big MachineTestA64CallBig(s64);
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(a64_supported_names) && a64_none_executable.address; name_index += 1)
         {
             if (!a64_encoded[name_index].valid)
@@ -1690,6 +1701,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             {
                 continue;
             }
+            // The shape-bearing signatures need their real calling forms:
+            // kagg_take's two-part aggregate arrives as two integer
+            // registers plus the salt in the third, and big_make returns
+            // through the X8 hidden pointer the caller must provide — a
+            // raw two-argument call would hand it garbage.
+            bool is_pair_take = string_equal(a64_supported_names[name_index], S8("kagg_take"));
+            bool is_indirect_make = string_equal(a64_supported_names[name_index], S8("big_make"));
             bool is_writep = string_equal(a64_supported_names[name_index], S8("writep"));
             bool is_readp = string_equal(a64_supported_names[name_index], S8("readp"));
             bool is_many = string_equal(a64_supported_names[name_index], S8("six")) || string_equal(a64_supported_names[name_index], S8("seven"));
@@ -1723,7 +1741,25 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 MachineTestA64Call2* machine_call = 0;
                 memcpy(&none_call, &none_address, sizeof(none_call));
                 memcpy(&machine_call, &machine_address, sizeof(machine_call));
-                if (is_writep)
+                if (is_pair_take)
+                {
+                    MachineTestA64Call3* none_call3 = 0;
+                    MachineTestA64Call3* machine_call3 = 0;
+                    memcpy(&none_call3, &none_address, sizeof(none_call3));
+                    memcpy(&machine_call3, &machine_address, sizeof(machine_call3));
+                    all_equal &= none_call3(left, right, left ^ right) == machine_call3(left, right, left ^ right);
+                }
+                else if (is_indirect_make)
+                {
+                    MachineTestA64CallBig* none_call_big = 0;
+                    MachineTestA64CallBig* machine_call_big = 0;
+                    memcpy(&none_call_big, &none_address, sizeof(none_call_big));
+                    memcpy(&machine_call_big, &machine_address, sizeof(machine_call_big));
+                    MachineTestA64Big none_big = none_call_big(left);
+                    MachineTestA64Big machine_big = machine_call_big(left);
+                    all_equal &= none_big.a == machine_big.a && none_big.b == machine_big.b && none_big.c == machine_big.c;
+                }
+                else if (is_writep)
                 {
                     s32 none_cell = 0;
                     s32 machine_cell = 0;
