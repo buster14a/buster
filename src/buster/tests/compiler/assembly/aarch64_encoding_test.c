@@ -2434,6 +2434,143 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, random_status != BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS ||
                                    memcmp(&immutable_result, &saved_result, sizeof(saved_result)) == 0);
 
+    // Typed direct-GPR and scalar projections decode only through canonical
+    // Arm row identity.  Every executable generated form must round-trip its
+    // canonical representative through both form-directed and word-first
+    // paths; the permanent UDF row is deliberately fail-closed.
+    bool gpr_typed_round_trips = true;
+    for (u32 direct_index = 0; direct_index < buster_aarch64_arm_m1_gpr_form_count(); direct_index += 1)
+    {
+        BusterAarch64ArmM1GprForm direct_form = {0};
+        gpr_typed_round_trips = gpr_typed_round_trips && buster_aarch64_arm_m1_gpr_form(direct_index, &direct_form);
+        u32 representative_word = 0;
+        bool representative_found = false;
+        for (u32 canonical_index = 0; canonical_index < buster_aarch64_canonical_form_count(); canonical_index += 1)
+        {
+            BusterAarch64CanonicalFormInfo info = {0};
+            if (buster_aarch64_canonical_form(canonical_index, &info) && info.arm_row_digest == direct_form.arm_row_digest)
+            {
+                representative_word = info.representative_word;
+                representative_found = true;
+                break;
+            }
+        }
+        gpr_typed_round_trips = gpr_typed_round_trips && representative_found;
+        A64GprOperand decoded_operands[4] = {0};
+        u32 decoded_count = 0;
+        gpr_typed_round_trips = gpr_typed_round_trips &&
+                                buster_aarch64_arm_m1_gpr_decode_form(canonical_target, direct_index, representative_word,
+                                                                       decoded_operands, BUSTER_ARRAY_LENGTH(decoded_operands), &decoded_count) &&
+                                decoded_count == direct_form.operand_count;
+        u32 reencoded_word = 0;
+        gpr_typed_round_trips = gpr_typed_round_trips &&
+                                buster_aarch64_arm_m1_gpr_encode(canonical_target, direct_index, decoded_operands, decoded_count,
+                                                                  &reencoded_word) &&
+                                reencoded_word == representative_word;
+        A64GprOperand word_first_operands[4] = {0};
+        u32 word_first_form = UINT32_MAX;
+        u32 word_first_count = 0;
+        gpr_typed_round_trips = gpr_typed_round_trips &&
+                                buster_aarch64_arm_m1_gpr_decode(canonical_target, representative_word, &word_first_form,
+                                                                  word_first_operands, BUSTER_ARRAY_LENGTH(word_first_operands),
+                                                                  &word_first_count) &&
+                                word_first_form == direct_index && word_first_count == decoded_count &&
+                                memcmp(word_first_operands, decoded_operands, sizeof(decoded_operands)) == 0;
+    }
+    BUSTER_TEST(arguments, gpr_typed_round_trips);
+
+    bool scalar_typed_round_trips = true;
+    for (u32 scalar_index = 0; scalar_index < buster_aarch64_arm_m1_scalar_integer_form_count(); scalar_index += 1)
+    {
+        BusterAarch64ArmM1ScalarIntegerForm scalar_form = {0};
+        scalar_typed_round_trips = scalar_typed_round_trips &&
+                                   buster_aarch64_arm_m1_scalar_integer_form(scalar_index, &scalar_form);
+        if (scalar_form.recipe == BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_UDF)
+        {
+            A64ScalarIntOperand udf_operands[4] = {0};
+            A64ScalarIntModifier udf_modifier = {0};
+            u32 udf_operand_count = UINT32_C(0x12345678);
+            u32 udf_modifier_count = UINT32_C(0x87654321);
+            scalar_typed_round_trips = scalar_typed_round_trips &&
+                                       !buster_aarch64_arm_m1_scalar_integer_decode_form(
+                                           canonical_target, scalar_index, UINT32_C(0x00001234), udf_operands,
+                                           BUSTER_ARRAY_LENGTH(udf_operands), &udf_operand_count, &udf_modifier, 1,
+                                           &udf_modifier_count) &&
+                                       udf_operand_count == UINT32_C(0x12345678) && udf_modifier_count == UINT32_C(0x87654321);
+            continue;
+        }
+        u32 representative_word = 0;
+        bool representative_found = false;
+        for (u32 canonical_index = 0; canonical_index < buster_aarch64_canonical_form_count(); canonical_index += 1)
+        {
+            BusterAarch64CanonicalFormInfo info = {0};
+            if (buster_aarch64_canonical_form(canonical_index, &info) && info.arm_row_digest == scalar_form.arm_row_digest)
+            {
+                representative_word = info.representative_word;
+                representative_found = true;
+                break;
+            }
+        }
+        scalar_typed_round_trips = scalar_typed_round_trips && representative_found;
+        A64ScalarIntOperand decoded_operands[4] = {0};
+        A64ScalarIntModifier decoded_modifier = {0};
+        u32 decoded_operand_count = 0;
+        u32 decoded_modifier_count = 0;
+        scalar_typed_round_trips = scalar_typed_round_trips &&
+                                   buster_aarch64_arm_m1_scalar_integer_decode_form(
+                                       canonical_target, scalar_index, representative_word, decoded_operands,
+                                       BUSTER_ARRAY_LENGTH(decoded_operands), &decoded_operand_count, &decoded_modifier, 1,
+                                       &decoded_modifier_count);
+        u32 reencoded_word = 0;
+        scalar_typed_round_trips = scalar_typed_round_trips &&
+                                   buster_aarch64_arm_m1_scalar_integer_encode(
+                                       canonical_target, scalar_index, decoded_operands, decoded_operand_count,
+                                       decoded_modifier_count ? &decoded_modifier : 0, decoded_modifier_count, &reencoded_word) &&
+                                   reencoded_word == representative_word;
+        A64ScalarIntOperand word_first_operands[4] = {0};
+        A64ScalarIntModifier word_first_modifier = {0};
+        u32 word_first_form = UINT32_MAX;
+        u32 word_first_operand_count = 0;
+        u32 word_first_modifier_count = 0;
+        scalar_typed_round_trips = scalar_typed_round_trips &&
+                                   buster_aarch64_arm_m1_scalar_integer_decode(
+                                       canonical_target, representative_word, &word_first_form, word_first_operands,
+                                       BUSTER_ARRAY_LENGTH(word_first_operands), &word_first_operand_count,
+                                       &word_first_modifier, 1, &word_first_modifier_count) &&
+                                   word_first_form == scalar_index && word_first_operand_count == decoded_operand_count &&
+                                   word_first_modifier_count == decoded_modifier_count &&
+                                   memcmp(word_first_operands, decoded_operands, sizeof(decoded_operands)) == 0 &&
+                                   memcmp(&word_first_modifier, &decoded_modifier, sizeof(decoded_modifier)) == 0;
+    }
+    BUSTER_TEST(arguments, scalar_typed_round_trips);
+
+    A64GprOperand immutable_gpr_operands[4];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(immutable_gpr_operands); index += 1)
+    {
+        immutable_gpr_operands[index] = (A64GprOperand){.index = 7, .width = 64, .stack_pointer = true, .reserved = 1};
+    }
+    A64GprOperand saved_gpr_operands[4] = {0};
+    memcpy(saved_gpr_operands, immutable_gpr_operands, sizeof(saved_gpr_operands));
+    u32 immutable_gpr_count = UINT32_C(0x13579bdf);
+    BUSTER_TEST(arguments, !buster_aarch64_arm_m1_gpr_decode_form(canonical_target, 0, UINT32_C(0xffffffff), immutable_gpr_operands, 0,
+                                                                   &immutable_gpr_count) &&
+                               immutable_gpr_count == UINT32_C(0x13579bdf) &&
+                               memcmp(immutable_gpr_operands, saved_gpr_operands, sizeof(saved_gpr_operands)) == 0);
+
+    A64ScalarIntOperand immutable_scalar_operands[4] = {0};
+    A64ScalarIntModifier immutable_scalar_modifier = {.kind = A64_SCALAR_INT_MODIFIER_EXTEND, .value = A64_SCALAR_INT_EXTEND_SXTX,
+                                                       .amount = 7, .present = true, .reserved = {1, 2, 3, 4, 5}};
+    u32 immutable_scalar_form = UINT32_C(0xabcdef01);
+    u32 immutable_scalar_operand_count = UINT32_C(0x2468ace0);
+    u32 immutable_scalar_modifier_count = UINT32_C(0xdeadbeef);
+    BUSTER_TEST(arguments, !buster_aarch64_arm_m1_scalar_integer_decode(
+                               canonical_target, UINT32_C(0xffffffff), &immutable_scalar_form, immutable_scalar_operands,
+                               BUSTER_ARRAY_LENGTH(immutable_scalar_operands), &immutable_scalar_operand_count,
+                               &immutable_scalar_modifier, 1, &immutable_scalar_modifier_count) &&
+                               immutable_scalar_form == UINT32_C(0xabcdef01) &&
+                               immutable_scalar_operand_count == UINT32_C(0x2468ace0) &&
+                               immutable_scalar_modifier_count == UINT32_C(0xdeadbeef));
+
     return result;
 }
 

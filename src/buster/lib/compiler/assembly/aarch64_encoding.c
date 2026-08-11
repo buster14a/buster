@@ -2895,3 +2895,644 @@ BusterAarch64CanonicalDecodeStatus buster_aarch64_canonical_decode(Target target
     *result = local;
     return BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS;
 }
+
+// The typed direct projections intentionally do not carry a second row-index
+// table.  Canonical digest identity is the join key shared by the generated
+// family recipes and the Arm decoder; requiring a unique digest match keeps a
+// stale or duplicated projection fail closed.
+BUSTER_GLOBAL_LOCAL bool a64_typed_canonical_index_for_digest(u64 digest, u32* form_index,
+                                                              BusterAarch64CanonicalDecoderForm const** form_result)
+{
+    if (!digest || !form_index)
+    {
+        return false;
+    }
+    u32 found = UINT32_MAX;
+    BusterAarch64CanonicalDecoderForm const* found_form = 0;
+    for (u32 index = 0; index < BUSTER_AARCH64_CANONICAL_DECODER_FORM_COUNT; index += 1)
+    {
+        BusterAarch64CanonicalDecoderForm const* form = 0;
+        if (!a64_canonical_form_valid(index, &form))
+        {
+            return false;
+        }
+        if (form->arm_row_digest != digest)
+        {
+            continue;
+        }
+        if (found != UINT32_MAX)
+        {
+            return false;
+        }
+        found = index;
+        found_form = form;
+    }
+    if (found == UINT32_MAX)
+    {
+        return false;
+    }
+    *form_index = found;
+    if (form_result)
+    {
+        *form_result = found_form;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_typed_output_ranges_overlap(void const* left, uintptr_t left_size, void const* right,
+                                                          uintptr_t right_size)
+{
+    if (!left || !right || !left_size || !right_size)
+    {
+        return false;
+    }
+    uintptr_t left_begin = (uintptr_t)left;
+    uintptr_t right_begin = (uintptr_t)right;
+    if (left_begin > UINTPTR_MAX - left_size || right_begin > UINTPTR_MAX - right_size)
+    {
+        return true;
+    }
+    uintptr_t left_end = left_begin + left_size;
+    uintptr_t right_end = right_begin + right_size;
+    return left_begin < right_end && right_begin < left_end;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_typed_gpr_output_arguments_valid(A64GprOperand* operands, u32 operand_capacity, u32* operand_count)
+{
+    if (!operand_count || operand_capacity > 4 || (operand_capacity && !operands) ||
+        a64_typed_output_ranges_overlap(operands, (uintptr_t)operand_capacity * sizeof(*operands), operand_count, sizeof(*operand_count)))
+    {
+        return false;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_typed_scalar_output_arguments_valid(
+    A64ScalarIntOperand* operands, u32 operand_capacity, u32* operand_count, A64ScalarIntModifier* modifiers,
+    u32 modifier_capacity, u32* modifier_count)
+{
+    uintptr_t operand_bytes = (uintptr_t)operand_capacity * sizeof(*operands);
+    uintptr_t modifier_bytes = (uintptr_t)modifier_capacity * sizeof(*modifiers);
+    if (!operand_count || !modifier_count || operand_capacity > 4 || modifier_capacity > 1 ||
+        (operand_capacity && !operands) || (modifier_capacity && !modifiers) ||
+        a64_typed_output_ranges_overlap(operands, operand_bytes, operand_count, sizeof(*operand_count)) ||
+        a64_typed_output_ranges_overlap(modifiers, modifier_bytes, modifier_count, sizeof(*modifier_count)) ||
+        a64_typed_output_ranges_overlap(operands, operand_bytes, modifiers, modifier_bytes) ||
+        a64_typed_output_ranges_overlap(operands, operand_bytes, modifier_count, sizeof(*modifier_count)) ||
+        a64_typed_output_ranges_overlap(modifiers, modifier_bytes, operand_count, sizeof(*operand_count)))
+    {
+        return false;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_typed_gpr_generated_index_for_digest(u64 digest, u32* form_index)
+{
+    if (!digest || !form_index)
+    {
+        return false;
+    }
+    u32 found = UINT32_MAX;
+    for (u32 index = 0; index < BUSTER_AARCH64_ARM_M1_GPR_FORM_COUNT; index += 1)
+    {
+        BusterAarch64ArmM1GprGeneratedForm const* form = buster_aarch64_arm_m1_gpr_generated_forms + index;
+        if (!a64_gpr_generated_form_valid(form))
+        {
+            return false;
+        }
+        if (form->arm_row_digest != digest)
+        {
+            continue;
+        }
+        if (found != UINT32_MAX)
+        {
+            return false;
+        }
+        found = index;
+    }
+    if (found == UINT32_MAX)
+    {
+        return false;
+    }
+    *form_index = found;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_typed_scalar_generated_index_for_digest(u64 digest, u32* form_index)
+{
+    if (!digest || !form_index)
+    {
+        return false;
+    }
+    u32 found = UINT32_MAX;
+    for (u32 index = 0; index < BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_FORM_COUNT; index += 1)
+    {
+        BusterAarch64ArmM1ScalarIntegerGeneratedForm const* form = buster_aarch64_arm_m1_scalar_integer_generated_forms + index;
+        if (!a64_scalar_generated_form_valid(form))
+        {
+            return false;
+        }
+        if (form->arm_row_digest != digest)
+        {
+            continue;
+        }
+        if (found != UINT32_MAX)
+        {
+            return false;
+        }
+        found = index;
+    }
+    if (found == UINT32_MAX)
+    {
+        return false;
+    }
+    *form_index = found;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_typed_canonical_raw_decode_for_digest(u64 digest, u32 word,
+                                                                   BusterAarch64CanonicalDecoderForm const** form_result)
+{
+    u32 canonical_index = UINT32_MAX;
+    BusterAarch64CanonicalDecoderForm const* form = 0;
+    if (!a64_typed_canonical_index_for_digest(digest, &canonical_index, &form) || !form || form->field_count > 32)
+    {
+        return false;
+    }
+    u32 fields[32] = {0};
+    if (!buster_aarch64_canonical_raw_decode(canonical_index, word, fields, form->field_count))
+    {
+        return false;
+    }
+    if (form_result)
+    {
+        *form_result = form;
+    }
+    return true;
+}
+
+bool buster_aarch64_arm_m1_gpr_decode_form(Target target, u32 form_index, u32 word, A64GprOperand* operands,
+                                           u32 operand_capacity, u32* operand_count)
+{
+    if (!a64_typed_gpr_output_arguments_valid(operands, operand_capacity, operand_count) ||
+        !a64_gpr_target_valid(target) || form_index >= BUSTER_AARCH64_ARM_M1_GPR_FORM_COUNT)
+    {
+        return false;
+    }
+    BusterAarch64ArmM1GprGeneratedForm const* form = buster_aarch64_arm_m1_gpr_generated_forms + form_index;
+    if (!a64_gpr_generated_form_valid(form) ||
+        (form->required_feature != TARGET_CPU_FEATURE_NONE && !target_cpu_feature_has(target, form->required_feature)) ||
+        operand_capacity < form->operand_count)
+    {
+        return false;
+    }
+    BusterAarch64CanonicalDecoderForm const* canonical_form = 0;
+    if (!a64_typed_canonical_raw_decode_for_digest(form->arm_row_digest, word, &canonical_form) || !canonical_form ||
+        canonical_form->fixed_mask != form->fixed_mask || canonical_form->fixed_value != form->fixed_value)
+    {
+        return false;
+    }
+    A64GprOperand local[4] = {0};
+    for (u32 index = 0; index < form->operand_count; index += 1)
+    {
+        BusterAarch64ArmM1GprGeneratedOperand expected = form->operands[index];
+        local[index] = (A64GprOperand){
+            .index = (u8)((word >> expected.bit_lsb) & 31u),
+            .width = expected.width,
+            .stack_pointer = false,
+        };
+        if (local[index].index == 31 && expected.register31_role == BUSTER_AARCH64_ARM_M1_GPR_31_SP)
+        {
+            local[index].stack_pointer = true;
+        }
+        if (!a64_gpr_operand_valid(expected, local[index]))
+        {
+            return false;
+        }
+    }
+    u32 reencoded = 0;
+    if (!buster_aarch64_arm_m1_gpr_encode(target, form_index, local, form->operand_count, &reencoded) || reencoded != word)
+    {
+        return false;
+    }
+    memcpy(operands, local, (size_t)form->operand_count * sizeof(*operands));
+    *operand_count = form->operand_count;
+    return true;
+}
+
+bool buster_aarch64_arm_m1_gpr_decode(Target target, u32 word, u32* form_index, A64GprOperand* operands,
+                                      u32 operand_capacity, u32* operand_count)
+{
+    if (!form_index || !a64_typed_gpr_output_arguments_valid(operands, operand_capacity, operand_count) ||
+        a64_typed_output_ranges_overlap(form_index, sizeof(*form_index), operands,
+                                         (uintptr_t)operand_capacity * sizeof(*operands)) ||
+        a64_typed_output_ranges_overlap(form_index, sizeof(*form_index), operand_count, sizeof(*operand_count)) ||
+        !a64_gpr_target_valid(target))
+    {
+        return false;
+    }
+    BusterAarch64CanonicalDecodeResult canonical = {0};
+    if (buster_aarch64_canonical_decode(target, word, &canonical) != BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS)
+    {
+        return false;
+    }
+    u32 selected = UINT32_MAX;
+    if (!a64_typed_gpr_generated_index_for_digest(canonical.arm_row_digest, &selected))
+    {
+        return false;
+    }
+    A64GprOperand local[4] = {0};
+    u32 local_count = 0;
+    if (!buster_aarch64_arm_m1_gpr_decode_form(target, selected, word, local, BUSTER_ARRAY_LENGTH(local), &local_count) ||
+        local_count > operand_capacity)
+    {
+        return false;
+    }
+    memcpy(operands, local, (size_t)local_count * sizeof(*operands));
+    *form_index = selected;
+    *operand_count = local_count;
+    return true;
+}
+
+bool a64_arm_m1_gpr_decode_form(Target target, u32 form_index, u32 word, A64GprOperand* operands, u32 operand_capacity,
+                                u32* operand_count)
+{
+    return buster_aarch64_arm_m1_gpr_decode_form(target, form_index, word, operands, operand_capacity, operand_count);
+}
+
+bool a64_arm_m1_gpr_decode(Target target, u32 word, u32* form_index, A64GprOperand* operands, u32 operand_capacity,
+                           u32* operand_count)
+{
+    return buster_aarch64_arm_m1_gpr_decode(target, word, form_index, operands, operand_capacity, operand_count);
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_typed_scalar_decode_register(BusterAarch64ArmM1ScalarIntegerGeneratedForm const* form, u32 index,
+                                                          u8 register_index, u8 width, A64ScalarIntOperand decoded[4])
+{
+    if (!form || index >= form->operand_count || form->operands[index].kind != BUSTER_AARCH64_ARM_M1_SCALAR_OPERAND_REGISTER)
+    {
+        return false;
+    }
+    BusterAarch64ArmM1ScalarIntegerGeneratedOperand expected = form->operands[index];
+    A64ScalarIntOperand value = {
+        .kind = A64_SCALAR_INT_OPERAND_REGISTER,
+        .width = expected.width ? expected.width : width,
+        .index = register_index,
+        .stack_pointer = register_index == 31 && expected.register31_role == BUSTER_AARCH64_ARM_M1_SCALAR_REGISTER31_SP,
+    };
+    if (value.width != width || !a64_scalar_operand_valid(expected, value))
+    {
+        return false;
+    }
+    decoded[index] = value;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_typed_scalar_decode_immediate(BusterAarch64ArmM1ScalarIntegerGeneratedForm const* form, u32 index,
+                                                           u64 immediate, A64ScalarIntOperand decoded[4])
+{
+    if (!form || index >= form->operand_count || form->operands[index].kind != BUSTER_AARCH64_ARM_M1_SCALAR_OPERAND_IMMEDIATE)
+    {
+        return false;
+    }
+    decoded[index] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = immediate};
+    return a64_scalar_operand_valid(form->operands[index], decoded[index]);
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_typed_scalar_logical_immediate_decode(u8 width, u32 n, u32 immr, u32 imms, u64* value)
+{
+    if (!value || (width != 32 && width != 64) || n > 1 || immr > 63 || imms > 63)
+    {
+        return false;
+    }
+    u32 packed = (n << 6) | ((~imms) & 63u);
+    s32 len = -1;
+    for (s32 bit = 6; bit >= 0; bit -= 1)
+    {
+        if (packed & (1u << bit))
+        {
+            len = bit;
+            break;
+        }
+    }
+    if (len < 1 || (width == 32 && (n || len >= 6)) || (width == 64 && len > 6))
+    {
+        return false;
+    }
+    u32 levels = (1u << len) - 1u;
+    u32 s = imms & levels;
+    u32 r = immr & levels;
+    if (s == levels)
+    {
+        return false;
+    }
+    u32 element_width = 1u << len;
+    u64 element_mask = element_width == 64 ? UINT64_MAX : ((UINT64_C(1) << element_width) - 1);
+    u64 element = (UINT64_C(1) << (s + 1u)) - 1;
+    u32 rotation = element_width ? (r % element_width) : 0;
+    if (rotation)
+    {
+        element = ((element >> rotation) | (element << (element_width - rotation))) & element_mask;
+    }
+    u64 result = 0;
+    for (u32 offset = 0; offset < width; offset += element_width)
+    {
+        result |= element << offset;
+    }
+    *value = result & (width == 32 ? UINT64_C(0xffffffff) : UINT64_MAX);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_typed_scalar_recipe_decode(BusterAarch64ArmM1ScalarIntegerGeneratedForm const* form, u32 word,
+                                                        A64ScalarIntOperand operands[4], u32* operand_count,
+                                                        A64ScalarIntModifier modifiers[1], u32* modifier_count)
+{
+    if (!form || !operands || !operand_count || !modifiers || !modifier_count || form->recipe == BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_UDF)
+    {
+        return false;
+    }
+    A64ScalarIntOperand decoded[4] = {0};
+    A64ScalarIntModifier decoded_modifier = {0};
+    u32 decoded_modifier_count = 0;
+    u8 width = form->width;
+    switch ((BusterAarch64ArmM1ScalarIntegerRecipe)form->recipe)
+    {
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_EXT:
+    {
+        u8 option = (u8)((word >> 13) & 7u);
+        u8 amount = (u8)((word >> 10) & 7u);
+        bool source_x = option == A64_SCALAR_INT_EXTEND_UXTX || option == A64_SCALAR_INT_EXTEND_SXTX;
+        if (amount > 4 || (width == 32 && source_x) ||
+            !a64_typed_scalar_decode_register(form, 0, (u8)(word & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_register(form, 1, (u8)((word >> 5) & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_register(form, 2, (u8)((word >> 16) & 31u), source_x ? 64 : 32, decoded))
+        {
+            return false;
+        }
+        bool default_option = option == (width == 64 ? A64_SCALAR_INT_EXTEND_UXTX : A64_SCALAR_INT_EXTEND_UXTW);
+        bool has_stack_pointer = decoded[0].stack_pointer || decoded[1].stack_pointer;
+        if (!(default_option && amount == 0 && has_stack_pointer))
+        {
+            decoded_modifier = (A64ScalarIntModifier){
+                .kind = A64_SCALAR_INT_MODIFIER_EXTEND,
+                .value = option,
+                .amount = amount,
+                .present = true,
+            };
+            decoded_modifier_count = 1;
+        }
+    }
+    break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_IMM:
+        if (!a64_typed_scalar_decode_register(form, 0, (u8)(word & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_register(form, 1, (u8)((word >> 5) & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_immediate(form, 2, (word >> 10) & 4095u, decoded))
+        {
+            return false;
+        }
+        if (word & (UINT32_C(1) << 22))
+        {
+            decoded_modifier = (A64ScalarIntModifier){
+                .kind = A64_SCALAR_INT_MODIFIER_SHIFT,
+                .value = A64_SCALAR_INT_SHIFT_LSL,
+                .amount = 12,
+                .present = true,
+            };
+            decoded_modifier_count = 1;
+        }
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_SHIFT:
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_SHIFT:
+    {
+        u8 shift = (u8)((word >> 22) & 3u);
+        u8 amount = (u8)((word >> 10) & 63u);
+        if ((form->recipe == BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_SHIFT && shift == A64_SCALAR_INT_SHIFT_ROR) ||
+            !a64_typed_scalar_decode_register(form, 0, (u8)(word & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_register(form, 1, (u8)((word >> 5) & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_register(form, 2, (u8)((word >> 16) & 31u), width, decoded))
+        {
+            return false;
+        }
+        if (shift != A64_SCALAR_INT_SHIFT_LSL || amount)
+        {
+            decoded_modifier = (A64ScalarIntModifier){
+                .kind = A64_SCALAR_INT_MODIFIER_SHIFT,
+                .value = shift,
+                .amount = amount,
+                .present = true,
+            };
+            decoded_modifier_count = 1;
+        }
+    }
+    break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_IMM:
+    {
+        u64 immediate = 0;
+        if (!a64_typed_scalar_logical_immediate_decode(width, (word >> 22) & 1u, (word >> 16) & 63u, (word >> 10) & 63u, &immediate) ||
+            !a64_typed_scalar_decode_register(form, 0, (u8)(word & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_register(form, 1, (u8)((word >> 5) & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_immediate(form, 2, immediate, decoded))
+        {
+            return false;
+        }
+    }
+    break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_BITFIELD:
+        if (!a64_typed_scalar_decode_register(form, 0, (u8)(word & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_register(form, 1, (u8)((word >> 5) & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_immediate(form, 2, (word >> 16) & 63u, decoded) ||
+            !a64_typed_scalar_decode_immediate(form, 3, (word >> 10) & 63u, decoded))
+        {
+            return false;
+        }
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_EXTRACT:
+        if (!a64_typed_scalar_decode_register(form, 0, (u8)(word & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_register(form, 1, (u8)((word >> 5) & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_register(form, 2, (u8)((word >> 16) & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_immediate(form, 3, (word >> 10) & 63u, decoded))
+        {
+            return false;
+        }
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_MOVEWIDE:
+    {
+        u8 halfword = (u8)((word >> 21) & 3u);
+        if ((width == 32 && halfword > 1) || !a64_typed_scalar_decode_register(form, 0, (u8)(word & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_immediate(form, 1, (word >> 5) & 0xffffu, decoded))
+        {
+            return false;
+        }
+        if (halfword)
+        {
+            decoded_modifier = (A64ScalarIntModifier){
+                .kind = A64_SCALAR_INT_MODIFIER_SHIFT,
+                .value = A64_SCALAR_INT_SHIFT_LSL,
+                .amount = (u64)halfword * 16,
+                .present = true,
+            };
+            decoded_modifier_count = 1;
+        }
+    }
+    break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COND_CMP_IMM:
+        if (!a64_typed_scalar_decode_register(form, 0, (u8)((word >> 5) & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_immediate(form, 1, (word >> 16) & 31u, decoded) ||
+            !a64_typed_scalar_decode_immediate(form, 2, word & 15u, decoded) ||
+            !a64_typed_scalar_decode_immediate(form, 3, (word >> 12) & 15u, decoded))
+        {
+            return false;
+        }
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COND_CMP_REG:
+        if (!a64_typed_scalar_decode_register(form, 0, (u8)((word >> 5) & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_register(form, 1, (u8)((word >> 16) & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_immediate(form, 2, word & 15u, decoded) ||
+            !a64_typed_scalar_decode_immediate(form, 3, (word >> 12) & 15u, decoded))
+        {
+            return false;
+        }
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_RMIF:
+        if (!a64_typed_scalar_decode_register(form, 0, (u8)((word >> 5) & 31u), width, decoded) ||
+            !a64_typed_scalar_decode_immediate(form, 1, (word >> 15) & 63u, decoded) ||
+            !a64_typed_scalar_decode_immediate(form, 2, word & 15u, decoded))
+        {
+            return false;
+        }
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_UDF:
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COUNT:
+        return false;
+    }
+    for (u32 index = 0; index < form->operand_count; index += 1)
+    {
+        if (!a64_scalar_operand_valid(form->operands[index], decoded[index]))
+        {
+            return false;
+        }
+    }
+    if (!a64_scalar_modifiers_valid(decoded_modifier_count ? &decoded_modifier : 0, decoded_modifier_count))
+    {
+        return false;
+    }
+    u32 reencoded = 0;
+    if (!a64_scalar_recipe_encode(form, decoded, form->operand_count, decoded_modifier_count ? &decoded_modifier : 0,
+                                  decoded_modifier_count, &reencoded) ||
+        reencoded != word)
+    {
+        return false;
+    }
+    memcpy(operands, decoded, sizeof(decoded));
+    *operand_count = form->operand_count;
+    if (decoded_modifier_count)
+    {
+        *modifiers = decoded_modifier;
+    }
+    *modifier_count = decoded_modifier_count;
+    return true;
+}
+
+bool buster_aarch64_arm_m1_scalar_integer_decode_form(
+    Target target, u32 form_index, u32 word, A64ScalarIntOperand* operands, u32 operand_capacity, u32* operand_count,
+    A64ScalarIntModifier* modifiers, u32 modifier_capacity, u32* modifier_count)
+{
+    if (!a64_typed_scalar_output_arguments_valid(operands, operand_capacity, operand_count, modifiers, modifier_capacity, modifier_count) ||
+        !a64_scalar_target_valid(target) || form_index >= BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_FORM_COUNT)
+    {
+        return false;
+    }
+    BusterAarch64ArmM1ScalarIntegerGeneratedForm const* form = buster_aarch64_arm_m1_scalar_integer_generated_forms + form_index;
+    if (!a64_scalar_generated_form_valid(form) ||
+        (form->required_feature != TARGET_CPU_FEATURE_NONE && !target_cpu_feature_has(target, form->required_feature)) ||
+        operand_capacity < form->operand_count)
+    {
+        return false;
+    }
+    BusterAarch64CanonicalDecoderForm const* canonical_form = 0;
+    if (!a64_typed_canonical_raw_decode_for_digest(form->arm_row_digest, word, &canonical_form) || !canonical_form ||
+        canonical_form->fixed_mask != form->fixed_mask || canonical_form->fixed_value != form->fixed_value)
+    {
+        return false;
+    }
+    A64ScalarIntOperand local_operands[4] = {0};
+    A64ScalarIntModifier local_modifier = {0};
+    u32 local_operand_count = 0;
+    u32 local_modifier_count = 0;
+    if (!a64_typed_scalar_recipe_decode(form, word, local_operands, &local_operand_count, &local_modifier, &local_modifier_count) ||
+        local_modifier_count > modifier_capacity)
+    {
+        return false;
+    }
+    memcpy(operands, local_operands, (size_t)local_operand_count * sizeof(*operands));
+    if (local_modifier_count)
+    {
+        memcpy(modifiers, &local_modifier, sizeof(local_modifier));
+    }
+    *operand_count = local_operand_count;
+    *modifier_count = local_modifier_count;
+    return true;
+}
+
+bool buster_aarch64_arm_m1_scalar_integer_decode(
+    Target target, u32 word, u32* form_index, A64ScalarIntOperand* operands, u32 operand_capacity, u32* operand_count,
+    A64ScalarIntModifier* modifiers, u32 modifier_capacity, u32* modifier_count)
+{
+    if (!form_index || !a64_typed_scalar_output_arguments_valid(operands, operand_capacity, operand_count, modifiers, modifier_capacity,
+                                                                 modifier_count) ||
+        a64_typed_output_ranges_overlap(form_index, sizeof(*form_index), operands,
+                                         (uintptr_t)operand_capacity * sizeof(*operands)) ||
+        a64_typed_output_ranges_overlap(form_index, sizeof(*form_index), operand_count, sizeof(*operand_count)) ||
+        a64_typed_output_ranges_overlap(form_index, sizeof(*form_index), modifiers,
+                                         (uintptr_t)modifier_capacity * sizeof(*modifiers)) ||
+        a64_typed_output_ranges_overlap(form_index, sizeof(*form_index), modifier_count, sizeof(*modifier_count)) || !a64_scalar_target_valid(target))
+    {
+        return false;
+    }
+    BusterAarch64CanonicalDecodeResult canonical = {0};
+    if (buster_aarch64_canonical_decode(target, word, &canonical) != BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS)
+    {
+        return false;
+    }
+    u32 selected = UINT32_MAX;
+    if (!a64_typed_scalar_generated_index_for_digest(canonical.arm_row_digest, &selected))
+    {
+        return false;
+    }
+    A64ScalarIntOperand local_operands[4] = {0};
+    A64ScalarIntModifier local_modifier = {0};
+    u32 local_operand_count = 0;
+    u32 local_modifier_count = 0;
+    if (!buster_aarch64_arm_m1_scalar_integer_decode_form(target, selected, word, local_operands, BUSTER_ARRAY_LENGTH(local_operands),
+                                                         &local_operand_count, &local_modifier, 1,
+                                                         &local_modifier_count) ||
+        local_operand_count > operand_capacity || local_modifier_count > modifier_capacity)
+    {
+        return false;
+    }
+    memcpy(operands, local_operands, (size_t)local_operand_count * sizeof(*operands));
+    if (local_modifier_count)
+    {
+        memcpy(modifiers, &local_modifier, sizeof(local_modifier));
+    }
+    *form_index = selected;
+    *operand_count = local_operand_count;
+    *modifier_count = local_modifier_count;
+    return true;
+}
+
+bool a64_arm_m1_scalar_integer_decode_form(
+    Target target, u32 form_index, u32 word, A64ScalarIntOperand* operands, u32 operand_capacity, u32* operand_count,
+    A64ScalarIntModifier* modifiers, u32 modifier_capacity, u32* modifier_count)
+{
+    return buster_aarch64_arm_m1_scalar_integer_decode_form(target, form_index, word, operands, operand_capacity, operand_count, modifiers,
+                                                            modifier_capacity, modifier_count);
+}
+
+bool a64_arm_m1_scalar_integer_decode(
+    Target target, u32 word, u32* form_index, A64ScalarIntOperand* operands, u32 operand_capacity, u32* operand_count,
+    A64ScalarIntModifier* modifiers, u32 modifier_capacity, u32* modifier_count)
+{
+    return buster_aarch64_arm_m1_scalar_integer_decode(target, word, form_index, operands, operand_capacity, operand_count, modifiers,
+                                                       modifier_capacity, modifier_count);
+}

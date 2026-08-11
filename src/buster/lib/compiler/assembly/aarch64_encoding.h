@@ -342,6 +342,20 @@ BUSTER_F_DECL bool a64_arm_m1_gpr_find_form(String8 mnemonic, A64GprOperand cons
 BUSTER_F_DECL bool a64_arm_m1_gpr_encode(Target target, u32 form_index, A64GprOperand const* operands, u32 operand_count, u32* word);
 BUSTER_F_DECL bool a64_arm_m1_gpr_encode_mnemonic(Target target, String8 mnemonic, A64GprOperand const* operands, u32 operand_count,
                                                   u32* word);
+// Typed direct-GPR decoding.  Form-directed decoding requires the selected
+// form index and checks that the word belongs to that exact canonical row.
+// Word-first decoding delegates overlap precedence and feature gating to the
+// canonical Arm decoder before selecting this family.  Outputs are committed
+// only on success; operand_count is both the output count and the buffer
+// capacity contract.
+BUSTER_F_DECL bool buster_aarch64_arm_m1_gpr_decode_form(Target target, u32 form_index, u32 word, A64GprOperand* operands,
+                                                        u32 operand_capacity, u32* operand_count);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_gpr_decode(Target target, u32 word, u32* form_index, A64GprOperand* operands,
+                                                   u32 operand_capacity, u32* operand_count);
+BUSTER_F_DECL bool a64_arm_m1_gpr_decode_form(Target target, u32 form_index, u32 word, A64GprOperand* operands,
+                                              u32 operand_capacity, u32* operand_count);
+BUSTER_F_DECL bool a64_arm_m1_gpr_decode(Target target, u32 word, u32* form_index, A64GprOperand* operands,
+                                         u32 operand_capacity, u32* operand_count);
 
 // Compact semantic API for the generated Apple-M1 scalar-integer slice.  The
 // first array contains architectural operands in source order; optional
@@ -457,6 +471,22 @@ BUSTER_F_DECL bool a64_arm_m1_scalar_integer_encode(Target target, u32 form_inde
 BUSTER_F_DECL bool a64_arm_m1_scalar_integer_encode_mnemonic(Target target, String8 mnemonic, A64ScalarIntOperand const* operands,
                                                              u32 operand_count, A64ScalarIntModifier const* modifiers,
                                                              u32 modifier_count, u32* word);
+// Typed scalar-integer decoding.  The modifier output is canonicalized: an
+// omitted architectural default is reported with modifier_count=0, while a
+// non-default shift/extension is reported as one present modifier.  Both
+// count outputs and all output buffers remain byte-unchanged on failure.
+BUSTER_F_DECL bool buster_aarch64_arm_m1_scalar_integer_decode_form(
+    Target target, u32 form_index, u32 word, A64ScalarIntOperand* operands, u32 operand_capacity, u32* operand_count,
+    A64ScalarIntModifier* modifiers, u32 modifier_capacity, u32* modifier_count);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_scalar_integer_decode(
+    Target target, u32 word, u32* form_index, A64ScalarIntOperand* operands, u32 operand_capacity, u32* operand_count,
+    A64ScalarIntModifier* modifiers, u32 modifier_capacity, u32* modifier_count);
+BUSTER_F_DECL bool a64_arm_m1_scalar_integer_decode_form(
+    Target target, u32 form_index, u32 word, A64ScalarIntOperand* operands, u32 operand_capacity, u32* operand_count,
+    A64ScalarIntModifier* modifiers, u32 modifier_capacity, u32* modifier_count);
+BUSTER_F_DECL bool a64_arm_m1_scalar_integer_decode(
+    Target target, u32 word, u32* form_index, A64ScalarIntOperand* operands, u32 operand_capacity, u32* operand_count,
+    A64ScalarIntModifier* modifiers, u32 modifier_capacity, u32* modifier_count);
 
 // Coverage classification is independent from raw bit-layout completeness.
 // Keep these values aligned with the generated snapshot while exposing a
