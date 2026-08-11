@@ -106,6 +106,7 @@ struct TestDescriptor
 {
     String8 name;
     TestFunction* function;
+    bool requires_temporary_root;
 };
 
 typedef struct TestTimingRecord TestTimingRecord;
@@ -188,9 +189,9 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
     {S8_INITIALIZER("hash_tests"), &hash_tests},
     {S8_INITIALIZER("simd_tests"), &simd_tests},
     {S8_INITIALIZER("string_tests"), &string_tests},
-    {S8_INITIALIZER("os_tests"), &os_tests},
+    {S8_INITIALIZER("os_tests"), &os_tests, true},
     {S8_INITIALIZER("file_tests"), &file_tests},
-    {S8_INITIALIZER("ide_document_tests"), &ide_document_tests},
+    {S8_INITIALIZER("ide_document_tests"), &ide_document_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     {S8_INITIALIZER("window_tests"), &window_tests},
     {S8_INITIALIZER("rendering_tests"), &rendering_tests},
     {S8_INITIALIZER("ui_tests"), &ui_tests},
@@ -211,11 +212,11 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
     {S8_INITIALIZER("debug_model_tests"), &debug_model_tests},
     {S8_INITIALIZER("dwarf_tests"), &dwarf_tests},
     {S8_INITIALIZER("codeview_tests"), &codeview_tests},
-    {S8_INITIALIZER("pdb_tests"), &pdb_tests},
+    {S8_INITIALIZER("pdb_tests"), &pdb_tests, !BUSTER_IOS},
     {S8_INITIALIZER("object_tests"), &object_tests},
     {S8_INITIALIZER("jit_tests"), &jit_tests},
-    {S8_INITIALIZER("link_tests"), &link_tests},
-    {S8_INITIALIZER("compiler_driver_tests"), &compiler_driver_tests},
+    {S8_INITIALIZER("link_tests"), &link_tests, !BUSTER_ANDROID && !BUSTER_IOS},
+    {S8_INITIALIZER("compiler_driver_tests"), &compiler_driver_tests, true},
 #if BUSTER_CPU_ARCH_X86_64
     {S8_INITIALIZER("x86_64_tests"), &x86_64_tests},
 #endif
@@ -271,6 +272,12 @@ BUSTER_GLOBAL_LOCAL UnitTestArguments* buster_test_temporary_arguments;
 BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_failed;
 BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_owned;
 BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_ready;
+BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_failure_injected;
+BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_failure_self_test_active;
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_failure_body_called;
+#endif
+BUSTER_GLOBAL_LOCAL u64 buster_test_temporary_path_call_count;
 
 BUSTER_GLOBAL_LOCAL String8 buster_test_temporary_base(void)
 {
@@ -307,6 +314,11 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_create(void)
     if (!arguments || !arena)
     {
         string_print(S8("TEST_TEMPORARY_ROOT_SETUP status=failed reason=no active library test run\n"));
+        return false;
+    }
+
+    if (buster_test_temporary_root_failure_injected)
+    {
         return false;
     }
 
@@ -392,6 +404,11 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_component_is_safe(String8 compone
 
 String8 buster_test_temporary_path(Arena* arena, String8 name, String8 suffix)
 {
+    if (buster_test_temporary_root_failure_self_test_active)
+    {
+        buster_test_temporary_path_call_count += 1;
+    }
+
     // Some tests intentionally exec this binary and exit from a child mode.
     // Create the root lazily so those children do not leave an empty root when
     // they never request a test artifact; the parent still owns final cleanup.
@@ -469,6 +486,101 @@ u64 buster_test_worker_count(u64 requested)
 #endif
 }
 
+BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_descriptors(UnitTestArguments* arguments, TestDescriptor* descriptors, u64 descriptor_count,
+                                                                 bool timing_enabled, u64* timing_record_count)
+{
+    BatchTestResult result = {0};
+    for (u64 i = 0; i < descriptor_count; i += 1)
+    {
+        TestDescriptor descriptor = descriptors[i];
+        BatchTestResult result_before_descriptor = result;
+
+        // A descriptor that can create an artifact must not enter its body
+        // until the root has been created and probed. Otherwise a setup
+        // failure would turn the empty path returned by the accessor into
+        // paths such as /top.txt when the descriptor formats a child path.
+        if (descriptor.requires_temporary_root && !buster_test_temporary_root.length && !buster_test_temporary_root_failed)
+        {
+            buster_test_temporary_root_failed = !buster_test_temporary_root_create();
+        }
+        if (buster_test_temporary_root_failed)
+        {
+            result = result_before_descriptor;
+            result.unit_test_count += 1;
+            break;
+        }
+
+        u64 arena_position = arguments->arena->position;
+        if (timing_enabled)
+        {
+            TestTimingRecord timing = test_timing_run_descriptor(arguments, descriptor, i);
+            consume_unit_tests(&result, timing.result);
+            arena_set_position(arguments->arena, arena_position);
+            test_timing_report(arguments, timing);
+            *timing_record_count += 1;
+        }
+        else
+        {
+            UnitTestResult unit_test_result = descriptor.function(arguments);
+            consume_unit_tests(&result, unit_test_result);
+            arena_set_position(arguments->arena, arena_position);
+        }
+
+        if (buster_test_temporary_root_failed)
+        {
+            // A failed root makes every later artifact path unusable. Discard
+            // the descriptor's downstream path failures and report exactly
+            // one deterministic harness failure instead, preserving all
+            // aggregate totals completed before this descriptor.
+            result = result_before_descriptor;
+            result.unit_test_count += 1;
+            break;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult buster_test_temporary_root_failure_body(UnitTestArguments* arguments)
+{
+    buster_test_temporary_root_failure_body_called = true;
+    String8 path = buster_test_temporary_path(arguments->arena, S8("should-not-run"), S8(""));
+    BUSTER_UNUSED(path);
+    return (UnitTestResult){1, 1};
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_failure_self_test(UnitTestArguments* arguments)
+{
+    TestDescriptor descriptor = {
+        .name = S8("temporary_root_failure_self_test"),
+        .function = &buster_test_temporary_root_failure_body,
+        .requires_temporary_root = true,
+    };
+    buster_test_temporary_root_failure_injected = true;
+    buster_test_temporary_root_failure_self_test_active = true;
+    buster_test_temporary_root_failure_body_called = false;
+    buster_test_temporary_path_call_count = 0;
+    buster_test_temporary_root = (String8){0};
+    buster_test_temporary_root_failed = false;
+    buster_test_temporary_root_owned = false;
+    buster_test_temporary_root_ready = false;
+
+    u64 timing_record_count = 0;
+    BatchTestResult test = buster_test_run_descriptors(arguments, &descriptor, 1, false, &timing_record_count);
+    bool result = !buster_test_temporary_root_failure_body_called && buster_test_temporary_path_call_count == 0 && timing_record_count == 0 &&
+                  test.succeeded_unit_test_count == 0 && test.unit_test_count == 1 && test.succeeded_module_test_count == 0 && test.module_test_count == 0 &&
+                  test.succeeded_external_test_count == 0 && test.external_test_count == 0;
+
+    buster_test_temporary_root_failure_injected = false;
+    buster_test_temporary_root_failure_self_test_active = false;
+    buster_test_temporary_root_failure_body_called = false;
+    buster_test_temporary_path_call_count = 0;
+    buster_test_temporary_root = (String8){0};
+    buster_test_temporary_root_failed = false;
+    buster_test_temporary_root_owned = false;
+    buster_test_temporary_root_ready = false;
+    return result;
+}
+
 BatchTestResult library_tests(UnitTestArguments* arguments)
 {
     BatchTestResult result = {0};
@@ -486,6 +598,19 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     buster_test_temporary_root_failed = false;
     buster_test_temporary_root_owned = false;
     buster_test_temporary_root_ready = false;
+    buster_test_temporary_root_failure_injected = false;
+
+    if (!buster_test_temporary_root_arena)
+    {
+        string_print(S8("TEST_TEMPORARY_ROOT_SETUP status=failed reason=arena allocation\n"));
+        result.unit_test_count = 1;
+        buster_test_temporary_arguments = 0;
+        buster_test_temporary_root_arena = 0;
+        buster_test_temporary_root_failed = false;
+        return result;
+    }
+
+    BUSTER_CHECK(buster_test_temporary_root_failure_self_test(arguments));
 
     bool timing_enabled = program_state != 0 && program_flag_get(PROGRAM_FLAG_VERBOSE);
     if (timing_enabled)
@@ -494,36 +619,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     }
 
     u64 timing_record_count = 0;
-    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(test_descriptors); i += 1)
-    {
-        BatchTestResult result_before_descriptor = result;
-        u64 arena_position = arguments->arena->position;
-        if (timing_enabled)
-        {
-            TestTimingRecord timing = test_timing_run_descriptor(arguments, test_descriptors[i], i);
-            consume_unit_tests(&result, timing.result);
-            arena_set_position(arguments->arena, arena_position);
-            test_timing_report(arguments, timing);
-            timing_record_count += 1;
-        }
-        else
-        {
-            UnitTestResult unit_test_result = test_descriptors[i].function(arguments);
-            consume_unit_tests(&result, unit_test_result);
-            arena_set_position(arguments->arena, arena_position);
-        }
-
-        if (buster_test_temporary_root_failed)
-        {
-            // A failed root makes every later artifact path unusable. Discard
-            // the descriptor's downstream path failures and report exactly
-            // one deterministic harness failure instead, preserving all
-            // aggregate totals completed before this descriptor.
-            result = result_before_descriptor;
-            result.unit_test_count += 1;
-            break;
-        }
-    }
+    result = buster_test_run_descriptors(arguments, test_descriptors, BUSTER_ARRAY_LENGTH(test_descriptors), timing_enabled, &timing_record_count);
     BUSTER_CHECK(!timing_enabled || buster_test_temporary_root_failed || timing_record_count == BUSTER_ARRAY_LENGTH(test_descriptors));
 
     bool temporary_root_succeeded = true;
