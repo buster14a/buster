@@ -36,18 +36,29 @@ BUSTER_GLOBAL_LOCAL String8 ide_document_test_temporary_root(Arena* arena, Strin
     }
     return result;
 #elif defined(__linux__) || defined(__APPLE__)
-    // realpath() rejects a not-yet-created leaf. Canonicalize the existing
-    // temporary parent instead so macOS /tmp -> /private/tmp is reflected in
-    // every test path before the workspace is created.
-    String8 parent = os_path_absolute(arena, S8("/tmp"), true);
-    if (!parent.length)
+    if (!temporary.length)
     {
         return temporary;
     }
+
+    // realpath() rejects a not-yet-created leaf. Canonicalize the complete
+    // existing temporary parent instead so the nested buster-tests directory
+    // remains owned by the harness and macOS /tmp -> /private/tmp is reflected
+    // in every test path before the workspace is created.
     u64 leaf_start = temporary.length;
     while (leaf_start && temporary.pointer[leaf_start - 1] != '/' && temporary.pointer[leaf_start - 1] != '\\')
     {
         leaf_start -= 1;
+    }
+    if (!leaf_start)
+    {
+        return temporary;
+    }
+    String8 parent_path = string_slice(temporary, 0, leaf_start - 1);
+    String8 parent = os_path_absolute(arena, parent_path, true);
+    if (!parent.length)
+    {
+        return temporary;
     }
     String8 leaf = string_slice(temporary, leaf_start, temporary.length);
     bool parent_separator = parent.length && (parent.pointer[parent.length - 1] == '/' || parent.pointer[parent.length - 1] == '\\');
@@ -486,6 +497,26 @@ UnitTestResult ide_document_tests(UnitTestArguments* arguments)
     }
 
     Arena* test_arena = arguments->arena;
+    String8 containment_root = ide_document_test_temporary_root(test_arena, S8("buster-ide-document-containment"));
+    u64 containment_leaf_start = containment_root.length;
+    while (containment_leaf_start && containment_root.pointer[containment_leaf_start - 1] != '/' && containment_root.pointer[containment_leaf_start - 1] != '\\')
+    {
+        containment_leaf_start -= 1;
+    }
+    if (containment_leaf_start)
+    {
+        u64 parent_leaf_start = containment_leaf_start - 1;
+        while (parent_leaf_start && containment_root.pointer[parent_leaf_start - 1] != '/' && containment_root.pointer[parent_leaf_start - 1] != '\\')
+        {
+            parent_leaf_start -= 1;
+        }
+        String8 containment_parent_leaf = string_slice(containment_root, parent_leaf_start, containment_leaf_start - 1);
+        BUSTER_TEST(arguments, string_starts_with_sequence(containment_parent_leaf, S8("buster-tests-")));
+    }
+    else
+    {
+        BUSTER_TEST(arguments, false);
+    }
     String8 root = ide_document_test_temporary_root(test_arena, S8("buster-ide-document-model"));
     String8 subdirectory = string_format_z(test_arena, S8("{S8}/sub"), root);
     String8 a_path = string_format_z(test_arena, S8("{S8}/a.bbb"), root);
