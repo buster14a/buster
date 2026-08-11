@@ -2339,6 +2339,86 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, invalid.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
         BUSTER_TEST(arguments, invalid.diagnostics[2].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
     }
+
+    String8 split_operands[6] = {0};
+    u32 split_operand_count = 0;
+    bool split_lists = assembly_test_split_operands(
+        S8("{v0.4s, v1.4s}, [x2, x3], (x4, x5), :lo12:symbol"),
+        split_operands, BUSTER_ARRAY_LENGTH(split_operands), &split_operand_count);
+    BUSTER_TEST(arguments, split_lists && split_operand_count == 4);
+    if (split_lists && split_operand_count == 4)
+    {
+        BUSTER_STRING_TEST(arguments, split_operands[0], S8("{v0.4s, v1.4s}"));
+        BUSTER_STRING_TEST(arguments, split_operands[1], S8("[x2, x3]"));
+        BUSTER_STRING_TEST(arguments, split_operands[2], S8("(x4, x5)"));
+        BUSTER_STRING_TEST(arguments, split_operands[3], S8(":lo12:symbol"));
+    }
+    BUSTER_TEST(arguments, !assembly_test_split_operands(
+                               S8("{v0.4s, v1.4s], x0"), split_operands,
+                               BUSTER_ARRAY_LENGTH(split_operands), &split_operand_count));
+    BUSTER_TEST(arguments, !assembly_test_split_operands(
+                               S8("{v0.4s, v1.4s, x0"), split_operands,
+                               BUSTER_ARRAY_LENGTH(split_operands), &split_operand_count));
+
+    bool split_six = assembly_test_split_operands(
+        S8("x0, x1, x2, x3, x4, x5"), split_operands,
+        BUSTER_ARRAY_LENGTH(split_operands), &split_operand_count);
+    BUSTER_TEST(arguments, split_six && split_operand_count == BUSTER_ARRAY_LENGTH(split_operands));
+    BUSTER_TEST(arguments, !assembly_test_split_operands(
+                               S8("x0, x1, x2, x3, x4, x5"), split_operands,
+                               BUSTER_ARRAY_LENGTH(split_operands) - 1, &split_operand_count));
+
+    AssemblyEncodeResult aarch64_same_line_label = assembly_encode(
+        arguments->arena, S8("leading_label : b leading_label\n"),
+        (AssemblyEncodeOptions){.target = aarch64_target});
+    BUSTER_TEST(arguments, aarch64_same_line_label.diagnostic_count == 0 &&
+                               aarch64_same_line_label.symbol_count == 1 &&
+                               aarch64_same_line_label.symbols[0].defined &&
+                               aarch64_same_line_label.symbols[0].offset == 0 &&
+                               string_equal(aarch64_same_line_label.symbols[0].name, S8("leading_label")) &&
+                               aarch64_same_line_label.bytes.length == sizeof(expected_aarch64_jump) &&
+                               memcmp(aarch64_same_line_label.bytes.pointer, expected_aarch64_jump,
+                                      sizeof(expected_aarch64_jump)) == 0);
+    AssemblyEncodeResult aarch64_modifier_operand = assembly_encode(
+        arguments->arena, S8("b :lo12:target\n"),
+        (AssemblyEncodeOptions){.target = aarch64_target});
+    BUSTER_TEST(arguments, aarch64_modifier_operand.diagnostic_count == 1 &&
+                               aarch64_modifier_operand.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                               aarch64_modifier_operand.symbol_count == 0 && aarch64_modifier_operand.bytes.length == 0);
+    AssemblyEncodeResult aarch64_trailing_modifier_operand = assembly_encode(
+        arguments->arena, S8("b target, :lo12:other\n"),
+        (AssemblyEncodeOptions){.target = aarch64_target});
+    BUSTER_TEST(arguments, aarch64_trailing_modifier_operand.diagnostic_count == 1 &&
+                               aarch64_trailing_modifier_operand.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                               aarch64_trailing_modifier_operand.symbol_count == 1 &&
+                               string_equal(aarch64_trailing_modifier_operand.symbols[0].name, S8("target")) &&
+                               aarch64_trailing_modifier_operand.bytes.length == 0);
+    AssemblyEncodeResult invalid_leading_label = assembly_encode(
+        arguments->arena, S8("bad-label: nop\n"),
+        (AssemblyEncodeOptions){.target = aarch64_target});
+    BUSTER_TEST(arguments, invalid_leading_label.diagnostic_count == 1 &&
+                               invalid_leading_label.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT &&
+                               invalid_leading_label.symbol_count == 0 && invalid_leading_label.bytes.length == 4);
+
+    AssemblyEncodeResult aarch64_six_operands = assembly_encode(
+        arguments->arena, S8("b one, two, three, four, five, six\n"),
+        (AssemblyEncodeOptions){.target = aarch64_target});
+    BUSTER_TEST(arguments, aarch64_six_operands.diagnostic_count == 1 &&
+                               aarch64_six_operands.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                               aarch64_six_operands.bytes.length == 0);
+    AssemblyEncodeResult unchanged_x86_diagnostic = assembly_encode(
+        arguments->arena, S8("mov rax, xmm0\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult unchanged_aarch64_diagnostic = assembly_encode(
+        arguments->arena, S8("ret x0\n"),
+        (AssemblyEncodeOptions){.target = aarch64_target});
+    BUSTER_TEST(arguments, unchanged_x86_diagnostic.diagnostic_count == 1 &&
+                               unchanged_x86_diagnostic.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                               unchanged_x86_diagnostic.bytes.length == 0);
+    BUSTER_TEST(arguments, unchanged_aarch64_diagnostic.diagnostic_count == 1 &&
+                               unchanged_aarch64_diagnostic.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                               unchanged_aarch64_diagnostic.bytes.length == 0);
+
     AssemblyEncodeResult invalid_syntax = assembly_encode(arguments->arena, S8("nop"),
                                                            (AssemblyEncodeOptions){
                                                                .target = aarch64_target,

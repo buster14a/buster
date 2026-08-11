@@ -367,10 +367,17 @@ struct AssemblyOperand
     bool sae;
 };
 
+enum
+{
+    // The imported AArch64 metadata contains source forms with six visible
+    // operands.  Keep every parser-side operand buffer at the same capacity.
+    ASSEMBLY_MAX_OPERANDS = 6,
+};
+
 typedef struct AssemblyInstruction AssemblyInstruction;
 struct AssemblyInstruction
 {
-    AssemblyOperand operands[5];
+    AssemblyOperand operands[ASSEMBLY_MAX_OPERANDS];
     u64 offset;
     u32 line;
     u32 column;
@@ -392,7 +399,7 @@ struct AssemblyInstruction
     String8 metadata_mnemonic;
     u8 metadata_address_size;
     u8 metadata_reserved_address[3];
-    BusterX86MetadataPhysicalOperand metadata_operands[5];
+    BusterX86MetadataPhysicalOperand metadata_operands[ASSEMBLY_MAX_OPERANDS];
     BusterX86MetadataPhysicalAttributes metadata_attributes;
 };
 
@@ -414,9 +421,9 @@ struct AssemblyBuilder
 
 enum
 {
-    // A source line can define one label and contain five metadata operands;
+    // A source line can define one label and contain six metadata operands;
     // each of those can introduce one distinct symbol.
-    ASSEMBLY_SOURCE_SYMBOLS_PER_LINE = 6,
+    ASSEMBLY_SOURCE_SYMBOLS_PER_LINE = ASSEMBLY_MAX_OPERANDS + 1,
 };
 
 BUSTER_GLOBAL_LOCAL bool assembly_space(char8 value)
@@ -437,6 +444,83 @@ BUSTER_GLOBAL_LOCAL String8 assembly_trim(String8 string)
         end -= 1;
     }
     return (String8){.pointer = string.pointer + start, .length = end - start};
+}
+
+typedef enum AssemblyOperandSplitStatus
+{
+    ASSEMBLY_OPERAND_SPLIT_END,
+    ASSEMBLY_OPERAND_SPLIT_SUCCESS,
+    ASSEMBLY_OPERAND_SPLIT_INVALID,
+} AssemblyOperandSplitStatus;
+
+BUSTER_GLOBAL_LOCAL AssemblyOperandSplitStatus assembly_operand_split_next(String8 text, u64* cursor, String8* result)
+{
+    if (*cursor >= text.length)
+    {
+        return ASSEMBLY_OPERAND_SPLIT_END;
+    }
+    u64 operand_start = *cursor;
+    u64 operand_end = operand_start;
+    u64 parenthesis_depth = 0;
+    u64 bracket_depth = 0;
+    u64 brace_depth = 0;
+    while (operand_end < text.length)
+    {
+        char8 character = text.pointer[operand_end];
+        if (character == '(')
+        {
+            parenthesis_depth += 1;
+        }
+        else if (character == ')')
+        {
+            if (!parenthesis_depth)
+            {
+                return ASSEMBLY_OPERAND_SPLIT_INVALID;
+            }
+            parenthesis_depth -= 1;
+        }
+        else if (character == '[')
+        {
+            bracket_depth += 1;
+        }
+        else if (character == ']')
+        {
+            if (!bracket_depth)
+            {
+                return ASSEMBLY_OPERAND_SPLIT_INVALID;
+            }
+            bracket_depth -= 1;
+        }
+        else if (character == '{')
+        {
+            brace_depth += 1;
+        }
+        else if (character == '}')
+        {
+            if (!brace_depth)
+            {
+                return ASSEMBLY_OPERAND_SPLIT_INVALID;
+            }
+            brace_depth -= 1;
+        }
+        else if (character == ',' && !parenthesis_depth && !bracket_depth && !brace_depth)
+        {
+            break;
+        }
+        operand_end += 1;
+    }
+    if (parenthesis_depth || bracket_depth || brace_depth)
+    {
+        return ASSEMBLY_OPERAND_SPLIT_INVALID;
+    }
+    String8 operand = assembly_trim(string_slice(text, operand_start, operand_end));
+    if (!operand.length)
+    {
+        return ASSEMBLY_OPERAND_SPLIT_INVALID;
+    }
+    *result = operand;
+    *cursor = operand_end < text.length ? operand_end + 1 : operand_end;
+    return ASSEMBLY_OPERAND_SPLIT_SUCCESS;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_character_identifier_start(char8 value)
@@ -463,6 +547,33 @@ BUSTER_GLOBAL_LOCAL bool assembly_identifier(String8 string)
         }
     }
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL u64 assembly_leading_label_colon(String8 statement)
+{
+    u64 token_end = 0;
+    while (token_end < statement.length && !assembly_space(statement.pointer[token_end]) && statement.pointer[token_end] != ':')
+    {
+        token_end += 1;
+    }
+    if (token_end < statement.length && statement.pointer[token_end] == ':')
+    {
+        return token_end;
+    }
+    u64 colon = token_end;
+    while (colon < statement.length && assembly_space(statement.pointer[colon]))
+    {
+        colon += 1;
+    }
+    // A separated label colon must itself be a token.  In particular, the
+    // colon that begins an AArch64 modifier such as `:lo12:symbol` belongs to
+    // the operand after the mnemonic, not to the mnemonic as a label.
+    if (colon < statement.length && statement.pointer[colon] == ':' &&
+        (colon + 1 == statement.length || assembly_space(statement.pointer[colon + 1])))
+    {
+        return colon;
+    }
+    return BUSTER_STRING_NO_MATCH;
 }
 
 BUSTER_GLOBAL_LOCAL char8 assembly_ascii_lower(char8 value)
@@ -5616,31 +5727,9 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
     u64 operand_start = 0;
     while (operand_start < operands.length && parsed_operand_count < BUSTER_ARRAY_LENGTH(instruction.operands))
     {
-        u64 operand_end = operand_start;
-        u32 delimiter_depth = 0;
-        while (operand_end < operands.length)
-        {
-            char8 character = operands.pointer[operand_end];
-            if (character == '(' || character == '[')
-            {
-                delimiter_depth += 1;
-            }
-            else if (character == ')' || character == ']')
-            {
-                if (!delimiter_depth)
-                {
-                    break;
-                }
-                delimiter_depth -= 1;
-            }
-            else if (character == ',' && !delimiter_depth)
-            {
-                break;
-            }
-            operand_end += 1;
-        }
-        String8 text = assembly_trim(string_slice(operands, operand_start, operand_end));
-        if (!text.length)
+        u64 next_operand_start = operand_start;
+        String8 text = {0};
+        if (assembly_operand_split_next(operands, &next_operand_start, &text) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
         {
             break;
         }
@@ -5667,7 +5756,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
                 }
                 leading_rounding = pseudo_rounding;
                 leading_sae = true;
-                operand_start = operand_end == operands.length ? operand_end : operand_end + 1;
+                operand_start = next_operand_start;
                 continue;
             }
         }
@@ -5731,14 +5820,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
             operand->kind = ASSEMBLY_OPERAND_EXPRESSION;
         }
         parsed_operand_count += 1;
-        if (operand_end == operands.length)
-        {
-            operand_start = operand_end;
-        }
-        else
-        {
-            operand_start = operand_end + 1;
-        }
+        operand_start = next_operand_start;
     }
     u8 valid_operand_count = target.cpu_arch == CPU_ARCH_X86_64
                                    ? assembly_x86_operand_count_valid(info.opcode, parsed_operand_count, info.operand_count)
@@ -6916,7 +6998,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             operands_text = assembly_trim(string_slice(operands_text, 1, operands_text.length));
         }
     }
-    AssemblyOperand operands[5] = {0};
+    AssemblyOperand operands[ASSEMBLY_MAX_OPERANDS] = {0};
     u32 operand_count = 0;
     u64 operand_start = 0;
     bool relative = assembly_x86_metadata_relative_mnemonic(mnemonic);
@@ -6948,35 +7030,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         {
             return BUSTER_X86_METADATA_ENCODE_WRONG_OPERAND_COUNT;
         }
-        u64 operand_end = operand_start;
-        u32 delimiter_depth = 0;
-        while (operand_end < operands_text.length)
-        {
-            char8 character = operands_text.pointer[operand_end];
-            if (character == '(' || character == '[')
-            {
-                delimiter_depth += 1;
-            }
-            else if (character == ')' || character == ']')
-            {
-                if (!delimiter_depth)
-                {
-                    return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
-                }
-                delimiter_depth -= 1;
-            }
-            else if (character == ',' && !delimiter_depth)
-            {
-                break;
-            }
-            operand_end += 1;
-        }
-        if (delimiter_depth)
-        {
-            return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
-        }
-        String8 text = assembly_trim(string_slice(operands_text, operand_start, operand_end));
-        if (!text.length)
+        String8 text = {0};
+        if (assembly_operand_split_next(operands_text, &operand_start, &text) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
         {
             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
         }
@@ -7026,14 +7081,6 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             operand->kind = ASSEMBLY_OPERAND_EXPRESSION;
         }
         operand_count += 1;
-        if (operand_end == operands_text.length)
-        {
-            operand_start = operand_end;
-        }
-        else
-        {
-            operand_start = operand_end + 1;
-        }
     }
     if (mnemonic_requires_dfv)
     {
@@ -7063,7 +7110,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             operands[right] = temporary;
         }
     }
-    BusterX86MetadataPhysicalOperand physical[5] = {0};
+    BusterX86MetadataPhysicalOperand physical[ASSEMBLY_MAX_OPERANDS] = {0};
     bool absolute = assembly_x86_metadata_absolute_mnemonic(mnemonic);
     for (u32 index = 0; index < operand_count; index += 1)
     {
@@ -7218,7 +7265,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     u32 trial_count = relative_literal ? 15 : 1;
     for (u32 trial_byte_count = 1; trial_byte_count <= trial_count; trial_byte_count += 1)
     {
-        BusterX86MetadataPhysicalOperand trial_physical[5] = {0};
+        BusterX86MetadataPhysicalOperand trial_physical[ASSEMBLY_MAX_OPERANDS] = {0};
         memcpy(trial_physical, physical, operand_count * sizeof(*physical));
         if (relative_literal && !assembly_x86_metadata_adjust_relative_literals(trial_physical, operand_count, offset, trial_byte_count))
         {
@@ -7604,7 +7651,7 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
         u32 column = statement.length ? (u32)(statement.pointer - original.pointer) + 1 : 1;
         if (statement.length)
         {
-            u64 colon = string_first_code_unit(statement, ':');
+            u64 colon = assembly_leading_label_colon(statement);
             bool segment_override = false;
             bool segment_colon_error = false;
             if (colon < statement.length)
@@ -8095,7 +8142,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
 {
     String8 feature_names[TARGET_CPU_FEATURE_COUNT] = {0};
     u32 feature_count = assembly_x86_metadata_feature_names(builder->target, feature_names, BUSTER_ARRAY_LENGTH(feature_names));
-    BusterX86MetadataPhysicalOperand operands[5] = {0};
+    BusterX86MetadataPhysicalOperand operands[ASSEMBLY_MAX_OPERANDS] = {0};
     if (instruction->metadata_operand_count > BUSTER_ARRAY_LENGTH(operands))
     {
         return false;
@@ -10668,3 +10715,25 @@ AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncod
     scratch_end(temporary);
     return builder.result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool assembly_test_split_operands(String8 source, String8* operands, u32 operand_capacity, u32* operand_count)
+{
+    if (!operand_count || (source.length && !source.pointer) || (operand_capacity && !operands))
+    {
+        return false;
+    }
+    *operand_count = 0;
+    u64 cursor = 0;
+    while (cursor < source.length)
+    {
+        if (*operand_count >= operand_capacity || *operand_count >= ASSEMBLY_MAX_OPERANDS ||
+            assembly_operand_split_next(source, &cursor, operands + *operand_count) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
+        {
+            return false;
+        }
+        *operand_count += 1;
+    }
+    return true;
+}
+#endif

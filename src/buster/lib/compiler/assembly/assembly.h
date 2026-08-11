@@ -101,3 +101,9 @@ struct AssemblyEncodeResult
 // forms use the same instruction-local representation that generated ISA
 // tables extend without changing this public contract.
 BUSTER_F_DECL AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncodeOptions options);
+
+#if BUSTER_INCLUDE_TESTS
+// Narrow parser seam for delimiter and capacity regression tests.  Production
+// assembly parsing uses this same splitter for handwritten and metadata forms.
+BUSTER_F_DECL bool assembly_test_split_operands(String8 source, String8* operands, u32 operand_capacity, u32* operand_count);
+#endif
