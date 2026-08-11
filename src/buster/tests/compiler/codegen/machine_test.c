@@ -1086,6 +1086,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             CodegenModule* patched = relocation_index < none_module.relocation_count ? &none_module : &mir_module;
             u32 local_index = relocation_index < none_module.relocation_count ? relocation_index : relocation_index - none_module.relocation_count;
             CodegenModuleRelocation* relocation = patched->relocations + local_index;
+            BUSTER_TEST(arguments, codegen_module_relocation_valid(relocation));
             if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute)
             {
                 continue;
@@ -1187,6 +1188,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         for (u32 relocation_index = 0; relocation_index < quality_module.relocation_count; relocation_index += 1)
         {
             CodegenModuleRelocation* relocation = quality_module.relocations + relocation_index;
+            BUSTER_TEST(arguments, codegen_module_relocation_valid(relocation));
             if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute)
             {
                 continue;
@@ -1380,6 +1382,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         for (u32 relocation_index = 0; relocation_index < fast_module.relocation_count; relocation_index += 1)
         {
             CodegenModuleRelocation* relocation = fast_module.relocations + relocation_index;
+            BUSTER_TEST(arguments, codegen_module_relocation_valid(relocation));
             if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute)
             {
                 continue;
@@ -1797,6 +1800,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 for (u32 relocation_index = 0; relocation_index < vector_modules[mode_index].relocation_count; relocation_index += 1)
                 {
                     CodegenModuleRelocation* relocation = vector_modules[mode_index].relocations + relocation_index;
+                    BUSTER_TEST(arguments, codegen_module_relocation_valid(relocation));
                     if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute)
                     {
                         continue;

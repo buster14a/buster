@@ -7359,6 +7359,48 @@ BUSTER_GLOBAL_LOCAL bool object_codegen_functions_valid(CodegenModule* module)
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool object_relocation_kind_from_codegen(CodegenModuleRelocationKind source, ObjectRelocationKind* destination)
+{
+    if (!destination)
+    {
+        return false;
+    }
+    switch (source)
+    {
+        case CODEGEN_MODULE_RELOCATION_X86_64_PC32: *destination = OBJECT_RELOCATION_X86_64_PC32; return true;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_CALL26: *destination = OBJECT_RELOCATION_AARCH64_CALL26; return true;
+        case CODEGEN_MODULE_RELOCATION_ABSOLUTE32: *destination = OBJECT_RELOCATION_ABSOLUTE32; return true;
+        case CODEGEN_MODULE_RELOCATION_ABSOLUTE64: *destination = OBJECT_RELOCATION_ABSOLUTE64; return true;
+        case CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32: *destination = OBJECT_RELOCATION_X86_64_TPOFF32; return true;
+        case CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32: *destination = OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32; return true;
+        case CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32: *destination = OBJECT_RELOCATION_PE_TLS_OFFSET32; return true;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP; return true;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12; return true;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12; return true;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12: *destination = OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12; return true;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12: *destination = OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12; return true;
+        case CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32: *destination = OBJECT_RELOCATION_X86_64_MACH_TLV_PC32; return true;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21; return true;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12; return true;
+        case CODEGEN_MODULE_RELOCATION_COUNT: return false;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_codegen_relocation_width(ObjectRelocationKind kind, u32* width)
+{
+    if (!width)
+    {
+        return false;
+    }
+    switch (kind)
+    {
+        case OBJECT_RELOCATION_ABSOLUTE32: *width = 4; return true;
+        case OBJECT_RELOCATION_ABSOLUTE64: *width = 8; return true;
+        default: *width = 4; return true;
+    }
+}
+
 ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, CodegenModule* module, Target target)
 {
     ObjectFile result = {
@@ -7602,6 +7644,16 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
     for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
     {
         CodegenModuleRelocation* source = module->relocations + relocation_index;
+        ObjectRelocationKind kind = OBJECT_RELOCATION_X86_64_PC32;
+        if (!codegen_module_relocation_valid(source) || !object_relocation_kind_from_codegen((CodegenModuleRelocationKind)source->kind, &kind))
+        {
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+            if (entry_index_initialized)
+            {
+                scratch_end(lookup_temporary);
+            }
+            return result;
+        }
         u32 symbol_index = UINT32_MAX;
         if (entry_index_initialized)
         {
@@ -7666,9 +7718,6 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
                 }
             }
         }
-        ObjectRelocationKind kind = source->absolute  ? OBJECT_RELOCATION_ABSOLUTE64
-                                    : source->aarch64 ? OBJECT_RELOCATION_AARCH64_CALL26
-                                                      : OBJECT_RELOCATION_X86_64_PC32;
         result.relocations[result.relocation_count++] = (ObjectRelocation){
             .addend = kind == OBJECT_RELOCATION_X86_64_PC32 ? -4 : 0,
             .offset = source->offset,
@@ -7676,9 +7725,11 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
             .symbol = symbol_index,
             .kind = kind,
         };
-        if (source->absolute)
+        u32 relocation_width = 4;
+        object_codegen_relocation_width(kind, &relocation_width);
+        if (kind == OBJECT_RELOCATION_ABSOLUTE32 || kind == OBJECT_RELOCATION_ABSOLUTE64)
         {
-            if (source->offset + 8 > module->code.length)
+            if (source->offset > module->code.length || relocation_width > module->code.length - source->offset)
             {
                 result.error = OBJECT_ERROR_INVALID_INPUT;
                 if (entry_index_initialized)
@@ -7687,9 +7738,9 @@ ObjectFile object_from_codegen_module(Arena* arena, AnalysisResult* analysis, Co
                 }
                 return result;
             }
-            memset(text + source->offset, 0, 8);
+            memset(text + source->offset, 0, relocation_width);
         }
-        else if (source->aarch64)
+        else if (kind == OBJECT_RELOCATION_AARCH64_CALL26)
         {
             if (source->offset + 4 > module->code.length)
             {
@@ -8099,13 +8150,22 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
     {
         CodegenModuleRelocation source = module->relocations[relocation_index];
+        ObjectRelocationKind kind = OBJECT_RELOCATION_X86_64_PC32;
+        if (!codegen_module_relocation_valid(&source) || !object_relocation_kind_from_codegen((CodegenModuleRelocationKind)source.kind, &kind))
+        {
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+            break;
+        }
         IrSymbol* target_symbol = ir_symbol_from_id(&program->symbols, source.symbol);
         ByteSlice source_data = source.source == CODEGEN_MODULE_RELOCATION_CODE                ? module->code
                                 : source.source == CODEGEN_MODULE_RELOCATION_READ_ONLY_DATA    ? module->read_only_data
                                 : source.source == CODEGEN_MODULE_RELOCATION_DATA              ? module->writable_data
                                 : source.source == CODEGEN_MODULE_RELOCATION_THREAD_LOCAL_DATA ? module->thread_local_data
                                                                                                : (ByteSlice){0};
-        if (!target_symbol || source.source >= CODEGEN_MODULE_RELOCATION_SOURCE_COUNT || source.offset >= source_data.length)
+        u32 relocation_width = 4;
+        object_codegen_relocation_width(kind, &relocation_width);
+        if (!target_symbol || source.source >= CODEGEN_MODULE_RELOCATION_SOURCE_COUNT || source.offset > source_data.length ||
+            relocation_width > source_data.length - source.offset)
         {
             result.error = OBJECT_ERROR_INVALID_INPUT;
             break;
@@ -8131,23 +8191,6 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             };
             object_symbol_name_index_add(name_index, &result.symbols[symbol_index], symbol_index);
         }
-        ObjectRelocationKind kind =
-            source.thread_local_index && source.aarch64 && source.thread_local_low              ? OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12
-            : source.thread_local_index && source.aarch64                                       ? OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP
-            : source.thread_local_index                                                         ? OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32
-            : source.is_thread_local && target.os == OPERATING_SYSTEM_WINDOWS && source.aarch64 ? OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12
-            : source.is_thread_local && target.os == OPERATING_SYSTEM_WINDOWS                   ? OBJECT_RELOCATION_PE_TLS_OFFSET32
-            : source.is_thread_local && (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS) && source.aarch64 && source.thread_local_low
-                ? OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12
-            : source.is_thread_local && (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS) && source.aarch64
-                ? OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21
-            : source.is_thread_local && (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS) ? OBJECT_RELOCATION_X86_64_MACH_TLV_PC32
-            : source.is_thread_local && source.aarch64 && source.thread_local_low ? OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12
-            : source.is_thread_local && source.aarch64                            ? OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12
-            : source.is_thread_local                                              ? OBJECT_RELOCATION_X86_64_TPOFF32
-            : source.absolute                                                     ? OBJECT_RELOCATION_ABSOLUTE64
-            : source.aarch64                                                      ? OBJECT_RELOCATION_AARCH64_CALL26
-                                                                                  : OBJECT_RELOCATION_X86_64_PC32;
         result.relocations[result.relocation_count++] = (ObjectRelocation){
             .addend = source.addend + (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
                                                kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32

@@ -2496,6 +2496,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             for (u32 relocation_index = 0; relocation_index < windows_abi_module.relocation_count; relocation_index += 1)
             {
                 CodegenModuleRelocation* relocation = windows_abi_module.relocations + relocation_index;
+                BUSTER_TEST(arguments, codegen_module_relocation_valid(relocation));
                 if (relocation->source == CODEGEN_MODULE_RELOCATION_CODE && !relocation->aarch64 && !relocation->absolute && relocation->offset > descriptor->code_offset &&
                     relocation->offset + 4 <= descriptor->code_offset + descriptor->code_size && windows_abi_module.code.pointer[relocation->offset - 1] == 0xe8)
                 {
@@ -3390,6 +3391,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 for (u32 relocation_index = 0; relocation_index < canonical_windows_module.relocation_count; relocation_index += 1)
                 {
                     CodegenModuleRelocation* relocation = canonical_windows_module.relocations + relocation_index;
+                    BUSTER_TEST(arguments, codegen_module_relocation_valid(relocation));
                     if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->aarch64 || relocation->absolute || relocation->offset == 0 ||
                         relocation->offset <= dynamic_layout_descriptor->code_offset || relocation->offset + 4 > dynamic_function_end ||
                         canonical_windows_module.code.pointer[relocation->offset - 1] != 0xe8)
@@ -3439,6 +3441,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             for (u32 relocation_index = 0; relocation_index < canonical_windows_module.relocation_count; relocation_index += 1)
             {
                 CodegenModuleRelocation* relocation = canonical_windows_module.relocations + relocation_index;
+                BUSTER_TEST(arguments, codegen_module_relocation_valid(relocation));
                 if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->aarch64 || relocation->absolute || relocation->offset == 0 ||
                     relocation->offset > canonical_windows_module.code.length || canonical_windows_module.code.pointer[relocation->offset - 1] != 0xe8)
                 {

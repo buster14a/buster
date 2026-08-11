@@ -244,8 +244,61 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_test_archive_long_name(Arena* arena, ByteSl
 
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
-    BUSTER_UNUSED(arguments);
     UnitTestResult result = {0};
+    BUSTER_TEST(arguments, sizeof(CodegenModuleRelocation) == 48);
+    BUSTER_TEST(arguments, BUSTER_ALIGN_OF(CodegenModuleRelocation) == 8);
+    BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 42);
+    BUSTER_TEST(arguments, CODEGEN_MODULE_RELOCATION_COUNT <= UINT8_MAX);
+    typedef struct CodegenRelocationKindExpectation CodegenRelocationKindExpectation;
+    struct CodegenRelocationKindExpectation
+    {
+        CodegenModuleRelocationKind kind;
+        bool aarch64;
+        bool absolute;
+        bool is_thread_local;
+        bool thread_local_low;
+        bool thread_local_index;
+    };
+    CodegenRelocationKindExpectation relocation_kinds[] = {
+        {CODEGEN_MODULE_RELOCATION_X86_64_PC32, false, false, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_CALL26, true, false, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_ABSOLUTE32, false, true, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_ABSOLUTE64, false, true, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32, false, false, true, false, false},
+        {CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32, false, false, true, false, true},
+        {CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32, false, false, true, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP, true, false, true, false, true},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12, true, false, true, true, true},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12, true, false, true, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12, true, false, true, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12, true, false, true, true, false},
+        {CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32, false, false, true, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21, true, false, true, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12, true, false, true, true, false},
+    };
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(relocation_kinds) == CODEGEN_MODULE_RELOCATION_COUNT);
+    for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(relocation_kinds); kind_index += 1)
+    {
+        CodegenRelocationKindExpectation expectation = relocation_kinds[kind_index];
+        CodegenModuleRelocation relocation = {
+            .kind = (u8)expectation.kind,
+            .aarch64 = expectation.aarch64,
+            .absolute = expectation.absolute,
+            .is_thread_local = expectation.is_thread_local,
+            .thread_local_low = expectation.thread_local_low,
+            .thread_local_index = expectation.thread_local_index,
+        };
+        BUSTER_TEST(arguments, codegen_module_relocation_kind_valid(relocation.kind));
+        BUSTER_TEST(arguments, codegen_module_relocation_valid(&relocation));
+        relocation.kind = CODEGEN_MODULE_RELOCATION_COUNT;
+        BUSTER_TEST(arguments, !codegen_module_relocation_kind_valid(relocation.kind));
+        BUSTER_TEST(arguments, !codegen_module_relocation_valid(&relocation));
+        relocation.kind = (u8)expectation.kind;
+        relocation.aarch64 = !relocation.aarch64;
+        BUSTER_TEST(arguments, !codegen_module_relocation_valid(&relocation));
+    }
+    BUSTER_TEST(arguments, !codegen_module_relocation_kind_valid(UINT8_MAX));
+
     AnalysisResult missing_entities = {0};
     missing_entities.module.id.value = 7;
     missing_entities.module.entity_count = 1;

@@ -192,6 +192,35 @@ typedef enum CodegenModuleRelocationSource
     CODEGEN_MODULE_RELOCATION_SOURCE_COUNT,
 } CodegenModuleRelocationSource;
 
+// The relocation kind is deliberately stored in the byte that used to be
+// reserved at the tail of CodegenModuleRelocation.  Keep this list in the
+// same (format-neutral) vocabulary as ObjectRelocationKind: conversion to a
+// native object must not infer a kind from a collection of loosely-related
+// booleans.  The enum is represented by u8 in the record so adding a family
+// does not change its ABI or alignment.
+typedef enum CodegenModuleRelocationKind
+{
+    // Zero remains the historical x86-64 rel32 default.  This keeps old
+    // zero-initialized records source-compatible while all producers now set
+    // the field explicitly.
+    CODEGEN_MODULE_RELOCATION_X86_64_PC32,
+    CODEGEN_MODULE_RELOCATION_AARCH64_CALL26,
+    CODEGEN_MODULE_RELOCATION_ABSOLUTE32,
+    CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
+    CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32,
+    CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32,
+    CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32,
+    CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP,
+    CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12,
+    CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12,
+    CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12,
+    CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12,
+    CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32,
+    CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21,
+    CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12,
+    CODEGEN_MODULE_RELOCATION_COUNT,
+} CodegenModuleRelocationKind;
+
 struct CodegenModuleRelocation
 {
     AnalysisEntityId entity;
@@ -207,8 +236,31 @@ struct CodegenModuleRelocation
     bool is_thread_local;
     bool thread_local_low;
     bool thread_local_index;
-    u8 reserved;
+    // Legacy compatibility bits.  `kind` is authoritative; these are kept
+    // only so old internal callers retain their ABI and so the independent
+    // TLS-index/low and absolute-width semantics remain inspectable while
+    // migration is in progress.  Producers must keep them consistent with
+    // kind; codegen_module_relocation_valid() rejects mismatches.
+    u8 kind;
 };
+
+BUSTER_CT_CHECK((u32)CODEGEN_MODULE_RELOCATION_COUNT <= UINT8_MAX);
+BUSTER_CT_CHECK(BUSTER_ALIGN_OF(CodegenModuleRelocation) == 8);
+BUSTER_CT_CHECK(sizeof(CodegenModuleRelocation) == 48);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, entity) == 0);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, instantiation) == 8);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, symbol) == 12);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, addend) == 16);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, offset) == 24);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, source) == 28);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, label_block) == 32);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, aarch64) == 36);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, absolute) == 37);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, label_address) == 38);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, is_thread_local) == 39);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, thread_local_low) == 40);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, thread_local_index) == 41);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 42);
 
 typedef struct CodegenModuleDataRelocation CodegenModuleDataRelocation;
 struct CodegenModuleDataRelocation
@@ -361,6 +413,8 @@ struct CodegenModuleOptions
 // unwarmed reports through BUSTER_CHECK_SERIAL_INITIALIZATION instead of
 // racing. compiler_prewarm() covers this along with the rest of the compiler.
 BUSTER_F_DECL void codegen_prewarm(void);
+BUSTER_F_DECL bool codegen_module_relocation_kind_valid(u8 kind);
+BUSTER_F_DECL bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation);
 BUSTER_F_DECL String8 codegen_register_allocator_mode_string(CodegenRegisterAllocatorMode mode);
 BUSTER_F_DECL CodegenAbi codegen_abi_for_target(Target target);
 BUSTER_F_DECL CodegenAbiSignature codegen_classify_signature(Arena* arena, AnalysisResult* analysis, AnalysisTypeId function_type, CodegenAbi abi);

@@ -1,5 +1,95 @@
 #include <buster/lib/compiler/codegen/codegen_internal.h>
 
+bool codegen_module_relocation_kind_valid(u8 kind)
+{
+    return kind < (u8)CODEGEN_MODULE_RELOCATION_COUNT;
+}
+
+bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
+{
+    if (!relocation || !codegen_module_relocation_kind_valid(relocation->kind) ||
+        relocation->source >= CODEGEN_MODULE_RELOCATION_SOURCE_COUNT)
+    {
+        return false;
+    }
+
+    CodegenModuleRelocationKind kind = (CodegenModuleRelocationKind)relocation->kind;
+    bool aarch64 = false;
+    bool absolute = false;
+    bool thread_local = false;
+    bool thread_local_low = false;
+    bool thread_local_index = false;
+    switch (kind)
+    {
+        case CODEGEN_MODULE_RELOCATION_X86_64_PC32:
+            break;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_CALL26:
+            aarch64 = true;
+            break;
+        case CODEGEN_MODULE_RELOCATION_ABSOLUTE32:
+        case CODEGEN_MODULE_RELOCATION_ABSOLUTE64:
+            absolute = true;
+            break;
+        case CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32:
+            thread_local = true;
+            break;
+        case CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32:
+            thread_local = true;
+            thread_local_index = true;
+            break;
+        case CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32:
+            thread_local = true;
+            break;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
+            aarch64 = true;
+            thread_local = true;
+            thread_local_index = true;
+            break;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12:
+            aarch64 = true;
+            thread_local = true;
+            thread_local_low = true;
+            thread_local_index = true;
+            break;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12:
+            aarch64 = true;
+            thread_local = true;
+            break;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12:
+            aarch64 = true;
+            thread_local = true;
+            break;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12:
+            aarch64 = true;
+            thread_local = true;
+            thread_local_low = true;
+            break;
+        case CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32:
+            thread_local = true;
+            break;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
+            aarch64 = true;
+            thread_local = true;
+            break;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
+            aarch64 = true;
+            thread_local = true;
+            thread_local_low = true;
+            break;
+        case CODEGEN_MODULE_RELOCATION_COUNT:
+            return false;
+    }
+
+    // The enum is authoritative.  These compatibility bits are checked,
+    // never consulted to choose a kind, so stale combinations fail loudly at
+    // the conversion boundary instead of silently producing the wrong object
+    // relocation.  label_address is an independent static-label operation,
+    // but it can only carry an absolute address payload.
+    return relocation->aarch64 == aarch64 && relocation->absolute == absolute && relocation->is_thread_local == thread_local &&
+           relocation->thread_local_low == thread_local_low && relocation->thread_local_index == thread_local_index &&
+           (!relocation->label_address || kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64);
+}
+
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/ir/interpreter.h>
 #include <buster/lib/compiler/object/object.h>
@@ -7316,7 +7406,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_module_fragments_merge(Arena* arena, I
                 .entity = relocation->entity,
                 .instantiation = relocation->instantiation,
                 .offset = function_offset + relocation->displacement_offset,
-                .aarch64 = relocation->aarch64,
+                .kind = (u8)(relocation->absolute       ? CODEGEN_MODULE_RELOCATION_ABSOLUTE64
+                             : relocation->aarch64       ? CODEGEN_MODULE_RELOCATION_AARCH64_CALL26
+                                                        : CODEGEN_MODULE_RELOCATION_X86_64_PC32),
+                .aarch64 = relocation->aarch64 && !relocation->absolute,
                 .absolute = relocation->absolute,
             };
             CodegenModuleEntry* target_entry = 0;
@@ -10468,6 +10561,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 .source = generated.is_thread_local ? CODEGEN_MODULE_RELOCATION_THREAD_LOCAL_DATA
                           : generated.read_only     ? CODEGEN_MODULE_RELOCATION_READ_ONLY_DATA
                                                     : CODEGEN_MODULE_RELOCATION_DATA,
+                .kind = CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
                 .absolute = true,
             };
         }
@@ -10489,6 +10583,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 .source = generated.is_thread_local ? CODEGEN_MODULE_RELOCATION_THREAD_LOCAL_DATA
                           : generated.read_only     ? CODEGEN_MODULE_RELOCATION_READ_ONLY_DATA
                                                     : CODEGEN_MODULE_RELOCATION_DATA,
+                .kind = CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
                 .absolute = true,
                 .label_address = relocation.is_label_address,
             };
@@ -11075,7 +11170,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
                                     .symbol = selected.function.call_targets[encoded.call_sites[site_index].target],
                                     .offset = (u32)buffer.count + encoded.call_sites[site_index].code_offset,
-                                    .aarch64 = true,
+                                    .kind = (u8)(encoded.call_sites[site_index].absolute ? CODEGEN_MODULE_RELOCATION_ABSOLUTE64
+                                                                                         : CODEGEN_MODULE_RELOCATION_AARCH64_CALL26),
+                                    .aarch64 = encoded.call_sites[site_index].absolute == 0,
                                     .absolute = encoded.call_sites[site_index].absolute != 0,
                                 };
                             }
@@ -11179,6 +11276,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
                                     .symbol = selected.function.call_targets[encoded.call_sites[site_index].target],
                                     .offset = (u32)buffer.count + encoded.call_sites[site_index].code_offset,
+                                    .kind = (u8)(encoded.call_sites[site_index].is_thread_local ? CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32
+                                                                                                  : CODEGEN_MODULE_RELOCATION_X86_64_PC32),
                                     .is_thread_local = encoded.call_sites[site_index].is_thread_local != 0,
                                 };
                             }
@@ -12024,12 +12123,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
                                     .offset = index_offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32,
                                     .is_thread_local = true,
                                     .thread_local_index = true,
                                 };
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
                                     .offset = value_offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32,
                                     .is_thread_local = true,
                                 };
                             }
@@ -12045,6 +12146,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
                                     .offset = descriptor_offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32,
                                     .is_thread_local = true,
                                 };
                             }
@@ -12071,6 +12173,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
                                     .symbol = instruction->symbol,
                                     .offset = offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32,
                                     .is_thread_local = true,
                                 };
                             }
@@ -12087,6 +12190,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
                                 .symbol = instruction->symbol,
                                 .offset = offset,
+                                .kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32,
                             };
                         }
                         codegen_emit_u8(&buffer, 0x48);
@@ -13972,6 +14076,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
                                 .symbol = instruction->symbol,
                                 .offset = offset,
+                                .kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32,
                             };
                         }
                         if (windows_dynamic_call)
@@ -16028,6 +16133,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
                                     .offset = index_high_offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP,
                                     .aarch64 = true,
                                     .is_thread_local = true,
                                     .thread_local_index = true,
@@ -16035,6 +16141,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
                                     .offset = index_low_offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12,
                                     .aarch64 = true,
                                     .is_thread_local = true,
                                     .thread_local_low = true,
@@ -16043,6 +16150,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
                                     .offset = value_offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12,
                                     .aarch64 = true,
                                     .is_thread_local = true,
                                 };
@@ -16059,12 +16167,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
                                     .offset = descriptor_high_offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21,
                                     .aarch64 = true,
                                     .is_thread_local = true,
                                 };
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
                                     .offset = descriptor_low_offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12,
                                     .aarch64 = true,
                                     .is_thread_local = true,
                                     .thread_local_low = true,
@@ -16087,6 +16197,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
                                     .symbol = instruction->symbol,
                                     .offset = high_offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12,
                                     .aarch64 = true,
                                     .is_thread_local = true,
                                 };
@@ -16095,6 +16206,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
                                     .symbol = instruction->symbol,
                                     .offset = low_offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12,
                                     .aarch64 = true,
                                     .is_thread_local = true,
                                     .thread_local_low = true,
@@ -16112,7 +16224,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
                                 .symbol = instruction->symbol,
                                 .offset = offset,
-                                .aarch64 = true,
+                                .kind = CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
                                 .absolute = true,
                             };
                         }
@@ -17097,6 +17209,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
                                 .symbol = instruction->symbol,
                                 .offset = offset,
+                                .kind = CODEGEN_MODULE_RELOCATION_AARCH64_CALL26,
                                 .aarch64 = true,
                             };
                         }
