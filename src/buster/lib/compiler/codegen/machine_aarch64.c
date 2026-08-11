@@ -15,6 +15,7 @@
 // which keeps the shared placement's grows-down offset convention intact.
 
 #include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
@@ -1490,8 +1491,8 @@ struct MachineA64BranchFixup
 {
     u32 patch_offset;
     u32 block;
-    // 0 = b (imm26), 1 = b.cond (imm19 << 5).
-    u32 form;
+    A64Opcode opcode;
+    u16 reserved;
 };
 
 BUSTER_GLOBAL_LOCAL void machine_a64_emit(MachineA64Encoder* encoder, u32 word)
@@ -1503,6 +1504,17 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit(MachineA64Encoder* encoder, u32 word)
     }
     memcpy(encoder->bytes + encoder->count, &word, sizeof(word));
     encoder->count += 4;
+}
+
+BUSTER_GLOBAL_LOCAL void machine_a64_emit_mc(MachineA64Encoder* encoder, A64MCInst instruction)
+{
+    u32 word = 0;
+    if (!a64_mc_encode(&instruction, &word))
+    {
+        encoder->error = true;
+        return;
+    }
+    machine_a64_emit(encoder, word);
 }
 
 // Seeded movz/movn materialization. The seed picks the fill — zeros or
@@ -1933,8 +1945,13 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 *fixup = (MachineA64BranchFixup){
                     .patch_offset = encoder.count,
                     .block = machine_ref_payload(instruction->operands[0]),
+                    .opcode = A64_OPCODE_B,
                 };
-                machine_a64_emit(&encoder, 0x14000000);
+                machine_a64_emit_mc(&encoder, (A64MCInst){
+                                                   .operands = {{.kind = A64_MC_OPERAND_PC_RELATIVE}},
+                                                   .opcode = A64_OPCODE_B,
+                                                   .operand_count = 1,
+                                               });
             }
             break;
             case MACHINE_A64_BCC:
@@ -1943,15 +1960,27 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 *taken = (MachineA64BranchFixup){
                     .patch_offset = encoder.count,
                     .block = machine_ref_payload(instruction->operands[0]),
-                    .form = 1,
+                    .opcode = A64_OPCODE_B_COND,
                 };
-                machine_a64_emit(&encoder, 0x54000000 | (instruction->payload & 0xf));
+                machine_a64_emit_mc(&encoder, (A64MCInst){
+                                                   .operands = {
+                                                       {.kind = A64_MC_OPERAND_PC_RELATIVE},
+                                                       {.value = instruction->payload & 15, .kind = A64_MC_OPERAND_IMMEDIATE},
+                                                   },
+                                                   .opcode = A64_OPCODE_B_COND,
+                                                   .operand_count = 2,
+                                               });
                 MachineA64BranchFixup* fallthrough = (MachineA64BranchFixup*)machine_stream_append(arena, &fixups);
                 *fallthrough = (MachineA64BranchFixup){
                     .patch_offset = encoder.count,
                     .block = machine_ref_payload(instruction->operands[1]),
+                    .opcode = A64_OPCODE_B,
                 };
-                machine_a64_emit(&encoder, 0x14000000);
+                machine_a64_emit_mc(&encoder, (A64MCInst){
+                                                   .operands = {{.kind = A64_MC_OPERAND_PC_RELATIVE}},
+                                                   .opcode = A64_OPCODE_B,
+                                                   .operand_count = 1,
+                                               });
             }
             break;
             case MACHINE_A64_RET:
@@ -1982,7 +2011,11 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                     release_remaining -= release_chunk;
                 }
                 machine_a64_emit(&encoder, 0xa8c17bfd);
-                machine_a64_emit(&encoder, 0xd65f03c0);
+                machine_a64_emit_mc(&encoder, (A64MCInst){
+                                                   .operands = {{.value = 30, .kind = A64_MC_OPERAND_REGISTER}},
+                                                   .opcode = A64_OPCODE_RET,
+                                                   .operand_count = 1,
+                                               });
             }
             break;
             case MACHINE_A64_BRK:
@@ -2002,19 +2035,38 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                     .code_offset = encoder.count,
                     .target = instruction->payload,
                 };
-                machine_a64_emit(&encoder, 0x94000000);
+                machine_a64_emit_mc(&encoder, (A64MCInst){
+                                                   .operands = {{.kind = A64_MC_OPERAND_PC_RELATIVE}},
+                                                   .opcode = A64_OPCODE_BL,
+                                                   .operand_count = 1,
+                                               });
             }
             break;
             case MACHINE_A64_CALL_INDIRECT:
-                machine_a64_emit(&encoder, 0xd63f0000 | ((u32)operand_registers[0] << 5));
+                machine_a64_emit_mc(&encoder, (A64MCInst){
+                                                   .operands = {{.value = operand_registers[0], .kind = A64_MC_OPERAND_REGISTER}},
+                                                   .opcode = A64_OPCODE_BLR,
+                                                   .operand_count = 1,
+                                               });
                 break;
             case MACHINE_A64_LEA_SYMBOL:
             {
                 // The canonical inline-literal form: load the eight-byte
                 // literal two words ahead, branch over it, and let the
                 // absolute relocation fill it.
-                machine_a64_emit(&encoder, 0x58000040 | operand_registers[0]);
-                machine_a64_emit(&encoder, 0x14000003);
+                machine_a64_emit_mc(&encoder, (A64MCInst){
+                                                   .operands = {
+                                                       {.value = operand_registers[0], .kind = A64_MC_OPERAND_REGISTER},
+                                                       {.value = 8, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                                                   },
+                                                   .opcode = A64_OPCODE_LDR_LITERAL_64,
+                                                   .operand_count = 2,
+                                               });
+                machine_a64_emit_mc(&encoder, (A64MCInst){
+                                                   .operands = {{.value = 12, .kind = A64_MC_OPERAND_PC_RELATIVE}},
+                                                   .opcode = A64_OPCODE_B,
+                                                   .operand_count = 1,
+                                               });
                 MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                 *site = (MachineCallSite){
                     .code_offset = encoder.count,
@@ -2062,16 +2114,17 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
         for (u32 row_index = 0; row_index < chunk->count; row_index += 1)
         {
             MachineA64BranchFixup* fixup = rows + row_index;
-            u32 word_delta = (result.block_offsets[fixup->block] - fixup->patch_offset) >> 2;
-            u32 patched;
-            memcpy(&patched, encoder.bytes + fixup->patch_offset, sizeof(patched));
-            if (fixup->form)
+            if (fixup->block >= function->block_count || encoder.count < 4 || fixup->patch_offset > encoder.count - 4)
             {
-                patched |= (word_delta & 0x7ffffu) << 5;
+                return result;
             }
-            else
+            s64 displacement = (s64)(u64)result.block_offsets[fixup->block] - (s64)(u64)fixup->patch_offset;
+            u32 word = 0;
+            u32 patched = 0;
+            memcpy(&word, encoder.bytes + fixup->patch_offset, sizeof(word));
+            if (!a64_pc_relative_patch(fixup->opcode, word, displacement, &patched))
             {
-                patched |= word_delta & 0x03ffffffu;
+                return result;
             }
             memcpy(encoder.bytes + fixup->patch_offset, &patched, sizeof(patched));
         }

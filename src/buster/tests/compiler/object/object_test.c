@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/object/object_test.h>
+#include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL bool object_bytes_contain(ByteSlice bytes, String8 value)
@@ -99,6 +100,64 @@ BUSTER_GLOBAL_LOCAL u64 object_test_elf_symbol_offset(ByteSlice bytes, u32 symbo
         return symbol;
     }
     return UINT64_MAX;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_test_elf_relocation_offsets(ByteSlice bytes, u64* relocation_section, u64* target_data)
+{
+    if (!bytes.pointer || !relocation_section || !target_data || bytes.length < 64)
+    {
+        return false;
+    }
+    u64 section_table = 0;
+    u16 section_count = 0;
+    memcpy(&section_table, bytes.pointer + 40, sizeof(section_table));
+    memcpy(&section_count, bytes.pointer + 60, sizeof(section_count));
+    if (section_table > bytes.length || (u64)section_count * 64 > bytes.length - section_table)
+    {
+        return false;
+    }
+    for (u16 section_index = 0; section_index < section_count; section_index += 1)
+    {
+        u64 section = section_table + (u64)section_index * 64;
+        u32 section_type = 0;
+        u32 target_index = 0;
+        memcpy(&section_type, bytes.pointer + section + 4, sizeof(section_type));
+        memcpy(&target_index, bytes.pointer + section + 44, sizeof(target_index));
+        if (section_type != 4 || target_index >= section_count)
+        {
+            continue;
+        }
+        u64 target_section = section_table + (u64)target_index * 64;
+        memcpy(target_data, bytes.pointer + target_section + 24, sizeof(*target_data));
+        if (*target_data > bytes.length)
+        {
+            return false;
+        }
+        *relocation_section = section;
+        return true;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_test_mach_text_offsets(ByteSlice bytes, u32* raw_offset, u32* relocation_offset, u32* relocation_count)
+{
+    u64 section = 32 + 72;
+    u32 magic = 0;
+    u32 command = 0;
+    if (!bytes.pointer || !raw_offset || !relocation_offset || !relocation_count || bytes.length < section + 80)
+    {
+        return false;
+    }
+    memcpy(&magic, bytes.pointer, sizeof(magic));
+    memcpy(&command, bytes.pointer + 32, sizeof(command));
+    if (magic != UINT32_C(0xfeedfacf) || command != 0x19)
+    {
+        return false;
+    }
+    memcpy(raw_offset, bytes.pointer + section + 48, sizeof(*raw_offset));
+    memcpy(relocation_offset, bytes.pointer + section + 56, sizeof(*relocation_offset));
+    memcpy(relocation_count, bytes.pointer + section + 60, sizeof(*relocation_count));
+    return *raw_offset <= bytes.length && *relocation_offset <= bytes.length && (u64)*relocation_count * 8 <= bytes.length - *relocation_offset;
 }
 
 BUSTER_GLOBAL_LOCAL ByteSlice object_test_archive(Arena* arena, ByteSlice member, bool bsd_name)
@@ -534,6 +593,278 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         memcpy(&aarch64_mach_cpu, aarch64_mach.bytes.pointer + 4, 4);
     }
     BUSTER_TEST(arguments, aarch64_mach_cpu == 0x0100000c);
+    u32 aarch64_jump_instruction = UINT32_C(0x14000000);
+    memcpy(aarch64_text + 4, &aarch64_jump_instruction, sizeof(aarch64_jump_instruction));
+    relocation.kind = OBJECT_RELOCATION_AARCH64_JUMP26;
+    ObjectFormat aarch64_jump_formats[] = {OBJECT_FORMAT_ELF64, OBJECT_FORMAT_COFF, OBJECT_FORMAT_MACH_O64};
+    OperatingSystem aarch64_jump_systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
+    for (u32 format_index = 0; format_index < BUSTER_ARRAY_LENGTH(aarch64_jump_formats); format_index += 1)
+    {
+        ObjectArtifact jump_artifact = object_write(arguments->arena, &object, aarch64_jump_formats[format_index]);
+        ObjectFile jump_roundtrip = object_read(arguments->arena, jump_artifact.bytes,
+                                                (Target){
+                                                    .cpu_arch = CPU_ARCH_AARCH64,
+                                                    .os = aarch64_jump_systems[format_index],
+                                                });
+        BUSTER_TEST(arguments, jump_artifact.error == OBJECT_ERROR_NONE && jump_roundtrip.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, jump_roundtrip.relocation_count == 1 &&
+                                   jump_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_JUMP26 &&
+                                   jump_roundtrip.relocations[0].addend == 0);
+    }
+    s64 mach_branch_addends[] = {-4, 4, -INT64_C(0x800000), INT64_C(0x7fffff)};
+    for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(mach_branch_addends); addend_index += 1)
+    {
+        relocation.addend = mach_branch_addends[addend_index];
+        ObjectArtifact addend_mach = object_write(arguments->arena, &object, OBJECT_FORMAT_MACH_O64);
+        u32 raw_offset = 0;
+        u32 relocation_offset = 0;
+        u32 relocation_count = 0;
+        bool offsets_valid = object_test_mach_text_offsets(addend_mach.bytes, &raw_offset, &relocation_offset, &relocation_count);
+        BUSTER_TEST(arguments, addend_mach.error == OBJECT_ERROR_NONE && offsets_valid && relocation_count == 2);
+        u32 stored_instruction = 0;
+        if (offsets_valid && (u64)raw_offset + relocation.offset <= addend_mach.bytes.length &&
+            sizeof(stored_instruction) <= addend_mach.bytes.length - ((u64)raw_offset + relocation.offset))
+        {
+            memcpy(&stored_instruction, addend_mach.bytes.pointer + raw_offset + relocation.offset, sizeof(stored_instruction));
+        }
+        BUSTER_TEST(arguments, stored_instruction == UINT32_C(0x14000000));
+        ObjectFile addend_roundtrip = object_read(arguments->arena, addend_mach.bytes,
+                                                  (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS});
+        BUSTER_TEST(arguments, addend_roundtrip.error == OBJECT_ERROR_NONE && addend_roundtrip.relocation_count == 1 &&
+                                   addend_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_JUMP26 &&
+                                   addend_roundtrip.relocations[0].addend == mach_branch_addends[addend_index]);
+    }
+    s64 invalid_mach_addends[] = {-INT64_C(0x800001), INT64_C(0x800000)};
+    for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(invalid_mach_addends); addend_index += 1)
+    {
+        relocation.addend = invalid_mach_addends[addend_index];
+        BUSTER_TEST(arguments, object_write(arguments->arena, &object, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    }
+    s64 unsupported_coff_addends[] = {-4, 4};
+    for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(unsupported_coff_addends); addend_index += 1)
+    {
+        relocation.addend = unsupported_coff_addends[addend_index];
+        BUSTER_TEST(arguments, object_write(arguments->arena, &object, OBJECT_FORMAT_COFF).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    }
+    relocation.addend = 0;
+
+    u32 aarch64_branch_opcodes[] = {UINT32_C(0x14000000), UINT32_C(0x94000000)};
+    ObjectRelocationKind aarch64_branch_kinds[] = {OBJECT_RELOCATION_AARCH64_JUMP26, OBJECT_RELOCATION_AARCH64_CALL26};
+    s64 elf_rel_addends[] = {4, -4};
+    for (u32 opcode_index = 0; opcode_index < BUSTER_ARRAY_LENGTH(aarch64_branch_opcodes); opcode_index += 1)
+    {
+        relocation.kind = aarch64_branch_kinds[opcode_index];
+        memcpy(aarch64_text + 4, aarch64_branch_opcodes + opcode_index, sizeof(u32));
+        for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(elf_rel_addends); addend_index += 1)
+        {
+            relocation.addend = elf_rel_addends[addend_index];
+            ObjectArtifact rela_artifact = object_write(arguments->arena, &object, OBJECT_FORMAT_ELF64);
+            u64 rela_section = 0;
+            u64 rela_target_data = 0;
+            bool rela_offsets_valid = object_test_elf_relocation_offsets(rela_artifact.bytes, &rela_section, &rela_target_data);
+            if (rela_offsets_valid)
+            {
+                u32 ignored_immediate = 0;
+                bool ignored_encoded = a64_signed_scaled_immediate_encode(-elf_rel_addends[addend_index], 26, 2, &ignored_immediate);
+                object_test_write_u32(rela_artifact.bytes, rela_target_data + relocation.offset,
+                                      aarch64_branch_opcodes[opcode_index] | ignored_immediate);
+                BUSTER_TEST(arguments, ignored_encoded);
+            }
+            ObjectFile rela_roundtrip = object_read(arguments->arena, rela_artifact.bytes,
+                                                    (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX});
+            BUSTER_TEST(arguments, rela_artifact.error == OBJECT_ERROR_NONE && rela_offsets_valid && rela_roundtrip.error == OBJECT_ERROR_NONE &&
+                                       rela_roundtrip.relocation_count == 1 && rela_roundtrip.relocations[0].kind == aarch64_branch_kinds[opcode_index] &&
+                                       rela_roundtrip.relocations[0].addend == elf_rel_addends[addend_index]);
+            ObjectArtifact rela_rewritten = object_write(arguments->arena, &rela_roundtrip, OBJECT_FORMAT_ELF64);
+            BUSTER_TEST(arguments, rela_rewritten.error == OBJECT_ERROR_NONE);
+
+            relocation.addend = 0;
+            ObjectArtifact rel_artifact = object_write(arguments->arena, &object, OBJECT_FORMAT_ELF64);
+            u64 relocation_section = 0;
+            u64 target_data = 0;
+            bool offsets_valid = object_test_elf_relocation_offsets(rel_artifact.bytes, &relocation_section, &target_data);
+            BUSTER_TEST(arguments, rel_artifact.error == OBJECT_ERROR_NONE && offsets_valid);
+            if (offsets_valid)
+            {
+                u32 encoded_immediate = 0;
+                bool encoded = a64_signed_scaled_immediate_encode(elf_rel_addends[addend_index], 26, 2, &encoded_immediate);
+                u32 rel_instruction = aarch64_branch_opcodes[opcode_index] | encoded_immediate;
+                object_test_write_u32(rel_artifact.bytes, target_data + relocation.offset, rel_instruction);
+                object_test_write_u32(rel_artifact.bytes, relocation_section + 4, 9);
+                object_test_write_u64(rel_artifact.bytes, relocation_section + 32, 16);
+                object_test_write_u64(rel_artifact.bytes, relocation_section + 56, 16);
+                BUSTER_TEST(arguments, encoded);
+            }
+            ObjectFile rel_roundtrip = object_read(arguments->arena, rel_artifact.bytes,
+                                                   (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX});
+            BUSTER_TEST(arguments, rel_roundtrip.error == OBJECT_ERROR_NONE && rel_roundtrip.relocation_count == 1 &&
+                                       rel_roundtrip.relocations[0].kind == aarch64_branch_kinds[opcode_index] &&
+                                       rel_roundtrip.relocations[0].addend == elf_rel_addends[addend_index]);
+            ObjectArtifact rel_rewritten = object_write(arguments->arena, &rel_roundtrip, OBJECT_FORMAT_ELF64);
+            ObjectFile rel_rewritten_roundtrip = object_read(arguments->arena, rel_rewritten.bytes,
+                                                             (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX});
+            BUSTER_TEST(arguments, rel_rewritten.error == OBJECT_ERROR_NONE && rel_rewritten_roundtrip.error == OBJECT_ERROR_NONE &&
+                                       rel_rewritten_roundtrip.relocation_count == 1 &&
+                                       rel_rewritten_roundtrip.relocations[0].kind == aarch64_branch_kinds[opcode_index] &&
+                                       rel_rewritten_roundtrip.relocations[0].addend == elf_rel_addends[addend_index]);
+        }
+    }
+
+    relocation.kind = OBJECT_RELOCATION_AARCH64_JUMP26;
+    relocation.addend = 0;
+    aarch64_jump_instruction = UINT32_C(0x14000000);
+    memcpy(aarch64_text + 4, &aarch64_jump_instruction, sizeof(aarch64_jump_instruction));
+    ObjectArtifact valid_mach_branch = object_write(arguments->arena, &object, OBJECT_FORMAT_MACH_O64);
+    u32 mach_raw_offset = 0;
+    u32 mach_relocation_offset = 0;
+    u32 mach_relocation_count = 0;
+    bool mach_offsets_valid = object_test_mach_text_offsets(valid_mach_branch.bytes, &mach_raw_offset, &mach_relocation_offset, &mach_relocation_count);
+    BUSTER_TEST(arguments, valid_mach_branch.error == OBJECT_ERROR_NONE && mach_offsets_valid && mach_relocation_count == 1);
+    if (mach_offsets_valid)
+    {
+        u32 relocation_information = 0;
+        memcpy(&relocation_information, valid_mach_branch.bytes.pointer + mach_relocation_offset + 4, sizeof(relocation_information));
+        object_test_write_u32(valid_mach_branch.bytes, mach_relocation_offset + 4, relocation_information & ~(1u << 24));
+    }
+    BUSTER_TEST(arguments, object_read(arguments->arena, valid_mach_branch.bytes,
+                                       (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS})
+                                 .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    valid_mach_branch = object_write(arguments->arena, &object, OBJECT_FORMAT_MACH_O64);
+    mach_offsets_valid = object_test_mach_text_offsets(valid_mach_branch.bytes, &mach_raw_offset, &mach_relocation_offset, &mach_relocation_count);
+    if (mach_offsets_valid)
+    {
+        u32 relocation_information = 0;
+        memcpy(&relocation_information, valid_mach_branch.bytes.pointer + mach_relocation_offset + 4, sizeof(relocation_information));
+        object_test_write_u32(valid_mach_branch.bytes, mach_relocation_offset + 4, relocation_information & ~(1u << 27));
+    }
+    BUSTER_TEST(arguments, mach_offsets_valid &&
+                               object_read(arguments->arena, valid_mach_branch.bytes,
+                                           (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS})
+                                       .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    valid_mach_branch = object_write(arguments->arena, &object, OBJECT_FORMAT_MACH_O64);
+    mach_offsets_valid = object_test_mach_text_offsets(valid_mach_branch.bytes, &mach_raw_offset, &mach_relocation_offset, &mach_relocation_count);
+    if (mach_offsets_valid)
+    {
+        object_test_write_u32(valid_mach_branch.bytes, (u64)mach_raw_offset + relocation.offset, UINT32_C(0x14000001));
+    }
+    BUSTER_TEST(arguments, mach_offsets_valid &&
+                               object_read(arguments->arena, valid_mach_branch.bytes,
+                                           (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS})
+                                       .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    relocation.addend = 4;
+    ObjectArtifact malformed_addend_pair = object_write(arguments->arena, &object, OBJECT_FORMAT_MACH_O64);
+    mach_offsets_valid = object_test_mach_text_offsets(malformed_addend_pair.bytes, &mach_raw_offset, &mach_relocation_offset, &mach_relocation_count);
+    if (mach_offsets_valid && mach_relocation_count == 2)
+    {
+        u32 addend_information = 0;
+        memcpy(&addend_information, malformed_addend_pair.bytes.pointer + mach_relocation_offset + 4, sizeof(addend_information));
+        object_test_write_u32(malformed_addend_pair.bytes, mach_relocation_offset + 4, addend_information | (1u << 27));
+    }
+    BUSTER_TEST(arguments, mach_offsets_valid && mach_relocation_count == 2 &&
+                               object_read(arguments->arena, malformed_addend_pair.bytes,
+                                           (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS})
+                                       .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    relocation.addend = 0;
+
+    ObjectArtifact stale_coff_branch = object_write(arguments->arena, &object, OBJECT_FORMAT_COFF);
+    u32 coff_raw_offset = 0;
+    if (stale_coff_branch.bytes.pointer && stale_coff_branch.bytes.length >= 44)
+    {
+        memcpy(&coff_raw_offset, stale_coff_branch.bytes.pointer + 40, sizeof(coff_raw_offset));
+    }
+    object_test_write_u32(stale_coff_branch.bytes, (u64)coff_raw_offset + relocation.offset, UINT32_C(0x14000001));
+    BUSTER_TEST(arguments, object_read(arguments->arena, stale_coff_branch.bytes,
+                                       (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS})
+                                 .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+
+    ObjectFormat strict_branch_formats[] = {OBJECT_FORMAT_ELF64, OBJECT_FORMAT_COFF, OBJECT_FORMAT_MACH_O64};
+    aarch64_jump_instruction = UINT32_C(0x94000000);
+    memcpy(aarch64_text + 4, &aarch64_jump_instruction, sizeof(aarch64_jump_instruction));
+    for (u32 format_index = 0; format_index < BUSTER_ARRAY_LENGTH(strict_branch_formats); format_index += 1)
+    {
+        BUSTER_TEST(arguments, object_write(arguments->arena, &object, strict_branch_formats[format_index]).error == OBJECT_ERROR_INVALID_INPUT);
+    }
+    aarch64_jump_instruction = UINT32_C(0x14000001);
+    memcpy(aarch64_text + 4, &aarch64_jump_instruction, sizeof(aarch64_jump_instruction));
+    for (u32 format_index = 0; format_index < BUSTER_ARRAY_LENGTH(strict_branch_formats); format_index += 1)
+    {
+        BUSTER_TEST(arguments, object_write(arguments->arena, &object, strict_branch_formats[format_index]).error == OBJECT_ERROR_INVALID_INPUT);
+    }
+    aarch64_jump_instruction = UINT32_C(0x14000000);
+    memcpy(aarch64_text + 4, &aarch64_jump_instruction, sizeof(aarch64_jump_instruction));
+    ObjectArtifact underaligned_elf = object_write(arguments->arena, &object, OBJECT_FORMAT_ELF64);
+    u64 underaligned_relocation_section = 0;
+    u64 underaligned_target_data = 0;
+    bool underaligned_offsets_valid =
+        object_test_elf_relocation_offsets(underaligned_elf.bytes, &underaligned_relocation_section, &underaligned_target_data);
+    if (underaligned_offsets_valid)
+    {
+        u64 section_table = 0;
+        u32 target_index = 0;
+        memcpy(&section_table, underaligned_elf.bytes.pointer + 40, sizeof(section_table));
+        memcpy(&target_index, underaligned_elf.bytes.pointer + underaligned_relocation_section + 44, sizeof(target_index));
+        object_test_write_u64(underaligned_elf.bytes, section_table + (u64)target_index * 64 + 48, 1);
+    }
+    BUSTER_TEST(arguments, underaligned_offsets_valid &&
+                               object_read(arguments->arena, underaligned_elf.bytes,
+                                           (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX})
+                                       .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    sections[0].alignment = 1;
+    BUSTER_TEST(arguments, object_write(arguments->arena, &object, OBJECT_FORMAT_ELF64).error == OBJECT_ERROR_INVALID_INPUT);
+    sections[0].alignment = 16;
+    relocation.offset = 5;
+    BUSTER_TEST(arguments, object_write(arguments->arena, &object, OBJECT_FORMAT_ELF64).error == OBJECT_ERROR_INVALID_INPUT);
+    relocation.offset = UINT64_MAX - 1;
+    BUSTER_TEST(arguments, object_write(arguments->arena, &object, OBJECT_FORMAT_ELF64).error == OBJECT_ERROR_INVALID_INPUT);
+    relocation.offset = 4;
+    u8 misaligned_link_text[12] = {0};
+    memcpy(misaligned_link_text + 1, &aarch64_jump_instruction, sizeof(aarch64_jump_instruction));
+    ObjectSection misaligned_link_section = {
+        .name = S8(".text"),
+        .data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(misaligned_link_text),
+        .kind = OBJECT_SECTION_TEXT,
+        .alignment = 16,
+    };
+    ObjectSymbol misaligned_link_symbols[] = {
+        {
+            .name = S8("misaligned_entry"),
+            .size = 5,
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+        {
+            .name = S8("misaligned_target"),
+            .value = 5,
+            .size = 4,
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+        },
+    };
+    ObjectRelocation misaligned_link_relocation = {
+        .offset = 1,
+        .section = OBJECT_SECTION_TEXT,
+        .symbol = 1,
+        .kind = OBJECT_RELOCATION_AARCH64_JUMP26,
+    };
+    ObjectFile misaligned_link_object = {
+        .sections = &misaligned_link_section,
+        .symbols = misaligned_link_symbols,
+        .relocations = &misaligned_link_relocation,
+        .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        .section_count = 1,
+        .symbol_count = BUSTER_ARRAY_LENGTH(misaligned_link_symbols),
+        .relocation_count = 1,
+    };
+    ObjectExecutable misaligned_link_executable = object_link_executable(&misaligned_link_object);
+    BUSTER_TEST(arguments, misaligned_link_executable.error == OBJECT_ERROR_CAPACITY);
+    object_release_executable(misaligned_link_executable);
+
+    String8 aarch64_jump_assembly = object_print_assembly(arguments->arena, &object);
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(aarch64_jump_assembly), S8("\tb object_callee\n")));
+    aarch64_jump_instruction = UINT32_C(0x94000000);
+    memcpy(aarch64_text + 4, &aarch64_jump_instruction, sizeof(aarch64_jump_instruction));
+    relocation.kind = OBJECT_RELOCATION_AARCH64_CALL26;
     sections[0].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_text);
     object.target.cpu_arch = CPU_ARCH_X86_64;
     relocation = (ObjectRelocation){

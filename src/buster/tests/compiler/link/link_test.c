@@ -2046,6 +2046,79 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_text_header && link_read_u32(aarch64_executable.executable.pointer, aarch64_text_header + 4) == 1);
     BUSTER_TEST(arguments, aarch64_bss_header && link_read_u32(aarch64_executable.executable.pointer, aarch64_bss_header + 4) == 8);
     BUSTER_TEST(arguments, aarch64_debug_info_header && link_read_u64(aarch64_executable.executable.pointer, aarch64_debug_info_header + 32) == 0);
+    u32 aarch64_jump_instructions[] = {
+        0x14000000, 0xd4200000, 0x52800000, 0xd65f03c0,
+    };
+    ObjectSymbol aarch64_jump_symbols[] = {
+        {
+            .name = S8("main"),
+            .size = 2 * sizeof(u32),
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+        {
+            .name = S8("jump_target"),
+            .value = 2 * sizeof(u32),
+            .size = 2 * sizeof(u32),
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+        },
+    };
+    ObjectRelocation aarch64_jump_relocation = {
+        .section = OBJECT_SECTION_TEXT,
+        .symbol = 1,
+        .kind = OBJECT_RELOCATION_AARCH64_JUMP26,
+    };
+    ObjectFile aarch64_jump_object = link_test_object_make(arguments->arena, aarch64_target,
+                                                           (ByteSlice){
+                                                               .pointer = (u8*)aarch64_jump_instructions,
+                                                               .length = sizeof(aarch64_jump_instructions),
+                                                           },
+                                                           aarch64_jump_symbols, BUSTER_ARRAY_LENGTH(aarch64_jump_symbols), &aarch64_jump_relocation, 1);
+    NativeExecutableLinkResult aarch64_jump_executable =
+        link_native_executable(arguments->arena, &aarch64_jump_object, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    u64 aarch64_jump_text_header = 0;
+    bool aarch64_jump_text_found = aarch64_jump_executable.error == LINK_ERROR_NONE &&
+                                   link_test_elf_section_find(aarch64_jump_executable.executable, S8(".text"), 0, &aarch64_jump_text_header);
+    BUSTER_TEST(arguments, aarch64_jump_text_found);
+    if (aarch64_jump_text_found)
+    {
+        u64 aarch64_jump_text_offset = link_read_u64(aarch64_jump_executable.executable.pointer, aarch64_jump_text_header + 24);
+        BUSTER_TEST(arguments, link_read_u32(aarch64_jump_executable.executable.pointer, aarch64_jump_text_offset) == UINT32_C(0x14000002));
+    }
+    u8 aarch64_misaligned_text[12] = {0};
+    u32 aarch64_misaligned_branch = UINT32_C(0x14000000);
+    memcpy(aarch64_misaligned_text + 1, &aarch64_misaligned_branch, sizeof(aarch64_misaligned_branch));
+    ObjectSymbol aarch64_misaligned_symbols[] = {
+        {
+            .name = S8("main"),
+            .size = 5,
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+        {
+            .name = S8("misaligned_target"),
+            .value = 5,
+            .size = 4,
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+        },
+    };
+    ObjectRelocation aarch64_misaligned_relocation = {
+        .offset = 1,
+        .section = OBJECT_SECTION_TEXT,
+        .symbol = 1,
+        .kind = OBJECT_RELOCATION_AARCH64_JUMP26,
+    };
+    ObjectFile aarch64_misaligned_object =
+        link_test_object_make(arguments->arena, aarch64_target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(aarch64_misaligned_text),
+                              aarch64_misaligned_symbols, BUSTER_ARRAY_LENGTH(aarch64_misaligned_symbols), &aarch64_misaligned_relocation, 1);
+    BUSTER_TEST(arguments,
+                link_native_executable(arguments->arena, &aarch64_misaligned_object,
+                                       (NativeExecutableLinkOptions){.entry_symbol = S8("main")})
+                        .error == LINK_ERROR_RELOCATION);
     u32 aarch64_libc_instructions[] = {
         0xa9bf7bfd, 0x910003fd, 0x52800540, 0x94000000, 0x5100a800, 0xa8c17bfd, 0xd65f03c0,
     };
@@ -2083,6 +2156,20 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                     .entry_symbol = S8("main"),
                                                                                 });
     BUSTER_TEST(arguments, aarch64_libc_executable.error == LINK_ERROR_NONE);
+    ObjectRelocationKind imported_aarch64_branch_kinds[] = {OBJECT_RELOCATION_AARCH64_CALL26, OBJECT_RELOCATION_AARCH64_JUMP26};
+    u32 imported_aarch64_branch_words[] = {UINT32_C(0x94000000), UINT32_C(0x14000000)};
+    for (u32 branch_index = 0; branch_index < BUSTER_ARRAY_LENGTH(imported_aarch64_branch_kinds); branch_index += 1)
+    {
+        aarch64_libc_relocation.kind = imported_aarch64_branch_kinds[branch_index];
+        aarch64_libc_relocation.addend = 4;
+        aarch64_libc_instructions[3] = imported_aarch64_branch_words[branch_index];
+        NativeExecutableLinkResult imported_addend = link_native_executable(arguments->arena, &aarch64_libc_object,
+                                                                             (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+        BUSTER_TEST(arguments, imported_addend.error == LINK_ERROR_RELOCATION);
+    }
+    aarch64_libc_relocation.kind = OBJECT_RELOCATION_AARCH64_CALL26;
+    aarch64_libc_relocation.addend = 0;
+    aarch64_libc_instructions[3] = UINT32_C(0x94000000);
     String8 dynamic_section_names[] = {
         S8(".interp"), S8(".plt"), S8(".dynstr"), S8(".dynsym"), S8(".hash"), S8(".rela.plt"), S8(".got.plt"), S8(".dynamic"),
     };
@@ -2216,6 +2303,11 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                        .entry_symbol = S8("main"),
                                                                                    });
     BUSTER_TEST(arguments, aarch64_pe_libc_executable.error == LINK_ERROR_NONE);
+    aarch64_libc_relocation.addend = 4;
+    NativeExecutableLinkResult aarch64_pe_import_addend =
+        link_native_executable(arguments->arena, &aarch64_pe_libc_object, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    BUSTER_TEST(arguments, aarch64_pe_import_addend.error == LINK_ERROR_RELOCATION);
+    aarch64_libc_relocation.addend = 0;
     ObjectFile android_object = aarch64_libc_object;
     android_object.target.os = OPERATING_SYSTEM_ANDROID;
     String8 android_output_path = link_test_temporary_executable_path(arguments->arena, S8("buster-native-android-test"), S8(""));
@@ -2353,6 +2445,11 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                          .entry_symbol = S8("main"),
                                                                                      });
     BUSTER_TEST(arguments, aarch64_mach_libc_executable.error == LINK_ERROR_NONE);
+    aarch64_libc_relocation.addend = 4;
+    NativeExecutableLinkResult aarch64_mach_import_addend =
+        link_native_executable(arguments->arena, &aarch64_mach_libc_object, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    BUSTER_TEST(arguments, aarch64_mach_import_addend.error == LINK_ERROR_RELOCATION);
+    aarch64_libc_relocation.addend = 0;
     // Debug sections must reach the Mach-O image in an unmapped __DWARF
     // segment, with their address relocations resolved statically.
     ObjectFile mach_debug_object = aarch64_mach_object;

@@ -1,4 +1,5 @@
 #include <buster/lib/compiler/assembly/assembly.h>
+#include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 
 #include <buster/lib/string.h>
@@ -9283,6 +9284,43 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_emit_bit_atomic(AssemblyBuilder* builder, 
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_target_difference(s64 target, u64 place, s64* difference)
+{
+    if (!difference)
+    {
+        return false;
+    }
+    if (target >= 0)
+    {
+        u64 target_unsigned = (u64)target;
+        if (target_unsigned >= place)
+        {
+            u64 magnitude = target_unsigned - place;
+            if (magnitude > (u64)INT64_MAX)
+            {
+                return false;
+            }
+            *difference = (s64)magnitude;
+            return true;
+        }
+        u64 magnitude = place - target_unsigned;
+        if (magnitude > (u64)INT64_MAX + 1)
+        {
+            return false;
+        }
+        *difference = magnitude == (u64)INT64_MAX + 1 ? INT64_MIN : -(s64)magnitude;
+        return true;
+    }
+    u64 target_magnitude = (u64)(-(target + 1)) + 1;
+    if (place > (u64)INT64_MAX + 1 - target_magnitude)
+    {
+        return false;
+    }
+    u64 magnitude = place + target_magnitude;
+    *difference = magnitude == (u64)INT64_MAX + 1 ? INT64_MIN : -(s64)magnitude;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
 {
     for (u32 instruction_index = 0; instruction_index < builder->instruction_count; instruction_index += 1)
@@ -10282,30 +10320,46 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             assembly_emit_immediate(builder, (u64)immediate, immediate_size);
             continue;
         }
-        u32 word = instruction->opcode == ASSEMBLY_OPCODE_AARCH64_NOP   ? UINT32_C(0xd503201f)
-                   : instruction->opcode == ASSEMBLY_OPCODE_AARCH64_RET ? UINT32_C(0xd65f03c0)
-                   : instruction->opcode == ASSEMBLY_OPCODE_AARCH64_BL  ? UINT32_C(0x94000000)
-                                                                        : UINT32_C(0x14000000);
+        A64Opcode opcode = instruction->opcode == ASSEMBLY_OPCODE_AARCH64_NOP   ? A64_OPCODE_NOP
+                           : instruction->opcode == ASSEMBLY_OPCODE_AARCH64_RET ? A64_OPCODE_RET
+                           : instruction->opcode == ASSEMBLY_OPCODE_AARCH64_BL  ? A64_OPCODE_BL
+                                                                                : A64_OPCODE_B;
+        A64MCInst exact = {
+            .opcode = opcode,
+            .operand_count = opcode == A64_OPCODE_NOP ? 0 : 1,
+        };
+        if (opcode == A64_OPCODE_RET)
+        {
+            exact.operands[0] = (A64MCOperand){.value = 30, .kind = A64_MC_OPERAND_REGISTER};
+        }
+        else if (opcode == A64_OPCODE_B || opcode == A64_OPCODE_BL)
+        {
+            exact.operands[0] = (A64MCOperand){.kind = A64_MC_OPERAND_PC_RELATIVE};
+        }
+        u32 word = 0;
+        if (!a64_mc_encode(&exact, &word))
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
+                                S8("AArch64 instruction could not be encoded"));
+            return;
+        }
         if (instruction->opcode == ASSEMBLY_OPCODE_AARCH64_B || instruction->opcode == ASSEMBLY_OPCODE_AARCH64_BL)
         {
             s64 target = 0;
             if (assembly_expression_target(builder, instruction->operands[0].expression, &target))
             {
-                s64 instruction_offset = (s64)instruction->offset;
-                s64 lower = instruction_offset - (INT64_C(1) << 27);
-                s64 upper = instruction_offset + (INT64_C(1) << 27);
-                if (target < lower || target >= upper || (target - instruction_offset) % 4)
+                s64 displacement = 0;
+                if (!assembly_aarch64_target_difference(target, instruction->offset, &displacement) ||
+                    !a64_pc_relative_patch(opcode, word, displacement, &word))
                 {
                     assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
                                         S8("AArch64 branch target is out of range or unaligned"));
                 }
-                else
-                {
-                    word |= (u32)((target - instruction_offset) / 4) & UINT32_C(0x03ffffff);
-                }
             }
             else if (!assembly_relocation_append(builder, instruction->offset, instruction->operands[0].expression,
-                                                 ASSEMBLY_RELOCATION_AARCH64_BRANCH26, 0))
+                                                 opcode == A64_OPCODE_BL ? ASSEMBLY_RELOCATION_AARCH64_CALL26
+                                                                         : ASSEMBLY_RELOCATION_AARCH64_JUMP26,
+                                                 0))
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
                                     S8("AArch64 relocation addend is out of range"));

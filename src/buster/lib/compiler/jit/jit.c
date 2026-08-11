@@ -1,6 +1,7 @@
 #include <buster/lib/compiler/jit/jit.h>
 
 #include <buster/lib/arena.h>
+#include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
@@ -141,7 +142,7 @@ BUSTER_GLOBAL_LOCAL bool jit_relocation_is_supported(ObjectRelocationKind kind, 
 {
     return kind == OBJECT_RELOCATION_ABSOLUTE64 ||
            (kind == OBJECT_RELOCATION_X86_64_PC32 && arch == CPU_ARCH_X86_64) ||
-           (kind == OBJECT_RELOCATION_AARCH64_CALL26 && arch == CPU_ARCH_AARCH64);
+           ((kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26) && arch == CPU_ARCH_AARCH64);
 }
 
 BUSTER_GLOBAL_LOCAL u64 jit_relocation_size(ObjectRelocationKind kind)
@@ -283,6 +284,12 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
         u64 target = 0;
         if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
+            if ((relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26) && relocation->addend)
+            {
+                program->error = JIT_ERROR_UNSUPPORTED_RELOCATION;
+                program->failing_symbol = symbol->name;
+                return false;
+            }
             if (symbol->kind == OBJECT_SYMBOL_DATA)
             {
                 program->error = JIT_ERROR_EXTERNAL_DATA;
@@ -351,7 +358,7 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
             s32 value = (s32)displacement;
             memcpy(patch, &value, sizeof(value));
         }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26)
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26)
         {
             if (symbol->kind != OBJECT_SYMBOL_FUNCTION)
             {
@@ -360,15 +367,19 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
                 return false;
             }
             s64 displacement = 0;
-            if (!jit_address_difference(target, (u64)(uintptr_t)patch, relocation->addend, &displacement) || (displacement & 3) ||
-                displacement < -(INT64_C(1) << 27) || displacement >= (INT64_C(1) << 27))
+            u32 instruction = 0;
+            u32 patched = 0;
+            memcpy(&instruction, patch, sizeof(instruction));
+            A64Opcode opcode = relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 ? A64_OPCODE_BL : A64_OPCODE_B;
+            if (((u64)(uintptr_t)patch & 3) ||
+                !a64_pc_relative_displacement(target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
+                !a64_pc_relative_patch(opcode, instruction, displacement, &patched))
             {
                 program->error = JIT_ERROR_CAPACITY;
                 program->failing_symbol = symbol->name;
                 return false;
             }
-            u32 instruction = 0x94000000 | ((u32)(displacement / 4) & 0x03ffffff);
-            memcpy(patch, &instruction, sizeof(instruction));
+            memcpy(patch, &patched, sizeof(patched));
         }
         else
         {
@@ -533,7 +544,8 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
         ObjectSymbol const* symbol = object->symbols + relocation->symbol;
         bool call_import = symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_FUNCTION &&
                            ((object->target.cpu_arch == CPU_ARCH_X86_64 && relocation->kind == OBJECT_RELOCATION_X86_64_PC32) ||
-                            (object->target.cpu_arch == CPU_ARCH_AARCH64 && relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26));
+                            (object->target.cpu_arch == CPU_ARCH_AARCH64 &&
+                             (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26)));
         if (call_import)
         {
             thunk_indices[relocation->symbol] = 0;

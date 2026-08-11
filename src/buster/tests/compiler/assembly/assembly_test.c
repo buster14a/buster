@@ -1919,7 +1919,17 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64.bytes.length == sizeof(expected_aarch64) &&
                                memcmp(aarch64.bytes.pointer, expected_aarch64, sizeof(expected_aarch64)) == 0);
     BUSTER_TEST(arguments, aarch64.relocation_count == 1 && aarch64.relocations[0].offset == 4 &&
-                               aarch64.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26);
+                               aarch64.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_CALL26);
+    AssemblyEncodeResult aarch64_jump = assembly_encode(arguments->arena, S8("b external\n"),
+                                                         (AssemblyEncodeOptions){
+                                                             .target = aarch64_target,
+                                                         });
+    u8 expected_aarch64_jump[] = {0, 0, 0, 0x14};
+    BUSTER_TEST(arguments, aarch64_jump.diagnostic_count == 0 &&
+                               aarch64_jump.bytes.length == sizeof(expected_aarch64_jump) &&
+                               memcmp(aarch64_jump.bytes.pointer, expected_aarch64_jump, sizeof(expected_aarch64_jump)) == 0);
+    BUSTER_TEST(arguments, aarch64_jump.relocation_count == 1 && aarch64_jump.relocations[0].offset == 0 &&
+                               aarch64_jump.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_JUMP26);
 
     AssemblyEncodeResult invalid = assembly_encode(arguments->arena, S8("same:\n same: nop\n ret x0\n unknown\n"),
                                                     (AssemblyEncodeOptions){

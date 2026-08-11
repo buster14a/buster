@@ -430,6 +430,26 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
         .address = host_address,
         .kind = OBJECT_SYMBOL_FUNCTION,
     };
+#if BUSTER_CPU_ARCH_AARCH64
+    u8 saved_misaligned_bytes[sizeof(u32)] = {0};
+    u32 misaligned_call = UINT32_C(0x94000000);
+    memcpy(saved_misaligned_bytes, native_text + import_relocation_offset + 1, sizeof(saved_misaligned_bytes));
+    memcpy(native_text + import_relocation_offset + 1, &misaligned_call, sizeof(misaligned_call));
+    native_relocations[0].offset = import_relocation_offset + 1;
+    JitProgram misaligned_branch_program = jit_link_object(&native_object, (JitOptions){.bindings = &native_binding, .binding_count = 1});
+    BUSTER_TEST(arguments, misaligned_branch_program.error == JIT_ERROR_CAPACITY);
+    BUSTER_STRING_TEST(arguments, misaligned_branch_program.failing_symbol, native_symbols[2].name);
+    jit_program_release(&misaligned_branch_program);
+    native_relocations[0].offset = import_relocation_offset;
+    memcpy(native_text + import_relocation_offset + 1, saved_misaligned_bytes, sizeof(saved_misaligned_bytes));
+
+    native_relocations[0].addend = 4;
+    JitProgram imported_addend_program = jit_link_object(&native_object, (JitOptions){.bindings = &native_binding, .binding_count = 1});
+    BUSTER_TEST(arguments, imported_addend_program.error == JIT_ERROR_UNSUPPORTED_RELOCATION);
+    BUSTER_STRING_TEST(arguments, imported_addend_program.failing_symbol, native_symbols[2].name);
+    jit_program_release(&imported_addend_program);
+    native_relocations[0].addend = 0;
+#endif
     JitProgram native_program = jit_link_object(&native_object, (JitOptions){.bindings = &native_binding, .binding_count = 1});
     BUSTER_TEST(arguments, native_program.error == JIT_ERROR_NONE);
     BUSTER_TEST(arguments, native_program.allocation_base && native_program.allocation_size && native_program.executable_size);
