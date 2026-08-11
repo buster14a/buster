@@ -16,6 +16,15 @@
 #pragma GCC diagnostic pop
 #endif
 
+BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_COVERAGE_DIRECT == (u32)BUSTER_AARCH64_GENERATED_COVERAGE_DIRECT);
+BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_COVERAGE_NORMALIZED == (u32)BUSTER_AARCH64_GENERATED_COVERAGE_NORMALIZED);
+BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_COVERAGE_ALIAS == (u32)BUSTER_AARCH64_GENERATED_COVERAGE_ALIAS);
+BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_COVERAGE_PRIVILEGED_SYSTEM == (u32)BUSTER_AARCH64_GENERATED_COVERAGE_PRIVILEGED_SYSTEM);
+BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_COVERAGE_RESERVED_UNENCODABLE == (u32)BUSTER_AARCH64_GENERATED_COVERAGE_RESERVED_UNENCODABLE);
+BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_COVERAGE_UNSUPPORTED_TOKEN == (u32)BUSTER_AARCH64_GENERATED_COVERAGE_UNSUPPORTED_TOKEN);
+BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_COVERAGE_UNCLASSIFIED == (u32)BUSTER_AARCH64_GENERATED_COVERAGE_UNCLASSIFIED);
+BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_COVERAGE_CLASS_COUNT == (u32)BUSTER_AARCH64_GENERATED_COVERAGE_CLASS_COUNT);
+
 #define A64_NO_PC_RELATIVE_OPERAND UINT8_MAX
 
 #define A64_METADATA_FIELD_UNMAPPED BUSTER_AARCH64_GENERATED_FIELD_UNMAPPED
@@ -127,7 +136,7 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_generated_segment(u32 segment_id, BusterAa
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool a64_metadata_form_layout_complete(u32 form_id, BusterAarch64GeneratedForm* form_result)
+BUSTER_GLOBAL_LOCAL bool a64_metadata_form_raw_layout_complete(u32 form_id, BusterAarch64GeneratedForm* form_result)
 {
     BusterAarch64GeneratedForm form = {0};
     if (!a64_metadata_generated_form(form_id, &form))
@@ -302,21 +311,21 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_form_m1_predicates(BusterAarch64GeneratedF
     return a64_metadata_form_predicates_supported(form, a64_metadata_apple_m1_target());
 }
 
-BUSTER_GLOBAL_LOCAL bool a64_metadata_form_and_layout(u32 form_id, BusterAarch64GeneratedForm* form, bool* complete)
+BUSTER_GLOBAL_LOCAL bool a64_metadata_form_and_layout(u32 form_id, BusterAarch64GeneratedForm* form, bool* raw_layout_complete)
 {
     BusterAarch64GeneratedForm generated = {0};
     if (!a64_metadata_generated_form(form_id, &generated))
     {
         return false;
     }
-    bool is_complete = a64_metadata_form_layout_complete(form_id, 0);
+    bool is_raw_layout_complete = a64_metadata_form_raw_layout_complete(form_id, 0);
     if (form)
     {
         *form = generated;
     }
-    if (complete)
+    if (raw_layout_complete)
     {
-        *complete = is_complete;
+        *raw_layout_complete = is_raw_layout_complete;
     }
     return true;
 }
@@ -374,12 +383,12 @@ BusterAarch64MetadataCounts buster_aarch64_metadata_counts(void)
             continue;
         }
         result.apple_m1_supported_count += 1;
-        if (a64_metadata_form_layout_complete(form_id, 0))
+        if (a64_metadata_form_raw_layout_complete(form_id, 0))
         {
-            result.apple_m1_complete_count += 1;
+            result.apple_m1_raw_layout_complete_count += 1;
         }
     }
-    result.apple_m1_incomplete_count = result.apple_m1_supported_count - result.apple_m1_complete_count;
+    result.apple_m1_raw_layout_incomplete_count = result.apple_m1_supported_count - result.apple_m1_raw_layout_complete_count;
     return result;
 }
 
@@ -405,8 +414,8 @@ bool buster_aarch64_metadata_form(u32 form_id, BusterAarch64MetadataForm* result
         return false;
     }
     BusterAarch64GeneratedForm form = {0};
-    bool complete = false;
-    if (!a64_metadata_form_and_layout(form_id, &form, &complete))
+    bool raw_layout_complete = false;
+    if (!a64_metadata_form_and_layout(form_id, &form, &raw_layout_complete))
     {
         return false;
     }
@@ -445,7 +454,7 @@ bool buster_aarch64_metadata_form(u32 form_id, BusterAarch64MetadataForm* result
         .address_flags = form.address_flags,
         .address_base_index = form.address_base_index,
         .address_offset_index = form.address_offset_index,
-        .complete = complete,
+        .raw_layout_complete = raw_layout_complete,
         .provisionally_apple_m1 = a64_metadata_form_m1_predicates(form),
     };
     return true;
@@ -605,14 +614,14 @@ bool buster_aarch64_metadata_form_provisionally_apple_m1_supported(u32 form_id)
     return buster_aarch64_metadata_form_supported(form_id, BUSTER_AARCH64_METADATA_TARGET_APPLE_M1);
 }
 
-bool buster_aarch64_metadata_form_is_complete(u32 form_id)
+bool buster_aarch64_metadata_form_has_complete_raw_layout(u32 form_id)
 {
-    return a64_metadata_form_layout_complete(form_id, 0);
+    return a64_metadata_form_raw_layout_complete(form_id, 0);
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_metadata_raw_layout(u32 form_id, BusterAarch64GeneratedForm* form_result)
 {
-    return a64_metadata_form_layout_complete(form_id, form_result);
+    return a64_metadata_form_raw_layout_complete(form_id, form_result);
 }
 
 bool buster_aarch64_metadata_raw_encode(u32 form_id, u32 const* field_values, u32 field_count, u32* word)
@@ -657,7 +666,7 @@ bool buster_aarch64_metadata_raw_encode(u32 form_id, u32 const* field_values, u3
 bool buster_aarch64_metadata_raw_decode(u32 form_id, u32 word, u32* field_values, u32 field_count)
 {
     BusterAarch64GeneratedForm form = {0};
-    if (!field_values || !a64_metadata_raw_layout(form_id, &form) || field_count != form.field_count ||
+    if (!a64_metadata_raw_layout(form_id, &form) || field_count != form.field_count || (field_count && !field_values) ||
         (word & form.fixed_mask) != form.fixed_value)
     {
         return false;

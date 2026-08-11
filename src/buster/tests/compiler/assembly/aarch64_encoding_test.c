@@ -375,8 +375,8 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, buster_aarch64_metadata_schema_version() == 4);
     BUSTER_TEST(arguments, metadata_counts.form_count == 7491 && metadata_counts.field_count == 22631 && metadata_counts.segment_count == 23037 &&
                               metadata_counts.operand_count == 26262 && metadata_counts.predicate_count == 7854 && metadata_counts.string_pool_size == 337490);
-    BUSTER_TEST(arguments, metadata_counts.apple_m1_supported_count == 2899 && metadata_counts.apple_m1_complete_count == 2873 &&
-                              metadata_counts.apple_m1_incomplete_count == 26);
+    BUSTER_TEST(arguments, metadata_counts.apple_m1_supported_count == 2899 && metadata_counts.apple_m1_raw_layout_complete_count == 2873 &&
+                              metadata_counts.apple_m1_raw_layout_incomplete_count == 26);
 
     // Target-aware predicate evaluation is the authority behind the legacy
     // Apple-M1 enum classifier. Explicit feature subtraction remains valid and
@@ -424,24 +424,35 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     unknown_feature_target.cpu_features.words[3] |= UINT64_C(1) << 63;
     BUSTER_TEST(arguments, !buster_aarch64_metadata_form_supported_for_target(85, unknown_feature_target));
 
-    u32 complete_count = 0;
+    u32 raw_layout_complete_count = 0;
     u32 m1_count = 0;
-    u32 m1_complete_count = 0;
+    u32 m1_raw_layout_complete_count = 0;
+    bool found_in_profile_unsupported_token_raw_layout = false;
     for (u32 form_id = 0; form_id < metadata_counts.form_count; form_id += 1)
     {
         BusterAarch64MetadataForm form = {0};
         BUSTER_TEST(arguments, buster_aarch64_metadata_form(form_id, &form) && form.id == form_id && form.normalized_form_id < metadata_counts.form_count);
         BUSTER_TEST(arguments, form.name.length != 0 && form.mnemonic.length != 0);
-        if (form.complete)
+        if (form.raw_layout_complete)
         {
-            complete_count += 1;
+            raw_layout_complete_count += 1;
         }
         if (form.provisionally_apple_m1)
         {
             m1_count += 1;
-            if (form.complete)
+            if (form.raw_layout_complete)
             {
-                m1_complete_count += 1;
+                m1_raw_layout_complete_count += 1;
+            }
+            if (form.raw_layout_complete && form.coverage_class == BUSTER_AARCH64_METADATA_COVERAGE_UNSUPPORTED_TOKEN)
+            {
+                // A structurally complete raw layout is not semantic encoder
+                // coverage. Keep unsupported-token rows in the audit census,
+                // but do not mistake them for accepted instruction forms.
+                found_in_profile_unsupported_token_raw_layout = true;
+                BUSTER_TEST(arguments, form.coverage_class != BUSTER_AARCH64_METADATA_COVERAGE_DIRECT &&
+                                          form.coverage_class != BUSTER_AARCH64_METADATA_COVERAGE_NORMALIZED &&
+                                          form.coverage_class != BUSTER_AARCH64_METADATA_COVERAGE_ALIAS);
             }
         }
         for (u32 field_index = 0; field_index < form.field_count; field_index += 1)
@@ -465,7 +476,7 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
             BusterAarch64MetadataString predicate = {0};
             BUSTER_TEST(arguments, buster_aarch64_metadata_predicate(form_id, predicate_index, &predicate) && predicate.length != 0);
         }
-        if (form.complete)
+        if (form.raw_layout_complete)
         {
             u32 values[8] = {0};
             u32 decoded_values[8] = {0};
@@ -485,7 +496,8 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, (raw_word & form.fixed_mask) == form.fixed_value);
         }
     }
-    BUSTER_TEST(arguments, complete_count == 7320 && m1_count == 2899 && m1_complete_count == 2873);
+    BUSTER_TEST(arguments, raw_layout_complete_count == 7320 && m1_count == 2899 && m1_raw_layout_complete_count == 2873);
+    BUSTER_TEST(arguments, found_in_profile_unsupported_token_raw_layout);
 
     // Differential words checked against llvm-mc 22.1.8. The values are raw
     // source-field values in generated field order, not semantic operands.
@@ -526,7 +538,7 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     }
 
     // Bounded rejection coverage for null, wrong-count, overflow, fixed-bit,
-    // unsupported-target, incomplete, and out-of-range metadata requests.
+    // unsupported-target, raw-layout-incomplete, and out-of-range metadata requests.
     BusterAarch64MetadataForm metadata_form = {0};
     BUSTER_TEST(arguments, !buster_aarch64_metadata_form(metadata_counts.form_count, &metadata_form));
     BUSTER_TEST(arguments, !buster_aarch64_metadata_form(0, 0));
@@ -536,7 +548,7 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !buster_aarch64_metadata_predicate(0, UINT32_MAX, 0));
     BUSTER_TEST(arguments, !buster_aarch64_metadata_form_supported(0, BUSTER_AARCH64_METADATA_TARGET_COUNT));
     BUSTER_TEST(arguments, !buster_aarch64_metadata_form_provisionally_apple_m1_supported(metadata_counts.form_count));
-    BUSTER_TEST(arguments, !buster_aarch64_metadata_form_is_complete(3854));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_form_has_complete_raw_layout(3854));
     u32 rejection_decoded_values[4] = {0};
     BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_encode(3854, 0, 2, &encoded));
     BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_encode(85, 0, 4, &encoded));
@@ -548,6 +560,12 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
                                                               rejection_decoded_values, 4));
     BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_decode(85, UINT32_C(0x0b050083), rejection_decoded_values, 3));
     BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_decode(85, UINT32_C(0x0b050083), 0, 4));
+
+    // Zero-field fixed forms are symmetric: no field buffer is needed in
+    // either direction.
+    u32 zero_field_word = 0;
+    BUSTER_TEST(arguments, buster_aarch64_metadata_raw_encode(229, 0, 0, &zero_field_word) && zero_field_word == UINT32_C(0xd50323bf));
+    BUSTER_TEST(arguments, buster_aarch64_metadata_raw_decode(229, zero_field_word, 0, 0));
 
     return result;
 }

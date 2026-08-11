@@ -202,7 +202,10 @@ struct BusterAarch64MetadataForm
     u8 reserved1;
     u16 address_base_index;
     u16 address_offset_index;
-    bool complete;
+    // This only describes whether the raw 32-bit field layout is complete.
+    // Semantic encoder coverage is represented independently by coverage_class
+    // and encoder_family.
+    bool raw_layout_complete;
     bool provisionally_apple_m1;
     u8 reserved2[2];
 };
@@ -217,9 +220,24 @@ struct BusterAarch64MetadataCounts
     u32 predicate_count;
     u32 string_pool_size;
     u32 apple_m1_supported_count;
-    u32 apple_m1_complete_count;
-    u32 apple_m1_incomplete_count;
+    u32 apple_m1_raw_layout_complete_count;
+    u32 apple_m1_raw_layout_incomplete_count;
 };
+
+// Coverage classification is independent from raw bit-layout completeness.
+// Keep these values aligned with the generated snapshot while exposing a
+// stable public vocabulary to semantic encoder and test layers.
+typedef enum BusterAarch64MetadataCoverageClass
+{
+    BUSTER_AARCH64_METADATA_COVERAGE_DIRECT,
+    BUSTER_AARCH64_METADATA_COVERAGE_NORMALIZED,
+    BUSTER_AARCH64_METADATA_COVERAGE_ALIAS,
+    BUSTER_AARCH64_METADATA_COVERAGE_PRIVILEGED_SYSTEM,
+    BUSTER_AARCH64_METADATA_COVERAGE_RESERVED_UNENCODABLE,
+    BUSTER_AARCH64_METADATA_COVERAGE_UNSUPPORTED_TOKEN,
+    BUSTER_AARCH64_METADATA_COVERAGE_UNCLASSIFIED,
+    BUSTER_AARCH64_METADATA_COVERAGE_CLASS_COUNT,
+} BusterAarch64MetadataCoverageClass;
 
 typedef enum BusterAarch64MetadataTarget
 {
@@ -254,11 +272,11 @@ BUSTER_F_DECL bool buster_aarch64_metadata_predicate(u32 form_id, u32 predicate_
 BUSTER_F_DECL bool buster_aarch64_metadata_form_supported_for_target(u32 form_id, Target target);
 BUSTER_F_DECL bool buster_aarch64_metadata_form_supported(u32 form_id, BusterAarch64MetadataTarget target);
 BUSTER_F_DECL bool buster_aarch64_metadata_form_provisionally_apple_m1_supported(u32 form_id);
-BUSTER_F_DECL bool buster_aarch64_metadata_form_is_complete(u32 form_id);
+BUSTER_F_DECL bool buster_aarch64_metadata_form_has_complete_raw_layout(u32 form_id);
 
 // Raw field bit plumbing. Values are packed source-field u32 values, before
 // any semantic register/immediate/relocation transform. The caller supplies
-// exactly form.field_count values; incomplete, unmapped, malformed, or
+// exactly form.field_count values; raw-layout-incomplete, unmapped, malformed, or
 // overlapping layouts are rejected in both directions.
 BUSTER_F_DECL bool buster_aarch64_metadata_raw_encode(u32 form_id, u32 const* field_values, u32 field_count, u32* word);
 BUSTER_F_DECL bool buster_aarch64_metadata_raw_decode(u32 form_id, u32 word, u32* field_values, u32 field_count);
