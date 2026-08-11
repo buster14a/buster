@@ -43,6 +43,7 @@
     "numeric_relation_source_projection_identity": true,
     "owner_partition": true,
     "residual_overlay_count_honest": true,
+    "table_key_classification_partition": true,
     "undefined_udf_only": true
   },
   "largest_strings": [
@@ -166,7 +167,19 @@
       "arm-a64@2026-06:UDF_only_perm_undef"
     ]
   },
-  "string_pool_bytes": 235630,
+  "string_pool_bytes": 235804,
+  "table_key_classification": {
+    "bitfield_numeric_10_11_cells": 2014,
+    "inferred_width_columns": 0,
+    "key_bitfield_cells": 12563,
+    "key_cells": 12563,
+    "key_fallback_cells": 0,
+    "key_inferred_width_cells": 0,
+    "key_missing_class_cells": 0,
+    "key_non_bitfield_cells": 0,
+    "non_bitfield_numeric_10_11_cells": 0,
+    "numeric_10_11_cells": 2014
+  },
   "transform_kinds": {
     "concat": 898,
     "integer_decode": 297,

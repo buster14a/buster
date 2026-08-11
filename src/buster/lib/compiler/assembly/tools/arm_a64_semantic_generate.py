@@ -177,13 +177,20 @@ def parse_table(definition: ET.Element) -> dict[str, Any] | None:
     def cells(row: ET.Element) -> list[str]:
         return [norm("".join(cell.itertext())) for cell in row.findall("entry")]
 
+    def cell_classes(row: ET.Element) -> list[str | None]:
+        return [norm(cell.get("class")) or None for cell in row.findall("entry")]
+
     head = tgroup.find("thead")
     body = tgroup.find("tbody")
+    header_row = head.find("row") if head is not None else None
+    body_rows = body.findall("row") if body is not None else []
     return {
         "class": table.get("class"),
         "cols": tgroup.get("cols"),
-        "header": cells(head.find("row")) if head is not None and head.find("row") is not None else [],
-        "rows": [cells(row) for row in body.findall("row")] if body is not None else [],
+        "header": cells(header_row) if header_row is not None else [],
+        "header_classes": cell_classes(header_row) if header_row is not None else [],
+        "rows": [cells(row) for row in body_rows],
+        "row_classes": [cell_classes(row) for row in body_rows],
     }
 
 
@@ -199,6 +206,8 @@ def compact_table(table: dict[str, Any] | None) -> dict[str, Any] | None:
     if not table:
         return None
     header = [norm(str(value)) for value in table.get("header", [])]
+    header_classes = table.get("header_classes", [])
+    row_classes = table.get("row_classes", [])
     if not header:
         raise RuntimeError("value table has no header")
     result_indices = [index for index, value in enumerate(header) if re.search(r"<[^>]+>", value)]
@@ -213,15 +222,21 @@ def compact_table(table: dict[str, Any] | None) -> dict[str, Any] | None:
     if not key_indices:
         raise RuntimeError(f"value table has no explicit key columns: {header!r}")
     rows = []
-    for row in table.get("rows", []):
+    for row_index, row in enumerate(table.get("rows", [])):
         if len(row) <= result_index:
             raise RuntimeError(f"value table row is missing its result column: {header!r}: {row!r}")
         if any(not norm(str(row[index])) for index in key_indices):
             raise RuntimeError(f"value table row is missing an explicit key: {header!r}: {row!r}")
-        rows.append({"key": [norm(str(row[index])) for index in key_indices], "result": norm(str(row[result_index]))})
+        classes = row_classes[row_index] if row_index < len(row_classes) else []
+        rows.append({"key": [norm(str(row[index])) for index in key_indices],
+                     "key_classes": [classes[index] if index < len(classes) else None for index in key_indices],
+                     "result": norm(str(row[result_index])),
+                     "result_class": classes[result_index] if result_index < len(classes) else None})
     return {
         "key_headers": [header[index] for index in key_indices],
+        "key_header_classes": [header_classes[index] if index < len(header_classes) else None for index in key_indices],
         "result_header": header[result_index],
+        "result_class": header_classes[result_index] if result_index < len(header_classes) else None,
         "key_arity": len(key_indices),
         "result_arity": 1,
         "rows": rows,
@@ -391,15 +406,20 @@ def program_text(program: list[dict[str, Any]] | None) -> str:
     return json.dumps(program or [], sort_keys=True, separators=(",", ":"))
 
 
-def normalize_table_value(value: str, *, result: bool = False) -> dict[str, Any]:
+def normalize_table_value(value: str, *, result: bool = False, field_width: int | None = None,
+                          source_class: str | None = None) -> dict[str, Any]:
     """Normalize a compact table atom to a typed semantic value.
 
     Bit patterns remain strings so leading zeroes and ``x`` don't disappear;
     decimal literals become integers; architectural names become enums; and
     the small set of XML expressions (``UInt(...)`` and arithmetic shifts)
-    remains an explicitly typed expression rather than raw prose.
+    remains an explicitly typed expression rather than raw prose.  The Arm
+    XML entry class is authoritative for ambiguous numeric cells: a
+    ``bitfield`` cell is parsed as binary, while cells with no class use the
+    bounded field-width fallback below.
     """
     value = norm(value)
+    source_class = norm(source_class).lower() or None
     if not value or len(value) > 96:
         raise RuntimeError(f"empty/overlong value-table atom: {value!r}")
     if value.startswith("[") and value.endswith("]"):
@@ -409,11 +429,24 @@ def normalize_table_value(value: str, *, result: bool = False) -> dict[str, Any]
         raise RuntimeError(f"unsupported bracketed value-table atom: {value!r}")
     integer = re.fullmatch(r"#?[-+]?\d+", value)
     if integer:
+        unsigned_digits = re.fullmatch(r"[01]+", value)
+        if source_class == "bitfield" and unsigned_digits:
+            if len(value) == 1 and value in "01" and (field_width is None or field_width == 1):
+                return {"type": "integer", "value": int(value)}
+            return {"type": "bits", "value": value.lower()}
+        # Missing entry classes are rare in the pinned tables.  Use the
+        # encoded width only as a fallback for those cells, preserving genuine
+        # decimal values such as 10/11 when they fit a wider field and were
+        # not marked as bitfield in the source.
+        if source_class is None and field_width is not None and field_width > 1 and unsigned_digits:
+            decimal_value = int(value, 10)
+            if len(value) == field_width or decimal_value >= (1 << field_width):
+                return {"type": "bits", "value": value.lower()}
         return {"type": "integer", "value": int(value.lstrip("#"), 10)}
     if re.fullmatch(r"[01xX]+", value):
         # A one-bit 0/1 cell is a scalar integer; multi-bit cells preserve
         # their width and wildcard positions as a bit-pattern.
-        if len(value) == 1 and value in "01":
+        if len(value) == 1 and value in "01" and (source_class != "bitfield" or field_width in (None, 1)):
             return {"type": "integer", "value": int(value)}
         return {"type": "bits", "value": value.lower()}
     if re.fullmatch(r"0[xX][0-9a-fA-F]+", value):
@@ -440,15 +473,69 @@ def normalize_table_value(value: str, *, result: bool = False) -> dict[str, Any]
     return {"type": "enum", "value": value}
 
 
-def normalized_value_table(table: dict[str, Any] | None) -> dict[str, Any]:
+def table_field_width(header: str, field_widths: dict[str, int]) -> int | None:
+    """Resolve a valuetable key header to its encoded bit width.
+
+    Most headers are direct field names, while a few Arm tables name a slice
+    (for example ``cmode[2:1]``).  Alias rows can also carry an incomplete
+    field map; callers may supplement this result with the fixed-width format
+    inferred from the table's own bitfield cells.
+    """
+    if header in field_widths:
+        return field_widths[header]
+    match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(?:\[([0-9]+)(?::([0-9]+))?\])?", header)
+    if not match or match.group(1) not in field_widths:
+        return None
+    first = match.group(2)
+    if first is None:
+        return field_widths[match.group(1)]
+    second = match.group(3)
+    return abs(int(first) - int(second if second is not None else first)) + 1
+
+
+def normalized_value_table(table: dict[str, Any] | None, field_widths: dict[str, int] | None = None,
+                           class_census: collections.Counter | None = None) -> dict[str, Any]:
     compact = compact_table(table)
     if compact is None:
         raise RuntimeError("value-table transform has no source table")
     entries = []
     keys_seen: set[str] = set()
     results_seen: set[str] = set()
+    field_widths = field_widths or {}
+    if class_census is None:
+        class_census = collections.Counter()
+    key_widths = [table_field_width(header, field_widths) for header in compact["key_headers"]]
+    fallback_widths: list[int | None] = [None] * len(key_widths)
+    for index in range(len(key_widths)):
+        if key_widths[index] is not None:
+            continue
+        missing_values = [row["key"][index] for row in compact["rows"]
+                          if index >= len(row.get("key_classes", [])) or row["key_classes"][index] is None]
+        bit_lengths = [len(value) for value in missing_values if re.fullmatch(r"[01xX]+", value)]
+        if bit_lengths and len(bit_lengths) == len(missing_values) and len(set(bit_lengths)) == 1 and bit_lengths[0] > 1:
+            fallback_widths[index] = bit_lengths[0]
+            class_census["inferred_width_columns"] += 1
     for row in compact["rows"]:
-        key = [normalize_table_value(value) for value in row["key"]]
+        key = []
+        key_classes = row.get("key_classes", [])
+        for index, (value, width) in enumerate(zip(row["key"], key_widths)):
+            source_class = key_classes[index] if index < len(key_classes) else None
+            class_census["key_cells"] += 1
+            if source_class == "bitfield":
+                class_census["key_bitfield_cells"] += 1
+            elif source_class:
+                class_census["key_non_bitfield_cells"] += 1
+            else:
+                class_census["key_missing_class_cells"] += 1
+            if value in {"10", "11"}:
+                class_census["numeric_10_11_cells"] += 1
+                class_census["bitfield_numeric_10_11_cells" if source_class == "bitfield" else "non_bitfield_numeric_10_11_cells"] += 1
+            effective_width = width if width is not None else fallback_widths[index]
+            if source_class is None and width is None and effective_width is not None:
+                class_census["key_inferred_width_cells"] += 1
+            if source_class is None and effective_width is not None:
+                class_census["key_fallback_cells"] += 1
+            key.append(normalize_table_value(value, field_width=effective_width, source_class=source_class))
         result = [normalize_table_value(row["result"], result=True)]
         key_signature = json.dumps(key, sort_keys=True, separators=(",", ":"))
         if key_signature in keys_seen:
@@ -681,7 +768,9 @@ def fields_from_expr(encodedin: str | None, canonical_fields: set[str]) -> tuple
     return tokens, None
 
 
-def transform_records(operand: dict[str, Any], explanations: list[dict[str, Any]], canonical_fields: set[str]) -> list[dict[str, Any]]:
+def transform_records(operand: dict[str, Any], explanations: list[dict[str, Any]], canonical_fields: set[str],
+                      field_widths: dict[str, int] | None = None,
+                      class_census: collections.Counter | None = None) -> list[dict[str, Any]]:
     result = []
     for explanation_index, explanation in enumerate(explanations):
         relation = numeric_relation_descriptor(explanation.get("intro", ""), explanation.get("encodedin"), canonical_fields)
@@ -726,7 +815,7 @@ def transform_records(operand: dict[str, Any], explanations: list[dict[str, Any]
                         program.append({"op": "text_factor", "value": factor})
                 result.append({"kind": "text_transform", "source": explanation_index, "program": program, "invertible": False})
         if explanation.get("table"):
-            table = normalized_value_table(explanation["table"])
+            table = normalized_value_table(explanation["table"], field_widths, class_census)
             # Keep only typed key/result entries.  Narrative XML prose and
             # description columns are intentionally omitted from artifacts.
             result.append({"kind": "value_table", "source": explanation_index, **table, "invertible": table["unique_results"]})
@@ -890,6 +979,7 @@ def semantic_rows(rows: list[dict[str, Any]], source: Path) -> tuple[list[dict[s
     mode_counts = collections.Counter()
     all_kinds = collections.Counter()
     all_transforms = collections.Counter()
+    table_class_census = collections.Counter()
     parsed_vm_programs = 0
     residual_overlay_rows = 0
     for form_index, row in enumerate(rows):
@@ -900,6 +990,10 @@ def semantic_rows(rows: list[dict[str, Any]], source: Path) -> tuple[list[dict[s
         anchors = anchor_info(encoding)
         explanations = explanation_index.get(key, [])
         canonical_fields = {field["name"] for field in row.get("fields", [])}
+        canonical_field_widths = {
+            field["name"]: sum(segment["width"] for segment in field.get("segments", []))
+            for field in row.get("fields", [])
+        }
         operands = []
         transforms = []
         for anchor in anchors:
@@ -912,7 +1006,8 @@ def semantic_rows(rows: list[dict[str, Any]], source: Path) -> tuple[list[dict[s
                         fields.append(field)
             source_indices = [index for index, x in enumerate(explanations) if x.get("link") == anchor.get("link")]
             operand_transform_first = len(transforms)
-            transforms.extend(transform_records({"form_id": row["id"], "link": anchor.get("link")}, matching, canonical_fields))
+            transforms.extend(transform_records({"form_id": row["id"], "link": anchor.get("link")}, matching,
+                                                canonical_fields, canonical_field_widths, table_class_census))
             operand = {
                 "position": anchor["position"],
                 "link": anchor.get("link"),
@@ -1073,7 +1168,11 @@ def semantic_rows(rows: list[dict[str, Any]], source: Path) -> tuple[list[dict[s
     no_anchor = [row for row in output if not row["operands"]]
     proven = [row for row in output if row.get("binding_confidence") == "proven-overlay"]
     relation_digest = hashlib.sha256(("\n".join(sorted(numeric_source_signatures)) + "\n").encode()).hexdigest()
-    return output, {"owners": owner_census, "owner_counts": dict(sorted(counts.items())), "canonical_owner_counts": dict(sorted(canonical_counts.items())), "memory_modes": dict(sorted(mode_counts.items())), "semantic_kinds": dict(sorted(all_kinds.items())), "transform_kinds": dict(sorted(all_transforms.items())), "parsed_vm_programs": parsed_vm_programs, "residual_overlay_rows": residual_overlay_rows, "unknown_role_operands": unknown_role_operands, "ambiguous_role_operands": 0, "cross_lenses": cross_census, "proven_overlay_rows": len(proven), "proven_overlay_ids": [row["id"] for row in proven], "no_anchor_rows": len(no_anchor), "no_anchor_canonical_rows": sum(row["kind"] == "canonical" for row in no_anchor), "no_anchor_alias_rows": sum(row["kind"] == "alias" for row in no_anchor), "numeric_relation_records": len(numeric_source_signatures), "numeric_relation_parsed": len(numeric_projected_signatures) - len(numeric_residual_signatures), "numeric_relation_residual": len(numeric_residual_signatures), "numeric_relation_source_key_sha256": relation_digest, "numeric_relation_source_keys": numeric_source_keys, "numeric_relation_projected_keys": numeric_projected, "numeric_relation_residual_keys": numeric_residual}
+    for key in ("key_bitfield_cells", "key_non_bitfield_cells", "key_missing_class_cells", "key_fallback_cells",
+                "inferred_width_columns", "key_inferred_width_cells", "numeric_10_11_cells",
+                "bitfield_numeric_10_11_cells", "non_bitfield_numeric_10_11_cells"):
+        table_class_census.setdefault(key, 0)
+    return output, {"owners": owner_census, "owner_counts": dict(sorted(counts.items())), "canonical_owner_counts": dict(sorted(canonical_counts.items())), "memory_modes": dict(sorted(mode_counts.items())), "semantic_kinds": dict(sorted(all_kinds.items())), "transform_kinds": dict(sorted(all_transforms.items())), "parsed_vm_programs": parsed_vm_programs, "residual_overlay_rows": residual_overlay_rows, "unknown_role_operands": unknown_role_operands, "ambiguous_role_operands": 0, "cross_lenses": cross_census, "proven_overlay_rows": len(proven), "proven_overlay_ids": [row["id"] for row in proven], "no_anchor_rows": len(no_anchor), "no_anchor_canonical_rows": sum(row["kind"] == "canonical" for row in no_anchor), "no_anchor_alias_rows": sum(row["kind"] == "alias" for row in no_anchor), "numeric_relation_records": len(numeric_source_signatures), "numeric_relation_parsed": len(numeric_projected_signatures) - len(numeric_residual_signatures), "numeric_relation_residual": len(numeric_residual_signatures), "numeric_relation_source_key_sha256": relation_digest, "numeric_relation_source_keys": numeric_source_keys, "numeric_relation_projected_keys": numeric_projected, "numeric_relation_residual_keys": numeric_residual, "table_key_classification": dict(sorted(table_class_census.items()))}
 
 
 def collect_strings(rows: list[dict[str, Any]]) -> tuple[dict[str, int], bytes]:
@@ -1598,6 +1697,7 @@ def emit_report(rows: list[dict[str, Any]], census: dict[str, Any], path: Path) 
         "owner_counts": census["owner_counts"], "canonical_owner_counts": census["canonical_owner_counts"],
         "memory_modes": census["memory_modes"], "cross_lenses": census["cross_lenses"],
         "semantic_kinds": census["semantic_kinds"], "transform_kinds": census["transform_kinds"],
+        "table_key_classification": census.get("table_key_classification", {}),
         "string_pool_bytes": census.get("string_pool_bytes", 0), "largest_strings": census.get("largest_strings", []),
         "status": "binding_complete" if not unsupported else "binding_with_residuals",
         "binding_complete_rows": len(rows) - len(unsupported),
@@ -1627,7 +1727,7 @@ def emit_report(rows: list[dict[str, Any]], census: dict[str, Any], path: Path) 
         "no_anchor_canonical_rows": census["no_anchor_canonical_rows"],
         "no_anchor_alias_rows": census["no_anchor_alias_rows"],
         "unsupported_or_gap_ids": [row["id"] for row in unsupported],
-        "invariants": {"canonical_plus_alias": len(rows) == 1695, "owner_partition": sum(census["canonical_owner_counts"].values()) == 1523, "memory_partition": sum(census["memory_modes"].values()) == 559, "all_source_links_accounted": all(row.get("encoding_name") for row in rows), "all_canonical_binding_complete": not any(row["kind"] == "canonical" for row in unsupported), "no_row_claims_executable_semantics": not any(row.get("executable_semantics") for row in rows), "classification_is_not_authoritative": all(row.get("operand_classification_status") == "presentation-only" for row in rows), "undefined_udf_only": len(undefined) == 1 and undefined[0]["id"].endswith(":UDF_only_perm_undef"), "numeric_relation_source_projection_identity": census.get("numeric_relation_records", 0) == census.get("numeric_relation_parsed", 0) + census.get("numeric_relation_residual", 0), "residual_overlay_count_honest": census.get("residual_overlay_rows", 0) > 0 or census.get("numeric_relation_residual", 0) == 0},
+        "invariants": {"canonical_plus_alias": len(rows) == 1695, "owner_partition": sum(census["canonical_owner_counts"].values()) == 1523, "memory_partition": sum(census["memory_modes"].values()) == 559, "all_source_links_accounted": all(row.get("encoding_name") for row in rows), "all_canonical_binding_complete": not any(row["kind"] == "canonical" for row in unsupported), "no_row_claims_executable_semantics": not any(row.get("executable_semantics") for row in rows), "classification_is_not_authoritative": all(row.get("operand_classification_status") == "presentation-only" for row in rows), "undefined_udf_only": len(undefined) == 1 and undefined[0]["id"].endswith(":UDF_only_perm_undef"), "numeric_relation_source_projection_identity": census.get("numeric_relation_records", 0) == census.get("numeric_relation_parsed", 0) + census.get("numeric_relation_residual", 0), "table_key_classification_partition": (lambda values: values.get("key_cells", 0) == values.get("key_bitfield_cells", 0) + values.get("key_non_bitfield_cells", 0) + values.get("key_missing_class_cells", 0))(census.get("table_key_classification", {})), "residual_overlay_count_honest": census.get("residual_overlay_rows", 0) > 0 or census.get("numeric_relation_residual", 0) == 0},
     }
     path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     return len(path.read_bytes()), sha256(path)
@@ -1676,9 +1776,9 @@ def main() -> int:
         "source": {"release": "2026-06", "tree_sha256": SOURCE_TREE_SHA256, "directory": str(args.source), "raw_source_policy": "raw Arm XML is not vendored; obtain the pinned release from Arm and verify this tree SHA-256 before regeneration"},
         "artifacts": {"jsonl": {"file": jsonl.name, "bytes": json_bytes, "sha256": json_digest}, "header": {"file": header.name, "bytes": header.stat().st_size, "sha256": header_digest, "string_pool_bytes": pool_size}, "report": {"file": report.name, "bytes": report_bytes, "sha256": report_digest}},
         "string_pool_bytes": census.get("string_pool_bytes", pool_size), "largest_strings": census.get("largest_strings", []),
-        "owner_counts": census["owner_counts"], "canonical_owner_counts": census["canonical_owner_counts"], "memory_modes": census["memory_modes"], "cross_lenses": census["cross_lenses"], "transform_kinds": census["transform_kinds"], "parsed_vm_programs": census.get("parsed_vm_programs", 0), "typed_transform_programs": census.get("typed_transform_programs", 0), "typed_value_program_atoms": census.get("typed_value_program_atoms", 0), "typed_program_instructions": census.get("typed_program_instructions", 0), "typed_program_operands": census.get("typed_program_operands", 0), "residual_overlay_rows": census.get("residual_overlay_rows", 0), "numeric_relation_records": census.get("numeric_relation_records", 0), "numeric_relation_parsed": census.get("numeric_relation_parsed", 0), "numeric_relation_residual": census.get("numeric_relation_residual", 0), "numeric_relation_source_key_sha256": census.get("numeric_relation_source_key_sha256", ""), "operand_classification_status": "presentation-only", "unknown_role_operands": census.get("unknown_role_operands", 0), "ambiguous_role_operands": census.get("ambiguous_role_operands", 0),
+        "owner_counts": census["owner_counts"], "canonical_owner_counts": census["canonical_owner_counts"], "memory_modes": census["memory_modes"], "cross_lenses": census["cross_lenses"], "transform_kinds": census["transform_kinds"], "table_key_classification": census.get("table_key_classification", {}), "parsed_vm_programs": census.get("parsed_vm_programs", 0), "typed_transform_programs": census.get("typed_transform_programs", 0), "typed_value_program_atoms": census.get("typed_value_program_atoms", 0), "typed_program_instructions": census.get("typed_program_instructions", 0), "typed_program_operands": census.get("typed_program_operands", 0), "residual_overlay_rows": census.get("residual_overlay_rows", 0), "numeric_relation_records": census.get("numeric_relation_records", 0), "numeric_relation_parsed": census.get("numeric_relation_parsed", 0), "numeric_relation_residual": census.get("numeric_relation_residual", 0), "numeric_relation_source_key_sha256": census.get("numeric_relation_source_key_sha256", ""), "operand_classification_status": "presentation-only", "unknown_role_operands": census.get("unknown_role_operands", 0), "ambiguous_role_operands": census.get("ambiguous_role_operands", 0),
         "coverage": {"binding_complete_rows": len(semantic) - census.get("residual_overlay_rows", 0), "canonical_binding_complete_rows": len(canonical) - sum(1 for row in canonical if any(transform.get("kind") == "overlay_required" for transform in row.get("transforms", []))), "alias_binding_complete_rows": len(semantic) - len(canonical), "executable_semantic_rows": 0, "canonical_executable_semantic_rows": 0, "alias_executable_semantic_rows": 0, "proven_overlay_rows": census["proven_overlay_rows"], "no_anchor_rows": census["no_anchor_rows"], "unsupported_or_gap_rows": census.get("residual_overlay_rows", 0)},
-        "invariants": {"canonical_plus_alias": True, "owner_partition": sum(census["canonical_owner_counts"].values()) == CANONICAL_DENOMINATOR, "memory_partition": sum(census["memory_modes"].values()) == 559, "all_rows_accounted": len(semantic) == CANONICAL_COUNT, "all_canonical_binding_complete": not any(transform.get("kind") == "overlay_required" for row in canonical for transform in row.get("transforms", [])), "no_row_claims_executable_semantics": not any(row.get("executable_semantics") for row in semantic), "classification_is_not_authoritative": True, "numeric_relation_source_projection_identity": census.get("numeric_relation_records", 0) == census.get("numeric_relation_parsed", 0) + census.get("numeric_relation_residual", 0), "residual_overlay_count_honest": census.get("residual_overlay_rows", 0) > 0 or census.get("numeric_relation_residual", 0) == 0},
+        "invariants": {"canonical_plus_alias": True, "owner_partition": sum(census["canonical_owner_counts"].values()) == CANONICAL_DENOMINATOR, "memory_partition": sum(census["memory_modes"].values()) == 559, "all_rows_accounted": len(semantic) == CANONICAL_COUNT, "all_canonical_binding_complete": not any(transform.get("kind") == "overlay_required" for row in canonical for transform in row.get("transforms", [])), "no_row_claims_executable_semantics": not any(row.get("executable_semantics") for row in semantic), "classification_is_not_authoritative": True, "numeric_relation_source_projection_identity": census.get("numeric_relation_records", 0) == census.get("numeric_relation_parsed", 0) + census.get("numeric_relation_residual", 0), "table_key_classification_partition": (lambda values: values.get("key_cells", 0) == values.get("key_bitfield_cells", 0) + values.get("key_non_bitfield_cells", 0) + values.get("key_missing_class_cells", 0))(census.get("table_key_classification", {})), "residual_overlay_count_honest": census.get("residual_overlay_rows", 0) > 0 or census.get("numeric_relation_residual", 0) == 0},
     }
     manifest_text = json.dumps(manifest_obj, indent=2, sort_keys=True) + "\n"
     if args.check and manifest.exists() and manifest.read_text() != manifest_text:

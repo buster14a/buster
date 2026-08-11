@@ -39,6 +39,56 @@ static bool a64_vm_find_transform(u32 form_id, u8 kind, u32* transform_id)
     return false;
 }
 
+static bool a64_vm_find_table_by_headers(u32 form_id, String8 first_name, String8 second_name, u32* transform_id)
+{
+    BusterA64SemanticForm form = {0};
+    if (!transform_id || !buster_a64_semantic_form(form_id, &form)) return false;
+    for (u32 ordinal = 0; ordinal < form.transform_count; ordinal += 1)
+    {
+        BusterA64SemanticTransform transform = {0};
+        if (!buster_a64_semantic_transform(form.transform_first + ordinal, &transform) ||
+            transform.kind != BUSTER_A64_SEMANTIC_TRANSFORM_VALUE_TABLE) continue;
+        u32 table_id = UINT32_MAX;
+        BusterA64SemanticTableHeader table = {0};
+        BusterA64SemanticString first = {0};
+        BusterA64SemanticString second = {0};
+        if (!buster_a64_semantic_transform_table_header(transform.id, &table_id) ||
+            !buster_a64_semantic_table_header(table_id, &table) || table.key_header_count != 2 ||
+            !buster_a64_semantic_table_key_header(table_id, 0, &first) ||
+            !buster_a64_semantic_table_key_header(table_id, 1, &second)) continue;
+        if (a64_vm_string_is(first, first_name) && a64_vm_string_is(second, second_name))
+        {
+            *transform_id = transform.id;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool a64_vm_find_table_by_header(u32 form_id, String8 name, u32* transform_id)
+{
+    BusterA64SemanticForm form = {0};
+    if (!transform_id || !buster_a64_semantic_form(form_id, &form)) return false;
+    for (u32 ordinal = 0; ordinal < form.transform_count; ordinal += 1)
+    {
+        BusterA64SemanticTransform transform = {0};
+        if (!buster_a64_semantic_transform(form.transform_first + ordinal, &transform) ||
+            transform.kind != BUSTER_A64_SEMANTIC_TRANSFORM_VALUE_TABLE) continue;
+        u32 table_id = UINT32_MAX;
+        BusterA64SemanticTableHeader table = {0};
+        BusterA64SemanticString header = {0};
+        if (!buster_a64_semantic_transform_table_header(transform.id, &table_id) ||
+            !buster_a64_semantic_table_header(table_id, &table) || table.key_header_count != 1 ||
+            !buster_a64_semantic_table_key_header(table_id, 0, &header)) continue;
+        if (a64_vm_string_is(header, name))
+        {
+            *transform_id = transform.id;
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool a64_vm_find_program_table_transform(u32 form_id, u32* transform_id)
 {
     BusterA64SemanticForm form = {0};
@@ -193,6 +243,70 @@ UnitTestResult aarch64_semantic_vm_tests(UnitTestArguments* arguments)
     BusterA64SemanticVMValue table_result = output;
     BUSTER_TEST(arguments, buster_a64_semantic_vm_eval_transform(form_id, table_id, &fields, &table_result) == BUSTER_A64_SEMANTIC_VM_STATUS_OK);
     BUSTER_TEST(arguments, table_result.kind == BUSTER_A64_SEMANTIC_VM_VALUE_ENUMERATION);
+
+    /* Arm's fixed-width bitfield cells must remain bit patterns even when
+       their spelling is also a decimal integer.  ADDHN's reserved ``11``
+       size row is wildcarded over Q, so both Q values must reject without
+       clobbering the caller's output. */
+    u32 addhn_id = UINT32_MAX;
+    BUSTER_TEST(arguments, buster_a64_semantic_find_form(S8("arm-a64@2026-06:ADDHN_asimddiff_N"), 0, &addhn_id));
+    BusterA64SemanticForm addhn_form = {0};
+    BUSTER_TEST(arguments, buster_a64_semantic_form(addhn_id, &addhn_form));
+    BusterA64SemanticVMFields addhn_fields = {.count = addhn_form.field_count};
+    u32 addhn_table_id = UINT32_MAX;
+    BUSTER_TEST(arguments, a64_vm_find_table_by_headers(addhn_id, S8("size"), S8("Q"), &addhn_table_id));
+    BusterA64SemanticVMValue addhn_sentinel = buster_a64_semantic_vm_value_unsigned(UINT64_C(0x5a), 8);
+    BusterA64SemanticVMValue addhn_before = addhn_sentinel;
+    BUSTER_TEST(arguments, a64_vm_set_field(addhn_id, &addhn_fields, S8("size"), 2));
+    BUSTER_TEST(arguments, a64_vm_set_field(addhn_id, &addhn_fields, S8("Q"), 0));
+    BUSTER_TEST(arguments, buster_a64_semantic_vm_eval_transform(addhn_id, addhn_table_id, &addhn_fields, &addhn_sentinel) == BUSTER_A64_SEMANTIC_VM_STATUS_OK &&
+                           addhn_sentinel.kind == BUSTER_A64_SEMANTIC_VM_VALUE_ENUMERATION && a64_vm_string_is(addhn_sentinel.text, S8("2S")));
+    addhn_sentinel = addhn_before;
+    BUSTER_TEST(arguments, a64_vm_set_field(addhn_id, &addhn_fields, S8("size"), 3));
+    BUSTER_TEST(arguments, a64_vm_set_field(addhn_id, &addhn_fields, S8("Q"), 0));
+    BUSTER_TEST(arguments, buster_a64_semantic_vm_eval_transform(addhn_id, addhn_table_id, &addhn_fields, &addhn_sentinel) == BUSTER_A64_SEMANTIC_VM_STATUS_RESERVED);
+    BUSTER_TEST(arguments, memcmp(&addhn_sentinel, &addhn_before, sizeof(addhn_sentinel)) == 0);
+    BUSTER_TEST(arguments, a64_vm_set_field(addhn_id, &addhn_fields, S8("Q"), 1));
+    BUSTER_TEST(arguments, buster_a64_semantic_vm_eval_transform(addhn_id, addhn_table_id, &addhn_fields, &addhn_sentinel) == BUSTER_A64_SEMANTIC_VM_STATUS_RESERVED);
+    BUSTER_TEST(arguments, memcmp(&addhn_sentinel, &addhn_before, sizeof(addhn_sentinel)) == 0);
+
+    u32 addhn_q_table_id = UINT32_MAX;
+    BusterA64SemanticValue addhn_q_entry = {0};
+    BusterA64SemanticValueAtom addhn_q_atom = {0};
+    BusterA64SemanticValue addhn_q_entry_one = {0};
+    BusterA64SemanticValueAtom addhn_q_atom_one = {0};
+    BUSTER_TEST(arguments, a64_vm_find_transform(addhn_id, BUSTER_A64_SEMANTIC_TRANSFORM_VALUE_TABLE, &addhn_q_table_id) &&
+                           buster_a64_semantic_transform_value(addhn_q_table_id, 0, &addhn_q_entry) && addhn_q_entry.key_count == 1 &&
+                           buster_a64_semantic_value_atom(addhn_q_entry.key_first, &addhn_q_atom) &&
+                           addhn_q_atom.kind == BUSTER_A64_SEMANTIC_VALUE_INTEGER && addhn_q_atom.integer == 0 &&
+                           buster_a64_semantic_transform_value(addhn_q_table_id, 1, &addhn_q_entry_one) && addhn_q_entry_one.key_count == 1 &&
+                           buster_a64_semantic_value_atom(addhn_q_entry_one.key_first, &addhn_q_atom_one) &&
+                           addhn_q_atom_one.kind == BUSTER_A64_SEMANTIC_VALUE_INTEGER && addhn_q_atom_one.integer == 1);
+    bool addhn_wildcard = false;
+    for (u32 value_index = 0; value_index < 16 && !addhn_wildcard; value_index += 1)
+    {
+        BusterA64SemanticValue value = {0};
+        BusterA64SemanticValueAtom size_atom = {0};
+        BusterA64SemanticValueAtom q_atom = {0};
+        if (!buster_a64_semantic_transform_value(addhn_table_id, value_index, &value) || value.key_count != 2 ||
+            !buster_a64_semantic_value_atom(value.key_first, &size_atom) || !buster_a64_semantic_value_atom(value.key_first + 1, &q_atom)) continue;
+        addhn_wildcard = size_atom.kind == BUSTER_A64_SEMANTIC_VALUE_BITS && a64_vm_string_is(size_atom.text, S8("11")) &&
+                         q_atom.kind == BUSTER_A64_SEMANTIC_VALUE_BITS && a64_vm_string_is(q_atom.text, S8("x"));
+    }
+    BUSTER_TEST(arguments, addhn_wildcard);
+
+    /* Decimal result cells are not bitfield keys: the cmode table keeps its
+       shift amounts as integer 0, 8, 16, and 24 while the two-bit keys above
+       are exact patterns. */
+    u32 bic_id = UINT32_MAX;
+    u32 bic_table_id = UINT32_MAX;
+    BusterA64SemanticValue bic_entry = {0};
+    BusterA64SemanticValueAtom bic_result = {0};
+    BUSTER_TEST(arguments, buster_a64_semantic_find_form(S8("arm-a64@2026-06:BIC_asimdimm_L_sl"), 0, &bic_id) &&
+                           a64_vm_find_table_by_header(bic_id, S8("cmode[2:1]"), &bic_table_id) &&
+                           buster_a64_semantic_transform_value(bic_table_id, 1, &bic_entry) && bic_entry.result_count == 1 &&
+                           buster_a64_semantic_value_atom(bic_entry.result_first, &bic_result) &&
+                           bic_result.kind == BUSTER_A64_SEMANTIC_VALUE_INTEGER && bic_result.integer == 8);
 
     BUSTER_TEST(arguments, buster_a64_semantic_form(208, &form));
     fields = (BusterA64SemanticVMFields){.count = form.field_count};

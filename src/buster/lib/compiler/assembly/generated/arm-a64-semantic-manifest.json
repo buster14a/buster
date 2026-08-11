@@ -2,20 +2,20 @@
   "ambiguous_role_operands": 0,
   "artifacts": {
     "header": {
-      "bytes": 2482188,
+      "bytes": 2482466,
       "file": "arm-a64-semantic.generated.h",
-      "sha256": "f2439db25af2f538965fbc067d6d7d708afbdfe5945495eed553a9b9865e2f3d",
-      "string_pool_bytes": 235630
+      "sha256": "eca5b5313223d9b81a603fc877c919895edf666c2b759da7e15644b219ccb732",
+      "string_pool_bytes": 235804
     },
     "jsonl": {
-      "bytes": 6988584,
+      "bytes": 6986663,
       "file": "arm-a64-semantic.generated.jsonl",
-      "sha256": "1f8ad9753e8bf03834c86bc744f4f4d8460b283fdb1056c00fcbdda71c0d0dc5"
+      "sha256": "e2729fde8375d0f9035c272000702394a46c05134e2095dcee4a97ad274fb26e"
     },
     "report": {
-      "bytes": 5108,
+      "bytes": 5531,
       "file": "arm-a64-semantic-report.json",
-      "sha256": "240e13d6ccebcac914385203b6f9a814ae7214da36459e105035926d4fc28253"
+      "sha256": "64e8063d21020206424162ca08cc10741e14fd8238b8dffa3f76ddc580426bcd"
     }
   },
   "canonical": {
@@ -74,7 +74,8 @@
     "no_row_claims_executable_semantics": true,
     "numeric_relation_source_projection_identity": true,
     "owner_partition": true,
-    "residual_overlay_count_honest": true
+    "residual_overlay_count_honest": true,
+    "table_key_classification_partition": true
   },
   "largest_strings": [
     {
@@ -157,7 +158,19 @@
     "tree_sha256": "0ee17fd2fe7ed165adda377d90f8f284d009e14d2300577f231c87ca6a45916d"
   },
   "status": "binding_complete",
-  "string_pool_bytes": 235630,
+  "string_pool_bytes": 235804,
+  "table_key_classification": {
+    "bitfield_numeric_10_11_cells": 2014,
+    "inferred_width_columns": 0,
+    "key_bitfield_cells": 12563,
+    "key_cells": 12563,
+    "key_fallback_cells": 0,
+    "key_inferred_width_cells": 0,
+    "key_missing_class_cells": 0,
+    "key_non_bitfield_cells": 0,
+    "non_bitfield_numeric_10_11_cells": 0,
+    "numeric_10_11_cells": 2014
+  },
   "transform_kinds": {
     "concat": 898,
     "integer_decode": 297,
