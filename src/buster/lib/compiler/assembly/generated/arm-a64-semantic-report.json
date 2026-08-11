@@ -1,0 +1,174 @@
+{
+  "alias_binding_complete_rows": 172,
+  "alias_executable_semantic_rows": 0,
+  "alias_rows": 172,
+  "ambiguous_role_operands": 0,
+  "binding_complete_rows": 1695,
+  "canonical_binding_complete_rows": 1523,
+  "canonical_executable_semantic_rows": 0,
+  "canonical_owner_counts": {
+    "complex_simd_fp": 348,
+    "direct_gpr": 80,
+    "direct_simd": 390,
+    "fixed32": 32,
+    "general_nonmemory": 24,
+    "memory": 559,
+    "scalar_integer": 72,
+    "system": 18
+  },
+  "canonical_rows": 1523,
+  "canonical_sha256": "8485c5c61835d5394d325757ab2964890e8bdfea304c6faa8fd4c23e4c7aabec",
+  "cross_lenses": {
+    "atomic-memory": {
+      "memory": 225,
+      "system_barriers": 4,
+      "total": 229
+    },
+    "control-flow": {
+      "complex_simd_fp": 3,
+      "general": 24,
+      "total": 27
+    }
+  },
+  "executable_semantic_rows": 0,
+  "executable_semantics_status": "not-emitted",
+  "explicit_overlay_rows": 0,
+  "invariants": {
+    "all_canonical_binding_complete": true,
+    "all_source_links_accounted": true,
+    "canonical_plus_alias": true,
+    "classification_is_not_authoritative": true,
+    "memory_partition": true,
+    "no_row_claims_executable_semantics": true,
+    "owner_partition": true,
+    "undefined_udf_only": true
+  },
+  "largest_strings": [
+    {
+      "bytes": 74,
+      "value": "TBL <Vd>.<Ta>, { <Vn>.16B, <Vn+1>.16B, <Vn+2>.16B, <Vn+3>.16B }, <Vm>.<Ta>"
+    },
+    {
+      "bytes": 74,
+      "value": "TBX <Vd>.<Ta>, { <Vn>.16B, <Vn+1>.16B, <Vn+2>.16B, <Vn+3>.16B }, <Vm>.<Ta>"
+    },
+    {
+      "bytes": 69,
+      "value": "PRFM (<prfop>|#<imm5>), [<Xn|SP>, (<Wm>|<Xm>){, <extend> {<amount>}}]"
+    },
+    {
+      "bytes": 68,
+      "value": "LD4R { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>"
+    },
+    {
+      "bytes": 67,
+      "value": "LD1 { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>"
+    },
+    {
+      "bytes": 67,
+      "value": "LD4 { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>"
+    },
+    {
+      "bytes": 67,
+      "value": "LD4 { <Vt>.B, <Vt2>.B, <Vt3>.B, <Vt4>.B }[<index>], [<Xn|SP>], <Xm>"
+    },
+    {
+      "bytes": 67,
+      "value": "LD4 { <Vt>.D, <Vt2>.D, <Vt3>.D, <Vt4>.D }[<index>], [<Xn|SP>], <Xm>"
+    },
+    {
+      "bytes": 67,
+      "value": "LD4 { <Vt>.H, <Vt2>.H, <Vt3>.H, <Vt4>.H }[<index>], [<Xn|SP>], <Xm>"
+    },
+    {
+      "bytes": 67,
+      "value": "LD4 { <Vt>.S, <Vt2>.S, <Vt3>.S, <Vt4>.S }[<index>], [<Xn|SP>], <Xm>"
+    }
+  ],
+  "memory_modes": {
+    "AdvSIMD-list/base": 50,
+    "AdvSIMD-list/post": 100,
+    "FP/imm": 32,
+    "FP/post": 16,
+    "FP/pre": 16,
+    "FP/reg": 12,
+    "general/base": 144,
+    "general/imm": 133,
+    "general/post": 18,
+    "general/pre": 20,
+    "general/reg": 18
+  },
+  "no_anchor_alias_rows": 2,
+  "no_anchor_canonical_rows": 32,
+  "no_anchor_rows": 34,
+  "operand_classification_status": "presentation-only",
+  "owner_counts": {
+    "alias": 172,
+    "complex_simd_fp": 348,
+    "direct_gpr": 80,
+    "direct_simd": 390,
+    "fixed32": 32,
+    "general_nonmemory": 24,
+    "memory": 559,
+    "scalar_integer": 72,
+    "system": 18
+  },
+  "parsed_vm_programs": 86,
+  "proven_overlay_ids": [
+    "arm-a64@2026-06:FMAXNMV_asimdall_only_H",
+    "arm-a64@2026-06:FMAXV_asimdall_only_H",
+    "arm-a64@2026-06:FMINNMV_asimdall_only_H",
+    "arm-a64@2026-06:FMINV_asimdall_only_H"
+  ],
+  "proven_overlay_rows": 4,
+  "residual_overlay_rows": 0,
+  "rows": 1695,
+  "schema_version": 1,
+  "semantic_kinds": {
+    "barrier_option": 7,
+    "condition": 36,
+    "extend": 36,
+    "fixed_constant": 55,
+    "fp_immediate": 81,
+    "gpr_register": 2041,
+    "gpr_width_selector": 3,
+    "integer_immediate": 566,
+    "label_fixup": 18,
+    "memory_base": 623,
+    "memory_offset": 185,
+    "nzcv_flags": 15,
+    "other": 8,
+    "prefetch_operation": 8,
+    "rotate": 4,
+    "shift": 220,
+    "simd_arrangement": 1225,
+    "simd_lane": 166,
+    "simd_list": 302,
+    "simd_prefix_selector": 4,
+    "simd_register": 2355,
+    "simd_width_selector": 190,
+    "system_operation": 34,
+    "system_register": 2
+  },
+  "source_tree_sha256": "0ee17fd2fe7ed165adda377d90f8f284d009e14d2300577f231c87ca6a45916d",
+  "status": "binding_complete",
+  "status_composition": {
+    "canonical_defined": 1522,
+    "canonical_denominator": 1523,
+    "canonical_undefined": 1,
+    "canonical_undefined_ids": [
+      "arm-a64@2026-06:UDF_only_perm_undef"
+    ]
+  },
+  "string_pool_bytes": 234945,
+  "transform_kinds": {
+    "concat": 898,
+    "integer_decode": 11,
+    "shared_decode": 4,
+    "slice": 10,
+    "text_transform": 71,
+    "value_table": 1528
+  },
+  "unknown_role_operands": 6268,
+  "unsupported_or_gap_ids": []
+}

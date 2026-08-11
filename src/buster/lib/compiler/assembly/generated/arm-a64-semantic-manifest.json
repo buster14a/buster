@@ -1,0 +1,164 @@
+{
+  "ambiguous_role_operands": 0,
+  "artifacts": {
+    "header": {
+      "bytes": 1418551,
+      "file": "arm-a64-semantic.generated.h",
+      "sha256": "b3bf20ba318a63ecb0831d0889f166f5ac41e6d57a72b11e57dfe11f8586a534",
+      "string_pool_bytes": 234945
+    },
+    "jsonl": {
+      "bytes": 6911464,
+      "file": "arm-a64-semantic.generated.jsonl",
+      "sha256": "ca4947359ffa53c963a5976a3df96a5ac5804c3c036c41ede92126be464f1853"
+    },
+    "report": {
+      "bytes": 4654,
+      "file": "arm-a64-semantic-report.json",
+      "sha256": "a333c3224cb65dac4f5ea770c987b2489d7c9d496fbe3bce47273b169fe7f94b"
+    }
+  },
+  "canonical": {
+    "alias_rows": 172,
+    "canonical_rows": 1523,
+    "rows": 1695,
+    "sha256": "8485c5c61835d5394d325757ab2964890e8bdfea304c6faa8fd4c23e4c7aabec",
+    "status_composition": {
+      "defined": 1522,
+      "undefined": 1,
+      "undefined_ids": [
+        "arm-a64@2026-06:UDF_only_perm_undef"
+      ]
+    }
+  },
+  "canonical_owner_counts": {
+    "complex_simd_fp": 348,
+    "direct_gpr": 80,
+    "direct_simd": 390,
+    "fixed32": 32,
+    "general_nonmemory": 24,
+    "memory": 559,
+    "scalar_integer": 72,
+    "system": 18
+  },
+  "coverage": {
+    "alias_binding_complete_rows": 172,
+    "alias_executable_semantic_rows": 0,
+    "binding_complete_rows": 1695,
+    "canonical_binding_complete_rows": 1523,
+    "canonical_executable_semantic_rows": 0,
+    "executable_semantic_rows": 0,
+    "no_anchor_rows": 34,
+    "proven_overlay_rows": 4,
+    "unsupported_or_gap_rows": 0
+  },
+  "cross_lenses": {
+    "atomic-memory": {
+      "memory": 225,
+      "system_barriers": 4,
+      "total": 229
+    },
+    "control-flow": {
+      "complex_simd_fp": 3,
+      "general": 24,
+      "total": 27
+    }
+  },
+  "executable_semantics_status": "not-emitted",
+  "invariants": {
+    "all_canonical_binding_complete": true,
+    "all_rows_accounted": true,
+    "canonical_plus_alias": true,
+    "classification_is_not_authoritative": true,
+    "memory_partition": true,
+    "no_row_claims_executable_semantics": true,
+    "owner_partition": true
+  },
+  "largest_strings": [
+    {
+      "bytes": 74,
+      "value": "TBL <Vd>.<Ta>, { <Vn>.16B, <Vn+1>.16B, <Vn+2>.16B, <Vn+3>.16B }, <Vm>.<Ta>"
+    },
+    {
+      "bytes": 74,
+      "value": "TBX <Vd>.<Ta>, { <Vn>.16B, <Vn+1>.16B, <Vn+2>.16B, <Vn+3>.16B }, <Vm>.<Ta>"
+    },
+    {
+      "bytes": 69,
+      "value": "PRFM (<prfop>|#<imm5>), [<Xn|SP>, (<Wm>|<Xm>){, <extend> {<amount>}}]"
+    },
+    {
+      "bytes": 68,
+      "value": "LD4R { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>"
+    },
+    {
+      "bytes": 67,
+      "value": "LD1 { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>"
+    },
+    {
+      "bytes": 67,
+      "value": "LD4 { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>"
+    },
+    {
+      "bytes": 67,
+      "value": "LD4 { <Vt>.B, <Vt2>.B, <Vt3>.B, <Vt4>.B }[<index>], [<Xn|SP>], <Xm>"
+    },
+    {
+      "bytes": 67,
+      "value": "LD4 { <Vt>.D, <Vt2>.D, <Vt3>.D, <Vt4>.D }[<index>], [<Xn|SP>], <Xm>"
+    },
+    {
+      "bytes": 67,
+      "value": "LD4 { <Vt>.H, <Vt2>.H, <Vt3>.H, <Vt4>.H }[<index>], [<Xn|SP>], <Xm>"
+    },
+    {
+      "bytes": 67,
+      "value": "LD4 { <Vt>.S, <Vt2>.S, <Vt3>.S, <Vt4>.S }[<index>], [<Xn|SP>], <Xm>"
+    }
+  ],
+  "memory_modes": {
+    "AdvSIMD-list/base": 50,
+    "AdvSIMD-list/post": 100,
+    "FP/imm": 32,
+    "FP/post": 16,
+    "FP/pre": 16,
+    "FP/reg": 12,
+    "general/base": 144,
+    "general/imm": 133,
+    "general/post": 18,
+    "general/pre": 20,
+    "general/reg": 18
+  },
+  "operand_classification_status": "presentation-only",
+  "owner_counts": {
+    "alias": 172,
+    "complex_simd_fp": 348,
+    "direct_gpr": 80,
+    "direct_simd": 390,
+    "fixed32": 32,
+    "general_nonmemory": 24,
+    "memory": 559,
+    "scalar_integer": 72,
+    "system": 18
+  },
+  "parsed_vm_programs": 86,
+  "residual_overlay_rows": 0,
+  "schema_version": 1,
+  "source": {
+    "directory": "../sources/arm-a64-2026-06",
+    "raw_source_policy": "raw Arm XML is not vendored; obtain the pinned release from Arm and verify this tree SHA-256 before regeneration",
+    "release": "2026-06",
+    "tree_sha256": "0ee17fd2fe7ed165adda377d90f8f284d009e14d2300577f231c87ca6a45916d"
+  },
+  "status": "binding_complete",
+  "string_pool_bytes": 234945,
+  "transform_kinds": {
+    "concat": 898,
+    "integer_decode": 11,
+    "shared_decode": 4,
+    "slice": 10,
+    "text_transform": 71,
+    "value_table": 1528
+  },
+  "unknown_role_operands": 6268
+}
