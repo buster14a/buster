@@ -741,6 +741,7 @@ struct BusterX86MetadataPatternSemantics
     u8 forbid_mandatory_prefix;
     u8 not16;
     u8 no_rex2;
+    u8 no_rexr_prefix;
     u8 no_vector_source;
     u8 apx_fixed_width_no_w_isa;
     u8 no_scc;
@@ -1739,6 +1740,14 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             else
                 pattern.rex_b_control = forbid ? BUSTER_X86_METADATA_REX_CONTROL_FORBID : BUSTER_X86_METADATA_REX_CONTROL_REQUIRE;
         }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norexr_prefix")))
+        {
+            // XED's norexr_prefix atom forbids the VEX/EVEX R extension bit.
+            // Keep it as a typed prefix constraint; unlike norexr_r4 this is
+            // the low R field and never changes the prefix family.
+            pattern.has_prefix_control = 1;
+            pattern.no_rexr_prefix = 1;
+        }
         else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("EVEXR4")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("norexr")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("SCC")) ||
@@ -2192,6 +2201,9 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
         return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
     if (pattern.has_evex_r4 && form.prefix_kind != BUSTER_X86_METADATA_PREFIX_EVEX)
         return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
+    if (pattern.no_rexr_prefix && form.prefix_kind != BUSTER_X86_METADATA_PREFIX_VEX &&
+        form.prefix_kind != BUSTER_X86_METADATA_PREFIX_XOP && form.prefix_kind != BUSTER_X86_METADATA_PREFIX_EVEX)
+        return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
     if (pattern.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 && pattern.map != BUSTER_X86_METADATA_MAP_LEGACY &&
         pattern.map != BUSTER_X86_METADATA_MAP_0F)
         return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
@@ -2206,6 +2218,7 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
                                  pattern.relative_count || pattern.has_nd || pattern.has_nf || pattern.has_bcrc || pattern.has_ubit ||
                                  pattern.no_vector_source || pattern.no_scc || pattern.forbid_mandatory_prefix ||
                                  pattern.lock_control || pattern.rep_control || pattern.rep_not_f3 || pattern.no_rex2 ||
+                                 pattern.no_rexr_prefix ||
                                  pattern.has_modep5 || pattern.has_rep_selector || pattern.has_segment_override ||
                                  pattern.has_branch_hint_control ||
                                  pattern.has_remove_segment || pattern.rex_b_control || pattern.rex_b4_control ||
@@ -2229,14 +2242,22 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
                                                      BUSTER_X86_METADATA_MODE_64 | BUSTER_X86_METADATA_MODE_NOT64));
         if (!address_supported) return BUSTER_X86_METADATA_BLOCKER_ADDRESSING_FIELDS;
     }
-    if (pattern.has_bcrc || pattern.has_ubit || pattern.has_rounding_control || pattern.mask_control || pattern.zeroing_control)
+    // ACE-1's VEX BSRINIT row carries XED's ZEROING=0 selector even though
+    // VEX has no zeroing decorator.  The typed no_rexr_prefix contract and
+    // the zero-valued selector together express the fixed unmasked form; no
+    // decorator byte or caller attribute is accepted.  Other non-EVEX
+    // decorator controls remain schema blockers.
+    bool fixed_non_evex_no_zeroing = pattern.no_rexr_prefix && pattern.zeroing_control == 1 && !pattern.mask_control &&
+                                     !pattern.has_sae_control && !pattern.has_rounding_control;
+    if ((pattern.has_bcrc || pattern.has_ubit || pattern.has_rounding_control || pattern.mask_control || pattern.zeroing_control) &&
+        !fixed_non_evex_no_zeroing)
     {
         if (form.prefix_kind != BUSTER_X86_METADATA_PREFIX_EVEX)
             return pattern.has_rounding_control || pattern.mask_control || pattern.zeroing_control
                        ? BUSTER_X86_METADATA_BLOCKER_DECORATOR_FIELDS
                        : BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
     }
-    if (pattern.has_decorator_control && form.prefix_kind != BUSTER_X86_METADATA_PREFIX_EVEX)
+    if (pattern.has_decorator_control && form.prefix_kind != BUSTER_X86_METADATA_PREFIX_EVEX && !fixed_non_evex_no_zeroing)
         return BUSTER_X86_METADATA_BLOCKER_DECORATOR_FIELDS;
     if (pattern.has_sae_control && !(form.decorator_flags & BUSTER_X86_METADATA_DECORATOR_SAE))
         return BUSTER_X86_METADATA_BLOCKER_DECORATOR_FIELDS;
@@ -2543,7 +2564,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_contains(BusterX86Metadat
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_equal(BusterX86MetadataString atom, String8 literal);
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_explicit_fixed_implicit_operand(
-    BusterX86MetadataPhysicalQuery query, BusterX86MetadataOperand metadata, u32 actual_index)
+    BusterX86MetadataPhysicalQuery query, BusterX86MetadataForm form, BusterX86MetadataOperand metadata, u32 actual_index)
 {
     // Most implicit operands are architectural defaults and remain omitted
     // from the physical query. ACE-1's BSRMOV direction is the one typed
@@ -2551,6 +2572,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_explicit_fixed_implicit_operan
     // position. Other fixed implicit registers (for example an AL accumulator)
     // remain non-source-spellable when include_implicit is false.
     return !query.include_implicit && !metadata.visible &&
+           (!query.source_semantics || form.operand_count > 1) &&
            metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER &&
            metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_FIXED && actual_index < query.operand_count &&
            buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_BSR0")) &&
@@ -2607,7 +2629,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_bind_form(BusterX86MetadataPhy
         if (pattern_valid)
             metadata.field_source = buster_x86_metadata_emit_effective_field_source_pattern(metadata, pattern);
         if (!query.include_implicit && !metadata.visible &&
-            !buster_x86_metadata_emit_explicit_fixed_implicit_operand(query, metadata, actual_index))
+            !buster_x86_metadata_emit_explicit_fixed_implicit_operand(query, form, metadata, actual_index))
             continue;
         bool mask_default = buster_x86_metadata_emit_is_writemask_operand(metadata) &&
                             (actual_index >= query.operand_count ||
@@ -2713,7 +2735,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_count(BusterX86Me
         BusterX86MetadataOperand metadata = {0};
         if (!buster_x86_metadata_operand(form.id, operand_index, &metadata)) return false;
         if (!query.include_implicit && !metadata.visible &&
-            !buster_x86_metadata_emit_explicit_fixed_implicit_operand(query, metadata, actual_index))
+            !buster_x86_metadata_emit_explicit_fixed_implicit_operand(query, form, metadata, actual_index))
             continue;
         bool mask_default = buster_x86_metadata_emit_is_writemask_operand(metadata) &&
                             (actual_index >= query.operand_count ||
@@ -4377,6 +4399,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         if (has_r4 || has_x4 || has_b4 || vvvv_index >= 16 || pattern.vector_length == 512)
             return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     }
+    if (pattern.no_rexr_prefix && has_r)
+        return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY || form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX ||
         form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2)
     {
@@ -4947,6 +4971,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_eamode_alias_forms(BusterX86Metadat
         first_pattern.forbid_address_override != second_pattern.forbid_address_override ||
         first_pattern.forbid_operand_size_override != second_pattern.forbid_operand_size_override ||
         first_pattern.forbid_mandatory_prefix != second_pattern.forbid_mandatory_prefix || first_pattern.not16 != second_pattern.not16 ||
+        first_pattern.no_rexr_prefix != second_pattern.no_rexr_prefix ||
         first_pattern.no_rex2 != second_pattern.no_rex2 ||
         first_pattern.no_vector_source != second_pattern.no_vector_source ||
         first_pattern.apx_fixed_width_no_w_isa != second_pattern.apx_fixed_width_no_w_isa ||
@@ -6189,7 +6214,8 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_copy_form(BusterX86GeneratedForm so
     // a distinct architectural family even though its byte prefix is VEX or
     // EVEX.
     bool pattern_prefix_override = pattern.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 ||
-                                   pattern.prefix_kind == BUSTER_X86_METADATA_PREFIX_XOP || pattern.explicit_evex_selector;
+                                   pattern.prefix_kind == BUSTER_X86_METADATA_PREFIX_XOP || pattern.explicit_evex_selector ||
+                                   pattern.no_rexr_prefix;
     if (pattern.has_prefix_kind && pattern_prefix_override)
     {
         destination->prefix_kind = pattern.prefix_kind;

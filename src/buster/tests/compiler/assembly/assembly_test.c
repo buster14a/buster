@@ -34,6 +34,24 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, ace_att.diagnostic_count == 0 &&
                                assembly_test_bytes_equal(ace_att.bytes, expected_ace_bsr_movf,
                                                          BUSTER_ARRAY_LENGTH(expected_ace_bsr_movf)));
+    AssemblyEncodeResult ace_init_intel = assembly_encode(arguments->arena, S8("bsrinit\n"),
+                                                           (AssemblyEncodeOptions){.target = ace_target,
+                                                                                    .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult ace_init_att = assembly_encode(arguments->arena, S8("bsrinit\n"),
+                                                         (AssemblyEncodeOptions){.target = ace_target,
+                                                                                  .syntax = ASSEMBLY_SYNTAX_ATT});
+    AssemblyEncodeResult ace_init_explicit_bsr0 = assembly_encode(
+        arguments->arena, S8("bsrinit bsr0\n"),
+        (AssemblyEncodeOptions){.target = ace_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_ace_bsr_init[] = {0xc4, 0xe2, 0xfb, 0x49, 0xc0};
+    BUSTER_TEST(arguments, ace_init_intel.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(ace_init_intel.bytes, expected_ace_bsr_init,
+                                                         BUSTER_ARRAY_LENGTH(expected_ace_bsr_init)));
+    BUSTER_TEST(arguments, ace_init_att.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(ace_init_att.bytes, expected_ace_bsr_init,
+                                                         BUSTER_ARRAY_LENGTH(expected_ace_bsr_init)));
+    BUSTER_TEST(arguments, ace_init_explicit_bsr0.diagnostic_count == 1 &&
+                               ace_init_explicit_bsr0.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
 
     // Every ACE-1 BSRMOV form is exposed through both source dialects.  The
     // explicit BSR0 operand carries the direction for the H/L rows; memory
@@ -100,11 +118,16 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyEncodeResult ace_without_feature = assembly_encode(
         arguments->arena, S8("bsrmovf zmm0, zmm1\n"),
         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult ace_init_without_feature = assembly_encode(
+        arguments->arena, S8("bsrinit\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
     AssemblyEncodeResult ace_with_amx_tile = assembly_encode(
         arguments->arena, S8("bsrmovf zmm0, zmm1\n"),
         (AssemblyEncodeOptions){.target = amx_tile_only_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
     BUSTER_TEST(arguments, ace_without_feature.diagnostic_count == 1 &&
                                ace_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    BUSTER_TEST(arguments, ace_init_without_feature.diagnostic_count == 1 &&
+                               ace_init_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     BUSTER_TEST(arguments, ace_with_amx_tile.diagnostic_count == 1 &&
                                ace_with_amx_tile.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     AssemblyEncodeResult ace_bsr0_without_feature = assembly_encode(

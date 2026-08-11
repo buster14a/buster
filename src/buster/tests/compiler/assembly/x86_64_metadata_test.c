@@ -1098,11 +1098,131 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             ace_rows_consistent &= implicit_count == 1;
         }
         BusterX86MetadataForm bsrinit_form = {0};
+        u32 norexr_prefix_count = 0;
+        u32 norexr_prefix_form_id = UINT32_MAX;
+        u32 norexr_prefix_visible_reg_count = 0;
+        for (u32 form_id = 0; form_id < buster_x86_metadata_form_count(); form_id += 1)
+        {
+            BusterX86MetadataForm form = {0};
+            if (!buster_x86_metadata_form(form_id, &form)) continue;
+            if (!x86_64_metadata_test_pattern_has_token(form.pattern, S8("norexr_prefix"))) continue;
+            norexr_prefix_count += 1;
+            norexr_prefix_form_id = form_id;
+            for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+            {
+                BusterX86MetadataOperand operand = {0};
+                if (buster_x86_metadata_operand(form_id, operand_index, &operand) && operand.visible &&
+                    operand.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_REG)
+                    norexr_prefix_visible_reg_count += 1;
+            }
+        }
+        BusterX86MetadataForm previous_ace_form = {0};
+        BusterX86MetadataForm next_ace_form = {0};
+        // The ACE EVEX row immediately preceding BSRINIT and the first VEX
+        // row following it retain their existing families; only the typed
+        // norexr_prefix row is normalized from stale packed metadata.
+        bool neighboring_prefixes_unchanged = buster_x86_metadata_form(6, &previous_ace_form) &&
+                                               previous_ace_form.prefix_kind == BUSTER_X86_METADATA_PREFIX_EVEX &&
+                                               previous_ace_form.encoder_family == BUSTER_X86_METADATA_ENCODER_EVEX &&
+                                               buster_x86_metadata_form(31, &next_ace_form) &&
+                                               next_ace_form.prefix_kind == BUSTER_X86_METADATA_PREFIX_VEX &&
+                                               next_ace_form.encoder_family == BUSTER_X86_METADATA_ENCODER_VEX;
         BUSTER_TEST(arguments, ace_r4_token_count == BUSTER_ARRAY_LENGTH(ace_r4_form_ids) && ace_ids_are_complete &&
-                                   ace_rows_consistent && ace_visible_operand_count == 12 && ace_implicit_operand_count == 10 &&
-                                   buster_x86_metadata_form(30, &bsrinit_form) &&
+                                   ace_rows_consistent && ace_visible_operand_count == 12 && ace_implicit_operand_count == 10);
+        BUSTER_TEST(arguments, buster_x86_metadata_form(30, &bsrinit_form) && norexr_prefix_count == 1 &&
+                                   norexr_prefix_form_id == 30 && norexr_prefix_visible_reg_count == 0);
+        BUSTER_TEST(arguments, bsrinit_form.prefix_kind == BUSTER_X86_METADATA_PREFIX_VEX &&
+                                   bsrinit_form.encoder_family == BUSTER_X86_METADATA_ENCODER_VEX &&
                                    x86_64_metadata_test_pattern_has_token(bsrinit_form.pattern, S8("norexr_prefix")) &&
                                    !x86_64_metadata_test_pattern_has_token(bsrinit_form.pattern, S8("norexr_r4")));
+        BUSTER_TEST(arguments, neighboring_prefixes_unchanged);
+        String8 ace_feature[] = {S8("ACE_1")};
+
+        // BSRINIT has no visible operands: its exact BSR0 register is a
+        // fixed hidden field and the VEX bytes are independent of any source
+        // register.  Both the canonical ACE_1 feature spelling and the
+        // wildcard feature gate must select the same five-byte form.
+        u8 const bsrinit_bytes[] = {0xc4, 0xe2, 0xfb, 0x49, 0xc0};
+        String8 wildcard_feature[] = {S8("*")};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BSRINIT"), 30, 0, 0,
+                                                                (BusterX86MetadataPhysicalAttributes){0}, ace_feature,
+                                                                BUSTER_ARRAY_LENGTH(ace_feature), bsrinit_bytes,
+                                                                BUSTER_ARRAY_LENGTH(bsrinit_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BSRINIT"), 30, 0, 0,
+                                                                (BusterX86MetadataPhysicalAttributes){0}, wildcard_feature,
+                                                                BUSTER_ARRAY_LENGTH(wildcard_feature), bsrinit_bytes,
+                                                                BUSTER_ARRAY_LENGTH(bsrinit_bytes)));
+        BusterX86MetadataPhysicalOperand bsr0_operand =
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL, 0, 64);
+        BusterX86MetadataPhysicalOperand fake_special_operand =
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL, 1, 64);
+        BusterX86MetadataPhysicalOperand high_special_operand =
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL, 8, 64);
+        BusterX86MetadataPhysicalOperand high_gpr_operand =
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 8, 64);
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BSRINIT"), 30, &bsr0_operand, 1,
+                                                                (BusterX86MetadataPhysicalAttributes){0}, ace_feature,
+                                                                BUSTER_ARRAY_LENGTH(ace_feature), bsrinit_bytes,
+                                                                BUSTER_ARRAY_LENGTH(bsrinit_bytes)));
+        BusterX86MetadataPhysicalQuery source_bsr0_query = x86_64_metadata_test_physical_query(
+            S8("BSRINIT"), &bsr0_operand, 1, (BusterX86MetadataPhysicalAttributes){0}, ace_feature,
+            BUSTER_ARRAY_LENGTH(ace_feature));
+        source_bsr0_query.source_semantics = true;
+        BusterX86MetadataEmitResult source_bsr0_result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = source_bsr0_query,
+            .form_id = 30,
+            .output = (u8[32]){0},
+            .output_capacity = 32,
+            .relocations = (BusterX86MetadataRelocation[8]){0},
+            .relocation_capacity = 8,
+        });
+        BUSTER_TEST(arguments, source_bsr0_result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS);
+        BusterX86MetadataEmitResult fake_special_result = x86_64_metadata_test_emit_form(
+            S8("BSRINIT"), 30, &fake_special_operand, 1, (BusterX86MetadataPhysicalAttributes){0}, ace_feature,
+            BUSTER_ARRAY_LENGTH(ace_feature), (u8[32]){0}, 32, (BusterX86MetadataRelocation[8]){0}, 8);
+        BusterX86MetadataEmitResult high_special_result = x86_64_metadata_test_emit_form(
+            S8("BSRINIT"), 30, &high_special_operand, 1, (BusterX86MetadataPhysicalAttributes){0}, ace_feature,
+            BUSTER_ARRAY_LENGTH(ace_feature), (u8[32]){0}, 32, (BusterX86MetadataRelocation[8]){0}, 8);
+        BusterX86MetadataEmitResult high_gpr_result = x86_64_metadata_test_emit_form(
+            S8("BSRINIT"), 30, &high_gpr_operand, 1, (BusterX86MetadataPhysicalAttributes){0}, ace_feature,
+            BUSTER_ARRAY_LENGTH(ace_feature), (u8[32]){0}, 32, (BusterX86MetadataRelocation[8]){0}, 8);
+        BUSTER_TEST(arguments, fake_special_result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   high_special_result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   high_gpr_result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS);
+        BusterX86MetadataPhysicalQuery include_implicit_query = x86_64_metadata_test_physical_query(
+            S8("BSRINIT"), 0, 0, (BusterX86MetadataPhysicalAttributes){0}, ace_feature, BUSTER_ARRAY_LENGTH(ace_feature));
+        include_implicit_query.include_implicit = true;
+        BusterX86MetadataEmitResult include_implicit_missing = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = include_implicit_query,
+            .form_id = 30,
+            .output = (u8[32]){0},
+            .output_capacity = 32,
+            .relocations = (BusterX86MetadataRelocation[8]){0},
+            .relocation_capacity = 8,
+        });
+        include_implicit_query.operands = &bsr0_operand;
+        include_implicit_query.operand_count = 1;
+        BusterX86MetadataEmitResult include_implicit_explicit = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = include_implicit_query,
+            .form_id = 30,
+            .output = (u8[32]){0},
+            .output_capacity = 32,
+            .relocations = (BusterX86MetadataRelocation[8]){0},
+            .relocation_capacity = 8,
+        });
+        BUSTER_TEST(arguments, include_implicit_missing.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   include_implicit_explicit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS);
+        BusterX86MetadataPhysicalQuery missing_feature_query = x86_64_metadata_test_physical_query(
+            S8("BSRINIT"), 0, 0, (BusterX86MetadataPhysicalAttributes){0}, 0, 0);
+        BusterX86MetadataEmitResult missing_feature_result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = missing_feature_query,
+            .form_id = 30,
+            .output = (u8[32]){0},
+            .output_capacity = 32,
+            .relocations = (BusterX86MetadataRelocation[8]){0},
+            .relocation_capacity = 8,
+        });
+        BUSTER_TEST(arguments, missing_feature_result.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE);
 
         // ACE_1 is the target feature for these rows.  AMX_TILE is the XED
         // category, and ACE is the extension spelling; neither substitutes
@@ -1111,7 +1231,6 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         char8 gate_mnemonic[128] = {0};
         BusterX86MetadataPhysicalQuery gate_query = {0};
         bool gate_query_built = x86_64_metadata_test_build_gate_query(6, &gate_query, gate_operands, gate_mnemonic);
-        String8 ace_feature[] = {S8("ACE_1")};
         String8 ace_lower_feature[] = {S8("ace_1")};
         String8 ace_cli_feature[] = {S8("ace-1")};
         String8 amx_tile_feature[] = {S8("AMX_TILE")};
@@ -2602,21 +2721,22 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                       entry.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
                                       entry.blocker == BUSTER_X86_METADATA_BLOCKER_NONE && entry.encoder_capable;
         }
-        BUSTER_TEST(arguments, ace_r4_ledger_unlocked && ledger[30].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
-                                   ledger[30].blocker == BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS && !ledger[30].encoder_capable);
+        BUSTER_TEST(arguments, ace_r4_ledger_unlocked && ledger[30].disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
+                                   ledger[30].blocker == BUSTER_X86_METADATA_BLOCKER_NONE && ledger[30].encoder_capable);
         // The residual-control stack contributes sixteen rows, legacy
         // DF64/IMMUNE controls contribute seventeen, IBHF=1 contributes one
-        // boolean row, and the ACE R4 cohort contributes ten.  These are
-        // disjoint normalized rows on top of the eight fixed NOT16 rows.
-        BUSTER_TEST(arguments, audit.emitted_count == 10580 && audit.blocked_count == 433 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10580 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 433);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10688 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 56);
+        // boolean row, the ACE R4 cohort contributes ten, and BSRINIT adds
+        // one.  These are disjoint normalized rows on top of the fixed NOT16
+        // rows.
+        BUSTER_TEST(arguments, audit.emitted_count == 10581 && audit.blocked_count == 432 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10581 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 432);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10689 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 55);
 
-        u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 199, 5, 1643, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1759, 196, 5, 1643, 176, 6728, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {53, 3, 0, 0, 0, 0, 0, 0};
+        u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 198, 5, 1644, 176, 6728, 49, 24};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1759, 196, 5, 1644, 176, 6728, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {53, 2, 0, 0, 0, 0, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2626,7 +2746,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10580, 268, 108, 44, 0, 13, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10581, 268, 108, 44, 0, 12, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
