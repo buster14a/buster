@@ -1691,6 +1691,30 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !buster_x86_metadata_test_execution_mode_matches(
                                    not64_mode, BUSTER_X86_METADATA_COVERAGE_NORMALIZED, false,
                                    BUSTER_X86_METADATA_EXECUTION_MODE_64));
+        BUSTER_TEST(arguments, buster_x86_metadata_test_execution_mode_matches(
+                                   BUSTER_X86_METADATA_MODE_16, BUSTER_X86_METADATA_COVERAGE_NORMALIZED, false,
+                                   BUSTER_X86_METADATA_EXECUTION_MODE_16));
+        BUSTER_TEST(arguments, buster_x86_metadata_test_execution_mode_matches(
+                                   BUSTER_X86_METADATA_MODE_32, BUSTER_X86_METADATA_COVERAGE_NORMALIZED, false,
+                                   BUSTER_X86_METADATA_EXECUTION_MODE_32));
+        BUSTER_TEST(arguments, !buster_x86_metadata_test_execution_mode_matches(
+                                   BUSTER_X86_METADATA_MODE_16, BUSTER_X86_METADATA_COVERAGE_NORMALIZED, false,
+                                   BUSTER_X86_METADATA_EXECUTION_MODE_64));
+        BUSTER_TEST(arguments, !buster_x86_metadata_test_execution_mode_matches(
+                                   BUSTER_X86_METADATA_MODE_32, BUSTER_X86_METADATA_COVERAGE_NORMALIZED, false,
+                                   BUSTER_X86_METADATA_EXECUTION_MODE_64));
+        BUSTER_TEST(arguments, !buster_x86_metadata_test_execution_mode_matches(
+                                   BUSTER_X86_METADATA_MODE_16, BUSTER_X86_METADATA_COVERAGE_NORMALIZED, false,
+                                   BUSTER_X86_METADATA_EXECUTION_MODE_ANY));
+        BUSTER_TEST(arguments, !buster_x86_metadata_test_execution_mode_matches(
+                                   BUSTER_X86_METADATA_MODE_32, BUSTER_X86_METADATA_COVERAGE_NORMALIZED, false,
+                                   BUSTER_X86_METADATA_EXECUTION_MODE_ANY));
+        BUSTER_TEST(arguments, !buster_x86_metadata_test_execution_mode_matches(
+                                   BUSTER_X86_METADATA_MODE_16, BUSTER_X86_METADATA_COVERAGE_NORMALIZED, true,
+                                   BUSTER_X86_METADATA_EXECUTION_MODE_64));
+        BUSTER_TEST(arguments, buster_x86_metadata_test_execution_mode_matches(
+                                   BUSTER_X86_METADATA_MODE_16, BUSTER_X86_METADATA_COVERAGE_NORMALIZED, true,
+                                   BUSTER_X86_METADATA_EXECUTION_MODE_ANY));
         BUSTER_TEST(arguments, !buster_x86_metadata_test_execution_mode_matches(
                                    BUSTER_X86_METADATA_MODE_NOT64, BUSTER_X86_METADATA_COVERAGE_NOT64, false,
                                    BUSTER_X86_METADATA_EXECUTION_MODE_64));
@@ -2303,15 +2327,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        BUSTER_TEST(arguments, audit.emitted_count == 10504 && audit.blocked_count == 509 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10504 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 509);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10612 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 132);
+        BUSTER_TEST(arguments, audit.emitted_count == 10528 && audit.blocked_count == 485 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10528 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 485);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10636 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 108);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 199, 5, 1643, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1697, 192, 5, 1643, 176, 6718, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {115, 7, 0, 0, 0, 10, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1721, 192, 5, 1643, 176, 6718, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {91, 7, 0, 0, 0, 10, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2321,11 +2345,95 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10504, 268, 108, 99, 0, 34, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10528, 268, 108, 75, 0, 34, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
         BUSTER_TEST(arguments, blocker_counts_match);
+
+        // MPXMODE is a deliberately closed raw-pattern cohort.  Keep the
+        // snapshot-local IDs and signatures explicit so a regenerated table
+        // cannot silently widen this typed control to neighboring NOT64 or
+        // unrelated rows.  GNU as/LLVM MC reject MPX in the host toolchain;
+        // the byte fixtures below therefore use the XED pattern bytes as the
+        // external-oracle gap for this cohort.
+        static u32 const mpxmode_ids[] = {
+            8781, 8783, 8785, 8787, 8789, 8791, 8793, 8795, 8796, 8797, 8798, 8799, 8800, 8801, 8802,
+            8804, 8805, 8806, 8808, 8809, 8810, 8811, 8812, 8813,
+        };
+        static u32 const mpxmode_alias_ids[] = {8814, 8815, 8816, 8817};
+        static u32 const mpxmode_adjacent_ids[] = {8782, 8784, 8786, 8788, 8790, 8792, 8794, 8803, 8807};
+        bool mpxmode_rows_exact = true;
+        u32 mpxmode_one_count = 0;
+        u32 mpxmode_zero_count = 0;
+        u32 mpxmode_memory_count = 0;
+        u32 mpxmode_refining_count = 0;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(mpxmode_ids); index += 1)
+        {
+            u32 form_id = mpxmode_ids[index];
+            BusterX86MetadataForm form = {0};
+            bool retrieved = buster_x86_metadata_form(form_id, &form);
+            bool mpx_extension = retrieved && x86_64_metadata_test_string_equal(form.extension, S8("MPX"));
+            bool base_nop = retrieved && x86_64_metadata_test_string_equal(form.extension, S8("BASE")) &&
+                            x86_64_metadata_test_string_equal(form.isa_set, S8("PPRO")) &&
+                            x86_64_metadata_test_string_equal(form.iclass, S8("NOP"));
+            bool mode_one = retrieved && x86_64_metadata_test_pattern_has_token(form.pattern, S8("MPXMODE=1"));
+            bool mode_zero = retrieved && x86_64_metadata_test_pattern_has_token(form.pattern, S8("MPXMODE=0"));
+            bool mpx_mnemonic = retrieved &&
+                                (x86_64_metadata_test_string_equal(form.iclass, S8("BNDMK")) ||
+                                 x86_64_metadata_test_string_equal(form.iclass, S8("BNDCL")) ||
+                                 x86_64_metadata_test_string_equal(form.iclass, S8("BNDCU")) ||
+                                 x86_64_metadata_test_string_equal(form.iclass, S8("BNDCN")) ||
+                                 x86_64_metadata_test_string_equal(form.iclass, S8("BNDMOV")) ||
+                                 x86_64_metadata_test_string_equal(form.iclass, S8("BNDLDX")) ||
+                                 x86_64_metadata_test_string_equal(form.iclass, S8("BNDSTX")));
+            bool mode_value_valid = (mode_one ^ mode_zero) && (mode_one ? mpx_extension || base_nop : base_nop);
+            mpxmode_rows_exact &= retrieved && form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                  ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED && ledger[form_id].encoder_capable &&
+                                  ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_NONE && mode_value_valid &&
+                                  (base_nop || mpx_mnemonic);
+            mpxmode_one_count += mode_one;
+            mpxmode_zero_count += mode_zero;
+            mpxmode_memory_count += retrieved && x86_64_metadata_test_pattern_has_token(form.pattern, S8("MOD!=3"));
+            mpxmode_refining_count += retrieved &&
+                                      (x86_64_metadata_test_pattern_has_token(form.pattern, S8("f2_refining_prefix")) ||
+                                       x86_64_metadata_test_pattern_has_token(form.pattern, S8("f3_refining_prefix")) ||
+                                       x86_64_metadata_test_pattern_has_token(form.pattern, S8("REFINING66()")));
+        }
+        bool mpxmode_aliases_blocked = true;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(mpxmode_alias_ids); index += 1)
+        {
+            u32 form_id = mpxmode_alias_ids[index];
+            BusterX86MetadataForm form = {0};
+            bool retrieved = buster_x86_metadata_form(form_id, &form);
+            bool base_nop = retrieved && x86_64_metadata_test_string_equal(form.extension, S8("BASE")) &&
+                            x86_64_metadata_test_string_equal(form.isa_set, S8("PPRO")) &&
+                            x86_64_metadata_test_string_equal(form.iclass, S8("NOP"));
+            bool mode_zero = retrieved && x86_64_metadata_test_pattern_has_token(form.pattern, S8("MPXMODE=0"));
+            mpxmode_aliases_blocked &= retrieved && base_nop && mode_zero &&
+                                      form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                      ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
+                                      ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS &&
+                                      !ledger[form_id].encoder_capable;
+        }
+        bool mpxmode_adjacent_excluded = true;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(mpxmode_adjacent_ids); index += 1)
+        {
+            u32 form_id = mpxmode_adjacent_ids[index];
+            BusterX86MetadataForm form = {0};
+            mpxmode_adjacent_excluded &= buster_x86_metadata_form(form_id, &form) &&
+                                         form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64 &&
+                                         ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
+                                         ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_NOT64;
+        }
+        BusterX86MetadataForm after_mpxmode = {0};
+        bool no_adjacent_token = buster_x86_metadata_form(8818, &after_mpxmode) &&
+                                 !x86_64_metadata_test_pattern_has_token(after_mpxmode.pattern, S8("MPXMODE=1")) &&
+                                 !x86_64_metadata_test_pattern_has_token(after_mpxmode.pattern, S8("MPXMODE=0"));
+        BUSTER_TEST(arguments, mpxmode_rows_exact && mpxmode_one_count == 24 && mpxmode_zero_count == 0 &&
+                                   mpxmode_memory_count == 10 && mpxmode_refining_count == 16 && mpxmode_aliases_blocked &&
+                                   mpxmode_adjacent_excluded &&
+                                   no_adjacent_token);
 
         // The raw APXEVEX source carries ND=1 on 778 rows.  XED annotates
         // APX_NDD on 730 of them, while the 48 IMULZU/SET*ZU rows omit the
@@ -2622,10 +2730,10 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             }
         }
         BUSTER_TEST(arguments, ledger_rows_consistent);
-        BUSTER_TEST(arguments, emitted_bnd == 0 && emitted_control == 0 && emitted_debug == 0 && emitted_segment == 4);
+        BUSTER_TEST(arguments, emitted_bnd == 21 && emitted_control == 0 && emitted_debug == 0 && emitted_segment == 4);
         BUSTER_TEST(arguments, privileged_capable == 90);
         BUSTER_TEST(arguments, privileged_blocked == 0);
-        BUSTER_TEST(arguments, not64_capable == 150);
+        BUSTER_TEST(arguments, not64_capable == 154);
         BUSTER_TEST(arguments, privileged_total == 109 && privileged_valid64 == 90 && privileged_valid64_capable == 90 &&
                                    privileged_valid64_blocked == 0 && privileged_not64 == 19);
         BUSTER_TEST(arguments, apx_total == 2465);
@@ -3122,6 +3230,253 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                    x86_64_metadata_test_bytes_equal(wrmsr_output, wrmsr.byte_count, (u8 const[]){0x0f, 0x30}, 2));
         BUSTER_TEST(arguments, rdmsr.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && rdmsr.byte_count == 2 &&
                                    x86_64_metadata_test_bytes_equal(rdmsr_output, rdmsr.byte_count, (u8 const[]){0x0f, 0x32}, 2));
+    }
+
+    {
+        // Direct MPXMODE coverage uses the XED/manual byte oracle because
+        // both GNU as and LLVM MC reject MPX mnemonics on this host.  Each
+        // semantic class is exercised: AGEN memory, BND/GPR register forms,
+        // BNDMOV's 66/address-size controls, fixed MOD=0/1/2 BNDLDX/STX
+        // shapes, and all seven BASE NOP aliases.
+        String8 wildcard[1] = {S8("*")};
+        String8 no_features[1] = {S8("sse2")};
+        BusterX86MetadataPhysicalOperand bnd0 =
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_BND, 0, 128);
+        BusterX86MetadataPhysicalOperand bnd1 =
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_BND, 1, 128);
+        BusterX86MetadataPhysicalOperand gpr0 =
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64);
+        BusterX86MetadataPhysicalOperand gpr1 =
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 64);
+        BusterX86MetadataPhysicalOperand bnd_memory = x86_64_metadata_test_physical_mem_base(0, 64, 0);
+        BusterX86MetadataPhysicalOperand bnd_operands[] = {bnd0, bnd_memory};
+        BusterX86MetadataPhysicalOperand bnd_store_operands[] = {bnd_memory, bnd0};
+        BusterX86MetadataPhysicalOperand bnd_register_operands[] = {bnd0, gpr0};
+        BusterX86MetadataPhysicalOperand bnd_pair_operands[] = {bnd0, bnd1};
+        BusterX86MetadataPhysicalOperand nop_register_operands[] = {gpr0, gpr1};
+        BusterX86MetadataPhysicalOperand nop_memory_operands[] = {gpr0, bnd_memory};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BNDMK"), 8781, bnd_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1,
+                                                                 (u8 const[]){0xf3, 0x0f, 0x1b, 0x00}, 4));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BNDCL"), 8785, bnd_register_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1,
+                                                                 (u8 const[]){0xf3, 0x48, 0x0f, 0x1a, 0xc0}, 5));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BNDMOV"), 8795, bnd_pair_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1,
+                                                                 (u8 const[]){0x66, 0x0f, 0x1a, 0xc1}, 4));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BNDMOV"), 8798, bnd_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1,
+                                                                 (u8 const[]){0x66, 0x0f, 0x1a, 0x00}, 4));
+
+        BusterX86MetadataPhysicalOperand bnd_memory32 = x86_64_metadata_test_physical_mem_base(0, 32, 0);
+        bnd_memory32.memory.address_size = 32;
+        bnd_memory32.memory.base.width = 32;
+        BusterX86MetadataPhysicalOperand bnd_mode32_operands[] = {bnd0, bnd_memory32};
+        BusterX86MetadataPhysicalQuery bnd_mode32_query = x86_64_metadata_test_physical_query(
+            S8("BNDMOV"), bnd_mode32_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1);
+        bnd_mode32_query.address_size = 32;
+        u8 bnd_mode16_output[8] = {0};
+        u8 bnd_mode32_output[8] = {0};
+        bnd_mode32_query.execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_16;
+        BusterX86MetadataEmitResult bnd_mode16 = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = bnd_mode32_query, .form_id = 8796, .output = bnd_mode16_output,
+            .output_capacity = BUSTER_ARRAY_LENGTH(bnd_mode16_output)});
+        bnd_mode32_query.execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_32;
+        BusterX86MetadataEmitResult bnd_mode32 = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = bnd_mode32_query, .form_id = 8797, .output = bnd_mode32_output,
+            .output_capacity = BUSTER_ARRAY_LENGTH(bnd_mode32_output)});
+        BUSTER_TEST(arguments, bnd_mode16.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && bnd_mode16.byte_count == 5 &&
+                                   x86_64_metadata_test_bytes_equal(bnd_mode16_output, bnd_mode16.byte_count,
+                                                                     (u8 const[]){0x67, 0x66, 0x0f, 0x1a, 0x00}, 5));
+        BUSTER_TEST(arguments, bnd_mode32.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && bnd_mode32.byte_count == 5 &&
+                                   x86_64_metadata_test_bytes_equal(bnd_mode32_output, bnd_mode32.byte_count,
+                                                                     (u8 const[]){0x67, 0x66, 0x0f, 0x1a, 0x00}, 5));
+
+        // The EA32 BNDMOV rows are declared MODE16/MODE32, not aliases for
+        // the long-mode rows.  Their bytes can be inspected with the typed
+        // mode or with ANY+include_not64, while mode64, ANY without the
+        // policy opt-in, and include_not64 attached to mode64 all reject.
+        static u32 const bnd_mode_ids[] = {8796, 8797, 8800, 8801};
+        static u8 const bnd_mode_values[] = {
+            BUSTER_X86_METADATA_EXECUTION_MODE_16, BUSTER_X86_METADATA_EXECUTION_MODE_32,
+            BUSTER_X86_METADATA_EXECUTION_MODE_16, BUSTER_X86_METADATA_EXECUTION_MODE_32,
+        };
+        bool bnd_mode_contract = true;
+        for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(bnd_mode_ids); mode_index += 1)
+        {
+            bool load = bnd_mode_ids[mode_index] < 8800;
+            BusterX86MetadataPhysicalOperand mode_operands[2] = {0};
+            mode_operands[0] = load ? bnd0 : bnd_memory32;
+            mode_operands[1] = load ? bnd_memory32 : bnd0;
+            BusterX86MetadataPhysicalQuery mode_query = x86_64_metadata_test_physical_query(
+                S8("BNDMOV"), mode_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1);
+            mode_query.address_size = 32;
+            mode_query.execution_mode = bnd_mode_values[mode_index];
+            u8 declared_output[8] = {0};
+            BusterX86MetadataEmitResult declared = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = mode_query, .form_id = bnd_mode_ids[mode_index], .output = declared_output,
+                .output_capacity = BUSTER_ARRAY_LENGTH(declared_output)});
+            u8 expected_opcode = load ? 0x1a : 0x1b;
+            bnd_mode_contract &= declared.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && declared.byte_count == 5 &&
+                                 x86_64_metadata_test_bytes_equal(
+                                     declared_output, declared.byte_count, (u8 const[]){0x67, 0x66, 0x0f, expected_opcode, 0x00}, 5);
+
+            mode_query.execution_mode = bnd_mode_values[mode_index] == BUSTER_X86_METADATA_EXECUTION_MODE_16
+                                            ? BUSTER_X86_METADATA_EXECUTION_MODE_32
+                                            : BUSTER_X86_METADATA_EXECUTION_MODE_16;
+            BusterX86MetadataEmitResult wrong_mode = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = mode_query, .form_id = bnd_mode_ids[mode_index], .output = declared_output,
+                .output_capacity = BUSTER_ARRAY_LENGTH(declared_output)});
+            bnd_mode_contract &= wrong_mode.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
+
+            mode_query.execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64;
+            mode_query.include_not64 = false;
+            BusterX86MetadataEmitResult mode64 = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = mode_query, .form_id = bnd_mode_ids[mode_index], .output = declared_output,
+                .output_capacity = BUSTER_ARRAY_LENGTH(declared_output)});
+            mode_query.include_not64 = true;
+            BusterX86MetadataEmitResult mode64_with_opt_in = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = mode_query, .form_id = bnd_mode_ids[mode_index], .output = declared_output,
+                .output_capacity = BUSTER_ARRAY_LENGTH(declared_output)});
+            bnd_mode_contract &= mode64.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                                 mode64_with_opt_in.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
+
+            mode_query.execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_ANY;
+            mode_query.include_not64 = false;
+            BusterX86MetadataEmitResult any_without_opt_in = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = mode_query, .form_id = bnd_mode_ids[mode_index], .output = declared_output,
+                .output_capacity = BUSTER_ARRAY_LENGTH(declared_output)});
+            mode_query.include_not64 = true;
+            u8 inspected_output[8] = {0};
+            BusterX86MetadataEmitResult any_with_opt_in = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = mode_query, .form_id = bnd_mode_ids[mode_index], .output = inspected_output,
+                .output_capacity = BUSTER_ARRAY_LENGTH(inspected_output)});
+            bnd_mode_contract &= any_without_opt_in.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                                 any_with_opt_in.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && any_with_opt_in.byte_count == 5 &&
+                                 x86_64_metadata_test_bytes_equal(
+                                     inspected_output, any_with_opt_in.byte_count, (u8 const[]){0x67, 0x66, 0x0f, expected_opcode, 0x00}, 5);
+        }
+        BUSTER_TEST(arguments, bnd_mode_contract);
+
+        BusterX86MetadataPhysicalQuery mode64_load_query = x86_64_metadata_test_physical_query(
+            S8("BNDMOV"), bnd_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1);
+        BusterX86MetadataPhysicalQuery mode64_store_query = x86_64_metadata_test_physical_query(
+            S8("BNDMOV"), bnd_store_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1);
+        BusterX86MetadataSelectResult mode64_load_selection = buster_x86_metadata_select_form(mode64_load_query);
+        BusterX86MetadataSelectResult mode64_store_selection = buster_x86_metadata_select_form(mode64_store_query);
+        BUSTER_TEST(arguments, mode64_load_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   mode64_load_selection.form_id == 8798 && mode64_store_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   mode64_store_selection.form_id == 8802);
+        BusterX86MetadataPhysicalQuery mode32_load_query = x86_64_metadata_test_physical_query(
+            S8("BNDMOV"), bnd_mode32_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1);
+        mode32_load_query.address_size = 32;
+        BusterX86MetadataSelectResult mode32_as_64 = buster_x86_metadata_select_form(mode32_load_query);
+        mode32_load_query.include_not64 = true;
+        BusterX86MetadataSelectResult mode32_as_64_with_opt_in = buster_x86_metadata_select_form(mode32_load_query);
+        mode32_load_query.execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_ANY;
+        mode32_load_query.include_not64 = false;
+        BusterX86MetadataSelectResult mode32_as_any = buster_x86_metadata_select_form(mode32_load_query);
+        // Selection must not expose a non-64 row through the default mode64
+        // query (even when include_not64 is set) or through ANY without its
+        // inspection opt-in.  The direct form checks above pin the precise
+        // feature/mode diagnostic; selection may stop earlier with a more
+        // specific operand/addressing diagnostic as it filters candidates.
+        BUSTER_TEST(arguments, mode32_as_64.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   mode32_as_64_with_opt_in.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   mode32_as_any.status != BUSTER_X86_METADATA_ENCODE_SUCCESS);
+
+        BusterX86MetadataPhysicalOperand bnd_ldx_operands[] = {bnd0, bnd_memory};
+        BusterX86MetadataPhysicalQuery bnd_ldx_query = x86_64_metadata_test_physical_query(
+            S8("BNDLDX"), bnd_ldx_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1);
+        u8 bnd_ldx_mod0_output[16] = {0};
+        u8 bnd_ldx_mod1_output[16] = {0};
+        u8 bnd_ldx_mod2_output[16] = {0};
+        BusterX86MetadataEmitResult bnd_ldx_mod0 = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = bnd_ldx_query, .form_id = 8804, .output = bnd_ldx_mod0_output,
+            .output_capacity = BUSTER_ARRAY_LENGTH(bnd_ldx_mod0_output)});
+        bnd_ldx_operands[1].memory.has_displacement = true;
+        BusterX86MetadataEmitResult bnd_ldx_mod1 = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = bnd_ldx_query, .form_id = 8805, .output = bnd_ldx_mod1_output,
+            .output_capacity = BUSTER_ARRAY_LENGTH(bnd_ldx_mod1_output)});
+        bnd_ldx_operands[1].memory.displacement = 0x100;
+        BusterX86MetadataEmitResult bnd_ldx_mod2 = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = bnd_ldx_query, .form_id = 8806, .output = bnd_ldx_mod2_output,
+            .output_capacity = BUSTER_ARRAY_LENGTH(bnd_ldx_mod2_output)});
+        BUSTER_TEST(arguments, bnd_ldx_mod0.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && bnd_ldx_mod0.byte_count == 3 &&
+                                   x86_64_metadata_test_bytes_equal(bnd_ldx_mod0_output, bnd_ldx_mod0.byte_count,
+                                                                     (u8 const[]){0x0f, 0x1a, 0x00}, 3));
+        BUSTER_TEST(arguments, bnd_ldx_mod1.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && bnd_ldx_mod1.byte_count == 4 &&
+                                   x86_64_metadata_test_bytes_equal(bnd_ldx_mod1_output, bnd_ldx_mod1.byte_count,
+                                                                     (u8 const[]){0x0f, 0x1a, 0x40, 0x00}, 4));
+        BUSTER_TEST(arguments, bnd_ldx_mod2.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && bnd_ldx_mod2.byte_count == 7 &&
+                                   x86_64_metadata_test_bytes_equal(bnd_ldx_mod2_output, bnd_ldx_mod2.byte_count,
+                                                                     (u8 const[]){0x0f, 0x1a, 0x80, 0x00, 0x01, 0x00, 0x00}, 7));
+
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BNDSTX"), 8808, bnd_store_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1,
+                                                                 (u8 const[]){0x0f, 0x1b, 0x00}, 3));
+        bnd_ldx_operands[1].memory.displacement = 0;
+        BusterX86MetadataPhysicalOperand bnd_store_mod_operands[] = {bnd_memory, bnd0};
+        bnd_store_mod_operands[0].memory.has_displacement = true;
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BNDSTX"), 8809, bnd_store_mod_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1,
+                                                                 (u8 const[]){0x0f, 0x1b, 0x40, 0x00}, 4));
+        bnd_ldx_operands[1].memory.displacement = 0x100;
+        bnd_store_mod_operands[0].memory.displacement = 0x100;
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BNDSTX"), 8810, bnd_store_mod_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1,
+                                                                 (u8 const[]){0x0f, 0x1b, 0x80, 0x00, 0x01, 0x00, 0x00}, 7));
+
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("NOP"), 8811, nop_register_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1,
+                                                                 (u8 const[]){0x48, 0x0f, 0x1a, 0xc8}, 4));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("NOP"), 8812, nop_register_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1,
+                                                                 (u8 const[]){0x48, 0x0f, 0x1b, 0xc8}, 4));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("NOP"), 8813, nop_register_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1,
+                                                                 (u8 const[]){0xf3, 0x48, 0x0f, 0x1b, 0xc8}, 5));
+        BusterX86MetadataEmitResult mpxmode_zero_reg_load = x86_64_metadata_test_emit_form(
+            S8("NOP"), 8814, nop_register_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1,
+            (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult mpxmode_zero_reg_store = x86_64_metadata_test_emit_form(
+            S8("NOP"), 8815, nop_register_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1,
+            (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult mpxmode_zero_mem_load = x86_64_metadata_test_emit_form(
+            S8("NOP"), 8816, nop_memory_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1,
+            (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult mpxmode_zero_mem_store = x86_64_metadata_test_emit_form(
+            S8("NOP"), 8817, nop_memory_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1,
+            (u8[1]){0}, 0, 0, 0);
+        BUSTER_TEST(arguments, mpxmode_zero_reg_load.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA);
+        BUSTER_TEST(arguments, mpxmode_zero_reg_store.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA);
+        BUSTER_TEST(arguments, mpxmode_zero_mem_load.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA);
+        BUSTER_TEST(arguments, mpxmode_zero_mem_store.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA);
+
+        BusterX86MetadataPhysicalQuery missing_mpx_query = x86_64_metadata_test_physical_query(
+            S8("BNDMK"), bnd_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, no_features, 1);
+        BusterX86MetadataEmitResult missing_mpx = x86_64_metadata_test_emit_form(
+            S8("BNDMK"), 8781, bnd_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, no_features, 1,
+            (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataPhysicalOperand adjacent_memory = x86_64_metadata_test_physical_mem_base(0, 32, 0);
+        adjacent_memory.memory.address_size = 32;
+        adjacent_memory.memory.base.width = 32;
+        BusterX86MetadataPhysicalOperand adjacent_operands[] = {bnd0, adjacent_memory};
+        BusterX86MetadataPhysicalQuery adjacent_query = x86_64_metadata_test_physical_query(
+            S8("BNDMK"), adjacent_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1);
+        adjacent_query.address_size = 32;
+        BusterX86MetadataEmitResult adjacent = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = adjacent_query, .form_id = 8782, .output = (u8[8]){0}, .output_capacity = 8});
+        BusterX86MetadataPhysicalOperand mode_mismatch_memory = x86_64_metadata_test_physical_mem_base(0, 64, 0);
+        BusterX86MetadataPhysicalOperand mode_mismatch_operands[] = {bnd0, mode_mismatch_memory};
+        BusterX86MetadataEmitResult mode_mismatch = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = x86_64_metadata_test_physical_query(S8("BNDMOV"), mode_mismatch_operands, 2,
+                                                              (BusterX86MetadataPhysicalAttributes){0}, wildcard, 1),
+            .form_id = 8796, .output = (u8[8]){0}, .output_capacity = 8});
+        BUSTER_TEST(arguments, missing_mpx.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                                   missing_mpx.required_feature.length != 0 &&
+                                   missing_mpx_query.features.count == 1 && adjacent.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                                   mode_mismatch.status == BUSTER_X86_METADATA_ENCODE_ADDRESSING);
     }
 
     {

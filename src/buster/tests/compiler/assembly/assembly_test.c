@@ -5053,8 +5053,8 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         AssemblyEncodeResult metadata_bnd = assembly_encode(arguments->arena, S8("bndcl bnd0, rax\n"),
                                                              (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
         BUSTER_TEST(arguments, metadata_bnd.diagnostic_count == 1 && metadata_bnd.bytes.length == 0 &&
-                                   metadata_bnd.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
-                                   string_equal(metadata_bnd.diagnostics[0].message, S8("metadata instruction form is not encodable")));
+                                   metadata_bnd.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   string_equal(metadata_bnd.diagnostics[0].message, S8("instruction requires an enabled target feature")));
         AssemblyEncodeResult metadata_debug = assembly_encode(arguments->arena, S8("mov rax, dr0\n"),
                                                                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
         u8 expected_metadata_debug[] = {0x0f, 0x21, 0xc0};

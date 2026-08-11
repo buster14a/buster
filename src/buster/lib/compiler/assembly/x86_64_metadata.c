@@ -691,6 +691,12 @@ struct BusterX86MetadataPatternSemantics
     u8 modep5_value;
     u8 has_rep_selector;
     u8 rep_selector_value;
+    // MPXMODE is a source-pattern selector rather than an encoded prefix.
+    // Keep its value typed so only the two architectural spellings are
+    // admitted; the form check below ties each value to the narrow MPX/BASE
+    // rows that carry it instead of treating every future token as opaque.
+    u8 has_mpx_mode;
+    u8 mpx_mode_value;
     u8 has_segment_override;
     u8 segment_override_index;
     u8 immune66_loop64;
@@ -1695,6 +1701,21 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             pattern.has_segment_override = 1;
             pattern.segment_override_index = segment_index;
         }
+        else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("MPXMODE=")))
+        {
+            // MPXMODE selects between the MPX instruction rows and the BASE
+            // NOP aliases in this source snapshot.  It is not a byte-level
+            // prefix, so retain it as typed source semantics and validate the
+            // value/form pairing after the complete pattern has been parsed.
+            pattern.has_prefix_control = 1;
+            pattern.has_mpx_mode = 1;
+            if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("MPXMODE=0")))
+                pattern.mpx_mode_value = 0;
+            else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("MPXMODE=1")))
+                pattern.mpx_mode_value = 1;
+            else
+                buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
+        }
         else if ((buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("IMMUNE")) &&
                  !buster_x86_metadata_emit_token_equal(token_buffer, length, S8("IMMUNE66()"))) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("OVERRIDE")) ||
@@ -1702,7 +1723,6 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("FORCE")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("P4")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("IBHF")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("MPXMODE")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("ENCDELETE")))
         {
             pattern.has_prefix_control = 1;
@@ -1854,6 +1874,32 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_mode66_residual(BusterX86Metad
         return false;
     return true;
 }
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_mpx_mode_supported(BusterX86MetadataForm form,
+                                                                      BusterX86MetadataPatternSemantics pattern)
+{
+    if (!pattern.has_mpx_mode || pattern.mpx_mode_value > 1) return false;
+
+    // The normalized MPX cohort is deliberately closed over the seven
+    // architectural MPX mnemonics and the three BASE NOP rows that remain
+    // NOPs when MPX mode is enabled.  The BASE MPXMODE=0 rows are decode-
+    // policy aliases: on an MPX-enabled target their bytes can execute the
+    // architectural MPX operation, and a positive feature query cannot
+    // express MPX absence.  Keep those aliases blocked rather than exposing
+    // an unsound source-selectable NOP form.
+    bool mpx_instruction = buster_x86_metadata_string_input_equal(form.extension.offset, S8("MPX")) &&
+                           buster_x86_metadata_string_input_equal(form.isa_set.offset, S8("MPX")) &&
+                           (buster_x86_metadata_string_input_equal(form.iclass.offset, S8("BNDMK")) ||
+                            buster_x86_metadata_string_input_equal(form.iclass.offset, S8("BNDCL")) ||
+                            buster_x86_metadata_string_input_equal(form.iclass.offset, S8("BNDCU")) ||
+                            buster_x86_metadata_string_input_equal(form.iclass.offset, S8("BNDCN")) ||
+                            buster_x86_metadata_string_input_equal(form.iclass.offset, S8("BNDMOV")) ||
+                            buster_x86_metadata_string_input_equal(form.iclass.offset, S8("BNDLDX")) ||
+                            buster_x86_metadata_string_input_equal(form.iclass.offset, S8("BNDSTX")));
+    bool base_nop = buster_x86_metadata_string_input_equal(form.extension.offset, S8("BASE")) &&
+                    buster_x86_metadata_string_input_equal(form.isa_set.offset, S8("PPRO")) &&
+                    buster_x86_metadata_string_input_equal(form.iclass.offset, S8("NOP"));
+    return pattern.mpx_mode_value == 1 && (mpx_instruction || base_nop);
+}
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX86MetadataForm form,
                                                                           BusterX86MetadataPatternSemantics pattern)
@@ -1911,10 +1957,13 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
                                  pattern.has_modep5 || pattern.has_rep_selector || pattern.has_segment_override ||
                                  pattern.has_branch_hint_control ||
                                  pattern.immune66_loop64 || buster_x86_metadata_emit_canonical_df64(form, pattern) ||
+                                 pattern.has_mpx_mode ||
                                  (form.mode_flags & (BUSTER_X86_METADATA_MODE_16 | BUSTER_X86_METADATA_MODE_32 |
                                                      BUSTER_X86_METADATA_MODE_64 | BUSTER_X86_METADATA_MODE_NOT64));
         if (!prefix_supported) return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
     }
+    if (pattern.has_mpx_mode && !buster_x86_metadata_emit_mpx_mode_supported(form, pattern))
+        return BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
     if (pattern.has_address_control)
     {
         bool address_supported = pattern.required_address_size || pattern.forbid_address_override || pattern.lock_control ||
@@ -2177,10 +2226,12 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_operand_matches(BusterX86Metad
                                                                     BusterX86MetadataPatternSemantics pattern)
 {
     u8 actual_class = buster_x86_metadata_emit_operand_class(physical);
+    bool address_generator = metadata.kind == BUSTER_X86_METADATA_OPERAND_ADDRESS_GENERATOR && pattern.has_mpx_mode;
     if (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER &&
         physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
         return false;
-    if (metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY && physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+    if ((metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY || address_generator) &&
+        physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
         return false;
     if (metadata.kind == BUSTER_X86_METADATA_OPERAND_IMMEDIATE && physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE)
         return false;
@@ -2188,7 +2239,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_operand_matches(BusterX86Metad
         return false;
     if (metadata.kind == BUSTER_X86_METADATA_OPERAND_ABSOLUTE && physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE)
         return false;
-    if (metadata.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_NONE &&
+    if (!address_generator && metadata.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_NONE &&
         metadata.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_UNKNOWN &&
         metadata.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_ANY && metadata.physical_class != actual_class)
         return false;
@@ -2216,7 +2267,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_operand_matches(BusterX86Metad
     bool architectural_mask_register = physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
                                        physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK;
     if (architectural_mask_register && width && width != 64) return false;
-    if (!architectural_mask_register && !vector_register && !variable_encoded_width && width && metadata.physical_width_flags &&
+    if (!address_generator && !architectural_mask_register && !vector_register && !variable_encoded_width && width && metadata.physical_width_flags &&
         metadata.physical_width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN &&
         !(metadata.physical_width_flags & buster_x86_metadata_emit_width_flags(width)))
         return false;
@@ -4824,7 +4875,8 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_coverage_structural_blocker(BusterX86
             return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
         if (!operand.visible) continue;
         if (operand.kind == BUSTER_X86_METADATA_OPERAND_BASE || operand.kind == BUSTER_X86_METADATA_OPERAND_SEGMENT ||
-            operand.kind == BUSTER_X86_METADATA_OPERAND_ADDRESS_GENERATOR || operand.kind == BUSTER_X86_METADATA_OPERAND_PSEUDO)
+            (operand.kind == BUSTER_X86_METADATA_OPERAND_ADDRESS_GENERATOR && !pattern.has_mpx_mode) ||
+            operand.kind == BUSTER_X86_METADATA_OPERAND_PSEUDO)
             return BUSTER_X86_METADATA_BLOCKER_OPERAND_SEMANTICS;
         if (operand.kind == BUSTER_X86_METADATA_OPERAND_REGISTER && operand.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_UNKNOWN)
             return BUSTER_X86_METADATA_BLOCKER_OPERAND_SEMANTICS;
@@ -4946,7 +4998,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_canonical_query(BusterX86M
                 operands[operand_count].reg.index == 0)
                 operands[operand_count].reg.index = 1;
         }
-        else if (metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY)
+        else if (metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY ||
+                 (metadata.kind == BUSTER_X86_METADATA_OPERAND_ADDRESS_GENERATOR && pattern.has_mpx_mode))
         {
             canonical_has_memory = true;
             u16 width = buster_x86_metadata_coverage_width(metadata.physical_width_flags,
@@ -4962,6 +5015,19 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_canonical_query(BusterX86M
                 .has_displacement = (form.field_flags & BUSTER_X86_METADATA_FIELD_DISPLACEMENT) != 0,
                 .base = {.index = 0, .width = address_size, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
             };
+            // BNDLDX/BNDSTX carry three distinct fixed ModRM modes.  Their
+            // raw rows do not advertise a displacement field, but MOD=1/2
+            // still require a canonical displacement so the coverage audit
+            // exercises those exact byte shapes instead of always selecting
+            // MOD=0.  A zero byte is enough for MOD=1; 0x100 forces MOD=2.
+            if (pattern.has_mpx_mode &&
+                (buster_x86_metadata_string_input_equal(form.iclass.offset, S8("BNDLDX")) ||
+                 buster_x86_metadata_string_input_equal(form.iclass.offset, S8("BNDSTX"))) &&
+                (pattern.mod_kind == 1 || pattern.mod_kind == 2))
+            {
+                memory.has_displacement = true;
+                memory.displacement = pattern.mod_kind == 1 ? 0 : 0x100;
+            }
             bool prefetchit = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("PREFETCHIT0")) ||
                               buster_x86_metadata_string_input_equal(form.iclass.offset, S8("PREFETCHIT1"));
             if (prefetchit)
@@ -5069,7 +5135,12 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_canonical_query(BusterX86M
                                 form.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY &&
                                 buster_x86_metadata_string_input_equal(form.extension.offset, S8("BASE"));
     bool mode66_residual = buster_x86_metadata_emit_mode66_residual(form, pattern);
-    bool legacy_mode_cohort = legacy_repeat_cohort || mode66_residual;
+    bool mpx_mode_cohort = pattern.has_mpx_mode &&
+                           form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                           form.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY &&
+                           buster_x86_metadata_string_input_equal(form.extension.offset, S8("MPX")) &&
+                           buster_x86_metadata_string_input_equal(form.iclass.offset, S8("BNDMOV"));
+    bool legacy_mode_cohort = legacy_repeat_cohort || mode66_residual || mpx_mode_cohort;
     bool include_not64 = form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64 ||
                          (form.mode_flags & BUSTER_X86_METADATA_MODE_NOT64) != 0;
     u8 execution_mode = buster_x86_metadata_form_declared_execution_mode((BusterX86GeneratedForm){
