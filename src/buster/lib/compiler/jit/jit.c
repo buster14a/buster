@@ -247,12 +247,18 @@ BUSTER_GLOBAL_LOCAL bool jit_relocation_is_tls(ObjectRelocationKind kind)
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool jit_relocation_uses_function_thunk(ObjectRelocationKind kind)
+{
+    return kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26;
+}
+
 BUSTER_GLOBAL_LOCAL bool jit_relocation_is_supported(ObjectRelocationKind kind, CpuArch arch)
 {
     return kind == OBJECT_RELOCATION_ABSOLUTE64 ||
            (kind == OBJECT_RELOCATION_X86_64_PC32 && arch == CPU_ARCH_X86_64) ||
            ((kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26 ||
-             kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12) &&
+             kind == OBJECT_RELOCATION_AARCH64_PREL32 || kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ||
+             kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12) &&
             arch == CPU_ARCH_AARCH64);
 }
 
@@ -400,7 +406,8 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
         u64 target = 0;
         if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
-            if ((relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26) && relocation->addend)
+            if ((relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26) &&
+                relocation->addend)
             {
                 program->error = JIT_ERROR_UNSUPPORTED_RELOCATION;
                 program->failing_symbol = symbol->name;
@@ -421,7 +428,7 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
                 return false;
             }
             target = (u64)(uintptr_t)binding->address;
-            if (relocation->kind != OBJECT_RELOCATION_ABSOLUTE64)
+            if (jit_relocation_uses_function_thunk(relocation->kind) && symbol->kind == OBJECT_SYMBOL_FUNCTION)
             {
                 u64 thunk_index = thunk_indices[relocation->symbol];
                 if (thunk_index == UINT32_MAX)
@@ -496,6 +503,19 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
                 return false;
             }
             memcpy(patch, &patched, sizeof(patched));
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
+        {
+            s64 displacement = 0;
+            if (!jit_address_difference(target, (u64)(uintptr_t)patch, relocation->addend, &displacement) || displacement < INT32_MIN ||
+                displacement > INT32_MAX)
+            {
+                program->error = JIT_ERROR_CAPACITY;
+                program->failing_symbol = symbol->name;
+                return false;
+            }
+            s32 value = (s32)displacement;
+            memcpy(patch, &value, sizeof(value));
         }
         else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
         {
@@ -630,6 +650,13 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
             result.failing_symbol = symbol->name;
             return result;
         }
+        if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_DATA && relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 &&
+            !options.binding_count)
+        {
+            result.error = JIT_ERROR_EXTERNAL_DATA;
+            result.failing_symbol = symbol->name;
+            return result;
+        }
         if (!jit_relocation_is_supported(relocation->kind, object->target.cpu_arch))
         {
             result.error = JIT_ERROR_UNSUPPORTED_RELOCATION;
@@ -677,11 +704,7 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
         }
         ObjectSymbol const* symbol = object->symbols + relocation->symbol;
         bool call_import = symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_FUNCTION &&
-                           ((object->target.cpu_arch == CPU_ARCH_X86_64 && relocation->kind == OBJECT_RELOCATION_X86_64_PC32) ||
-                            (object->target.cpu_arch == CPU_ARCH_AARCH64 &&
-                             (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26 ||
-                              relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ||
-                              relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)));
+                           jit_relocation_uses_function_thunk(relocation->kind);
         if (call_import)
         {
             thunk_indices[relocation->symbol] = 0;

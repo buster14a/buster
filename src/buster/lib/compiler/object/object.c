@@ -189,6 +189,79 @@ BUSTER_GLOBAL_LOCAL bool object_mach_pageoff12_shift(u32 instruction, u32* shift
     return false;
 }
 
+// Checked target+addend arithmetic shared by the in-memory object linker.
+// Relocation addends are signed even when the resulting address is unsigned;
+// never rely on unsigned wraparound here because malformed objects must fail
+// before a patch is committed.
+BUSTER_GLOBAL_LOCAL bool object_address_addend(u64 address, s64 addend, u64* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    if (addend < 0)
+    {
+        u64 magnitude = (u64)(-(addend + 1)) + 1;
+        if (magnitude > address)
+        {
+            return false;
+        }
+        *result = address - magnitude;
+    }
+    else
+    {
+        u64 magnitude = (u64)addend;
+        if (magnitude > UINT64_MAX - address)
+        {
+            return false;
+        }
+        *result = address + magnitude;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_apply_aarch64_mach_page_relocation(ObjectRelocationKind kind, u8* patch, u64 place, u64 target, s64 addend)
+{
+    if (!patch || (place & 3))
+    {
+        return false;
+    }
+    u64 address = 0;
+    if (!object_address_addend(target, addend, &address))
+    {
+        return false;
+    }
+    u32 instruction = 0;
+    memcpy(&instruction, patch, sizeof(instruction));
+    if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
+    {
+        if (!object_mach_page21_instruction_valid(instruction))
+        {
+            return false;
+        }
+        u32 patched = 0;
+        if (!a64_adrp_encode(instruction & 31, place, address, &patched))
+        {
+            return false;
+        }
+        memcpy(patch, &patched, sizeof(patched));
+        return true;
+    }
+    if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+    {
+        u32 shift = 0;
+        if (!object_mach_pageoff12_shift(instruction, &shift) || ((address & 0xfff) & ((1u << shift) - 1)))
+        {
+            return false;
+        }
+        instruction &= ~(UINT32_C(0xfff) << 10);
+        instruction |= (u32)((address & 0xfff) >> shift) << 10;
+        memcpy(patch, &instruction, sizeof(instruction));
+        return true;
+    }
+    return false;
+}
+
 ObjectFormat object_format_for_target(Target target)
 {
     switch (target.os)
@@ -5010,7 +5083,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     !a64_signed_scaled_immediate_decode(source_symbol, 24, 0, &pending_addend_value) ||
                     !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE, &next_source_offset) ||
                     !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE + 4, &next_information) || next_source_offset != source_offset_u32 ||
-                    ((next_information >> 28) != 2 && (next_information >> 28) != 3 && (next_information >> 28) != 4))
+                    ((next_information >> 28) != 2 && (next_information >> 28) != 3 && (next_information >> 28) != 4 &&
+                     (next_information >> 28) != 8 && (next_information >> 28) != 9))
                 {
                     result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                     return result;
@@ -5020,7 +5094,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 continue;
             }
             if (pending_addend && (target.cpu_arch != CPU_ARCH_AARCH64 || source_offset_u32 != pending_addend_offset ||
-                                   (relocation_type != 2 && relocation_type != 3 && relocation_type != 4)))
+                                   (relocation_type != 2 && relocation_type != 3 && relocation_type != 4 && relocation_type != 8 && relocation_type != 9)))
             {
                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                 return result;
@@ -5167,6 +5241,32 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     if (pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
                         !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) ||
                         !object_mach_pageoff12_shift(stored, &shift))
+                    {
+                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                        return result;
+                    }
+                    addend = pending_addend ? pending_addend_value : 0;
+                    pending_addend = false;
+                }
+                if (relocation_type == 8 && length == 2)
+                {
+                    u32 stored = 0;
+                    if (!pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
+                        !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) || !object_mach_page21_instruction_valid(stored))
+                    {
+                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                        return result;
+                    }
+                    addend = pending_addend ? pending_addend_value : 0;
+                    pending_addend = false;
+                }
+                if (relocation_type == 9 && length == 2)
+                {
+                    u32 stored = 0;
+                    u32 shift = 0;
+                    if (pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
+                        !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) || !object_mach_pageoff12_shift(stored, &shift) || shift != 3 ||
+                        (stored & UINT32_C(0xffc00000)) != UINT32_C(0xf9400000))
                     {
                         result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                         return result;
@@ -9052,7 +9152,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
                 object_write_s64_at(&buffer, section_offsets[section] + source->offset, addend);
             }
             else if (addend && source->kind != OBJECT_RELOCATION_AARCH64_CALL26 && source->kind != OBJECT_RELOCATION_AARCH64_JUMP26 &&
-                     source->kind != OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && source->kind != OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+                     source->kind != OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && source->kind != OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 &&
+                     source->kind != OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 && source->kind != OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12)
             {
                 object_write_u32_at(&buffer, section_offsets[section] + source->offset, (u32)addend);
             }
@@ -9068,7 +9169,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
                 continue;
             }
             if ((source->kind == OBJECT_RELOCATION_AARCH64_CALL26 || source->kind == OBJECT_RELOCATION_AARCH64_JUMP26 ||
-                 source->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || source->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12) &&
+                 source->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || source->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 ||
+                 source->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 || source->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12) &&
                 addend)
             {
                 u32 encoded_addend = 0;
@@ -9304,14 +9406,25 @@ ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat forma
                 return result;
             }
         }
-        if (source->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || source->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+        if (source->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || source->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 ||
+            source->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 || source->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12)
         {
             u32 instruction = 0;
             u32 shift = 0;
             memcpy(&instruction, object->sections[source->section].data.pointer + source->offset, sizeof(instruction));
             if ((source->offset & 3) || object->sections[source->section].alignment < 4 ||
-                (source->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ? !object_mach_page21_instruction_valid(instruction)
-                                                                          : !object_mach_pageoff12_shift(instruction, &shift)))
+                ((source->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || source->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21)
+                     ? !object_mach_page21_instruction_valid(instruction)
+                     : !object_mach_pageoff12_shift(instruction, &shift)))
+            {
+                return result;
+            }
+            // A TLVP pageoff denotes the 8-byte descriptor load generated by
+            // Darwin's ABI.  Reject byte/half/word stores and unscaled ADDs
+            // rather than accepting a relocation whose architectural meaning
+            // would be ambiguous in an in-memory linker.
+            if (source->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 &&
+                ((instruction & UINT32_C(0xffc00000)) != UINT32_C(0xf9400000) || shift != 3))
             {
                 return result;
             }
@@ -9347,7 +9460,8 @@ BUSTER_GLOBAL_LOCAL bool object_address_difference(u64 target, u64 place, s64 ad
 ObjectExecutable object_link_executable(ObjectFile* object)
 {
     ObjectExecutable result = {0};
-    if (!object || object->error != OBJECT_ERROR_NONE || object->section_count <= OBJECT_SECTION_TEXT || object->section_count > OBJECT_SECTION_COUNT)
+    if (!object || object->error != OBJECT_ERROR_NONE || object->section_count <= OBJECT_SECTION_TEXT || object->section_count > OBJECT_SECTION_COUNT ||
+        !object->sections || (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations))
     {
         result.error = OBJECT_ERROR_INVALID_INPUT;
         return result;
@@ -9356,17 +9470,45 @@ ObjectExecutable object_link_executable(ObjectFile* object)
     u64 image_size = 0;
     for (u32 section = 0; section < object->section_count; section += 1)
     {
+        ObjectSection* source = object->sections + section;
+        if ((u32)source->kind >= (u32)OBJECT_SECTION_COUNT || (source->data.length && !source->data.pointer) ||
+            (object_section_kind_is_zero_fill(source->kind) && source->data.length) ||
+            (source->alignment && (source->alignment & (source->alignment - 1))))
+        {
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+            return result;
+        }
         u64 alignment = object->sections[section].alignment;
         if (!alignment)
         {
             alignment = 1;
         }
+        if (image_size > UINT64_MAX - (alignment - 1))
+        {
+            result.error = OBJECT_ERROR_CAPACITY;
+            return result;
+        }
         image_size = (image_size + alignment - 1) & ~(alignment - 1);
         section_offsets[section] = image_size;
-        image_size += BUSTER_MAX(object->sections[section].data.length, object->sections[section].virtual_size);
+        u64 section_size = BUSTER_MAX(source->data.length, source->virtual_size);
+        if (section_size > UINT64_MAX - image_size)
+        {
+            result.error = OBJECT_ERROR_CAPACITY;
+            return result;
+        }
+        image_size += section_size;
     }
     u64 page_size = os_get_page_size();
+    if (!page_size || (page_size & (page_size - 1)) || image_size > UINT64_MAX - (page_size - 1))
+    {
+        result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
+        return result;
+    }
     u64 allocation_size = (image_size + page_size - 1) & ~(page_size - 1);
+    if (!allocation_size)
+    {
+        allocation_size = page_size;
+    }
     void* address = os_reserve(0, allocation_size, (ProtectionFlags){.read = 1, .write = 1}, (MapFlags){.priv = 1, .anonymous = 1});
     if (!address)
     {
@@ -9392,6 +9534,11 @@ ObjectExecutable object_link_executable(ObjectFile* object)
             result.error = OBJECT_ERROR_INVALID_INPUT;
             break;
         }
+        if ((u32)relocation->kind >= (u32)OBJECT_RELOCATION_COUNT)
+        {
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+            break;
+        }
         u64 relocation_size = relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 8 : 4;
         ObjectSection* source_section = object->sections + relocation->section;
         if (relocation->offset > source_section->data.length || relocation_size > source_section->data.length - relocation->offset)
@@ -9411,11 +9558,19 @@ ObjectExecutable object_link_executable(ObjectFile* object)
             result.error = OBJECT_ERROR_INVALID_INPUT;
             break;
         }
+        ObjectSection* target_section = object->sections + symbol->section;
+        u64 target_section_size = BUSTER_MAX(target_section->data.length, target_section->virtual_size);
+        if (symbol->value > target_section_size || symbol->size > target_section_size - symbol->value)
+        {
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+            break;
+        }
         u8* target = (u8*)address + section_offsets[symbol->section] + symbol->value;
         if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
         {
-            s64 displacement = target - (patch + 4) + relocation->addend + 4;
-            if (displacement < INT32_MIN || displacement > INT32_MAX)
+            s64 displacement = 0;
+            if (!object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
+                displacement < INT32_MIN || displacement > INT32_MAX)
             {
                 result.error = OBJECT_ERROR_CAPACITY;
                 break;
@@ -9430,7 +9585,7 @@ ObjectExecutable object_link_executable(ObjectFile* object)
             u32 patched = 0;
             memcpy(&instruction, patch, sizeof(instruction));
             A64Opcode opcode = relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 ? A64_OPCODE_BL : A64_OPCODE_B;
-            if (((u64)(uintptr_t)patch & 3) ||
+            if (symbol->kind != OBJECT_SYMBOL_FUNCTION || ((u64)(uintptr_t)patch & 3) ||
                 !object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
                 !a64_pc_relative_patch(opcode, instruction, displacement, &patched))
             {
@@ -9453,8 +9608,41 @@ ObjectExecutable object_link_executable(ObjectFile* object)
         }
         else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
         {
-            u64 value = (u64)(uintptr_t)target + (u64)relocation->addend;
+            u64 value = 0;
+            if (!object_address_addend((u64)(uintptr_t)target, relocation->addend, &value))
+            {
+                result.error = OBJECT_ERROR_CAPACITY;
+                break;
+            }
             memcpy(patch, &value, sizeof(value));
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+        {
+            if (!object_apply_aarch64_mach_page_relocation(relocation->kind, patch, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
+                                                           relocation->addend))
+            {
+                result.error = OBJECT_ERROR_CAPACITY;
+                break;
+            }
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 ||
+                 relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 ||
+                 relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
+                 relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 ||
+                 relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                 relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ||
+                 relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
+                 relocation->kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32)
+        {
+            // A standalone executable image has no thread-pointer or Darwin
+            // TLVP resolver.  Keep these relocations fail-closed rather than
+            // encoding an address that would only work by accident on one
+            // host's TLS layout.
+            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+            break;
         }
         else if (relocation->kind == OBJECT_RELOCATION_COFF_ADDR32NB)
         {

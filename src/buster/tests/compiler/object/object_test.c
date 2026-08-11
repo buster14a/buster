@@ -972,6 +972,57 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                    direct_page_roundtrip.symbols[0].kind == OBJECT_SYMBOL_DATA);
         BUSTER_TEST(arguments, direct_page_roundtrip.relocations[0].offset == 0 && direct_page_roundtrip.relocations[1].offset == sizeof(u32));
     }
+    u32 tlvp_words[] = {UINT32_C(0x90000009), UINT32_C(0xf9400129)};
+    ObjectSection tlvp_section = {
+        .name = S8(".text"),
+        .data = {.pointer = (u8*)tlvp_words, .length = sizeof(tlvp_words)},
+        .kind = OBJECT_SECTION_TEXT,
+        .alignment = 4,
+    };
+    ObjectSymbol tlvp_symbol = {
+        .name = S8("tls_value"),
+        .section = OBJECT_SECTION_UNDEFINED,
+        .kind = OBJECT_SYMBOL_DATA,
+        .global = true,
+    };
+    ObjectRelocation tlvp_relocations[] = {
+        {
+            .addend = 0x1000,
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21,
+        },
+        {
+            .addend = 8,
+            .offset = sizeof(u32),
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12,
+        },
+    };
+    ObjectFile tlvp_object = {
+        .sections = &tlvp_section,
+        .symbols = &tlvp_symbol,
+        .relocations = tlvp_relocations,
+        .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+        .section_count = 1,
+        .symbol_count = 1,
+        .relocation_count = BUSTER_ARRAY_LENGTH(tlvp_relocations),
+    };
+    ObjectArtifact tlvp_mach = object_write(arguments->arena, &tlvp_object, OBJECT_FORMAT_MACH_O64);
+    ObjectFile tlvp_roundtrip = object_read(arguments->arena, tlvp_mach.bytes,
+                                            (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS});
+    BUSTER_TEST(arguments, tlvp_mach.error == OBJECT_ERROR_NONE && tlvp_roundtrip.error == OBJECT_ERROR_NONE &&
+                               tlvp_roundtrip.relocation_count == BUSTER_ARRAY_LENGTH(tlvp_relocations));
+    if (tlvp_roundtrip.error == OBJECT_ERROR_NONE && tlvp_roundtrip.relocation_count == BUSTER_ARRAY_LENGTH(tlvp_relocations))
+    {
+        BUSTER_TEST(arguments, tlvp_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 &&
+                                   tlvp_roundtrip.relocations[1].kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 &&
+                                   tlvp_roundtrip.relocations[0].addend == 0x1000 && tlvp_roundtrip.relocations[1].addend == 8);
+    }
+    tlvp_words[1] = UINT32_C(0x91000029);
+    BUSTER_TEST(arguments, object_write(arguments->arena, &tlvp_object, OBJECT_FORMAT_MACH_O64).error != OBJECT_ERROR_NONE);
+    tlvp_words[1] = UINT32_C(0xf9400129);
     u64 direct_page_symbol_offset = object_test_mach_symbol_offset(direct_page_mach.bytes, 0);
     u16 direct_page_n_desc = 0;
     if (direct_page_symbol_offset != UINT64_MAX && direct_page_symbol_offset + 8 <= direct_page_mach.bytes.length)
@@ -1350,6 +1401,90 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     ObjectExecutable misaligned_link_executable = object_link_executable(&misaligned_link_object);
     BUSTER_TEST(arguments, misaligned_link_executable.error == OBJECT_ERROR_CAPACITY);
     object_release_executable(misaligned_link_executable);
+
+    // The in-memory AArch64 linker shares the checked Mach PAGE patch rules
+    // with the JIT.  Local data is enough to exercise both fixups without
+    // requiring an AArch64 host, while TLVP remains an explicit resolver-only
+    // exclusion and must fail before exposing an executable mapping.
+    u32 linked_page_words[] = {UINT32_C(0x90000009), UINT32_C(0x91000129)};
+    u64 linked_page_data = UINT64_C(0x1122334455667788);
+    ObjectSection linked_page_sections[] = {
+        {
+            .name = S8(".text"),
+            .data = {.pointer = (u8*)linked_page_words, .length = sizeof(linked_page_words)},
+            .kind = OBJECT_SECTION_TEXT,
+            .alignment = 4,
+        },
+        {
+            .name = S8(".data"),
+            .data = {.pointer = (u8*)&linked_page_data, .length = sizeof(linked_page_data)},
+            .kind = OBJECT_SECTION_READ_ONLY_DATA,
+            .alignment = 8,
+        },
+    };
+    ObjectSymbol linked_page_symbols[] = {
+        {
+            .name = S8("linked_page_entry"),
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+            .size = sizeof(linked_page_words),
+        },
+        {
+            .name = S8("linked_page_data"),
+            .section = 1,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+            .size = sizeof(linked_page_data),
+        },
+    };
+    ObjectRelocation linked_page_relocations[] = {
+        {
+            .offset = 0,
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 1,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGE21,
+        },
+        {
+            .offset = sizeof(u32),
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 1,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12,
+        },
+    };
+    ObjectFile linked_page_object = {
+        .sections = linked_page_sections,
+        .symbols = linked_page_symbols,
+        .relocations = linked_page_relocations,
+        .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        .section_count = BUSTER_ARRAY_LENGTH(linked_page_sections),
+        .symbol_count = BUSTER_ARRAY_LENGTH(linked_page_symbols),
+        .relocation_count = BUSTER_ARRAY_LENGTH(linked_page_relocations),
+    };
+    ObjectExecutable linked_page_executable = object_link_executable(&linked_page_object);
+    BUSTER_TEST(arguments, linked_page_executable.error == OBJECT_ERROR_NONE && linked_page_executable.address);
+    if (linked_page_executable.error == OBJECT_ERROR_NONE && linked_page_executable.address)
+    {
+        u8* linked_page_text = (u8*)linked_page_executable.address;
+        u8* linked_page_data_address = linked_page_text + 8;
+        u32 expected_linked_page21 = 0;
+        u32 actual_linked_page21 = 0;
+        u32 actual_linked_pageoff12 = 0;
+        memcpy(&actual_linked_page21, linked_page_text, sizeof(actual_linked_page21));
+        memcpy(&actual_linked_pageoff12, linked_page_text + sizeof(u32), sizeof(actual_linked_pageoff12));
+        bool linked_page21_valid = a64_adrp_encode(9, (u64)(uintptr_t)linked_page_text, (u64)(uintptr_t)linked_page_data_address, &expected_linked_page21);
+        BUSTER_TEST(arguments, linked_page21_valid && actual_linked_page21 == expected_linked_page21);
+        BUSTER_TEST(arguments, actual_linked_pageoff12 == (UINT32_C(0x91000000) | (u32)((u64)(uintptr_t)linked_page_data_address & 0xfff) << 10 | (9u << 5) | 9u));
+        object_release_executable(linked_page_executable);
+    }
+    ObjectRelocation linked_page_tlvp_relocation = linked_page_relocations[0];
+    linked_page_tlvp_relocation.kind = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21;
+    ObjectFile linked_page_tlvp_object = linked_page_object;
+    linked_page_tlvp_object.relocations = &linked_page_tlvp_relocation;
+    linked_page_tlvp_object.relocation_count = 1;
+    ObjectExecutable linked_page_tlvp_executable = object_link_executable(&linked_page_tlvp_object);
+    BUSTER_TEST(arguments, linked_page_tlvp_executable.error == OBJECT_ERROR_UNSUPPORTED_TARGET && !linked_page_tlvp_executable.address);
+    object_release_executable(linked_page_tlvp_executable);
 
     String8 aarch64_jump_assembly = object_print_assembly(arguments->arena, &object);
     BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(aarch64_jump_assembly), S8("\tb object_callee\n")));
