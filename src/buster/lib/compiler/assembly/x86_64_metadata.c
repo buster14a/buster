@@ -4981,6 +4981,10 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_canonical_query(BusterX86M
         .coverage_class = form.coverage_class,
         .mode_flags = form.mode_flags,
     }, legacy_repeat_cohort);
+    bool include_not64 = form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64 ||
+                         (form.mode_flags & BUSTER_X86_METADATA_MODE_NOT64) != 0;
+    if (include_not64 && execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64)
+        execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_ANY;
     *query = (BusterX86MetadataPhysicalQuery){
         .mnemonic = mnemonic,
         .operands = operands,
@@ -4990,8 +4994,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_canonical_query(BusterX86M
         .address_size = address_size,
         .execution_mode = execution_mode,
         .include_privileged = form.coverage_class == BUSTER_X86_METADATA_COVERAGE_PRIVILEGED,
-        .include_not64 = form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64 ||
-                         (form.mode_flags & BUSTER_X86_METADATA_MODE_NOT64) != 0,
+        .include_not64 = include_not64,
     };
     return true;
 }
@@ -7099,15 +7102,24 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_execution_mode_matches(BusterX
                           (mode_bits & BUSTER_X86_GENERATED_MODE_NOT64) != 0;
     bool has_64 = (mode_bits & BUSTER_X86_GENERATED_MODE_64) != 0;
     bool has_explicit_mode = mode_bits != 0;
-    if (query.include_not64) return true;
-    if (explicit_not64) return false;
-    if (query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64 && has_explicit_mode && !has_64) return false;
-    if (query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_16 && has_explicit_mode &&
-        !(mode_bits & BUSTER_X86_GENERATED_MODE_16))
-        return false;
-    if (query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_32 && has_explicit_mode &&
-        !(mode_bits & BUSTER_X86_GENERATED_MODE_32))
-        return false;
+    bool non64_only = explicit_not64 || (has_explicit_mode && !has_64);
+    if (explicit_not64 && !query.include_not64) return false;
+    if (query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64)
+    {
+        if (explicit_not64 || (has_explicit_mode && !has_64)) return false;
+    }
+    else if (query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_ANY)
+    {
+        if (non64_only && !query.include_not64) return false;
+    }
+    else if (query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_16)
+    {
+        if (has_explicit_mode && !(mode_bits & BUSTER_X86_GENERATED_MODE_16)) return false;
+    }
+    else if (query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_32)
+    {
+        if (has_explicit_mode && !(mode_bits & BUSTER_X86_GENERATED_MODE_32)) return false;
+    }
     // No execution-mode bits means that the generated row carries no mode
     // restriction; coverage and the remaining metadata filters still apply.
     return true;

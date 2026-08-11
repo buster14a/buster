@@ -1494,11 +1494,17 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !buster_x86_metadata_test_execution_mode_matches(
                                    BUSTER_X86_METADATA_MODE_32, BUSTER_X86_METADATA_COVERAGE_NORMALIZED, false,
                                    BUSTER_X86_METADATA_EXECUTION_MODE_64));
-        BUSTER_TEST(arguments, buster_x86_metadata_test_execution_mode_matches(
+        BUSTER_TEST(arguments, !buster_x86_metadata_test_execution_mode_matches(
                                    BUSTER_X86_METADATA_MODE_16, BUSTER_X86_METADATA_COVERAGE_NORMALIZED, false,
                                    BUSTER_X86_METADATA_EXECUTION_MODE_ANY));
-        BUSTER_TEST(arguments, buster_x86_metadata_test_execution_mode_matches(
+        BUSTER_TEST(arguments, !buster_x86_metadata_test_execution_mode_matches(
                                    BUSTER_X86_METADATA_MODE_32, BUSTER_X86_METADATA_COVERAGE_NORMALIZED, false,
+                                   BUSTER_X86_METADATA_EXECUTION_MODE_ANY));
+        BUSTER_TEST(arguments, buster_x86_metadata_test_execution_mode_matches(
+                                   BUSTER_X86_METADATA_MODE_16, BUSTER_X86_METADATA_COVERAGE_NORMALIZED, true,
+                                   BUSTER_X86_METADATA_EXECUTION_MODE_ANY));
+        BUSTER_TEST(arguments, buster_x86_metadata_test_execution_mode_matches(
+                                   BUSTER_X86_METADATA_MODE_32, BUSTER_X86_METADATA_COVERAGE_NORMALIZED, true,
                                    BUSTER_X86_METADATA_EXECUTION_MODE_ANY));
         BUSTER_TEST(arguments, !buster_x86_metadata_test_execution_mode_matches(
                                    BUSTER_X86_METADATA_MODE_16, BUSTER_X86_METADATA_COVERAGE_NORMALIZED, false,
@@ -1512,9 +1518,12 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !buster_x86_metadata_test_execution_mode_matches(
                                    BUSTER_X86_METADATA_MODE_NOT64, BUSTER_X86_METADATA_COVERAGE_NOT64, false,
                                    BUSTER_X86_METADATA_EXECUTION_MODE_64));
-        BUSTER_TEST(arguments, buster_x86_metadata_test_execution_mode_matches(
+        BUSTER_TEST(arguments, !buster_x86_metadata_test_execution_mode_matches(
                                    BUSTER_X86_METADATA_MODE_NOT64, BUSTER_X86_METADATA_COVERAGE_NOT64, true,
                                    BUSTER_X86_METADATA_EXECUTION_MODE_64));
+        BUSTER_TEST(arguments, buster_x86_metadata_test_execution_mode_matches(
+                                   BUSTER_X86_METADATA_MODE_NOT64, BUSTER_X86_METADATA_COVERAGE_NOT64, true,
+                                   BUSTER_X86_METADATA_EXECUTION_MODE_ANY));
 
         u32 not64_form_id = 0;
         String8 not64_mnemonic = {0};
@@ -1575,6 +1584,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                     .operands = not64_signatures,
                     .operand_count = not64_signature_count,
                     .features = {.names = not64_features, .count = BUSTER_ARRAY_LENGTH(not64_features)},
+                    .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_ANY,
                     .include_not64 = true,
                 },
                 not64_ids, BUSTER_ARRAY_LENGTH(not64_ids));
