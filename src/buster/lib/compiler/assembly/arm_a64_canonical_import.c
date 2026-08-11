@@ -107,7 +107,9 @@ struct ArmA64CanonicalRow
     String8 kind;
     String8 alias_to_file;
     String8 alias_to_id;
+    String8 assembly;
     String8 equivalent;
+    String8 alias_condition;
     String8 instr_class;
     String8 feature_expression;
     String8 feature_tags;
@@ -731,6 +733,49 @@ static String8 arm_a64_xml_decode(Arena* arena, String8 value)
     return (String8){.pointer = (char8*)arm_a64_arena_pointer(arena, mark), .length = arena->position - mark};
 }
 
+static String8 arm_a64_xml_functional_text(Arena* arena, String8 xml)
+{
+    // Keep only text nodes from alias equivalence templates. This retains the
+    // functional assembly spelling and alias condition while dropping source
+    // markup and descriptive attributes such as hover prose.
+    u64 raw_mark = arena->position;
+    u64 text_start = 0;
+    ArmA64XmlCursor cursor = {.text = xml};
+    ArmA64XmlTag tag = {0};
+    while (arm_a64_xml_next(&cursor, &tag))
+    {
+        if (tag.start > text_start)
+        {
+            arm_a64_xml_decode(arena, string_slice(xml, text_start, tag.start));
+        }
+        text_start = tag.end;
+    }
+    if (text_start < xml.length)
+    {
+        arm_a64_xml_decode(arena, string_slice(xml, text_start, xml.length));
+    }
+    String8 raw = {.pointer = (char8*)arm_a64_arena_pointer(arena, raw_mark), .length = arena->position - raw_mark};
+    return arm_a64_slice_normalize(arena, raw);
+}
+
+static bool arm_a64_xml_first_functional_element(Arena* arena, String8 text, u64 start, u64 end, const char* name,
+                                                  String8* result, u64* element_end)
+{
+    ArmA64XmlCursor cursor = {.text = text, .position = start};
+    ArmA64XmlTag tag = {0};
+    while (arm_a64_xml_next(&cursor, &tag))
+    {
+        if (tag.start >= end) break;
+        if (tag.kind != ARM_A64_XML_TAG_OPEN || !arm_a64_tag_name_is(tag, name)) continue;
+        u64 close = tag.end;
+        if (!tag.self_closing && !arm_a64_find_element_end(text, tag.start, tag.name, &close)) return false;
+        *result = tag.self_closing ? (String8){0} : arm_a64_xml_functional_text(arena, arm_a64_element_inner(text, tag, close));
+        if (element_end) *element_end = close;
+        return true;
+    }
+    return false;
+}
+
 /* Return true only for an <arch_variant> directly contained by an
    <arch_variants> block directly contained by the requested scope.  Class
    ranges contain their encodings, and encodings may carry their own variant
@@ -1100,6 +1145,12 @@ static void arm_a64_row_digest(Arena* arena, ArmA64CanonicalRow* row)
     arena_append_string8(arena, row->feature_expression);
     arena_append_char8(arena, '|');
     arena_append_string8(arena, row->constraints);
+    arena_append_char8(arena, '|');
+    arena_append_string8(arena, row->assembly);
+    arena_append_char8(arena, '|');
+    arena_append_string8(arena, row->equivalent);
+    arena_append_char8(arena, '|');
+    arena_append_string8(arena, row->alias_condition);
     row->digest = buster_hash_64(arm_a64_arena_pointer(arena, mark), arena->position - mark);
     arena_set_position(arena, mark);
 }
@@ -1119,8 +1170,12 @@ static bool arm_a64_append_row_json(Arena* output, ArmA64CanonicalRow* row)
     arena_append_string8(output, S8(",\"id\":"));
     if (row->alias_to_id.length) arm_a64_json_string(output, row->alias_to_id); else arena_append_string8(output, S8("null"));
     arena_append_string8(output, S8("}"));
+    arena_append_string8(output, S8(",\"assembly\":"));
+    if (row->assembly.length) arm_a64_json_string(output, row->assembly); else arena_append_string8(output, S8("null"));
     arena_append_string8(output, S8(",\"equivalent\":"));
     if (row->equivalent.length) arm_a64_json_string(output, row->equivalent); else arena_append_string8(output, S8("null"));
+    arena_append_string8(output, S8(",\"alias_condition\":"));
+    if (row->alias_condition.length) arm_a64_json_string(output, row->alias_condition); else arena_append_string8(output, S8("null"));
     arena_append_string8(output, S8(",\"instr_class\":")); arm_a64_json_string(output, row->instr_class);
     arena_append_string8(output, S8(",\"system\":")); arena_append_string8(output, row->system ? S8("true") : S8("false"));
     arena_append_string8(output, S8(",\"feature_expression\":"));
@@ -1265,14 +1320,23 @@ static bool arm_a64_parse_page(Arena* arena, Arena* scratch, String8 source, Arm
             arena_append_string8(arena, row->encoding_name);
             row->canonical_id = (String8){.pointer = (char8*)arm_a64_arena_pointer(arena, id_mark), .length = arena->position - id_mark};
             row->constraints = arm_a64_xml_decode(arena, arm_a64_tag_attr(encoding_tag, S8("bitdiffs")));
+            row->assembly = (String8){0};
             row->equivalent = (String8){0};
+            row->alias_condition = (String8){0};
             ArmA64Layout layout = base_layout;
             ArmA64XmlCursor local_scan = {.text = text, .position = encoding_tag.end};
             ArmA64XmlTag local = {0};
             while (arm_a64_xml_next(&local_scan, &local))
             {
                 if (local.start >= encoding_end) break;
-                if (local.kind == ARM_A64_XML_TAG_OPEN && arm_a64_tag_name_is(local, "box"))
+                if (local.kind == ARM_A64_XML_TAG_OPEN && arm_a64_tag_name_is(local, "asmtemplate") && !row->assembly.length)
+                {
+                    u64 assembly_end = local.end;
+                    if (!local.self_closing && !arm_a64_find_element_end(text, local.start, local.name, &assembly_end)) return false;
+                    row->assembly = local.self_closing ? (String8){0} : arm_a64_xml_functional_text(arena, arm_a64_element_inner(text, local, assembly_end));
+                    local_scan.position = assembly_end;
+                }
+                else if (local.kind == ARM_A64_XML_TAG_OPEN && arm_a64_tag_name_is(local, "box"))
                 {
                     if (!arm_a64_layout_box(arena, text, local, &layout, true)) return false;
                 }
@@ -1280,9 +1344,15 @@ static bool arm_a64_parse_page(Arena* arena, Arena* scratch, String8 source, Arm
                 {
                     u64 equivalent_end = 0;
                     if (!arm_a64_find_element_end(text, local.start, S8("equivalent_to"), &equivalent_end)) return false;
-                    row->equivalent = arm_a64_slice_normalize(arena, arm_a64_element_inner(text, local, equivalent_end));
+                    if (!arm_a64_xml_first_functional_element(arena, text, local.end, equivalent_end, "asmtemplate", &row->equivalent, 0) ||
+                        !arm_a64_xml_first_functional_element(arena, text, local.end, equivalent_end, "aliascond", &row->alias_condition, 0))
+                    {
+                        return false;
+                    }
+                    local_scan.position = equivalent_end;
                 }
             }
+            if (!row->assembly.length) return false;
             String8 local_features = {0};
             String8 local_tags = {0};
             if (!arm_a64_collect_features(arena, text, encoding_tag.end, encoding_end, &local_features, &local_tags)) return false;
@@ -1299,16 +1369,15 @@ static bool arm_a64_parse_page(Arena* arena, Arena* scratch, String8 source, Arm
     return true;
 }
 
-static bool arm_a64_append_manifest(Arena* output, String8 source, u64 source_hash, u64 artifact_hash, u64 artifact_bytes,
+static bool arm_a64_append_manifest(Arena* output, u64 source_hash, u64 artifact_hash, u64 artifact_bytes,
                                     ArmA64CanonicalRows rows, u32 page_count, u32 instruction_pages, u32 alias_pages,
                                     u32 iclass_count, u32 regdiagram_count, u32 selected, u32 selected_canonical,
                                     u32 selected_alias, u32 selected_system, u32 selected_system_canonical, u32 selected_system_alias,
                                     u32 selected_non_system, u32 selected_non_system_canonical, u32 selected_non_system_alias)
 {
     arena_append_string8(output, S8("{\n  \"schema_version\": 1,\n  \"status\": \"provisional-canonical-foundation\",\n  \"acceptance\": \"blocked\",\n"));
-    arena_append_string8(output, S8("  \"source\": {\"release\": \"2026-06\", \"directory\": "));
-    arm_a64_json_string(output, source);
-    arena_append_string8(output, S8(", \"archive_sha256\": \"63a01a1696483bbe2edfef9e0f0cd053d6c1c619ec0587876cb7a60bb344f354\", \"raw_xml_policy\": \"non-vendored-license-restricted\"},\n"));
+    arena_append_string8(output,
+                         S8("  \"source\": {\"release\": \"2026-06\", \"source_url\": \"https://developer.arm.com/-/cdn-downloads/permalink/Exploration-Tools-A64-ISA/ISA_A64/ISA_A64_xml_A_profile-2026-06.tar.gz\", \"archive_sha256\": \"63a01a1696483bbe2edfef9e0f0cd053d6c1c619ec0587876cb7a60bb344f354\", \"raw_xml_policy\": \"non-vendored-license-restricted\"},\n"));
     arena_append_string8(output, S8("  \"source_hash\": ")); arm_a64_json_hex(output, source_hash); arena_append_string8(output, S8(",\n"));
     arena_append_string8(output, S8("  \"inventory\": {\"pages\": ")); arm_a64_append_u64(output, page_count);
     arena_append_string8(output, S8(", \"instruction_pages\": ")); arm_a64_append_u64(output, instruction_pages);
@@ -1439,7 +1508,7 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
     }
     String8 manifest = {0};
     u64 manifest_mark = output_arena->position;
-    arm_a64_append_manifest(output_arena, options.source_directory, source_hash, buster_hash_64((u8*)artifact.pointer, artifact.length), artifact.length,
+    arm_a64_append_manifest(output_arena, source_hash, buster_hash_64((u8*)artifact.pointer, artifact.length), artifact.length,
                             rows, page_count, instruction_pages, alias_pages, iclass_count, regdiagram_count, selected, selected_canonical,
                             selected_alias, selected_system, selected_system_canonical, selected_system_alias, selected - selected_system,
                             selected_canonical - selected_system_canonical, selected_alias - selected_system_alias);
