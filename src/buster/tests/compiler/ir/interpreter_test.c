@@ -14,6 +14,485 @@ BUSTER_GLOBAL_LOCAL AnalysisEntity* ir_interpreter_test_entity_find(AnalysisResu
     return 0;
 }
 
+typedef struct IrInterpreterF80Fixture IrInterpreterF80Fixture;
+struct IrInterpreterF80Fixture
+{
+    AnalysisResult analysis;
+    AnalysisProgram analysis_program;
+    AnalysisResult* module_results[1];
+    AnalysisEntity* entities;
+    IrProgram program;
+    AnalysisTypeId f80_type;
+    AnalysisTypeId function_type;
+    IrTypeId canonical_f80_type;
+    IrTypeId canonical_function_type;
+    IrSymbolId padding_symbol;
+    u32 function_count;
+};
+
+enum
+{
+    IR_INTERPRETER_TEST_F80_CONSTANT,
+    IR_INTERPRETER_TEST_F80_STORE_LOAD,
+    IR_INTERPRETER_TEST_F80_CALLEE,
+    IR_INTERPRETER_TEST_F80_CALLER,
+    IR_INTERPRETER_TEST_F80_BLOCK,
+    IR_INTERPRETER_TEST_F80_PADDING,
+    IR_INTERPRETER_TEST_F80_UNARY,
+    IR_INTERPRETER_TEST_F80_BINARY,
+    IR_INTERPRETER_TEST_F80_CAST,
+    IR_INTERPRETER_TEST_F80_FUNCTION_COUNT,
+};
+
+BUSTER_GLOBAL_LOCAL IrInstructionId ir_interpreter_test_f80_append(Arena* arena, IrFunction* function, u32 block_index, IrInstruction instruction)
+{
+    instruction.next = IR_INSTRUCTION_ID_INVALID;
+    IrInstructionId id = ir_function_add_instruction(arena, function, instruction, (IrSourceRange){0});
+    if (id.value == IR_ID_UNDERLYING_INVALID || block_index >= function->block_count)
+    {
+        return IR_INSTRUCTION_ID_INVALID;
+    }
+    IrBlock* block = function->blocks + block_index;
+    if (block->first_instruction.value == IR_ID_UNDERLYING_INVALID)
+    {
+        block->first_instruction = id;
+    }
+    else
+    {
+        function->instructions[block->last_instruction.value].next = id;
+    }
+    block->last_instruction = id;
+    return id;
+}
+
+BUSTER_GLOBAL_LOCAL IrValueId ir_interpreter_test_f80_value(Arena* arena, IrFunction* function, AnalysisTypeId type, IrTypeId canonical_type,
+                                                            IrValueCategory category)
+{
+    return ir_function_add_value(arena, function, (IrValue){
+                                                     .type = type,
+                                                     .canonical_type = canonical_type,
+                                                     .definition = IR_INSTRUCTION_ID_INVALID,
+                                                     .category = category,
+                                                 });
+}
+
+BUSTER_GLOBAL_LOCAL IrInstructionId ir_interpreter_test_f80_constant(Arena* arena, IrInterpreterF80Fixture* fixture, IrFunction* function,
+                                                                       u32 block_index, u64 significand, u16 sign_exponent, IrValueId result)
+{
+    u64* immediates = arena_allocate(arena, u64, 2);
+    immediates[0] = significand;
+    immediates[1] = sign_exponent;
+    IrInstructionId id = ir_interpreter_test_f80_append(arena, function, block_index, (IrInstruction){
+                                                                                                   .type = fixture->f80_type,
+                                                                                                   .canonical_type = fixture->canonical_f80_type,
+                                                                                                   .immediates = immediates,
+                                                                                                   .immediate_count = 2,
+                                                                                                   .result = result,
+                                                                                                   .opcode = IR_OPCODE_CONSTANT_FLOAT,
+                                                                                               });
+    if (result.value != IR_ID_UNDERLYING_INVALID && result.value < function->value_count)
+    {
+        function->values[result.value].definition = id;
+    }
+    return id;
+}
+
+BUSTER_GLOBAL_LOCAL IrFunction* ir_interpreter_test_f80_function(Arena* arena, IrInterpreterF80Fixture* fixture, u32 function_index)
+{
+    IrFunction function = {
+        .entity = fixture->entities[function_index].id,
+        .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
+        .type = fixture->function_type,
+        .canonical_type = fixture->canonical_function_type,
+        .entry = (IrBlockId){.value = 0},
+        .state = IR_FUNCTION_LOWERED,
+    };
+    IrFunction* result = ir_module_add_function(arena, fixture->program.modules, function);
+    if (!result || !ir_function_add_block(arena, result, (IrBlock){
+                                                       .first_instruction = IR_INSTRUCTION_ID_INVALID,
+                                                       .last_instruction = IR_INSTRUCTION_ID_INVALID,
+                                                       .terminated = true,
+                                                       .sealed = true,
+                                                   }))
+    {
+        return 0;
+    }
+    u64 significand = UINT64_C(0x8000000000000000);
+    u16 sign_exponent = UINT16_C(0x3fff);
+    if (function_index == IR_INTERPRETER_TEST_F80_STORE_LOAD)
+    {
+        IrValueId place = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_PLACE);
+        IrValueId constant = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_VALUE);
+        IrValueId loaded = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_VALUE);
+        ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                     .type = fixture->f80_type,
+                                                     .canonical_type = fixture->canonical_f80_type,
+                                                     .result = place,
+                                                     .opcode = IR_OPCODE_LOCAL,
+                                                 });
+        ir_interpreter_test_f80_constant(arena, fixture, result, 0, significand, sign_exponent, constant);
+        IrValueId* store_operands = arena_allocate(arena, IrValueId, 2);
+        store_operands[0] = place;
+        store_operands[1] = constant;
+        ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                     .operands = store_operands,
+                                                     .operand_count = 2,
+                                                     .type = fixture->f80_type,
+                                                     .canonical_type = fixture->canonical_f80_type,
+                                                     .result = IR_VALUE_ID_INVALID,
+                                                     .opcode = IR_OPCODE_STORE,
+                                                 });
+        IrValueId* load_operands = arena_allocate(arena, IrValueId, 1);
+        load_operands[0] = place;
+        IrInstructionId load_id = ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                                                .operands = load_operands,
+                                                                                .operand_count = 1,
+                                                                                .type = fixture->f80_type,
+                                                                                .canonical_type = fixture->canonical_f80_type,
+                                                                                .result = loaded,
+                                                                                .opcode = IR_OPCODE_LOAD,
+                                                                            });
+        result->values[loaded.value].definition = load_id;
+        IrValueId* return_operands = arena_allocate(arena, IrValueId, 1);
+        return_operands[0] = loaded;
+        ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                     .operands = return_operands,
+                                                     .operand_count = 1,
+                                                     .type = fixture->f80_type,
+                                                     .canonical_type = fixture->canonical_f80_type,
+                                                     .result = IR_VALUE_ID_INVALID,
+                                                     .opcode = IR_OPCODE_RETURN,
+                                                 });
+    }
+    else if (function_index == IR_INTERPRETER_TEST_F80_CALLER)
+    {
+        IrValueId reference = ir_interpreter_test_f80_value(arena, result, fixture->function_type, fixture->canonical_function_type, IR_VALUE_VALUE);
+        IrValueId called = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_VALUE);
+        ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                     .type = fixture->function_type,
+                                                     .canonical_type = fixture->canonical_function_type,
+                                                     .entity = fixture->entities[IR_INTERPRETER_TEST_F80_CALLEE].id,
+                                                     .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
+                                                     .result = reference,
+                                                     .opcode = IR_OPCODE_FUNCTION,
+                                                 });
+        IrValueId* call_operands = arena_allocate(arena, IrValueId, 1);
+        call_operands[0] = reference;
+        ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                     .operands = call_operands,
+                                                     .operand_count = 1,
+                                                     .type = fixture->f80_type,
+                                                     .canonical_type = fixture->canonical_f80_type,
+                                                     .entity = fixture->entities[IR_INTERPRETER_TEST_F80_CALLEE].id,
+                                                     .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
+                                                     .result = called,
+                                                     .opcode = IR_OPCODE_CALL,
+                                                 });
+        result->values[called.value].definition = (IrInstructionId){.value = result->instruction_count - 1};
+        IrValueId* return_operands = arena_allocate(arena, IrValueId, 1);
+        return_operands[0] = called;
+        ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                     .operands = return_operands,
+                                                     .operand_count = 1,
+                                                     .type = fixture->f80_type,
+                                                     .canonical_type = fixture->canonical_f80_type,
+                                                     .result = IR_VALUE_ID_INVALID,
+                                                     .opcode = IR_OPCODE_RETURN,
+                                                 });
+    }
+    else if (function_index == IR_INTERPRETER_TEST_F80_BLOCK)
+    {
+        IrBlock* second = ir_function_add_block(arena, result, (IrBlock){
+                                                         .first_instruction = IR_INSTRUCTION_ID_INVALID,
+                                                         .last_instruction = IR_INSTRUCTION_ID_INVALID,
+                                                         .terminated = true,
+                                                         .sealed = true,
+                                                     });
+        if (!second)
+        {
+            return 0;
+        }
+        IrValueId constant = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_VALUE);
+        IrValueId parameter_value = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_VALUE);
+        ir_interpreter_test_f80_constant(arena, fixture, result, 0, significand, sign_exponent, constant);
+        IrBlockParameter* parameter = arena_allocate(arena, IrBlockParameter, 1);
+        IrIncoming* incoming = arena_allocate(arena, IrIncoming, 1);
+        *incoming = (IrIncoming){.predecessor = (IrBlockId){.value = 0}, .value = constant};
+        *parameter = (IrBlockParameter){
+            .first_incoming = incoming,
+            .last_incoming = incoming,
+            .type = fixture->f80_type,
+            .canonical_type = fixture->canonical_f80_type,
+            .value = parameter_value,
+            .incoming_count = 1,
+        };
+        second->first_parameter = parameter;
+        second->last_parameter = parameter;
+        second->parameter_count = 1;
+        second->first_predecessor = arena_allocate(arena, IrPredecessor, 1);
+        *second->first_predecessor = (IrPredecessor){.block = (IrBlockId){.value = 0}};
+        second->last_predecessor = second->first_predecessor;
+        second->predecessor_count = 1;
+        IrBlockId* targets = arena_allocate(arena, IrBlockId, 1);
+        targets[0] = second->id;
+        ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                     .targets = targets,
+                                                     .target_count = 1,
+                                                     .type = fixture->f80_type,
+                                                     .canonical_type = fixture->canonical_f80_type,
+                                                     .result = IR_VALUE_ID_INVALID,
+                                                     .opcode = IR_OPCODE_BRANCH,
+                                                 });
+        IrValueId* return_operands = arena_allocate(arena, IrValueId, 1);
+        return_operands[0] = parameter_value;
+        ir_interpreter_test_f80_append(arena, result, 1, (IrInstruction){
+                                                     .operands = return_operands,
+                                                     .operand_count = 1,
+                                                     .type = fixture->f80_type,
+                                                     .canonical_type = fixture->canonical_f80_type,
+                                                     .result = IR_VALUE_ID_INVALID,
+                                                     .opcode = IR_OPCODE_RETURN,
+                                                 });
+    }
+    else if (function_index == IR_INTERPRETER_TEST_F80_PADDING)
+    {
+        IrValueId place = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_PLACE);
+        IrValueId loaded = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_VALUE);
+        IrInstructionId global_id = ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                                                               .type = fixture->f80_type,
+                                                                                               .canonical_type = fixture->canonical_f80_type,
+                                                                                               .symbol = fixture->padding_symbol,
+                                                                                               .result = place,
+                                                                                               .opcode = IR_OPCODE_GLOBAL,
+                                                                                           });
+        result->values[place.value].definition = global_id;
+        IrValueId* load_operands = arena_allocate(arena, IrValueId, 1);
+        load_operands[0] = place;
+        IrInstructionId load_id = ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                                                .operands = load_operands,
+                                                                                .operand_count = 1,
+                                                                                .type = fixture->f80_type,
+                                                                                .canonical_type = fixture->canonical_f80_type,
+                                                                                .result = loaded,
+                                                                                .opcode = IR_OPCODE_LOAD,
+                                                                            });
+        result->values[loaded.value].definition = load_id;
+        IrValueId* return_operands = arena_allocate(arena, IrValueId, 1);
+        return_operands[0] = loaded;
+        ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                     .operands = return_operands,
+                                                     .operand_count = 1,
+                                                     .type = fixture->f80_type,
+                                                     .canonical_type = fixture->canonical_f80_type,
+                                                     .result = IR_VALUE_ID_INVALID,
+                                                     .opcode = IR_OPCODE_RETURN,
+                                                 });
+    }
+    else if (function_index == IR_INTERPRETER_TEST_F80_UNARY)
+    {
+        IrValueId constant = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_VALUE);
+        IrValueId negated = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_VALUE);
+        ir_interpreter_test_f80_constant(arena, fixture, result, 0, significand, sign_exponent, constant);
+        IrValueId* unary_operands = arena_allocate(arena, IrValueId, 1);
+        unary_operands[0] = constant;
+        IrInstructionId unary_id = ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                                                .operands = unary_operands,
+                                                                                .operand_count = 1,
+                                                                                .type = fixture->f80_type,
+                                                                                .canonical_type = fixture->canonical_f80_type,
+                                                                                .unary_operation = IR_UNARY_FLOAT_NEGATE,
+                                                                                .result = negated,
+                                                                                .opcode = IR_OPCODE_UNARY,
+                                                                            });
+        result->values[negated.value].definition = unary_id;
+        IrValueId* return_operands = arena_allocate(arena, IrValueId, 1);
+        return_operands[0] = negated;
+        ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                     .operands = return_operands,
+                                                     .operand_count = 1,
+                                                     .type = fixture->f80_type,
+                                                     .canonical_type = fixture->canonical_f80_type,
+                                                     .result = IR_VALUE_ID_INVALID,
+                                                     .opcode = IR_OPCODE_RETURN,
+                                                 });
+    }
+    else if (function_index == IR_INTERPRETER_TEST_F80_BINARY)
+    {
+        IrValueId left = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_VALUE);
+        IrValueId right = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_VALUE);
+        IrValueId compared = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_VALUE);
+        ir_interpreter_test_f80_constant(arena, fixture, result, 0, significand, sign_exponent, left);
+        ir_interpreter_test_f80_constant(arena, fixture, result, 0, significand, sign_exponent, right);
+        IrValueId* binary_operands = arena_allocate(arena, IrValueId, 2);
+        binary_operands[0] = left;
+        binary_operands[1] = right;
+        IrInstructionId binary_id = ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                                                  .operands = binary_operands,
+                                                                                  .operand_count = 2,
+                                                                                  .type = fixture->f80_type,
+                                                                                  .canonical_type = fixture->canonical_f80_type,
+                                                                                  .binary_operation = IR_BINARY_FLOAT_EQUAL,
+                                                                                  .result = compared,
+                                                                                  .opcode = IR_OPCODE_BINARY,
+                                                                              });
+        result->values[compared.value].definition = binary_id;
+        IrValueId* return_operands = arena_allocate(arena, IrValueId, 1);
+        return_operands[0] = compared;
+        ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                     .operands = return_operands,
+                                                     .operand_count = 1,
+                                                     .type = fixture->f80_type,
+                                                     .canonical_type = fixture->canonical_f80_type,
+                                                     .result = IR_VALUE_ID_INVALID,
+                                                     .opcode = IR_OPCODE_RETURN,
+                                                 });
+    }
+    else if (function_index == IR_INTERPRETER_TEST_F80_CAST)
+    {
+        IrValueId constant = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_VALUE);
+        IrValueId casted = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_VALUE);
+        ir_interpreter_test_f80_constant(arena, fixture, result, 0, significand, sign_exponent, constant);
+        IrValueId* cast_operands = arena_allocate(arena, IrValueId, 1);
+        cast_operands[0] = constant;
+        IrInstructionId cast_id = ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                                                .operands = cast_operands,
+                                                                                .operand_count = 1,
+                                                                                .type = fixture->f80_type,
+                                                                                .canonical_type = fixture->canonical_f80_type,
+                                                                                .conversion_operation = IR_CONVERSION_IDENTITY,
+                                                                                .result = casted,
+                                                                                .opcode = IR_OPCODE_CAST,
+                                                                            });
+        result->values[casted.value].definition = cast_id;
+        IrValueId* return_operands = arena_allocate(arena, IrValueId, 1);
+        return_operands[0] = casted;
+        ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                     .operands = return_operands,
+                                                     .operand_count = 1,
+                                                     .type = fixture->f80_type,
+                                                     .canonical_type = fixture->canonical_f80_type,
+                                                     .result = IR_VALUE_ID_INVALID,
+                                                     .opcode = IR_OPCODE_RETURN,
+                                                 });
+    }
+    else
+    {
+        IrValueId constant = ir_interpreter_test_f80_value(arena, result, fixture->f80_type, fixture->canonical_f80_type, IR_VALUE_VALUE);
+        ir_interpreter_test_f80_constant(arena, fixture, result, 0, significand, sign_exponent, constant);
+        IrValueId* return_operands = arena_allocate(arena, IrValueId, 1);
+        return_operands[0] = constant;
+        ir_interpreter_test_f80_append(arena, result, 0, (IrInstruction){
+                                                     .operands = return_operands,
+                                                     .operand_count = 1,
+                                                     .type = fixture->f80_type,
+                                                     .canonical_type = fixture->canonical_f80_type,
+                                                     .result = IR_VALUE_ID_INVALID,
+                                                     .opcode = IR_OPCODE_RETURN,
+                                                 });
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_test_f80_fixture_init(Arena* arena, IrInterpreterF80Fixture* fixture)
+{
+    if (!arena || !fixture)
+    {
+        return false;
+    }
+    *fixture = (IrInterpreterF80Fixture){0};
+    fixture->function_count = IR_INTERPRETER_TEST_F80_FUNCTION_COUNT;
+    fixture->analysis.module.id = (AnalysisModuleId){.value = 1700};
+    fixture->analysis.module.entity_count = fixture->function_count;
+    fixture->analysis.module.entities = arena_allocate(arena, AnalysisEntity, fixture->function_count);
+    fixture->entities = fixture->analysis.module.entities;
+    fixture->analysis.types.types = arena_allocate(arena, AnalysisType, 2);
+    fixture->analysis.types.count = 2;
+    fixture->analysis.types.capacity = 2;
+    fixture->f80_type = (AnalysisTypeId){.value = 0};
+    fixture->function_type = (AnalysisTypeId){.value = 1};
+    fixture->analysis.types.types[0] = (AnalysisType){
+        .id = fixture->f80_type,
+        .kind = ANALYSIS_TYPE_FLOAT,
+        .as.float_bit_width = 80,
+        .layout = {.size = 16, .alignment = 16, .abi_class = ANALYSIS_ABI_CLASS_FLOAT, .state = ANALYSIS_LAYOUT_RESOLVED},
+    };
+    fixture->analysis.types.types[1] = (AnalysisType){
+        .id = fixture->function_type,
+        .kind = ANALYSIS_TYPE_FUNCTION,
+        .as.function = {.return_type = fixture->f80_type},
+        .layout = {.size = 8, .alignment = 8, .abi_class = ANALYSIS_ABI_CLASS_POINTER, .state = ANALYSIS_LAYOUT_RESOLVED},
+    };
+    for (u32 function_index = 0; function_index < fixture->function_count; function_index += 1)
+    {
+        fixture->entities[function_index] = (AnalysisEntity){
+            .id = {.module = fixture->analysis.module.id, .index = (AnalysisEntityIndex){.value = function_index}},
+            .kind = ANALYSIS_ENTITY_CODE,
+        };
+    }
+    fixture->analysis.data_layout = target_data_layout(target_native);
+    fixture->module_results[0] = &fixture->analysis;
+    fixture->analysis_program = (AnalysisProgram){
+        .module_results = fixture->module_results,
+        .module_count = 1,
+    };
+    fixture->program = ir_program_initialize(arena, 1, 2, 1, 0);
+    fixture->canonical_f80_type = ir_program_add_type(&fixture->program, (IrType){
+                                                                           .kind = IR_TYPE_FLOAT,
+                                                                           .bit_width = 80,
+                                                                           .layout = {.size = 16, .alignment = 16, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true},
+                                                                       });
+    fixture->canonical_function_type = ir_program_add_type(&fixture->program, (IrType){
+                                                                               .kind = IR_TYPE_FUNCTION,
+                                                                               .return_type = fixture->canonical_f80_type,
+                                                                               .calling_convention = IR_CALLING_CONVENTION_C,
+                                                                               .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true},
+                                                                           });
+    if (fixture->canonical_f80_type.value == IR_ID_UNDERLYING_INVALID || fixture->canonical_function_type.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return false;
+    }
+    fixture->padding_symbol = ir_program_add_symbol(&fixture->program, (IrSymbol){
+                                                                          .type = fixture->canonical_f80_type,
+                                                                          .kind = IR_SYMBOL_DATA,
+                                                                          .linkage = IR_LINKAGE_INTERNAL,
+                                                                          .is_definition = true,
+                                                                      });
+    u8* padding_bytes = arena_allocate(arena, u8, 16);
+    if (fixture->padding_symbol.value == IR_ID_UNDERLYING_INVALID || !padding_bytes)
+    {
+        return false;
+    }
+    u64 padding_significand = UINT64_C(0x0123456789abcdef);
+    u16 padding_sign_exponent = UINT16_C(0x4567);
+    for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
+    {
+        padding_bytes[byte_index] = (u8)(padding_significand >> (byte_index * 8));
+    }
+    padding_bytes[8] = (u8)padding_sign_exponent;
+    padding_bytes[9] = (u8)(padding_sign_exponent >> 8);
+    for (u32 byte_index = 10; byte_index < 16; byte_index += 1)
+    {
+        padding_bytes[byte_index] = (u8)(0xa0 + byte_index);
+    }
+    if (!ir_module_add_global(arena, fixture->program.modules, (IrGlobal){
+                                                                   .symbol = fixture->padding_symbol,
+                                                                   .type = fixture->canonical_f80_type,
+                                                                   .bytes = (ByteSlice){.pointer = padding_bytes, .length = 16},
+                                                                   .initializer_kind = IR_GLOBAL_INITIALIZER_BYTES,
+                                                               }))
+    {
+        return false;
+    }
+    for (u32 function_index = 0; function_index < fixture->function_count; function_index += 1)
+    {
+        if (!ir_interpreter_test_f80_function(arena, fixture, function_index))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_test_static_label_dispatch(Arena* arena, AnalysisProgram* analysis, IrProgram* program, AnalysisEntityId entry)
 {
     if (!arena || !analysis || !program || !program->modules)
@@ -398,6 +877,206 @@ UnitTestResult ir_interpreter_tests(UnitTestArguments* arguments)
     TemporalArena temporary = arena_begin_temporal(arguments->arena);
     Arena* expression_arena = arena_create((ArenaCreation){0});
     BUSTER_CHECK(expression_arena);
+
+    IrInterpreterF80Fixture f80_fixture = {0};
+    bool f80_fixture_valid = ir_interpreter_test_f80_fixture_init(arguments->arena, &f80_fixture);
+    BUSTER_TEST(arguments, f80_fixture_valid);
+    if (f80_fixture_valid)
+    {
+        IrModule* f80_module = f80_fixture.program.modules;
+        IrFunction* constant_function = f80_module->functions + IR_INTERPRETER_TEST_F80_CONSTANT;
+        IrInstruction* constant_instruction = constant_function->instructions;
+        const u64 payload_significands[] = {
+            0,
+            UINT64_C(1),
+            UINT64_C(0xc000000000000001),
+        };
+        const u16 payload_exponents[] = {
+            UINT16_C(0x8000), // negative zero
+            UINT16_C(0x0000), // smallest subnormal
+            UINT16_C(0x7fff), // NaN payload
+        };
+        for (u32 payload_index = 0; payload_index < BUSTER_ARRAY_LENGTH(payload_significands); payload_index += 1)
+        {
+            constant_instruction->immediates[0] = payload_significands[payload_index];
+            constant_instruction->immediates[1] = payload_exponents[payload_index];
+            IrExecutionResult executed = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                                     f80_fixture.entities[IR_INTERPRETER_TEST_F80_CONSTANT].id,
+                                                     ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+            BUSTER_TEST(arguments, executed.trap == IR_EXECUTION_TRAP_NONE && executed.has_value &&
+                                      executed.value.kind == IR_EXECUTION_VALUE_WIDE_SCALAR && executed.value.bytes.length == 16 &&
+                                      executed.value.initialized.length == 16);
+            if (executed.trap == IR_EXECUTION_TRAP_NONE && executed.value.bytes.length == 16 && executed.value.initialized.length == 16)
+            {
+                for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
+                {
+                    BUSTER_TEST(arguments, executed.value.bytes.pointer[byte_index] == (u8)(payload_significands[payload_index] >> (byte_index * 8)));
+                }
+                for (u32 byte_index = 0; byte_index < 2; byte_index += 1)
+                {
+                    BUSTER_TEST(arguments, executed.value.bytes.pointer[8 + byte_index] == (u8)(payload_exponents[payload_index] >> (byte_index * 8)));
+                }
+                for (u32 byte_index = 10; byte_index < 16; byte_index += 1)
+                {
+                    BUSTER_TEST(arguments, executed.value.bytes.pointer[byte_index] == 0 && executed.value.initialized.pointer[byte_index] == 1);
+                }
+            }
+        }
+        IrExecutionResult stored = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                               f80_fixture.entities[IR_INTERPRETER_TEST_F80_STORE_LOAD].id, ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0,
+                                               (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, stored.trap == IR_EXECUTION_TRAP_NONE && stored.value.kind == IR_EXECUTION_VALUE_WIDE_SCALAR &&
+                                  stored.value.bytes.length == 16 && stored.value.bytes.pointer[10] == 0 && stored.value.bytes.pointer[15] == 0);
+        IrExecutionResult called = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                               f80_fixture.entities[IR_INTERPRETER_TEST_F80_CALLER].id, ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0,
+                                               (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, called.trap == IR_EXECUTION_TRAP_NONE && called.value.kind == IR_EXECUTION_VALUE_WIDE_SCALAR &&
+                                  called.value.bytes.length == 16 && called.value.bytes.pointer[10] == 0 && called.value.bytes.pointer[15] == 0);
+        IrExecutionResult block = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                              f80_fixture.entities[IR_INTERPRETER_TEST_F80_BLOCK].id, ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0,
+                                              (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, block.trap == IR_EXECUTION_TRAP_NONE && block.value.kind == IR_EXECUTION_VALUE_WIDE_SCALAR &&
+                                  block.value.bytes.length == 16 && block.value.bytes.pointer[10] == 0 && block.value.bytes.pointer[15] == 0);
+        IrExecutionResult padded = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                               f80_fixture.entities[IR_INTERPRETER_TEST_F80_PADDING].id, ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0,
+                                               (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, padded.trap == IR_EXECUTION_TRAP_NONE && padded.value.kind == IR_EXECUTION_VALUE_WIDE_SCALAR &&
+                                  padded.value.bytes.length == 16 && padded.value.initialized.length == 16);
+        if (padded.trap == IR_EXECUTION_TRAP_NONE && padded.value.bytes.length == 16 && padded.value.initialized.length == 16)
+        {
+            const u64 padded_significand = UINT64_C(0x0123456789abcdef);
+            const u16 padded_sign_exponent = UINT16_C(0x4567);
+            for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
+            {
+                BUSTER_TEST(arguments, padded.value.bytes.pointer[byte_index] == (u8)(padded_significand >> (byte_index * 8)));
+            }
+            BUSTER_TEST(arguments, padded.value.bytes.pointer[8] == (u8)padded_sign_exponent && padded.value.bytes.pointer[9] == (u8)(padded_sign_exponent >> 8));
+            for (u32 byte_index = 10; byte_index < 16; byte_index += 1)
+            {
+                BUSTER_TEST(arguments, padded.value.bytes.pointer[byte_index] == 0 && padded.value.initialized.pointer[byte_index] == 1);
+            }
+        }
+        IrGlobal* padding_global = f80_module->globals;
+        IrGlobalInitializerKind saved_padding_initializer = padding_global->initializer_kind;
+        padding_global->initializer_kind = IR_GLOBAL_INITIALIZER_FLOAT;
+        IrExecutionResult malformed_global = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                                         f80_fixture.entities[IR_INTERPRETER_TEST_F80_PADDING].id,
+                                                         ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, malformed_global.trap == IR_EXECUTION_TRAP_INVALID_PROGRAM);
+        padding_global->initializer_kind = saved_padding_initializer;
+        padding_global->initializer_kind = IR_GLOBAL_INITIALIZER_INTEGER;
+        IrExecutionResult malformed_integer_global = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                                                 f80_fixture.entities[IR_INTERPRETER_TEST_F80_PADDING].id,
+                                                                 ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, malformed_integer_global.trap == IR_EXECUTION_TRAP_INVALID_PROGRAM);
+        padding_global->initializer_kind = IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS;
+        IrExecutionResult malformed_symbol_global = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                                                f80_fixture.entities[IR_INTERPRETER_TEST_F80_PADDING].id,
+                                                                ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, malformed_symbol_global.trap == IR_EXECUTION_TRAP_INVALID_PROGRAM);
+        padding_global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
+        u64 saved_padding_length = padding_global->bytes.length;
+        padding_global->bytes.length = 10;
+        IrExecutionResult malformed_partial_global = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                                                 f80_fixture.entities[IR_INTERPRETER_TEST_F80_PADDING].id,
+                                                                 ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, malformed_partial_global.trap == IR_EXECUTION_TRAP_INVALID_PROGRAM);
+        padding_global->bytes.length = 17;
+        IrExecutionResult malformed_oversized_global = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                                                   f80_fixture.entities[IR_INTERPRETER_TEST_F80_PADDING].id,
+                                                                   ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, malformed_oversized_global.trap == IR_EXECUTION_TRAP_INVALID_PROGRAM);
+        padding_global->bytes.length = saved_padding_length;
+        padding_global->initializer_kind = saved_padding_initializer;
+        IrExecutionResult unary = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                              f80_fixture.entities[IR_INTERPRETER_TEST_F80_UNARY].id, ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0,
+                                              (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, unary.trap == IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION);
+        IrExecutionResult binary = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                               f80_fixture.entities[IR_INTERPRETER_TEST_F80_BINARY].id, ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0,
+                                               (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, binary.trap == IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION);
+        IrInstruction* binary_instruction = f80_module->functions[IR_INTERPRETER_TEST_F80_BINARY].instructions + 2;
+        IrBinaryOperation saved_binary_operation = binary_instruction->binary_operation;
+        binary_instruction->binary_operation = IR_BINARY_FLOAT_ADD;
+        IrExecutionResult arithmetic = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                                   f80_fixture.entities[IR_INTERPRETER_TEST_F80_BINARY].id, ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0,
+                                                   (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, arithmetic.trap == IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION);
+        binary_instruction->binary_operation = saved_binary_operation;
+        IrExecutionResult cast = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                             f80_fixture.entities[IR_INTERPRETER_TEST_F80_CAST].id, ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0,
+                                             (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, cast.trap == IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION);
+        IrFunction* unary_function = f80_module->functions + IR_INTERPRETER_TEST_F80_UNARY;
+        IrInstruction* unary_instruction = unary_function->instructions + 1;
+        IrInstruction saved_unary_instruction = *unary_instruction;
+        unary_instruction->unary_operation = IR_UNARY_INTEGER_NEGATE;
+        IrExecutionResult malformed_integer_unary = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                                                f80_fixture.entities[IR_INTERPRETER_TEST_F80_UNARY].id,
+                                                                ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, malformed_integer_unary.trap == IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION);
+        *unary_instruction = saved_unary_instruction;
+        IrFunction* block_function = f80_module->functions + IR_INTERPRETER_TEST_F80_BLOCK;
+        IrInstruction* branch_instruction = block_function->instructions + 1;
+        IrInstruction saved_branch_instruction = *branch_instruction;
+        IrValueId branch_condition = block_function->instructions[0].result;
+        IrValueId* branch_operands = arena_allocate(arguments->arena, IrValueId, 1);
+        IrBlockId* branch_if_targets = arena_allocate(arguments->arena, IrBlockId, 2);
+        branch_operands[0] = branch_condition;
+        branch_if_targets[0] = (IrBlockId){.value = 1};
+        branch_if_targets[1] = (IrBlockId){.value = 1};
+        branch_instruction->operands = branch_operands;
+        branch_instruction->operand_count = 1;
+        branch_instruction->targets = branch_if_targets;
+        branch_instruction->target_count = 2;
+        branch_instruction->immediates = 0;
+        branch_instruction->immediate_count = 0;
+        branch_instruction->opcode = IR_OPCODE_BRANCH_IF;
+        IrExecutionResult malformed_branch_if = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                                            f80_fixture.entities[IR_INTERPRETER_TEST_F80_BLOCK].id,
+                                                            ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, malformed_branch_if.trap == IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION);
+        u64* switch_immediates = arena_allocate(arguments->arena, u64, 1);
+        switch_immediates[0] = 0;
+        branch_instruction->immediates = switch_immediates;
+        branch_instruction->immediate_count = 1;
+        branch_instruction->opcode = IR_OPCODE_SWITCH;
+        IrExecutionResult malformed_switch = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                                         f80_fixture.entities[IR_INTERPRETER_TEST_F80_BLOCK].id,
+                                                         ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, malformed_switch.trap == IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION);
+        *branch_instruction = saved_branch_instruction;
+        u32 saved_immediate_count = constant_instruction->immediate_count;
+        constant_instruction->immediate_count = 1;
+        IrExecutionResult malformed_count = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                                        f80_fixture.entities[IR_INTERPRETER_TEST_F80_CONSTANT].id,
+                                                        ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, malformed_count.trap == IR_EXECUTION_TRAP_INVALID_PROGRAM);
+        constant_instruction->immediate_count = saved_immediate_count;
+        u64 saved_sign_exponent = constant_instruction->immediates[1];
+        constant_instruction->immediates[1] = UINT64_C(0x10000);
+        IrExecutionResult malformed_payload = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                                          f80_fixture.entities[IR_INTERPRETER_TEST_F80_CONSTANT].id,
+                                                          ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, malformed_payload.trap == IR_EXECUTION_TRAP_INVALID_PROGRAM);
+        constant_instruction->immediates[1] = saved_sign_exponent;
+        AnalysisType* analysis_f80_type = f80_fixture.analysis.types.types + f80_fixture.f80_type.value;
+        u64 saved_f80_layout_size = analysis_f80_type->layout.size;
+        analysis_f80_type->layout.size = 10;
+        IrExecutionResult malformed_layout = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                                         f80_fixture.entities[IR_INTERPRETER_TEST_F80_CONSTANT].id,
+                                                         ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, malformed_layout.trap == IR_EXECUTION_TRAP_INVALID_PROGRAM);
+        analysis_f80_type->layout.size = saved_f80_layout_size;
+        u32 saved_f80_layout_alignment = analysis_f80_type->layout.alignment;
+        analysis_f80_type->layout.alignment = 8;
+        IrExecutionResult malformed_alignment = ir_execute(expression_arena, &f80_fixture.analysis_program, &f80_fixture.program,
+                                                            f80_fixture.entities[IR_INTERPRETER_TEST_F80_CONSTANT].id,
+                                                            ANALYSIS_INSTANTIATION_ID_INVALID, 0, 0, (IrExecutionOptions){0});
+        BUSTER_TEST(arguments, malformed_alignment.trap == IR_EXECUTION_TRAP_INVALID_PROGRAM);
+        analysis_f80_type->layout.alignment = saved_f80_layout_alignment;
+    }
 
     String8 scalar_source = S8("type Pair = struct\n"
                                "{\n"

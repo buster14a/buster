@@ -41,6 +41,10 @@ typedef enum IrExecutionValueKind
 {
     IR_EXECUTION_VALUE_NONE,
     IR_EXECUTION_VALUE_SCALAR,
+    // An x87 extended value has 80 semantic bits but occupies a canonical
+    // 16-byte storage slot in the IR ABI.  It cannot fit in `bits`; callers
+    // read its little-endian representation from `bytes` instead.
+    IR_EXECUTION_VALUE_WIDE_SCALAR,
     IR_EXECUTION_VALUE_AGGREGATE,
     IR_EXECUTION_VALUE_VECTOR,
     IR_EXECUTION_VALUE_ADDRESS,

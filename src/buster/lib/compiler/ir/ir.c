@@ -5923,6 +5923,24 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_conversion_valid(IrType* source, IrType* d
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool ir_canonical_float_constant_valid(IrType* type, IrInstruction* instruction)
+{
+    if (!type || !instruction || type->kind != IR_TYPE_FLOAT || instruction->operand_count != 0 || instruction->target_count != 0 ||
+        instruction->result.value == IR_ID_UNDERLYING_INVALID || !instruction->immediates)
+    {
+        return false;
+    }
+    if (type->bit_width == 80)
+    {
+        // The IR carries only the ten semantic x87 bytes.  The six ABI
+        // padding bytes are materialized by the interpreter/runtime and are
+        // never accepted as an additional immediate or payload bits.
+        return type->layout.resolved && type->layout.size == 16 && type->layout.alignment == 16 && instruction->immediate_count == 2 &&
+               (instruction->immediates[1] & ~UINT64_C(0xffff)) == 0;
+    }
+    return (type->bit_width == 32 || type->bit_width == 64) && instruction->immediate_count == 1;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(AnalysisResult* analysis, IrFunction* function, IrInstruction* instruction)
 {
     if (!analysis || !function || !instruction || instruction->opcode >= IR_OPCODE_COUNT)
@@ -5933,6 +5951,21 @@ BUSTER_GLOBAL_LOCAL bool ir_instruction_operation_valid(AnalysisResult* analysis
     {
         return instruction->operand_count == 0 && instruction->immediate_count == 0 && instruction->result.value == IR_ID_UNDERLYING_INVALID &&
                ir_type_id_equal(instruction->type, analysis->types.builtin.void_type);
+    }
+    if (instruction->opcode == IR_OPCODE_CONSTANT_FLOAT)
+    {
+        AnalysisType* type = analysis_type_from_id(analysis, instruction->type);
+        if (!type || type->kind != ANALYSIS_TYPE_FLOAT || instruction->operand_count != 0 || instruction->target_count != 0 ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID || !instruction->immediates)
+        {
+            return false;
+        }
+        if (type->as.float_bit_width == 80)
+        {
+            return type->layout.state == ANALYSIS_LAYOUT_RESOLVED && type->layout.size == 16 && type->layout.alignment == 16 &&
+                   instruction->immediate_count == 2 && (instruction->immediates[1] & ~UINT64_C(0xffff)) == 0;
+        }
+        return (type->as.float_bit_width == 32 || type->as.float_bit_width == 64) && instruction->immediate_count == 1;
     }
     if (instruction->opcode == IR_OPCODE_LABEL_ADDRESS)
     {
@@ -6450,7 +6483,10 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
             break;
             case IR_GLOBAL_INITIALIZER_FLOAT:
             {
-                initializer_valid = type->kind == IR_TYPE_FLOAT;
+                // The compact initializer_bits field carries only one u64;
+                // f80 globals must use an explicit 16-byte BYTES initializer
+                // until the frontend/codegen can carry their full payload.
+                initializer_valid = type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64);
             }
             break;
             case IR_GLOBAL_INITIALIZER_BYTES:
@@ -6728,8 +6764,7 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                 else if (instruction->opcode == IR_OPCODE_CONSTANT_FLOAT)
                 {
                     IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
-                    if (!type || type->kind != IR_TYPE_FLOAT || (type->bit_width != 32 && type->bit_width != 64) || instruction->immediate_count != 1 ||
-                        instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
+                    if (!ir_canonical_float_constant_valid(type, instruction))
                     {
                         return ir_validation_error(IR_VALIDATION_OPERATION, function, block->id, instruction_id);
                     }

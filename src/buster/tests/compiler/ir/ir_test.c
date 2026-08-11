@@ -120,6 +120,127 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_conversion_count(IrModule* module, IrConversionO
     return count;
 }
 
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_f80_constant(Arena* arena, u64 significand, u64 sign_exponent, u32 immediate_count, u32 target_count,
+                                                                      u64 layout_size, u32 layout_alignment)
+{
+    IrProgram program = ir_program_initialize(arena, 1, 2, 0, 0);
+    IrTypeId f80 = ir_program_add_type(&program, (IrType){
+                                                       .kind = IR_TYPE_FLOAT,
+                                                       .bit_width = 80,
+                                                       .layout = {.size = layout_size, .alignment = layout_alignment, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true},
+                                                   });
+    IrTypeId function_type = ir_program_add_type(&program, (IrType){
+                                                                   .kind = IR_TYPE_FUNCTION,
+                                                                   .return_type = f80,
+                                                                   .calling_convention = IR_CALLING_CONVENTION_C,
+                                                                   .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true},
+                                                               });
+    IrFunction* function = ir_module_add_function(arena, program.modules, (IrFunction){
+                                                                               .canonical_type = function_type,
+                                                                               .entry = (IrBlockId){.value = 0},
+                                                                               .state = IR_FUNCTION_LOWERED,
+                                                                           });
+    IrBlock* block = function ? ir_function_add_block(arena, function, (IrBlock){
+                                                                       .first_instruction = IR_INSTRUCTION_ID_INVALID,
+                                                                       .last_instruction = IR_INSTRUCTION_ID_INVALID,
+                                                                       .terminated = true,
+                                                                       .sealed = true,
+                                                                   })
+                              : 0;
+    IrValueId value = function ? ir_function_add_value(arena, function, (IrValue){
+                                                                      .canonical_type = f80,
+                                                                      .definition = IR_INSTRUCTION_ID_INVALID,
+                                                                      .category = IR_VALUE_VALUE,
+                                                                  })
+                               : IR_VALUE_ID_INVALID;
+    u64* immediates = arena_allocate(arena, u64, 2);
+    if (immediates)
+    {
+        immediates[0] = significand;
+        immediates[1] = sign_exponent;
+    }
+    IrBlockId* targets = target_count ? arena_allocate(arena, IrBlockId, target_count) : 0;
+    for (u32 target_index = 0; targets && target_index < target_count; target_index += 1)
+    {
+        targets[target_index] = (IrBlockId){.value = 0};
+    }
+    IrInstructionId constant = function ? ir_function_add_instruction(arena, function, (IrInstruction){
+                                                                                         .immediates = immediates,
+                                                                                         .canonical_type = f80,
+                                                                                         .targets = targets,
+                                                                                         .target_count = target_count,
+                                                                                         .result = value,
+                                                                                         .opcode = IR_OPCODE_CONSTANT_FLOAT,
+                                                                                         .immediate_count = immediate_count,
+                                                                                         .next = IR_INSTRUCTION_ID_INVALID,
+                                                                                     },
+                                                                        (IrSourceRange){0})
+                                           : IR_INSTRUCTION_ID_INVALID;
+    IrValueId* operands = arena_allocate(arena, IrValueId, 1);
+    if (operands)
+    {
+        operands[0] = value;
+    }
+    IrInstructionId returned = function ? ir_function_add_instruction(arena, function, (IrInstruction){
+                                                                                         .operands = operands,
+                                                                                         .operand_count = 1,
+                                                                                         .canonical_type = f80,
+                                                                                         .result = IR_VALUE_ID_INVALID,
+                                                                                         .opcode = IR_OPCODE_RETURN,
+                                                                                         .next = IR_INSTRUCTION_ID_INVALID,
+                                                                                     },
+                                                                        (IrSourceRange){0})
+                                           : IR_INSTRUCTION_ID_INVALID;
+    if (function && block && value.value != IR_ID_UNDERLYING_INVALID && constant.value != IR_ID_UNDERLYING_INVALID && returned.value != IR_ID_UNDERLYING_INVALID)
+    {
+        function->values[value.value].definition = constant;
+        function->instructions[constant.value].next = returned;
+        block->first_instruction = constant;
+        block->last_instruction = returned;
+    }
+    return ir_validate_canonical_module(&program, program.modules);
+}
+
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_float_global(Arena* arena, u32 bit_width, IrGlobalInitializerKind initializer_kind)
+{
+    IrProgram program = ir_program_initialize(arena, 1, 1, 1, 0);
+    u64 size = bit_width / 8;
+    u32 alignment = (u32)size;
+    if (bit_width == 80)
+    {
+        size = 16;
+        alignment = 16;
+    }
+    IrTypeId floating = ir_program_add_type(&program, (IrType){
+                                                           .kind = IR_TYPE_FLOAT,
+                                                           .bit_width = bit_width,
+                                                           .layout = {.size = size, .alignment = alignment, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true},
+                                                       });
+    IrSymbolId symbol = ir_program_add_symbol(&program, (IrSymbol){
+                                                                    .type = floating,
+                                                                    .kind = IR_SYMBOL_DATA,
+                                                                    .linkage = IR_LINKAGE_INTERNAL,
+                                                                    .is_definition = true,
+                                                                });
+    u8* bytes = arena_allocate(arena, u8, size);
+    if (bytes)
+    {
+        memset(bytes, 0, size);
+    }
+    IrGlobal* global = ir_module_add_global(arena, program.modules, (IrGlobal){
+                                                                          .symbol = symbol,
+                                                                          .type = floating,
+                                                                          .bytes = (ByteSlice){.pointer = bytes, .length = size},
+                                                                          .initializer_bits = 1,
+                                                                          .initializer_kind = initializer_kind,
+                                                                      });
+    if (!global || floating.value == IR_ID_UNDERLYING_INVALID || symbol.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return (IrValidationResult){.error = IR_VALIDATION_INVALID_ID};
+    }
+    return ir_validate_canonical_module(&program, program.modules);
+}
+
 UnitTestResult ir_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -323,6 +444,28 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, abi_struct_f80_aapcs_argument.parts[0].abi_class == IR_ABI_CLASS_FLOAT && abi_struct_f80_aapcs_argument.parts[0].size == 16);
     BUSTER_TEST(arguments, abi_struct_f80_aapcs_result.part_count == 1 && !abi_struct_f80_aapcs_result.indirect && !abi_struct_f80_aapcs_result.memory);
     BUSTER_TEST(arguments, abi_struct_f80_aapcs_result.parts[0].abi_class == IR_ABI_CLASS_FLOAT && abi_struct_f80_aapcs_result.parts[0].size == 16);
+
+    IrValidationResult valid_f80_constant =
+        ir_test_canonical_f80_constant(arguments->arena, UINT64_C(0x8000000000000001), UINT64_C(0x7fff), 2, 0, 16, 16);
+    BUSTER_TEST(arguments, valid_f80_constant.error == IR_VALIDATION_NONE);
+    IrValidationResult malformed_f80_count = ir_test_canonical_f80_constant(arguments->arena, UINT64_C(1), UINT64_C(0), 1, 0, 16, 16);
+    BUSTER_TEST(arguments, malformed_f80_count.error == IR_VALIDATION_OPERATION);
+    IrValidationResult malformed_f80_payload = ir_test_canonical_f80_constant(arguments->arena, UINT64_C(1), UINT64_C(0x10000), 2, 0, 16, 16);
+    BUSTER_TEST(arguments, malformed_f80_payload.error == IR_VALIDATION_OPERATION);
+    IrValidationResult malformed_f80_extra = ir_test_canonical_f80_constant(arguments->arena, UINT64_C(1), UINT64_C(0), 3, 0, 16, 16);
+    BUSTER_TEST(arguments, malformed_f80_extra.error == IR_VALIDATION_OPERATION);
+    IrValidationResult malformed_f80_target = ir_test_canonical_f80_constant(arguments->arena, UINT64_C(1), UINT64_C(0), 2, 1, 16, 16);
+    BUSTER_TEST(arguments, malformed_f80_target.error == IR_VALIDATION_OPERATION);
+    IrValidationResult malformed_f80_layout = ir_test_canonical_f80_constant(arguments->arena, UINT64_C(1), UINT64_C(0), 2, 0, 10, 16);
+    BUSTER_TEST(arguments, malformed_f80_layout.error == IR_VALIDATION_OPERATION);
+    IrValidationResult malformed_f80_alignment = ir_test_canonical_f80_constant(arguments->arena, UINT64_C(1), UINT64_C(0), 2, 0, 16, 8);
+    BUSTER_TEST(arguments, malformed_f80_alignment.error == IR_VALIDATION_OPERATION);
+    IrValidationResult valid_f80_global_bytes = ir_test_canonical_float_global(arguments->arena, 80, IR_GLOBAL_INITIALIZER_BYTES);
+    BUSTER_TEST(arguments, valid_f80_global_bytes.error == IR_VALIDATION_NONE);
+    IrValidationResult malformed_f80_global_float = ir_test_canonical_float_global(arguments->arena, 80, IR_GLOBAL_INITIALIZER_FLOAT);
+    BUSTER_TEST(arguments, malformed_f80_global_float.error == IR_VALIDATION_OPERATION);
+    IrValidationResult malformed_f16_global_float = ir_test_canonical_float_global(arguments->arena, 16, IR_GLOBAL_INITIALIZER_FLOAT);
+    BUSTER_TEST(arguments, malformed_f16_global_float.error == IR_VALIDATION_OPERATION);
 
     String8 focused_source = S8("code choose : fn (a: s32, b: s32) s32\n"
                                 "{\n"

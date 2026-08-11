@@ -5,6 +5,11 @@
 typedef enum IrRuntimeValueKind
 {
     IR_RUNTIME_VALUE_SCALAR,
+    // f80 values are kept as bytes, never converted through the host's
+    // `long double` (which is not a portable representation).  The object
+    // contains the canonical 16-byte slot: ten semantic little-endian bytes
+    // followed by six zero padding bytes.
+    IR_RUNTIME_VALUE_WIDE_SCALAR,
     IR_RUNTIME_VALUE_FUNCTION,
     IR_RUNTIME_VALUE_PLACE,
     IR_RUNTIME_VALUE_AGGREGATE,
@@ -14,6 +19,12 @@ typedef enum IrRuntimeValueKind
     IR_RUNTIME_VALUE_VA_LIST,
     IR_RUNTIME_VALUE_KIND_COUNT,
 } IrRuntimeValueKind;
+
+enum
+{
+    IR_INTERPRETER_WIDE_SCALAR_SEMANTIC_SIZE = 10,
+    IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE = 16,
+};
 
 typedef struct IrRuntimeObject IrRuntimeObject;
 typedef struct IrRuntimeStoredValue IrRuntimeStoredValue;
@@ -215,6 +226,17 @@ BUSTER_GLOBAL_LOCAL u32 ir_interpreter_type_width(AnalysisResult* analysis, Anal
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_type_is_wide_scalar(AnalysisResult* analysis, AnalysisTypeId type_id)
+{
+    AnalysisType* type = analysis_type_from_id(analysis, type_id);
+    return type && type->kind == ANALYSIS_TYPE_FLOAT && type->as.float_bit_width == 80;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_interpreter_wide_scalar_payload_valid(u64 sign_exponent)
+{
+    return (sign_exponent & ~UINT64_C(0xffff)) == 0;
+}
+
 BUSTER_GLOBAL_LOCAL u64 ir_interpreter_mask(u32 width)
 {
     return width >= 64 ? UINT64_MAX : width ? (((u64)1 << width) - 1) : 0;
@@ -266,6 +288,10 @@ f64 ir_interpreter_float_read(u64 bits, u32 width)
         memcpy(&value, &bits32, sizeof(value));
         return (f64)value;
     }
+    if (width != 64)
+    {
+        return 0.0;
+    }
     f64 value = 0.0;
     memcpy(&value, &bits, sizeof(value));
     return value;
@@ -281,7 +307,7 @@ BUSTER_GLOBAL_LOCAL u64 ir_interpreter_float_write(f64 value, u32 width)
         memcpy(&bits32, &value32, sizeof(value32));
         bits = bits32;
     }
-    else
+    else if (width == 64)
     {
         memcpy(&bits, &value, sizeof(value));
     }
@@ -371,6 +397,11 @@ BUSTER_GLOBAL_LOCAL u64 ir_interpreter_type_size(AnalysisResult* analysis, Analy
         AnalysisType* type = analysis_type_from_id(analysis, current);
         if (type->layout.state == ANALYSIS_LAYOUT_RESOLVED)
         {
+            if (type->kind == ANALYSIS_TYPE_FLOAT && type->as.float_bit_width == 80 &&
+                (type->layout.size != IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE || type->layout.alignment != IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE))
+            {
+                return 0;
+            }
             return type->layout.size && multiplier > UINT64_MAX / type->layout.size ? 0 : multiplier * type->layout.size;
         }
         u64 size = 0;
@@ -389,7 +420,12 @@ BUSTER_GLOBAL_LOCAL u64 ir_interpreter_type_size(AnalysisResult* analysis, Analy
             size = (type->as.integer.bit_width + 7) / 8;
             break;
         case ANALYSIS_TYPE_FLOAT:
-            size = type->as.float_bit_width == data_layout.long_double_type.bit_width ? data_layout.long_double_type.size
+            size = type->as.float_bit_width == 80                                      ? (type->layout.state == ANALYSIS_LAYOUT_RESOLVED &&
+                                                                                         type->layout.size == IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE &&
+                                                                                         type->layout.alignment == IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE
+                                                                                         ? IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE
+                                                                                         : 0)
+                  : type->as.float_bit_width == data_layout.long_double_type.bit_width ? data_layout.long_double_type.size
                   : type->as.float_bit_width == data_layout.double_type.bit_width ? data_layout.double_type.size
                   : type->as.float_bit_width == data_layout.float_type.bit_width  ? data_layout.float_type.size
                                                                                    : 0;
@@ -469,6 +505,42 @@ BUSTER_GLOBAL_LOCAL IrRuntimeObject* ir_interpreter_object_create(Arena* arena, 
         }
     }
     return object;
+}
+
+BUSTER_GLOBAL_LOCAL IrRuntimeValue ir_interpreter_wide_scalar_create(Arena* arena, u64 significand, u64 sign_exponent)
+{
+    IrRuntimeValue result = {0};
+    if (!arena || !ir_interpreter_wide_scalar_payload_valid(sign_exponent))
+    {
+        return result;
+    }
+    IrRuntimeObject* object = ir_interpreter_object_create(arena, IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE);
+    if (!object)
+    {
+        return result;
+    }
+    for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
+    {
+        object->bytes[byte_index] = (u8)(significand >> (byte_index * 8));
+        object->initialized[byte_index] = 1;
+    }
+    for (u32 byte_index = 0; byte_index < 2; byte_index += 1)
+    {
+        object->bytes[8 + byte_index] = (u8)(sign_exponent >> (byte_index * 8));
+        object->initialized[8 + byte_index] = 1;
+    }
+    // The six ABI padding bytes are canonicalized to initialized zeroes.
+    for (u32 byte_index = IR_INTERPRETER_WIDE_SCALAR_SEMANTIC_SIZE; byte_index < IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE; byte_index += 1)
+    {
+        object->bytes[byte_index] = 0;
+        object->initialized[byte_index] = 1;
+    }
+    return (IrRuntimeValue){
+        .object = object,
+        .length = IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE,
+        .kind = IR_RUNTIME_VALUE_WIDE_SCALAR,
+        .initialized = true,
+    };
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_write(Arena* arena, IrRuntimeObject* object, u64 offset, u64 size, IrRuntimeValue value);
@@ -768,6 +840,23 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_runtime_globals_initialize(Arena* arena,
             IrGlobal* global = module->globals + module_global_index;
             IrRuntimeGlobal* runtime_global = runtime->globals + global_index++;
             IrRuntimeObject* object = runtime_global->object;
+            IrType* initializer_type = ir_type_from_id(&program->types, global->type);
+            bool wide_initializer = initializer_type && initializer_type->kind == IR_TYPE_FLOAT && initializer_type->bit_width == 80;
+            if (wide_initializer &&
+                (!initializer_type->layout.resolved || initializer_type->layout.size != IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE ||
+                 initializer_type->layout.alignment != IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE ||
+                 !((global->initializer_kind == IR_GLOBAL_INITIALIZER_NONE) || (global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO) ||
+                   (global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->bytes.pointer &&
+                    global->bytes.length == IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE))))
+            {
+                return false;
+            }
+            if (global->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT &&
+                (!initializer_type || initializer_type->kind != IR_TYPE_FLOAT ||
+                 (initializer_type->bit_width != 32 && initializer_type->bit_width != 64)))
+            {
+                return false;
+            }
             switch (global->initializer_kind)
             {
             case IR_GLOBAL_INITIALIZER_ZERO:
@@ -1203,6 +1292,25 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_write(Arena* arena, IrRuntimeObje
         }
         return true;
     }
+    if (value.kind == IR_RUNTIME_VALUE_WIDE_SCALAR)
+    {
+        if (!value.object || value.length != IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE || size != IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE ||
+            !ir_interpreter_object_range_valid(value.object, value.offset, size))
+        {
+            return false;
+        }
+        for (u64 index = 0; index < IR_INTERPRETER_WIDE_SCALAR_SEMANTIC_SIZE; index += 1)
+        {
+            object->bytes[offset + index] = value.object->bytes[value.offset + index];
+            object->initialized[offset + index] = value.object->initialized[value.offset + index];
+        }
+        for (u64 index = IR_INTERPRETER_WIDE_SCALAR_SEMANTIC_SIZE; index < IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE; index += 1)
+        {
+            object->bytes[offset + index] = 0;
+            object->initialized[offset + index] = 1;
+        }
+        return true;
+    }
     if (value.kind == IR_RUNTIME_VALUE_AGGREGATE && ir_interpreter_object_range_valid(value.object, value.offset, size))
     {
         return ir_interpreter_object_region_copy(arena, object, offset, value.object, value.offset, size, stored_value_count);
@@ -1225,8 +1333,9 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_read(Arena* arena, AnalysisResult
         return false;
     }
     AnalysisType* type = analysis_type_from_id(analysis, type_id);
-    bool scalar =
-        type->kind == ANALYSIS_TYPE_BOOL || type->kind == ANALYSIS_TYPE_INTEGER || type->kind == ANALYSIS_TYPE_FLOAT || type->kind == ANALYSIS_TYPE_ENUM;
+    bool wide_scalar = ir_interpreter_type_is_wide_scalar(analysis, type_id);
+    bool scalar = type->kind == ANALYSIS_TYPE_BOOL || type->kind == ANALYSIS_TYPE_INTEGER || type->kind == ANALYSIS_TYPE_ENUM ||
+                  (type->kind == ANALYSIS_TYPE_FLOAT && !wide_scalar);
     if (scalar)
     {
         u64 bits = 0;
@@ -1244,6 +1353,42 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_memory_read(Arena* arena, AnalysisResult
         *value_out = (IrRuntimeValue){
             .bits = bits,
             .kind = IR_RUNTIME_VALUE_SCALAR,
+            .initialized = true,
+        };
+        return true;
+    }
+    if (wide_scalar)
+    {
+        if (size != IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE)
+        {
+            return false;
+        }
+        for (u64 index = 0; index < IR_INTERPRETER_WIDE_SCALAR_SEMANTIC_SIZE; index += 1)
+        {
+            if (!object->initialized[offset + index])
+            {
+                return false;
+            }
+        }
+        IrRuntimeObject* copy = ir_interpreter_object_create(arena, IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE);
+        if (!copy)
+        {
+            return false;
+        }
+        for (u64 index = 0; index < IR_INTERPRETER_WIDE_SCALAR_SEMANTIC_SIZE; index += 1)
+        {
+            copy->bytes[index] = object->bytes[offset + index];
+            copy->initialized[index] = object->initialized[offset + index];
+        }
+        for (u64 index = IR_INTERPRETER_WIDE_SCALAR_SEMANTIC_SIZE; index < IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE; index += 1)
+        {
+            copy->bytes[index] = 0;
+            copy->initialized[index] = 1;
+        }
+        *value_out = (IrRuntimeValue){
+            .object = copy,
+            .length = IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE,
+            .kind = IR_RUNTIME_VALUE_WIDE_SCALAR,
             .initialized = true,
         };
         return true;
@@ -1574,9 +1719,19 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_instruction_shape_valid(IrExecutionFrame
     case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
         return instruction->operand_count == 2 && instruction->target_count == 0 && instruction->immediate_count == 0;
     case IR_OPCODE_CONSTANT_INTEGER:
-    case IR_OPCODE_CONSTANT_FLOAT:
     case IR_OPCODE_ENUM:
         return instruction->operand_count == 0 && instruction->target_count == 0 && instruction->immediate_count == 1;
+    case IR_OPCODE_CONSTANT_FLOAT:
+    {
+        AnalysisType* type = analysis_type_from_id(frame->analysis, instruction->type);
+        bool wide = type && type->kind == ANALYSIS_TYPE_FLOAT && type->as.float_bit_width == 80;
+        bool supported = type && type->kind == ANALYSIS_TYPE_FLOAT &&
+                         (type->as.float_bit_width == 32 || type->as.float_bit_width == 64 || type->as.float_bit_width == 80);
+        bool wide_layout_valid = !wide || ir_interpreter_type_size(frame->analysis, instruction->type) == IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE;
+        return supported && instruction->operand_count == 0 && instruction->target_count == 0 &&
+               wide_layout_valid && instruction->immediate_count == (wide ? 2u : 1u) &&
+               (!wide || ir_interpreter_wide_scalar_payload_valid(instruction->immediates[1]));
+    }
     case IR_OPCODE_ARRAY:
         return instruction->target_count == 0 && instruction->immediate_count == 0;
     case IR_OPCODE_AGGREGATE:
@@ -2145,6 +2300,11 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_float_binary(IrExecutionFrame* frame, Ir
     IrValueId right_id = instruction->operands[1];
     AnalysisTypeId operand_type = frame->function->values[left_id.value].type;
     u32 width = ir_interpreter_type_width(frame->analysis, operand_type);
+    if (width == 80)
+    {
+        *trap_out = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+        return false;
+    }
     f64 left = ir_interpreter_float_read(frame->values[left_id.value].bits, width);
     f64 right = ir_interpreter_float_read(frame->values[right_id.value].bits, width);
     f64 value = 0.0;
@@ -2211,6 +2371,11 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_vector_unary(Arena* arena, IrExecutionFr
     AnalysisType* vector = analysis_type_from_id(frame->analysis, instruction->type);
     AnalysisTypeId element_type_id = vector->as.vector.element_type;
     AnalysisType* element = analysis_type_from_id(frame->analysis, element_type_id);
+    if (element && element->kind == ANALYSIS_TYPE_FLOAT && element->as.float_bit_width == 80)
+    {
+        *trap_out = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+        return false;
+    }
     u64 lane_size = ir_interpreter_type_size(frame->analysis, element_type_id);
     IrRuntimeValue operand = frame->values[instruction->operands[0].value];
     if (operand.kind != IR_RUNTIME_VALUE_AGGREGATE || !operand.object || !lane_size)
@@ -2279,6 +2444,11 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_vector_binary(Arena* arena, IrExecutionF
     AnalysisType* vector = analysis_type_from_id(frame->analysis, operand_type_id);
     AnalysisTypeId element_type_id = vector->as.vector.element_type;
     AnalysisType* element = analysis_type_from_id(frame->analysis, element_type_id);
+    if (element && element->kind == ANALYSIS_TYPE_FLOAT && element->as.float_bit_width == 80)
+    {
+        *trap_out = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+        return false;
+    }
     AnalysisType* result_vector = analysis_type_from_id(frame->analysis, instruction->type);
     AnalysisTypeId result_element_type_id = result_vector->as.vector.element_type;
     u64 lane_size = ir_interpreter_type_size(frame->analysis, element_type_id);
@@ -2509,6 +2679,11 @@ BUSTER_GLOBAL_LOCAL bool ir_interpreter_cast(IrExecutionFrame* frame, IrInstruct
     IrValueId operand_id = instruction->operands[0];
     AnalysisType* source = analysis_type_from_id(frame->analysis, frame->function->values[operand_id.value].type);
     AnalysisType* target = analysis_type_from_id(frame->analysis, instruction->type);
+    if ((source && source->kind == ANALYSIS_TYPE_FLOAT && source->as.float_bit_width == 80) ||
+        (target && target->kind == ANALYSIS_TYPE_FLOAT && target->as.float_bit_width == 80))
+    {
+        return false;
+    }
     u64 bits = frame->values[operand_id.value].bits;
     switch (instruction->conversion_operation)
     {
@@ -2664,6 +2839,26 @@ BUSTER_GLOBAL_LOCAL IrExecutionValue ir_interpreter_public_value(Arena* arena, A
     case IR_RUNTIME_VALUE_FUNCTION:
         result.kind = IR_EXECUTION_VALUE_FUNCTION;
         return result;
+    case IR_RUNTIME_VALUE_WIDE_SCALAR:
+    {
+        result.kind = IR_EXECUTION_VALUE_WIDE_SCALAR;
+        u64 size = IR_INTERPRETER_WIDE_SCALAR_STORAGE_SIZE;
+        if (arena && value.object && value.length == size && ir_interpreter_object_range_valid(value.object, value.offset, size) &&
+            ir_interpreter_arena_can_allocate_count(arena, size, 2))
+        {
+            result.bytes = (ByteSlice){
+                .pointer = arena_allocate(arena, u8, size),
+                .length = size,
+            };
+            result.initialized = (ByteSlice){
+                .pointer = arena_allocate(arena, u8, size),
+                .length = size,
+            };
+            memcpy(result.bytes.pointer, value.object->bytes + value.offset, size);
+            memcpy(result.initialized.pointer, value.object->initialized + value.offset, size);
+        }
+        return result;
+    }
     case IR_RUNTIME_VALUE_ADDRESS:
     {
         result.kind = IR_EXECUTION_VALUE_ADDRESS;
@@ -2877,12 +3072,25 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
         break;
         case IR_OPCODE_CONSTANT_FLOAT:
         {
-            if (instruction->immediate_count != 1)
+            AnalysisType* type = analysis_type_from_id(frame->analysis, instruction->type);
+            bool wide = type && type->kind == ANALYSIS_TYPE_FLOAT && type->as.float_bit_width == 80;
+            if (instruction->immediate_count != (wide ? 2u : 1u) || (wide && !ir_interpreter_wide_scalar_payload_valid(instruction->immediates[1])))
             {
                 operation_trap = IR_EXECUTION_TRAP_INVALID_PROGRAM;
                 break;
             }
-            produced.bits = instruction->immediates[0];
+            if (wide)
+            {
+                produced = ir_interpreter_wide_scalar_create(scratch.arena, instruction->immediates[0], instruction->immediates[1]);
+                if (!produced.initialized)
+                {
+                    operation_trap = IR_EXECUTION_TRAP_INVALID_MEMORY;
+                }
+            }
+            else
+            {
+                produced.bits = instruction->immediates[0];
+            }
         }
         break;
         case IR_OPCODE_CONSTANT_STRING:
@@ -3033,6 +3241,13 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
             IrRuntimeValue operand = frame->values[instruction->operands[1].value];
             IrRuntimeValue updated = {0};
             AnalysisTypeId value_type = frame->function->values[instruction->operands[1].value].type;
+            AnalysisType* analysis_value_type = analysis_type_from_id(frame->analysis, value_type);
+            if (analysis_value_type && analysis_value_type->kind == ANALYSIS_TYPE_FLOAT && analysis_value_type->as.float_bit_width == 80 &&
+                instruction->atomic_operation != IR_ATOMIC_EXCHANGE)
+            {
+                operation_trap = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                break;
+            }
             u64 size = ir_interpreter_type_size(frame->analysis, value_type);
             if (place.kind != IR_RUNTIME_VALUE_PLACE || !operand.initialized || !size ||
                 !ir_interpreter_memory_read(scratch.arena, frame->analysis, value_type, place.object, place.offset, &produced) ||
@@ -3116,6 +3331,12 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
             IrRuntimeValue expected = frame->values[instruction->operands[1].value];
             IrRuntimeValue desired = frame->values[instruction->operands[2].value];
             AnalysisTypeId value_type = frame->function->values[instruction->operands[1].value].type;
+            AnalysisType* analysis_value_type = analysis_type_from_id(frame->analysis, value_type);
+            if (analysis_value_type && analysis_value_type->kind == ANALYSIS_TYPE_FLOAT && analysis_value_type->as.float_bit_width == 80)
+            {
+                operation_trap = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                break;
+            }
             u64 size = ir_interpreter_type_size(frame->analysis, value_type);
             if (place.kind != IR_RUNTIME_VALUE_PLACE || !expected.initialized || !desired.initialized || !size ||
                 !ir_interpreter_memory_read(scratch.arena, frame->analysis, value_type, place.object, place.offset, &produced) || !produced.initialized)
@@ -3254,7 +3475,13 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
         {
             IrValueId base_id = instruction->operands[0];
             IrRuntimeValue base = frame->values[base_id.value];
-            u64 index = frame->values[instruction->operands[1].value].bits;
+            IrRuntimeValue index_value = frame->values[instruction->operands[1].value];
+            if (index_value.kind == IR_RUNTIME_VALUE_WIDE_SCALAR)
+            {
+                operation_trap = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                break;
+            }
+            u64 index = index_value.bits;
             AnalysisType* base_type = analysis_type_from_id(frame->analysis, frame->function->values[base_id.value].type);
             if (base_type->kind == ANALYSIS_TYPE_RANGE && base.kind == IR_RUNTIME_VALUE_RANGE)
             {
@@ -3325,6 +3552,12 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
             bool has_start = instruction->immediates[0] != 0;
             bool has_end = instruction->immediates[1] != 0;
             u32 operand_index = 1;
+            if ((has_start && frame->values[instruction->operands[operand_index].value].kind == IR_RUNTIME_VALUE_WIDE_SCALAR) ||
+                (has_end && frame->values[instruction->operands[operand_index + (has_start ? 1 : 0)].value].kind == IR_RUNTIME_VALUE_WIDE_SCALAR))
+            {
+                operation_trap = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                break;
+            }
             u64 start = has_start ? frame->values[instruction->operands[operand_index++].value].bits : 0;
             u64 end = has_end ? frame->values[instruction->operands[operand_index].value].bits : count;
             if (start > end || end > count)
@@ -3411,7 +3644,11 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
         {
             IrRuntimeValue operand = frame->values[instruction->operands[0].value];
             AnalysisType* target_type = analysis_type_from_id(frame->analysis, instruction->type);
-            if (operand.kind == IR_RUNTIME_VALUE_ADDRESS && target_type->kind == ANALYSIS_TYPE_POINTER &&
+            if (operand.kind == IR_RUNTIME_VALUE_WIDE_SCALAR)
+            {
+                operation_trap = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+            }
+            else if (operand.kind == IR_RUNTIME_VALUE_ADDRESS && target_type->kind == ANALYSIS_TYPE_POINTER &&
                 instruction->conversion_operation == IR_CONVERSION_POINTER_REINTERPRET)
             {
                 produced = operand;
@@ -3430,14 +3667,27 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                 break;
             }
             IrValueId operand_id = instruction->operands[0];
-            u64 operand = frame->values[operand_id.value].bits;
+            IrRuntimeValue operand_value = frame->values[operand_id.value];
+            if (operand_value.kind == IR_RUNTIME_VALUE_WIDE_SCALAR)
+            {
+                operation_trap = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                break;
+            }
+            u64 operand = operand_value.bits;
             switch (instruction->unary_operation)
             {
             case IR_UNARY_FLOAT_NEGATE:
             {
                 AnalysisType* type = analysis_type_from_id(frame->analysis, instruction->type);
-                f64 value = ir_interpreter_float_read(operand, type->as.float_bit_width);
-                produced.bits = ir_interpreter_float_write(-value, type->as.float_bit_width);
+                if (!type || type->kind != ANALYSIS_TYPE_FLOAT || type->as.float_bit_width == 80)
+                {
+                    operation_trap = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                }
+                else
+                {
+                    f64 value = ir_interpreter_float_read(operand, type->as.float_bit_width);
+                    produced.bits = ir_interpreter_float_write(-value, type->as.float_bit_width);
+                }
             }
             break;
             case IR_UNARY_INTEGER_NEGATE:
@@ -3507,6 +3757,11 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
         {
             IrRuntimeValue left_value = frame->values[instruction->operands[0].value];
             IrRuntimeValue right_value = frame->values[instruction->operands[1].value];
+            if (left_value.kind == IR_RUNTIME_VALUE_WIDE_SCALAR || right_value.kind == IR_RUNTIME_VALUE_WIDE_SCALAR)
+            {
+                operation_trap = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                break;
+            }
             AnalysisType* operand_type = analysis_type_from_id(frame->analysis, frame->function->values[instruction->operands[0].value].type);
             if (operand_type->kind == ANALYSIS_TYPE_VECTOR)
             {
@@ -3739,7 +3994,13 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                 break;
             }
             IrBlockId predecessor = frame->block;
-            u64 condition = frame->values[instruction->operands[0].value].bits;
+            IrRuntimeValue condition_value = frame->values[instruction->operands[0].value];
+            if (condition_value.kind == IR_RUNTIME_VALUE_WIDE_SCALAR)
+            {
+                operation_trap = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                break;
+            }
+            u64 condition = condition_value.bits;
             IrBlockId target = instruction->targets[condition ? 0 : 1];
             if (!ir_interpreter_block_enter(frame, target, predecessor))
             {
@@ -3755,7 +4016,13 @@ IrExecutionResult ir_execute(Arena* execution_arena, AnalysisProgram* analysis, 
                 operation_trap = IR_EXECUTION_TRAP_INVALID_PROGRAM;
                 break;
             }
-            u64 switched = frame->values[instruction->operands[0].value].bits;
+            IrRuntimeValue switched_value = frame->values[instruction->operands[0].value];
+            if (switched_value.kind == IR_RUNTIME_VALUE_WIDE_SCALAR)
+            {
+                operation_trap = IR_EXECUTION_TRAP_UNSUPPORTED_INSTRUCTION;
+                break;
+            }
+            u64 switched = switched_value.bits;
             u32 target_index = instruction->immediate_count;
             for (u32 value_index = 0; value_index < instruction->immediate_count; value_index += 1)
             {
