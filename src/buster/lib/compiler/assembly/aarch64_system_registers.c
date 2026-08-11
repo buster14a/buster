@@ -4,6 +4,21 @@
 
 BUSTER_GLOBAL_LOCAL bool a64_sysreg_parameter_encoding(BusterA64SysregGeneratedRow row, u32 index, u16* result);
 
+BUSTER_GLOBAL_LOCAL bool a64_sysreg_string_valid(String8 value)
+{
+    return value.length == 0 || value.pointer != 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_sysreg_encoding_valid(u16 packed)
+{
+    return packed != (u16)0xffffu;
+}
+
+BUSTER_GLOBAL_LOCAL u8 a64_sysreg_mode_or(u8 left, u8 right)
+{
+    return (u8)(left | right);
+}
+
 BUSTER_GLOBAL_LOCAL bool a64_sysreg_string_at(u32 offset, String8* result)
 {
     if (!result || offset >= BUSTER_A64_SYSREG_GENERATED_POOL_SIZE) return false;
@@ -18,6 +33,7 @@ BUSTER_GLOBAL_LOCAL bool a64_sysreg_row(u32 index, Aarch64SystemRegister* result
 {
     if (!result || index >= BUSTER_A64_SYSREG_GENERATED_ROW_COUNT) return false;
     BusterA64SysregGeneratedRow row = buster_a64_sysreg_generated_rows[index];
+    if (!a64_sysreg_encoding_valid(row.packed_encoding)) return false;
     Aarch64SystemRegister value = {0};
     if (!a64_sysreg_string_at(row.name_offset, &value.name) || !a64_sysreg_string_at(row.target_offset, &value.accessor_target) ||
         !a64_sysreg_string_at(row.source_file_offset, &value.source_file) ||
@@ -69,7 +85,7 @@ Aarch64SystemRegisterCensus aarch64_system_register_census(void)
 
 BUSTER_GLOBAL_LOCAL bool a64_sysreg_name_equal(String8 left, String8 right)
 {
-    if (left.length != right.length) return false;
+    if (!a64_sysreg_string_valid(left) || !a64_sysreg_string_valid(right) || left.length != right.length) return false;
     for (u64 index = 0; index < left.length; index += 1)
     {
         char8 a = left.pointer[index], b = right.pointer[index];
@@ -82,6 +98,7 @@ BUSTER_GLOBAL_LOCAL bool a64_sysreg_name_equal(String8 left, String8 right)
 
 BUSTER_GLOBAL_LOCAL bool a64_sysreg_name_less(String8 left, String8 right)
 {
+    if (!a64_sysreg_string_valid(left) || !a64_sysreg_string_valid(right)) return false;
     u64 count = BUSTER_MIN(left.length, right.length);
     int cmp = 0;
     for (u64 index = 0; index < count; index += 1)
@@ -96,38 +113,52 @@ BUSTER_GLOBAL_LOCAL bool a64_sysreg_name_less(String8 left, String8 right)
 
 bool aarch64_system_register_lookup_name(String8 name, Aarch64SystemRegisterLookup* result)
 {
-    if (!result || !name.length) return false;
+    if (!result || !name.length || !a64_sysreg_string_valid(name)) return false;
     Aarch64SystemRegisterLookup value = {0};
-    bool found = false;
+    String8 direct_name = {0};
+    u16 direct_encoding = 0;
+    u8 direct_mode = AARCH64_SYSTEM_REGISTER_MODE_NONE;
+    u8 direct_count = 0;
+    bool found_direct = false;
     for (u32 index = 0; index < aarch64_system_register_count(); index += 1)
     {
         Aarch64SystemRegister row = {0};
         if (!a64_sysreg_row(index, &row) || row.raw_s3 || row.parameterized || !a64_sysreg_name_equal(row.name, name)) continue;
-        if (!found)
+        // Accessor aliases describe another spelling's provenance.  They must
+        // never select or add modes to an ordinary direct-name lookup.
+        if (row.accessor_alias) continue;
+        if (!found_direct)
         {
-            value.canonical_name = row.name;
-            value.packed_encoding = row.packed_encoding;
-            value.mode = row.mode;
-            value.alias_count = row.accessor_alias ? 1 : 0;
-            value.mechanism_count = 1;
-            found = true;
+            direct_name = row.name;
+            direct_encoding = row.packed_encoding;
+            direct_mode = row.mode;
+            direct_count = 1;
+            found_direct = true;
+        }
+        else if (row.packed_encoding != direct_encoding)
+        {
+            // A name with more than one direct encoding is ambiguous.  Keep
+            // the caller's result untouched and fail closed.
+            return false;
         }
         else
         {
-            value.mode |= row.mode;
-            if (value.mechanism_count != UINT8_MAX) value.mechanism_count += 1;
-            if (row.accessor_alias && value.alias_count != UINT8_MAX) value.alias_count += 1;
+            direct_mode = a64_sysreg_mode_or(direct_mode, row.mode);
+            if (direct_count != UINT8_MAX) direct_count = (u8)(direct_count + 1u);
         }
-        // A direct spelling wins over a provenance alias for canonical lookup.
-        if (!row.accessor_alias) value.canonical_name = row.name;
     }
-    if (found) *result = value;
-    return found;
+    if (!found_direct) return false;
+    value.canonical_name = direct_name;
+    value.packed_encoding = direct_encoding;
+    value.mode = direct_mode;
+    value.mechanism_count = direct_count;
+    *result = value;
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_sysreg_match_expanded_family(String8 family, String8 expanded, u32* index)
 {
-    if (!family.length || !expanded.length || !index) return false;
+    if (!family.length || !expanded.length || !index || !a64_sysreg_string_valid(family) || !a64_sysreg_string_valid(expanded)) return false;
     u64 left = 0, right = 0; bool saw_parameter = false; u32 value = 0;
     while (left < family.length)
     {
@@ -160,8 +191,12 @@ BUSTER_GLOBAL_LOCAL bool a64_sysreg_match_expanded_family(String8 family, String
 
 bool aarch64_system_register_lookup_expanded_name(String8 name, Aarch64SystemRegisterLookup* result)
 {
-    if (!result || !name.length) return false;
-    Aarch64SystemRegisterLookup value = {0}; bool found = false;
+    if (!result || !name.length || !a64_sysreg_string_valid(name)) return false;
+    Aarch64SystemRegisterLookup value = {0};
+    u16 direct_encoding = 0;
+    u8 direct_mode = AARCH64_SYSTEM_REGISTER_MODE_NONE;
+    u8 direct_count = 0;
+    bool found_direct = false;
     for (u32 i = 0; i < aarch64_system_register_count(); i += 1)
     {
         BusterA64SysregGeneratedRow row = buster_a64_sysreg_generated_rows[i];
@@ -172,32 +207,45 @@ bool aarch64_system_register_lookup_expanded_name(String8 name, Aarch64SystemReg
         if (!a64_sysreg_match_expanded_family(family, name, &index) && !a64_sysreg_match_expanded_family(target, name, &index)) continue;
         u16 packed = 0;
         if (!a64_sysreg_parameter_encoding(row, index, &packed)) continue;
+        // Parameterized accessor aliases are provenance only.  If direct
+        // families disagree, no alias may hide that ambiguity.
+        if (row.flags & BUSTER_A64_SYSREG_ROW_FLAG_ALIAS) continue;
         Aarch64SystemRegisterMode mode = row.mechanism == AARCH64_SYSTEM_REGISTER_MRS || row.mechanism == AARCH64_SYSTEM_REGISTER_MRRS ?
                                              AARCH64_SYSTEM_REGISTER_MODE_READ : AARCH64_SYSTEM_REGISTER_MODE_WRITE;
-        if (!found)
+        if (!found_direct)
         {
             value.canonical_name = name;
             value.packed_encoding = packed;
             value.mode = (u8)mode;
-            value.alias_count = row.flags & BUSTER_A64_SYSREG_ROW_FLAG_ALIAS ? 1 : 0;
             value.mechanism_count = 1;
             value.parameterized = 1;
-            found = true;
+            direct_encoding = packed;
+            direct_mode = (u8)mode;
+            direct_count = 1;
+            found_direct = true;
         }
-        else if (value.packed_encoding == packed)
+        else if (direct_encoding == packed)
         {
-            value.mode |= mode;
-            if (value.mechanism_count != UINT8_MAX) value.mechanism_count += 1;
-            if ((row.flags & BUSTER_A64_SYSREG_ROW_FLAG_ALIAS) && value.alias_count != UINT8_MAX) value.alias_count += 1;
+            direct_mode = a64_sysreg_mode_or(direct_mode, (u8)mode);
+            if (direct_count != UINT8_MAX) direct_count = (u8)(direct_count + 1u);
+        }
+        else
+        {
+            // Multiple direct encodings for one expanded spelling are
+            // ambiguous regardless of source-row order.
+            return false;
         }
     }
-    if (found) *result = value;
-    return found;
+    if (!found_direct) return false;
+    value.mode = direct_mode;
+    value.mechanism_count = direct_count;
+    *result = value;
+    return true;
 }
 
 bool aarch64_system_register_lookup_encoding(u16 packed_encoding, Aarch64SystemRegisterLookup* result)
 {
-    if (!result) return false;
+    if (!result || !a64_sysreg_encoding_valid(packed_encoding)) return false;
     Aarch64SystemRegisterLookup value = {0};
     bool found = false;
     bool selected_alias = true;
@@ -217,7 +265,7 @@ bool aarch64_system_register_lookup_encoding(u16 packed_encoding, Aarch64SystemR
         }
         else
         {
-            value.mode |= row.mode;
+            value.mode = a64_sysreg_mode_or(value.mode, row.mode);
             if (value.mechanism_count != UINT8_MAX) value.mechanism_count += 1;
             if (row.accessor_alias && value.alias_count != UINT8_MAX) value.alias_count += 1;
             // Prefer a direct (non-accessor-alias) spelling, then lexical order.
@@ -234,6 +282,7 @@ bool aarch64_system_register_lookup_encoding(u16 packed_encoding, Aarch64SystemR
 
 bool aarch64_system_register_name_is_eligible(String8 name, Aarch64SystemRegisterMode mode)
 {
+    if (!a64_sysreg_string_valid(name) || !name.length) return false;
     if (mode != AARCH64_SYSTEM_REGISTER_MODE_READ && mode != AARCH64_SYSTEM_REGISTER_MODE_WRITE && mode != AARCH64_SYSTEM_REGISTER_MODE_READ_WRITE)
         return false;
     Aarch64SystemRegisterLookup lookup = {0};
@@ -243,7 +292,7 @@ bool aarch64_system_register_name_is_eligible(String8 name, Aarch64SystemRegiste
 
 BUSTER_GLOBAL_LOCAL bool a64_sysreg_decimal(String8 text, u32* value)
 {
-    if (!text.length || !value) return false;
+    if (!text.length || !value || !a64_sysreg_string_valid(text)) return false;
     u32 result = 0;
     for (u64 index = 0; index < text.length; index += 1)
     {
@@ -257,6 +306,7 @@ BUSTER_GLOBAL_LOCAL bool a64_sysreg_decimal(String8 text, u32* value)
 
 BUSTER_GLOBAL_LOCAL bool a64_sysreg_match_prefix(String8 text, u64* position, char const* prefix)
 {
+    if (!a64_sysreg_string_valid(text) || !position || !prefix) return false;
     String8 p = string_from_pointer((char8*)prefix);
     if (*position > text.length || p.length > text.length - *position || !a64_sysreg_name_equal(string_slice(text, *position, *position + p.length), p)) return false;
     *position += p.length;
@@ -265,7 +315,7 @@ BUSTER_GLOBAL_LOCAL bool a64_sysreg_match_prefix(String8 text, u64* position, ch
 
 bool aarch64_system_register_parse_raw_s3(String8 text, u16* packed_encoding)
 {
-    if (!packed_encoding || !text.length) return false;
+    if (!packed_encoding || !text.length || !a64_sysreg_string_valid(text)) return false;
     u64 at = 0; u32 op1 = 0, crn = 0, crm = 0, op2 = 0;
     if (!a64_sysreg_match_prefix(text, &at, "S3_")) return false;
     u64 start = at; while (at < text.length && text.pointer[at] >= '0' && text.pointer[at] <= '9') at += 1;
@@ -276,13 +326,15 @@ bool aarch64_system_register_parse_raw_s3(String8 text, u16* packed_encoding)
     if (!a64_sysreg_decimal(string_slice(text, start, at), &crm) || crm > 15 || !a64_sysreg_match_prefix(text, &at, "_")) return false;
     start = at; while (at < text.length && text.pointer[at] >= '0' && text.pointer[at] <= '9') at += 1;
     if (!a64_sysreg_decimal(string_slice(text, start, at), &op2) || op2 > 7 || at != text.length) return false;
-    *packed_encoding = (u16)((3u << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2);
+    u16 packed = (u16)((3u << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2);
+    if (!a64_sysreg_encoding_valid(packed)) return false;
+    *packed_encoding = packed;
     return true;
 }
 
 bool aarch64_system_register_format_raw_s3(Arena* arena, u16 packed_encoding, String8* result)
 {
-    if (!arena || !result || ((packed_encoding >> 14) & 3u) != 3u) return false;
+    if (!arena || !result || !a64_sysreg_encoding_valid(packed_encoding) || ((packed_encoding >> 14) & 3u) != 3u) return false;
     u32 op1 = (packed_encoding >> 11) & 7u, crn = (packed_encoding >> 7) & 15u, crm = (packed_encoding >> 3) & 15u, op2 = packed_encoding & 7u;
     u64 mark = arena->position;
     String8 text = string_format(arena, S8("S3_{u32}_C{u32}_C{u32}_{u32}"), op1, crn, crm, op2);
@@ -302,7 +354,9 @@ BUSTER_GLOBAL_LOCAL bool a64_sysreg_parameter_encoding(BusterA64SysregGeneratedR
         return false;
     u32 offset = row.parameter_encoding_offset + (index - row.array_start);
     if (offset >= BUSTER_A64_SYSREG_PARAMETER_ENCODING_COUNT || index - row.array_start >= row.parameter_encoding_count) return false;
-    *result = buster_a64_sysreg_generated_parameter_encodings[offset];
+    u16 packed = buster_a64_sysreg_generated_parameter_encodings[offset];
+    if (!a64_sysreg_encoding_valid(packed)) return false;
+    *result = packed;
     return true;
 }
 
@@ -323,7 +377,7 @@ BUSTER_GLOBAL_LOCAL char8* a64_sysreg_decimal_write(char8* destination, u32 valu
 
 bool aarch64_system_register_expand_name_encoding(Arena* arena, String8 family, u32 index, String8* result, u16* packed_encoding)
 {
-    if (!arena || !result || !packed_encoding || !family.length) return false;
+    if (!arena || !result || !packed_encoding || !family.length || !a64_sysreg_string_valid(family)) return false;
     BusterA64SysregGeneratedRow selected = {0}; bool found = false;
     for (u32 i = 0; i < aarch64_system_register_count(); i += 1)
     {
@@ -336,6 +390,7 @@ bool aarch64_system_register_expand_name_encoding(Arena* arena, String8 family, 
     if (!found || index < selected.array_start || index > selected.array_end) return false;
     u16 packed = 0;
     if (!a64_sysreg_parameter_encoding(selected, index, &packed)) return false;
+    if (!a64_sysreg_encoding_valid(packed)) return false;
     u32 decimal_length = a64_sysreg_decimal_length(index);
     u64 capacity = family.length;
     for (u64 i = 0; i < family.length; i += 1)
@@ -379,13 +434,14 @@ bool aarch64_system_register_expand_name_encoding(Arena* arena, String8 family, 
 
 bool aarch64_system_register_expand_name(Arena* arena, String8 family, u32 index, String8* result)
 {
+    if (!a64_sysreg_string_valid(family) || !family.length) return false;
     u16 ignored = 0;
     return aarch64_system_register_expand_name_encoding(arena, family, index, result, &ignored);
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_sysreg_encode_common(u16 packed, u32 rt, bool read, u32* word)
 {
-    if (!word || rt > 31u || ((packed >> 14) & 3u) < 2u) return false;
+    if (!word || !a64_sysreg_encoding_valid(packed) || rt > 31u || ((packed >> 14) & 3u) < 2u) return false;
     u32 op0 = (packed >> 14) & 3u, op1 = (packed >> 11) & 7u, crn = (packed >> 7) & 15u, crm = (packed >> 3) & 15u, op2 = packed & 7u;
     u32 value = 0xd5000000u | (1u << 20) | (read ? (1u << 21) : 0u) | ((op0 - 2u) << 19) | (op1 << 16) | (crn << 12) |
                 (crm << 8) | (op2 << 5) | rt;
@@ -408,7 +464,7 @@ BUSTER_GLOBAL_LOCAL bool a64_sysreg_encode_pair_common(u16 packed, u32 rt, bool 
     // MRRS/MSRR name an even/odd consecutive register pair.  X31 is not a
     // legal member of that pair, and an odd first register cannot describe the
     // architectural pair encoding.
-    if (rt > 30u || (rt & 1u) || ((packed >> 14) & 3u) != 3u) return false;
+    if (!a64_sysreg_encoding_valid(packed) || rt > 30u || (rt & 1u) || ((packed >> 14) & 3u) != 3u) return false;
     if (!a64_sysreg_encode_common(packed, rt, read, word)) return false;
     *word |= 1u << 22;
     return true;
@@ -432,8 +488,10 @@ bool aarch64_system_register_decode_word(u32 word, bool* is_read, u16* packed_en
     bool write = top == 0xd5100000u;
     if (!read && !write) return false;
     u32 op0 = 2u + ((word >> 19) & 1u), op1 = (word >> 16) & 7u, crn = (word >> 12) & 15u, crm = (word >> 8) & 15u, op2 = (word >> 5) & 7u;
+    u16 packed = (u16)((op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2);
+    if (!a64_sysreg_encoding_valid(packed)) return false;
     *is_read = read;
-    *packed_encoding = (u16)((op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2);
+    *packed_encoding = packed;
     *rt = word & 31u;
     return true;
 }
@@ -450,8 +508,10 @@ bool aarch64_system_register_decode_pair_word(u32 word, bool* is_read, u16* pack
     u32 op0 = 2u + ((word >> 19) & 1u), op1 = (word >> 16) & 7u, crn = (word >> 12) & 15u,
         crm = (word >> 8) & 15u, op2 = (word >> 5) & 7u;
     if (op0 != 3u) return false;
+    u16 packed = (u16)((op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2);
+    if (!a64_sysreg_encoding_valid(packed)) return false;
     *is_read = read;
-    *packed_encoding = (u16)((op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2);
+    *packed_encoding = packed;
     *rt = first;
     *rt2 = first + 1u;
     return true;
