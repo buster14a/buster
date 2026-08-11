@@ -151,13 +151,55 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
     imported_data.name = S8("jit_test_external_data");
     imported_data.kind = OBJECT_SYMBOL_DATA;
     ObjectRelocation absolute_import = imported_relocation;
+    absolute_import.addend = 0;
     absolute_import.kind = OBJECT_RELOCATION_ABSOLUTE64;
     ObjectFile external_data_object = imported_object;
     external_data_object.symbols = &imported_data;
     external_data_object.relocations = &absolute_import;
     JitProgram external_data_program = jit_link_object(&external_data_object, (JitOptions){0});
+#if BUSTER_CPU_ARCH_X86_64
+    BUSTER_TEST(arguments, external_data_program.error == JIT_ERROR_UNRESOLVED_IMPORT);
+#else
     BUSTER_TEST(arguments, external_data_program.error == JIT_ERROR_EXTERNAL_DATA);
+#endif
     BUSTER_STRING_TEST(arguments, external_data_program.failing_symbol, imported_data.name);
+    BUSTER_TEST(arguments, !external_data_program.allocation_base);
+
+#if BUSTER_CPU_ARCH_X86_64
+    u64 external_data_value = UINT64_C(0x1122334455667788);
+    JitHostBinding external_data_binding = {
+        .name = imported_data.name,
+        .address = &external_data_value,
+        .kind = OBJECT_SYMBOL_DATA,
+    };
+    ObjectRelocation unsupported_data_relocation = imported_relocation;
+    ObjectFile unsupported_data_object = external_data_object;
+    unsupported_data_object.relocations = &unsupported_data_relocation;
+    JitProgram unsupported_data_program =
+        jit_link_object(&unsupported_data_object, (JitOptions){.bindings = &external_data_binding, .binding_count = 1});
+    BUSTER_TEST(arguments, unsupported_data_program.error == JIT_ERROR_EXTERNAL_DATA);
+    BUSTER_STRING_TEST(arguments, unsupported_data_program.failing_symbol, imported_data.name);
+    BUSTER_TEST(arguments, !unsupported_data_program.allocation_base);
+
+#if !BUSTER_SANITIZE && !BUSTER_MACOS && !BUSTER_IOS && !BUSTER_ANDROID
+    JitProgram bound_data_program =
+        jit_link_object(&external_data_object, (JitOptions){.bindings = &external_data_binding, .binding_count = 1});
+    BUSTER_TEST(arguments, bound_data_program.error == JIT_ERROR_NONE);
+    BUSTER_TEST(arguments, bound_data_program.allocation_base && bound_data_program.section_addresses[0]);
+    if (bound_data_program.error == JIT_ERROR_NONE && bound_data_program.section_addresses[0])
+    {
+        u64 linked_address = 0;
+        memcpy(&linked_address, bound_data_program.section_addresses[0], sizeof(linked_address));
+        BUSTER_TEST(arguments, linked_address == (u64)(uintptr_t)&external_data_value);
+        external_data_value = UINT64_C(0x8877665544332211);
+        u64 linked_value = 0;
+        memcpy(&linked_value, (void*)(uintptr_t)linked_address, sizeof(linked_value));
+        BUSTER_TEST(arguments, linked_value == external_data_value);
+    }
+    jit_program_release(&bound_data_program);
+    BUSTER_TEST(arguments, !bound_data_program.allocation_base && !bound_data_program.object);
+#endif
+#endif
 
     u8 tls_byte = 1;
     ObjectSection tls_section = {

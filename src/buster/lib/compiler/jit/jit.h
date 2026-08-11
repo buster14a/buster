@@ -42,8 +42,8 @@ struct JitOptions
 typedef struct JitProgram JitProgram;
 // Single-owner executable mapping. Do not copy a successfully linked program:
 // symbol addresses remain valid only until release, and release must not race
-// code executing from the mapping. Bound host targets must remain valid for
-// every execution that can reach their import thunks.
+// code executing from the mapping. Bound host targets, including imported data
+// addresses, must remain valid for every execution that can reach them.
 struct JitProgram
 {
     // Primary mapping, followed by an optional contiguous second mapping on
