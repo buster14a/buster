@@ -6331,8 +6331,64 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_relative_mnemonic(String8 mnemoni
            assembly_word_equal(mnemonic, S8("xbegin"));
 }
 
+BUSTER_GLOBAL_LOCAL String8 assembly_x86_metadata_att_string_alias(AssemblySyntax syntax, String8 mnemonic)
+{
+    if (syntax != ASSEMBLY_SYNTAX_ATT) return mnemonic;
+    if (assembly_word_equal(mnemonic, S8("movsl"))) return S8("movsd");
+    if (assembly_word_equal(mnemonic, S8("cmpsl"))) return S8("cmpsd");
+    if (assembly_word_equal(mnemonic, S8("stosl"))) return S8("stosd");
+    if (assembly_word_equal(mnemonic, S8("lodsl"))) return S8("lodsd");
+    if (assembly_word_equal(mnemonic, S8("scasl"))) return S8("scasd");
+    if (assembly_word_equal(mnemonic, S8("insl"))) return S8("insd");
+    if (assembly_word_equal(mnemonic, S8("outsl"))) return S8("outsd");
+    return mnemonic;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_string_has_token(BusterX86MetadataString string, String8 token)
+{
+    u32 offset = 0;
+    while (offset < string.length)
+    {
+        while (offset < string.length && assembly_space(buster_x86_metadata_string_byte(string, offset))) offset += 1;
+        u32 start = offset;
+        while (offset < string.length && !assembly_space(buster_x86_metadata_string_byte(string, offset))) offset += 1;
+        u32 length = offset - start;
+        if (length != token.length) continue;
+        bool equal = true;
+        for (u32 index = 0; index < length; index += 1)
+        {
+            if (assembly_ascii_lower(buster_x86_metadata_string_byte(string, start + index)) !=
+                assembly_ascii_lower(token.pointer[index]))
+            {
+                equal = false;
+                break;
+            }
+        }
+        if (equal) return true;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_mnemonic_has_att_operand_order_exception(String8 mnemonic)
+{
+    if (!assembly_word_equal(mnemonic, S8("enter"))) return false;
+    BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
+    for (u32 position = 0; position < candidates.count; position += 1)
+    {
+        u32 form_id = 0;
+        BusterX86MetadataForm form = {0};
+        if (buster_x86_metadata_candidate_at(candidates, position, &form_id) && buster_x86_metadata_form(form_id, &form) &&
+            assembly_x86_metadata_string_has_token(form.attributes, S8("ATT_OPERAND_ORDER_EXCEPTION")))
+            return true;
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL String8 assembly_x86_metadata_mnemonic(String8 mnemonic)
 {
+    if (assembly_word_equal(mnemonic, S8("loopz"))) return S8("loope");
+    if (assembly_word_equal(mnemonic, S8("loopnz"))) return S8("loopne");
+    if (assembly_word_equal(mnemonic, S8("xlatb"))) return S8("xlat");
     if (buster_x86_metadata_lookup_mnemonic(mnemonic).count)
     {
         return mnemonic;
@@ -6639,15 +6695,27 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         String8 prefix = string_slice(work, 0, prefix_end);
         if (assembly_word_equal(prefix, S8("lock")))
         {
+            if (lock)
+            {
+                return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+            }
             lock = true;
         }
         else if (assembly_word_equal(prefix, S8("rep")) || assembly_word_equal(prefix, S8("repe")) ||
                  assembly_word_equal(prefix, S8("repz")))
         {
+            if (rep || repne)
+            {
+                return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+            }
             rep = true;
         }
         else if (assembly_word_equal(prefix, S8("repne")) || assembly_word_equal(prefix, S8("repnz")))
         {
+            if (rep || repne)
+            {
+                return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+            }
             repne = true;
         }
         else if (assembly_word_equal(prefix, S8("addr32")))
@@ -6683,7 +6751,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     u64 mnemonic_end = 0;
     while (mnemonic_end < work.length && !assembly_space(work.pointer[mnemonic_end])) mnemonic_end += 1;
     String8 source_mnemonic = string_slice(work, 0, mnemonic_end);
-    String8 mnemonic = assembly_x86_metadata_mnemonic(source_mnemonic);
+    String8 metadata_source_mnemonic = assembly_x86_metadata_att_string_alias(syntax, source_mnemonic);
+    String8 mnemonic = assembly_x86_metadata_mnemonic(metadata_source_mnemonic);
     String8 mnemonic_suffix_base = {0};
     AssemblyInstructionInfo mnemonic_suffix_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
     u8 mnemonic_suffix_width = 0;
@@ -6846,7 +6915,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         }
         operand_count -= 1;
     }
-    if (syntax == ASSEMBLY_SYNTAX_ATT)
+    bool att_operand_order_exception = syntax == ASSEMBLY_SYNTAX_ATT &&
+                                       assembly_x86_metadata_mnemonic_has_att_operand_order_exception(mnemonic);
+    if (syntax == ASSEMBLY_SYNTAX_ATT && !att_operand_order_exception)
     {
         for (u32 left = 0; left < operand_count / 2; left += 1)
         {

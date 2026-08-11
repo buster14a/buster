@@ -1,6 +1,12 @@
 #include <buster/tests/compiler/assembly/assembly_test.h>
 #if BUSTER_INCLUDE_TESTS
 
+BUSTER_GLOBAL_LOCAL bool assembly_test_bytes_equal(ByteSlice actual, u8 const* expected, u32 expected_count)
+{
+    return actual.length == expected_count && (!expected_count || (actual.pointer && expected &&
+                                                                     memcmp(actual.pointer, expected, expected_count) == 0));
+}
+
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5431,6 +5437,446 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                         missing_selector_att.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE) &&
                                        missing_selector_att.bytes.length == 0 && missing_selector_att.relocation_count == 0 &&
                                        missing_selector_att.symbol_count == 0);
+        }
+    }
+
+    {
+        u8 const expected_classic_intel[] = {
+            0xa4,
+            0x66, 0xa5,
+            0xa5,
+            0x48, 0xa5,
+            0xa6,
+            0x66, 0xa7,
+            0xa7,
+            0x48, 0xa7,
+            0xaa,
+            0x66, 0xab,
+            0xab,
+            0x48, 0xab,
+            0xac,
+            0x66, 0xad,
+            0xad,
+            0x48, 0xad,
+            0xae,
+            0x66, 0xaf,
+            0xaf,
+            0x48, 0xaf,
+            0x6c,
+            0x66, 0x6d,
+            0x6d,
+            0x6e,
+            0x66, 0x6f,
+            0x6f,
+        };
+        AssemblyEncodeResult classic_intel = assembly_encode(
+            arguments->arena,
+            S8("movsb\nmovsw\nmovsd\nmovsq\n"
+               "cmpsb\ncmpsw\ncmpsd\ncmpsq\n"
+               "stosb\nstosw\nstosd\nstosq\n"
+               "lodsb\nlodsw\nlodsd\nlodsq\n"
+               "scasb\nscasw\nscasd\nscasq\n"
+               "insb\ninsw\ninsd\noutsb\noutsw\noutsd\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, classic_intel.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(classic_intel.bytes, expected_classic_intel,
+                                                             BUSTER_ARRAY_LENGTH(expected_classic_intel)) &&
+                                   classic_intel.relocation_count == 0 && classic_intel.symbol_count == 0);
+
+        AssemblyEncodeResult classic_att = assembly_encode(
+            arguments->arena,
+            S8("movsb\nmovsw\nmovsl\nmovsq\n"
+               "cmpsb\ncmpsw\ncmpsl\ncmpsq\n"
+               "stosb\nstosw\nstosl\nstosq\n"
+               "lodsb\nlodsw\nlodsl\nlodsq\n"
+               "scasb\nscasw\nscasl\nscasq\n"
+               "insb\ninsw\ninsl\noutsb\noutsw\noutsl\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, classic_att.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(classic_att.bytes, expected_classic_intel,
+                                                             BUSTER_ARRAY_LENGTH(expected_classic_intel)) &&
+                                   classic_att.relocation_count == 0 && classic_att.symbol_count == 0);
+
+        typedef struct ClassicRepeatEncodingCase ClassicRepeatEncodingCase;
+        struct ClassicRepeatEncodingCase
+        {
+            String8 intel;
+            String8 att;
+            u8 bytes[3];
+            u8 byte_count;
+        };
+        static ClassicRepeatEncodingCase const classic_repeat_matrix[] = {
+            {S8_INITIALIZER("rep movsb"), S8_INITIALIZER("rep movsb"), {0xf3, 0xa4}, 2},
+            {S8_INITIALIZER("rep movsw"), S8_INITIALIZER("rep movsw"), {0xf3, 0x66, 0xa5}, 3},
+            {S8_INITIALIZER("rep movsd"), S8_INITIALIZER("rep movsl"), {0xf3, 0xa5}, 2},
+            {S8_INITIALIZER("rep movsq"), S8_INITIALIZER("rep movsq"), {0xf3, 0x48, 0xa5}, 3},
+            {S8_INITIALIZER("rep cmpsb"), S8_INITIALIZER("rep cmpsb"), {0xf3, 0xa6}, 2},
+            {S8_INITIALIZER("repz cmpsw"), S8_INITIALIZER("repz cmpsw"), {0xf3, 0x66, 0xa7}, 3},
+            {S8_INITIALIZER("repe cmpsd"), S8_INITIALIZER("repe cmpsl"), {0xf3, 0xa7}, 2},
+            {S8_INITIALIZER("repz cmpsq"), S8_INITIALIZER("repz cmpsq"), {0xf3, 0x48, 0xa7}, 3},
+            {S8_INITIALIZER("repne cmpsb"), S8_INITIALIZER("repne cmpsb"), {0xf2, 0xa6}, 2},
+            {S8_INITIALIZER("repnz cmpsw"), S8_INITIALIZER("repnz cmpsw"), {0xf2, 0x66, 0xa7}, 3},
+            {S8_INITIALIZER("repne cmpsd"), S8_INITIALIZER("repne cmpsl"), {0xf2, 0xa7}, 2},
+            {S8_INITIALIZER("repnz cmpsq"), S8_INITIALIZER("repnz cmpsq"), {0xf2, 0x48, 0xa7}, 3},
+            {S8_INITIALIZER("rep stosb"), S8_INITIALIZER("rep stosb"), {0xf3, 0xaa}, 2},
+            {S8_INITIALIZER("rep stosw"), S8_INITIALIZER("rep stosw"), {0xf3, 0x66, 0xab}, 3},
+            {S8_INITIALIZER("rep stosd"), S8_INITIALIZER("rep stosl"), {0xf3, 0xab}, 2},
+            {S8_INITIALIZER("rep stosq"), S8_INITIALIZER("rep stosq"), {0xf3, 0x48, 0xab}, 3},
+            {S8_INITIALIZER("rep lodsb"), S8_INITIALIZER("rep lodsb"), {0xf3, 0xac}, 2},
+            {S8_INITIALIZER("rep lodsw"), S8_INITIALIZER("rep lodsw"), {0xf3, 0x66, 0xad}, 3},
+            {S8_INITIALIZER("rep lodsd"), S8_INITIALIZER("rep lodsl"), {0xf3, 0xad}, 2},
+            {S8_INITIALIZER("rep lodsq"), S8_INITIALIZER("rep lodsq"), {0xf3, 0x48, 0xad}, 3},
+            {S8_INITIALIZER("rep insb"), S8_INITIALIZER("rep insb"), {0xf3, 0x6c}, 2},
+            {S8_INITIALIZER("rep insw"), S8_INITIALIZER("rep insw"), {0xf3, 0x66, 0x6d}, 3},
+            {S8_INITIALIZER("rep insd"), S8_INITIALIZER("rep insl"), {0xf3, 0x6d}, 2},
+            {S8_INITIALIZER("rep outsb"), S8_INITIALIZER("rep outsb"), {0xf3, 0x6e}, 2},
+            {S8_INITIALIZER("rep outsw"), S8_INITIALIZER("rep outsw"), {0xf3, 0x66, 0x6f}, 3},
+            {S8_INITIALIZER("rep outsd"), S8_INITIALIZER("rep outsl"), {0xf3, 0x6f}, 2},
+            {S8_INITIALIZER("rep scasb"), S8_INITIALIZER("rep scasb"), {0xf3, 0xae}, 2},
+            {S8_INITIALIZER("repz scasw"), S8_INITIALIZER("repz scasw"), {0xf3, 0x66, 0xaf}, 3},
+            {S8_INITIALIZER("repe scasd"), S8_INITIALIZER("repe scasl"), {0xf3, 0xaf}, 2},
+            {S8_INITIALIZER("repz scasq"), S8_INITIALIZER("repz scasq"), {0xf3, 0x48, 0xaf}, 3},
+            {S8_INITIALIZER("repne scasb"), S8_INITIALIZER("repne scasb"), {0xf2, 0xae}, 2},
+            {S8_INITIALIZER("repnz scasw"), S8_INITIALIZER("repnz scasw"), {0xf2, 0x66, 0xaf}, 3},
+            {S8_INITIALIZER("repne scasd"), S8_INITIALIZER("repne scasl"), {0xf2, 0xaf}, 2},
+            {S8_INITIALIZER("repnz scasq"), S8_INITIALIZER("repnz scasq"), {0xf2, 0x48, 0xaf}, 3},
+            {S8_INITIALIZER("repne movsb"), S8_INITIALIZER("repne movsb"), {0xf2, 0xa4}, 2},
+            {S8_INITIALIZER("repnz movsw"), S8_INITIALIZER("repnz movsw"), {0xf2, 0x66, 0xa5}, 3},
+            {S8_INITIALIZER("repne movsd"), S8_INITIALIZER("repne movsl"), {0xf2, 0xa5}, 2},
+            {S8_INITIALIZER("repnz movsq"), S8_INITIALIZER("repnz movsq"), {0xf2, 0x48, 0xa5}, 3},
+            {S8_INITIALIZER("repnz stosb"), S8_INITIALIZER("repnz stosb"), {0xf2, 0xaa}, 2},
+            {S8_INITIALIZER("repne stosw"), S8_INITIALIZER("repne stosw"), {0xf2, 0x66, 0xab}, 3},
+            {S8_INITIALIZER("repnz stosd"), S8_INITIALIZER("repnz stosl"), {0xf2, 0xab}, 2},
+            {S8_INITIALIZER("repne stosq"), S8_INITIALIZER("repne stosq"), {0xf2, 0x48, 0xab}, 3},
+            {S8_INITIALIZER("repne lodsb"), S8_INITIALIZER("repne lodsb"), {0xf2, 0xac}, 2},
+            {S8_INITIALIZER("repnz lodsw"), S8_INITIALIZER("repnz lodsw"), {0xf2, 0x66, 0xad}, 3},
+            {S8_INITIALIZER("repne lodsd"), S8_INITIALIZER("repne lodsl"), {0xf2, 0xad}, 2},
+            {S8_INITIALIZER("repnz lodsq"), S8_INITIALIZER("repnz lodsq"), {0xf2, 0x48, 0xad}, 3},
+            {S8_INITIALIZER("repnz insb"), S8_INITIALIZER("repnz insb"), {0xf2, 0x6c}, 2},
+            {S8_INITIALIZER("repne insw"), S8_INITIALIZER("repne insw"), {0xf2, 0x66, 0x6d}, 3},
+            {S8_INITIALIZER("repnz insd"), S8_INITIALIZER("repnz insl"), {0xf2, 0x6d}, 2},
+            {S8_INITIALIZER("repne outsb"), S8_INITIALIZER("repne outsb"), {0xf2, 0x6e}, 2},
+            {S8_INITIALIZER("repnz outsw"), S8_INITIALIZER("repnz outsw"), {0xf2, 0x66, 0x6f}, 3},
+            {S8_INITIALIZER("repne outsd"), S8_INITIALIZER("repne outsl"), {0xf2, 0x6f}, 2},
+        };
+        for (u32 repeat_index = 0; repeat_index < BUSTER_ARRAY_LENGTH(classic_repeat_matrix); repeat_index += 1)
+        {
+            ClassicRepeatEncodingCase repeat_case = classic_repeat_matrix[repeat_index];
+            AssemblyEncodeResult repeat_intel = assembly_encode(
+                arguments->arena, repeat_case.intel,
+                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult repeat_att = assembly_encode(
+                arguments->arena, repeat_case.att,
+                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            BUSTER_TEST(arguments, repeat_intel.diagnostic_count == 0 &&
+                                       assembly_test_bytes_equal(repeat_intel.bytes, repeat_case.bytes, repeat_case.byte_count) &&
+                                       repeat_intel.relocation_count == 0 && repeat_intel.symbol_count == 0 &&
+                                       repeat_att.diagnostic_count == 0 &&
+                                       assembly_test_bytes_equal(repeat_att.bytes, repeat_case.bytes, repeat_case.byte_count) &&
+                                       repeat_att.relocation_count == 0 && repeat_att.symbol_count == 0);
+        }
+
+        typedef struct ClassicAddressSizeEncodingCase ClassicAddressSizeEncodingCase;
+        struct ClassicAddressSizeEncodingCase
+        {
+            String8 intel;
+            String8 att;
+            u8 bytes[3];
+            u8 byte_count;
+        };
+        static ClassicAddressSizeEncodingCase const classic_address_size_matrix[] = {
+            {S8_INITIALIZER("addr32 movsb"), S8_INITIALIZER("addr32 movsb"), {0x67, 0xa4}, 2},
+            {S8_INITIALIZER("addr32 cmpsb"), S8_INITIALIZER("addr32 cmpsb"), {0x67, 0xa6}, 2},
+            {S8_INITIALIZER("addr32 stosb"), S8_INITIALIZER("addr32 stosb"), {0x67, 0xaa}, 2},
+            {S8_INITIALIZER("addr32 lodsb"), S8_INITIALIZER("addr32 lodsb"), {0x67, 0xac}, 2},
+            {S8_INITIALIZER("addr32 scasb"), S8_INITIALIZER("addr32 scasb"), {0x67, 0xae}, 2},
+            {S8_INITIALIZER("addr32 insb"), S8_INITIALIZER("addr32 insb"), {0x67, 0x6c}, 2},
+            {S8_INITIALIZER("addr32 outsb"), S8_INITIALIZER("addr32 outsb"), {0x67, 0x6e}, 2},
+            {S8_INITIALIZER("addr32 rep movsb"), S8_INITIALIZER("addr32 rep movsb"), {0x67, 0xf3, 0xa4}, 3},
+            {S8_INITIALIZER("addr32 repe cmpsb"), S8_INITIALIZER("addr32 repz cmpsb"), {0x67, 0xf3, 0xa6}, 3},
+            {S8_INITIALIZER("addr32 rep stosb"), S8_INITIALIZER("addr32 rep stosb"), {0x67, 0xf3, 0xaa}, 3},
+            {S8_INITIALIZER("addr32 rep lodsb"), S8_INITIALIZER("addr32 rep lodsb"), {0x67, 0xf3, 0xac}, 3},
+            {S8_INITIALIZER("addr32 rep insb"), S8_INITIALIZER("addr32 rep insb"), {0x67, 0xf3, 0x6c}, 3},
+            {S8_INITIALIZER("addr32 rep outsb"), S8_INITIALIZER("addr32 rep outsb"), {0x67, 0xf3, 0x6e}, 3},
+            {S8_INITIALIZER("addr32 repne scasb"), S8_INITIALIZER("addr32 repnz scasb"), {0x67, 0xf2, 0xae}, 3},
+        };
+        for (u32 address_size_index = 0; address_size_index < BUSTER_ARRAY_LENGTH(classic_address_size_matrix);
+             address_size_index += 1)
+        {
+            ClassicAddressSizeEncodingCase address_size_case = classic_address_size_matrix[address_size_index];
+            AssemblyEncodeResult address_size_intel = assembly_encode(
+                arguments->arena, address_size_case.intel,
+                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult address_size_att = assembly_encode(
+                arguments->arena, address_size_case.att,
+                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            BUSTER_TEST(arguments, address_size_intel.diagnostic_count == 0 &&
+                                       assembly_test_bytes_equal(address_size_intel.bytes, address_size_case.bytes,
+                                                                 address_size_case.byte_count) &&
+                                       address_size_intel.relocation_count == 0 && address_size_intel.symbol_count == 0 &&
+                                       address_size_att.diagnostic_count == 0 &&
+                                       assembly_test_bytes_equal(address_size_att.bytes, address_size_case.bytes,
+                                                                 address_size_case.byte_count) &&
+                                       address_size_att.relocation_count == 0 && address_size_att.symbol_count == 0);
+        }
+
+        u8 const expected_classic_repeat[] = {
+            0xf3, 0xa4,
+            0xf3, 0xa6,
+            0xf3, 0x66, 0xa7,
+            0xf2, 0xae,
+            0xf2, 0xaf,
+            0xf3, 0x66, 0xab,
+            0xf3, 0xad,
+            0xf3, 0x6d,
+            0xf3, 0x6f,
+        };
+        AssemblyEncodeResult classic_repeat = assembly_encode(
+            arguments->arena,
+            S8("rep movsb\nrepe cmpsb\nrepz cmpsw\nrepne scasb\nrepnz scasd\n"
+               "rep stosw\nrep lodsd\nrep insd\nrep outsd\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, classic_repeat.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(classic_repeat.bytes, expected_classic_repeat,
+                                                             BUSTER_ARRAY_LENGTH(expected_classic_repeat)) &&
+                                   classic_repeat.relocation_count == 0 && classic_repeat.symbol_count == 0);
+
+        u8 const expected_loop[] = {0xe2, 0x00, 0xe1, 0x00, 0xe0, 0x00};
+        AssemblyEncodeResult loop_forward = assembly_encode(
+            arguments->arena, S8("loop forward\nforward:\nloope backward\nbackward:\nloopne done\ndone:\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, loop_forward.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(loop_forward.bytes, expected_loop, BUSTER_ARRAY_LENGTH(expected_loop)) &&
+                                   loop_forward.relocation_count == 0 && loop_forward.symbol_count == 3);
+
+        u8 const expected_loop_aliases[] = {0xe1, 0x00, 0xe0, 0x00};
+        AssemblyEncodeResult loop_aliases = assembly_encode(
+            arguments->arena, S8("loopz target\ntarget:\nloopnz done\ndone:\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, loop_aliases.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(loop_aliases.bytes, expected_loop_aliases,
+                                                             BUSTER_ARRAY_LENGTH(expected_loop_aliases)) &&
+                                   loop_aliases.relocation_count == 0 && loop_aliases.symbol_count == 2);
+
+        AssemblyEncodeResult loop_att = assembly_encode(
+            arguments->arena, S8("loop forward\nforward:\nloopz backward\nbackward:\nloopnz done\ndone:\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, loop_att.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(loop_att.bytes, expected_loop, BUSTER_ARRAY_LENGTH(expected_loop)) &&
+                                   loop_att.relocation_count == 0 && loop_att.symbol_count == 3);
+
+        u8 const expected_backward_loop[] = {0x90, 0xe2, 0xfd};
+        AssemblyEncodeResult loop_backward = assembly_encode(
+            arguments->arena, S8("target:\nnop\nloop target\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, loop_backward.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(loop_backward.bytes, expected_backward_loop,
+                                                             BUSTER_ARRAY_LENGTH(expected_backward_loop)) &&
+                                   loop_backward.relocation_count == 0 && loop_backward.symbol_count == 1);
+
+        u8 const expected_jcxz[] = {0x67, 0xe3, 0x00, 0xe3, 0x00};
+        AssemblyEncodeResult jcxz_long_mode = assembly_encode(
+            arguments->arena, S8("jecxz target\ntarget:\njrcxz done\ndone:\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, jcxz_long_mode.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(jcxz_long_mode.bytes, expected_jcxz,
+                                                             BUSTER_ARRAY_LENGTH(expected_jcxz)) &&
+                                   jcxz_long_mode.relocation_count == 0 && jcxz_long_mode.symbol_count == 2);
+
+        AssemblyEncodeResult jcxz_att = assembly_encode(
+            arguments->arena, S8("jecxz target\ntarget:\njrcxz done\ndone:\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, jcxz_att.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(jcxz_att.bytes, expected_jcxz, BUSTER_ARRAY_LENGTH(expected_jcxz)) &&
+                                   jcxz_att.relocation_count == 0 && jcxz_att.symbol_count == 2);
+
+        AssemblyEncodeResult explicit_addr32_jecxz = assembly_encode(
+            arguments->arena, S8("addr32 jecxz external\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 const expected_explicit_addr32_jecxz[] = {0x67, 0xe3, 0x00};
+        BUSTER_TEST(arguments, explicit_addr32_jecxz.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(explicit_addr32_jecxz.bytes, expected_explicit_addr32_jecxz,
+                                                             BUSTER_ARRAY_LENGTH(expected_explicit_addr32_jecxz)) &&
+                                   explicit_addr32_jecxz.relocation_count == 1 && explicit_addr32_jecxz.symbol_count == 1 &&
+                                   explicit_addr32_jecxz.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC8 &&
+                                   explicit_addr32_jecxz.relocations[0].offset == 2);
+
+        AssemblyEncodeResult explicit_addr32_loop = assembly_encode(
+            arguments->arena, S8("addr32 loop external\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        u8 const expected_explicit_addr32_loop[] = {0x67, 0xe2, 0x00};
+        BUSTER_TEST(arguments, explicit_addr32_loop.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(explicit_addr32_loop.bytes, expected_explicit_addr32_loop,
+                                                             BUSTER_ARRAY_LENGTH(expected_explicit_addr32_loop)) &&
+                                   explicit_addr32_loop.relocation_count == 1 && explicit_addr32_loop.symbol_count == 1 &&
+                                   explicit_addr32_loop.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC8 &&
+                                   explicit_addr32_loop.relocations[0].offset == 2);
+
+        AssemblyEncodeResult invalid_addr32_jrcxz = assembly_encode(
+            arguments->arena, S8("addr32 jrcxz external\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, invalid_addr32_jrcxz.diagnostic_count > 0 && invalid_addr32_jrcxz.bytes.length == 0 &&
+                                   invalid_addr32_jrcxz.relocation_count == 0 && invalid_addr32_jrcxz.symbol_count == 0);
+
+        u8 const expected_enter[] = {0xc8, 0x34, 0x12, 0x56};
+        AssemblyEncodeResult enter_intel = assembly_encode(
+            arguments->arena, S8("enter 0x1234, 0x56\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, enter_intel.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(enter_intel.bytes, expected_enter, BUSTER_ARRAY_LENGTH(expected_enter)));
+        AssemblyEncodeResult enter_att = assembly_encode(
+            arguments->arena, S8("enter $0x1234, $0x56\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, enter_att.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(enter_att.bytes, expected_enter, BUSTER_ARRAY_LENGTH(expected_enter)));
+
+        AssemblyEncodeResult xlat = assembly_encode(
+            arguments->arena, S8("xlat\nxlatb\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 const expected_xlat[] = {0xd7, 0xd7};
+        BUSTER_TEST(arguments, xlat.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(xlat.bytes, expected_xlat, BUSTER_ARRAY_LENGTH(expected_xlat)) &&
+                                   xlat.relocation_count == 0 && xlat.symbol_count == 0);
+
+        AssemblyEncodeResult xlat_att = assembly_encode(
+            arguments->arena, S8("xlat\nxlatb\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, xlat_att.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(xlat_att.bytes, expected_xlat, BUSTER_ARRAY_LENGTH(expected_xlat)) &&
+                                   xlat_att.relocation_count == 0 && xlat_att.symbol_count == 0);
+
+        String8 const invalid_classic_sources[] = {
+            S8("enter 65536, 0\n"),
+            S8("enter 0, 256\n"),
+            S8("movsb rax\n"),
+            S8("lock movsb\n"),
+            S8("lock lock add dword ptr [rax], ecx\n"),
+            S8("jcxz 0\n"),
+            S8("rep rep movsb\n"),
+            S8("repe repne cmpsb\n"),
+            S8("repne repne scasb\n"),
+            S8("repne add rax, rbx\n"),
+        };
+        for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_classic_sources); invalid_index += 1)
+        {
+            AssemblyEncodeResult invalid_classic = assembly_encode(
+                arguments->arena, invalid_classic_sources[invalid_index],
+                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            BUSTER_TEST(arguments, invalid_classic.diagnostic_count > 0 && invalid_classic.bytes.length == 0 &&
+                                       invalid_classic.relocation_count == 0 && invalid_classic.symbol_count == 0);
+        }
+
+        AssemblyEncodeResult invalid_duplicate_lock_att = assembly_encode(
+            arguments->arena, S8("lock lock addl %ecx, (%rax)\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, invalid_duplicate_lock_att.diagnostic_count > 0 && invalid_duplicate_lock_att.bytes.length == 0 &&
+                                   invalid_duplicate_lock_att.relocation_count == 0 && invalid_duplicate_lock_att.symbol_count == 0);
+
+        AssemblyEncodeResult invalid_duplicate_rep_att = assembly_encode(
+            arguments->arena, S8("rep rep movsb\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, invalid_duplicate_rep_att.diagnostic_count > 0 && invalid_duplicate_rep_att.bytes.length == 0 &&
+                                   invalid_duplicate_rep_att.relocation_count == 0 && invalid_duplicate_rep_att.symbol_count == 0);
+
+        typedef struct ClassicPc8BoundaryCase ClassicPc8BoundaryCase;
+        struct ClassicPc8BoundaryCase
+        {
+            String8 source;
+            bool succeeds;
+            u8 displacement;
+        };
+        static ClassicPc8BoundaryCase const classic_pc8_boundary_cases[] = {
+            {S8_INITIALIZER("loop 129\n"), true, 0x7f},
+            {S8_INITIALIZER("loop 130\n"), false, 0},
+            {S8_INITIALIZER("loop -126\n"), true, 0x80},
+            {S8_INITIALIZER("loop -127\n"), false, 0},
+        };
+        for (u32 boundary_index = 0; boundary_index < BUSTER_ARRAY_LENGTH(classic_pc8_boundary_cases); boundary_index += 1)
+        {
+            ClassicPc8BoundaryCase boundary = classic_pc8_boundary_cases[boundary_index];
+            AssemblyEncodeResult boundary_result = assembly_encode(
+                arguments->arena, boundary.source,
+                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            if (boundary.succeeds)
+            {
+                u8 expected[] = {0xe2, boundary.displacement};
+                BUSTER_TEST(arguments, boundary_result.diagnostic_count == 0 &&
+                                           assembly_test_bytes_equal(boundary_result.bytes, expected, 2) &&
+                                           boundary_result.relocation_count == 0 && boundary_result.symbol_count == 0);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, boundary_result.diagnostic_count == 1 &&
+                                           boundary_result.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE &&
+                                           boundary_result.bytes.length == 0 && boundary_result.relocation_count == 0 &&
+                                           boundary_result.symbol_count == 0);
+            }
+        }
+
+        AssemblyEncodeResult valid_then_invalid_classic = assembly_encode(
+            arguments->arena, S8("nop\njcxz 0\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 const expected_valid_then_invalid_classic[] = {0x90};
+        BUSTER_TEST(arguments, valid_then_invalid_classic.diagnostic_count == 1 &&
+                                   assembly_test_bytes_equal(valid_then_invalid_classic.bytes, expected_valid_then_invalid_classic, 1) &&
+                                   valid_then_invalid_classic.relocation_count == 0 && valid_then_invalid_classic.symbol_count == 0);
+
+        AssemblyEncodeResult unresolved_pc8 = assembly_encode(
+            arguments->arena, S8("loop external_loop\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 const expected_unresolved_pc8[] = {0xe2, 0x00};
+        BUSTER_TEST(arguments, unresolved_pc8.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(unresolved_pc8.bytes, expected_unresolved_pc8,
+                                                             BUSTER_ARRAY_LENGTH(expected_unresolved_pc8)) &&
+                                   unresolved_pc8.symbol_count == 1 && unresolved_pc8.relocation_count == 1 &&
+                                   unresolved_pc8.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC8 &&
+                                   unresolved_pc8.relocations[0].offset == 1 && unresolved_pc8.relocations[0].addend == -1 &&
+                                   unresolved_pc8.relocations[0].symbol == 0);
+
+        typedef struct ClassicUnresolvedPc8Case ClassicUnresolvedPc8Case;
+        struct ClassicUnresolvedPc8Case
+        {
+            String8 mnemonic;
+            u8 expected_prefix;
+            u8 expected_opcode;
+            u32 expected_offset;
+        };
+        static ClassicUnresolvedPc8Case const classic_unresolved_pc8_cases[] = {
+            {S8_INITIALIZER("jecxz"), 0x67, 0xe3, 2},
+            {S8_INITIALIZER("jrcxz"), 0x00, 0xe3, 1},
+        };
+        for (u32 unresolved_index = 0; unresolved_index < BUSTER_ARRAY_LENGTH(classic_unresolved_pc8_cases); unresolved_index += 1)
+        {
+            ClassicUnresolvedPc8Case unresolved_case = classic_unresolved_pc8_cases[unresolved_index];
+            AssemblyEncodeResult unresolved_intel = assembly_encode(
+                arguments->arena, string_format(arguments->arena, S8("{S8} external\n"), unresolved_case.mnemonic),
+                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult unresolved_att = assembly_encode(
+                arguments->arena, string_format(arguments->arena, S8("{S8} external\n"), unresolved_case.mnemonic),
+                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            u8 expected_unresolved[3] = {0};
+            if (unresolved_case.expected_prefix)
+            {
+                expected_unresolved[0] = unresolved_case.expected_prefix;
+                expected_unresolved[1] = unresolved_case.expected_opcode;
+            }
+            else
+            {
+                expected_unresolved[0] = unresolved_case.expected_opcode;
+            }
+            u32 expected_byte_count = unresolved_case.expected_prefix ? 3 : 2;
+            BUSTER_TEST(arguments, unresolved_intel.diagnostic_count == 0 &&
+                                       assembly_test_bytes_equal(unresolved_intel.bytes, expected_unresolved, expected_byte_count) &&
+                                       unresolved_intel.symbol_count == 1 && unresolved_intel.relocation_count == 1 &&
+                                       unresolved_intel.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC8 &&
+                                       unresolved_intel.relocations[0].offset == unresolved_case.expected_offset &&
+                                       unresolved_intel.relocations[0].addend == -1 && unresolved_intel.relocations[0].symbol == 0 &&
+                                       unresolved_att.diagnostic_count == 0 &&
+                                       assembly_test_bytes_equal(unresolved_att.bytes, expected_unresolved, expected_byte_count) &&
+                                       unresolved_att.symbol_count == 1 && unresolved_att.relocation_count == 1 &&
+                                       unresolved_att.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC8 &&
+                                       unresolved_att.relocations[0].offset == unresolved_case.expected_offset &&
+                                       unresolved_att.relocations[0].addend == -1 && unresolved_att.relocations[0].symbol == 0);
         }
     }
 
