@@ -529,7 +529,8 @@ bool buster_aarch64_control_semantic_patch(u32 row_index, u32 word, s64 displace
 
 BUSTER_GLOBAL_LOCAL bool a64_control_fixup_is_darwin(Target target)
 {
-    return target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+    return target.cpu_arch == CPU_ARCH_AARCH64 &&
+           (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS);
 }
 
 BUSTER_GLOBAL_LOCAL u8 a64_control_relocation_kind(BusterAarch64ControlFixupKind kind)

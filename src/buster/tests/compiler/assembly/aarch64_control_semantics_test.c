@@ -129,6 +129,7 @@ UnitTestResult aarch64_control_semantics_tests(UnitTestArguments* arguments)
     BUSTER_STRING_TEST(arguments, string_from_pointer((char8*)BUSTER_AARCH64_CONTROL_RET_DIGEST),
                        S8("babf7e807a273b459d0fb4caa94e41b9779c9949ec2f7bf4eda1803aa7a734d6"));
     String8 literal_digest = S8("2a29a4d0e6b7d537dde6523e1859678169a4c93c973e4bd1d4f6e87fa6d6e25e");
+    BUSTER_STRING_TEST(arguments, string_from_pointer((char8*)BUSTER_AARCH64_CONTROL_LITERAL_DIGEST), literal_digest);
     BUSTER_STRING_TEST(arguments, string_from_pointer((char8*)buster_aarch64_control_semantic_group_digest(BUSTER_AARCH64_CONTROL_OWNER_COMPLEX_LITERAL)), literal_digest);
     BUSTER_TEST(arguments, literal_digest.length == 64 &&
                                string_from_pointer((char8*)buster_aarch64_control_semantic_group_digest(BUSTER_AARCH64_CONTROL_OWNER_COMPLEX_LITERAL)).length ==
@@ -350,6 +351,14 @@ UnitTestResult aarch64_control_semantics_tests(UnitTestArguments* arguments)
                                external_word == UINT32_C(0x14000000) && fixup.external &&
                                fixup.relocation_kind == BUSTER_AARCH64_CONTROL_RELOCATION_KIND_BRANCH26);
     BUSTER_TEST(arguments, !buster_aarch64_control_semantic_fixup(b_cond, UINT32_C(0x54000000), external, &external_word, &fixup));
+
+    // Object-format policy alone is insufficient: an AArch64 relocation may
+    // never be returned for a non-AArch64 Darwin target.
+    external.target.cpu_arch = CPU_ARCH_X86_64;
+    external_word = UINT32_C(0xfeedface);
+    fixup = (BusterAarch64ControlFixupResult){.displacement = INT64_C(0x1234)};
+    BUSTER_TEST(arguments, !buster_aarch64_control_semantic_fixup(b_row, UINT32_C(0x14000000), external, &external_word, &fixup) &&
+                               external_word == UINT32_C(0xfeedface) && fixup.displacement == INT64_C(0x1234));
 
     return result;
 }
