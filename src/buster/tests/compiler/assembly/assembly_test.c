@@ -4768,7 +4768,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         AssemblyEncodeResult metadata_vsib_att = assembly_encode(
             arguments->arena, S8("vgatherdps %xmm2, (%rax,%xmm1,4), %xmm0\n"),
             (AssemblyEncodeOptions){.target = gather_target, .syntax = ASSEMBLY_SYNTAX_ATT});
-        u8 expected_vsib[] = {0xc4, 0xe2, 0x79, 0x92, 0x04, 0x88};
+        // The final XMM operand is VEX.vvvv (the distinct destination); it
+        // must not be dropped merely because the form also carries VSIB.
+        u8 expected_vsib[] = {0xc4, 0xe2, 0x69, 0x92, 0x04, 0x88};
         BUSTER_TEST(arguments, metadata_vsib_intel.diagnostic_count == 0 && metadata_vsib_intel.bytes.length == sizeof(expected_vsib) &&
                                    memcmp(metadata_vsib_intel.bytes.pointer, expected_vsib, sizeof(expected_vsib)) == 0);
         BUSTER_TEST(arguments, metadata_vsib_att.diagnostic_count == 0 && metadata_vsib_att.bytes.length == sizeof(expected_vsib) &&

@@ -2037,15 +2037,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        BUSTER_TEST(arguments, audit.emitted_count == 10037 && audit.blocked_count == 976 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10037 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 976);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10145 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 599);
+        BUSTER_TEST(arguments, audit.emitted_count == 10039 && audit.blocked_count == 974 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10039 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 974);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10147 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 597);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 293, 5, 1549, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1485, 192, 5, 1520, 176, 6586, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {327, 101, 0, 29, 0, 142, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1485, 192, 5, 1522, 176, 6586, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {327, 101, 0, 27, 0, 142, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2055,7 +2055,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10037, 268, 108, 99, 0, 296, 5, 0, 48, 152, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10039, 268, 108, 99, 0, 296, 3, 0, 48, 152, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -3576,7 +3576,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         gather_operands[1].memory.vsib = true;
         gather_operands[1].memory.has_index = true;
         gather_operands[1].memory.index = (BusterX86MetadataPhysicalRegister){
-            .index = 1, .width = 256, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM};
+            .index = 1, .width = 128, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM};
         BusterX86MetadataPhysicalAttributes gather_attributes = {
             .decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK, .has_mask_register = true, .mask_register = 1,
         };
@@ -3594,6 +3594,81 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VGATHERDPD"), 5508, gather_operands, 2, gather_attributes,
                                                                  wildcard, BUSTER_ARRAY_LENGTH(wildcard), gather_high_bytes,
                                                                  BUSTER_ARRAY_LENGTH(gather_high_bytes)));
+
+        // AVX2 gather rows carry the mask in REG0/ModRM.reg, the destination
+        // in REG1/VEX.vvvv, and the independent VSIB index in memory.index.
+        // Keep all four aliases distinct so both VEX.L and VEX.vvvv routing
+        // are covered (the YMM-index forms intentionally have XMM outputs).
+        BusterX86MetadataPhysicalOperand vex_gather_ymm_operands[3] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 2, 128),
+            x86_64_metadata_test_physical_mem_base(0, 32, 0),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 3, 128),
+        };
+        vex_gather_ymm_operands[1].memory.vsib = true;
+        vex_gather_ymm_operands[1].memory.has_index = true;
+        vex_gather_ymm_operands[1].memory.index = (BusterX86MetadataPhysicalRegister){
+            .index = 1, .width = 256, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM};
+        u8 vgatherqps_ymm_bytes[] = {0xc4, 0xe2, 0x65, 0x93, 0x14, 0x08};
+        u8 vpgatherqd_ymm_bytes[] = {0xc4, 0xe2, 0x65, 0x91, 0x14, 0x08};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VGATHERQPS"), 8311, vex_gather_ymm_operands, 3,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), vgatherqps_ymm_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(vgatherqps_ymm_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VPGATHERQD"), 8319, vex_gather_ymm_operands, 3,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), vpgatherqd_ymm_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(vpgatherqd_ymm_bytes)));
+
+        BusterX86MetadataPhysicalOperand vex_gather_xmm_operands[3] = {
+            vex_gather_ymm_operands[0], vex_gather_ymm_operands[1], vex_gather_ymm_operands[2]};
+        vex_gather_xmm_operands[1].memory.index = (BusterX86MetadataPhysicalRegister){
+            .index = 1, .width = 128, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM};
+        u8 vgatherqps_xmm_bytes[] = {0xc4, 0xe2, 0x61, 0x93, 0x14, 0x08};
+        u8 vpgatherqd_xmm_bytes[] = {0xc4, 0xe2, 0x61, 0x91, 0x14, 0x08};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VGATHERQPS"), 8312, vex_gather_xmm_operands, 3,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), vgatherqps_xmm_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(vgatherqps_xmm_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VPGATHERQD"), 8320, vex_gather_xmm_operands, 3,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), vpgatherqd_xmm_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(vpgatherqd_xmm_bytes)));
+
+        BusterX86MetadataPhysicalOperand wrong_vsib_class_operands[3] = {
+            vex_gather_ymm_operands[0], vex_gather_ymm_operands[1], vex_gather_ymm_operands[2]};
+        wrong_vsib_class_operands[1].memory.index = (BusterX86MetadataPhysicalRegister){
+            .index = 1, .width = 128, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM};
+        BusterX86MetadataEmitResult wrong_vsib_class = x86_64_metadata_test_emit_form(
+            S8("VGATHERQPS"), 8311, wrong_vsib_class_operands, 3, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BUSTER_TEST(arguments, wrong_vsib_class.status == BUSTER_X86_METADATA_ENCODE_ADDRESSING);
+
+        BusterX86MetadataPhysicalOperand non_vsib_index_operands[3] = {
+            vex_gather_ymm_operands[0], vex_gather_ymm_operands[1], vex_gather_ymm_operands[2]};
+        non_vsib_index_operands[1].memory.vsib = false;
+        non_vsib_index_operands[1].memory.index = (BusterX86MetadataPhysicalRegister){
+            .index = 1, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR};
+        BusterX86MetadataEmitResult non_vsib_index = x86_64_metadata_test_emit_form(
+            S8("VGATHERQPS"), 8311, non_vsib_index_operands, 3, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BUSTER_TEST(arguments, non_vsib_index.status == BUSTER_X86_METADATA_ENCODE_ADDRESSING);
+
+        BusterX86MetadataPhysicalOperand missing_vsib_index_operands[3] = {
+            vex_gather_ymm_operands[0], vex_gather_ymm_operands[1], vex_gather_ymm_operands[2]};
+        missing_vsib_index_operands[1].memory.has_index = false;
+        BusterX86MetadataEmitResult missing_vsib_index = x86_64_metadata_test_emit_form(
+            S8("VGATHERQPS"), 8311, missing_vsib_index_operands, 3, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BUSTER_TEST(arguments, missing_vsib_index.status == BUSTER_X86_METADATA_ENCODE_INVALID_INPUT);
+
+        BusterX86MetadataPhysicalOperand high_vsib_index_operands[3] = {
+            vex_gather_ymm_operands[0], vex_gather_ymm_operands[1], vex_gather_ymm_operands[2]};
+        high_vsib_index_operands[1].memory.index.index = 16;
+        BusterX86MetadataEmitResult high_vsib_index = x86_64_metadata_test_emit_form(
+            S8("VGATHERQPS"), 8311, high_vsib_index_operands, 3, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BUSTER_TEST(arguments, high_vsib_index.status == BUSTER_X86_METADATA_ENCODE_ADDRESSING);
+
         BusterX86MetadataPhysicalOperand ordinary_vsib = vaddps_memory_operands[2];
         ordinary_vsib.memory.vsib = true;
         ordinary_vsib.memory.has_index = true;

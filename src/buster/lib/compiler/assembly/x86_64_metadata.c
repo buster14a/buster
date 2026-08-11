@@ -3573,17 +3573,12 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     {
         BusterX86MetadataPhysicalRegister expected_index = {0};
         bool have_expected_index = false;
-        if (vvvv_binding && vvvv_binding->physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
+        if (pattern.vsib_vector_length)
         {
-            expected_index = vvvv_binding->physical.reg;
-            have_expected_index = true;
-        }
-        else if (pattern.vector_length)
-        {
-            expected_index.width = pattern.vector_length;
-            expected_index.physical_class = pattern.vector_length == 128 ? BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM
-                                              : pattern.vector_length == 256 ? BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM
-                                                                             : BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM;
+            expected_index.width = pattern.vsib_vector_length;
+            expected_index.physical_class = pattern.vsib_vector_length == 128 ? BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM
+                                            : pattern.vsib_vector_length == 256 ? BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM
+                                                                                : BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM;
             have_expected_index = true;
         }
         if (!have_expected_index || !memory_binding->physical.memory.has_index ||
@@ -3681,16 +3676,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     u16 rm_index = rm_binding && rm_binding->physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER
                        ? rm_binding->physical.reg.index
                        : 0;
-    bool form_vsib = (form.field_flags & BUSTER_X86_METADATA_FIELD_VSIB) != 0;
-    u16 vvvv_index = !form_vsib && vvvv_binding && vvvv_binding->physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER
+    u16 vvvv_index = vvvv_binding && vvvv_binding->physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER
                          ? vvvv_binding->physical.reg.index
                          : 0;
-    if (form_vsib && vvvv_binding && has_memory && vvvv_binding->physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
-        (vvvv_binding->physical.reg.width != memory.index.width ||
-         vvvv_binding->physical.reg.physical_class != memory.index.physical_class))
-    {
-        return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
-    }
     if (pattern.no_vector_source && vvvv_binding)
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if (pattern.has_ubit && form.prefix_kind != BUSTER_X86_METADATA_PREFIX_EVEX &&
@@ -4737,9 +4725,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_canonical_query(BusterX86M
             }
             if (vsib)
             {
-                u8 vector_class = pattern.vector_length == 512 ? BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM
-                                  : pattern.vector_length == 256 ? BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM
-                                                                  : BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM;
+                u8 vector_class = pattern.vsib_vector_length == 512 ? BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM
+                                  : pattern.vsib_vector_length == 256 ? BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM
+                                                                     : BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM;
                 memory.index = (BusterX86MetadataPhysicalRegister){
                     .index = 0,
                     .width = vector_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM
