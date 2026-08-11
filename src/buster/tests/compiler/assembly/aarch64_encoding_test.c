@@ -3,6 +3,21 @@
 #if BUSTER_INCLUDE_TESTS
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#if BUSTER_COMPILER_CLANG
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Woverlength-strings"
+#pragma clang diagnostic ignored "-Wimplicit-int-conversion"
+#pragma clang diagnostic ignored "-Wsign-conversion"
+#elif BUSTER_COMPILER_GCC
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Woverlength-strings"
+#endif
+#include <buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h>
+#if BUSTER_COMPILER_CLANG
+#pragma clang diagnostic pop
+#elif BUSTER_COMPILER_GCC
+#pragma GCC diagnostic pop
+#endif
 #include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
 
 typedef struct A64EncodingCase A64EncodingCase;
@@ -373,11 +388,11 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     // exact shape counts and M1 policy census here so a regenerated table
     // cannot silently change the denominator.
     BusterAarch64MetadataCounts metadata_counts = buster_aarch64_metadata_counts();
-    BUSTER_TEST(arguments, buster_aarch64_metadata_schema_version() == 4);
-    BUSTER_TEST(arguments, metadata_counts.form_count == 7491 && metadata_counts.field_count == 22631 && metadata_counts.segment_count == 23037 &&
+    BUSTER_TEST(arguments, buster_aarch64_metadata_schema_version() == 5);
+    BUSTER_TEST(arguments, metadata_counts.form_count == 7491 && metadata_counts.field_count == 22631 && metadata_counts.segment_count == 23039 &&
                               metadata_counts.operand_count == 26262 && metadata_counts.predicate_count == 7854 && metadata_counts.string_pool_size == 337490);
-    BUSTER_TEST(arguments, metadata_counts.apple_m1_supported_count == 2899 && metadata_counts.apple_m1_raw_layout_complete_count == 2873 &&
-                              metadata_counts.apple_m1_raw_layout_incomplete_count == 26);
+    BUSTER_TEST(arguments, metadata_counts.apple_m1_supported_count == 2899 && metadata_counts.apple_m1_raw_layout_complete_count == 2899 &&
+                              metadata_counts.apple_m1_raw_layout_incomplete_count == 0);
 
     // Target-aware predicate evaluation is the authority behind the legacy
     // Apple-M1 enum classifier. Explicit feature subtraction remains valid and
@@ -424,6 +439,24 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     Target unknown_feature_target = m1_explicit_target;
     unknown_feature_target.cpu_features.words[3] |= UINT64_C(1) << 63;
     BUSTER_TEST(arguments, !buster_aarch64_metadata_form_supported_for_target(85, unknown_feature_target));
+
+    // Unknown predicate expressions are omitted from the retained predicate
+    // list by the importer.  The generated reason byte must therefore reject
+    // them for a generic AArch64 target as well as for the M1 membership path.
+    Target generic_aarch64_target = m1_explicit_target;
+    generic_aarch64_target.cpu_model = CPU_MODEL_BASELINE;
+    u32 unknown_predicate_form_count = 0;
+    for (u32 form_id = 0; form_id < metadata_counts.form_count; form_id += 1)
+    {
+        BusterAarch64MetadataForm form = {0};
+        BUSTER_TEST(arguments, buster_aarch64_metadata_form(form_id, &form));
+        if (form.reason_id == BUSTER_AARCH64_GENERATED_REASON_UNKNOWN_PREDICATE)
+        {
+            unknown_predicate_form_count += 1;
+            BUSTER_TEST(arguments, !buster_aarch64_metadata_form_supported_for_target(form_id, generic_aarch64_target));
+        }
+    }
+    BUSTER_TEST(arguments, unknown_predicate_form_count == 0);
 
     u32 raw_layout_complete_count = 0;
     u32 m1_count = 0;
@@ -497,8 +530,60 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, (raw_word & form.fixed_mask) == form.fixed_value);
         }
     }
-    BUSTER_TEST(arguments, raw_layout_complete_count == 7320 && m1_count == 2899 && m1_raw_layout_complete_count == 2873);
+    BUSTER_TEST(arguments, raw_layout_complete_count == 7346 && m1_count == 2899 && m1_raw_layout_complete_count == 2899);
     BUSTER_TEST(arguments, found_in_profile_unsupported_token_raw_layout);
+
+    // Every raw-layout gap in the pinned LLVM snapshot is covered by an
+    // exact name allowlist in the importer.  Keep this regression list in the
+    // runtime test so a regenerated table cannot silently reintroduce a null
+    // or scalar-var hole (or drop the importer-derived M1 membership bit).
+    static char const* const m1_raw_closure_names[] = {
+        "DUPv16i8gpr", "DUPv2i32gpr", "DUPv2i64gpr", "DUPv4i16gpr", "DUPv4i32gpr", "DUPv8i16gpr", "DUPv8i8gpr",
+        "FCMPDri",     "FCMPEDri",     "FCMPEHri",     "FCMPESri",     "FCMPHri",     "FCMPSri",
+        "INSvi16lane", "INSvi32lane", "INSvi64lane",
+        "STLXRB",      "STLXRH",       "STLXRW",       "STLXRX",       "STXRB",       "STXRH",       "STXRW",       "STXRX",
+        "MSRpstateImm1", "MSRpstatesvcrImm1",
+    };
+    bool m1_raw_closure_found[BUSTER_ARRAY_LENGTH(m1_raw_closure_names)] = {0};
+    for (u32 form_id = 0; form_id < metadata_counts.form_count; form_id += 1)
+    {
+        BusterAarch64MetadataForm form = {0};
+        BUSTER_TEST(arguments, buster_aarch64_metadata_form(form_id, &form));
+        for (u32 closure_index = 0; closure_index < BUSTER_ARRAY_LENGTH(m1_raw_closure_names); closure_index += 1)
+        {
+            if (!a64_encoding_metadata_string_equal(form.name, m1_raw_closure_names[closure_index]))
+            {
+                continue;
+            }
+            BUSTER_TEST(arguments, !m1_raw_closure_found[closure_index]);
+            m1_raw_closure_found[closure_index] = true;
+            BUSTER_TEST(arguments, form.apple_m1_profile_member && form.raw_layout_complete);
+            if (closure_index >= 24)
+            {
+                BusterAarch64MetadataField scalar_field = {0};
+                bool scalar_found = false;
+                for (u32 field_index = 0; field_index < form.field_count; field_index += 1)
+                {
+                    BusterAarch64MetadataField candidate = {0};
+                    BUSTER_TEST(arguments, buster_aarch64_metadata_field(form_id, field_index, &candidate));
+                    if (a64_encoding_metadata_string_equal(candidate.name, "imm"))
+                    {
+                        scalar_field = candidate;
+                        scalar_found = true;
+                        break;
+                    }
+                }
+                BUSTER_TEST(arguments, scalar_found && scalar_field.width == 1 && scalar_field.source_mask == 1 && scalar_field.segment_count == 1);
+                BusterAarch64MetadataSegment scalar_segment = {0};
+                BUSTER_TEST(arguments, scalar_found && buster_aarch64_metadata_segment(form_id, scalar_field.id - form.field_first, 0, &scalar_segment) &&
+                                          scalar_segment.instruction_lsb == 8 && scalar_segment.width == 1 && scalar_segment.value_lsb == 0);
+            }
+        }
+    }
+    for (u32 closure_index = 0; closure_index < BUSTER_ARRAY_LENGTH(m1_raw_closure_names); closure_index += 1)
+    {
+        BUSTER_TEST(arguments, m1_raw_closure_found[closure_index]);
+    }
 
     // Differential words checked against llvm-mc 22.1.8. The values are raw
     // source-field values in generated field order, not semantic operands.
@@ -591,7 +676,7 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     }
 
     // Bounded rejection coverage for null, wrong-count, overflow, fixed-bit,
-    // unsupported-target, raw-layout-incomplete, and out-of-range metadata requests.
+    // unsupported-target, and out-of-range metadata requests.
     BusterAarch64MetadataForm metadata_form = {0};
     BUSTER_TEST(arguments, !buster_aarch64_metadata_form(metadata_counts.form_count, &metadata_form));
     BUSTER_TEST(arguments, !buster_aarch64_metadata_form(0, 0));
@@ -601,9 +686,9 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !buster_aarch64_metadata_predicate(0, UINT32_MAX, 0));
     BUSTER_TEST(arguments, !buster_aarch64_metadata_form_supported(0, BUSTER_AARCH64_METADATA_TARGET_COUNT));
     BUSTER_TEST(arguments, !buster_aarch64_metadata_form_provisionally_apple_m1_supported(metadata_counts.form_count));
-    BUSTER_TEST(arguments, !buster_aarch64_metadata_form_has_complete_raw_layout(3854));
+    BUSTER_TEST(arguments, buster_aarch64_metadata_form_has_complete_raw_layout(3854));
     u32 rejection_decoded_values[4] = {0};
-    BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_encode(3854, 0, 2, &encoded));
+    BUSTER_TEST(arguments, buster_aarch64_metadata_raw_encode(3854, (u32[]){0, 1}, 2, &encoded));
     BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_encode(85, 0, 4, &encoded));
     BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_encode(85, (u32 const[]){32, 0, 0, 0}, 4, &encoded));
     BUSTER_TEST(arguments, !buster_aarch64_metadata_raw_encode(85, (u32 const[]){3, 4, 0, 5}, 3, &encoded));

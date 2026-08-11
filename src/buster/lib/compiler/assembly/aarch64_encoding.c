@@ -269,8 +269,23 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_form_predicates_supported(BusterAarch64Gen
     {
         return false;
     }
+    // The importer omits malformed predicate expressions from the retained
+    // predicate list, so the reason byte is the only runtime evidence that
+    // the expression was not valid.  Fail closed for every AArch64 target,
+    // not only the Apple-M1 membership branch below.
+    if (form.reason_id == BUSTER_AARCH64_GENERATED_REASON_UNKNOWN_PREDICATE)
+    {
+        return false;
+    }
     TargetCpuFeatures features = target_cpu_features_effective(target);
     bool m1_profile = a64_metadata_target_is_m1_profile(target);
+    if (m1_profile && !form.apple_m1_profile_member)
+    {
+        // Membership is importer-derived and records parser failures that
+        // cannot be reconstructed from the retained predicate strings.
+        // Dynamic feature checks below still handle explicit removals.
+        return false;
+    }
     for (u32 predicate_index = 0; predicate_index < form.predicate_count; predicate_index += 1)
     {
         u32 offset = buster_aarch64_generated_predicate_at(form.predicate_first + predicate_index);
@@ -308,7 +323,7 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_form_predicates_supported(BusterAarch64Gen
 
 BUSTER_GLOBAL_LOCAL bool a64_metadata_form_m1_predicates(BusterAarch64GeneratedForm form)
 {
-    return a64_metadata_form_predicates_supported(form, a64_metadata_apple_m1_target());
+    return form.apple_m1_profile_member && a64_metadata_form_predicates_supported(form, a64_metadata_apple_m1_target());
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_metadata_form_and_layout(u32 form_id, BusterAarch64GeneratedForm* form, bool* raw_layout_complete)
@@ -455,7 +470,8 @@ bool buster_aarch64_metadata_form(u32 form_id, BusterAarch64MetadataForm* result
         .address_base_index = form.address_base_index,
         .address_offset_index = form.address_offset_index,
         .raw_layout_complete = raw_layout_complete,
-        .provisionally_apple_m1 = a64_metadata_form_m1_predicates(form),
+        .apple_m1_profile_member = form.apple_m1_profile_member,
+        .provisionally_apple_m1 = form.apple_m1_profile_member && a64_metadata_form_predicates_supported(form, a64_metadata_apple_m1_target()),
     };
     return true;
 }

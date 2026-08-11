@@ -4,12 +4,11 @@ This directory contains deterministic, pointer-free assembly metadata emitted
 by `build import_assembly_metadata`. Normal builds do not parse JSON, execute
 XED/LLVM, or run TableGen. The generated x86-64 C header is consumed by the
 x86-64 metadata ABI and bounded lookup layer, while the current assembler
-encoder does not yet consume its encoding fields. The AArch64 tables remain an
-audit artifact: the acceptance importer fails closed while any record lacks an
-exact proven schema, and the current assembler runtime does not consume them
-yet. The Apple M1 profile is emitted as a separate, deterministic JSONL
-projection over the pinned AArch64 records; it is provisional until raw LLVM
-aliases and the official Arm XML are independently validated.
+encoder does not yet consume its encoding fields. The AArch64 packed tables are
+consumed by the metadata runtime and raw bit-layout encoder; semantic coverage
+and the Apple M1 profile remain provisional until raw LLVM aliases and the
+official Arm XML are independently validated. The profile is emitted as a
+separate, deterministic JSONL projection over the pinned AArch64 records.
 
 - `x86_64-xed.jsonl`, `x86_64-assembly.generated.h`, and
   `x86_64-coverage.generated.inc` are the existing checked-in XED artifacts.
@@ -81,10 +80,10 @@ reduced-input manifest records the raw reduced checksum separately from the
 checksum of the normalized JSONL emitted by the importer.
 
 The current audit output has 7,491 coverage rows, 7,491 canonical forms,
-22,631 fields, 23,037 segments, 26,262 operands, 7,854 predicate uses, and
-116 distinct predicate features. The flat-chunk header is 3,951,261 bytes
-(checksum `6a66326fc028ed49`), the flat-chunk coverage include is 299,898
-bytes (checksum `251decd3edac8470`), and the sorted string pool is 337,490
+22,631 fields, 23,039 segments, 26,262 operands, 7,854 predicate uses, and
+116 distinct predicate features. The flat-chunk header is 3,951,958 bytes
+(checksum `21ff206904cdbd7a`), the flat-chunk coverage include is 299,898
+bytes (checksum `ec5065a9b4503e40`), and the sorted string pool is 337,490
 bytes. Lookup
 indexes contain 1,557 mnemonic ranges and candidates for all 7,491 records;
 the proven-signature index contains 4,310 ranges and 4,310 candidates.
@@ -92,21 +91,21 @@ the proven-signature index contains 4,310 ranges and 4,310 candidates.
 Coverage is intentionally blocked:
 
 ```text
-DIRECT=37 NORMALIZED=4250 ALIAS=0 PRIVILEGED/SYSTEM=23
-RESERVED/UNENCODABLE=147 UNSUPPORTED_TOKEN=3034 UNCLASSIFIED=0
+DIRECT=37 NORMALIZED=4271 ALIAS=0 PRIVILEGED/SYSTEM=25
+RESERVED/UNENCODABLE=145 UNSUPPORTED_TOKEN=3013 UNCLASSIFIED=0
 ```
 
 The reason totals are:
 
 ```text
-NONE=4287 SYSTEM_OR_PRIVILEGED=23 UNMAPPED_VARIABLE=147 NULL_FIELD=24
+NONE=4308 SYSTEM_OR_PRIVILEGED=25 UNMAPPED_VARIABLE=145 NULL_FIELD=0
 UNPROVEN_FIELD_SEMANTICS=1018 UNPROVEN_OPERAND_KIND=1298
-UNPROVEN_IMMEDIATE_RANGE=486 UNPROVEN_MEMORY_FORM=144
+UNPROVEN_IMMEDIATE_RANGE=489 UNPROVEN_MEMORY_FORM=144
 UNPROVEN_TIED_OPERAND=32 UNPROVEN_CORRESPONDENCE=32
 ```
 
-The inventory contains 3,181 rows, is 581,211 bytes, and has checksum
-`951f5fb99507e0ce`. Every row carries the source hash, name hash, normalized
+The inventory contains 3,158 rows, is 577,108 bytes, and has checksum
+`2b59a0e89f2303af`. Every row carries the source hash, name hash, normalized
 form ID, classification, family, test class, and exact reason ID. The
 acceptance command fails with these rows present; `--audit` is the deliberate
 report mode and does not certify completeness.
@@ -128,15 +127,17 @@ explicit exclusions, never silent support.
 For the 7,491 checked-in LLVM rows this produces 2,899 provisional in-profile
 rows and 4,592 explicit exclusions (4,961 excluded predicate occurrences).
 The in-profile classification counts are
-DIRECT=22, NORMALIZED=1,921, PRIVILEGED/SYSTEM=17,
-RESERVED/UNENCODABLE=2, UNSUPPORTED_TOKEN=937, with ALIAS=0 and
+DIRECT=22, NORMALIZED=1,942, PRIVILEGED/SYSTEM=19,
+RESERVED/UNENCODABLE=0, UNSUPPORTED_TOKEN=916, with ALIAS=0 and
 UNCLASSIFIED=0. The exclusion counts are DIRECT=15, NORMALIZED=2,329,
 PRIVILEGED/SYSTEM=6, RESERVED/UNENCODABLE=145, UNSUPPORTED_TOKEN=2,097,
 with ALIAS=0 and UNCLASSIFIED=0. The profile acceptance gate is therefore
-blocked by the two in-profile reserved rows and 937 in-profile unsupported
-rows; non-M1 extensions (for example SVE/SVE2, SME/SME2, MTE, BF16, I8MM,
-and BTI) remain explicit exclusions and do not inflate that denominator.
-The emitted profile is 2,537,270 bytes with checksum `a7bb762e2d781972`.
+blocked by 916 in-profile unsupported rows; non-M1 extensions (for example
+SVE/SVE2, SME/SME2, MTE, BF16, I8MM, and BTI) remain explicit exclusions and
+do not inflate that denominator. Raw layout closure is complete for all 2,899
+in-profile rows (2,899/2,899); this is a bit-layout guarantee, not semantic
+encoder coverage. The emitted profile is 2,537,249 bytes with checksum
+`ad73d60fbca76b9c`.
 
 The HasRCPC_IMMO member is intentional: the pinned source tags the
 LDAPUR*/STLUR* unscaled-immediate forms with HasRCPC_IMMO. Dropping it would
@@ -186,22 +187,20 @@ workspace. A strict include probe should exercise the generated header with
 Buster itself before compiler-matrix checks; the flat chunk representation is
 chosen to avoid exhausting Buster's C IR fallback arena.
 
-The generated AArch64 header is not included in the Release unity translation
-unit yet, so the current Release unity compile impact is zero bytes of
-compiled-source input. Future runtime integration must measure its own lookup
-and emitter impact.
+The generated AArch64 header is included by the metadata runtime. Future
+assembler-front-door integration must measure lookup and emitter impact.
 
 ## Runtime boundary
 
-This tranche supplies metadata and objective coverage only. Remaining runtime
-work is to add bounded mnemonic/signature candidate selection, validate source
-operands against the exact descriptor grammar, implement register/immediate,
-memory/list/lane/system and relocation transforms, connect feature predicates,
-and emit AArch64 machine code through the assembler front door. Alias import
-and canonical linking must be completed before the full raw source can be
-accepted. The checked-in DIRECT rows are only fixed-mask/no-operand forms
-proven by the current schema; no runtime encoding claim is made for the
-blocked normalized inventory.
+This tranche supplies the packed metadata ABI, bounded lookup, raw fixed-bit
+validation, and objective coverage. Remaining runtime work is to add complete
+mnemonic/signature candidate selection, validate source operands against the
+descriptor grammar, implement register/immediate, memory/list/lane/system and
+relocation transforms, connect feature predicates, and emit AArch64 machine
+code through the assembler front door. Alias import and canonical linking must
+be completed before the full raw source can be accepted. Semantic encoding is
+still not claimed for the blocked normalized inventory or for the provisional
+M1 profile.
 
 XED data is Apache-2.0. LLVM data is Apache-2.0 WITH LLVM-exception. Exact
 revisions, checksums, and generated sizes are in `manifest.json`.

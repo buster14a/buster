@@ -206,8 +206,11 @@ struct BusterAarch64MetadataForm
     // Semantic encoder coverage is represented independently by coverage_class
     // and encoder_family.
     bool raw_layout_complete;
+    // Exact importer decision for the pinned Apple-M1 profile.  This is not
+    // semantic encoder readiness; target-feature evaluation remains separate.
+    bool apple_m1_profile_member;
     bool provisionally_apple_m1;
-    u8 reserved2[2];
+    u8 reserved2[1];
 };
 
 typedef struct BusterAarch64MetadataCounts BusterAarch64MetadataCounts;
