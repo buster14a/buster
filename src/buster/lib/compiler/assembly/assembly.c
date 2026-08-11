@@ -6696,6 +6696,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     bool rep = false;
     bool repne = false;
     u8 branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NONE;
+    bool notrack = false;
     bool source_address_size_seen = false;
     u8 source_address_size = 64;
     String8 work = assembly_trim(statement);
@@ -6728,6 +6729,14 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
             }
             repne = true;
+        }
+        else if (assembly_word_equal(prefix, S8("notrack")))
+        {
+            if (notrack)
+            {
+                return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+            }
+            notrack = true;
         }
         else if (assembly_word_equal(prefix, S8("addr32")))
         {
@@ -7036,6 +7045,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         .rep = rep,
         .repne = repne,
         .branch_hint = branch_hint,
+        .notrack = notrack,
         .no_flags = no_flags,
         .dfv = dfv,
         .has_dfv = has_dfv,

@@ -676,9 +676,12 @@ struct BusterX86MetadataPhysicalAttributes
     bool rep;
     bool repne;
     u8 branch_hint;
+    // CET indirect-branch tracking is a typed source/query prefix.  It uses
+    // the legacy 0x3e byte, but is distinct from the conditional branch-hint
+    // interpretation of that byte.
+    bool notrack;
     u8 dfv;
     bool has_dfv;
-    u8 reserved[1];
 };
 
 typedef struct BusterX86MetadataPhysicalQuery BusterX86MetadataPhysicalQuery;

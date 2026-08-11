@@ -669,6 +669,7 @@ struct BusterX86MetadataPatternSemantics
     u8 operand_size_control;
     u8 has_cet_control;
     u8 cet_value;
+    u8 has_cet_no_track;
     u8 has_encdelete_control;
     u8 has_address_control;
     u8 has_decorator_control;
@@ -840,6 +841,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_is_maskmov_supplemental(Buster
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_moffs_source_accumulator(BusterX86MetadataPhysicalQuery query,
                                                                             BusterX86MetadataForm form,
                                                                             BusterX86MetadataPatternSemantics pattern);
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_cet_no_track(BusterX86MetadataForm form,
+                                                                           BusterX86MetadataPatternSemantics pattern);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_string_has(BusterX86MetadataString string, String8 needle);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_df64(BusterX86MetadataForm form,
                                                                   BusterX86MetadataPatternSemantics pattern);
@@ -1976,6 +1979,14 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             else
                 pattern.has_unsupported_token = 1;
         }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("CET_NO_TRACK()")))
+        {
+            // CET_NO_TRACK is an optional source prefix for the four legacy
+            // indirect CALL/JMP rows.  It shares byte 3e with the legacy DS
+            // branch-hint encoding, but has separate typed query semantics.
+            pattern.has_prefix_control = 1;
+            pattern.has_cet_no_track = 1;
+        }
         else pattern.has_unsupported_token = 1;
     }
     pattern.apx_fixed_width_no_w_isa =
@@ -2011,6 +2022,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
     if (pattern.immune66_loop64 && buster_x86_metadata_emit_string_has(form.attributes, S8("UNDOCUMENTED")))
         buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
     if (pattern.has_segment_override && !buster_x86_metadata_emit_canonical_segment_override(form, pattern))
+        buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
+    if (pattern.has_cet_no_track && !buster_x86_metadata_emit_canonical_cet_no_track(form, pattern))
         buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
     if (pattern.has_remove_segment &&
         (!buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LEA")) || pattern.opcode_count != 1 ||
@@ -2234,6 +2247,8 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
         return BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
     if (buster_x86_metadata_emit_ibhf_generic_nop_collision(form, pattern))
         return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
+    if (pattern.has_cet_no_track && !buster_x86_metadata_emit_canonical_cet_no_track(form, pattern))
+        return BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
     if (pattern.has_prefix_kind && form.prefix_kind != pattern.prefix_kind)
         return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
     // BRANCH_HINT is only implemented for the normalized 64-bit conditional
@@ -2290,6 +2305,7 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
                                  pattern.has_remove_segment || pattern.rex_b_control || pattern.rex_b4_control ||
                                  pattern.has_p4_control ||
                                  pattern.immune66 || pattern.immune66_loop64 || pattern.immune_rexw || pattern.df64 ||
+                                 pattern.has_cet_no_track ||
                                  buster_x86_metadata_emit_canonical_df64(form, pattern) ||
                                  pattern.has_mpx_mode ||
                                  (form.mode_flags & (BUSTER_X86_METADATA_MODE_16 | BUSTER_X86_METADATA_MODE_32 |
@@ -3058,6 +3074,42 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_segment_override(Bus
         if (!buster_x86_metadata_operand(form.id, operand_index, &operand) || operand.visible) return false;
     }
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_cet_no_track(BusterX86MetadataForm form,
+                                                                           BusterX86MetadataPatternSemantics pattern)
+{
+    // CET_NO_TRACK is present on exactly the indirect near CALL/JMP legacy
+    // rows.  Keep this shape check independent of generated row order so an
+    // unrelated future use cannot become source-selectable without an
+    // explicit schema decision.
+    bool call_form = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("CALL_NEAR")) &&
+                     buster_x86_metadata_string_input_equal(form.category.offset, S8("CALL")) && pattern.reg_fixed == 2;
+    bool jmp_form = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("JMP")) &&
+                    buster_x86_metadata_string_input_equal(form.category.offset, S8("UNCOND_BR")) && pattern.reg_fixed == 4;
+    if (!call_form && !jmp_form) return false;
+    if (form.prefix_kind != BUSTER_X86_METADATA_PREFIX_LEGACY || form.encoder_family != BUSTER_X86_METADATA_ENCODER_LEGACY ||
+        form.map != BUSTER_X86_METADATA_MAP_LEGACY || form.mandatory_prefix || pattern.opcode_count != 1 ||
+        pattern.opcode[0] != 0xff || pattern.trailing_count || pattern.has_sib || !pattern.has_modrm ||
+        pattern.has_dynamic_opcode || pattern.immediate_count || pattern.relative_count || pattern.displacement_count ||
+        pattern.has_unsupported_token)
+        return false;
+    bool memory_shape = pattern.mod_kind == BUSTER_X86_METADATA_PATTERN_MOD_MEMORY;
+    bool register_shape = pattern.mod_kind == BUSTER_X86_METADATA_PATTERN_MOD_REGISTER;
+    if ((!memory_shape && !register_shape) || pattern.has_memory != memory_shape) return false;
+    u32 visible_count = 0;
+    for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+    {
+        BusterX86MetadataOperand operand = {0};
+        if (!buster_x86_metadata_operand(form.id, operand_index, &operand)) return false;
+        if (!operand.visible) continue;
+        visible_count += 1;
+        if (visible_count != 1) return false;
+        if (memory_shape ? operand.kind != BUSTER_X86_METADATA_OPERAND_MEMORY
+                         : operand.kind != BUSTER_X86_METADATA_OPERAND_REGISTER)
+            return false;
+    }
+    return visible_count == 1;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_df64(BusterX86MetadataForm form,
@@ -4231,6 +4283,11 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     if (!buster_x86_metadata_prefetchit_address_valid(query)) return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
     if (buster_x86_metadata_emit_pattern_control_blocker(form, pattern) != BUSTER_X86_METADATA_BLOCKER_NONE)
         return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
+    bool canonical_notrack = pattern.has_cet_no_track && buster_x86_metadata_emit_canonical_cet_no_track(form, pattern);
+    if (query.attributes.notrack && !canonical_notrack)
+        return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+    if (query.attributes.notrack && (query.attributes.lock || query.attributes.rep || query.attributes.repne))
+        return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     bool jecxz_form = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("JECXZ"));
     bool implicit_eamode32 = jecxz_form && pattern.required_address_size == 32 && !pattern.has_memory &&
                              query.address_size == 64 && query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64;
@@ -4662,6 +4719,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     }
     if (pattern.has_remove_segment && has_memory && memory.has_segment)
         return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
+    if (query.attributes.notrack && has_memory && memory.has_segment)
+        return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+    if (query.attributes.notrack && !buster_x86_metadata_emit_write_byte(scratch, 0x3e))
+        return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
     if (has_memory && memory.has_segment)
     {
         u8 segment_prefix = memory.segment == BUSTER_X86_METADATA_SEGMENT_ES ? 0x26
@@ -5157,6 +5218,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_eamode_alias_forms(BusterX86Metadat
         first_pattern.has_branch_hint_control != second_pattern.has_branch_hint_control ||
         first_pattern.has_force64_control != second_pattern.has_force64_control ||
         first_pattern.has_cet_control != second_pattern.has_cet_control || first_pattern.cet_value != second_pattern.cet_value ||
+        first_pattern.has_cet_no_track != second_pattern.has_cet_no_track ||
         first_pattern.has_encdelete_control != second_pattern.has_encdelete_control ||
         first_pattern.has_address_control != second_pattern.has_address_control ||
         first_pattern.has_decorator_control != second_pattern.has_decorator_control ||
@@ -5738,6 +5800,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_canonical_query(BusterX86M
         operand_count += 1;
     }
     BusterX86MetadataPhysicalAttributes attributes = {0};
+    if (pattern.has_cet_no_track) attributes.notrack = true;
     if (pattern.lock_control == 1) attributes.lock = true;
     if (pattern.rep_control == 1) attributes.rep = true;
     if (pattern.rep_control == 2) attributes.repne = true;

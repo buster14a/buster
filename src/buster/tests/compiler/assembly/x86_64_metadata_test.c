@@ -2572,7 +2572,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         String8 const cohort_tokens[] = {
             S8_INITIALIZER("ONE()"), S8_INITIALIZER("IGNORE66()"), S8_INITIALIZER("IMMUNE66()"),
             S8_INITIALIZER("LZCNT=1"), S8_INITIALIZER("TZCNT=1"), S8_INITIALIZER("CLDEMOTE=1"),
-            S8_INITIALIZER("CET=1"), S8_INITIALIZER("PREFETCHIT=1"), S8_INITIALIZER("PREFETCHRST=1"),
+            S8_INITIALIZER("CET=1"), S8_INITIALIZER("PREFETCHIT=1"), S8_INITIALIZER("PREFETCHRST=1"), S8_INITIALIZER("CET_NO_TRACK()"),
         };
         u32 cohort_counts[BUSTER_ARRAY_LENGTH(cohort_tokens)] = {0};
         u32 cohort_all_counts[BUSTER_ARRAY_LENGTH(cohort_tokens)] = {0};
@@ -2581,7 +2581,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         u32 cohort_capable[BUSTER_ARRAY_LENGTH(cohort_tokens)] = {0};
         u32 cohort_emitted[BUSTER_ARRAY_LENGTH(cohort_tokens)] = {0};
         // Both cohort sweeps below need the same per-form token answers, so
-        // resolve each form's pattern against the nine tokens once.
+        // resolve each form's pattern against the ten tokens once.
         BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(cohort_tokens) <= 16);
         u16* cohort_masks = arena_allocate(arguments->arena, u16, audit.entry_count ? audit.entry_count : 1);
         for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
@@ -2614,9 +2614,9 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                 }
             }
         }
-        static u32 const cohort_all_expected[] = {200, 105, 34, 2, 2, 1, 4, 2, 1};
-        static u32 const cohort_normalized_expected[] = {200, 103, 26, 2, 2, 1, 4, 2, 1};
-        static u32 const cohort_privileged_expected[] = {0, 1, 0, 0, 0, 0, 0, 0, 0};
+        static u32 const cohort_all_expected[] = {200, 105, 34, 2, 2, 1, 4, 2, 1, 4};
+        static u32 const cohort_normalized_expected[] = {200, 103, 26, 2, 2, 1, 4, 2, 1, 4};
+        static u32 const cohort_privileged_expected[] = {0, 1, 0, 0, 0, 0, 0, 0, 0, 0};
         bool cohort_rows_consistent = true;
         for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
         {
@@ -2653,7 +2653,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         struct X86_64MetadataBooleanCohortCase
         {
             String8 token;
-            u32 expected_ids[2];
+            u32 expected_ids[4];
             u8 expected_count;
         };
         static X86_64MetadataBooleanCohortCase const boolean_cohort_cases[] = {
@@ -2669,6 +2669,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             {S8("PREFETCHRST=1"), {8780, UINT32_MAX}, 1},
             {S8("PREFETCHIT=0"), {9573, 9574}, 2},
             {S8("PREFETCHIT=1"), {8694, 8695}, 2},
+            {S8("CET_NO_TRACK()"), {9483, 9484, 9487, 9488}, 4},
         };
         bool boolean_cohort_ok = true;
         for (u32 cohort_index = 0; cohort_index < BUSTER_ARRAY_LENGTH(boolean_cohort_cases); cohort_index += 1)
@@ -2708,6 +2709,25 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             }
         }
         BUSTER_TEST(arguments, boolean_cohort_ok);
+        // The raw indirect branch inventory is intentionally closed: there
+        // are exactly four 0xff ModRM CALL/JMP rows, and each carries the
+        // CET_NO_TRACK marker.  This prevents a future untagged sibling from
+        // silently changing default-versus-notrack selection semantics.
+        static u32 const cet_no_track_ids[] = {9483, 9484, 9487, 9488};
+        u32 indirect_branch_rows = 0;
+        bool indirect_branch_inventory = true;
+        for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
+        {
+            BusterX86MetadataForm form = {0};
+            if (!buster_x86_metadata_form(form_id, &form)) continue;
+            if (!x86_64_metadata_test_pattern_has_token(form.pattern, S8("CET_NO_TRACK()"))) continue;
+            indirect_branch_rows += 1;
+            bool expected = false;
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cet_no_track_ids); index += 1)
+                expected |= form_id == cet_no_track_ids[index];
+            indirect_branch_inventory &= expected && x86_64_metadata_test_pattern_has_token(form.pattern, S8("CET_NO_TRACK()"));
+        }
+        BUSTER_TEST(arguments, indirect_branch_rows == BUSTER_ARRAY_LENGTH(cet_no_track_ids) && indirect_branch_inventory);
         BUSTER_TEST(arguments, !no_storage.complete && no_storage.required_entry_count == 11013 && no_storage.entry_count == 0);
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
@@ -2728,17 +2748,18 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         // DF64/IMMUNE controls contribute seventeen, IBHF=1 contributes one
         // boolean row, the ACE R4 cohort contributes ten, BSRINIT adds one,
         // and the fixed CET/IBHF NOP cohort contributes eleven newly capable
-        // rows.  MASKMOV contributes two more legacy rows.  These are
+        // rows. MASKMOV contributes two more legacy rows, and CET_NO_TRACK
+        // contributes the four indirect CALL/JMP rows. These are
         // disjoint normalized rows on top of the fixed NOT16 rows.
-        BUSTER_TEST(arguments, audit.emitted_count == 10598 && audit.blocked_count == 415 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10598 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 415);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10706 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 38);
+        BUSTER_TEST(arguments, audit.emitted_count == 10602 && audit.blocked_count == 411 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10602 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 411);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10710 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 34);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 198, 5, 1644, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1775, 197, 5, 1644, 176, 6728, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {37, 1, 0, 0, 0, 0, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1779, 197, 5, 1644, 176, 6728, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {33, 1, 0, 0, 0, 0, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2748,7 +2769,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10598, 268, 108, 38, 0, 1, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10602, 268, 108, 34, 0, 1, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -3343,15 +3364,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         };
         static u32 const residual_total_expected[] = {42, 34, 15, 4};
         static u32 const residual_normalized_expected[] = {40, 26, 15, 4};
-        static u32 const residual_blocked_expected[] = {10, 0, 10, 0};
-        static u32 const residual_emitted_expected[] = {30, 26, 5, 4};
+        static u32 const residual_blocked_expected[] = {6, 0, 6, 0};
+        static u32 const residual_emitted_expected[] = {34, 26, 9, 4};
         static u32 const residual_blocked_ids[][10] = {
-            {9483, 9484, 9487, 9488, 10042, 10043, 10045, 10046, 10047, 10049},
+            {10042, 10043, 10045, 10046, 10047, 10049},
             {0},
-            {9483, 9484, 9487, 9488, 10042, 10043, 10045, 10046, 10047, 10049},
+            {10042, 10043, 10045, 10046, 10047, 10049},
             {0},
         };
-        static u32 const residual_blocked_id_count[] = {10, 0, 10, 0};
+        static u32 const residual_blocked_id_count[] = {6, 0, 6, 0};
         u32 residual_total[4] = {0};
         u32 residual_normalized[4] = {0};
         u32 residual_blocked[4] = {0};
@@ -4143,6 +4164,59 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             S8("LOOP"), 10050, &loop_disp8, 1, (BusterX86MetadataPhysicalAttributes){.rep = true}, 0, 0,
             guard_output, sizeof(guard_output), 0, 0);
         BUSTER_TEST(arguments, loop_rep_result.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION);
+
+        // CET_NO_TRACK is an optional 0x3e prefix on the four real indirect
+        // CALL/JMP rows.  The same rows must retain their ordinary FF /2,/4
+        // encodings when the typed source/query attribute is absent.
+        BusterX86MetadataPhysicalOperand branch_mem64 = x86_64_metadata_test_physical_mem_base(0, 64, 0);
+        BusterX86MetadataPhysicalOperand branch_reg64 = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64);
+        BusterX86MetadataPhysicalAttributes notrack_attributes = {.notrack = true};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("CALL_NEAR"), 9484, &branch_reg64, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xff, 0xd0}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("CALL_NEAR"), 9484, &branch_reg64, 1,
+                                                                 notrack_attributes, 0, 0,
+                                                                 (u8 const[]){0x3e, 0xff, 0xd0}, 3));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("CALL_NEAR"), 9483, &branch_mem64, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xff, 0x10}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("CALL_NEAR"), 9483, &branch_mem64, 1,
+                                                                 notrack_attributes, 0, 0,
+                                                                 (u8 const[]){0x3e, 0xff, 0x10}, 3));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("JMP"), 9488, &branch_reg64, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xff, 0xe0}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("JMP"), 9488, &branch_reg64, 1,
+                                                                 notrack_attributes, 0, 0,
+                                                                 (u8 const[]){0x3e, 0xff, 0xe0}, 3));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("JMP"), 9487, &branch_mem64, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xff, 0x20}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("JMP"), 9487, &branch_mem64, 1,
+                                                                 notrack_attributes, 0, 0,
+                                                                 (u8 const[]){0x3e, 0xff, 0x20}, 3));
+        BusterX86MetadataEmitResult notrack_direct_result = x86_64_metadata_test_emit_form(
+            S8("CALL_NEAR"), 9484, &branch_reg64, 1, (BusterX86MetadataPhysicalAttributes){.rep = true, .notrack = true}, 0, 0,
+            guard_output, sizeof(guard_output), 0, 0);
+        BUSTER_TEST(arguments, notrack_direct_result.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION);
+        BusterX86MetadataEmitResult notrack_lock_result = x86_64_metadata_test_emit_form(
+            S8("CALL_NEAR"), 9483, &branch_mem64, 1, (BusterX86MetadataPhysicalAttributes){.lock = true, .notrack = true}, 0, 0,
+            guard_output, sizeof(guard_output), 0, 0);
+        BUSTER_TEST(arguments, notrack_lock_result.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION);
+        BusterX86MetadataPhysicalQuery notrack_query = x86_64_metadata_test_physical_query(
+            S8("CALL"), &branch_reg64, 1, notrack_attributes, 0, 0);
+        notrack_query.features.names = (String8[]){S8("*")};
+        notrack_query.features.count = 1;
+        BusterX86MetadataSelectResult notrack_selection = buster_x86_metadata_select_form(notrack_query);
+        BUSTER_TEST(arguments, notrack_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && notrack_selection.form_id == 9484 &&
+                                   notrack_selection.selected_byte_count == 3);
+        BusterX86MetadataPhysicalQuery default_branch_query = x86_64_metadata_test_physical_query(
+            S8("CALL"), &branch_reg64, 1, (BusterX86MetadataPhysicalAttributes){0}, 0, 0);
+        default_branch_query.features.names = (String8[]){S8("*")};
+        default_branch_query.features.count = 1;
+        BusterX86MetadataSelectResult default_branch_selection = buster_x86_metadata_select_form(default_branch_query);
+        BUSTER_TEST(arguments, default_branch_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   default_branch_selection.form_id == 9484 && default_branch_selection.selected_byte_count == 2);
 
         // Representative ADCX and CMPXCHG8B byte checks pin the old
         // IMMUNE66 path; the audit ledger above covers all 26 rows' status.

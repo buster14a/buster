@@ -356,6 +356,41 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_att_memory.relocation_count == 1 && x86_att_memory.relocations[0].offset == 26 &&
                                x86_att_memory.relocations[0].addend == -4 &&
                                x86_att_memory.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+    // CET indirect-branch tracking has a typed `notrack` source prefix.  It
+    // is accepted in both dialects for register and memory CALL/JMP forms,
+    // while ordinary handwritten call/jmp syntax remains unprefixed.
+    String8 x86_notrack_intel_source =
+        S8("notrack call rax\n"
+           "notrack jmp rax\n"
+           "notrack call qword ptr [rax]\n"
+           "notrack jmp qword ptr [rax]\n");
+    u8 expected_x86_notrack[] = {
+        0x3e, 0xff, 0xd0,
+        0x3e, 0xff, 0xe0,
+        0x3e, 0xff, 0x10,
+        0x3e, 0xff, 0x20,
+    };
+    AssemblyEncodeResult x86_notrack_intel = assembly_encode(
+        arguments->arena, x86_notrack_intel_source,
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_notrack_intel.diagnostic_count == 0 &&
+                               x86_notrack_intel.bytes.length == sizeof(expected_x86_notrack) &&
+                               memcmp(x86_notrack_intel.bytes.pointer, expected_x86_notrack, sizeof(expected_x86_notrack)) == 0);
+    String8 x86_notrack_att_source =
+        S8("notrack callq *%rax\n"
+           "notrack jmpq *%rax\n"
+           "notrack callq *(%rax)\n"
+           "notrack jmpq *(%rax)\n");
+    AssemblyEncodeResult x86_notrack_att = assembly_encode(
+        arguments->arena, x86_notrack_att_source,
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_notrack_att.diagnostic_count == 0 &&
+                               x86_notrack_att.bytes.length == sizeof(expected_x86_notrack) &&
+                               memcmp(x86_notrack_att.bytes.pointer, expected_x86_notrack, sizeof(expected_x86_notrack)) == 0);
+    AssemblyEncodeResult x86_notrack_invalid = assembly_encode(
+        arguments->arena, S8("notrack call external\nnotrack jmp external\nnotrack notrack call rax\nrep notrack call rax\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_notrack_invalid.diagnostic_count == 4 && x86_notrack_invalid.bytes.length == 0);
     AssemblyEncodeResult x86_absolute_memory = assembly_encode(
         arguments->arena, S8("mov rax, [rbx + external + 8]\n"),
         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
