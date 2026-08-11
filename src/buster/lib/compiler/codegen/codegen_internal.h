@@ -144,6 +144,17 @@ BUSTER_F_DECL CodegenError codegen_x64_maximum_call_stack_size(Arena* arena, Ana
                                                                      u32* stack_size);
 BUSTER_F_DECL CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
                                                                     CodegenAbi abi, Target target, CodegenCanonicalCallLayout* layout);
+BUSTER_F_DECL bool codegen_canonical_x64_type_is_f80(IrType* type);
+BUSTER_F_DECL bool codegen_canonical_x64_type_is_f80_x87_shape(IrProgram* program, IrTypeId type_id);
+BUSTER_F_DECL bool codegen_canonical_x64_type_contains_f80(IrProgram* program, IrTypeId type_id);
+BUSTER_F_DECL bool codegen_canonical_x64_abi_is_f80_result(IrType* type, CodegenCanonicalAbiValue const* abi);
+BUSTER_F_DECL void codegen_canonical_x64_x87_memory(CodegenBuffer* buffer, bool store, X64Register base, s32 displacement);
+BUSTER_F_DECL void codegen_canonical_x64_zero_f80_padding(CodegenBuffer* buffer, X64Register base, s32 displacement);
+BUSTER_F_DECL bool codegen_canonical_x64_emit_f80_copy(CodegenBuffer* buffer, X64Register source_base, s32 source_displacement,
+                                                            X64Register destination_base, s32 destination_displacement, u32* x87_depth);
+BUSTER_F_DECL bool codegen_canonical_x64_emit_f80_store_top(CodegenBuffer* buffer, X64Register destination_base, s32 destination_displacement,
+                                                                 u32* x87_depth);
+BUSTER_F_DECL bool codegen_canonical_x64_store_f80_constant(CodegenBuffer* buffer, s32 displacement, u64 significand, u16 sign_exponent);
 BUSTER_F_DECL u32 codegen_canonical_x64_stack_argument_alignment(IrType* type);
 BUSTER_F_DECL Target codegen_target_for_abi(CodegenAbi abi);
 BUSTER_F_DECL Arena* codegen_worker_arena_create(u64 reserved_size, u64 granularity);

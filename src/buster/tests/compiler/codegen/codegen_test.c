@@ -30,6 +30,127 @@ typedef f64 CodegenTestAbiMixedSumFunction(CodegenTestAbiMixed mixed);
 typedef s64 CodegenTestAbiLargeSumFunction(CodegenTestAbiLarge large);
 typedef CodegenTestAbiLarge CodegenTestAbiLargeMakeFunction(s64 first, s64 second, s64 third);
 
+// The native f80 differential below is a test harness only.  The backend
+// itself never consults host long double; the host ABI is the independent
+// oracle we call through after the generated module has been emitted.
+typedef long double CodegenTestHostF80;
+typedef CodegenTestHostF80 CodegenTestHostF80Function0(void);
+typedef CodegenTestHostF80 CodegenTestHostF80Function1(CodegenTestHostF80 value);
+typedef CodegenTestHostF80 CodegenTestHostF80Function2(CodegenTestHostF80 first, CodegenTestHostF80 second);
+typedef s64 CodegenTestHostF80LayoutFunction(s64 a, s64 b, s64 c, s64 d, s64 e, s64 f, s64 g, CodegenTestHostF80 first, CodegenTestHostF80 second,
+                                             s64 tail);
+
+BUSTER_GLOBAL_LOCAL CodegenTestHostF80 codegen_test_host_f80_probe(CodegenTestHostF80 first, CodegenTestHostF80 second)
+{
+    (void)first;
+    return second;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_test_promote_canonical_f64_to_f80(IrProgram* program)
+{
+    if (!program)
+    {
+        return false;
+    }
+    bool promoted = false;
+    for (u32 type_index = 0; type_index < program->types.count; type_index += 1)
+    {
+        IrType* type = program->types.types + type_index;
+        if (type->kind == IR_TYPE_FLOAT && type->bit_width == 64)
+        {
+            type->bit_width = 80;
+            type->layout.size = 16;
+            type->layout.alignment = 16;
+            type->abi = 0;
+            promoted = true;
+        }
+    }
+    for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
+    {
+        IrModule* module = program->modules + module_index;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+            {
+                IrType* value_type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
+                if (value_type && value_type->kind == IR_TYPE_FLOAT && value_type->bit_width == 80 && function->values[value_index].alignment < 16)
+                {
+                    function->values[value_index].alignment = 16;
+                }
+            }
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = function->instructions + instruction_index;
+                IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                if (instruction->opcode == IR_OPCODE_CONSTANT_FLOAT && type && type->kind == IR_TYPE_FLOAT && type->bit_width == 80)
+                {
+                    u64* immediates = arena_allocate(program->arena, u64, 2);
+                    instruction->immediate_count = 2;
+                    instruction->immediate_is_negative = false;
+                    immediates[0] = UINT64_C(0x8000000000000000); // +1.0
+                    immediates[1] = UINT64_C(0x3fff);
+                    instruction->immediates = immediates;
+                }
+            }
+        }
+    }
+    return promoted;
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_test_host_f80_set(CodegenTestHostF80* value, u64 significand, u16 sign_exponent)
+{
+    u8 bytes[16] = {0};
+    memcpy(bytes, &significand, sizeof(significand));
+    memcpy(bytes + 8, &sign_exponent, sizeof(sign_exponent));
+    u64 copy_size = BUSTER_MIN((u64)sizeof(*value), (u64)sizeof(bytes));
+    memcpy(value, bytes, copy_size);
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_test_host_f80_semantic_equal(CodegenTestHostF80 value, u64 significand, u16 sign_exponent)
+{
+    u8 expected[10] = {0};
+    memcpy(expected, &significand, sizeof(significand));
+    memcpy(expected + 8, &sign_exponent, sizeof(sign_exponent));
+    u8 actual[16] = {0};
+    u64 copy_size = BUSTER_MIN((u64)sizeof(value), (u64)sizeof(actual));
+    memcpy(actual, &value, copy_size);
+    return copy_size >= sizeof(expected) && !memcmp(actual, expected, sizeof(expected));
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_test_patch_local_canonical_calls(CodegenModule* module)
+{
+    if (!module || module->error != CODEGEN_ERROR_NONE)
+    {
+        return;
+    }
+    for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
+    {
+        CodegenModuleRelocation* relocation = module->relocations + relocation_index;
+        if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute || relocation->aarch64 ||
+            relocation->offset > module->code.length || module->code.length - relocation->offset < 4)
+        {
+            continue;
+        }
+        for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
+        {
+            CodegenModuleEntry* entry = module->entries + entry_index;
+            if (entry->symbol.value != relocation->symbol.value)
+            {
+                continue;
+            }
+            s64 displacement = (s64)entry->offset - ((s64)relocation->offset + 4);
+            if (displacement < INT32_MIN || displacement > INT32_MAX)
+            {
+                continue;
+            }
+            s32 encoded = (s32)displacement;
+            memcpy(module->code.pointer + relocation->offset, &encoded, sizeof(encoded));
+            break;
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL AnalysisEntity* codegen_test_entity_find(AnalysisResult* analysis, String8 name)
 {
     for (u32 index = 0; index < analysis->module.entity_count; index += 1)
@@ -1224,6 +1345,232 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_float_snapshot_buffer.count == sizeof(aarch64_float_snapshot_words));
     BUSTER_TEST(arguments, aarch64_float_snapshot_words[0] == 0x3d800be3);
     BUSTER_TEST(arguments, aarch64_float_snapshot_words[1] == 0xfd401bf0);
+
+    // x87 f80 values are encoded from the two IR immediates, never through
+    // host long double.  Check both the exact semantic bytes and the six-byte
+    // canonical zero padding in the internal sixteen-byte slot.
+    u8 f80_constant_bytes[128] = {0};
+    CodegenBuffer f80_constant_buffer = {
+        .bytes = f80_constant_bytes,
+        .capacity = sizeof(f80_constant_bytes),
+    };
+    BUSTER_TEST(arguments, codegen_canonical_x64_store_f80_constant(&f80_constant_buffer, -16, UINT64_C(0x0123456789abcdef), 0x7fff));
+    u8 f80_constant_expected_prefix[] = {
+        0x48, 0xb8, 0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01,
+        0x48, 0x89, 0x85, 0xf0, 0xff, 0xff, 0xff,
+        0xb8, 0xff, 0x7f, 0x00, 0x00,
+        0x66, 0x89, 0x85, 0xf8, 0xff, 0xff, 0xff,
+    };
+    BUSTER_TEST(arguments, f80_constant_buffer.error == CODEGEN_ERROR_NONE);
+    BUSTER_TEST(arguments, f80_constant_buffer.count >= sizeof(f80_constant_expected_prefix));
+    BUSTER_TEST(arguments, !memcmp(f80_constant_bytes, f80_constant_expected_prefix, sizeof(f80_constant_expected_prefix)));
+    u8 f80_zero_padding_expected[] = {
+        0x31, 0xc0, 0x66, 0x89, 0x85, 0xfa, 0xff, 0xff, 0xff, 0x89, 0x85, 0xfc, 0xff, 0xff, 0xff,
+    };
+    BUSTER_TEST(arguments, f80_constant_buffer.count == sizeof(f80_constant_expected_prefix) + sizeof(f80_zero_padding_expected));
+    BUSTER_TEST(arguments, !memcmp(f80_constant_bytes + sizeof(f80_constant_expected_prefix), f80_zero_padding_expected,
+                                   sizeof(f80_zero_padding_expected)));
+    u8 f80_copy_bytes[128] = {0};
+    CodegenBuffer f80_copy_buffer = {
+        .bytes = f80_copy_bytes,
+        .capacity = sizeof(f80_copy_bytes),
+    };
+    u32 f80_x87_depth = 0;
+    BUSTER_TEST(arguments, codegen_canonical_x64_emit_f80_copy(&f80_copy_buffer, X64_REGISTER_RBP, -16, X64_REGISTER_RBP, -32, &f80_x87_depth));
+    u8 f80_copy_expected_prefix[] = {
+        0xdb, 0xad, 0xf0, 0xff, 0xff, 0xff,
+        0xdb, 0xbd, 0xe0, 0xff, 0xff, 0xff,
+    };
+    BUSTER_TEST(arguments, f80_copy_buffer.error == CODEGEN_ERROR_NONE && f80_x87_depth == 0);
+    BUSTER_TEST(arguments, f80_copy_buffer.count >= sizeof(f80_copy_expected_prefix));
+    BUSTER_TEST(arguments, !memcmp(f80_copy_bytes, f80_copy_expected_prefix, sizeof(f80_copy_expected_prefix)));
+    u8 f80_extended_padding_bytes[64] = {0};
+    CodegenBuffer f80_extended_padding_buffer = {
+        .bytes = f80_extended_padding_bytes,
+        .capacity = sizeof(f80_extended_padding_bytes),
+    };
+    codegen_canonical_x64_zero_f80_padding(&f80_extended_padding_buffer, X64_REGISTER_R12, -16);
+    u8 f80_extended_padding_expected[] = {
+        0x31, 0xc0,
+        0x66, 0x41, 0x89, 0x84, 0x24, 0xfa, 0xff, 0xff, 0xff,
+        0x41, 0x89, 0x84, 0x24, 0xfc, 0xff, 0xff, 0xff,
+    };
+    BUSTER_TEST(arguments, f80_extended_padding_buffer.error == CODEGEN_ERROR_NONE);
+    BUSTER_TEST(arguments, f80_extended_padding_buffer.count == sizeof(f80_extended_padding_expected));
+    BUSTER_TEST(arguments, !memcmp(f80_extended_padding_bytes, f80_extended_padding_expected, sizeof(f80_extended_padding_expected)));
+    IrProgram f80_abi_program = ir_program_initialize(arguments->arena, 0, 1, 0, 0);
+    IrTypeId f80_type_id = ir_program_add_type(&f80_abi_program, (IrType){
+        .kind = IR_TYPE_FLOAT,
+        .bit_width = 80,
+        .layout = {
+            .size = 16,
+            .alignment = 16,
+            .resolved = true,
+        },
+    });
+    IrAbiValue f80_argument_abi = ir_type_abi_value(&f80_abi_program, f80_type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
+    IrAbiValue f80_result_abi = ir_type_abi_value(&f80_abi_program, f80_type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+    BUSTER_TEST(arguments, f80_argument_abi.memory && !f80_argument_abi.indirect && f80_argument_abi.part_count == 1 &&
+                           f80_argument_abi.parts[0].abi_class == IR_ABI_CLASS_MEMORY && f80_argument_abi.parts[0].size == 16);
+    BUSTER_TEST(arguments, !f80_result_abi.memory && !f80_result_abi.indirect && f80_result_abi.part_count == 2 &&
+                           f80_result_abi.parts[0].abi_class == IR_ABI_CLASS_X87 && f80_result_abi.parts[1].abi_class == IR_ABI_CLASS_X87_UP);
+    IrProgram f80_call_program = ir_program_initialize(arguments->arena, 1, 1024, 1, 0);
+    IrTypeId f80_call_type = ir_program_add_type(&f80_call_program, (IrType){
+        .kind = IR_TYPE_FLOAT,
+        .bit_width = 80,
+        .layout = {.size = 16, .alignment = 16, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true},
+    });
+    IrTypeId f80_function_type = ir_program_add_type(&f80_call_program, (IrType){
+        .kind = IR_TYPE_FUNCTION,
+        .return_type = f80_call_type,
+        .parameter_types = &f80_call_type,
+        .parameter_count = 1,
+        .calling_convention = IR_CALLING_CONVENTION_C,
+        .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true},
+    });
+    IrFunction* f80_call_function = ir_module_add_function(arguments->arena, f80_call_program.modules, (IrFunction){
+                                                                                                          .canonical_type = f80_function_type,
+                                                                                                          .state = IR_FUNCTION_LOWERED,
+                                                                                                      });
+    IrValueId f80_callee_value = ir_function_add_value(arguments->arena, f80_call_function, (IrValue){
+                                                                                                  .canonical_type = f80_function_type,
+                                                                                                  .category = IR_VALUE_VALUE,
+                                                                                              });
+    IrValueId f80_argument_value = ir_function_add_value(arguments->arena, f80_call_function, (IrValue){
+                                                                                                     .canonical_type = f80_call_type,
+                                                                                                     .category = IR_VALUE_VALUE,
+                                                                                                 });
+    IrValueId f80_call_operands[] = {f80_callee_value, f80_argument_value};
+    IrInstruction f80_call_instruction = {
+        .opcode = IR_OPCODE_CALL,
+        .canonical_type = f80_call_type,
+        .operands = f80_call_operands,
+        .operand_count = BUSTER_ARRAY_LENGTH(f80_call_operands),
+        .result = IR_VALUE_ID_INVALID,
+    };
+    CodegenCanonicalCallLayout f80_call_layout = {0};
+    Target f80_call_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    CodegenError f80_call_layout_error = codegen_canonical_x64_call_layout(arguments->arena, &f80_call_program, f80_call_function,
+                                                                              &f80_call_instruction, CODEGEN_ABI_X86_64_SYSTEM_V,
+                                                                              f80_call_target, &f80_call_layout);
+    BUSTER_TEST(arguments, f80_call_layout_error == CODEGEN_ERROR_NONE);
+    BUSTER_TEST(arguments, f80_call_layout.argument_count == 1 && f80_call_layout.arguments[0].on_stack &&
+                           f80_call_layout.arguments[0].stack_part_count == 2 && f80_call_layout.arguments[0].stack_offset == 0 &&
+                           f80_call_layout.simulated_float_registers == 0 && f80_call_layout.stack_alignment == 16);
+    // The cache is a bounded per-module allocation.  A caller-provided arena
+    // that cannot hold one state byte and one DFS frame per type must return a
+    // capacity error before the layout walker can classify an unchecked value.
+    while (f80_call_program.types.count < f80_call_program.types.capacity)
+    {
+        IrTypeId narrow_type = ir_program_add_type(&f80_call_program, (IrType){
+            .kind = IR_TYPE_INTEGER,
+            .bit_width = 32,
+            .layout = {.size = 4, .alignment = 4, .resolved = true},
+        });
+        BUSTER_TEST(arguments, narrow_type.value != IR_ID_UNDERLYING_INVALID);
+        if (narrow_type.value == IR_ID_UNDERLYING_INVALID)
+        {
+            break;
+        }
+    }
+    Arena* tiny_f80_cache_arena = arena_create((ArenaCreation){
+        .reserved_size = BUSTER_KB(4),
+        .initial_size = BUSTER_KB(4),
+        .flags.no_pool = true,
+    });
+    BUSTER_TEST(arguments, tiny_f80_cache_arena != 0);
+    if (tiny_f80_cache_arena)
+    {
+        CodegenCanonicalCallLayout tiny_f80_cache_layout = {0};
+        CodegenError tiny_f80_cache_error = codegen_canonical_x64_call_layout(tiny_f80_cache_arena, &f80_call_program, f80_call_function,
+                                                                                &f80_call_instruction, CODEGEN_ABI_X86_64_SYSTEM_V, f80_call_target,
+                                                                                &tiny_f80_cache_layout);
+        BUSTER_TEST(arguments, tiny_f80_cache_error == CODEGEN_ERROR_CAPACITY);
+        BUSTER_TEST(arguments, arena_destroy(tiny_f80_cache_arena, 1));
+    }
+
+    // contains_f80 is intentionally not sufficient to select fldt/fstpt: the
+    // ABI classifier must prove the complete value is one canonical x87
+    // payload. Keep malformed and mixed layouts visible to the tests so a
+    // future aggregate fast path cannot silently truncate their active bytes.
+    IrProgram f80_shape_program = ir_program_initialize(arguments->arena, 0, 8, 0, 0);
+    IrTypeId shape_f80_type = ir_program_add_type(&f80_shape_program, (IrType){
+        .kind = IR_TYPE_FLOAT,
+        .bit_width = 80,
+        .layout = {.size = 16, .alignment = 16, .resolved = true},
+    });
+    IrTypeId shape_i32_type = ir_program_add_type(&f80_shape_program, (IrType){
+        .kind = IR_TYPE_INTEGER,
+        .bit_width = 32,
+        .layout = {.size = 4, .alignment = 4, .resolved = true},
+    });
+    IrField single_f80_field = {
+        .type = shape_f80_type,
+        .offset = 0,
+    };
+    IrTypeId single_f80_struct = ir_program_add_type(&f80_shape_program, (IrType){
+        .kind = IR_TYPE_STRUCT,
+        .fields = &single_f80_field,
+        .field_count = 1,
+        .layout = {.size = 16, .alignment = 16, .resolved = true},
+    });
+    IrField mixed_union_fields[] = {
+        {.type = shape_f80_type, .offset = 0},
+        {.type = shape_i32_type, .offset = 0},
+    };
+    IrTypeId mixed_union = ir_program_add_type(&f80_shape_program, (IrType){
+        .kind = IR_TYPE_UNION,
+        .fields = mixed_union_fields,
+        .field_count = BUSTER_ARRAY_LENGTH(mixed_union_fields),
+        .layout = {.size = 16, .alignment = 16, .resolved = true},
+    });
+    IrTypeId f80_array = ir_program_add_type(&f80_shape_program, (IrType){
+        .kind = IR_TYPE_ARRAY,
+        .element_type = shape_f80_type,
+        .element_count = 1,
+        .layout = {.size = 16, .alignment = 16, .resolved = true},
+    });
+    IrField nested_f80_field = {
+        .type = single_f80_struct,
+        .offset = 0,
+    };
+    IrTypeId nested_f80_struct = ir_program_add_type(&f80_shape_program, (IrType){
+        .kind = IR_TYPE_STRUCT,
+        .fields = &nested_f80_field,
+        .field_count = 1,
+        .layout = {.size = 16, .alignment = 16, .resolved = true},
+    });
+    IrField same_f80_union_fields[] = {
+        {.type = shape_f80_type, .offset = 0},
+        {.type = single_f80_struct, .offset = 0},
+    };
+    IrTypeId same_f80_union = ir_program_add_type(&f80_shape_program, (IrType){
+        .kind = IR_TYPE_UNION,
+        .fields = same_f80_union_fields,
+        .field_count = BUSTER_ARRAY_LENGTH(same_f80_union_fields),
+        .layout = {.size = 16, .alignment = 16, .resolved = true},
+    });
+    IrTypeId malformed_f80 = ir_program_add_type(&f80_shape_program, (IrType){
+        .kind = IR_TYPE_FLOAT,
+        .bit_width = 80,
+        .layout = {.size = 16, .alignment = 8, .resolved = true},
+    });
+    BUSTER_TEST(arguments, codegen_canonical_x64_type_is_f80_x87_shape(&f80_shape_program, shape_f80_type));
+    BUSTER_TEST(arguments, codegen_canonical_x64_type_is_f80_x87_shape(&f80_shape_program, single_f80_struct));
+    BUSTER_TEST(arguments, codegen_canonical_x64_type_is_f80_x87_shape(&f80_shape_program, nested_f80_struct));
+    BUSTER_TEST(arguments, codegen_canonical_x64_type_contains_f80(&f80_shape_program, mixed_union));
+    BUSTER_TEST(arguments, !codegen_canonical_x64_type_is_f80_x87_shape(&f80_shape_program, mixed_union));
+    BUSTER_TEST(arguments, codegen_canonical_x64_type_contains_f80(&f80_shape_program, f80_array));
+    BUSTER_TEST(arguments, codegen_canonical_x64_type_is_f80_x87_shape(&f80_shape_program, f80_array));
+    BUSTER_TEST(arguments, codegen_canonical_x64_type_contains_f80(&f80_shape_program, same_f80_union));
+    BUSTER_TEST(arguments, codegen_canonical_x64_type_is_f80_x87_shape(&f80_shape_program, same_f80_union));
+    BUSTER_TEST(arguments, codegen_canonical_x64_type_contains_f80(&f80_shape_program, malformed_f80));
+    BUSTER_TEST(arguments, !codegen_canonical_x64_type_is_f80_x87_shape(&f80_shape_program, malformed_f80));
+    BUSTER_TEST(arguments, !codegen_canonical_x64_type_is_f80(ir_type_from_id(&f80_shape_program.types, malformed_f80)));
     typedef struct CodegenTargetAbiCase
     {
         CpuArch cpu_arch;
@@ -3607,6 +3954,216 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             }
         }
     }
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
+    // Promote a C frontend module whose source uses ordinary double values.
+    // The frontend deliberately rejects wide-float signatures, so this keeps
+    // the parser/lowering contract intact while exercising the canonical
+    // x87 emitter and the host compiler's independent SysV long-double ABI.
+    if (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_MACOS)
+    {
+        String8 f80_native_source = S8(
+            "extern double f80_host_probe(double first, double second);\n"
+            "double f80_identity(double value) { return value; }\n"
+            "double f80_forward(double value) { return f80_identity(value); }\n"
+            "double f80_second(double first, double second) { return second; }\n"
+            "double f80_forward2(double first, double second) { return f80_second(first, second); }\n"
+            "double f80_host_wrapper(double first, double second) { return f80_host_probe(first, second); }\n"
+            "double f80_constant(void) { return 1.0; }\n"
+            "long long f80_after_ints(long long a, long long b, long long c, long long d, long long e, long long f, long long g,\n"
+            "                           double first, double second, long long tail) { return tail; }\n"
+            "long long f80_after_ints_caller(void) {\n"
+            "    return f80_after_ints(1, 2, 3, 4, 5, 6, 7, 1.0, 2.0, 0x123456789abcdefLL);\n"
+            "}\n");
+        CPreprocessResult f80_native_tokens = c_preprocess(arguments->arena, f80_native_source, (CPreprocessOptions){0});
+        CParseResult f80_native_parse = c_parse(arguments->arena, f80_native_tokens);
+        CIRLowerResult f80_native_ir = c_lower_to_ir(arguments->arena, S8("canonical-f80-native.c"), f80_native_tokens, f80_native_parse, target);
+        BUSTER_TEST(arguments, f80_native_tokens.error_count == 0);
+        BUSTER_TEST(arguments, f80_native_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, f80_native_ir.diagnostic_count == 0);
+        if (f80_native_ir.program)
+        {
+            IrProgram* f80_native_program = f80_native_ir.program;
+            IrModule* f80_native_module = f80_native_program->modules;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(f80_native_program, f80_native_module).error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, codegen_test_promote_canonical_f64_to_f80(f80_native_program));
+            IrValidationResult f80_native_validation = ir_validate_canonical_module(f80_native_program, f80_native_module);
+            BUSTER_TEST(arguments, f80_native_validation.error == IR_VALIDATION_NONE);
+            CodegenModule f80_native_codegen = codegen_generate_canonical_module(
+                arguments->arena, f80_native_program, f80_native_module, target,
+                (CodegenModuleOptions){
+                    .lane_count = 1,
+                    .assume_validated = true,
+                });
+            BUSTER_TEST(arguments, f80_native_codegen.error == CODEGEN_ERROR_NONE);
+            BUSTER_TEST(arguments, sizeof(CodegenTestHostF80) == 16);
+            if (f80_native_codegen.error == CODEGEN_ERROR_NONE && sizeof(CodegenTestHostF80) == 16)
+            {
+                // Canonical module relocations are intentionally retained for
+                // object/link writers.  For this in-process differential,
+                // resolve the local call sites against the module entries
+                // before exposing the code as executable memory.
+                codegen_test_patch_local_canonical_calls(&f80_native_codegen);
+                IrFunction* host_wrapper_function = codegen_test_c_function_find(f80_native_module, S8("f80_host_wrapper"));
+                CodegenFunctionDescriptor* host_wrapper_descriptor =
+                    host_wrapper_function ? codegen_test_c_descriptor_find(&f80_native_codegen, host_wrapper_function->symbol) : 0;
+                BUSTER_TEST(arguments, host_wrapper_descriptor != 0);
+                u8* f80_native_executable_code = f80_native_codegen.code.pointer;
+                u64 f80_native_executable_code_length = f80_native_codegen.code.length;
+                bool f80_host_relocation_patched = false;
+                if (host_wrapper_descriptor && f80_native_codegen.code.length <= UINT64_MAX - 14)
+                {
+                    // Keep the generated call's normal rel32 relocation, but
+                    // point it at an in-image RIP-indirect trampoline.  The
+                    // trampoline's absolute target is the host C helper, so
+                    // this exercises generated-to-host argument marshalling
+                    // without asking the executable mapper to expose a host
+                    // symbol or to relax a short displacement.
+                    u64 trampoline_offset = f80_native_codegen.code.length;
+                    f80_native_executable_code_length += 14;
+                    f80_native_executable_code = arena_allocate(arguments->arena, u8, f80_native_executable_code_length);
+                    memcpy(f80_native_executable_code, f80_native_codegen.code.pointer, f80_native_codegen.code.length);
+                    u8 trampoline[14] = {0xff, 0x25, 0, 0, 0, 0};
+                    CodegenTestHostF80Function2* host_probe_function = codegen_test_host_f80_probe;
+                    u64 host_probe_address = 0;
+                    memcpy(&host_probe_address, &host_probe_function, sizeof(host_probe_address));
+                    memcpy(trampoline + 6, &host_probe_address, sizeof(host_probe_address));
+                    memcpy(f80_native_executable_code + trampoline_offset, trampoline, sizeof(trampoline));
+                    for (u32 relocation_index = 0; relocation_index < f80_native_codegen.relocation_count; relocation_index += 1)
+                    {
+                        CodegenModuleRelocation* relocation = f80_native_codegen.relocations + relocation_index;
+                        IrSymbol* symbol = relocation->symbol.value < f80_native_program->symbols.count
+                                               ? f80_native_program->symbols.symbols + relocation->symbol.value
+                                               : 0;
+                        String8 symbol_name = symbol && symbol->link_name.length ? symbol->link_name : symbol ? symbol->name : (String8){0};
+                        if (relocation->source != CODEGEN_MODULE_RELOCATION_CODE || relocation->absolute || relocation->aarch64 ||
+                            !string_equal(symbol_name, S8("f80_host_probe")) || relocation->offset > f80_native_codegen.code.length ||
+                            f80_native_codegen.code.length - relocation->offset < 4)
+                        {
+                            continue;
+                        }
+                        s64 displacement = (s64)trampoline_offset - ((s64)relocation->offset + 4);
+                        if (displacement < INT32_MIN || displacement > INT32_MAX)
+                        {
+                            continue;
+                        }
+                        s32 encoded_displacement = (s32)displacement;
+                        memcpy(f80_native_executable_code + relocation->offset, &encoded_displacement, sizeof(encoded_displacement));
+                        f80_host_relocation_patched = true;
+                        break;
+                    }
+                }
+                BUSTER_TEST(arguments, f80_host_relocation_patched);
+                CodegenExecutable f80_native_executable = codegen_make_executable((CodegenFunction){
+                    .code = {.pointer = f80_native_executable_code, .length = f80_native_executable_code_length},
+                    .error = f80_native_codegen.error,
+                });
+                BUSTER_TEST(arguments, f80_native_executable.error == CODEGEN_ERROR_NONE);
+                if (f80_native_executable.address && f80_host_relocation_patched)
+                {
+                    IrFunction* identity_function = codegen_test_c_function_find(f80_native_module, S8("f80_identity"));
+                    IrFunction* forward_function = codegen_test_c_function_find(f80_native_module, S8("f80_forward"));
+                    IrFunction* second_function = codegen_test_c_function_find(f80_native_module, S8("f80_second"));
+                    IrFunction* forward2_function = codegen_test_c_function_find(f80_native_module, S8("f80_forward2"));
+                    IrFunction* constant_function = codegen_test_c_function_find(f80_native_module, S8("f80_constant"));
+                    IrFunction* layout_function = codegen_test_c_function_find(f80_native_module, S8("f80_after_ints"));
+                    IrFunction* layout_caller_function = codegen_test_c_function_find(f80_native_module, S8("f80_after_ints_caller"));
+                    CodegenFunctionDescriptor* identity_descriptor =
+                        identity_function ? codegen_test_c_descriptor_find(&f80_native_codegen, identity_function->symbol) : 0;
+                    CodegenFunctionDescriptor* forward_descriptor =
+                        forward_function ? codegen_test_c_descriptor_find(&f80_native_codegen, forward_function->symbol) : 0;
+                    CodegenFunctionDescriptor* second_descriptor =
+                        second_function ? codegen_test_c_descriptor_find(&f80_native_codegen, second_function->symbol) : 0;
+                    CodegenFunctionDescriptor* forward2_descriptor =
+                        forward2_function ? codegen_test_c_descriptor_find(&f80_native_codegen, forward2_function->symbol) : 0;
+                    CodegenFunctionDescriptor* constant_descriptor =
+                        constant_function ? codegen_test_c_descriptor_find(&f80_native_codegen, constant_function->symbol) : 0;
+                    CodegenFunctionDescriptor* layout_descriptor =
+                        layout_function ? codegen_test_c_descriptor_find(&f80_native_codegen, layout_function->symbol) : 0;
+                    CodegenFunctionDescriptor* layout_caller_descriptor =
+                        layout_caller_function ? codegen_test_c_descriptor_find(&f80_native_codegen, layout_caller_function->symbol) : 0;
+                    BUSTER_TEST(arguments,
+                                identity_descriptor && forward_descriptor && second_descriptor && forward2_descriptor && host_wrapper_descriptor &&
+                                    constant_descriptor && layout_descriptor && layout_caller_descriptor);
+                    if (identity_descriptor && forward_descriptor && second_descriptor && forward2_descriptor && host_wrapper_descriptor && constant_descriptor &&
+                        layout_descriptor && layout_caller_descriptor)
+                    {
+                        void* identity_address = (u8*)f80_native_executable.address + identity_descriptor->code_offset;
+                        void* forward_address = (u8*)f80_native_executable.address + forward_descriptor->code_offset;
+                        void* second_address = (u8*)f80_native_executable.address + second_descriptor->code_offset;
+                        void* forward2_address = (u8*)f80_native_executable.address + forward2_descriptor->code_offset;
+                        void* host_wrapper_address = (u8*)f80_native_executable.address + host_wrapper_descriptor->code_offset;
+                        void* constant_address = (u8*)f80_native_executable.address + constant_descriptor->code_offset;
+                        void* layout_address = (u8*)f80_native_executable.address + layout_descriptor->code_offset;
+                        void* layout_caller_address = (u8*)f80_native_executable.address + layout_caller_descriptor->code_offset;
+                        CodegenTestHostF80Function1* native_identity = 0;
+                        CodegenTestHostF80Function1* native_forward = 0;
+                        CodegenTestHostF80Function2* native_second = 0;
+                        CodegenTestHostF80Function2* native_forward2 = 0;
+                        CodegenTestHostF80Function2* native_host_wrapper = 0;
+                        CodegenTestHostF80Function0* native_constant = 0;
+                        CodegenTestHostF80LayoutFunction* native_layout = 0;
+                        s64 (*native_layout_caller)(void) = 0;
+                        memcpy(&native_identity, &identity_address, sizeof(native_identity));
+                        memcpy(&native_forward, &forward_address, sizeof(native_forward));
+                        memcpy(&native_second, &second_address, sizeof(native_second));
+                        memcpy(&native_forward2, &forward2_address, sizeof(native_forward2));
+                        memcpy(&native_host_wrapper, &host_wrapper_address, sizeof(native_host_wrapper));
+                        memcpy(&native_constant, &constant_address, sizeof(native_constant));
+                        memcpy(&native_layout, &layout_address, sizeof(native_layout));
+                        memcpy(&native_layout_caller, &layout_caller_address, sizeof(native_layout_caller));
+                        struct
+                        {
+                            u64 significand;
+                            u16 sign_exponent;
+                        } f80_cases[] = {
+                            {UINT64_C(0x8000000000000000), 0x3fff}, // +1
+                            {UINT64_C(0x0000000000000000), 0x8000}, // -0
+                            {UINT64_C(0x0000000000000001), 0x0000}, // minimum subnormal
+                            {UINT64_C(0x8000000000000000), 0x7fff}, // +infinity
+                            {UINT64_C(0xc000000000000001), 0x7fff}, // quiet NaN payload
+                        };
+                        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(f80_cases); case_index += 1)
+                        {
+                            CodegenTestHostF80 f80_input = 0;
+                            codegen_test_host_f80_set(&f80_input, f80_cases[case_index].significand, f80_cases[case_index].sign_exponent);
+                            CodegenTestHostF80 identity_output = native_identity(f80_input);
+                            CodegenTestHostF80 forward_output = native_forward(f80_input);
+                            CodegenTestHostF80 second_input = 0;
+                            codegen_test_host_f80_set(&second_input, f80_cases[(case_index + 1) % BUSTER_ARRAY_LENGTH(f80_cases)].significand,
+                                                     f80_cases[(case_index + 1) % BUSTER_ARRAY_LENGTH(f80_cases)].sign_exponent);
+                            CodegenTestHostF80 second_output = native_second(f80_input, second_input);
+                            CodegenTestHostF80 forward2_output = native_forward2(f80_input, second_input);
+                            BUSTER_TEST(arguments, codegen_test_host_f80_semantic_equal(identity_output, f80_cases[case_index].significand,
+                                                                                         f80_cases[case_index].sign_exponent));
+                            BUSTER_TEST(arguments, codegen_test_host_f80_semantic_equal(forward_output, f80_cases[case_index].significand,
+                                                                                         f80_cases[case_index].sign_exponent));
+                            BUSTER_TEST(arguments,
+                                        codegen_test_host_f80_semantic_equal(second_output,
+                                                                             f80_cases[(case_index + 1) % BUSTER_ARRAY_LENGTH(f80_cases)].significand,
+                                                                             f80_cases[(case_index + 1) % BUSTER_ARRAY_LENGTH(f80_cases)].sign_exponent));
+                            BUSTER_TEST(arguments,
+                                        codegen_test_host_f80_semantic_equal(forward2_output,
+                                                                             f80_cases[(case_index + 1) % BUSTER_ARRAY_LENGTH(f80_cases)].significand,
+                                                                             f80_cases[(case_index + 1) % BUSTER_ARRAY_LENGTH(f80_cases)].sign_exponent));
+                        }
+                        CodegenTestHostF80 constant_output = native_constant();
+                        BUSTER_TEST(arguments, codegen_test_host_f80_semantic_equal(constant_output, UINT64_C(0x8000000000000000), 0x3fff));
+                        CodegenTestHostF80 first = 0;
+                        CodegenTestHostF80 second = 0;
+                        codegen_test_host_f80_set(&first, UINT64_C(0x0000000000000001), 0x0000);
+                        codegen_test_host_f80_set(&second, UINT64_C(0xc000000000000001), 0x7fff);
+                        CodegenTestHostF80 host_probe_output = native_host_wrapper(first, second);
+                        BUSTER_TEST(arguments, codegen_test_host_f80_semantic_equal(host_probe_output, UINT64_C(0xc000000000000001), 0x7fff));
+                        s64 expected_tail = INT64_C(0x123456789abcdef);
+                        BUSTER_TEST(arguments, native_layout(1, 2, 3, 4, 5, 6, 7, first, second, expected_tail) == expected_tail);
+                        BUSTER_TEST(arguments, native_layout_caller() == expected_tail);
+                    }
+                    codegen_release_executable(f80_native_executable);
+                }
+            }
+        }
+    }
+#endif
     BUSTER_CHECK(arena_destroy(expression_arena, 1));
     arena_set_position(temporary.arena, temporary.position);
     return result;

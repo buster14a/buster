@@ -7534,6 +7534,233 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_abi_part_is_float(IrAbiClass abi_clas
     return abi_class == IR_ABI_CLASS_FLOAT || abi_class == IR_ABI_CLASS_VECTOR;
 }
 
+// The canonical x86-64 backend keeps the 80-bit spelling in a sixteen-byte
+// slot: ten semantic bytes followed by six zero bytes.  It is deliberately a
+// byte-level representation here; host long double has a different size and
+// alignment on some targets and must never participate in code generation.
+BUSTER_F_DECL bool codegen_canonical_x64_type_is_f80(IrType* type)
+{
+    return type && type->kind == IR_TYPE_FLOAT && type->bit_width == 80 && type->layout.resolved && type->layout.size == 16 &&
+           type->layout.alignment == 16;
+}
+
+typedef enum CodegenCanonicalX64F80State
+{
+    CODEGEN_CANONICAL_X64_F80_UNKNOWN,
+    CODEGEN_CANONICAL_X64_F80_VISITING,
+    CODEGEN_CANONICAL_X64_F80_SAFE,
+    CODEGEN_CANONICAL_X64_F80_CONTAINS,
+} CodegenCanonicalX64F80State;
+
+typedef struct CodegenCanonicalX64F80Work CodegenCanonicalX64F80Work;
+struct CodegenCanonicalX64F80Work
+{
+    IrTypeId type;
+    u32 next_child;
+};
+
+typedef struct CodegenCanonicalX64F80Cache CodegenCanonicalX64F80Cache;
+struct CodegenCanonicalX64F80Cache
+{
+    IrProgram* program;
+    IrType* types;
+    u8* state;
+    CodegenCanonicalX64F80Work* work;
+    u32 capacity;
+    bool allocation_failed;
+    u8 reserved[3];
+};
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_f80_cache_arena_capacity(Arena* arena, u32 count)
+{
+    if (!arena)
+    {
+        return false;
+    }
+    u64 state_bytes = count;
+    u64 work_bytes = (u64)count * sizeof(CodegenCanonicalX64F80Work);
+    u64 position = arena->position;
+    u64 state_end = position > arena->reserved_size || state_bytes > arena->reserved_size - position ? UINT64_MAX : position + state_bytes;
+    if (state_end == UINT64_MAX)
+    {
+        return false;
+    }
+    u64 work_alignment = BUSTER_ALIGN_OF(CodegenCanonicalX64F80Work);
+    if (state_end > UINT64_MAX - (work_alignment - 1))
+    {
+        return false;
+    }
+    u64 work_start = (state_end + work_alignment - 1) & ~(work_alignment - 1);
+    return work_start <= arena->reserved_size && work_bytes <= arena->reserved_size - work_start;
+}
+
+// A type graph is shared by every function in a canonical module.  Classify it
+// once, iteratively, and let every worker read the immutable result.  Pointer
+// and function referents are not part of a value representation; vectors are
+// included because an element type still contributes to the value's shape.
+BUSTER_GLOBAL_LOCAL CodegenCanonicalX64F80Cache codegen_canonical_x64_f80_cache_initialize(Arena* arena, IrProgram* program)
+{
+    CodegenCanonicalX64F80Cache result = {
+        .program = program,
+        .types = program ? program->types.types : 0,
+        .capacity = program ? program->types.count : 0,
+    };
+    if (!arena || !program)
+    {
+        result.allocation_failed = true;
+        return result;
+    }
+    if (!result.capacity)
+    {
+        return result;
+    }
+    if (!codegen_canonical_x64_f80_cache_arena_capacity(arena, result.capacity))
+    {
+        result.allocation_failed = true;
+        return result;
+    }
+    result.state = arena_allocate(arena, u8, result.capacity);
+    result.work = arena_allocate(arena, CodegenCanonicalX64F80Work, result.capacity);
+    if (!result.state || !result.work)
+    {
+        result.allocation_failed = true;
+        return result;
+    }
+    memset(result.state, CODEGEN_CANONICAL_X64_F80_UNKNOWN, result.capacity * sizeof(*result.state));
+    for (u32 root_index = 0; root_index < result.capacity; root_index += 1)
+    {
+        if (result.state[root_index] != CODEGEN_CANONICAL_X64_F80_UNKNOWN)
+        {
+            continue;
+        }
+        u32 work_count = 1;
+        result.state[root_index] = CODEGEN_CANONICAL_X64_F80_VISITING;
+        result.work[0] = (CodegenCanonicalX64F80Work){.type = (IrTypeId){.value = root_index}};
+        while (work_count)
+        {
+            CodegenCanonicalX64F80Work* frame = result.work + work_count - 1;
+            IrTypeId type_id = frame->type;
+            IrType* type = ir_type_from_id(&program->types, type_id);
+            if (!type)
+            {
+                result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
+                work_count -= 1;
+                continue;
+            }
+            // Treat every f80 spelling as a wide value here.  The stricter
+            // type_is_f80 predicate below then rejects an unresolved,
+            // mis-sized, or misaligned spelling instead of silently lowering
+            // it as an ordinary scalar.
+            if (type->kind == IR_TYPE_FLOAT && type->bit_width == 80)
+            {
+                result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
+                work_count -= 1;
+                continue;
+            }
+            u32 child_count = 0;
+            if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
+            {
+                child_count = 1;
+            }
+            else if (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
+            {
+                child_count = type->field_count;
+            }
+            if (frame->next_child >= child_count)
+            {
+                result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_SAFE;
+                work_count -= 1;
+                continue;
+            }
+            IrTypeId child = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
+                                 ? type->element_type
+                                 : (type->fields ? type->fields[frame->next_child].type : IR_TYPE_ID_INVALID);
+            if (child.value >= result.capacity)
+            {
+                result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
+                work_count -= 1;
+                continue;
+            }
+            u8 child_state = result.state[child.value];
+            if (child_state == CODEGEN_CANONICAL_X64_F80_CONTAINS)
+            {
+                result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
+                work_count -= 1;
+            }
+            else if (child_state == CODEGEN_CANONICAL_X64_F80_SAFE)
+            {
+                frame->next_child += 1;
+            }
+            else if (child_state == CODEGEN_CANONICAL_X64_F80_VISITING)
+            {
+                // Direct recursive value graphs are invalid IR.  Mark the
+                // cycle wide so a caller cannot accidentally lower it.
+                result.state[child.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
+                result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
+                work_count -= 1;
+            }
+            else if (work_count >= result.capacity)
+            {
+                result.state[type_id.value] = CODEGEN_CANONICAL_X64_F80_CONTAINS;
+                work_count -= 1;
+            }
+            else
+            {
+                result.state[child.value] = CODEGEN_CANONICAL_X64_F80_VISITING;
+                result.work[work_count++] = (CodegenCanonicalX64F80Work){.type = child};
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_type_contains_f80_cached(CodegenCanonicalX64F80Cache const* cache, IrProgram* program, IrTypeId type_id)
+{
+    // AArch64 never consumes the x86 cache.  The zero value threaded through
+    // its shared emitter is deliberately benign so an ordinary narrow value
+    // is not mistaken for an allocation failure or an unsupported wide value.
+    if (cache && !cache->program && !cache->types && !cache->state && !cache->work && !cache->capacity && !cache->allocation_failed)
+    {
+        return false;
+    }
+    if (!cache || cache->allocation_failed || !program || cache->types != program->types.types || !cache->state || type_id.value >= cache->capacity)
+    {
+        // A missing or mismatched cache is not evidence that the value is
+        // narrow.  Force the caller down its explicit unsupported/capacity
+        // path rather than silently lowering an unchecked wide value.
+        return true;
+    }
+    return cache->state[type_id.value] == CODEGEN_CANONICAL_X64_F80_CONTAINS;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_type_is_f80_x87_shape_cached(CodegenCanonicalX64F80Cache const* cache, IrProgram* program,
+                                                                              IrTypeId type_id);
+
+// Direct callers outside module generation retain the old helper API.  They
+// pay one bounded cache build; canonical emission passes its reusable cache.
+BUSTER_F_DECL bool codegen_canonical_x64_type_contains_f80(IrProgram* program, IrTypeId type_id)
+{
+    TemporalArena temporary = scratch_begin(0, 0);
+    CodegenCanonicalX64F80Cache cache = codegen_canonical_x64_f80_cache_initialize(temporary.arena, program);
+    bool result = codegen_canonical_x64_type_contains_f80_cached(&cache, program, type_id);
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_F_DECL bool codegen_canonical_x64_abi_is_f80_result(IrType* type, CodegenCanonicalAbiValue const* abi)
+{
+    if (!type || !abi || abi->memory || abi->indirect || abi->part_count != 2 || type->layout.size != 16)
+    {
+        return false;
+    }
+    if (!codegen_canonical_x64_type_is_f80(type) && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_ARRAY)
+    {
+        return false;
+    }
+    return abi->parts[0].abi_class == IR_ABI_CLASS_X87 && abi->parts[1].abi_class == IR_ABI_CLASS_X87_UP &&
+           abi->parts[0].value_offset == 0 && abi->parts[1].value_offset == 8 && abi->parts[0].size == 8 && abi->parts[1].size == 8;
+}
+
 // How many consecutive vector registers one ABI part occupies on this target,
 // and how much of it each one carries. The IR ABI classifies a vector by the
 // psABI rule alone -- a 512-bit vector is one vector part whatever the machine
@@ -7597,6 +7824,49 @@ BUSTER_GLOBAL_LOCAL CodegenCanonicalAbiValue codegen_canonical_aggregate_abi(IrP
     IrAbiConvention convention = codegen_canonical_ir_abi_convention(abi);
     IrAbiUse use = is_result ? IR_ABI_USE_RESULT : variadic_argument ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT;
     return ir_type_abi_value(program, type_id, convention, use);
+}
+
+// The ABI classifier is the authority for aggregate x87 shapes.  It admits
+// nested one-field wrappers, one-element arrays, and unions whose alternatives
+// all occupy the same x87 payload, while mixed/offset aggregates classify as
+// MEMORY or INTEGER and are rejected.  Do not duplicate that recursive walk in
+// codegen; use the module-wide contains cache plus the already-resolved result
+// classes instead.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_type_is_f80_x87_shape_cached(CodegenCanonicalX64F80Cache const* cache, IrProgram* program,
+                                                                              IrTypeId type_id)
+{
+    if (!cache || cache->allocation_failed || !program)
+    {
+        return false;
+    }
+    IrType* type = ir_type_from_id(&program->types, type_id);
+    if (!type || !type->layout.resolved || type->layout.size != 16 || type->layout.alignment != 16)
+    {
+        return false;
+    }
+    if (codegen_canonical_x64_type_is_f80(type))
+    {
+        return true;
+    }
+    if (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_ARRAY)
+    {
+        return false;
+    }
+    if (!codegen_canonical_x64_type_contains_f80_cached(cache, program, type_id))
+    {
+        return false;
+    }
+    CodegenCanonicalAbiValue result_abi = codegen_canonical_aggregate_abi(program, type_id, CODEGEN_ABI_X86_64_SYSTEM_V, true, false);
+    return codegen_canonical_x64_abi_is_f80_result(type, &result_abi);
+}
+
+BUSTER_F_DECL bool codegen_canonical_x64_type_is_f80_x87_shape(IrProgram* program, IrTypeId type_id)
+{
+    TemporalArena temporary = scratch_begin(0, 0);
+    CodegenCanonicalX64F80Cache cache = codegen_canonical_x64_f80_cache_initialize(temporary.arena, program);
+    bool result = codegen_canonical_x64_type_is_f80_x87_shape_cached(&cache, program, type_id);
+    scratch_end(temporary);
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u32 codegen_canonical_va_list_component_count(IrProgram* program, IrTypeId type_id)
@@ -7728,8 +7998,9 @@ BUSTER_GLOBAL_LOCAL u64 codegen_canonical_x64_stack_argument_offset(u64 cursor, 
     return remainder ? cursor + alignment - remainder : cursor;
 }
 
-CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
-                                                                  CodegenAbi abi, Target target, CodegenCanonicalCallLayout* layout)
+CodegenError codegen_canonical_x64_call_layout_cached(Arena* arena, IrProgram* program, CodegenCanonicalX64F80Cache const* f80_cache,
+                                                       IrFunction* function, IrInstruction* instruction, CodegenAbi abi, Target target,
+                                                       CodegenCanonicalCallLayout* layout)
 {
     if (!layout)
     {
@@ -7779,6 +8050,12 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
     }
     layout->argument_count = argument_count;
     layout->return_abi = codegen_canonical_aggregate_abi(program, instruction->canonical_type, abi, true, false);
+    bool return_contains_f80 = codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, callee_type->return_type);
+    if (return_contains_f80 && (abi != CODEGEN_ABI_X86_64_SYSTEM_V ||
+                                !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, callee_type->return_type)))
+    {
+        return CODEGEN_ERROR_UNSUPPORTED_ABI;
+    }
     layout->indirect_return = layout->return_abi.indirect;
     layout->windows_indirect_return = abi == CODEGEN_ABI_X86_64_WINDOWS && layout->return_abi.indirect;
     layout->simulated_registers = layout->indirect_return ? 1 : 0;
@@ -7813,6 +8090,21 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
         u32 part_count = 1;
         bool aggregate = codegen_canonical_integer_aggregate_parts(program, type_id, &part_count);
         CodegenCanonicalAbiValue argument_abi = codegen_canonical_aggregate_abi(program, type_id, abi, false, false);
+        bool contains_f80 = codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, type_id);
+        bool f80_x87_shape = codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, type_id);
+        if (contains_f80 && (abi != CODEGEN_ABI_X86_64_SYSTEM_V || !f80_x87_shape))
+        {
+            return CODEGEN_ERROR_UNSUPPORTED_ABI;
+        }
+        // SysV puts both a scalar f80 and the canonical single-f80 aggregate
+        // in a sixteen-byte, sixteen-aligned memory slot.  The aggregate is
+        // marked here so the normal stack-copy path does not mistake it for
+        // an unsupported register aggregate.
+        bool f80_memory = f80_x87_shape && argument_abi.memory && type->layout.size == 16;
+        if (f80_memory && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_ARRAY))
+        {
+            aggregate = true;
+        }
         // A value the target cannot carry in the registers its classification
         // named goes on the stack, and its stack image is the eightbyte count
         // the aggregate walk already produced rather than the register count.
@@ -7849,7 +8141,12 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
             .system_v_aggregate = abi == CODEGEN_ABI_X86_64_SYSTEM_V && argument_abi.part_count && !argument_abi.memory && argument_in_registers,
         };
         u64 argument_stack_parts = 0;
-        if (abi == CODEGEN_ABI_X86_64_SYSTEM_V && type->kind == IR_TYPE_FLOAT)
+        if (abi == CODEGEN_ABI_X86_64_SYSTEM_V && f80_memory)
+        {
+            call_argument.on_stack = true;
+            argument_stack_parts = call_argument.stack_part_count;
+        }
+        else if (abi == CODEGEN_ABI_X86_64_SYSTEM_V && type->kind == IR_TYPE_FLOAT)
         {
             if (layout->simulated_float_registers < 8)
             {
@@ -7907,7 +8204,9 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
             // Windows gives every stack argument one eightbyte and passes
             // anything wider by reference, so only System V has an argument
             // whose alignment the area has to answer for.
-            u32 argument_alignment = abi == CODEGEN_ABI_X86_64_SYSTEM_V ? codegen_canonical_x64_stack_argument_alignment(type) : 8;
+            u32 argument_alignment = abi == CODEGEN_ABI_X86_64_SYSTEM_V
+                                         ? f80_memory ? 16 : codegen_canonical_x64_stack_argument_alignment(type)
+                                         : 8;
             u64 offset = codegen_canonical_x64_stack_argument_offset(stack_part_count * 8, argument_alignment);
             if (offset > UINT32_MAX || argument_stack_parts > (UINT32_MAX - offset) / 8)
             {
@@ -7980,6 +8279,17 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
         layout->windows_copy_storage_size = (u32)(copy_cursor - stack_bytes);
     }
     return CODEGEN_ERROR_NONE;
+}
+
+BUSTER_F_DECL CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
+                                                                  CodegenAbi abi, Target target, CodegenCanonicalCallLayout* layout)
+{
+    CodegenCanonicalX64F80Cache cache = codegen_canonical_x64_f80_cache_initialize(arena, program);
+    if (cache.allocation_failed)
+    {
+        return CODEGEN_ERROR_CAPACITY;
+    }
+    return codegen_canonical_x64_call_layout_cached(arena, program, &cache, function, instruction, abi, target, layout);
 }
 
 BUSTER_GLOBAL_LOCAL void codegen_canonical_a64_adjust_stack_described(CodegenBuffer* buffer, u32 byte_count, bool subtract,
@@ -8249,6 +8559,113 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_float_memory(CodegenBuffer* buffe
     codegen_emit_u8(buffer, (u8)(0x85 | (vector_register << 3)));
     codegen_emit_u32(buffer, (u32)displacement);
     return true;
+}
+
+// Raw x87 memory forms keep the backend independent of the host C ABI.  A
+// disp32 addressing form is used even for zero offsets: it makes RBP/R13 and
+// RSP/R12 unambiguous and keeps every frame access the same fixed shape.
+BUSTER_F_DECL void codegen_canonical_x64_x87_memory(CodegenBuffer* buffer, bool store, X64Register base, s32 displacement)
+{
+    if (base >= X64_REGISTER_R8)
+    {
+        codegen_emit_u8(buffer, 0x41); // REX.B
+    }
+    codegen_emit_u8(buffer, 0xdb);
+    u8 x87_reg = store ? 7 : 5;
+    codegen_emit_u8(buffer, (u8)(0x80u | ((u32)x87_reg << 3) | (u32)(base & 7)));
+    if ((base & 7) == 4)
+    {
+        // SIB with no index, preserving the selected base register.
+        codegen_emit_u8(buffer, (u8)(0x20 | (base & 7)));
+    }
+    codegen_emit_u32(buffer, (u32)displacement);
+}
+
+BUSTER_F_DECL void codegen_canonical_x64_zero_f80_padding(CodegenBuffer* buffer, X64Register base, s32 displacement)
+{
+    // xor scratch,scratch; [base+10] = scratch.w; [base+12] = scratch.d.
+    // Keep RAX intact when it is the destination pointer: the indirect store
+    // path deliberately holds its address there.  The two stores avoid an
+    // unaligned eight-byte access while covering exactly the six padding
+    // bytes following the x87 ten-byte semantic value.
+    u8 zero_register = base == X64_REGISTER_RAX ? 1 : 0; // ECX when base is RAX, otherwise EAX.
+    codegen_emit_u8(buffer, 0x31);
+    codegen_emit_u8(buffer, (u8)(0xc0u | ((u32)zero_register << 3) | (u32)zero_register));
+    codegen_emit_u8(buffer, 0x66);
+    // REX prefixes follow legacy prefixes; putting REX.B before 0x66 would
+    // make the CPU treat the extended base as an unextended register.
+    if (base >= X64_REGISTER_R8)
+    {
+        codegen_emit_u8(buffer, 0x41);
+    }
+    codegen_emit_u8(buffer, 0x89);
+    codegen_emit_u8(buffer, (u8)(0x80u | ((u32)zero_register << 3) | (u32)(base & 7)));
+    if ((base & 7) == 4)
+    {
+        codegen_emit_u8(buffer, (u8)(0x20 | (base & 7)));
+    }
+    codegen_emit_u32(buffer, (u32)(displacement + 10));
+    if (base >= X64_REGISTER_R8)
+    {
+        codegen_emit_u8(buffer, 0x41);
+    }
+    codegen_emit_u8(buffer, 0x89);
+    codegen_emit_u8(buffer, (u8)(0x80u | ((u32)zero_register << 3) | (u32)(base & 7)));
+    if ((base & 7) == 4)
+    {
+        codegen_emit_u8(buffer, (u8)(0x20 | (base & 7)));
+    }
+    codegen_emit_u32(buffer, (u32)(displacement + 12));
+}
+
+BUSTER_F_DECL bool codegen_canonical_x64_emit_f80_copy(CodegenBuffer* buffer, X64Register source_base, s32 source_displacement,
+                                                              X64Register destination_base, s32 destination_displacement, u32* x87_depth)
+{
+    // Every copy is a bounded one-entry x87 stack transaction.  Keeping the
+    // depth explicit catches an accidental future path that would leave a
+    // value live across a call or a branch.
+    if (!x87_depth || *x87_depth >= 8)
+    {
+        return false;
+    }
+    codegen_canonical_x64_x87_memory(buffer, false, source_base, source_displacement);
+    *x87_depth += 1;
+    codegen_canonical_x64_x87_memory(buffer, true, destination_base, destination_displacement);
+    *x87_depth -= 1;
+    codegen_canonical_x64_zero_f80_padding(buffer, destination_base, destination_displacement);
+    return buffer->error == CODEGEN_ERROR_NONE;
+}
+
+BUSTER_F_DECL bool codegen_canonical_x64_emit_f80_store_top(CodegenBuffer* buffer, X64Register destination_base, s32 destination_displacement,
+                                                                   u32* x87_depth)
+{
+    if (!x87_depth || *x87_depth == 0)
+    {
+        return false;
+    }
+    codegen_canonical_x64_x87_memory(buffer, true, destination_base, destination_displacement);
+    *x87_depth -= 1;
+    codegen_canonical_x64_zero_f80_padding(buffer, destination_base, destination_displacement);
+    return buffer->error == CODEGEN_ERROR_NONE;
+}
+
+BUSTER_F_DECL bool codegen_canonical_x64_store_f80_constant(CodegenBuffer* buffer, s32 displacement, u64 significand, u16 sign_exponent)
+{
+    codegen_emit_u8(buffer, 0x48);
+    codegen_emit_u8(buffer, 0xb8);
+    codegen_emit_u64(buffer, significand);
+    codegen_emit_u8(buffer, 0x48);
+    codegen_emit_u8(buffer, 0x89);
+    codegen_emit_u8(buffer, 0x85);
+    codegen_emit_u32(buffer, (u32)displacement);
+    codegen_emit_u8(buffer, 0xb8);
+    codegen_emit_u32(buffer, sign_exponent);
+    codegen_emit_u8(buffer, 0x66);
+    codegen_emit_u8(buffer, 0x89);
+    codegen_emit_u8(buffer, 0x85);
+    codegen_emit_u32(buffer, (u32)(displacement + 8));
+    codegen_canonical_x64_zero_f80_padding(buffer, X64_REGISTER_RBP, displacement);
+    return buffer->error == CODEGEN_ERROR_NONE;
 }
 
 BUSTER_GLOBAL_LOCAL String8 codegen_global_assembly_trim(String8 value)
@@ -9825,8 +10242,9 @@ struct CodegenCanonicalFragmentInfo
 // so a caller that does not like the answer can rewind and ask again; the
 // target, the program ABI and the IR validation are its caller's business and
 // are not repeated per attempt.
-BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Arena* arena, IrProgram* program, IrModule* module, Target target,
-                                                                           CodegenModuleOptions options, u64 capacity_scale,
+BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Arena* arena, IrProgram* program,
+                                                                           CodegenCanonicalX64F80Cache const* f80_cache, IrModule* module,
+                                                                           Target target, CodegenModuleOptions options, u64 capacity_scale,
                                                                            bool* code_buffer_exhausted, bool allow_unresolved_label_addresses,
                                                                            CodegenCanonicalFragmentInfo* fragment_info)
 {
@@ -10309,6 +10727,66 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         IrTypeId canonical_return_type =
             canonical_function_type && canonical_function_type->kind == IR_TYPE_FUNCTION ? canonical_function_type->return_type : IR_TYPE_ID_INVALID;
         bool canonical_variadic = canonical_function_type && canonical_function_type->kind == IR_TYPE_FUNCTION && canonical_function_type->is_variadic;
+        if (target.cpu_arch == CPU_ARCH_X86_64)
+        {
+            bool canonical_f80_supported = result.abi == CODEGEN_ABI_X86_64_SYSTEM_V;
+            if (!canonical_f80_supported)
+            {
+                bool has_f80 = codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, canonical_return_type);
+                if (canonical_function_type && canonical_function_type->kind == IR_TYPE_FUNCTION)
+                {
+                    for (u32 parameter_index = 0; parameter_index < canonical_function_type->parameter_count && !has_f80; parameter_index += 1)
+                    {
+                        has_f80 |= codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, canonical_function_type->parameter_types[parameter_index]);
+                    }
+                }
+                for (u32 value_index = 0; value_index < function->value_count && !has_f80; value_index += 1)
+                {
+                    has_f80 |= codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, function->values[value_index].canonical_type);
+                }
+                if (has_f80)
+                {
+                    result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                    return result;
+                }
+            }
+            else
+            {
+                // The recursive contains query is broader than the x87 payload
+                // we can interpret.  Reject incompatible aggregate shapes
+                // before an instruction-specific path can mistake their bytes
+                // for scalar f80 data.
+                if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, canonical_return_type) &&
+                    !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, canonical_return_type))
+                {
+                    result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                    return result;
+                }
+                if (canonical_function_type && canonical_function_type->kind == IR_TYPE_FUNCTION)
+                {
+                    for (u32 parameter_index = 0; parameter_index < canonical_function_type->parameter_count; parameter_index += 1)
+                    {
+                        IrTypeId parameter_type_id = canonical_function_type->parameter_types[parameter_index];
+                        if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, parameter_type_id) &&
+                            !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, parameter_type_id))
+                        {
+                            result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                            return result;
+                        }
+                    }
+                }
+                for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+                {
+                    IrTypeId value_type_id = function->values[value_index].canonical_type;
+                    if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, value_type_id) &&
+                        !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, value_type_id))
+                    {
+                        result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                        return result;
+                    }
+                }
+            }
+        }
         CodegenCanonicalAbiValue canonical_return_abi = codegen_canonical_aggregate_abi(program, canonical_return_type, result.abi, true, false);
         bool windows_indirect_return = target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_WINDOWS && canonical_return_abi.indirect;
         bool system_v_indirect_return = target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && canonical_return_abi.indirect;
@@ -10364,7 +10842,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 }
                 CodegenCanonicalCallLayout* call_layout = arena_allocate(arena, CodegenCanonicalCallLayout, 1);
                 *call_layout = (CodegenCanonicalCallLayout){0};
-                CodegenError call_error = codegen_canonical_x64_call_layout(arena, program, function, instruction, result.abi, target, call_layout);
+                CodegenError call_error =
+                    codegen_canonical_x64_call_layout_cached(arena, program, f80_cache, function, instruction, result.abi, target, call_layout);
                 if (call_error != CODEGEN_ERROR_NONE)
                 {
                     // This pass runs before the emitting one that keeps the
@@ -10924,6 +11403,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // inside its own instruction expansion.
         u64 x64_forwarded_store_end = UINT64_MAX;
         s32 x64_forwarded_store_displacement = 0;
+        // Canonical f80 support uses only bounded fldt/fstpt transactions and
+        // one live ST0 for a direct f80 return.  Keep the depth explicit so a
+        // future path cannot silently leak an x87 stack entry across a call.
+        u32 x87_stack_depth = 0;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             IrBlock* emitted_block = function->blocks + block_index;
@@ -11173,6 +11656,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             bool prior_aggregate =
                                 codegen_canonical_integer_aggregate_parts(program, function_type->parameter_types[prior_index], &prior_parts);
                             IrType* prior_type = ir_type_from_id(&program->types, function_type->parameter_types[prior_index]);
+                            if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, function_type->parameter_types[prior_index]))
+                            {
+                                if (result.abi != CODEGEN_ABI_X86_64_SYSTEM_V || !prior_type || prior_type->layout.size != 16 ||
+                                    !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, function_type->parameter_types[prior_index]))
+                                {
+                                    result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                                    return result;
+                                }
+                                prior_stack_bytes = codegen_canonical_x64_stack_argument_offset(prior_stack_bytes, 16) + 16;
+                                continue;
+                            }
                             CodegenCanonicalAbiValue prior_aggregate_abi =
                                 codegen_canonical_aggregate_abi(program, function_type->parameter_types[prior_index], result.abi, false, false);
                             bool prior_in_registers = codegen_canonical_x64_abi_value_in_registers(&prior_aggregate_abi, &target);
@@ -11267,6 +11761,30 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         bool windows_indirect = result.abi == CODEGEN_ABI_X86_64_WINDOWS && argument_aggregate_abi.indirect;
                         IrType* argument_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                        bool argument_contains_f80 = codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type);
+                        if (argument_contains_f80)
+                        {
+                            if (result.abi != CODEGEN_ABI_X86_64_SYSTEM_V || !argument_type || argument_type->layout.size != 16 ||
+                                !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, instruction->canonical_type) ||
+                                !argument_aggregate_abi.memory)
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                                return result;
+                            }
+                            u64 argument_stack_offset = codegen_canonical_x64_stack_argument_offset(prior_stack_bytes, 16);
+                            s64 source_displacement = (s64)16 + (s64)argument_stack_offset;
+                            if (source_displacement > INT32_MAX ||
+                                !codegen_canonical_x64_emit_f80_copy(&buffer, X64_REGISTER_RBP,
+                                                                      codegen_canonical_x64_rebase_frame_displacement(
+                                                                          &buffer, source_displacement, canonical_x64_frame_base_offset),
+                                                                      X64_REGISTER_RBP, result_displacement, &x87_stack_depth))
+                            {
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_ABI;
+                                return result;
+                            }
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         if (result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && argument_type && argument_type->kind == IR_TYPE_FLOAT)
                         {
                             if (argument_type->bit_width != 32 && argument_type->bit_width != 64)
@@ -11583,6 +12101,36 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         bool indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                         definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE ||
                                         (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
+                        IrType* loaded_value_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                        if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type))
+                        {
+                            if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD || !loaded_value_type || loaded_value_type->layout.size != 16 ||
+                                result.abi != CODEGEN_ABI_X86_64_SYSTEM_V ||
+                                !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, instruction->canonical_type))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            if (indirect)
+                            {
+                                C_X64_LOAD(0x85, instruction->operands[0]);
+                                if (!codegen_canonical_x64_emit_f80_copy(&buffer, X64_REGISTER_RAX, 0, X64_REGISTER_RBP, result_displacement,
+                                                                          &x87_stack_depth))
+                                {
+                                    result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                    return result;
+                                }
+                            }
+                            else if (!codegen_canonical_x64_emit_f80_copy(
+                                         &buffer, X64_REGISTER_RBP, C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value]),
+                                         X64_REGISTER_RBP, result_displacement, &x87_stack_depth))
+                            {
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD && aggregate)
                         {
                             if (!aggregate_type || aggregate_type->kind != IR_TYPE_INTEGER || aggregate_type->layout.size != 16 ||
@@ -11872,6 +12420,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         if (!target_type || !source_type)
                         {
                             result.error = CODEGEN_ERROR_INVALID_IR;
+                            return result;
+                        }
+                        if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, function->values[instruction->operands[0].value].canonical_type) ||
+                            codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type))
+                        {
+                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                             return result;
                         }
                         bool source_integer128 = source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128;
@@ -12168,6 +12722,37 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         bool indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                         definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE ||
                                         (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
+                        if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, function->values[instruction->operands[1].value].canonical_type))
+                        {
+                            if (instruction->opcode == IR_OPCODE_ATOMIC_STORE || !stored_type || stored_type->layout.size != 16 ||
+                                result.abi != CODEGEN_ABI_X86_64_SYSTEM_V ||
+                                !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program,
+                                                                                     function->values[instruction->operands[1].value].canonical_type))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            if (indirect)
+                            {
+                                C_X64_LOAD(0x85, instruction->operands[0]);
+                                if (!codegen_canonical_x64_emit_f80_copy(
+                                         &buffer, X64_REGISTER_RBP, C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[1].value]),
+                                         X64_REGISTER_RAX, 0, &x87_stack_depth))
+                                {
+                                    result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                    return result;
+                                }
+                            }
+                            else if (!codegen_canonical_x64_emit_f80_copy(
+                                         &buffer, X64_REGISTER_RBP, C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[1].value]),
+                                         X64_REGISTER_RBP, C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value]), &x87_stack_depth))
+                            {
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         if (instruction->opcode == IR_OPCODE_ATOMIC_STORE && aggregate)
                         {
                             if (!stored_type || stored_type->kind != IR_TYPE_INTEGER || stored_type->layout.size != 16 ||
@@ -12613,6 +13198,21 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     }
                     else if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER || instruction->opcode == IR_OPCODE_CONSTANT_FLOAT)
                     {
+                        IrType* constant_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                        if (instruction->opcode == IR_OPCODE_CONSTANT_FLOAT && constant_type && constant_type->kind == IR_TYPE_FLOAT && constant_type->bit_width == 80)
+                        {
+                            if (!codegen_canonical_x64_type_is_f80(constant_type) || result.abi != CODEGEN_ABI_X86_64_SYSTEM_V ||
+                                instruction->immediate_count != 2 ||
+                                (instruction->immediates[1] & ~UINT64_C(0xffff)) ||
+                                !codegen_canonical_x64_store_f80_constant(&buffer, result_displacement, instruction->immediates[0],
+                                                                           (u16)instruction->immediates[1]))
+                            {
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         u64 immediate = instruction->immediates[0];
                         if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER && instruction->immediate_is_negative)
                         {
@@ -12630,7 +13230,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             codegen_emit_u32(&buffer, (u32)immediate);
                         }
                         C_X64_STORE_RESULT();
-                        IrType* constant_type = ir_type_from_id(&program->types, instruction->canonical_type);
                         if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER && constant_type && constant_type->kind == IR_TYPE_INTEGER &&
                             constant_type->bit_width == 128)
                         {
@@ -12661,6 +13260,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         {
                             IrTypeId parameter_type_id = canonical_function_type->parameter_types[parameter_index];
                             IrType* parameter_type = ir_type_from_id(&program->types, parameter_type_id);
+                            if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, parameter_type_id))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
                             u32 parts = 1;
                             bool aggregate = codegen_canonical_integer_aggregate_parts(program, parameter_type_id, &parts);
                             if (parameter_type && parameter_type->kind == IR_TYPE_FLOAT)
@@ -12763,6 +13367,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     else if (instruction->opcode == IR_OPCODE_VA_ARG)
                     {
                         IrType* value_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                        if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type))
+                        {
+                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                            return result;
+                        }
                         u32 integer_parts = 0;
                         bool aggregate = codegen_canonical_integer_aggregate_parts(program, instruction->canonical_type, &integer_parts);
                         bool floating = value_type && value_type->kind == IR_TYPE_FLOAT;
@@ -13022,8 +13631,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         else
                         {
-                            CodegenError call_error =
-                                codegen_canonical_x64_call_layout(arena, program, function, instruction, result.abi, target, &call_layout);
+                            CodegenError call_error = codegen_canonical_x64_call_layout_cached(arena, program, f80_cache, function, instruction,
+                                                                                                  result.abi, target, &call_layout);
                             if (call_error != CODEGEN_ERROR_NONE)
                             {
                                 result.error = call_error;
@@ -13367,9 +13976,45 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             u32 cleanup = call_layout.stack_part_count * 8 + (stack_padding ? 8 : 0);
                             codegen_canonical_x64_adjust_stack(&buffer, cleanup, false);
                         }
+                        IrType* call_return_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                        if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type))
+                        {
+                            if (result.abi != CODEGEN_ABI_X86_64_SYSTEM_V ||
+                                !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, instruction->canonical_type) ||
+                                !codegen_canonical_x64_abi_is_f80_result(call_return_type, &call_return_abi))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                                return result;
+                            }
+                            // SysV returns f80 in ST0.  Spill it immediately
+                            // into the canonical sixteen-byte result slot, or
+                            // pop it when the call result is unused.
+                            if (x87_stack_depth != 0)
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
+                            {
+                                x87_stack_depth += 1;
+                                if (!codegen_canonical_x64_emit_f80_store_top(&buffer, X64_REGISTER_RBP, result_displacement,
+                                                                               &x87_stack_depth))
+                                {
+                                    result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_ABI;
+                                    return result;
+                                }
+                            }
+                            else
+                            {
+                                codegen_emit_u8(&buffer, 0xdd);
+                                codegen_emit_u8(&buffer, 0xd8); // fstp st(0)
+                            }
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
                         {
-                            IrType* return_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                            IrType* return_type = call_return_type;
                             if (return_type && return_type->kind == IR_TYPE_FLOAT)
                             {
                                 if (return_type->bit_width != 32 && return_type->bit_width != 64)
@@ -13622,6 +14267,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     else if (instruction->opcode == IR_OPCODE_UNARY)
                     {
                         IrType* canonical_unary_type = ir_type_from_id(&program->types, instruction->canonical_type);
+                        if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type) ||
+                            (instruction->operand_count &&
+                             codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, function->values[instruction->operands[0].value].canonical_type)))
+                        {
+                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                            return result;
+                        }
                         if (canonical_unary_type && canonical_unary_type->kind == IR_TYPE_VECTOR)
                         {
                             if (!codegen_canonical_x64_vector_operation(
@@ -13768,6 +14420,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     {
                         IrTypeId operand_type = function->values[instruction->operands[0].value].canonical_type;
                         IrType* operand_type_value = ir_type_from_id(&program->types, operand_type);
+                        if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, operand_type) ||
+                            codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, function->values[instruction->operands[1].value].canonical_type) ||
+                            codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type))
+                        {
+                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                            return result;
+                        }
                         if (operand_type_value && operand_type_value->kind == IR_TYPE_VECTOR)
                         {
                             if (!codegen_canonical_x64_vector_operation(
@@ -14921,6 +15580,24 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 codegen_canonical_integer_aggregate_parts(program, function->values[return_value.value].canonical_type, &return_parts);
                             CodegenCanonicalAbiValue aggregate_return_abi =
                                 codegen_canonical_aggregate_abi(program, function->values[return_value.value].canonical_type, result.abi, true, false);
+                            if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, function->values[return_value.value].canonical_type))
+                            {
+                                if (result.abi != CODEGEN_ABI_X86_64_SYSTEM_V ||
+                                    !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, function->values[return_value.value].canonical_type) ||
+                                    !codegen_canonical_x64_abi_is_f80_result(return_type, &aggregate_return_abi) || x87_stack_depth != 0)
+                                {
+                                    result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
+                                    return result;
+                                }
+                                codegen_canonical_x64_x87_memory(&buffer, false, X64_REGISTER_RBP,
+                                                                 C_X64_FRAME_DISPLACEMENT(value_offsets[return_value.value]));
+                                x87_stack_depth += 1;
+                                C_X64_RESTORE_RBX();
+                                codegen_canonical_x64_emit_return(&buffer, frame_size, result.abi, windows_dynamic_stack);
+                                x87_stack_depth = 0; // the RET terminates this path; the next block starts with an empty stack.
+                                instruction_id = instruction->next;
+                                continue;
+                            }
                             if (aggregate_return_abi.part_count && !aggregate_return_abi.indirect)
                             {
                                 aggregate_return = true;
@@ -17457,6 +18134,7 @@ struct CodegenCanonicalParallelState
     Arena* fragment_arena;
     OsMutexHandle* fragment_mutex;
     IrProgram* program;
+    CodegenCanonicalX64F80Cache const* f80_cache;
     IrModule* module;
     CodegenCanonicalFragment* fragments;
     AtomicU64 take_index;
@@ -17865,8 +18543,9 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType codegen_canonical_parallel_lane(void* argum
         {
             bool code_buffer_exhausted = false;
             emitted_info = (CodegenCanonicalFragmentInfo){0};
-            emitted = codegen_generate_canonical_module_attempt(emission_arena, &emission_program, &fragment_module, state->target, fragment_options,
-                                                                 capacity_scale, &code_buffer_exhausted, false, &emitted_info);
+            emitted = codegen_generate_canonical_module_attempt(emission_arena, &emission_program, state->f80_cache, &fragment_module,
+                                                                 state->target, fragment_options, capacity_scale, &code_buffer_exhausted, false,
+                                                                 &emitted_info);
             if (!code_buffer_exhausted)
             {
                 break;
@@ -17917,12 +18596,22 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     // ABI records and the target-for-ABI cache are mutable on first use. Freeze
     // both on the caller before any worker reads them.
     ir_prepare_program_abi(program, codegen_canonical_ir_abi_convention(result.abi));
+    CodegenCanonicalX64F80Cache f80_cache = {0};
     if (!options.assume_validated)
     {
         IrValidationResult validation = ir_validate_canonical_module(program, module);
         if (validation.error != IR_VALIDATION_NONE)
         {
             result.error = CODEGEN_ERROR_INVALID_IR;
+            return result;
+        }
+    }
+    if (target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        f80_cache = codegen_canonical_x64_f80_cache_initialize(arena, program);
+        if (f80_cache.allocation_failed)
+        {
+            result.error = CODEGEN_ERROR_CAPACITY;
             return result;
         }
     }
@@ -17937,7 +18626,8 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     serial_options.assume_validated = true;
     serial_options.lane_count = 1;
     bool globals_buffer_exhausted = false;
-    result = codegen_generate_canonical_module_attempt(arena, program, &globals_module, target, serial_options, 1, &globals_buffer_exhausted, true, 0);
+    result = codegen_generate_canonical_module_attempt(arena, program, &f80_cache, &globals_module, target, serial_options, 1,
+                                                       &globals_buffer_exhausted, true, 0);
     BUSTER_CHECK(!globals_buffer_exhausted);
     result.ir_module = module;
     if (result.error != CODEGEN_ERROR_NONE)
@@ -17988,6 +18678,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         .fragment_arena = fragment_arena,
         .fragment_mutex = fragment_mutex,
         .program = program,
+        .f80_cache = &f80_cache,
         .module = module,
         .fragments = fragments,
         .result = result,
