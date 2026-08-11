@@ -885,6 +885,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_register_parse(String8 text, AssemblySyntax sy
     {
         return true;
     }
+    // ACE-1's BSRMOV forms name the fixed architectural BSR0 operand when
+    // spelling the direction explicitly. It is a 64-bit special register,
+    // distinct from the x87 ST* aliases below.
+    if (assembly_word_equal(text, S8("bsr0")))
+    {
+        *result = (AssemblyRegister){.index = 0, .width = 64, .class = ASSEMBLY_REGISTER_SPECIAL};
+        return true;
+    }
     static String8 const names_mmx[] = {
         S8_INITIALIZER("mm0"), S8_INITIALIZER("mm1"), S8_INITIALIZER("mm2"), S8_INITIALIZER("mm3"),
         S8_INITIALIZER("mm4"), S8_INITIALIZER("mm5"), S8_INITIALIZER("mm6"), S8_INITIALIZER("mm7"),
@@ -6970,6 +6978,12 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     else if (implicit_att_memory &&
              (assembly_word_equal(mnemonic, S8("wrssq")) || assembly_word_equal(mnemonic, S8("wrussq")) ||
               assembly_word_equal(mnemonic, S8("rstorssp")) || assembly_word_equal(mnemonic, S8("clrssbsy"))))
+        implicit_memory_width = 64;
+    else if (implicit_att_memory &&
+             (assembly_word_equal(mnemonic, S8("bsrmovh")) || assembly_word_equal(mnemonic, S8("bsrmovl"))))
+        // BSRMOVH/L's only memory schema is a fixed u64 element.  AT&T has
+        // no ptr qualifier, so resolve an unsized memory operand here; an
+        // explicit q suffix remains accepted by the generic alias path.
         implicit_memory_width = 64;
     else if (cet_unsized_intel) implicit_memory_width = 64;
     if (implicit_memory_width)

@@ -34,6 +34,65 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, ace_att.diagnostic_count == 0 &&
                                assembly_test_bytes_equal(ace_att.bytes, expected_ace_bsr_movf,
                                                          BUSTER_ARRAY_LENGTH(expected_ace_bsr_movf)));
+
+    // Every ACE-1 BSRMOV form is exposed through both source dialects.  The
+    // explicit BSR0 operand carries the direction for the H/L rows; memory
+    // rows use qword ptr in Intel and the fixed u64 schema normalization in
+    // AT&T.  Distinct ZMM registers on BSRMOVF make operand topology visible
+    // rather than allowing an accidental same-register encoding to pass.
+    typedef struct AceAssemblyCase AceAssemblyCase;
+    struct AceAssemblyCase
+    {
+        String8 source;
+        AssemblySyntax syntax;
+        u8 expected[6];
+    };
+    static AceAssemblyCase const ace_front_door_cases[] = {
+        {S8("bsrmovf zmm1, zmm2\n"), ASSEMBLY_SYNTAX_INTEL, {0x62, 0xf6, 0xf4, 0x48, 0x95, 0xc2}},
+        {S8("bsrmovf zmm1, qword ptr [rax]\n"), ASSEMBLY_SYNTAX_INTEL, {0x62, 0xf6, 0xf4, 0x48, 0x95, 0x00}},
+        {S8("bsrmovh bsr0, zmm1\n"), ASSEMBLY_SYNTAX_INTEL, {0x62, 0xf6, 0xff, 0x48, 0x95, 0xc1}},
+        {S8("bsrmovh bsr0, qword ptr [rax]\n"), ASSEMBLY_SYNTAX_INTEL, {0x62, 0xf6, 0xff, 0x48, 0x95, 0x00}},
+        {S8("bsrmovh zmm1, bsr0\n"), ASSEMBLY_SYNTAX_INTEL, {0x62, 0xf6, 0x7f, 0x48, 0x95, 0xc1}},
+        {S8("bsrmovh qword ptr [rax], bsr0\n"), ASSEMBLY_SYNTAX_INTEL, {0x62, 0xf6, 0x7f, 0x48, 0x95, 0x00}},
+        {S8("bsrmovl bsr0, zmm1\n"), ASSEMBLY_SYNTAX_INTEL, {0x62, 0xf6, 0xfe, 0x48, 0x95, 0xc1}},
+        {S8("bsrmovl bsr0, qword ptr [rax]\n"), ASSEMBLY_SYNTAX_INTEL, {0x62, 0xf6, 0xfe, 0x48, 0x95, 0x00}},
+        {S8("bsrmovl zmm1, bsr0\n"), ASSEMBLY_SYNTAX_INTEL, {0x62, 0xf6, 0x7e, 0x48, 0x95, 0xc1}},
+        {S8("bsrmovl qword ptr [rax], bsr0\n"), ASSEMBLY_SYNTAX_INTEL, {0x62, 0xf6, 0x7e, 0x48, 0x95, 0x00}},
+        {S8("bsrmovf %zmm2, %zmm1\n"), ASSEMBLY_SYNTAX_ATT, {0x62, 0xf6, 0xf4, 0x48, 0x95, 0xc2}},
+        {S8("bsrmovf (%rax), %zmm1\n"), ASSEMBLY_SYNTAX_ATT, {0x62, 0xf6, 0xf4, 0x48, 0x95, 0x00}},
+        {S8("bsrmovh %zmm1, %bsr0\n"), ASSEMBLY_SYNTAX_ATT, {0x62, 0xf6, 0xff, 0x48, 0x95, 0xc1}},
+        {S8("bsrmovh (%rax), %bsr0\n"), ASSEMBLY_SYNTAX_ATT, {0x62, 0xf6, 0xff, 0x48, 0x95, 0x00}},
+        {S8("bsrmovh %bsr0, %zmm1\n"), ASSEMBLY_SYNTAX_ATT, {0x62, 0xf6, 0x7f, 0x48, 0x95, 0xc1}},
+        {S8("bsrmovh %bsr0, (%rax)\n"), ASSEMBLY_SYNTAX_ATT, {0x62, 0xf6, 0x7f, 0x48, 0x95, 0x00}},
+        {S8("bsrmovl %zmm1, %bsr0\n"), ASSEMBLY_SYNTAX_ATT, {0x62, 0xf6, 0xfe, 0x48, 0x95, 0xc1}},
+        {S8("bsrmovl (%rax), %bsr0\n"), ASSEMBLY_SYNTAX_ATT, {0x62, 0xf6, 0xfe, 0x48, 0x95, 0x00}},
+        {S8("bsrmovl %bsr0, %zmm1\n"), ASSEMBLY_SYNTAX_ATT, {0x62, 0xf6, 0x7e, 0x48, 0x95, 0xc1}},
+        {S8("bsrmovl %bsr0, (%rax)\n"), ASSEMBLY_SYNTAX_ATT, {0x62, 0xf6, 0x7e, 0x48, 0x95, 0x00}},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(ace_front_door_cases); case_index += 1)
+    {
+        AceAssemblyCase const test_case = ace_front_door_cases[case_index];
+        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, test_case.source,
+                                                        (AssemblyEncodeOptions){.target = ace_target, .syntax = test_case.syntax});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(encoded.bytes, test_case.expected,
+                                                             BUSTER_ARRAY_LENGTH(test_case.expected)));
+    }
+    AssemblyEncodeResult ace_wrong_direction = assembly_encode(
+        arguments->arena, S8("bsrmovh zmm1, zmm2\n"),
+        (AssemblyEncodeOptions){.target = ace_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult ace_wrong_class = assembly_encode(
+        arguments->arena, S8("bsrmovh bsr0, ymm1\n"),
+        (AssemblyEncodeOptions){.target = ace_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult ace_wrong_width = assembly_encode(
+        arguments->arena, S8("bsrmovh bsr0, byte ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = ace_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, ace_wrong_direction.diagnostic_count == 1 &&
+                               ace_wrong_direction.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    BUSTER_TEST(arguments, ace_wrong_class.diagnostic_count == 1 &&
+                               ace_wrong_class.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    BUSTER_TEST(arguments, ace_wrong_width.diagnostic_count == 1 &&
+                               ace_wrong_width.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     Target amx_tile_only_target = ace_target;
     amx_tile_only_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
                                                                                                   TARGET_CPU_FEATURE_X86_AMX_TILE},
@@ -48,6 +107,11 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                ace_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     BUSTER_TEST(arguments, ace_with_amx_tile.diagnostic_count == 1 &&
                                ace_with_amx_tile.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    AssemblyEncodeResult ace_bsr0_without_feature = assembly_encode(
+        arguments->arena, S8("bsrmovh bsr0, zmm1\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, ace_bsr0_without_feature.diagnostic_count == 1 &&
+                               ace_bsr0_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     Target sse4a_target = x86_target;
     sse4a_target.cpu_model = CPU_MODEL_AMD_AMD_FAMILY_10;
     sse4a_target.cpu_features_explicit = true;

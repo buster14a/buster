@@ -1707,11 +1707,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
         }
         else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norexr_r4")))
         {
-            // XED's norexr_r4 atom fixes EVEX's inverted R' bit to one.  It
-            // is a complete, typed constraint (unlike the broader norexr
-            // family below), so keep it in the same representation as the
-            // equivalent EVEXR4_ONE() spelling without special-casing any
-            // mnemonic.
+            // XED's norexr_r4 atom fixes EVEX's inverted R' bit to one. The
+            // ACE-1 rows also carry REG[0b000], which fixes the low R bits;
+            // that ordinary pattern field is the separate low-R constraint.
+            // Keep this token in the same typed representation as
+            // EVEXR4_ONE(), without special-casing any mnemonic.
             pattern.has_prefix_control = 1;
             pattern.has_evex_r4 = 1;
             pattern.evex_r4_value = 1;
@@ -2542,6 +2542,21 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_effective_field_source_pattern(B
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_contains(BusterX86MetadataString atom, String8 needle);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_equal(BusterX86MetadataString atom, String8 literal);
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_explicit_fixed_implicit_operand(
+    BusterX86MetadataPhysicalQuery query, BusterX86MetadataOperand metadata, u32 actual_index)
+{
+    // Most implicit operands are architectural defaults and remain omitted
+    // from the physical query. ACE-1's BSRMOV direction is the one typed
+    // exception: consume only the raw XED_REG_BSR0 identity at its topology
+    // position. Other fixed implicit registers (for example an AL accumulator)
+    // remain non-source-spellable when include_implicit is false.
+    return !query.include_implicit && !metadata.visible &&
+           metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER &&
+           metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_FIXED && actual_index < query.operand_count &&
+           buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_BSR0")) &&
+           buster_x86_metadata_emit_fixed_register_matches(metadata, query.operands[actual_index]);
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_is_writemask_operand(BusterX86MetadataOperand metadata)
 {
     if (metadata.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK) return false;
@@ -2591,7 +2606,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_bind_form(BusterX86MetadataPhy
         if (!buster_x86_metadata_operand(form.id, operand_index, &metadata)) return false;
         if (pattern_valid)
             metadata.field_source = buster_x86_metadata_emit_effective_field_source_pattern(metadata, pattern);
-        if (!query.include_implicit && !metadata.visible) continue;
+        if (!query.include_implicit && !metadata.visible &&
+            !buster_x86_metadata_emit_explicit_fixed_implicit_operand(query, metadata, actual_index))
+            continue;
         bool mask_default = buster_x86_metadata_emit_is_writemask_operand(metadata) &&
                             (actual_index >= query.operand_count ||
                              buster_x86_metadata_emit_operand_class(query.operands[actual_index]) != BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK);
@@ -2695,7 +2712,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_count(BusterX86Me
     {
         BusterX86MetadataOperand metadata = {0};
         if (!buster_x86_metadata_operand(form.id, operand_index, &metadata)) return false;
-        if (!query.include_implicit && !metadata.visible) continue;
+        if (!query.include_implicit && !metadata.visible &&
+            !buster_x86_metadata_emit_explicit_fixed_implicit_operand(query, metadata, actual_index))
+            continue;
         bool mask_default = buster_x86_metadata_emit_is_writemask_operand(metadata) &&
                             (actual_index >= query.operand_count ||
                              buster_x86_metadata_emit_operand_class(query.operands[actual_index]) !=
@@ -2737,6 +2756,12 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_contains(BusterX86Metadat
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_effective_field_source(BusterX86MetadataOperand metadata)
 {
+    // Fixed architectural names may contain the same `_B`/`_N` spelling
+    // used by XED's vector field annotations (BSR0 is the `_B` example).
+    // Preserve an explicit fixed source before applying those generic atom
+    // suffix heuristics.
+    if (metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_FIXED)
+        return BUSTER_X86_METADATA_FIELD_SOURCE_FIXED;
     if (buster_x86_metadata_emit_atom_contains(metadata.atom, S8("_B"))) return BUSTER_X86_METADATA_FIELD_SOURCE_RM;
     if (buster_x86_metadata_emit_atom_contains(metadata.atom, S8("_N"))) return BUSTER_X86_METADATA_FIELD_SOURCE_VVVV;
     if (metadata.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK &&
@@ -3150,6 +3175,12 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_fixed_register_matches(BusterX
         expected_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL;
         expected_index = 7;
         expected_width = 80;
+    }
+    else if (buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_BSR0")))
+    {
+        expected_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL;
+        expected_index = 0;
+        expected_width = 64;
     }
     if (expected_index == UINT16_MAX)
     {

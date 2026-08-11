@@ -1034,8 +1034,9 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 
     {
         // ACE-1's BSRMOV rows are the complete norexr_r4 cohort in this
-        // snapshot.  The token constrains EVEX R' but does not make BSR0 a
-        // user-visible operand.
+        // snapshot. The token constrains EVEX R'; REG[0b000] fixes low R,
+        // while BSR0 remains schema-hidden but may be spelled explicitly by
+        // source syntax to select the directional form.
         static u32 const ace_r4_form_ids[] = {6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
         bool ace_rows_consistent = true;
         bool ace_ids_are_complete = true;
@@ -1065,7 +1066,11 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                    form.prefix_kind == BUSTER_X86_METADATA_PREFIX_EVEX &&
                                    form.encoder_family == BUSTER_X86_METADATA_ENCODER_EVEX &&
                                    x86_64_metadata_test_string_equal(form.isa_set, S8("ACE_1")) &&
-                                   x86_64_metadata_test_pattern_has_token(form.pattern, S8("norexr_r4"));
+                                   x86_64_metadata_test_pattern_has_token(form.pattern, S8("norexr_r4")) &&
+                                   // Low R is fixed independently by the
+                                   // schema's REG[0b000] atom; norexr_r4
+                                   // supplies only EVEX R4.
+                                   x86_64_metadata_test_pattern_has_token(form.pattern, S8("REG[0b000]"));
             u32 visible_count = 0;
             u32 implicit_count = 0;
             for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
@@ -1138,35 +1143,98 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                    no_feature_rejected.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE);
 
         // These bytes are inferred from XED's EVV/MAP6/W/VF atoms and this
-        // runtime's EVEX builder.  LLVM 22 rejects BSRMOVF/BSRMOVH/BSRMOVL,
+        // runtime's EVEX builder. LLVM 22 rejects BSRMOVF/BSRMOVH/BSRMOVL,
         // so there is deliberately no LLVM byte oracle for this ACE-1 cohort.
         BusterX86MetadataPhysicalOperand bsr_movf_registers[] = {
-            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
-            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 1, 512),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 2, 512),
         };
         BusterX86MetadataPhysicalOperand bsr_movf_memory[] = {
-            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 1, 512),
             x86_64_metadata_test_physical_mem_base(0, 64, 0),
         };
-        BusterX86MetadataPhysicalOperand bsr_movh_store[] = {
-            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+        BusterX86MetadataPhysicalOperand bsr_movh_register[] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 1, 512),
         };
-        u8 const bsr_movf_register_bytes[] = {0x62, 0xf6, 0xfc, 0x48, 0x95, 0xc0};
-        u8 const bsr_movf_memory_bytes[] = {0x62, 0xf6, 0xfc, 0x48, 0x95, 0x00};
-        u8 const bsr_movh_store_bytes[] = {0x62, 0xf6, 0x7f, 0x48, 0x95, 0xc0};
+        BusterX86MetadataPhysicalOperand bsr_movh_memory[] = {
+            x86_64_metadata_test_physical_mem_base(0, 64, 0),
+        };
+        BusterX86MetadataPhysicalOperand bsr_movh_load_explicit[] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL, 0, 64),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 1, 512),
+        };
+        BusterX86MetadataPhysicalOperand bsr_movh_store_explicit_memory[] = {
+            x86_64_metadata_test_physical_mem_base(0, 64, 0),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL, 0, 64),
+        };
+        BusterX86MetadataPhysicalOperand bsr_movl_register[] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 1, 512),
+        };
+        BusterX86MetadataPhysicalOperand bsr_movl_memory[] = {
+            x86_64_metadata_test_physical_mem_base(0, 64, 0),
+        };
+        u8 const bsr_movf_register_bytes[] = {0x62, 0xf6, 0xf4, 0x48, 0x95, 0xc2};
+        u8 const bsr_movf_memory_bytes[] = {0x62, 0xf6, 0xf4, 0x48, 0x95, 0x00};
+        u8 const bsr_movh_load_register_bytes[] = {0x62, 0xf6, 0xff, 0x48, 0x95, 0xc1};
+        u8 const bsr_movh_load_memory_bytes[] = {0x62, 0xf6, 0xff, 0x48, 0x95, 0x00};
+        u8 const bsr_movh_store_register_bytes[] = {0x62, 0xf6, 0x7f, 0x48, 0x95, 0xc1};
+        u8 const bsr_movh_store_memory_bytes[] = {0x62, 0xf6, 0x7f, 0x48, 0x95, 0x00};
+        u8 const bsr_movl_load_register_bytes[] = {0x62, 0xf6, 0xfe, 0x48, 0x95, 0xc1};
+        u8 const bsr_movl_load_memory_bytes[] = {0x62, 0xf6, 0xfe, 0x48, 0x95, 0x00};
+        u8 const bsr_movl_store_register_bytes[] = {0x62, 0xf6, 0x7e, 0x48, 0x95, 0xc1};
+        u8 const bsr_movl_store_memory_bytes[] = {0x62, 0xf6, 0x7e, 0x48, 0x95, 0x00};
         BUSTER_TEST(arguments,
                     x86_64_metadata_test_emit_exact(S8("BSRMOVF"), 6, bsr_movf_registers,
                                                      BUSTER_ARRAY_LENGTH(bsr_movf_registers), (BusterX86MetadataPhysicalAttributes){0},
                                                      ace_feature, BUSTER_ARRAY_LENGTH(ace_feature), bsr_movf_register_bytes,
-                                                     BUSTER_ARRAY_LENGTH(bsr_movf_register_bytes)) &&
-                        x86_64_metadata_test_emit_exact(S8("BSRMOVF"), 7, bsr_movf_memory,
-                                                         BUSTER_ARRAY_LENGTH(bsr_movf_memory), (BusterX86MetadataPhysicalAttributes){0},
-                                                         ace_feature, BUSTER_ARRAY_LENGTH(ace_feature), bsr_movf_memory_bytes,
-                                                         BUSTER_ARRAY_LENGTH(bsr_movf_memory_bytes)) &&
-                        x86_64_metadata_test_emit_exact(S8("BSRMOVH"), 10, bsr_movh_store,
-                                                         BUSTER_ARRAY_LENGTH(bsr_movh_store), (BusterX86MetadataPhysicalAttributes){0},
-                                                         ace_feature, BUSTER_ARRAY_LENGTH(ace_feature), bsr_movh_store_bytes,
-                                                         BUSTER_ARRAY_LENGTH(bsr_movh_store_bytes)));
+                                                     BUSTER_ARRAY_LENGTH(bsr_movf_register_bytes)));
+        BUSTER_TEST(arguments,
+                    x86_64_metadata_test_emit_exact(S8("BSRMOVF"), 7, bsr_movf_memory,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movf_memory), (BusterX86MetadataPhysicalAttributes){0},
+                                                     ace_feature, BUSTER_ARRAY_LENGTH(ace_feature), bsr_movf_memory_bytes,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movf_memory_bytes)));
+        BUSTER_TEST(arguments,
+                    x86_64_metadata_test_emit_exact(S8("BSRMOVH"), 8, bsr_movh_load_explicit,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movh_load_explicit),
+                                                     (BusterX86MetadataPhysicalAttributes){0},
+                                                     ace_feature, BUSTER_ARRAY_LENGTH(ace_feature), bsr_movh_load_register_bytes,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movh_load_register_bytes)));
+        BUSTER_TEST(arguments,
+                    x86_64_metadata_test_emit_exact(S8("BSRMOVH"), 9, bsr_movh_memory,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movh_memory), (BusterX86MetadataPhysicalAttributes){0},
+                                                     ace_feature, BUSTER_ARRAY_LENGTH(ace_feature), bsr_movh_load_memory_bytes,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movh_load_memory_bytes)));
+        BUSTER_TEST(arguments,
+                    x86_64_metadata_test_emit_exact(S8("BSRMOVH"), 10, bsr_movh_register,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movh_register), (BusterX86MetadataPhysicalAttributes){0},
+                                                     ace_feature, BUSTER_ARRAY_LENGTH(ace_feature), bsr_movh_store_register_bytes,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movh_store_register_bytes)));
+        BUSTER_TEST(arguments,
+                    x86_64_metadata_test_emit_exact(S8("BSRMOVH"), 11, bsr_movh_store_explicit_memory,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movh_store_explicit_memory),
+                                                     (BusterX86MetadataPhysicalAttributes){0},
+                                                     ace_feature, BUSTER_ARRAY_LENGTH(ace_feature), bsr_movh_store_memory_bytes,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movh_store_memory_bytes)));
+        BUSTER_TEST(arguments,
+                    x86_64_metadata_test_emit_exact(S8("BSRMOVL"), 12, bsr_movl_register,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movl_register), (BusterX86MetadataPhysicalAttributes){0},
+                                                     ace_feature, BUSTER_ARRAY_LENGTH(ace_feature), bsr_movl_load_register_bytes,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movl_load_register_bytes)));
+        BUSTER_TEST(arguments,
+                    x86_64_metadata_test_emit_exact(S8("BSRMOVL"), 13, bsr_movl_memory,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movl_memory), (BusterX86MetadataPhysicalAttributes){0},
+                                                     ace_feature, BUSTER_ARRAY_LENGTH(ace_feature), bsr_movl_load_memory_bytes,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movl_load_memory_bytes)));
+        BUSTER_TEST(arguments,
+                    x86_64_metadata_test_emit_exact(S8("BSRMOVL"), 14, bsr_movl_register,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movl_register), (BusterX86MetadataPhysicalAttributes){0},
+                                                     ace_feature, BUSTER_ARRAY_LENGTH(ace_feature), bsr_movl_store_register_bytes,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movl_store_register_bytes)));
+        BUSTER_TEST(arguments,
+                    x86_64_metadata_test_emit_exact(S8("BSRMOVL"), 15, bsr_movl_memory,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movl_memory), (BusterX86MetadataPhysicalAttributes){0},
+                                                     ace_feature, BUSTER_ARRAY_LENGTH(ace_feature), bsr_movl_store_memory_bytes,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movl_store_memory_bytes)));
     }
 
     BusterX86MetadataForm first_form = {0};
@@ -6312,6 +6380,13 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BusterX86MetadataPhysicalQuery fixed_al_query = x86_64_metadata_test_physical_query(
             S8("ADD"), fixed_al_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
             BUSTER_ARRAY_LENGTH(wildcard));
+        // A hidden fixed AL is introspectable only when callers opt into the
+        // complete implicit operand list; source matching must not make an
+        // ordinary ADD AL spelling look like an extra source operand.
+        u8 fixed_source_bytes[32] = {0};
+        BusterX86MetadataEmitResult fixed_al_source = buster_x86_metadata_emit_form(
+            (BusterX86MetadataEmitQuery){.physical = fixed_al_query, .form_id = 9625, .output = fixed_source_bytes,
+                                         .output_capacity = sizeof(fixed_source_bytes)});
         fixed_al_query.include_implicit = true;
         u8 fixed_bytes[32] = {0};
         BusterX86MetadataEmitResult fixed_al = buster_x86_metadata_emit_form(
@@ -6319,6 +6394,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         fixed_al_operands[0] = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 3, 8);
         BusterX86MetadataEmitResult fixed_bl = buster_x86_metadata_emit_form(
             (BusterX86MetadataEmitQuery){.physical = fixed_al_query, .form_id = 9625, .output = fixed_bytes, .output_capacity = sizeof(fixed_bytes)});
+        BUSTER_TEST(arguments, fixed_al_source.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
         BUSTER_TEST(arguments, fixed_al.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && fixed_al.byte_count == 2 && fixed_bytes[0] == 0x04 &&
                                    fixed_bytes[1] == 0x01);
         BUSTER_TEST(arguments, fixed_bl.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
