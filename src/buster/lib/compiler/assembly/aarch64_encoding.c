@@ -1284,6 +1284,8 @@ A64OpcodeDescriptor const* a64_opcode_descriptor(A64Opcode opcode)
         case A64_PC_RELATIVE_NONE:
         case A64_PC_RELATIVE_LAYOUT_COUNT:
             return 0;
+        default:
+            return 0;
         }
     }
     return descriptor;
@@ -1780,10 +1782,23 @@ bool a64_adr_encode(u32 destination_register, u64 instruction_address, u64 targe
     {
         return false;
     }
+    // Architectural address generation wraps modulo 2^64.  Interpret a
+    // wrapped delta as the representable signed IMM21 displacement when it
+    // is within ADR's range, mirroring the page-relative helper above.
+    u64 delta = target_address - instruction_address;
     s64 displacement = 0;
-    if (!a64_pc_relative_displacement(target_address, instruction_address, 0, &displacement))
+    if (delta <= UINT64_C(0xfffff))
     {
-        return false;
+        displacement = (s64)delta;
+    }
+    else
+    {
+        u64 distance = 0 - delta;
+        if (distance > UINT64_C(0x100000))
+        {
+            return false;
+        }
+        displacement = -(s64)distance;
     }
     A64MCInst instruction = {
         .operands =

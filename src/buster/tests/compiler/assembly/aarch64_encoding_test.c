@@ -642,6 +642,8 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, a64_adr_encode(1, UINT64_C(0x1000), UINT64_C(0x1004), &encoded) && encoded == UINT32_C(0x10000021));
     BUSTER_TEST(arguments, a64_adr_encode(31, UINT64_C(0x100000), 0, &encoded) && encoded == UINT32_C(0x1080001f));
     BUSTER_TEST(arguments, a64_adr_encode(0, 0, UINT64_C(0xfffff), &encoded) && encoded == UINT32_C(0x707fffe0));
+    BUSTER_TEST(arguments, a64_adr_encode(0, UINT64_MAX - 3, 0, &encoded) && encoded == UINT32_C(0x10000020));
+    BUSTER_TEST(arguments, a64_adr_encode(0, 0, UINT64_MAX - 3, &encoded) && encoded == UINT32_C(0x10ffffe0));
     BUSTER_TEST(arguments, !a64_adr_encode(0, 0, UINT64_C(0x100000), &encoded));
     BUSTER_TEST(arguments, !a64_adr_encode(0, UINT64_C(0x100001), 0, &encoded));
     BUSTER_TEST(arguments, !a64_adr_encode(32, 0, 0, &encoded));
