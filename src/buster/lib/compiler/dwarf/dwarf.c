@@ -52,6 +52,7 @@ enum
     DW_AT_DECL_LINE = 0x3b,
     DW_AT_TYPE = 0x49,
     DW_AT_BYTE_SIZE = 0x0b,
+    DW_AT_BIT_SIZE = 0x0d,
     DW_AT_ENCODING = 0x3e,
     DW_AT_UPPER_BOUND = 0x2f,
     DW_AT_DATA_MEMBER_LOCATION = 0x38,
@@ -1143,12 +1144,37 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_abbrev(DwarfBuffer* buffer, u32 number, u32
     dwarf_abbrev_pair(buffer, 0, 0);
 }
 
-BUSTER_GLOBAL_LOCAL void dwarf_model_emit_abbreviations(DwarfBuffer* buffer)
+BUSTER_GLOBAL_LOCAL bool dwarf_model_base_is_float(DebugType* type)
+{
+    if (!type || type->kind != DEBUG_TYPE_BASE || !type->name.length)
+    {
+        return false;
+    }
+    // Buster's builtin names use f32/f64-style spellings.  C frontend scalar
+    // types retain their source spellings, including the padded SysV
+    // long-double name, so recognize those exact names too.
+    return type->name.pointer[0] == 'f' || type->name.pointer[0] == 'F' || string_equal(type->name, S8("float")) ||
+           string_equal(type->name, S8("double")) || string_equal(type->name, S8("long double"));
+}
+
+BUSTER_GLOBAL_LOCAL bool dwarf_model_base_has_bit_size(DebugType* type)
+{
+    // DW_AT_byte_size alone cannot distinguish a padded 80-bit value in a
+    // 16-byte slot from an IEEE binary128 value.  Keep the existing
+    // abbreviation for naturally sized f32/f64 (and every other exact-size
+    // base type), adding the standard bit-size attribute only when a positive
+    // semantic width is smaller than the storage width.
+    return dwarf_model_base_is_float(type) && type->bit_width && type->size <= UINT64_MAX / 8 && (u64)type->bit_width < type->size * 8;
+}
+
+BUSTER_GLOBAL_LOCAL void dwarf_model_emit_abbreviations(DwarfBuffer* buffer, bool include_padded_float)
 {
     static const u32 cu_attributes[] = {DW_AT_PRODUCER, DW_AT_LANGUAGE, DW_AT_NAME, DW_AT_COMP_DIR, DW_AT_LOW_PC, DW_AT_HIGH_PC, DW_AT_STMT_LIST};
     static const u32 cu_forms[] = {DW_FORM_STRP, DW_FORM_DATA2, DW_FORM_STRP, DW_FORM_STRP, DW_FORM_ADDR, DW_FORM_DATA8, DW_FORM_SEC_OFFSET};
     static const u32 base_attributes[] = {DW_AT_NAME, DW_AT_BYTE_SIZE, DW_AT_ENCODING, DW_AT_DECL_FILE, DW_AT_DECL_LINE};
     static const u32 base_forms[] = {DW_FORM_STRP, DW_FORM_DATA8, DW_FORM_DATA1, DW_FORM_UDATA, DW_FORM_UDATA};
+    static const u32 padded_float_attributes[] = {DW_AT_NAME, DW_AT_BYTE_SIZE, DW_AT_BIT_SIZE, DW_AT_ENCODING, DW_AT_DECL_FILE, DW_AT_DECL_LINE};
+    static const u32 padded_float_forms[] = {DW_FORM_STRP, DW_FORM_DATA8, DW_FORM_DATA8, DW_FORM_DATA1, DW_FORM_UDATA, DW_FORM_UDATA};
     static const u32 pointer_attributes[] = {DW_AT_TYPE, DW_AT_BYTE_SIZE};
     static const u32 pointer_forms[] = {DW_FORM_REF4, DW_FORM_DATA8};
     static const u32 array_attributes[] = {DW_AT_TYPE, DW_AT_UPPER_BOUND, DW_AT_BYTE_SIZE};
@@ -1209,6 +1235,14 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_abbreviations(DwarfBuffer* buffer)
     dwarf_model_abbrev(buffer, 23, DW_TAG_SUBPROGRAM, false, function_attributes, function_forms, BUSTER_ARRAY_LENGTH(function_attributes));
     dwarf_model_abbrev(buffer, 24, DW_TAG_LEXICAL_BLOCK, false, lexical_attributes, lexical_forms, BUSTER_ARRAY_LENGTH(lexical_attributes));
     dwarf_model_abbrev(buffer, 25, DW_TAG_INLINED_SUBROUTINE, false, inline_attributes, inline_forms, BUSTER_ARRAY_LENGTH(inline_attributes));
+    if (include_padded_float)
+    {
+        // Keep abbreviation 2 and the complete no-padded-float table byte for
+        // byte stable.  The optional entry is needed only by a model that
+        // actually emits a padded floating base type.
+        dwarf_model_abbrev(buffer, 26, DW_TAG_BASE_TYPE, false, padded_float_attributes, padded_float_forms,
+                           BUSTER_ARRAY_LENGTH(padded_float_attributes));
+    }
     dwarf_emit_uleb128(buffer, 0);
 }
 
@@ -1218,7 +1252,7 @@ BUSTER_GLOBAL_LOCAL u8 dwarf_model_base_encoding(DebugType* type)
     {
         return 0x02;
     }
-    if (type->name.length && (type->name.pointer[0] == 'f' || type->name.pointer[0] == 'F'))
+    if (dwarf_model_base_is_float(type))
     {
         return 0x04;
     }
@@ -1321,11 +1355,18 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_type(DwarfModelWriter* writer, DebugTy
         dwarf_model_type_reference(writer, type->unqualified_type != DEBUG_ID_INVALID ? type->unqualified_type : type->element_type);
         break;
     case DEBUG_TYPE_BASE:
-        dwarf_emit_uleb128(&writer->info, 2);
-        dwarf_model_string(writer, type->name);
-        dwarf_emit_u64(&writer->info, type->size);
-        dwarf_emit_u8(&writer->info, dwarf_model_base_encoding(type));
-        dwarf_model_emit_declaration(writer, type->declaration);
+        {
+            bool has_bit_size = dwarf_model_base_has_bit_size(type);
+            dwarf_emit_uleb128(&writer->info, has_bit_size ? 26 : 2);
+            dwarf_model_string(writer, type->name);
+            dwarf_emit_u64(&writer->info, type->size);
+            if (has_bit_size)
+            {
+                dwarf_emit_u64(&writer->info, type->bit_width);
+            }
+            dwarf_emit_u8(&writer->info, dwarf_model_base_encoding(type));
+            dwarf_model_emit_declaration(writer, type->declaration);
+        }
         break;
     case DEBUG_TYPE_COUNT:
         break;
@@ -1637,7 +1678,12 @@ DwarfResult dwarf_build_model(Arena* arena, DwarfInput input)
         .function_offsets = arena_allocate(arena, u32, model->function_count ? model->function_count : 1),
     };
     writer.strings = dwarf_string_table_make(arena, &writer.str, (u32)BUSTER_MIN(string_entry_capacity, UINT32_MAX));
-    dwarf_model_emit_abbreviations(&writer.abbrev);
+    bool include_padded_float = false;
+    for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
+    {
+        include_padded_float |= dwarf_model_base_has_bit_size(model->types + type_index);
+    }
+    dwarf_model_emit_abbreviations(&writer.abbrev, include_padded_float);
     dwarf_emit_u32(&writer.info, 0);
     dwarf_emit_u16(&writer.info, DWARF_VERSION);
     dwarf_model_relocation(&writer, (DwarfRelocation){

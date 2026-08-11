@@ -53,6 +53,206 @@ BUSTER_GLOBAL_LOCAL bool dwarf_test_read_sleb128(ByteSlice bytes, u64* offset, s
     return false;
 }
 
+enum
+{
+    DWARF_TEST_TAG_BASE_TYPE = 0x24,
+    DWARF_TEST_AT_BYTE_SIZE = 0x0b,
+    DWARF_TEST_AT_BIT_SIZE = 0x0d,
+    DWARF_TEST_AT_ENCODING = 0x3e,
+    DWARF_TEST_FORM_ADDR = 0x01,
+    DWARF_TEST_FORM_DATA1 = 0x0b,
+    DWARF_TEST_FORM_DATA2 = 0x05,
+    DWARF_TEST_FORM_DATA4 = 0x06,
+    DWARF_TEST_FORM_DATA8 = 0x07,
+    DWARF_TEST_FORM_STRP = 0x0e,
+    DWARF_TEST_FORM_UDATA = 0x0f,
+    DWARF_TEST_FORM_SEC_OFFSET = 0x17,
+    DWARF_TEST_FORM_REF4 = 0x13,
+    DWARF_TEST_FORM_EXPRLOC = 0x18,
+};
+
+typedef struct DwarfTestAbbrev DwarfTestAbbrev;
+struct DwarfTestAbbrev
+{
+    u32 tag;
+    u32 attribute_count;
+    u32 attributes[8];
+    u32 forms[8];
+    bool children;
+    u8 reserved[3];
+};
+
+BUSTER_GLOBAL_LOCAL bool dwarf_test_find_abbrev(ByteSlice bytes, u32 wanted, DwarfTestAbbrev* result)
+{
+    u64 offset = 0;
+    while (offset < bytes.length)
+    {
+        u64 number;
+        if (!dwarf_test_read_uleb128(bytes, &offset, &number))
+        {
+            return false;
+        }
+        if (!number)
+        {
+            return false;
+        }
+        u64 tag;
+        if (!dwarf_test_read_uleb128(bytes, &offset, &tag) || offset >= bytes.length)
+        {
+            return false;
+        }
+        DwarfTestAbbrev candidate = {
+            .tag = (u32)tag,
+            .children = bytes.pointer[offset++] != 0,
+        };
+        for (;;)
+        {
+            u64 attribute;
+            u64 form;
+            if (!dwarf_test_read_uleb128(bytes, &offset, &attribute) || !dwarf_test_read_uleb128(bytes, &offset, &form))
+            {
+                return false;
+            }
+            if (!attribute && !form)
+            {
+                break;
+            }
+            if (candidate.attribute_count >= BUSTER_ARRAY_LENGTH(candidate.attributes))
+            {
+                return false;
+            }
+            candidate.attributes[candidate.attribute_count] = (u32)attribute;
+            candidate.forms[candidate.attribute_count] = (u32)form;
+            candidate.attribute_count += 1;
+        }
+        if (number == wanted)
+        {
+            *result = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool dwarf_test_skip_form(ByteSlice bytes, u64* offset, u32 form)
+{
+    u64 size = 0;
+    switch (form)
+    {
+    case DWARF_TEST_FORM_ADDR:
+    case DWARF_TEST_FORM_DATA8:
+        size = 8;
+        break;
+    case DWARF_TEST_FORM_DATA4:
+    case DWARF_TEST_FORM_STRP:
+    case DWARF_TEST_FORM_SEC_OFFSET:
+    case DWARF_TEST_FORM_REF4:
+        size = 4;
+        break;
+    case DWARF_TEST_FORM_DATA2:
+        size = 2;
+        break;
+    case DWARF_TEST_FORM_DATA1:
+        size = 1;
+        break;
+    case DWARF_TEST_FORM_UDATA:
+    {
+        u64 ignored;
+        return dwarf_test_read_uleb128(bytes, offset, &ignored);
+    }
+    case DWARF_TEST_FORM_EXPRLOC:
+    {
+        u64 length;
+        if (!dwarf_test_read_uleb128(bytes, offset, &length) || length > bytes.length - *offset)
+        {
+            return false;
+        }
+        *offset += length;
+        return true;
+    }
+    default:
+        return false;
+    }
+    if (size > bytes.length - *offset)
+    {
+        return false;
+    }
+    *offset += size;
+    return true;
+}
+
+typedef struct DwarfTestBaseDie DwarfTestBaseDie;
+struct DwarfTestBaseDie
+{
+    u64 byte_size;
+    u64 bit_size;
+    u8 encoding;
+    bool has_bit_size;
+    u8 reserved[6];
+};
+
+BUSTER_GLOBAL_LOCAL bool dwarf_test_read_base_die(ByteSlice info, ByteSlice abbrev_bytes, u64* offset, u32 expected_abbrev,
+                                                    DwarfTestBaseDie* result)
+{
+    u64 number;
+    if (!dwarf_test_read_uleb128(info, offset, &number) || number != expected_abbrev)
+    {
+        return false;
+    }
+    DwarfTestAbbrev abbrev;
+    if (!dwarf_test_find_abbrev(abbrev_bytes, (u32)number, &abbrev) || abbrev.tag != DWARF_TEST_TAG_BASE_TYPE || abbrev.children)
+    {
+        return false;
+    }
+    DwarfTestBaseDie candidate = {0};
+    bool have_byte_size = false;
+    bool have_encoding = false;
+    for (u32 index = 0; index < abbrev.attribute_count; index += 1)
+    {
+        u32 attribute = abbrev.attributes[index];
+        u32 form = abbrev.forms[index];
+        if (attribute == DWARF_TEST_AT_BYTE_SIZE)
+        {
+            if (form != DWARF_TEST_FORM_DATA8 || *offset > info.length || sizeof(candidate.byte_size) > info.length - *offset)
+            {
+                return false;
+            }
+            memcpy(&candidate.byte_size, info.pointer + *offset, sizeof(candidate.byte_size));
+            *offset += sizeof(candidate.byte_size);
+            have_byte_size = true;
+        }
+        else if (attribute == DWARF_TEST_AT_BIT_SIZE)
+        {
+            if (form != DWARF_TEST_FORM_DATA8 || *offset > info.length || sizeof(candidate.bit_size) > info.length - *offset)
+            {
+                return false;
+            }
+            memcpy(&candidate.bit_size, info.pointer + *offset, sizeof(candidate.bit_size));
+            *offset += sizeof(candidate.bit_size);
+            candidate.has_bit_size = true;
+        }
+        else if (attribute == DWARF_TEST_AT_ENCODING)
+        {
+            if (form != DWARF_TEST_FORM_DATA1 || *offset >= info.length)
+            {
+                return false;
+            }
+            candidate.encoding = info.pointer[(*offset)++];
+            have_encoding = true;
+        }
+        else if (!dwarf_test_skip_form(info, offset, form))
+        {
+            return false;
+        }
+    }
+    if (!have_byte_size || !have_encoding)
+    {
+        return false;
+    }
+    *result = candidate;
+    return true;
+}
+
 bool dwarf_line_lookup(ByteSlice debug_line, u64 address, DwarfLineRow* row)
 {
     if (debug_line.length < 16 || !row)
@@ -419,6 +619,213 @@ UnitTestResult dwarf_tests(UnitTestArguments* arguments)
         has_inline_abbrev |= model_built.sections[DWARF_SECTION_ABBREV].pointer[byte_index] == 25;
     }
     BUSTER_TEST(arguments, has_inline_abbrev);
+
+    // A SysV x87 long double has an 80-bit semantic value in a 16-byte
+    // storage slot.  Decode the emitted abbreviation and DIEs instead of
+    // merely searching for the value: the attribute must be standard
+    // DW_AT_bit_size=80, while naturally sized f32/f64 retain abbreviation 2
+    // and its original byte layout.  The C frontend's float/double/long
+    // double spellings are covered alongside the fNN aliases.
+    DebugType dwarf_float_types[] = {
+        {
+            .name = S8("f32"),
+            .kind = DEBUG_TYPE_BASE,
+            .size = 4,
+            .alignment = 4,
+            .bit_width = 32,
+        },
+        {
+            .name = S8("f64"),
+            .kind = DEBUG_TYPE_BASE,
+            .size = 8,
+            .alignment = 8,
+            .bit_width = 64,
+        },
+        {
+            .name = S8("f80"),
+            .kind = DEBUG_TYPE_BASE,
+            .size = 16,
+            .alignment = 16,
+            .bit_width = 80,
+        },
+        {
+            .name = S8("float"),
+            .kind = DEBUG_TYPE_BASE,
+            .size = 4,
+            .alignment = 4,
+            .bit_width = 32,
+        },
+        {
+            .name = S8("double"),
+            .kind = DEBUG_TYPE_BASE,
+            .size = 8,
+            .alignment = 8,
+            .bit_width = 64,
+        },
+        {
+            .name = S8("long double"),
+            .kind = DEBUG_TYPE_BASE,
+            .size = 16,
+            .alignment = 16,
+            .bit_width = 80,
+        },
+    };
+    DebugModel dwarf_float_model = {
+        .source_paths = files,
+        .types = dwarf_float_types,
+        .source_count = BUSTER_ARRAY_LENGTH(files),
+        .type_count = BUSTER_ARRAY_LENGTH(dwarf_float_types),
+        .valid = true,
+    };
+    DwarfResult dwarf_float_built = dwarf_build(arguments->arena, (DwarfInput){
+                                                                       .model = &dwarf_float_model,
+                                                                       .target = (Target){.cpu_arch = CPU_ARCH_X86_64},
+                                                                       .producer = S8("buster"),
+                                                                       .comp_dir = S8("."),
+                                                                       .file_paths = files,
+                                                                       .code_size = 1,
+                                                                       .file_count = BUSTER_ARRAY_LENGTH(files),
+                                                                       .language = 0x000c,
+                                                                   });
+    BUSTER_TEST(arguments, dwarf_float_built.valid);
+    DwarfTestAbbrev f32_abbrev = {0};
+    DwarfTestAbbrev f80_abbrev = {0};
+    BUSTER_TEST(arguments, dwarf_test_find_abbrev(dwarf_float_built.sections[DWARF_SECTION_ABBREV], 2, &f32_abbrev));
+    BUSTER_TEST(arguments, dwarf_test_find_abbrev(dwarf_float_built.sections[DWARF_SECTION_ABBREV], 26, &f80_abbrev));
+    BUSTER_TEST(arguments, f32_abbrev.tag == DWARF_TEST_TAG_BASE_TYPE && !f32_abbrev.children && f32_abbrev.attribute_count == 5);
+    BUSTER_TEST(arguments, f32_abbrev.attributes[0] == 0x03 && f32_abbrev.attributes[1] == DWARF_TEST_AT_BYTE_SIZE &&
+                             f32_abbrev.attributes[2] == DWARF_TEST_AT_ENCODING && f32_abbrev.attributes[3] == 0x3a && f32_abbrev.attributes[4] == 0x3b);
+    BUSTER_TEST(arguments, f32_abbrev.forms[0] == DWARF_TEST_FORM_STRP && f32_abbrev.forms[1] == DWARF_TEST_FORM_DATA8 &&
+                             f32_abbrev.forms[2] == DWARF_TEST_FORM_DATA1 && f32_abbrev.forms[3] == DWARF_TEST_FORM_UDATA &&
+                             f32_abbrev.forms[4] == DWARF_TEST_FORM_UDATA);
+    BUSTER_TEST(arguments, f80_abbrev.tag == DWARF_TEST_TAG_BASE_TYPE && !f80_abbrev.children && f80_abbrev.attribute_count == 6);
+    BUSTER_TEST(arguments, f80_abbrev.attributes[1] == DWARF_TEST_AT_BYTE_SIZE && f80_abbrev.attributes[2] == DWARF_TEST_AT_BIT_SIZE &&
+                             f80_abbrev.attributes[3] == DWARF_TEST_AT_ENCODING);
+    BUSTER_TEST(arguments, f80_abbrev.forms[1] == DWARF_TEST_FORM_DATA8 && f80_abbrev.forms[2] == DWARF_TEST_FORM_DATA8 &&
+                             f80_abbrev.forms[3] == DWARF_TEST_FORM_DATA1);
+    if (dwarf_float_built.valid)
+    {
+        ByteSlice float_info = dwarf_float_built.sections[DWARF_SECTION_INFO];
+        ByteSlice float_abbrev = dwarf_float_built.sections[DWARF_SECTION_ABBREV];
+        u64 info_offset = 11;
+        u64 cu_abbrev_number;
+        bool cu_decoded = dwarf_test_read_uleb128(float_info, &info_offset, &cu_abbrev_number) && cu_abbrev_number == 1;
+        DwarfTestAbbrev cu_abbrev = {0};
+        cu_decoded = cu_decoded && dwarf_test_find_abbrev(float_abbrev, 1, &cu_abbrev);
+        if (cu_decoded)
+        {
+            for (u32 attribute_index = 0; attribute_index < cu_abbrev.attribute_count; attribute_index += 1)
+            {
+                cu_decoded = dwarf_test_skip_form(float_info, &info_offset, cu_abbrev.forms[attribute_index]) && cu_decoded;
+            }
+        }
+        DwarfTestBaseDie f32_die = {0};
+        DwarfTestBaseDie f64_die = {0};
+        DwarfTestBaseDie f80_die = {0};
+        DwarfTestBaseDie float_die = {0};
+        DwarfTestBaseDie double_die = {0};
+        DwarfTestBaseDie long_double_die = {0};
+        cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 2, &f32_die);
+        cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 2, &f64_die);
+        cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 26, &f80_die);
+        cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 2, &float_die);
+        cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 2, &double_die);
+        cu_decoded = cu_decoded && dwarf_test_read_base_die(float_info, float_abbrev, &info_offset, 26, &long_double_die);
+        BUSTER_TEST(arguments, cu_decoded);
+        BUSTER_TEST(arguments, f32_die.byte_size == 4 && f32_die.bit_size == 0 && !f32_die.has_bit_size && f32_die.encoding == 0x04);
+        BUSTER_TEST(arguments, f64_die.byte_size == 8 && f64_die.bit_size == 0 && !f64_die.has_bit_size && f64_die.encoding == 0x04);
+        BUSTER_TEST(arguments, f80_die.byte_size == 16 && f80_die.bit_size == 80 && f80_die.has_bit_size && f80_die.encoding == 0x04);
+        BUSTER_TEST(arguments, float_die.byte_size == 4 && float_die.bit_size == 0 && !float_die.has_bit_size && float_die.encoding == 0x04);
+        BUSTER_TEST(arguments, double_die.byte_size == 8 && double_die.bit_size == 0 && !double_die.has_bit_size && double_die.encoding == 0x04);
+        BUSTER_TEST(arguments, long_double_die.byte_size == 16 && long_double_die.bit_size == 80 && long_double_die.has_bit_size && long_double_die.encoding == 0x04);
+    }
+
+    DebugType dwarf_narrow_float_types[] = {
+        dwarf_float_types[0],
+        dwarf_float_types[1],
+    };
+    DebugModel dwarf_narrow_float_model = dwarf_float_model;
+    dwarf_narrow_float_model.types = dwarf_narrow_float_types;
+    dwarf_narrow_float_model.type_count = BUSTER_ARRAY_LENGTH(dwarf_narrow_float_types);
+    DwarfResult dwarf_narrow_float_a = dwarf_build(arguments->arena, (DwarfInput){
+                                                                            .model = &dwarf_narrow_float_model,
+                                                                            .target = (Target){.cpu_arch = CPU_ARCH_X86_64},
+                                                                            .producer = S8("buster"),
+                                                                            .comp_dir = S8("."),
+                                                                            .file_paths = files,
+                                                                            .code_size = 1,
+                                                                            .file_count = BUSTER_ARRAY_LENGTH(files),
+                                                                            .language = 0x000c,
+                                                                        });
+    DwarfResult dwarf_narrow_float_b = dwarf_build(arguments->arena, (DwarfInput){
+                                                                            .model = &dwarf_narrow_float_model,
+                                                                            .target = (Target){.cpu_arch = CPU_ARCH_X86_64},
+                                                                            .producer = S8("buster"),
+                                                                            .comp_dir = S8("."),
+                                                                            .file_paths = files,
+                                                                            .code_size = 1,
+                                                                            .file_count = BUSTER_ARRAY_LENGTH(files),
+                                                                            .language = 0x000c,
+                                                                        });
+    BUSTER_TEST(arguments, dwarf_narrow_float_a.valid && dwarf_narrow_float_b.valid);
+    if (dwarf_narrow_float_a.valid && dwarf_narrow_float_b.valid)
+    {
+        ByteSlice a_abbrev = dwarf_narrow_float_a.sections[DWARF_SECTION_ABBREV];
+        ByteSlice b_abbrev = dwarf_narrow_float_b.sections[DWARF_SECTION_ABBREV];
+        ByteSlice a_info = dwarf_narrow_float_a.sections[DWARF_SECTION_INFO];
+        ByteSlice b_info = dwarf_narrow_float_b.sections[DWARF_SECTION_INFO];
+        BUSTER_TEST(arguments, a_abbrev.length == b_abbrev.length && memcmp(a_abbrev.pointer, b_abbrev.pointer, a_abbrev.length) == 0);
+        BUSTER_TEST(arguments, a_info.length == b_info.length && memcmp(a_info.pointer, b_info.pointer, a_info.length) == 0);
+        DwarfTestAbbrev absent_padded_abbrev = {0};
+        BUSTER_TEST(arguments, !dwarf_test_find_abbrev(a_abbrev, 26, &absent_padded_abbrev));
+    }
+
+    // A bit width larger than the storage slot is inconsistent metadata, not
+    // a padded value.  Keep the normal base-type abbreviation rather than
+    // emitting an impossible DW_AT_bit_size.
+    DebugType dwarf_inconsistent_float = {
+        .name = S8("long double"),
+        .kind = DEBUG_TYPE_BASE,
+        .size = 16,
+        .alignment = 16,
+        .bit_width = 160,
+    };
+    DebugModel dwarf_inconsistent_model = dwarf_narrow_float_model;
+    dwarf_inconsistent_model.types = &dwarf_inconsistent_float;
+    dwarf_inconsistent_model.type_count = 1;
+    DwarfResult dwarf_inconsistent_built = dwarf_build(arguments->arena, (DwarfInput){
+                                                                                 .model = &dwarf_inconsistent_model,
+                                                                                 .target = (Target){.cpu_arch = CPU_ARCH_X86_64},
+                                                                                 .producer = S8("buster"),
+                                                                                 .comp_dir = S8("."),
+                                                                                 .file_paths = files,
+                                                                                 .code_size = 1,
+                                                                                 .file_count = BUSTER_ARRAY_LENGTH(files),
+                                                                                 .language = 0x000c,
+                                                                             });
+    BUSTER_TEST(arguments, dwarf_inconsistent_built.valid);
+    if (dwarf_inconsistent_built.valid)
+    {
+        ByteSlice inconsistent_info = dwarf_inconsistent_built.sections[DWARF_SECTION_INFO];
+        ByteSlice inconsistent_abbrev = dwarf_inconsistent_built.sections[DWARF_SECTION_ABBREV];
+        DwarfTestAbbrev absent_padded_abbrev = {0};
+        BUSTER_TEST(arguments, !dwarf_test_find_abbrev(inconsistent_abbrev, 26, &absent_padded_abbrev));
+        u64 info_offset = 11;
+        u64 cu_abbrev_number;
+        bool decoded = dwarf_test_read_uleb128(inconsistent_info, &info_offset, &cu_abbrev_number) && cu_abbrev_number == 1;
+        DwarfTestAbbrev cu_abbrev = {0};
+        decoded = decoded && dwarf_test_find_abbrev(inconsistent_abbrev, 1, &cu_abbrev);
+        if (decoded)
+        {
+            for (u32 attribute_index = 0; attribute_index < cu_abbrev.attribute_count; attribute_index += 1)
+            {
+                decoded = dwarf_test_skip_form(inconsistent_info, &info_offset, cu_abbrev.forms[attribute_index]) && decoded;
+            }
+        }
+        DwarfTestBaseDie inconsistent_die = {0};
+        decoded = decoded && dwarf_test_read_base_die(inconsistent_info, inconsistent_abbrev, &info_offset, 2, &inconsistent_die);
+        BUSTER_TEST(arguments, decoded && inconsistent_die.byte_size == 16 && !inconsistent_die.has_bit_size && inconsistent_die.encoding == 0x04);
+    }
 
     DebugVariable dwarf_global = {
         .name = S8("global_value"),
