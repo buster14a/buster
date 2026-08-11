@@ -63,6 +63,27 @@ BUSTER_CT_CHECK(BUSTER_AARCH64_GENERATED_PRODUCTION_FORM_COUNT < UINT16_MAX);
 
 #define A64_METADATA_FIELD_UNMAPPED BUSTER_AARCH64_GENERATED_FIELD_UNMAPPED
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL u32 a64_metadata_packed_access_counter;
+BUSTER_GLOBAL_LOCAL void a64_metadata_note_packed_access(void)
+{
+    a64_metadata_packed_access_counter += 1;
+}
+
+void buster_aarch64_metadata_test_reset_packed_access_counter(void)
+{
+    a64_metadata_packed_access_counter = 0;
+}
+
+u32 buster_aarch64_metadata_test_packed_access_count(void)
+{
+    return a64_metadata_packed_access_counter;
+}
+#define A64_METADATA_PACKED_ACCESS() a64_metadata_note_packed_access()
+#else
+#define A64_METADATA_PACKED_ACCESS() ((void)0)
+#endif
+
 BUSTER_GLOBAL_LOCAL bool a64_metadata_count_range_valid(u32 total, u32 first, u32 count)
 {
     return first <= total && count <= total - first;
@@ -70,6 +91,7 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_count_range_valid(u32 total, u32 first, u3
 
 BUSTER_GLOBAL_LOCAL bool a64_metadata_string_descriptor(u32 offset, BusterAarch64MetadataString* result)
 {
+    A64_METADATA_PACKED_ACCESS();
     if (!result || offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE)
     {
         return false;
@@ -120,6 +142,7 @@ BUSTER_GLOBAL_LOCAL u32 a64_metadata_width_mask(u8 width)
 
 BUSTER_GLOBAL_LOCAL bool a64_metadata_generated_form(u32 form_id, BusterAarch64GeneratedForm* result)
 {
+    A64_METADATA_PACKED_ACCESS();
     if (!result || form_id >= BUSTER_AARCH64_GENERATED_FORM_COUNT)
     {
         return false;
@@ -143,6 +166,7 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_generated_form(u32 form_id, BusterAarch64G
 
 BUSTER_GLOBAL_LOCAL bool a64_metadata_generated_field(u32 field_id, BusterAarch64GeneratedField* result)
 {
+    A64_METADATA_PACKED_ACCESS();
     if (!result || field_id >= BUSTER_AARCH64_GENERATED_FIELD_COUNT)
     {
         return false;
@@ -159,6 +183,7 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_generated_field(u32 field_id, BusterAarch6
 
 BUSTER_GLOBAL_LOCAL bool a64_metadata_generated_segment(u32 segment_id, BusterAarch64GeneratedBitSegment* result)
 {
+    A64_METADATA_PACKED_ACCESS();
     if (!result || segment_id >= BUSTER_AARCH64_GENERATED_SEGMENT_COUNT)
     {
         return false;
@@ -445,6 +470,7 @@ BusterAarch64MetadataCounts buster_aarch64_metadata_counts(void)
 
 u8 buster_aarch64_metadata_string_byte(BusterAarch64MetadataString string, u32 index)
 {
+    A64_METADATA_PACKED_ACCESS();
     if (index >= string.length || string.offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE ||
         index >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE - string.offset)
     {
@@ -455,6 +481,7 @@ u8 buster_aarch64_metadata_string_byte(BusterAarch64MetadataString string, u32 i
 
 bool buster_aarch64_metadata_string(u32 offset, BusterAarch64MetadataString* result)
 {
+    A64_METADATA_PACKED_ACCESS();
     return a64_metadata_string_descriptor(offset, result);
 }
 
@@ -583,6 +610,7 @@ bool buster_aarch64_metadata_segment(u32 form_id, u32 field_index, u32 segment_i
 
 bool buster_aarch64_metadata_operand(u32 form_id, u32 operand_index, BusterAarch64MetadataOperand* result)
 {
+    A64_METADATA_PACKED_ACCESS();
     if (!result)
     {
         return false;
@@ -629,6 +657,7 @@ bool buster_aarch64_metadata_operand(u32 form_id, u32 operand_index, BusterAarch
 
 bool buster_aarch64_metadata_predicate(u32 form_id, u32 predicate_index, BusterAarch64MetadataString* result)
 {
+    A64_METADATA_PACKED_ACCESS();
     if (!result)
     {
         return false;

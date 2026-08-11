@@ -1992,6 +1992,83 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         memcpy(words, bytes, sizeof(words));
         BUSTER_TEST(arguments, words[0] == UINT32_C(0xd2900010) && words[1] == UINT32_C(0x8b100390) && words[2] == UINT32_C(0xf9000211));
     }
+    // Literal words for every non-memory generated production row. These
+    // cases enter through the real MachineOpcode mapping, with distinct
+    // registers and nonzero immediates so a swapped semantic field changes
+    // the oracle rather than merely reproducing a symmetric raw-layout test.
+    static struct
+    {
+        u16 opcode;
+        u32 operand0;
+        u32 operand1;
+        u32 operand2;
+        u32 payload;
+        u32 expected[2];
+        u8 expected_count;
+        char const* name;
+    } const generated_machine_cases[] = {
+        {MACHINE_A64_MOV_RR, 3, 5, 0, 0, {UINT32_C(0xaa0503e3)}, 1, "MOV_RR"},
+        {MACHINE_A64_MOV32_RR, 3, 5, 0, 0, {UINT32_C(0x2a0503e3)}, 1, "MOV32_RR"},
+        {MACHINE_A64_SXTB, 3, 5, 0, 0, {UINT32_C(0x93401ca3)}, 1, "SXTB"},
+        {MACHINE_A64_SXTH, 3, 5, 0, 0, {UINT32_C(0x93403ca3)}, 1, "SXTH"},
+        {MACHINE_A64_SXTW, 3, 5, 0, 0, {UINT32_C(0x93407ca3)}, 1, "SXTW"},
+        {MACHINE_A64_UXTB, 3, 5, 0, 0, {UINT32_C(0x53001ca3)}, 1, "UXTB"},
+        {MACHINE_A64_UXTH, 3, 5, 0, 0, {UINT32_C(0x53003ca3)}, 1, "UXTH"},
+        {MACHINE_A64_ADD32, 3, 5, 7, 0, {UINT32_C(0x0b0700a3)}, 1, "ADD32"},
+        {MACHINE_A64_ADD64, 3, 5, 7, 0, {UINT32_C(0x8b0700a3)}, 1, "ADD64"},
+        {MACHINE_A64_SUB32, 3, 5, 7, 0, {UINT32_C(0x4b0700a3)}, 1, "SUB32"},
+        {MACHINE_A64_SUB64, 3, 5, 7, 0, {UINT32_C(0xcb0700a3)}, 1, "SUB64"},
+        {MACHINE_A64_AND32, 3, 5, 7, 0, {UINT32_C(0x0a0700a3)}, 1, "AND32"},
+        {MACHINE_A64_AND64, 3, 5, 7, 0, {UINT32_C(0x8a0700a3)}, 1, "AND64"},
+        {MACHINE_A64_ORR32, 3, 5, 7, 0, {UINT32_C(0x2a0700a3)}, 1, "ORR32"},
+        {MACHINE_A64_ORR64, 3, 5, 7, 0, {UINT32_C(0xaa0700a3)}, 1, "ORR64"},
+        {MACHINE_A64_EOR32, 3, 5, 7, 0, {UINT32_C(0x4a0700a3)}, 1, "EOR32"},
+        {MACHINE_A64_EOR64, 3, 5, 7, 0, {UINT32_C(0xca0700a3)}, 1, "EOR64"},
+        {MACHINE_A64_MUL32, 3, 5, 7, 0, {UINT32_C(0x1b077ca3)}, 1, "MUL32"},
+        {MACHINE_A64_MUL64, 3, 5, 7, 0, {UINT32_C(0x9b077ca3)}, 1, "MUL64"},
+        {MACHINE_A64_SDIV32, 3, 5, 7, 0, {UINT32_C(0x1ac70ca3)}, 1, "SDIV32"},
+        {MACHINE_A64_SDIV64, 3, 5, 7, 0, {UINT32_C(0x9ac70ca3)}, 1, "SDIV64"},
+        {MACHINE_A64_UDIV32, 3, 5, 7, 0, {UINT32_C(0x1ac708a3)}, 1, "UDIV32"},
+        {MACHINE_A64_UDIV64, 3, 5, 7, 0, {UINT32_C(0x9ac708a3)}, 1, "UDIV64"},
+        {MACHINE_A64_SREM32, 3, 5, 7, 0, {UINT32_C(0x1ac70ca3), UINT32_C(0x1b078ca3)}, 2, "SREM32"},
+        {MACHINE_A64_SREM64, 3, 5, 7, 0, {UINT32_C(0x9ac70ca3), UINT32_C(0x9b078ca3)}, 2, "SREM64"},
+        {MACHINE_A64_UREM32, 3, 5, 7, 0, {UINT32_C(0x1ac708a3), UINT32_C(0x1b078ca3)}, 2, "UREM32"},
+        {MACHINE_A64_UREM64, 3, 5, 7, 0, {UINT32_C(0x9ac708a3), UINT32_C(0x9b078ca3)}, 2, "UREM64"},
+        {MACHINE_A64_LSL32, 3, 5, 7, 0, {UINT32_C(0x1ac720a3)}, 1, "LSL32"},
+        {MACHINE_A64_LSL64, 3, 5, 7, 0, {UINT32_C(0x9ac720a3)}, 1, "LSL64"},
+        {MACHINE_A64_ASR32, 3, 5, 7, 0, {UINT32_C(0x1ac728a3)}, 1, "ASR32"},
+        {MACHINE_A64_ASR64, 3, 5, 7, 0, {UINT32_C(0x9ac728a3)}, 1, "ASR64"},
+        {MACHINE_A64_LSR32, 3, 5, 7, 0, {UINT32_C(0x1ac724a3)}, 1, "LSR32"},
+        {MACHINE_A64_LSR64, 3, 5, 7, 0, {UINT32_C(0x9ac724a3)}, 1, "LSR64"},
+        {MACHINE_A64_NEG32, 3, 5, 0, 0, {UINT32_C(0x4b0503e3)}, 1, "NEG32"},
+        {MACHINE_A64_NEG64, 3, 5, 0, 0, {UINT32_C(0xcb0503e3)}, 1, "NEG64"},
+        {MACHINE_A64_NOT32, 3, 5, 0, 0, {UINT32_C(0x2a2503e3)}, 1, "NOT32"},
+        {MACHINE_A64_NOT64, 3, 5, 0, 0, {UINT32_C(0xaa2503e3)}, 1, "NOT64"},
+        {MACHINE_A64_CMP32, 5, 7, 0, 0, {UINT32_C(0x6b0700bf)}, 1, "CMP32"},
+        {MACHINE_A64_CMP64, 5, 7, 0, 0, {UINT32_C(0xeb0700bf)}, 1, "CMP64"},
+        {MACHINE_A64_CMP_ZERO, 5, 0, 0, 0, {UINT32_C(0xf10000bf)}, 1, "CMP_ZERO"},
+        {MACHINE_A64_CSET, 3, 0, 0, 5, {UINT32_C(0x1a9f47e3)}, 1, "CSET"},
+        {MACHINE_A64_FMOV_TO_VEC, 5, 0, 0, 3, {UINT32_C(0x9e6700a3)}, 1, "FMOV_TO_VEC"},
+        {MACHINE_A64_FMOV_FROM_VEC, 3, 0, 0, 5, {UINT32_C(0x9e6600a3)}, 1, "FMOV_FROM_VEC"},
+        {MACHINE_A64_READ_SP, 3, 0, 0, 7, {UINT32_C(0x91001fe3)}, 1, "READ_SP"},
+        {MACHINE_A64_WRITE_SP, 5, 0, 0, 7, {UINT32_C(0x91001cbf)}, 1, "WRITE_SP"},
+        {MACHINE_A64_RET, 0, 0, 0, 0, {UINT32_C(0xd65f03c0)}, 1, "RET"},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(generated_machine_cases); case_index += 1)
+    {
+        u8 bytes[8] = {0};
+        u32 byte_count = 0;
+        bool error = false;
+        bool emitted = machine_a64_test_emit_generated_opcode((u8*)bytes, sizeof(bytes), generated_machine_cases[case_index].opcode,
+                                                               generated_machine_cases[case_index].operand0,
+                                                               generated_machine_cases[case_index].operand1,
+                                                               generated_machine_cases[case_index].operand2,
+                                                               generated_machine_cases[case_index].payload, &byte_count, &error);
+        BUSTER_TEST_RAW(arguments,
+                        emitted && !error && byte_count == generated_machine_cases[case_index].expected_count * sizeof(u32) &&
+                            memcmp(bytes, generated_machine_cases[case_index].expected, byte_count) == 0,
+                        string_format(arguments->arena, S8("a64 generated machine opcode {S8}"), generated_machine_cases[case_index].name));
+    }
     IrProgram* machine_a64_program = machine_test_compile_c(arguments->arena, S8("machine-stage11.c"), machine_c_source_base, machine_a64_target);
     BUSTER_TEST(arguments, machine_a64_program != 0);
     if (machine_a64_program && machine_a64_program->module_count)

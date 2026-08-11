@@ -1090,4 +1090,11 @@ BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFu
 // while preserving the production-only machine API surface.
 BUSTER_F_DECL bool machine_a64_test_emit_unsigned_memory(u8* bytes, u32 capacity, u32 register_number, u32 base_register, u32 offset, u32 size,
                                                          bool store, bool frame_relative, u32* byte_count, bool* error);
+// Test-only byte seam for the generated scalar/register/SP/RET/FMOV rows.
+// Operands are physical register numbers in slots 0..2; payload carries the
+// immediate/condition/vector register used by the selected opcode. The seam
+// invokes the same MachineOpcode-to-production-form mapping as the encoder,
+// while keeping that mapping out of the production API when tests are absent.
+BUSTER_F_DECL bool machine_a64_test_emit_generated_opcode(u8* bytes, u32 capacity, u16 opcode, u32 operand0, u32 operand1, u32 operand2,
+                                                          u32 payload, u32* byte_count, bool* error);
 #endif

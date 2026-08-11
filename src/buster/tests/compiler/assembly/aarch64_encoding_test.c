@@ -4,6 +4,14 @@
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
+#if BUSTER_COMPILER_CLANG
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wignored-attributes"
+#endif
+#include <buster/lib/compiler/assembly/generated/aarch64-production-plan.generated.h>
+#if BUSTER_COMPILER_CLANG
+#pragma clang diagnostic pop
+#endif
 
 typedef struct A64EncodingCase A64EncodingCase;
 struct A64EncodingCase
@@ -824,6 +832,42 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, buster_aarch64_production_plan_field_count() == production_field_total &&
                               buster_aarch64_production_plan_segment_count() == production_segment_total);
+
+    // The fast production path must remain independent of the packed/base64
+    // metadata accessors. Build inputs directly from the generated plan and
+    // encode every named form after resetting the test-only counter; a future
+    // fallback into the audit tables turns this into a deterministic failure.
+    buster_aarch64_metadata_test_reset_packed_access_counter();
+    for (u32 form_index = 0; form_index < BUSTER_ARRAY_LENGTH(production_forms); form_index += 1)
+    {
+        u16 plan_index = buster_aarch64_generated_production_plan_index(production_forms[form_index].form_id);
+        BUSTER_TEST(arguments, plan_index != UINT16_MAX);
+        if (plan_index == UINT16_MAX)
+        {
+            continue;
+        }
+        BusterAarch64GeneratedProductionForm const* plan = buster_aarch64_generated_production_form_at(plan_index);
+        BUSTER_TEST(arguments, plan != 0 && plan->field_count <= 8);
+        if (!plan || plan->field_count > 8)
+        {
+            continue;
+        }
+        u32 values[8] = {0};
+        for (u32 field_index = 0; field_index < plan->field_count; field_index += 1)
+        {
+            BusterAarch64GeneratedProductionField const* field =
+                buster_aarch64_generated_production_field_at(plan->field_first + field_index);
+            BUSTER_TEST(arguments, field != 0);
+            if (field)
+            {
+                values[field_index] = field->source_mask & (UINT32_C(0x13579bdf) ^ production_forms[form_index].form_id * UINT32_C(0x9e3779b9) ^
+                                                              field_index * UINT32_C(0x45d9f3b));
+            }
+        }
+        u32 word = 0;
+        BUSTER_TEST(arguments, buster_aarch64_production_raw_encode(plan->form_id, values, plan->field_count, &word));
+    }
+    BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == 0);
     u32 fast_values[8] = {0};
     u32 fast_word = 0;
     BUSTER_TEST(arguments, !buster_aarch64_production_raw_encode(UINT32_MAX, fast_values, 0, &fast_word) &&

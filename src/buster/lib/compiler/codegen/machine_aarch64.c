@@ -2383,6 +2383,228 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_emit_generated_form(MachineA64Encoder* enco
     return true;
 }
 
+// Keep the semantic field order for every generated scalar row in one place.
+// The imported plans intentionally follow LLVM's source-variable order, not
+// necessarily the spelling order of an assembly alias (for example SBFM's
+// imms/immr fields).  Both the production switch and the unconditional byte
+// oracles below call this helper so a swapped field cannot hide behind a
+// generic raw-layout comparison.
+BUSTER_GLOBAL_LOCAL bool machine_a64_emit_generated_opcode(MachineA64Encoder* encoder, u16 opcode, u32 operand0, u32 operand1, u32 operand2, u32 payload)
+{
+    if (!encoder)
+    {
+        return false;
+    }
+    u32 form_id = UINT32_MAX;
+    u32 field_count = 0;
+    u32 fields[4] = {0};
+    switch (opcode)
+    {
+    case MACHINE_A64_MOV_RR:
+        form_id = BUSTER_AARCH64_GENERATED_FORM_ORRXRS;
+        fields[0] = operand0;
+        fields[1] = MACHINE_A64_SP;
+        fields[2] = 0;
+        fields[3] = operand1;
+        field_count = 4;
+        break;
+    case MACHINE_A64_MOV32_RR:
+        form_id = BUSTER_AARCH64_GENERATED_FORM_ORRWRS;
+        fields[0] = operand0;
+        fields[1] = MACHINE_A64_SP;
+        fields[2] = 0;
+        fields[3] = operand1;
+        field_count = 4;
+        break;
+    case MACHINE_A64_SXTB:
+    case MACHINE_A64_SXTH:
+    case MACHINE_A64_SXTW:
+        form_id = BUSTER_AARCH64_GENERATED_FORM_SBFMXRI;
+        fields[0] = operand0;
+        fields[1] = operand1;
+        fields[2] = opcode == MACHINE_A64_SXTB ? 7u : opcode == MACHINE_A64_SXTH ? 15u : 31u;
+        fields[3] = 0;
+        field_count = 4;
+        break;
+    case MACHINE_A64_UXTB:
+    case MACHINE_A64_UXTH:
+        form_id = BUSTER_AARCH64_GENERATED_FORM_UBFMWRI;
+        fields[0] = operand0;
+        fields[1] = operand1;
+        fields[2] = opcode == MACHINE_A64_UXTB ? 7u : 15u;
+        fields[3] = 0;
+        field_count = 4;
+        break;
+    case MACHINE_A64_ADD32:
+    case MACHINE_A64_ADD64:
+    case MACHINE_A64_SUB32:
+    case MACHINE_A64_SUB64:
+    case MACHINE_A64_AND32:
+    case MACHINE_A64_AND64:
+    case MACHINE_A64_ORR32:
+    case MACHINE_A64_ORR64:
+    case MACHINE_A64_EOR32:
+    case MACHINE_A64_EOR64:
+        form_id = opcode == MACHINE_A64_ADD32 ? BUSTER_AARCH64_GENERATED_FORM_ADDWRS
+                  : opcode == MACHINE_A64_ADD64 ? BUSTER_AARCH64_GENERATED_FORM_ADDXRS
+                  : opcode == MACHINE_A64_SUB32 ? BUSTER_AARCH64_GENERATED_FORM_SUBWRS
+                  : opcode == MACHINE_A64_SUB64 ? BUSTER_AARCH64_GENERATED_FORM_SUBXRS
+                  : opcode == MACHINE_A64_AND32 ? BUSTER_AARCH64_GENERATED_FORM_ANDWRS
+                  : opcode == MACHINE_A64_AND64 ? BUSTER_AARCH64_GENERATED_FORM_ANDXRS
+                  : opcode == MACHINE_A64_ORR32 ? BUSTER_AARCH64_GENERATED_FORM_ORRWRS
+                  : opcode == MACHINE_A64_ORR64 ? BUSTER_AARCH64_GENERATED_FORM_ORRXRS
+                  : opcode == MACHINE_A64_EOR32 ? BUSTER_AARCH64_GENERATED_FORM_EORWRS
+                                                : BUSTER_AARCH64_GENERATED_FORM_EORXRS;
+        fields[0] = operand0;
+        fields[1] = operand1;
+        fields[2] = 0;
+        fields[3] = operand2;
+        field_count = 4;
+        break;
+    case MACHINE_A64_MUL32:
+    case MACHINE_A64_MUL64:
+        form_id = opcode == MACHINE_A64_MUL64 ? BUSTER_AARCH64_GENERATED_FORM_MADDXRRR : BUSTER_AARCH64_GENERATED_FORM_MADDWRRR;
+        fields[0] = operand0;
+        fields[1] = operand1;
+        fields[2] = MACHINE_A64_SP;
+        fields[3] = operand2;
+        field_count = 4;
+        break;
+    case MACHINE_A64_SDIV32:
+    case MACHINE_A64_SDIV64:
+    case MACHINE_A64_UDIV32:
+    case MACHINE_A64_UDIV64:
+        form_id = opcode == MACHINE_A64_SDIV32 ? BUSTER_AARCH64_GENERATED_FORM_SDIVWR
+                  : opcode == MACHINE_A64_SDIV64 ? BUSTER_AARCH64_GENERATED_FORM_SDIVXR
+                  : opcode == MACHINE_A64_UDIV32 ? BUSTER_AARCH64_GENERATED_FORM_UDIVWR
+                                                  : BUSTER_AARCH64_GENERATED_FORM_UDIVXR;
+        fields[0] = operand0;
+        fields[1] = operand1;
+        fields[2] = operand2;
+        field_count = 3;
+        break;
+    case MACHINE_A64_SREM32:
+    case MACHINE_A64_SREM64:
+    case MACHINE_A64_UREM32:
+    case MACHINE_A64_UREM64:
+    {
+        u32 divide_form_id = opcode == MACHINE_A64_SREM32 ? BUSTER_AARCH64_GENERATED_FORM_SDIVWR
+                              : opcode == MACHINE_A64_SREM64 ? BUSTER_AARCH64_GENERATED_FORM_SDIVXR
+                              : opcode == MACHINE_A64_UREM32 ? BUSTER_AARCH64_GENERATED_FORM_UDIVWR
+                                                              : BUSTER_AARCH64_GENERATED_FORM_UDIVXR;
+        u32 subtract_form_id = opcode == MACHINE_A64_SREM32 ? BUSTER_AARCH64_GENERATED_FORM_MSUBWRRR
+                               : opcode == MACHINE_A64_SREM64 ? BUSTER_AARCH64_GENERATED_FORM_MSUBXRRR
+                               : opcode == MACHINE_A64_UREM32 ? BUSTER_AARCH64_GENERATED_FORM_MSUBWRRR
+                                                              : BUSTER_AARCH64_GENERATED_FORM_MSUBXRRR;
+        u32 divide_fields[] = {operand0, operand1, operand2};
+        // Production fields are ordered Rd, Rn, Ra, Rm while the assembly
+        // spelling is Rd, Rn, Rm, Ra.  Remainder therefore computes
+        // n - (n / m) * m as {d, n, d, m}.
+        u32 subtract_fields[] = {operand0, operand1, operand0, operand2};
+        return machine_a64_emit_generated_form(encoder, divide_form_id, divide_fields, BUSTER_ARRAY_LENGTH(divide_fields)) &&
+               machine_a64_emit_generated_form(encoder, subtract_form_id, subtract_fields, BUSTER_ARRAY_LENGTH(subtract_fields));
+    }
+    case MACHINE_A64_LSL32:
+    case MACHINE_A64_LSL64:
+    case MACHINE_A64_ASR32:
+    case MACHINE_A64_ASR64:
+    case MACHINE_A64_LSR32:
+    case MACHINE_A64_LSR64:
+        form_id = opcode == MACHINE_A64_LSL32 ? BUSTER_AARCH64_GENERATED_FORM_LSLVWR
+                  : opcode == MACHINE_A64_LSL64 ? BUSTER_AARCH64_GENERATED_FORM_LSLVXR
+                  : opcode == MACHINE_A64_ASR32 ? BUSTER_AARCH64_GENERATED_FORM_ASRVWR
+                  : opcode == MACHINE_A64_ASR64 ? BUSTER_AARCH64_GENERATED_FORM_ASRVXR
+                  : opcode == MACHINE_A64_LSR32 ? BUSTER_AARCH64_GENERATED_FORM_LSRVWR
+                                                : BUSTER_AARCH64_GENERATED_FORM_LSRVXR;
+        fields[0] = operand0;
+        fields[1] = operand1;
+        fields[2] = operand2;
+        field_count = 3;
+        break;
+    case MACHINE_A64_NEG32:
+    case MACHINE_A64_NEG64:
+        form_id = opcode == MACHINE_A64_NEG32 ? BUSTER_AARCH64_GENERATED_FORM_SUBWRS : BUSTER_AARCH64_GENERATED_FORM_SUBXRS;
+        fields[0] = operand0;
+        fields[1] = MACHINE_A64_SP;
+        fields[2] = 0;
+        fields[3] = operand1;
+        field_count = 4;
+        break;
+    case MACHINE_A64_NOT32:
+    case MACHINE_A64_NOT64:
+        form_id = opcode == MACHINE_A64_NOT32 ? BUSTER_AARCH64_GENERATED_FORM_ORNWRS : BUSTER_AARCH64_GENERATED_FORM_ORNXRS;
+        fields[0] = operand0;
+        fields[1] = MACHINE_A64_SP;
+        fields[2] = 0;
+        fields[3] = operand1;
+        field_count = 4;
+        break;
+    case MACHINE_A64_CMP32:
+    case MACHINE_A64_CMP64:
+        form_id = opcode == MACHINE_A64_CMP32 ? BUSTER_AARCH64_GENERATED_FORM_SUBSWRS : BUSTER_AARCH64_GENERATED_FORM_SUBSXRS;
+        fields[0] = MACHINE_A64_SP;
+        fields[1] = operand0;
+        fields[2] = 0;
+        fields[3] = operand1;
+        field_count = 4;
+        break;
+    case MACHINE_A64_CMP_ZERO:
+        form_id = BUSTER_AARCH64_GENERATED_FORM_SUBSXRI;
+        fields[0] = MACHINE_A64_SP;
+        fields[1] = operand0;
+        fields[2] = 0;
+        field_count = 3;
+        break;
+    case MACHINE_A64_CSET:
+        form_id = BUSTER_AARCH64_GENERATED_FORM_CSINCWR;
+        fields[0] = operand0;
+        fields[1] = MACHINE_A64_SP;
+        fields[2] = payload ^ 1u;
+        fields[3] = MACHINE_A64_SP;
+        field_count = 4;
+        break;
+    case MACHINE_A64_FMOV_TO_VEC:
+        form_id = BUSTER_AARCH64_GENERATED_FORM_FMOVXDR;
+        fields[0] = payload;
+        fields[1] = operand0;
+        field_count = 2;
+        break;
+    case MACHINE_A64_FMOV_FROM_VEC:
+        form_id = BUSTER_AARCH64_GENERATED_FORM_FMOVDXR;
+        fields[0] = operand0;
+        fields[1] = payload;
+        field_count = 2;
+        break;
+    case MACHINE_A64_READ_SP:
+        form_id = BUSTER_AARCH64_GENERATED_FORM_ADDXRI;
+        fields[0] = operand0;
+        fields[1] = MACHINE_A64_SP;
+        fields[2] = 0;
+        field_count = 3;
+        break;
+    case MACHINE_A64_WRITE_SP:
+        form_id = BUSTER_AARCH64_GENERATED_FORM_ADDXRI;
+        fields[0] = MACHINE_A64_SP;
+        fields[1] = operand0;
+        fields[2] = 0;
+        field_count = 3;
+        break;
+    case MACHINE_A64_RET:
+        form_id = BUSTER_AARCH64_GENERATED_FORM_RET;
+        fields[0] = MACHINE_A64_X30;
+        field_count = 1;
+        break;
+    default:
+        encoder->error = true;
+        return false;
+    }
+    if (opcode == MACHINE_A64_READ_SP || opcode == MACHINE_A64_WRITE_SP)
+    {
+        fields[2] = payload;
+    }
+    return machine_a64_emit_generated_form(encoder, form_id, fields, field_count);
+}
+
 // Seeded movz/movn materialization. The seed picks the fill — zeros or
 // ones — matching more of the four halfwords, lands on the first
 // halfword that differs from the fill (the top one when none does), and
@@ -2531,14 +2753,32 @@ BUSTER_F_DECL bool machine_a64_test_emit_unsigned_memory(u8* bytes, u32 capacity
     }
     return !encoder.error && !encoder.overflow;
 }
+
+BUSTER_F_DECL bool machine_a64_test_emit_generated_opcode(u8* bytes, u32 capacity, u16 opcode, u32 operand0, u32 operand1, u32 operand2,
+                                                          u32 payload, u32* byte_count, bool* error)
+{
+    MachineA64Encoder encoder = {
+        .bytes = bytes,
+        .capacity = capacity,
+    };
+    machine_a64_emit_generated_opcode(&encoder, opcode, operand0, operand1, operand2, payload);
+    if (byte_count)
+    {
+        *byte_count = encoder.count;
+    }
+    if (error)
+    {
+        *error = encoder.error;
+    }
+    return !encoder.error && !encoder.overflow;
+}
 #endif
 
 // Register-to-register copy; SP never appears here, so the orr form's zero
 // register reading of 31 can never be misinterpreted.
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_move(MachineA64Encoder* encoder, u32 destination, u32 source)
 {
-    u32 fields[] = {destination, MACHINE_A64_SP, 0, source};
-    machine_a64_emit_generated_form(encoder, BUSTER_AARCH64_GENERATED_FORM_ORRXRS, fields, BUSTER_ARRAY_LENGTH(fields));
+    machine_a64_emit_generated_opcode(encoder, MACHINE_A64_MOV_RR, destination, source, 0, 0);
 }
 
 // Frame-slot placement offsets grow downward from the frame base; the
@@ -2695,45 +2935,16 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 // identity: it clears the upper bits.
                 if (operand_registers[0] != operand_registers[1])
                 {
-                    machine_a64_emit_move(&encoder, operand_registers[0], operand_registers[1]);
+                    machine_a64_emit_generated_opcode(&encoder, instruction->opcode, operand_registers[0], operand_registers[1], operand_registers[2],
+                                                      instruction->payload);
                 }
                 break;
             case MACHINE_A64_MOV32_RR:
-            {
-                u32 fields[] = {operand_registers[0], MACHINE_A64_SP, 0, operand_registers[1]};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ORRWRS, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-                break;
             case MACHINE_A64_SXTB:
-            {
-                u32 fields[] = {operand_registers[0], operand_registers[1], 7, 0};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_SBFMXRI, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-                break;
             case MACHINE_A64_SXTH:
-            {
-                u32 fields[] = {operand_registers[0], operand_registers[1], 15, 0};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_SBFMXRI, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-                break;
             case MACHINE_A64_SXTW:
-            {
-                u32 fields[] = {operand_registers[0], operand_registers[1], 31, 0};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_SBFMXRI, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-                break;
             case MACHINE_A64_UXTB:
-            {
-                u32 fields[] = {operand_registers[0], operand_registers[1], 7, 0};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_UBFMWRI, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-                break;
             case MACHINE_A64_UXTH:
-            {
-                u32 fields[] = {operand_registers[0], operand_registers[1], 15, 0};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_UBFMWRI, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-                break;
             case MACHINE_A64_ADD32:
             case MACHINE_A64_ADD64:
             case MACHINE_A64_SUB32:
@@ -2744,129 +2955,32 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             case MACHINE_A64_ORR64:
             case MACHINE_A64_EOR32:
             case MACHINE_A64_EOR64:
-            {
-                u32 form_id = instruction->opcode == MACHINE_A64_ADD32 ? BUSTER_AARCH64_GENERATED_FORM_ADDWRS
-                               : instruction->opcode == MACHINE_A64_ADD64 ? BUSTER_AARCH64_GENERATED_FORM_ADDXRS
-                               : instruction->opcode == MACHINE_A64_SUB32 ? BUSTER_AARCH64_GENERATED_FORM_SUBWRS
-                               : instruction->opcode == MACHINE_A64_SUB64 ? BUSTER_AARCH64_GENERATED_FORM_SUBXRS
-                               : instruction->opcode == MACHINE_A64_AND32 ? BUSTER_AARCH64_GENERATED_FORM_ANDWRS
-                               : instruction->opcode == MACHINE_A64_AND64 ? BUSTER_AARCH64_GENERATED_FORM_ANDXRS
-                               : instruction->opcode == MACHINE_A64_ORR32 ? BUSTER_AARCH64_GENERATED_FORM_ORRWRS
-                               : instruction->opcode == MACHINE_A64_ORR64 ? BUSTER_AARCH64_GENERATED_FORM_ORRXRS
-                               : instruction->opcode == MACHINE_A64_EOR32 ? BUSTER_AARCH64_GENERATED_FORM_EORWRS
-                                                                           : BUSTER_AARCH64_GENERATED_FORM_EORXRS;
-                u32 fields[] = {operand_registers[0], operand_registers[1], 0, operand_registers[2]};
-                machine_a64_emit_generated_form(&encoder, form_id, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-            break;
             case MACHINE_A64_MUL32:
             case MACHINE_A64_MUL64:
-            {
-                u32 fields[] = {operand_registers[0], operand_registers[1], MACHINE_A64_SP, operand_registers[2]};
-                machine_a64_emit_generated_form(&encoder, instruction->opcode == MACHINE_A64_MUL64 ? BUSTER_AARCH64_GENERATED_FORM_MADDXRRR
-                                                                                                    : BUSTER_AARCH64_GENERATED_FORM_MADDWRRR,
-                                                fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-                break;
             case MACHINE_A64_SDIV32:
             case MACHINE_A64_SDIV64:
             case MACHINE_A64_UDIV32:
             case MACHINE_A64_UDIV64:
-            {
-                u32 form_id = instruction->opcode == MACHINE_A64_SDIV32 ? BUSTER_AARCH64_GENERATED_FORM_SDIVWR
-                               : instruction->opcode == MACHINE_A64_SDIV64 ? BUSTER_AARCH64_GENERATED_FORM_SDIVXR
-                               : instruction->opcode == MACHINE_A64_UDIV32 ? BUSTER_AARCH64_GENERATED_FORM_UDIVWR
-                                                                            : BUSTER_AARCH64_GENERATED_FORM_UDIVXR;
-                u32 fields[] = {operand_registers[0], operand_registers[1], operand_registers[2]};
-                machine_a64_emit_generated_form(&encoder, form_id, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-            break;
             case MACHINE_A64_SREM32:
             case MACHINE_A64_SREM64:
             case MACHINE_A64_UREM32:
             case MACHINE_A64_UREM64:
-            {
-                // Divide into the destination, then multiply-subtract back:
-                // d = n - (n / m) * m. The constrained slot layout keeps
-                // the three registers distinct, which the sequence needs.
-                u32 divide_form_id = instruction->opcode == MACHINE_A64_SREM32 ? BUSTER_AARCH64_GENERATED_FORM_SDIVWR
-                                      : instruction->opcode == MACHINE_A64_SREM64 ? BUSTER_AARCH64_GENERATED_FORM_SDIVXR
-                                      : instruction->opcode == MACHINE_A64_UREM32 ? BUSTER_AARCH64_GENERATED_FORM_UDIVWR
-                                                                                   : BUSTER_AARCH64_GENERATED_FORM_UDIVXR;
-                u32 subtract_form_id = instruction->opcode == MACHINE_A64_SREM32 ? BUSTER_AARCH64_GENERATED_FORM_MSUBWRRR
-                                         : instruction->opcode == MACHINE_A64_SREM64 ? BUSTER_AARCH64_GENERATED_FORM_MSUBXRRR
-                                         : instruction->opcode == MACHINE_A64_UREM32 ? BUSTER_AARCH64_GENERATED_FORM_MSUBWRRR
-                                                                                      : BUSTER_AARCH64_GENERATED_FORM_MSUBXRRR;
-                u32 divide_fields[] = {operand_registers[0], operand_registers[1], operand_registers[2]};
-                u32 subtract_fields[] = {operand_registers[0], operand_registers[0], operand_registers[1], operand_registers[2]};
-                machine_a64_emit_generated_form(&encoder, divide_form_id, divide_fields, BUSTER_ARRAY_LENGTH(divide_fields));
-                machine_a64_emit_generated_form(&encoder, subtract_form_id, subtract_fields, BUSTER_ARRAY_LENGTH(subtract_fields));
-            }
-            break;
             case MACHINE_A64_LSL32:
             case MACHINE_A64_LSL64:
             case MACHINE_A64_ASR32:
             case MACHINE_A64_ASR64:
             case MACHINE_A64_LSR32:
             case MACHINE_A64_LSR64:
-            {
-                u32 form_id = instruction->opcode == MACHINE_A64_LSL32 ? BUSTER_AARCH64_GENERATED_FORM_LSLVWR
-                               : instruction->opcode == MACHINE_A64_LSL64 ? BUSTER_AARCH64_GENERATED_FORM_LSLVXR
-                               : instruction->opcode == MACHINE_A64_ASR32 ? BUSTER_AARCH64_GENERATED_FORM_ASRVWR
-                               : instruction->opcode == MACHINE_A64_ASR64 ? BUSTER_AARCH64_GENERATED_FORM_ASRVXR
-                               : instruction->opcode == MACHINE_A64_LSR32 ? BUSTER_AARCH64_GENERATED_FORM_LSRVWR
-                                                                           : BUSTER_AARCH64_GENERATED_FORM_LSRVXR;
-                u32 fields[] = {operand_registers[0], operand_registers[1], operand_registers[2]};
-                machine_a64_emit_generated_form(&encoder, form_id, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-            break;
             case MACHINE_A64_NEG32:
-            {
-                u32 fields[] = {operand_registers[0], MACHINE_A64_SP, 0, operand_registers[1]};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_SUBWRS, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-                break;
             case MACHINE_A64_NEG64:
-            {
-                u32 fields[] = {operand_registers[0], MACHINE_A64_SP, 0, operand_registers[1]};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_SUBXRS, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-                break;
             case MACHINE_A64_NOT32:
-            {
-                u32 fields[] = {operand_registers[0], MACHINE_A64_SP, 0, operand_registers[1]};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ORNWRS, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-                break;
             case MACHINE_A64_NOT64:
-            {
-                u32 fields[] = {operand_registers[0], MACHINE_A64_SP, 0, operand_registers[1]};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ORNXRS, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-                break;
             case MACHINE_A64_CMP32:
-            {
-                u32 fields[] = {MACHINE_A64_SP, operand_registers[0], 0, operand_registers[1]};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_SUBSWRS, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-                break;
             case MACHINE_A64_CMP64:
-            {
-                u32 fields[] = {MACHINE_A64_SP, operand_registers[0], 0, operand_registers[1]};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_SUBSXRS, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-                break;
             case MACHINE_A64_CMP_ZERO:
-            {
-                u32 fields[] = {MACHINE_A64_SP, operand_registers[0], 0};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_SUBSXRI, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
-                break;
             case MACHINE_A64_CSET:
-            {
-                u32 fields[] = {operand_registers[0], MACHINE_A64_SP, instruction->payload ^ 1u, MACHINE_A64_SP};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_CSINCWR, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
+                machine_a64_emit_generated_opcode(&encoder, instruction->opcode, operand_registers[0], operand_registers[1], operand_registers[2],
+                                                  instruction->payload);
                 break;
             case MACHINE_A64_LOAD_FRAME:
                 machine_a64_emit_frame_load(
@@ -3017,16 +3131,12 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             }
             break;
             case MACHINE_A64_FMOV_TO_VEC:
-            {
-                u32 fields[] = {instruction->payload, operand_registers[0]};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_FMOVXDR, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
+                machine_a64_emit_generated_opcode(&encoder, instruction->opcode, operand_registers[0], operand_registers[1], operand_registers[2],
+                                                  instruction->payload);
                 break;
             case MACHINE_A64_FMOV_FROM_VEC:
-            {
-                u32 fields[] = {operand_registers[0], instruction->payload};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_FMOVDXR, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
+                machine_a64_emit_generated_opcode(&encoder, instruction->opcode, operand_registers[0], operand_registers[1], operand_registers[2],
+                                                  instruction->payload);
                 break;
             case MACHINE_A64_B:
             {
@@ -3104,10 +3214,8 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                     release_remaining -= release_chunk;
                 }
                 machine_a64_emit(&encoder, 0xa8c17bfd);
-                {
-                    u32 fields[] = {MACHINE_A64_X30};
-                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_RET, fields, BUSTER_ARRAY_LENGTH(fields));
-                }
+                machine_a64_emit_generated_opcode(&encoder, instruction->opcode, operand_registers[0], operand_registers[1], operand_registers[2],
+                                                  instruction->payload);
             }
             break;
             case MACHINE_A64_BRK:
@@ -3115,16 +3223,12 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 machine_a64_emit(&encoder, 0xd4200000);
                 break;
             case MACHINE_A64_READ_SP:
-            {
-                u32 fields[] = {operand_registers[0], MACHINE_A64_SP, 0};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
+                machine_a64_emit_generated_opcode(&encoder, instruction->opcode, operand_registers[0], operand_registers[1], operand_registers[2],
+                                                  instruction->payload);
                 break;
             case MACHINE_A64_WRITE_SP:
-            {
-                u32 fields[] = {MACHINE_A64_SP, operand_registers[0], 0};
-                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
-            }
+                machine_a64_emit_generated_opcode(&encoder, instruction->opcode, operand_registers[0], operand_registers[1], operand_registers[2],
+                                                  instruction->payload);
                 break;
             case MACHINE_A64_CALL_DIRECT:
             {

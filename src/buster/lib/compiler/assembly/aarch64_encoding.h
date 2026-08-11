@@ -340,4 +340,6 @@ BUSTER_F_DECL bool a64_generated_production_raw_encode(u32 form_id, u32 const* f
 // Test seam for the fail-closed generated predicate-error bit. The checked
 // production snapshot deliberately contains no malformed predicate rows.
 BUSTER_F_DECL bool buster_aarch64_metadata_test_predicate_parse_error_fails_closed(Target target);
+BUSTER_F_DECL void buster_aarch64_metadata_test_reset_packed_access_counter(void);
+BUSTER_F_DECL u32 buster_aarch64_metadata_test_packed_access_count(void);
 #endif

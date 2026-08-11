@@ -44,11 +44,20 @@ separate, deterministic JSONL projection over the pinned AArch64 records.
   accessors; there are no runtime initialization paths, and the constant
   symbol-address tables lower through the same static-initializer relocation
   path Buster already supports, so the source remains consumable by Buster.
-- `aarch64-form-ids.generated.h` contains the named snapshot IDs for the
-  scalar unsigned load/store forms used by the machine AArch64 backend. It is
-  generated from source names during import so production code never embeds
-  row numbers by hand. The current artifact is 730 bytes (checksum
-  `58f6813468469913`), and its checksum/size are recorded in `manifest.json`.
+- `aarch64-form-ids.generated.h` contains the named snapshot IDs for all 44
+  forms used by the machine AArch64 backend (the eight scalar unsigned
+  load/store forms plus the scalar, register, SP, RET, and FMOV families). It
+  is generated from source names during import so production code never embeds
+  row numbers by hand. The current artifact is 2,892 bytes (checksum
+  `21bb44e355ee0e82`), and its checksum/size are recorded in `manifest.json`.
+- `aarch64-production-plan.generated.h` is the direct, predecoded production
+  plan consumed by the machine encoder. It contains 44 forms, 149 source
+  fields, and 163 bit segments; its current size is 104,303 bytes (checksum
+  `5cfdff7016801587`). `aarch64-production-plan.generated.jsonl` is the
+  deterministic, human-readable projection of the same plan (19,486 bytes,
+  checksum `b2305bba7fc58c35`). Both artifact checksums, sizes, and counts are
+  recorded in `manifest.json` and are regenerated from the same normalized
+  source rows.
 - `aarch64-coverage.generated.inc` contains one stable row for every input
   record, including explicit source and name hashes, normalized form ID,
   classification, encoder family, test class, and reason ID.
@@ -81,8 +90,8 @@ checksum of the normalized JSONL emitted by the importer.
 
 The current audit output has 7,491 coverage rows, 7,491 canonical forms,
 22,631 fields, 23,039 segments, 26,262 operands, 7,855 predicate uses, and
-116 distinct predicate features. The flat-chunk header is 3,952,094 bytes
-(checksum `f4f8bf298c132f18`), the flat-chunk coverage include is 299,898
+116 distinct predicate features. The flat-chunk header is 3,952,180 bytes
+(checksum `52b6075d82359ef6`), the flat-chunk coverage include is 299,898
 bytes (checksum `ec5065a9b4503e40`), and the sorted string pool is 337,490
 bytes. Lookup
 indexes contain 1,557 mnemonic ranges and candidates for all 7,491 records;
