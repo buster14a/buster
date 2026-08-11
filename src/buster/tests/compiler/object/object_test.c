@@ -979,6 +979,30 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         memcpy(&direct_page_n_desc, direct_page_mach.bytes.pointer + direct_page_symbol_offset + 6, sizeof(direct_page_n_desc));
     }
     BUSTER_TEST(arguments, direct_page_n_desc == 0);
+    ObjectArtifact lazy_reference_kind_one = object_write(arguments->arena, &direct_page_object, OBJECT_FORMAT_MACH_O64);
+    u64 lazy_reference_symbol = object_test_mach_symbol_offset(lazy_reference_kind_one.bytes, 0);
+    ObjectFile lazy_reference_kind_one_roundtrip = {0};
+    if (lazy_reference_symbol != UINT64_MAX && lazy_reference_symbol + 8 <= lazy_reference_kind_one.bytes.length)
+    {
+        object_test_write_u16(lazy_reference_kind_one.bytes, lazy_reference_symbol + 6, 1);
+        lazy_reference_kind_one_roundtrip = object_read(arguments->arena, lazy_reference_kind_one.bytes,
+                                                         (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS});
+    }
+    BUSTER_TEST(arguments, lazy_reference_kind_one_roundtrip.error == OBJECT_ERROR_NONE &&
+                               lazy_reference_kind_one_roundtrip.symbol_count >= 1 &&
+                               lazy_reference_kind_one_roundtrip.symbols[0].kind == OBJECT_SYMBOL_FUNCTION);
+    ObjectArtifact lazy_reference_kind_five = object_write(arguments->arena, &direct_page_object, OBJECT_FORMAT_MACH_O64);
+    lazy_reference_symbol = object_test_mach_symbol_offset(lazy_reference_kind_five.bytes, 0);
+    ObjectFile lazy_reference_kind_five_roundtrip = {0};
+    if (lazy_reference_symbol != UINT64_MAX && lazy_reference_symbol + 8 <= lazy_reference_kind_five.bytes.length)
+    {
+        object_test_write_u16(lazy_reference_kind_five.bytes, lazy_reference_symbol + 6, 5);
+        lazy_reference_kind_five_roundtrip = object_read(arguments->arena, lazy_reference_kind_five.bytes,
+                                                          (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS});
+    }
+    BUSTER_TEST(arguments, lazy_reference_kind_five_roundtrip.error == OBJECT_ERROR_NONE &&
+                               lazy_reference_kind_five_roundtrip.symbol_count >= 1 &&
+                               lazy_reference_kind_five_roundtrip.symbols[0].kind == OBJECT_SYMBOL_FUNCTION);
     ObjectArtifact unknown_reference_kind = object_write(arguments->arena, &direct_page_object, OBJECT_FORMAT_MACH_O64);
     u64 unknown_reference_symbol = object_test_mach_symbol_offset(unknown_reference_kind.bytes, 0);
     if (unknown_reference_symbol != UINT64_MAX && unknown_reference_symbol + 8 <= unknown_reference_kind.bytes.length)

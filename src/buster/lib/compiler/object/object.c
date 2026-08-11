@@ -4892,11 +4892,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
         {
             return result;
         }
-        // Undefined symbols are intrinsically ambiguous until a relocation
-        // proves their use as a function.  PAGE/PAGEOFF references can name
-        // either a function address or data, so only a BRANCH26 relocation
-        // below upgrades an undefined symbol to OBJECT_SYMBOL_FUNCTION.
-        bool function_symbol = kind == 0x0e && section_kinds[section_number - 1] == OBJECT_SECTION_TEXT;
+        // PAGE/PAGEOFF references can name either a function address or data,
+        // so ordinary undefined symbols remain data until a BRANCH26
+        // relocation below upgrades them.  Genuine lazy-symbol-pointer
+        // references carry explicit function evidence in n_desc (1 or 5).
+        bool function_symbol = (kind == 0 && (reference_kind == 1 || reference_kind == 5)) ||
+                               (kind == 0x0e && section_kinds[section_number - 1] == OBJECT_SECTION_TEXT);
         result.symbols[destination_index] = (ObjectSymbol){
             .name = string_duplicate_arena(arena, name, false),
             .value = section_value,
