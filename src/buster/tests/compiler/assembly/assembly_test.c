@@ -388,6 +388,47 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
     BUSTER_TEST(arguments, x86_moffs_wrong_accumulator.diagnostic_count != 0 && x86_moffs_wrong_accumulator.bytes.length == 0);
 
+    // MASKMOV's architectural destination is the implicit [DI] location;
+    // only the two visible vector registers appear in source.  Intel and
+    // AT&T spellings select the same REG/RM bytes after AT&T's operand
+    // reversal, while address-size 32 carries the ordinary 67 override.
+    AssemblyEncodeResult x86_maskmov_intel = assembly_encode(
+        arguments->arena, S8("maskmovq mm0, mm1\nmaskmovdqu xmm0, xmm1\naddr32 maskmovq mm0, mm1\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_x86_maskmov_intel[] = {0x0f, 0xf7, 0xc1, 0x66, 0x0f, 0xf7, 0xc1, 0x67, 0x0f, 0xf7, 0xc1};
+    BUSTER_TEST(arguments, x86_maskmov_intel.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(x86_maskmov_intel.bytes, expected_x86_maskmov_intel,
+                                                         BUSTER_ARRAY_LENGTH(expected_x86_maskmov_intel)));
+    AssemblyEncodeResult x86_maskmov_att = assembly_encode(
+        arguments->arena, S8("maskmovq %mm1, %mm0\nmaskmovdqu %xmm1, %xmm0\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    u8 expected_x86_maskmov_att[] = {0x0f, 0xf7, 0xc1, 0x66, 0x0f, 0xf7, 0xc1};
+    BUSTER_TEST(arguments, x86_maskmov_att.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(x86_maskmov_att.bytes, expected_x86_maskmov_att,
+                                                         BUSTER_ARRAY_LENGTH(expected_x86_maskmov_att)));
+    AssemblyEncodeResult x86_maskmov_wrong_class = assembly_encode(
+        arguments->arena, S8("maskmovq xmm0, xmm1\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult x86_maskmov_wrong_count = assembly_encode(
+        arguments->arena, S8("maskmovq mm0\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult x86_maskmov_wrong_direction = assembly_encode(
+        // The implicit [DI] store cannot be written as an explicit memory
+        // destination in either operand direction.
+        arguments->arena, S8("maskmovq [rdi], mm1\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_maskmov_wrong_class.diagnostic_count != 0 && x86_maskmov_wrong_class.bytes.length == 0 &&
+                               x86_maskmov_wrong_count.diagnostic_count != 0 && x86_maskmov_wrong_count.bytes.length == 0 &&
+                               x86_maskmov_wrong_direction.diagnostic_count != 0 && x86_maskmov_wrong_direction.bytes.length == 0);
+    AssemblyEncodeResult x86_maskmov_fs = assembly_encode(
+        arguments->arena, S8("fs:maskmovq mm0, mm1\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult x86_maskmov_gs_att = assembly_encode(
+        arguments->arena, S8("%gs:maskmovq %mm1, %mm0\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_maskmov_fs.diagnostic_count != 0 && x86_maskmov_fs.bytes.length == 0 &&
+                               x86_maskmov_gs_att.diagnostic_count != 0 && x86_maskmov_gs_att.bytes.length == 0);
+
     u8 expected_x86_adc_sbb[] = {
         0x10, 0xd8,
         0x66, 0x11, 0xc8,

@@ -2728,17 +2728,17 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         // DF64/IMMUNE controls contribute seventeen, IBHF=1 contributes one
         // boolean row, the ACE R4 cohort contributes ten, BSRINIT adds one,
         // and the fixed CET/IBHF NOP cohort contributes eleven newly capable
-        // rows.  These are disjoint normalized rows on top of the fixed NOT16
-        // rows.
-        BUSTER_TEST(arguments, audit.emitted_count == 10596 && audit.blocked_count == 417 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10596 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 417);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10704 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 40);
+        // rows.  MASKMOV contributes two more legacy rows.  These are
+        // disjoint normalized rows on top of the fixed NOT16 rows.
+        BUSTER_TEST(arguments, audit.emitted_count == 10598 && audit.blocked_count == 415 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10598 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 415);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10706 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 38);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 198, 5, 1644, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1773, 197, 5, 1644, 176, 6728, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {39, 1, 0, 0, 0, 0, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1775, 197, 5, 1644, 176, 6728, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {37, 1, 0, 0, 0, 0, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2748,7 +2748,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10596, 268, 108, 40, 0, 1, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10598, 268, 108, 38, 0, 1, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -2756,10 +2756,57 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 
         // The moffs OVERRIDE_SEG0 cohort is deliberately closed over the
         // four A0-A3 MOV rows.  MASKMOVQ/MASKMOVDQU carry the same source
-        // token but use an implicit-DI memory topology and must remain
-        // pattern-blocked until that separate schema is modeled.
+        // token but use an implicit-DI memory topology whose hidden MEM0,
+        // BASE0, and SEG0 records are supplemental encoding semantics.
         static u32 const moffs_ids[] = {9891, 9892, 9893, 9894};
         static u32 const implicit_di_ids[] = {10395, 10408};
+        BusterX86MetadataPhysicalOperand maskmovq_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX, 0, 64),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX, 1, 64),
+        };
+        String8 maskmov_features[1] = {S8("*")};
+        BusterX86MetadataPhysicalQuery maskmovq_query = x86_64_metadata_test_physical_query(
+            S8("MASKMOVQ"), maskmovq_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, maskmov_features, 1);
+        BusterX86MetadataSelectResult maskmovq_selection = buster_x86_metadata_select_form(maskmovq_query);
+        BusterX86MetadataPhysicalOperand maskmovdqu_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 0, 128),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 1, 128),
+        };
+        BusterX86MetadataPhysicalQuery maskmovdqu_query = x86_64_metadata_test_physical_query(
+            S8("MASKMOVDQU"), maskmovdqu_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, maskmov_features, 1);
+        BusterX86MetadataSelectResult maskmovdqu_selection = buster_x86_metadata_select_form(maskmovdqu_query);
+        BUSTER_TEST(arguments, maskmovq_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   maskmovq_selection.form_id == implicit_di_ids[0] && maskmovq_selection.candidate_count == 1 &&
+                                   maskmovq_selection.selected_byte_count == 3);
+        BUSTER_TEST(arguments, maskmovdqu_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   maskmovdqu_selection.form_id == implicit_di_ids[1] && maskmovdqu_selection.candidate_count == 1 &&
+                                   maskmovdqu_selection.selected_byte_count == 4);
+        u8 maskmovq_bytes[] = {0x0f, 0xf7, 0xc1};
+        u8 maskmovdqu_bytes[] = {0x66, 0x0f, 0xf7, 0xc1};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("MASKMOVQ"), implicit_di_ids[0], maskmovq_operands, 2,
+                                                                (BusterX86MetadataPhysicalAttributes){0}, maskmov_features, 1,
+                                                                maskmovq_bytes, BUSTER_ARRAY_LENGTH(maskmovq_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("MASKMOVDQU"), implicit_di_ids[1], maskmovdqu_operands, 2,
+                                                                (BusterX86MetadataPhysicalAttributes){0}, maskmov_features, 1,
+                                                                maskmovdqu_bytes, BUSTER_ARRAY_LENGTH(maskmovdqu_bytes)));
+        maskmovq_query.address_size = 32;
+        u8 maskmovq_addr32_bytes[8] = {0};
+        BusterX86MetadataEmitResult maskmovq_addr32 = buster_x86_metadata_emit_form(
+            (BusterX86MetadataEmitQuery){.physical = maskmovq_query, .form_id = implicit_di_ids[0],
+                                         .output = maskmovq_addr32_bytes, .output_capacity = BUSTER_ARRAY_LENGTH(maskmovq_addr32_bytes)});
+        u8 expected_maskmovq_addr32[] = {0x67, 0x0f, 0xf7, 0xc1};
+        BUSTER_TEST(arguments, maskmovq_addr32.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   x86_64_metadata_test_bytes_equal(maskmovq_addr32_bytes, maskmovq_addr32.byte_count,
+                                                                     expected_maskmovq_addr32, BUSTER_ARRAY_LENGTH(expected_maskmovq_addr32)));
+        maskmovdqu_query.address_size = 32;
+        u8 maskmovdqu_addr32_bytes[8] = {0};
+        BusterX86MetadataEmitResult maskmovdqu_addr32 = buster_x86_metadata_emit_form(
+            (BusterX86MetadataEmitQuery){.physical = maskmovdqu_query, .form_id = implicit_di_ids[1],
+                                         .output = maskmovdqu_addr32_bytes, .output_capacity = BUSTER_ARRAY_LENGTH(maskmovdqu_addr32_bytes)});
+        u8 expected_maskmovdqu_addr32[] = {0x67, 0x66, 0x0f, 0xf7, 0xc1};
+        BUSTER_TEST(arguments, maskmovdqu_addr32.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   x86_64_metadata_test_bytes_equal(maskmovdqu_addr32_bytes, maskmovdqu_addr32.byte_count,
+                                                                     expected_maskmovdqu_addr32, BUSTER_ARRAY_LENGTH(expected_maskmovdqu_addr32)));
         bool moffs_rows_exact = true;
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(moffs_ids); index += 1)
         {
@@ -2780,9 +2827,8 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             bool retrieved = buster_x86_metadata_form(form_id, &form);
             moffs_rows_exact &= retrieved && form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
                                 x86_64_metadata_test_pattern_has_token(form.pattern, S8("OVERRIDE_SEG0()")) &&
-                                ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
-                                ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS &&
-                                !ledger[form_id].encoder_capable;
+                                ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
+                                ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_NONE && ledger[form_id].encoder_capable;
         }
         u32 moffs_token_count = 0;
         for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)

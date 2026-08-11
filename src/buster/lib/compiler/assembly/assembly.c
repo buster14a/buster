@@ -7485,6 +7485,7 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
         {
             u64 colon = string_first_code_unit(statement, ':');
             bool segment_override = false;
+            bool standalone_segment_prefix = false;
             if (colon < statement.length)
             {
                 u64 segment_start = colon;
@@ -7506,9 +7507,21 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
                     String8 after_segment = string_slice(statement, following_index, statement.length);
                     memory_after_segment = string_first_code_unit(after_segment, '(') < after_segment.length;
                 }
-                segment_override = memory_after_segment && assembly_x86_segment_parse(segment, syntax, &segment_index);
+                bool segment_name = assembly_x86_segment_parse(segment, syntax, &segment_index);
+                segment_override = memory_after_segment && segment_name;
+                if (!segment_override && segment_name && (segment_index == 5 || segment_index == 6))
+                {
+                    // FS:/GS: before an instruction is not a typed operand
+                    // in the metadata front door.  Treating it as a label
+                    // would silently discard the requested segment override
+                    // (notably for MASKMOV's hidden DI destination), so reject
+                    // it until an implicit-segment query can carry the intent.
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT, line, column, (u32)segment.length,
+                                        S8("standalone FS/GS segment prefix requires an explicit memory operand"));
+                    standalone_segment_prefix = true;
+                }
             }
-            if (colon < statement.length && !segment_override)
+            if (colon < statement.length && !segment_override && !standalone_segment_prefix)
             {
                 String8 label = assembly_trim((String8){.pointer = statement.pointer, .length = colon});
                 if (!assembly_identifier(label))
@@ -7536,6 +7549,10 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
                 }
                 statement = assembly_trim((String8){.pointer = statement.pointer + colon + 1, .length = statement.length - colon - 1});
                 column = statement.length ? (u32)(statement.pointer - original.pointer) + 1 : column;
+            }
+            if (standalone_segment_prefix)
+            {
+                statement = (String8){0};
             }
             if (statement.length)
             {
