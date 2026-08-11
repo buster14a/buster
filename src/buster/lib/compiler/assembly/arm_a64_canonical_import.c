@@ -3151,6 +3151,7 @@ static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, const
                                     u64 scalar_header_hash, u64 scalar_header_bytes, u32 scalar_form_count, u32 scalar_mnemonic_count,
                                     const u32 scalar_arity_counts[4], const u32 scalar_feature_counts[2],
                                     const u32 scalar_recipe_counts[12], const char* scalar_identity_sha256,
+                                    u64 decoder_header_hash, u64 decoder_header_bytes, u64 decoder_audit_hash, u64 decoder_audit_bytes,
                                     ArmA64LayoutResolutionStats layout_resolution,
                                     ArmA64CanonicalRows rows, u32 page_count, u32 instruction_pages, u32 alias_pages, u32 pseudocode_pages,
                                     u32 iclass_count, u32 regdiagram_count, u32 selected, u32 selected_canonical,
@@ -3243,6 +3244,16 @@ static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, const
     arena_append_string8(output, S8("}, \"normalized_identity_sha256\": "));
     arm_a64_json_string(output, string_from_pointer((char8*)scalar_identity_sha256));
     arena_append_string8(output, S8(", \"unresolved_mask\": \"0x00000000\"},\n"));
+    arena_append_string8(output, S8("  \"canonical_decoder_artifact\": {\"file\": \"aarch64-canonical-decoder.generated.h\", \"bytes\": "));
+    arm_a64_append_u64(output, decoder_header_bytes);
+    arena_append_string8(output, S8(", \"xxh64\": "));
+    arm_a64_json_hex(output, decoder_header_hash);
+    arena_append_string8(output, S8(", \"forms\": 1523, \"aliases\": 0, \"constraint_programs\": 215, \"feature_programs\": 24},\n"));
+    arena_append_string8(output, S8("  \"canonical_decoder_audit_artifact\": {\"file\": \"aarch64-canonical-decoder-audit.json\", \"bytes\": "));
+    arm_a64_append_u64(output, decoder_audit_bytes);
+    arena_append_string8(output, S8(", \"xxh64\": "));
+    arm_a64_json_hex(output, decoder_audit_hash);
+    arena_append_string8(output, S8(", \"forms\": 1523, \"representative_collision_pairs\": 22},\n"));
     arena_append_string8(output, S8("  \"symmetric_difference\": {\"count\": 33, \"excluded_pauth_lr\": 17, \"included_special\": 16, \"inventory\": ["));
     static const char* excluded[] = {"AUTIA171615_64LR_dp_1src","AUTIASPPCR_64LRR_dp_1src","AUTIASPPC_only_dp_1src_imm","AUTIB171615_64LR_dp_1src","AUTIBSPPCR_64LRR_dp_1src","AUTIBSPPC_only_dp_1src_imm","PACIA171615_64LR_dp_1src","PACIASPPC_64LR_dp_1src","PACIB171615_64LR_dp_1src","PACIBSPPC_64LR_dp_1src","PACM_HI_hints","PACNBIASPPC_64LR_dp_1src","PACNBIBSPPC_64LR_dp_1src","RETAASPPCR_64M_branch_reg","RETABSPPCR_64M_branch_reg","RETAASPPC_only_miscbranch","RETABSPPC_only_miscbranch"};
     static const char* included[] = {"ESB_HI_hints","CFP_SYS_CR_systeminstrs","CPP_SYS_CR_systeminstrs","DVP_SYS_CR_systeminstrs","SHA1C_QSV_cryptosha3","SHA1H_SS_cryptosha2","SHA1M_QSV_cryptosha3","SHA1P_QSV_cryptosha3","SHA1SU0_VVV_cryptosha3","SHA1SU1_VV_cryptosha2","SHA512H2_QQV_cryptosha512_3","SHA512H_QQV_cryptosha512_3","SHA512SU0_VV2_cryptosha512_2","SHA512SU1_VVV2_cryptosha512_3","AXFLAG_M_pstate","XAFLAG_M_pstate"};
@@ -3277,6 +3288,84 @@ static bool arm_a64_check_file(Arena* scratch, String8 path, String8 expected, c
     return true;
 }
 
+/* The canonical decoder table is generated from the same pinned JSONL by the
+   checked-in bounded generator under tools/.  Keep the importer independent
+   of Python at runtime: import copies the deterministic snapshot into a
+   requested output directory, while check mode compares those bytes. */
+static bool arm_a64_copy_decoder_snapshot(Arena* scratch, Arena* output, const char* file_name, String8* result)
+{
+    if (!result || !file_name)
+    {
+        return false;
+    }
+    /* The repository snapshot is the only trusted source.  In particular,
+       never read the requested output directory here: check mode must compare
+       that directory against these pinned bytes rather than copy a corrupt
+       output back into the would-be import. */
+    String8 path = path_join(scratch, S8("src/buster/lib/compiler/assembly/generated"), string_from_pointer((char8*)file_name));
+    ByteSlice bytes = file_read(scratch, path, (FileReadOptions){0});
+    if (!bytes.pointer || !bytes.length)
+    {
+        fprintf(stderr, "error: missing repository-pinned canonical decoder snapshot (%s)\n", file_name);
+        return false;
+    }
+    u64 mark = output->position;
+    arena_append_string8(output, (String8){.pointer = (char8*)bytes.pointer, .length = bytes.length});
+    *result = (String8){.pointer = (char8*)arm_a64_arena_pointer(output, mark), .length = bytes.length};
+    return true;
+}
+
+/* The checked-in decoder is an optional developer-generated snapshot, not a
+   runtime dependency.  Import still validates its identity and the rows it
+   claims to cover before copying it, so changing either the pinned snapshot or
+   the canonical source requires an intentional table/audit update. */
+static bool arm_a64_validate_decoder_snapshot(String8 artifact, String8 decoder_header, String8 decoder_audit, ArmA64CanonicalRows rows)
+{
+    static const u8 expected_artifact_sha256[32] = {
+        0x84, 0x85, 0xc5, 0xc6, 0x18, 0x35, 0xd5, 0x39, 0x4d, 0x32, 0x57, 0x57, 0xab, 0x29, 0x64, 0x89,
+        0x0e, 0x8b, 0xdf, 0xea, 0x30, 0x4c, 0x6f, 0xaa, 0x8f, 0xd4, 0xc2, 0x3e, 0x4c, 0x7a, 0xab, 0xec,
+    };
+    u8 artifact_sha256[32] = {0};
+    arm_a64_sha256_bytes((u8*)artifact.pointer, artifact.length, artifact_sha256);
+    u32 selected_canonical = 0;
+    for (u32 index = 0; index < rows.count; index += 1)
+    {
+        ArmA64CanonicalRow* row = rows.pointer + index;
+        if (row->apple_m1 && string_equal(row->kind, S8("canonical")))
+        {
+            selected_canonical += 1;
+            if ((row->fixed_mask | row->field_mask | row->unresolved_mask) != UINT32_MAX) return false;
+        }
+    }
+    if (memcmp(artifact_sha256, expected_artifact_sha256, sizeof(expected_artifact_sha256)) != 0 || selected_canonical != 1523 ||
+        decoder_header.length != 1034723 || buster_hash_64((u8*)decoder_header.pointer, decoder_header.length) != 0x4932ef7e53365e52ULL ||
+        decoder_audit.length != 384965 || buster_hash_64((u8*)decoder_audit.pointer, decoder_audit.length) != 0x76d833aa59165f16ULL)
+    {
+        return false;
+    }
+    static const char* required_header_markers[] = {
+        "#define BUSTER_AARCH64_CANONICAL_DECODER_FORM_COUNT 1523u",
+        "#define BUSTER_AARCH64_CANONICAL_DECODER_FIELD_COUNT 5387u",
+        "#define BUSTER_AARCH64_CANONICAL_DECODER_CONSTRAINT_PROGRAM_COUNT 215u",
+        "#define BUSTER_AARCH64_CANONICAL_DECODER_FEATURE_PROGRAM_COUNT 24u",
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(required_header_markers); index += 1)
+    {
+        if (string_first_sequence(decoder_header, string_from_pointer((char8*)required_header_markers[index])) == BUSTER_STRING_NO_MATCH) return false;
+    }
+    static const char* required_audit_markers[] = {
+        "\"form_count\": 1523",
+        "\"constraint_program_count\": 215",
+        "\"feature_program_count\": 24",
+        "\"constrained_pairs\": 22",
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(required_audit_markers); index += 1)
+    {
+        if (string_first_sequence(decoder_audit, string_from_pointer((char8*)required_audit_markers[index])) == BUSTER_STRING_NO_MATCH) return false;
+    }
+    return true;
+}
+
 static bool arm_a64_readme_canonical_section_digest(ByteSlice readme, u8 digest[32])
 {
     String8 text = {.pointer = (char8*)readme.pointer, .length = readme.length};
@@ -3292,7 +3381,7 @@ static bool arm_a64_readme_canonical_section_digest(ByteSlice readme, u8 digest[
 }
 
 static bool arm_a64_check_existing_outputs(Arena* arena, String8 output_directory, String8 artifact, String8 manifest, String8 fixed_header, String8 gpr_header,
-                                           String8 scalar_header)
+                                           String8 scalar_header, String8 decoder_header, String8 decoder_audit)
 {
     TemporalArena scratch_scope = scratch_begin(&arena, 1);
     Arena* scratch = scratch_scope.arena;
@@ -3301,16 +3390,20 @@ static bool arm_a64_check_existing_outputs(Arena* arena, String8 output_director
     String8 fixed_header_path = path_join(scratch, output_directory, S8("arm-a64-m1-fixed.generated.h"));
     String8 gpr_header_path = path_join(scratch, output_directory, S8("arm-a64-m1-gpr.generated.h"));
     String8 scalar_header_path = path_join(scratch, output_directory, S8("arm-a64-m1-scalar-integer.generated.h"));
+    String8 decoder_header_path = path_join(scratch, output_directory, S8("aarch64-canonical-decoder.generated.h"));
+    String8 decoder_audit_path = path_join(scratch, output_directory, S8("aarch64-canonical-decoder-audit.json"));
     String8 readme_path = path_join(scratch, output_directory, S8("README.md"));
     bool valid = arm_a64_check_file(scratch, artifact_path, artifact, "canonical artifact") &&
                  arm_a64_check_file(scratch, manifest_path, manifest, "canonical manifest") &&
                  arm_a64_check_file(scratch, fixed_header_path, fixed_header, "M1 fixed-spelling header") &&
                  arm_a64_check_file(scratch, gpr_header_path, gpr_header, "M1 direct-GPR header") &&
-                 arm_a64_check_file(scratch, scalar_header_path, scalar_header, "M1 scalar-integer header");
+                 arm_a64_check_file(scratch, scalar_header_path, scalar_header, "M1 scalar-integer header") &&
+                 arm_a64_check_file(scratch, decoder_header_path, decoder_header, "canonical decoder header") &&
+                 arm_a64_check_file(scratch, decoder_audit_path, decoder_audit, "canonical decoder audit");
     ByteSlice readme = file_read(scratch, readme_path, (FileReadOptions){0});
     static const u8 expected_readme_section_sha256[32] = {
-        0x41, 0x6e, 0xfb, 0x7d, 0x76, 0x5b, 0x43, 0xf9, 0x8f, 0x9b, 0x73, 0x4d, 0x27, 0x3e, 0x26, 0x49,
-        0xb0, 0xad, 0x12, 0xbc, 0x88, 0x0e, 0x0d, 0xca, 0x0b, 0x29, 0xdf, 0xd7, 0x28, 0x00, 0x0c, 0x36,
+        0xb8, 0x5c, 0x9b, 0x71, 0xa9, 0x85, 0x27, 0x76, 0xc3, 0x80, 0x4e, 0x0f, 0xd7, 0xf5, 0x5e, 0x91,
+        0xd9, 0xa8, 0x4d, 0xb8, 0x95, 0xce, 0xf3, 0x21, 0xc6, 0x55, 0x2c, 0xee, 0x23, 0x6f, 0x13, 0x98,
     };
     u8 readme_section_sha256[32] = {0};
     if (!readme.pointer || !readme.length || !arm_a64_readme_canonical_section_digest(readme, readme_section_sha256) ||
@@ -3636,6 +3729,19 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
         }
         if (!seen_mnemonic) scalar_mnemonic_count += 1;
     }
+    String8 decoder_header = {0};
+    String8 decoder_audit = {0};
+    if (!arm_a64_copy_decoder_snapshot(scratch, output_arena, "aarch64-canonical-decoder.generated.h", &decoder_header) ||
+        !arm_a64_copy_decoder_snapshot(scratch, output_arena, "aarch64-canonical-decoder-audit.json", &decoder_audit))
+    {
+        string_print(S8("error: canonical decoder snapshot is missing; run tools/gen_aarch64_canonical_decoder.py first\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    if (!arm_a64_validate_decoder_snapshot(artifact, decoder_header, decoder_audit, rows))
+    {
+        string_print(S8("error: canonical decoder snapshot identity or invariant gate failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
     u64 manifest_mark = output_arena->position;
     arm_a64_append_manifest(output_arena, source_tree_digest, source_tree_sha256, source_file_count,
                             buster_hash_64((u8*)artifact.pointer, artifact.length), artifact.length,
@@ -3644,7 +3750,10 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
                             gpr_arity_counts, gpr_feature_counts,
                             buster_hash_64((u8*)scalar_header.pointer, scalar_header.length), scalar_header.length, scalar_form_count, scalar_mnemonic_count,
                             scalar_arity_counts, scalar_feature_counts, scalar_recipe_counts,
-                            "4429d9ab064a8e98561c794e8c5408a3922bc6a7f07a32015caaa9932ba2c484", layout_resolution, rows, page_count,
+                            "4429d9ab064a8e98561c794e8c5408a3922bc6a7f07a32015caaa9932ba2c484",
+                            buster_hash_64((u8*)decoder_header.pointer, decoder_header.length), decoder_header.length,
+                            buster_hash_64((u8*)decoder_audit.pointer, decoder_audit.length), decoder_audit.length,
+                            layout_resolution, rows, page_count,
                             instruction_pages, alias_pages, pseudocode_pages, iclass_count, regdiagram_count, selected, selected_canonical,
                             selected_alias, selected_system, selected_system_canonical, selected_system_alias, selected - selected_system,
                             selected_canonical - selected_system_canonical, selected_alias - selected_system_alias);
@@ -3654,17 +3763,21 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
     String8 fixed_header_path = path_join(arena, options.output_directory, S8("arm-a64-m1-fixed.generated.h"));
     String8 gpr_header_path = path_join(arena, options.output_directory, S8("arm-a64-m1-gpr.generated.h"));
     String8 scalar_header_path = path_join(arena, options.output_directory, S8("arm-a64-m1-scalar-integer.generated.h"));
+    String8 decoder_header_path = path_join(arena, options.output_directory, S8("aarch64-canonical-decoder.generated.h"));
+    String8 decoder_audit_path = path_join(arena, options.output_directory, S8("aarch64-canonical-decoder-audit.json"));
     if (arm_a64_check_mode_enabled())
     {
-        if (!arm_a64_check_existing_outputs(arena, options.output_directory, artifact, manifest, fixed_header, gpr_header, scalar_header)) return PROCESS_RESULT_FAILED;
-        string_print(S8("Arm A64 checked-in canonical artifacts, M1 fixed spellings, direct-GPR/scalar-integer forms, and README.md canonical section match deterministic import output: {S8}\n"),
+        if (!arm_a64_check_existing_outputs(arena, options.output_directory, artifact, manifest, fixed_header, gpr_header, scalar_header, decoder_header, decoder_audit)) return PROCESS_RESULT_FAILED;
+        string_print(S8("Arm A64 checked-in canonical artifacts, M1 fixed spellings, direct-GPR/scalar-integer forms, canonical decoder snapshot, and README.md canonical section match deterministic import output: {S8}\n"),
                      options.output_directory);
         return PROCESS_RESULT_SUCCESS;
     }
     make_directory_recursive(arena, options.output_directory);
     if (!file_write(artifact_path, BUSTER_SLICE_TO_BYTE_SLICE(artifact)) || !file_write(manifest_path, BUSTER_SLICE_TO_BYTE_SLICE(manifest)) ||
         !file_write(fixed_header_path, BUSTER_SLICE_TO_BYTE_SLICE(fixed_header)) || !file_write(gpr_header_path, BUSTER_SLICE_TO_BYTE_SLICE(gpr_header)) ||
-        !file_write(scalar_header_path, BUSTER_SLICE_TO_BYTE_SLICE(scalar_header)))
+        !file_write(scalar_header_path, BUSTER_SLICE_TO_BYTE_SLICE(scalar_header)) ||
+        !file_write(decoder_header_path, BUSTER_SLICE_TO_BYTE_SLICE(decoder_header)) ||
+        !file_write(decoder_audit_path, BUSTER_SLICE_TO_BYTE_SLICE(decoder_audit)))
     {
         string_print(S8("error: failed to write Arm A64 canonical artifacts\n"));
         return PROCESS_RESULT_FAILED;

@@ -259,10 +259,29 @@ recipe counts add/sub-ext 8, add/sub-imm 8, add/sub-shift 8, logical-imm 8,
 logical-shift 16, bitfield 6, extract 2, movewide 6, conditional-compare
 immediate/register 4/4, RMIF 1, and UDF 1. The normalized source identity is
 SHA-256 `4429d9ab064a8e98561c794e8c5408a3922bc6a7f07a32015caaa9932ba2c484`;
-all selected rows have an unresolved mask of zero. Regeneration writes five
+all selected rows have an unresolved mask of zero. Regeneration writes seven
 Arm artifacts to the requested output directory.
 
-Regenerate into a separate directory and compare all five output files byte-for-
+The canonical decoder snapshot is emitted as
+`aarch64-canonical-decoder.generated.h` with its deterministic audit in
+`aarch64-canonical-decoder-audit.json`. It contains exactly 1,523 canonical
+Apple-M1 rows (aliases are excluded), with complete fixed/variable bit
+partitions, 5,387 packed fields, 10,767 source segments, 215 deduplicated
+constraint programs (707 postfix tokens), and 24 target-feature programs.
+`tools/gen_aarch64_canonical_decoder.py` is the optional developer-side
+regenerator; normal imports remain zero-dependency and consume only the
+repository-pinned snapshot. The C importer independently checks the canonical
+row count, source digest, artifact sizes/checksums, and decoder invariants. The
+bounded runtime validates fixed bits and constraints, filters
+by target features, and resolves overlapping encodings by fixed-mask
+specificity; its pointer-free API exposes raw encode/decode and explicit
+success, unallocated, unsupported-feature, ambiguous, and incomplete statuses.
+The audit records deterministic representative words and the collision census:
+22 constrained representative pairs, including the 23-row generic HINT group.
+The importer copies and verifies both decoder snapshots, and records their
+sizes/checksums in `arm-a64-canonical-manifest.json`.
+
+Regenerate into a separate directory and compare all seven output files byte-for-
 byte across two runs:
 
 ```sh
@@ -273,16 +292,16 @@ byte across two runs:
 
 The importer rejects source-tree mutations before emitting artifacts and
 rejects duplicate canonical IDs/digests or unresolved alias targets. Run the
-command twice into separate directories and byte-compare all five generated
+command twice into separate directories and byte-compare all seven generated
 files (the SHA-256/FNV source identity, SHA-256 `abc` known vector, bounded
 feature-parser tests, direct-GPR/scalar-integer structural censuses, and symmetric-difference
 gate provide in-process verification).
 
 For a checked-in drift audit, point the importer at the generated directory
 with `BUSTER_ARM_A64_CHECK=1`. This performs the full parse and compares the
-would-be JSONL, manifest, fixed-spelling, direct-GPR, and scalar-integer header bytes
-plus the bounded canonical README section SHA-256, then exits without writing
-anything.
+would-be JSONL, manifest, fixed-spelling, direct-GPR, scalar-integer,
+canonical-decoder header, and canonical-decoder audit bytes plus the bounded
+canonical README section SHA-256, then exits without writing anything.
 Unrelated README sections may be edited without changing importer source:
 
 ```sh

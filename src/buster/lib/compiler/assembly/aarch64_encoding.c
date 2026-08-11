@@ -20,6 +20,17 @@
 #include <buster/lib/compiler/assembly/generated/arm-a64-m1-fixed.generated.h>
 #include <buster/lib/compiler/assembly/generated/arm-a64-m1-gpr.generated.h>
 #include <buster/lib/compiler/assembly/generated/arm-a64-m1-scalar-integer.generated.h>
+#include <buster/lib/compiler/assembly/generated/aarch64-canonical-decoder.generated.h>
+
+BUSTER_CT_CHECK(BUSTER_AARCH64_CANONICAL_DECODER_FORM_COUNT == 1523);
+BUSTER_CT_CHECK(BUSTER_AARCH64_CANONICAL_DECODER_FORM_COUNT == BUSTER_ARRAY_LENGTH(buster_aarch64_canonical_decoder_forms));
+BUSTER_CT_CHECK(BUSTER_AARCH64_CANONICAL_DECODER_FIELD_COUNT == BUSTER_ARRAY_LENGTH(buster_aarch64_canonical_decoder_fields));
+BUSTER_CT_CHECK(BUSTER_AARCH64_CANONICAL_DECODER_FIELD_SEGMENT_COUNT == BUSTER_ARRAY_LENGTH(buster_aarch64_canonical_decoder_field_segments));
+BUSTER_CT_CHECK(BUSTER_AARCH64_CANONICAL_DECODER_SOURCE_COUNT == BUSTER_ARRAY_LENGTH(buster_aarch64_canonical_decoder_sources));
+BUSTER_CT_CHECK(BUSTER_AARCH64_CANONICAL_DECODER_SOURCE_SEGMENT_COUNT == BUSTER_ARRAY_LENGTH(buster_aarch64_canonical_decoder_source_segments));
+BUSTER_CT_CHECK(BUSTER_AARCH64_CANONICAL_DECODER_CONSTRAINT_PROGRAM_COUNT == BUSTER_ARRAY_LENGTH(buster_aarch64_canonical_decoder_programs));
+BUSTER_CT_CHECK(BUSTER_AARCH64_CANONICAL_DECODER_CONSTRAINT_TOKEN_COUNT == BUSTER_ARRAY_LENGTH(buster_aarch64_canonical_decoder_tokens));
+BUSTER_CT_CHECK(BUSTER_AARCH64_CANONICAL_DECODER_FEATURE_PROGRAM_COUNT == BUSTER_ARRAY_LENGTH(buster_aarch64_canonical_decoder_features));
 
 BUSTER_CT_CHECK((u32)A64_GPR_REGISTER31_ZR == (u32)BUSTER_AARCH64_ARM_M1_GPR_31_ZR);
 BUSTER_CT_CHECK((u32)A64_GPR_REGISTER31_SP == (u32)BUSTER_AARCH64_ARM_M1_GPR_31_SP);
@@ -2443,4 +2454,444 @@ bool a64_condition_invert(u32 condition, u32* inverse)
     }
     *inverse = condition ^ 1;
     return true;
+}
+
+// -----------------------------------------------------------------------------
+// Canonical Arm A64 Apple-M1 decoder
+
+// Constraint operations are deliberately tiny and data-driven.  The importer
+// compiles Arm row/box expressions into these bounded postfix programs; the
+// runtime never reparses source text or consults a host assembler.
+enum
+{
+    A64_CANONICAL_CONSTRAINT_EQUAL = 0,
+    A64_CANONICAL_CONSTRAINT_NOT_EQUAL = 1,
+    A64_CANONICAL_CONSTRAINT_AND = 2,
+    A64_CANONICAL_CONSTRAINT_OR = 3,
+    A64_CANONICAL_CONSTRAINT_NOT = 4,
+    A64_CANONICAL_CONSTRAINT_LOGICAL_SOURCE = UINT16_MAX,
+    A64_CANONICAL_CONSTRAINT_STACK_CAPACITY = 64,
+};
+
+BUSTER_GLOBAL_LOCAL bool a64_canonical_range_valid(u32 total, u32 first, u32 count)
+{
+    return first <= total && count <= total - first;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_canonical_segment_valid(BusterAarch64CanonicalDecoderSegment segment)
+{
+    return segment.width && segment.width <= 32 && segment.instruction_lsb < 32 && segment.value_lsb < 32 &&
+           (u32)segment.instruction_lsb + segment.width <= 32 && (u32)segment.value_lsb + segment.width <= 32;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_canonical_form_valid(u32 form_index, BusterAarch64CanonicalDecoderForm const** result)
+{
+    if (form_index >= BUSTER_AARCH64_CANONICAL_DECODER_FORM_COUNT)
+    {
+        return false;
+    }
+    BusterAarch64CanonicalDecoderForm const* form = buster_aarch64_canonical_decoder_forms + form_index;
+    if (form->fixed_value & ~form->fixed_mask || form->field_count > 32 ||
+        !a64_canonical_range_valid(BUSTER_AARCH64_CANONICAL_DECODER_FIELD_COUNT, form->field_first, form->field_count) ||
+        !a64_canonical_range_valid(BUSTER_AARCH64_CANONICAL_DECODER_SOURCE_COUNT, form->source_first, form->source_count) ||
+        form->constraint_program >= BUSTER_AARCH64_CANONICAL_DECODER_CONSTRAINT_PROGRAM_COUNT ||
+        form->feature_program >= BUSTER_AARCH64_CANONICAL_DECODER_FEATURE_PROGRAM_COUNT)
+    {
+        return false;
+    }
+    u32 instruction_used = form->fixed_mask;
+    for (u32 field_index = 0; field_index < form->field_count; field_index += 1)
+    {
+        BusterAarch64CanonicalDecoderField field = buster_aarch64_canonical_decoder_fields[form->field_first + field_index];
+        if (!field.source_mask || !field.width || field.width > 32 ||
+            !a64_canonical_range_valid(BUSTER_AARCH64_CANONICAL_DECODER_FIELD_SEGMENT_COUNT, field.segment_first, field.segment_count))
+        {
+            return false;
+        }
+        u32 source_used = 0;
+        for (u32 segment_index = 0; segment_index < field.segment_count; segment_index += 1)
+        {
+            BusterAarch64CanonicalDecoderSegment segment =
+                buster_aarch64_canonical_decoder_field_segments[field.segment_first + segment_index];
+            if (!a64_canonical_segment_valid(segment))
+            {
+                return false;
+            }
+            u32 mask = a64_metadata_width_mask(segment.width);
+            u32 source_mask = mask << segment.value_lsb;
+            u32 instruction_mask = mask << segment.instruction_lsb;
+            if ((source_used & source_mask) || (instruction_used & instruction_mask))
+            {
+                return false;
+            }
+            source_used |= source_mask;
+            instruction_used |= instruction_mask;
+        }
+        if (source_used != field.source_mask || (field.source_mask & ~a64_metadata_width_mask(field.width)))
+        {
+            return false;
+        }
+    }
+    if (instruction_used != UINT32_MAX)
+    {
+        return false;
+    }
+    for (u32 source_index = 0; source_index < form->source_count; source_index += 1)
+    {
+        BusterAarch64CanonicalDecoderSource source = buster_aarch64_canonical_decoder_sources[form->source_first + source_index];
+        if (!source.width || source.width > 32 ||
+            !a64_canonical_range_valid(BUSTER_AARCH64_CANONICAL_DECODER_SOURCE_SEGMENT_COUNT, source.segment_first, source.segment_count))
+        {
+            return false;
+        }
+        for (u32 segment_index = 0; segment_index < source.segment_count; segment_index += 1)
+        {
+            if (!a64_canonical_segment_valid(buster_aarch64_canonical_decoder_source_segments[source.segment_first + segment_index]))
+            {
+                return false;
+            }
+        }
+    }
+    BusterAarch64CanonicalDecoderProgram program = buster_aarch64_canonical_decoder_programs[form->constraint_program];
+    if (!a64_canonical_range_valid(BUSTER_AARCH64_CANONICAL_DECODER_CONSTRAINT_TOKEN_COUNT, program.token_first, program.token_count))
+    {
+        return false;
+    }
+    for (u32 token_index = 0; token_index < program.token_count; token_index += 1)
+    {
+        BusterAarch64CanonicalDecoderConstraint token = buster_aarch64_canonical_decoder_tokens[program.token_first + token_index];
+        if (token.operation > A64_CANONICAL_CONSTRAINT_NOT ||
+            (token.operation <= A64_CANONICAL_CONSTRAINT_NOT_EQUAL && token.source >= form->source_count))
+        {
+            return false;
+        }
+    }
+    if (result)
+    {
+        *result = form;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_canonical_source_value(BusterAarch64CanonicalDecoderForm const* form, u32 source_index, u32 word, u32* value)
+{
+    if (!form || !value || source_index >= form->source_count)
+    {
+        return false;
+    }
+    BusterAarch64CanonicalDecoderSource source = buster_aarch64_canonical_decoder_sources[form->source_first + source_index];
+    u32 result = 0;
+    for (u32 segment_index = 0; segment_index < source.segment_count; segment_index += 1)
+    {
+        BusterAarch64CanonicalDecoderSegment segment =
+            buster_aarch64_canonical_decoder_source_segments[source.segment_first + segment_index];
+        if (!a64_canonical_segment_valid(segment))
+        {
+            return false;
+        }
+        u32 mask = a64_metadata_width_mask(segment.width);
+        result |= ((word >> segment.instruction_lsb) & mask) << segment.value_lsb;
+    }
+    *value = result;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_canonical_constraints_match(BusterAarch64CanonicalDecoderForm const* form, u32 word)
+{
+    if (!form)
+    {
+        return false;
+    }
+    BusterAarch64CanonicalDecoderProgram program = buster_aarch64_canonical_decoder_programs[form->constraint_program];
+    bool stack[A64_CANONICAL_CONSTRAINT_STACK_CAPACITY] = {0};
+    u32 stack_count = 0;
+    for (u32 token_index = 0; token_index < program.token_count; token_index += 1)
+    {
+        BusterAarch64CanonicalDecoderConstraint token = buster_aarch64_canonical_decoder_tokens[program.token_first + token_index];
+        if (token.operation <= A64_CANONICAL_CONSTRAINT_NOT_EQUAL)
+        {
+            if (stack_count >= A64_CANONICAL_CONSTRAINT_STACK_CAPACITY)
+            {
+                return false;
+            }
+            u32 actual = 0;
+            if (!a64_canonical_source_value(form, token.source, word, &actual))
+            {
+                return false;
+            }
+            stack[stack_count++] = token.operation == A64_CANONICAL_CONSTRAINT_EQUAL ?
+                                       ((actual ^ token.value) & token.mask) == 0 :
+                                       ((actual ^ token.value) & token.mask) != 0;
+        }
+        else if (token.operation == A64_CANONICAL_CONSTRAINT_AND || token.operation == A64_CANONICAL_CONSTRAINT_OR)
+        {
+            if (stack_count < 2)
+            {
+                return false;
+            }
+            bool right = stack[--stack_count];
+            bool left = stack[--stack_count];
+            stack[stack_count++] = token.operation == A64_CANONICAL_CONSTRAINT_AND ? (left && right) : (left || right);
+        }
+        else if (token.operation == A64_CANONICAL_CONSTRAINT_NOT)
+        {
+            if (!stack_count)
+            {
+                return false;
+            }
+            stack[stack_count - 1] = !stack[stack_count - 1];
+        }
+        else
+        {
+            return false;
+        }
+    }
+    return stack_count == 0 || (stack_count == 1 && stack[0]);
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_canonical_target_features_match(BusterAarch64CanonicalDecoderForm const* form, Target target)
+{
+    if (!form || target.cpu_arch != CPU_ARCH_AARCH64 || !target_cpu_features_are_valid(target))
+    {
+        return false;
+    }
+    TargetCpuFeatures effective = target_cpu_features_effective(target);
+    BusterAarch64CanonicalDecoderFeatureProgram required = buster_aarch64_canonical_decoder_features[form->feature_program];
+    for (u32 word_index = 0; word_index < TARGET_CPU_FEATURE_WORD_COUNT; word_index += 1)
+    {
+        if ((required.words[word_index] & ~effective.words[word_index]) != 0)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_canonical_more_specific(BusterAarch64CanonicalDecoderForm const* left,
+                                                       BusterAarch64CanonicalDecoderForm const* right)
+{
+    return left && right && left->fixed_mask != right->fixed_mask && (left->fixed_mask & right->fixed_mask) == right->fixed_mask &&
+           (left->fixed_value & right->fixed_mask) == (right->fixed_value & right->fixed_mask);
+}
+
+u32 buster_aarch64_canonical_form_count(void)
+{
+    return BUSTER_AARCH64_CANONICAL_DECODER_FORM_COUNT;
+}
+
+bool buster_aarch64_canonical_form(u32 form_index, BusterAarch64CanonicalFormInfo* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    BusterAarch64CanonicalDecoderForm const* form = 0;
+    if (!a64_canonical_form_valid(form_index, &form))
+    {
+        return false;
+    }
+    BusterAarch64CanonicalFormInfo local = {
+        .form_index = form_index,
+        .fixed_mask = form->fixed_mask,
+        .fixed_value = form->fixed_value,
+        .representative_word = form->representative_word,
+        .arm_row_digest = form->arm_row_digest,
+        .field_count = form->field_count,
+    };
+    *result = local;
+    return true;
+}
+
+bool buster_aarch64_canonical_field(u32 form_index, u32 field_index, BusterAarch64CanonicalFieldInfo* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    BusterAarch64CanonicalDecoderForm const* form = 0;
+    if (!a64_canonical_form_valid(form_index, &form) || field_index >= form->field_count)
+    {
+        return false;
+    }
+    BusterAarch64CanonicalDecoderField field = buster_aarch64_canonical_decoder_fields[form->field_first + field_index];
+    *result = (BusterAarch64CanonicalFieldInfo){.source_mask = field.source_mask, .width = field.width, .segment_count = field.segment_count};
+    return true;
+}
+
+bool buster_aarch64_canonical_field_segment(u32 form_index, u32 field_index, u32 segment_index, BusterAarch64MetadataSegment* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    BusterAarch64CanonicalDecoderForm const* form = 0;
+    if (!a64_canonical_form_valid(form_index, &form) || field_index >= form->field_count)
+    {
+        return false;
+    }
+    BusterAarch64CanonicalDecoderField field = buster_aarch64_canonical_decoder_fields[form->field_first + field_index];
+    if (segment_index >= field.segment_count)
+    {
+        return false;
+    }
+    BusterAarch64CanonicalDecoderSegment segment =
+        buster_aarch64_canonical_decoder_field_segments[field.segment_first + segment_index];
+    if (!a64_canonical_segment_valid(segment))
+    {
+        return false;
+    }
+    *result = (BusterAarch64MetadataSegment){
+        .id = field.segment_first + segment_index,
+        .instruction_lsb = segment.instruction_lsb,
+        .width = segment.width,
+        .value_lsb = segment.value_lsb,
+    };
+    return true;
+}
+
+bool buster_aarch64_canonical_raw_encode(u32 form_index, u32 const* field_values, u32 field_count, u32* word)
+{
+    if (!word)
+    {
+        return false;
+    }
+    BusterAarch64CanonicalDecoderForm const* form = 0;
+    if (!a64_canonical_form_valid(form_index, &form) || field_count != form->field_count || (field_count && !field_values))
+    {
+        return false;
+    }
+    u32 result = form->fixed_value;
+    for (u32 field_index = 0; field_index < form->field_count; field_index += 1)
+    {
+        BusterAarch64CanonicalDecoderField field = buster_aarch64_canonical_decoder_fields[form->field_first + field_index];
+        u32 source_value = field_values[field_index];
+        if (source_value & ~field.source_mask)
+        {
+            return false;
+        }
+        for (u32 segment_index = 0; segment_index < field.segment_count; segment_index += 1)
+        {
+            BusterAarch64CanonicalDecoderSegment segment =
+                buster_aarch64_canonical_decoder_field_segments[field.segment_first + segment_index];
+            u32 mask = a64_metadata_width_mask(segment.width);
+            result |= ((source_value >> segment.value_lsb) & mask) << segment.instruction_lsb;
+        }
+    }
+    if ((result & form->fixed_mask) != form->fixed_value || !a64_canonical_constraints_match(form, result))
+    {
+        return false;
+    }
+    *word = result;
+    return true;
+}
+
+bool buster_aarch64_canonical_raw_decode(u32 form_index, u32 word, u32* field_values, u32 field_count)
+{
+    BusterAarch64CanonicalDecoderForm const* form = 0;
+    if (!a64_canonical_form_valid(form_index, &form) || field_count != form->field_count || (field_count && !field_values) ||
+        (word & form->fixed_mask) != form->fixed_value || !a64_canonical_constraints_match(form, word))
+    {
+        return false;
+    }
+    u32 values[32] = {0};
+    for (u32 field_index = 0; field_index < form->field_count; field_index += 1)
+    {
+        BusterAarch64CanonicalDecoderField field = buster_aarch64_canonical_decoder_fields[form->field_first + field_index];
+        u32 source_value = 0;
+        for (u32 segment_index = 0; segment_index < field.segment_count; segment_index += 1)
+        {
+            BusterAarch64CanonicalDecoderSegment segment =
+                buster_aarch64_canonical_decoder_field_segments[field.segment_first + segment_index];
+            u32 mask = a64_metadata_width_mask(segment.width);
+            source_value |= ((word >> segment.instruction_lsb) & mask) << segment.value_lsb;
+        }
+        values[field_index] = source_value;
+    }
+    if (field_count)
+    {
+        memcpy(field_values, values, sizeof(u32) * field_count);
+    }
+    return true;
+}
+
+BusterAarch64CanonicalDecodeStatus buster_aarch64_canonical_decode(Target target, u32 word,
+                                                                    BusterAarch64CanonicalDecodeResult* result)
+{
+    if (!result || target.cpu_arch != CPU_ARCH_AARCH64 || !target_cpu_features_are_valid(target))
+    {
+        return BUSTER_AARCH64_CANONICAL_DECODE_INCOMPLETE;
+    }
+    u16 supported[ BUSTER_AARCH64_CANONICAL_DECODER_FORM_COUNT ];
+    u32 supported_count = 0;
+    bool raw_match = false;
+    for (u32 form_index = 0; form_index < BUSTER_AARCH64_CANONICAL_DECODER_FORM_COUNT; form_index += 1)
+    {
+        BusterAarch64CanonicalDecoderForm const* form = 0;
+        if (!a64_canonical_form_valid(form_index, &form))
+        {
+            return BUSTER_AARCH64_CANONICAL_DECODE_INCOMPLETE;
+        }
+        if ((word & form->fixed_mask) != form->fixed_value || !a64_canonical_constraints_match(form, word))
+        {
+            continue;
+        }
+        raw_match = true;
+        // The feature filter is intentionally before specificity ranking.
+        if (a64_canonical_target_features_match(form, target))
+        {
+            if (supported_count >= BUSTER_AARCH64_CANONICAL_DECODER_FORM_COUNT)
+            {
+                return BUSTER_AARCH64_CANONICAL_DECODE_INCOMPLETE;
+            }
+            supported[supported_count++] = (u16)form_index;
+        }
+    }
+    if (!raw_match)
+    {
+        return BUSTER_AARCH64_CANONICAL_DECODE_UNALLOCATED;
+    }
+    if (!supported_count)
+    {
+        return BUSTER_AARCH64_CANONICAL_DECODE_UNSUPPORTED_FEATURE;
+    }
+    u32 maxima_count = 0;
+    u16 selected = UINT16_MAX;
+    for (u32 candidate_index = 0; candidate_index < supported_count; candidate_index += 1)
+    {
+        BusterAarch64CanonicalDecoderForm const* candidate = buster_aarch64_canonical_decoder_forms + supported[candidate_index];
+        bool dominated = false;
+        for (u32 other_index = 0; other_index < supported_count; other_index += 1)
+        {
+            if (candidate_index == other_index)
+            {
+                continue;
+            }
+            BusterAarch64CanonicalDecoderForm const* other = buster_aarch64_canonical_decoder_forms + supported[other_index];
+            if (a64_canonical_more_specific(other, candidate))
+            {
+                dominated = true;
+                break;
+            }
+        }
+        if (!dominated)
+        {
+            maxima_count += 1;
+            selected = supported[candidate_index];
+        }
+    }
+    if (maxima_count != 1)
+    {
+        return BUSTER_AARCH64_CANONICAL_DECODE_AMBIGUOUS;
+    }
+    BusterAarch64CanonicalDecoderForm const* form = buster_aarch64_canonical_decoder_forms + selected;
+    BusterAarch64CanonicalDecodeResult local = {0};
+    local.form_index = selected;
+    local.arm_row_digest = form->arm_row_digest;
+    local.field_count = form->field_count;
+    if (!buster_aarch64_canonical_raw_decode(selected, word, local.field_values, form->field_count))
+    {
+        return BUSTER_AARCH64_CANONICAL_DECODE_INCOMPLETE;
+    }
+    *result = local;
+    return BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS;
 }

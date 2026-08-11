@@ -11,6 +11,7 @@
 #pragma clang diagnostic ignored "-Wignored-attributes"
 #endif
 #include <buster/lib/compiler/assembly/generated/aarch64-production-plan.generated.h>
+#include <buster/lib/compiler/assembly/generated/aarch64-canonical-decoder.generated.h>
 #if BUSTER_COMPILER_CLANG
 #pragma clang diagnostic pop
 #endif
@@ -2347,6 +2348,91 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, overlap_equal);
     }
     BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == 0);
+
+    // The Arm canonical decoder owns the complete 1,523-form Apple-M1
+    // closure.  Exercise every deterministic representative through the
+    // pointer-free decoder and raw field round trip, then probe malformed
+    // calls and feature filtering without allowing output mutation.
+    bool canonical_all_representatives = buster_aarch64_canonical_form_count() == 1523 &&
+                                         buster_aarch64_canonical_form_count() == BUSTER_AARCH64_CANONICAL_DECODER_FORM_COUNT;
+    bool canonical_all_round_trips = true;
+    bool canonical_negative_immutability = true;
+    Target canonical_target = a64_encoding_m1_target(true);
+    for (u32 form_index = 0; form_index < buster_aarch64_canonical_form_count(); form_index += 1)
+    {
+        BusterAarch64CanonicalFormInfo info = {0};
+        BusterAarch64CanonicalDecodeResult canonical_decoded = {0};
+        canonical_all_representatives = canonical_all_representatives && buster_aarch64_canonical_form(form_index, &info);
+        BusterAarch64CanonicalDecodeStatus status =
+            buster_aarch64_canonical_decode(canonical_target, info.representative_word, &canonical_decoded);
+        canonical_all_representatives = canonical_all_representatives && status == BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS &&
+                                         canonical_decoded.form_index == form_index && canonical_decoded.arm_row_digest == info.arm_row_digest &&
+                                         canonical_decoded.field_count == info.field_count;
+        u32 reencoded = 0;
+        canonical_all_round_trips = canonical_all_round_trips &&
+                                    buster_aarch64_canonical_raw_encode(form_index, canonical_decoded.field_values, canonical_decoded.field_count, &reencoded) &&
+                                    reencoded == info.representative_word;
+        u32 field_values[32] = {0};
+        u32 sentinel_values[32];
+        for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(sentinel_values); value_index += 1)
+        {
+            sentinel_values[value_index] = UINT32_C(0xa5a50000) + value_index;
+        }
+        memcpy(field_values, sentinel_values, sizeof(field_values));
+        bool malformed_decode = !buster_aarch64_canonical_raw_decode(form_index, info.representative_word, field_values,
+                                                                      info.field_count + 1);
+        canonical_negative_immutability = canonical_negative_immutability && malformed_decode &&
+                                           memcmp(field_values, sentinel_values, sizeof(field_values)) == 0;
+        if (info.field_count)
+        {
+            BusterAarch64CanonicalFieldInfo field = {0};
+            if (buster_aarch64_canonical_field(form_index, 0, &field) && field.source_mask != UINT32_MAX)
+            {
+                u32 invalid_values[32] = {0};
+                invalid_values[0] = ~field.source_mask;
+                u32 sentinel_word = UINT32_C(0xdeadbeef);
+                u32 saved_word = sentinel_word;
+                bool malformed_encode = !buster_aarch64_canonical_raw_encode(form_index, invalid_values, info.field_count, &sentinel_word);
+                canonical_negative_immutability = canonical_negative_immutability && malformed_encode && sentinel_word == saved_word;
+            }
+        }
+    }
+    BUSTER_TEST(arguments, canonical_all_representatives);
+    BUSTER_TEST(arguments, canonical_all_round_trips);
+    BUSTER_TEST(arguments, canonical_negative_immutability);
+
+    // Empty explicit features reject extension-only rows, while baseline
+    // forms remain decodable.  This also verifies feature filtering occurs
+    // before the fixed-mask specificity ranking.
+    Target no_features = canonical_target;
+    no_features.cpu_features_explicit = true;
+    no_features.cpu_features = target_cpu_features_empty();
+    bool saw_unsupported = false;
+    bool saw_baseline = false;
+    for (u32 form_index = 0; form_index < buster_aarch64_canonical_form_count(); form_index += 1)
+    {
+        BusterAarch64CanonicalFormInfo info = {0};
+        if (!buster_aarch64_canonical_form(form_index, &info)) continue;
+        BusterAarch64CanonicalDecodeResult canonical_feature_result = {0};
+        BusterAarch64CanonicalDecodeStatus status =
+            buster_aarch64_canonical_decode(no_features, info.representative_word, &canonical_feature_result);
+        if (status == BUSTER_AARCH64_CANONICAL_DECODE_UNSUPPORTED_FEATURE) saw_unsupported = true;
+        if (status == BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS) saw_baseline = true;
+    }
+    BUSTER_TEST(arguments, saw_unsupported && saw_baseline);
+
+    BusterAarch64CanonicalDecodeResult immutable_result;
+    for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(immutable_result.field_values); value_index += 1)
+    {
+        immutable_result.field_values[value_index] = UINT32_C(0x5a5a0000) + value_index;
+    }
+    immutable_result.form_index = UINT32_C(0x12345678);
+    immutable_result.arm_row_digest = UINT64_C(0x0123456789abcdef);
+    immutable_result.field_count = 31;
+    BusterAarch64CanonicalDecodeResult saved_result = immutable_result;
+    BusterAarch64CanonicalDecodeStatus random_status = buster_aarch64_canonical_decode(canonical_target, UINT32_C(0xffffffff), &immutable_result);
+    BUSTER_TEST(arguments, random_status != BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS ||
+                                   memcmp(&immutable_result, &saved_result, sizeof(saved_result)) == 0);
 
     return result;
 }

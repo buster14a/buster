@@ -560,6 +560,62 @@ BUSTER_F_DECL bool a64_generated_raw_encode(u32 form_id, u32 const* field_values
 BUSTER_F_DECL bool a64_generated_raw_decode(u32 form_id, u32 word, u32* field_values, u32 field_count);
 BUSTER_F_DECL bool a64_generated_production_raw_encode(u32 form_id, u32 const* field_values, u32 field_count, u32* word);
 
+// Pointer-free decoder for the canonical Arm A64 Apple-M1 closure.  The
+// generated table is an independent Arm projection: aliases and semantic
+// assembler presentation are intentionally not part of this API.
+typedef enum BusterAarch64CanonicalDecodeStatus
+{
+    BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS,
+    BUSTER_AARCH64_CANONICAL_DECODE_UNALLOCATED,
+    BUSTER_AARCH64_CANONICAL_DECODE_UNSUPPORTED_FEATURE,
+    BUSTER_AARCH64_CANONICAL_DECODE_AMBIGUOUS,
+    BUSTER_AARCH64_CANONICAL_DECODE_INCOMPLETE,
+} BusterAarch64CanonicalDecodeStatus;
+
+typedef struct BusterAarch64CanonicalDecodeResult BusterAarch64CanonicalDecodeResult;
+struct BusterAarch64CanonicalDecodeResult
+{
+    u32 form_index;
+    u64 arm_row_digest;
+    u16 field_count;
+    u16 reserved;
+    u32 field_values[32];
+};
+BUSTER_CT_CHECK(sizeof(BusterAarch64CanonicalDecodeResult) == 152);
+
+typedef struct BusterAarch64CanonicalFormInfo BusterAarch64CanonicalFormInfo;
+struct BusterAarch64CanonicalFormInfo
+{
+    u32 form_index;
+    u32 fixed_mask;
+    u32 fixed_value;
+    u32 representative_word;
+    u64 arm_row_digest;
+    u16 field_count;
+    u16 reserved;
+};
+BUSTER_CT_CHECK(sizeof(BusterAarch64CanonicalFormInfo) == 32);
+
+typedef struct BusterAarch64CanonicalFieldInfo BusterAarch64CanonicalFieldInfo;
+struct BusterAarch64CanonicalFieldInfo
+{
+    u32 source_mask;
+    u8 width;
+    u8 segment_count;
+    u8 reserved[2];
+};
+BUSTER_CT_CHECK(sizeof(BusterAarch64CanonicalFieldInfo) == 8);
+
+BUSTER_F_DECL u32 buster_aarch64_canonical_form_count(void);
+BUSTER_F_DECL bool buster_aarch64_canonical_form(u32 form_index, BusterAarch64CanonicalFormInfo* result);
+BUSTER_F_DECL bool buster_aarch64_canonical_field(u32 form_index, u32 field_index, BusterAarch64CanonicalFieldInfo* result);
+BUSTER_F_DECL bool buster_aarch64_canonical_field_segment(u32 form_index, u32 field_index, u32 segment_index,
+                                                           BusterAarch64MetadataSegment* result);
+BUSTER_F_DECL bool buster_aarch64_canonical_raw_encode(u32 form_index, u32 const* field_values, u32 field_count, u32* word);
+BUSTER_F_DECL bool buster_aarch64_canonical_raw_decode(u32 form_index, u32 word, u32* field_values, u32 field_count);
+BUSTER_F_DECL BusterAarch64CanonicalDecodeStatus buster_aarch64_canonical_decode(Target target, u32 word,
+                                                                                BusterAarch64CanonicalDecodeResult* result);
+
 #if BUSTER_INCLUDE_TESTS
 // Test seam for the fail-closed generated predicate-error bit. The checked
 // production snapshot deliberately contains no malformed predicate rows.
