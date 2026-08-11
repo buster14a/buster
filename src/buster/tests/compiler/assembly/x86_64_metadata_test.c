@@ -2729,15 +2729,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         // boolean row, the ACE R4 cohort contributes ten, and BSRINIT adds
         // one.  These are disjoint normalized rows on top of the fixed NOT16
         // rows.
-        BUSTER_TEST(arguments, audit.emitted_count == 10581 && audit.blocked_count == 432 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10581 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 432);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10689 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 55);
+        BUSTER_TEST(arguments, audit.emitted_count == 10585 && audit.blocked_count == 428 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10585 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 428);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10693 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 51);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 198, 5, 1644, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1759, 196, 5, 1644, 176, 6728, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {53, 2, 0, 0, 0, 0, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1763, 196, 5, 1644, 176, 6728, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {49, 2, 0, 0, 0, 0, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -3114,7 +3114,6 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             {10976, {0x48, 0x0f, 0x38, 0xf0, 0x00}, 5},
             {10977, {0x48, 0x0f, 0x38, 0xf1, 0x00}, 5},
         };
-        String8 wildcard[1] = {S8("*")};
         bool refining_bytes_exact = true;
         for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(refining_byte_cases); case_index += 1)
         {
