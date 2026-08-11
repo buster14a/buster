@@ -5,8 +5,8 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
 #if !BUSTER_ANDROID && !BUSTER_IOS
-    String8 source_path = S8("build/buster_file_test_source.bin");
-    String8 destination_path = S8("build/buster_file_test_destination.bin");
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("file-test-source"), S8(".bin"));
+    String8 destination_path = buster_test_temporary_path(arguments->arena, S8("file-test-destination"), S8(".bin"));
     String8 content = S8("buster file copy test");
 
     BUSTER_TEST(arguments, file_write(source_path, (ByteSlice){(u8*)content.pointer, content.length}));
@@ -24,9 +24,16 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
     arguments->arena->position = arena_position;
 
     FileMapRead required_map = file_map_read(arguments->arena, destination_path, (FileReadOptions){.map_required = 1});
-#if BUSTER_WINDOWS
+#if BUSTER_WINDOWS || BUSTER_LINUX || BUSTER_MACOS
     BUSTER_TEST(arguments, required_map.mapped_pointer != 0);
     BUSTER_TEST(arguments, required_map.bytes.pointer != 0);
+#if BUSTER_WINDOWS
+    BUSTER_TEST(arguments, arguments->arena->position == arena_position);
+#elif BUSTER_LINUX || BUSTER_MACOS
+    BUSTER_TEST(arguments, arguments->arena->position > arena_position);
+#else
+    BUSTER_TEST(arguments, arguments->arena->position == arena_position);
+#endif
 #else
     BUSTER_TEST(arguments, required_map.mapped_pointer == 0);
     BUSTER_TEST(arguments, required_map.bytes.pointer == 0);
@@ -36,7 +43,7 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
 
     FileMapRead fallback_map = file_map_read(arguments->arena, destination_path, (FileReadOptions){0});
     BUSTER_TEST(arguments, fallback_map.bytes.pointer != 0);
-#if BUSTER_WINDOWS
+#if BUSTER_WINDOWS || BUSTER_LINUX || BUSTER_MACOS
     BUSTER_TEST(arguments, fallback_map.mapped_pointer != 0);
 #else
     BUSTER_TEST(arguments, fallback_map.mapped_pointer == 0);

@@ -190,7 +190,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
     {S8_INITIALIZER("simd_tests"), &simd_tests},
     {S8_INITIALIZER("string_tests"), &string_tests},
     {S8_INITIALIZER("os_tests"), &os_tests, true},
-    {S8_INITIALIZER("file_tests"), &file_tests},
+    {S8_INITIALIZER("file_tests"), &file_tests, true},
     {S8_INITIALIZER("ide_document_tests"), &ide_document_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     {S8_INITIALIZER("window_tests"), &window_tests},
     {S8_INITIALIZER("rendering_tests"), &rendering_tests},
@@ -329,7 +329,7 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_create(void)
     // prevents a reused PID from selecting an old root in the same boot.
     u64 process_id = os_get_current_process_id();
     u64 serial = ++buster_test_temporary_root_serial;
-    u64 timestamp = timestamp_ns_between((TimeDataType)0, timestamp_take());
+    u64 timestamp = timestamp_ns_between((TimeDataType){0}, timestamp_take());
     buster_test_temporary_root = string_format_z(arena, S8("{S8}{S8}buster-tests-{u64}-{u64}-{u64}"), base, separator, process_id, serial, timestamp);
 
     // The shared OS helper intentionally has no status return. The harness
