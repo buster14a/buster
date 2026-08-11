@@ -11276,8 +11276,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
                                     .symbol = selected.function.call_targets[encoded.call_sites[site_index].target],
                                     .offset = (u32)buffer.count + encoded.call_sites[site_index].code_offset,
-                                    .kind = (u8)(encoded.call_sites[site_index].is_thread_local ? CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32
-                                                                                                  : CODEGEN_MODULE_RELOCATION_X86_64_PC32),
+                                    .kind = (u8)(encoded.call_sites[site_index].is_thread_local
+                                                     ? target.os == OPERATING_SYSTEM_WINDOWS
+                                                           ? CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32
+                                                           : (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
+                                                                 ? CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32
+                                                                 : CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32
+                                                     : CODEGEN_MODULE_RELOCATION_X86_64_PC32),
                                     .is_thread_local = encoded.call_sites[site_index].is_thread_local != 0,
                                 };
                             }
