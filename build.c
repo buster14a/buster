@@ -11670,6 +11670,7 @@ BUSTER_GLOBAL_LOCAL bool xed_import_normalize_operands(XedGeneratedForm* form, S
         {
             operand->atom = key;
         }
+        bool emx_broadcast = string_starts_with_sequence(operand->atom, S8("EMX_BROADCAST_"));
         if (string_starts_with_sequence(operand->atom, S8("XED_REG_")))
         {
             operand->field_source = XED_GENERATED_FIELD_SOURCE_FIXED;
@@ -11735,8 +11736,17 @@ BUSTER_GLOBAL_LOCAL bool xed_import_normalize_operands(XedGeneratedForm* form, S
             }
             part_start = part_end < token.length ? part_end + 1 : token.length;
         }
+        // XED's EMX_BROADCAST_* atoms describe the instruction's implicit
+        // widening/broadcast operation; they are not source operands and
+        // must not be exposed as an explicit broadcast decorator.  Keep the
+        // pseudo operand in the normalized record for provenance, but hide it
+        // from source matching and canonical emission.
+        if (emx_broadcast)
+        {
+            operand->access |= XED_GENERATED_ACCESS_IMPLICIT;
+        }
         operand->visible = (operand->access & (XED_GENERATED_ACCESS_SUPPRESSED | XED_GENERATED_ACCESS_IMPLICIT)) == 0;
-        if (string_contains(token, S8("BCASTSTR")) || string_contains(token, S8("EMX_BROADCAST_")))
+        if (string_contains(token, S8("BCASTSTR")))
         {
             form->decorator_flags |= XED_GENERATED_DECORATOR_BROADCAST;
         }
@@ -11889,6 +11899,19 @@ BUSTER_GLOBAL_LOCAL bool xed_import_normalize_record(XedGeneratedForm* form, Xed
     else if (form->prefix_kind == XED_GENERATED_PREFIX_EVEX)
     {
         form->encoder_family = XED_GENERATED_ENCODER_EVEX;
+    }
+    // A handful of AVX broadcast forms combine the VEX selector with
+    // NOREXW.  The legacy summary pass sees NOREXW after VV1 and records a
+    // REX prefix; repair both the prefix and encoder family so the metadata
+    // ledger agrees with the byte emitter.  Restrict this repair to EMX
+    // broadcast rows so unrelated XED NOREXW forms retain their existing
+    // schema classification.
+    if (form->prefix_kind == XED_GENERATED_PREFIX_REX &&
+        string_contains(record->pattern, S8("VV1")) && string_contains(record->pattern, S8("norexw_prefix")) &&
+        string_contains(record->operands, S8("EMX_BROADCAST_")))
+    {
+        form->prefix_kind = XED_GENERATED_PREFIX_VEX;
+        form->encoder_family = XED_GENERATED_ENCODER_VEX;
     }
 
     if (xed_import_attribute_contains(record->attributes, S8("GATHER")) ||
@@ -13117,8 +13140,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_validate_artifact(Arena* arena, String8
 BUSTER_GLOBAL_LOCAL bool assembly_import_validate_checked_in_x86(Arena* arena, String8* artifacts)
 {
     bool artifact_checks = assembly_import_validate_artifact(arena, artifacts[0], 4660881, S8("ba80aa3be0eb2e6f")) &&
-                           assembly_import_validate_artifact(arena, artifacts[1], 6052140, S8("6296b870e5a81815")) &&
-                           assembly_import_validate_artifact(arena, artifacts[2], 389599, S8("bae2415469c41d76"));
+                           assembly_import_validate_artifact(arena, artifacts[1], 6052140, S8("e98baa1bfee63fb0")) &&
+                           assembly_import_validate_artifact(arena, artifacts[2], 389599, S8("9135826a2cca621a"));
     bool invariant_checks = assembly_import_line_count(artifacts[0]) == 11013 &&
                             string_contains(artifacts[1], S8("#define BUSTER_X86_GENERATED_FORM_COUNT 11013")) &&
                             string_contains(artifacts[1], S8("#define BUSTER_X86_GENERATED_COVERAGE_COUNT 11013"));
@@ -18121,6 +18144,29 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
                   XED_GENERATED_DECORATOR_SAE) &&
              normalized_form.tuple_kind == XED_GENERATED_TUPLE_FULL && normalized_form.operands[0].field_source == XED_GENERATED_FIELD_SOURCE_REG &&
              normalized_form.operands[2].field_source == XED_GENERATED_FIELD_SOURCE_RM;
+
+    XedImportRecord emx_broadcast_record = {
+        .source = S8("avx/avx-isa.txt"),
+        .iclass = S8("VBROADCASTSS"),
+        .iform = S8("VBROADCASTSS_YMMf32_MEMf32"),
+        .isa_set = S8("AVX"),
+        .category = S8("BROADCAST"),
+        .extension = S8("AVX"),
+        .pattern = S8("VV1 0x18 norexw_prefix VL256 V66 V0F38 NOVSR MOD[mm] MOD!=3 REG[rrr] RM[nnn] MODRM()"),
+        .operands = S8("REG0=YMM_R():w:qq:f32 MEM0:r:d:f32 EMX_BROADCAST_1TO8_32"),
+        .operands_present = true,
+    };
+    XedGeneratedForm emx_broadcast_form = {0};
+    bad_token = (String8){0};
+    bad_operand = false;
+    result = result && xed_import_normalize_record(&emx_broadcast_form, &emx_broadcast_record, 0, &bad_token, &bad_operand) &&
+             emx_broadcast_form.operand_count == 3 &&
+             emx_broadcast_form.prefix_kind == XED_GENERATED_PREFIX_VEX &&
+             emx_broadcast_form.encoder_family == XED_GENERATED_ENCODER_VEX &&
+             emx_broadcast_form.operands[2].kind == XED_GENERATED_OPERAND_PSEUDO &&
+             (emx_broadcast_form.operands[2].access & XED_GENERATED_ACCESS_IMPLICIT) != 0 &&
+             !emx_broadcast_form.operands[2].visible &&
+             (emx_broadcast_form.decorator_flags & XED_GENERATED_DECORATOR_BROADCAST) == 0;
 
     XedImportRecord tdpbf16ps_record = {
         .source = S8("amx-spr/amx-spr-isa.xed.txt"),

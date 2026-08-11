@@ -3308,6 +3308,41 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, invalid_advanced_broadcasts_att.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
 
+    // XED's EMX_BROADCAST_* pseudo operands are implicit instruction
+    // semantics, so ordinary source syntax has no {1toN} decorator.  Keep
+    // exact-byte checks for one AVX, one AVX2/NE-convert, and one masked EVEX
+    // form; the EVEX byte also proves that EMX did not set EVEX.b.
+    AssemblyEncodeResult emx_avx = assembly_encode(
+        arguments->arena, S8("vbroadcastss ymm0, dword ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = x86_avx_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_emx_avx[] = {0xc4, 0xe2, 0x7d, 0x18, 0x00};
+    BUSTER_TEST(arguments, emx_avx.diagnostic_count == 0 && emx_avx.bytes.length == sizeof(expected_emx_avx) &&
+                               memcmp(emx_avx.bytes.pointer, expected_emx_avx, sizeof(expected_emx_avx)) == 0);
+
+    AssemblyEncodeResult emx_avx2 = assembly_encode(
+        arguments->arena, S8("vpbroadcastb ymm0, byte ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = x86_avx2_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_emx_avx2[] = {0xc4, 0xe2, 0x7d, 0x78, 0x00};
+    BUSTER_TEST(arguments, emx_avx2.diagnostic_count == 0 && emx_avx2.bytes.length == sizeof(expected_emx_avx2) &&
+                               memcmp(emx_avx2.bytes.pointer, expected_emx_avx2, sizeof(expected_emx_avx2)) == 0);
+
+    Target x86_avx_ne_target = x86_avx2_target;
+    x86_avx_ne_target.cpu_features = target_cpu_features_add(x86_avx_ne_target.cpu_features,
+                                                               TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT);
+    AssemblyEncodeResult emx_avx_ne = assembly_encode(
+        arguments->arena, S8("vbcstnebf162ps ymm0, word ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = x86_avx_ne_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_emx_avx_ne[] = {0xc4, 0xe2, 0x7e, 0xb1, 0x00};
+    BUSTER_TEST(arguments, emx_avx_ne.diagnostic_count == 0 && emx_avx_ne.bytes.length == sizeof(expected_emx_avx_ne) &&
+                               memcmp(emx_avx_ne.bytes.pointer, expected_emx_avx_ne, sizeof(expected_emx_avx_ne)) == 0);
+
+    AssemblyEncodeResult emx_evex = assembly_encode(
+        arguments->arena, S8("vbroadcastss ymm0 {k1}, dword ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_emx_evex[] = {0x62, 0xf2, 0x7d, 0x29, 0x18, 0x00};
+    BUSTER_TEST(arguments, emx_evex.diagnostic_count == 0 && emx_evex.bytes.length == sizeof(expected_emx_evex) &&
+                               memcmp(emx_evex.bytes.pointer, expected_emx_evex, sizeof(expected_emx_evex)) == 0);
+
     AssemblyEncodeResult invalid_advanced_rounding = assembly_encode(
         arguments->arena,
         S8("vaddps {rn-sae}, xmm0, xmm1, xmm2\n"

@@ -317,6 +317,27 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_first_form_with_operand_kind(Buste
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_emx_operand_hidden(u32 form_id, u32 expected_visible_count)
+{
+    BusterX86MetadataForm form = {0};
+    if (!buster_x86_metadata_form(form_id, &form) ||
+        (form.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) != 0 ||
+        x86_64_metadata_test_visible_operand_count(form_id, form.operand_count) != expected_visible_count)
+        return false;
+    bool found_emx = false;
+    for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+    {
+        BusterX86MetadataOperand operand = {0};
+        if (!buster_x86_metadata_operand(form_id, operand_index, &operand)) return false;
+        if (x86_64_metadata_test_string_contains(operand.atom, S8("EMX_BROADCAST_")))
+        {
+            found_emx = true;
+            if (operand.visible || (operand.access & BUSTER_X86_METADATA_ACCESS_IMPLICIT) == 0) return false;
+        }
+    }
+    return found_emx;
+}
+
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_first_form_with_coverage(BusterX86MetadataCandidateRange range, u8 coverage_class,
                                                                         u32* form_id, BusterX86MetadataForm* form)
 {
@@ -2037,15 +2058,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        BUSTER_TEST(arguments, audit.emitted_count == 10043 && audit.blocked_count == 970 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10043 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 970);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10151 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 593);
+        BUSTER_TEST(arguments, audit.emitted_count == 10142 && audit.blocked_count == 871 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10142 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 871);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10250 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 494);
 
-        u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 293, 5, 1549, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1485, 192, 5, 1522, 176, 6590, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {327, 101, 0, 27, 0, 138, 0, 0};
+        u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 289, 5, 1553, 176, 6728, 49, 24};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1485, 192, 5, 1550, 176, 6661, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {327, 97, 0, 3, 0, 67, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2055,7 +2076,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10043, 268, 108, 99, 0, 292, 3, 0, 48, 152, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10142, 268, 108, 99, 0, 288, 3, 0, 48, 57, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -3563,6 +3584,60 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             S8("VADDPS"), 6940, vaddps_broadcast_operands, 3, invalid_broadcast_attributes, avx512_only,
             BUSTER_ARRAY_LENGTH(avx512_only), (u8[8]){0}, 8, 0, 0);
         BUSTER_TEST(arguments, invalid_broadcast_count.status == BUSTER_X86_METADATA_ENCODE_DECORATOR);
+
+        // EMX_BROADCAST_* is XED's implicit widening description, not source
+        // syntax.  It stays in the normalized operand ledger for provenance,
+        // but is hidden from source matching and must not request EVEX.b.
+        BUSTER_TEST(arguments, x86_64_metadata_test_emx_operand_hidden(3239, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emx_operand_hidden(8568, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emx_operand_hidden(2957, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emx_operand_hidden(5135, 3));
+
+        BusterX86MetadataPhysicalOperand emx_avx_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM, 0, 256),
+            x86_64_metadata_test_physical_mem_base(0, 32, 0),
+        };
+        u8 emx_avx_bytes[] = {0xc4, 0xe2, 0x7d, 0x18, 0x00};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VBROADCASTSS"), 3239, emx_avx_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), emx_avx_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(emx_avx_bytes)));
+
+        BusterX86MetadataPhysicalOperand emx_avx2_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM, 0, 256),
+            x86_64_metadata_test_physical_mem_base(0, 8, 0),
+        };
+        u8 emx_avx2_bytes[] = {0xc4, 0xe2, 0x7d, 0x78, 0x00};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VPBROADCASTB"), 8568, emx_avx2_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), emx_avx2_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(emx_avx2_bytes)));
+
+        BusterX86MetadataPhysicalOperand emx_avx_ne_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM, 0, 256),
+            x86_64_metadata_test_physical_mem_base(0, 16, 0),
+        };
+        u8 emx_avx_ne_bytes[] = {0xc4, 0xe2, 0x7e, 0xb1, 0x00};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VBCSTNEBF162PS"), 2957, emx_avx_ne_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), emx_avx_ne_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(emx_avx_ne_bytes)));
+
+        BusterX86MetadataPhysicalOperand emx_evex_operands[3] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM, 0, 256),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK, 1, 64),
+            x86_64_metadata_test_physical_mem_base(0, 32, 0),
+        };
+        BusterX86MetadataPhysicalAttributes emx_evex_attributes = {
+            .decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK,
+            .has_mask_register = true,
+            .mask_register = 1,
+        };
+        u8 emx_evex_bytes[] = {0x62, 0xf2, 0x7d, 0x29, 0x18, 0x00};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VBROADCASTSS"), 5135, emx_evex_operands, 3,
+                                                                 emx_evex_attributes, (String8[2]){S8("avx512f"), S8("avx512vl")},
+                                                                 2, emx_evex_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(emx_evex_bytes)));
 
         BusterX86MetadataPhysicalOperand tile_memory_operands[2] = {
             x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_TMM, 0, 1024),

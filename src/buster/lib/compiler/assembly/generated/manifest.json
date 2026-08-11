@@ -23,10 +23,10 @@
   },
   "generated": {
     "header": "x86_64-assembly.generated.h",
-    "header_checksum": "6296b870e5a81815",
+    "header_checksum": "e98baa1bfee63fb0",
     "header_bytes": 6052140,
     "coverage": "x86_64-coverage.generated.inc",
-    "coverage_checksum": "bae2415469c41d76",
+    "coverage_checksum": "9135826a2cca621a",
     "coverage_bytes": 389599,
     "operand_count": 32813,
     "token_count": 136913,
