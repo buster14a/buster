@@ -578,6 +578,7 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_build_gate_query(
                   : metadata.physical_width_flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_512 ? 512
                   : metadata.physical_width_flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_256 ? 256
                   : metadata.physical_width_flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_128 ? 128
+                  : metadata.physical_width_flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_80 ? 80
                   : metadata.physical_width_flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_64 ? 64
                   : metadata.physical_width_flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_32 ? 32
                   : metadata.physical_width_flags & BUSTER_X86_METADATA_PHYSICAL_WIDTH_16 ? 16
@@ -808,6 +809,18 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         {2932, 2, {S8("apx"), S8("msr-imm")}},
         {1847, 2, {S8("apx"), S8("vmx")}},
         {1886, 2, {S8("apx"), S8("movdir64b")}},
+        {9162, 1, {S8("sse2")}},
+        {9163, 1, {S8("sse2")}},
+        {9164, 1, {S8("sse2")}},
+        {9165, 1, {S8("sse2")}},
+        {9172, 1, {S8("sse2")}},
+        {9173, 1, {S8("sse2")}},
+        {9174, 1, {S8("sse2")}},
+        {9175, 1, {S8("sse2")}},
+        {9181, 1, {S8("sse2")}},
+        {9182, 1, {S8("sse2")}},
+        {9243, 1, {S8("sse2")}},
+        {9244, 1, {S8("sse2")}},
     };
     for (u32 gate_index = 0; gate_index < BUSTER_ARRAY_LENGTH(canonical_gate_cases); gate_index += 1)
         BUSTER_TEST(arguments, x86_64_metadata_test_canonical_gate(canonical_gate_cases[gate_index]));
@@ -3210,6 +3223,71 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                            x87_cases[case_index].mnemonic, x87_cases[case_index].form_id, &x87_operand, 1,
                                            (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard),
                                            x87_cases[case_index].bytes, BUSTER_ARRAY_LENGTH(x87_cases[case_index].bytes)));
+            }
+
+            // FCMOV/FCOMI carry generated ISA-set spellings that are not
+            // target feature names.  They are baseline x87 forms, so the
+            // ordinary sse2 feature input must authorize both selection and
+            // emission without letting an unrelated alias stand in for it.
+            struct
+            {
+                String8 mnemonic;
+                u32 form_id;
+                u8 bytes[2];
+            } const x87_feature_cases[] = {
+                {S8("FCMOVB"), 9162, {0xda, 0xc1}},
+                {S8("FCMOVE"), 9163, {0xda, 0xc9}},
+                {S8("FCMOVBE"), 9164, {0xda, 0xd1}},
+                {S8("FCMOVU"), 9165, {0xda, 0xd9}},
+                {S8("FCMOVNB"), 9172, {0xdb, 0xc1}},
+                {S8("FCMOVNE"), 9173, {0xdb, 0xc9}},
+                {S8("FCMOVNBE"), 9174, {0xdb, 0xd1}},
+                {S8("FCMOVNU"), 9175, {0xdb, 0xd9}},
+                {S8("FUCOMI"), 9181, {0xdb, 0xe9}},
+                {S8("FCOMI"), 9182, {0xdb, 0xf1}},
+                {S8("FUCOMIP"), 9243, {0xdf, 0xe9}},
+                {S8("FCOMIP"), 9244, {0xdf, 0xf1}},
+            };
+            String8 sse2_features[1] = {S8("sse2")};
+            String8 unrelated_features[1] = {S8("sse3")};
+            String8 no_features[1] = {0};
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(x87_feature_cases); case_index += 1)
+            {
+                BusterX86MetadataPhysicalOperand x87_operand = x86_64_metadata_test_physical_reg(
+                    BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL, 1, 80);
+                BusterX86MetadataPhysicalQuery enabled_query = x86_64_metadata_test_physical_query(
+                    x87_feature_cases[case_index].mnemonic, &x87_operand, 1,
+                    (BusterX86MetadataPhysicalAttributes){0}, sse2_features, BUSTER_ARRAY_LENGTH(sse2_features));
+                BusterX86MetadataPhysicalQuery missing_query = enabled_query;
+                missing_query.features.names = no_features;
+                missing_query.features.count = 0;
+                BusterX86MetadataPhysicalQuery unrelated_query = enabled_query;
+                unrelated_query.features.names = unrelated_features;
+                unrelated_query.features.count = BUSTER_ARRAY_LENGTH(unrelated_features);
+                BusterX86MetadataSelectResult enabled_selection = buster_x86_metadata_select_form(enabled_query);
+                BusterX86MetadataSelectResult missing_selection = buster_x86_metadata_select_form(missing_query);
+                BusterX86MetadataSelectResult unrelated_selection = buster_x86_metadata_select_form(unrelated_query);
+                u8 enabled_output[2] = {0};
+                BusterX86MetadataEmitResult enabled_emit = x86_64_metadata_test_emit_form(
+                    x87_feature_cases[case_index].mnemonic, x87_feature_cases[case_index].form_id, &x87_operand, 1,
+                    (BusterX86MetadataPhysicalAttributes){0}, sse2_features, BUSTER_ARRAY_LENGTH(sse2_features), enabled_output,
+                    BUSTER_ARRAY_LENGTH(enabled_output), 0, 0);
+                BusterX86MetadataEmitResult missing_emit = x86_64_metadata_test_emit_form(
+                    x87_feature_cases[case_index].mnemonic, x87_feature_cases[case_index].form_id, &x87_operand, 1,
+                    (BusterX86MetadataPhysicalAttributes){0}, no_features, 0, (u8[2]){0}, 2, 0, 0);
+                BusterX86MetadataEmitResult unrelated_emit = x86_64_metadata_test_emit_form(
+                    x87_feature_cases[case_index].mnemonic, x87_feature_cases[case_index].form_id, &x87_operand, 1,
+                    (BusterX86MetadataPhysicalAttributes){0}, unrelated_features, BUSTER_ARRAY_LENGTH(unrelated_features), (u8[2]){0},
+                    2, 0, 0);
+                BUSTER_TEST(arguments, enabled_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                           enabled_selection.form_id == x87_feature_cases[case_index].form_id);
+                BUSTER_TEST(arguments, enabled_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && enabled_emit.byte_count == 2 &&
+                                           x86_64_metadata_test_bytes_equal(enabled_output, enabled_emit.byte_count,
+                                                                             x87_feature_cases[case_index].bytes, 2));
+                BUSTER_TEST(arguments, missing_selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                                           missing_emit.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE);
+                BUSTER_TEST(arguments, unrelated_selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                                           unrelated_emit.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE);
             }
 
             BusterX86MetadataPhysicalOperand st0 =

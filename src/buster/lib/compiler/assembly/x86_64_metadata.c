@@ -6285,7 +6285,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_canonical_feature_matches(u32 offse
         return buster_x86_metadata_feature_input_contains_all(input, S8("cx16"), S8(""), S8(""), S8(""));
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SSE3X87")))
         return buster_x86_metadata_feature_input_contains_all(input, S8("sse3"), S8(""), S8(""), S8(""));
-    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("X87")) ||
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("FCMOV")) ||
+        buster_x86_metadata_pool_string_equal_literal(offset, S8("FCOMI")) ||
+        buster_x86_metadata_pool_string_equal_literal(offset, S8("X87")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("PENTIUMMMX")) ||
         buster_x86_metadata_pool_string_equal_literal(offset, S8("SSE2MMX")))
         return buster_x86_metadata_feature_input_contains_all(input, S8("sse2"), S8(""), S8(""), S8(""));
