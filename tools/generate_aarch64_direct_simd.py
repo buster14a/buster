@@ -31,6 +31,12 @@ EXPLICIT_GAP_NAMES = {
     "MVNI_asimdimm_M_sm",
 }
 TBL_TBX_METADATA_CORRECTION_FORMS = [1566, 1567, 1568, 1569, 1571, 1572, 1573, 1574]
+ARRANGEMENT_SELECTOR_KINDS = {
+    "simd_arrangement",
+    "simd_width_selector",
+    "simd_prefix_selector",
+}
+ARRANGEMENT_BINDING_NONE = 255
 
 
 def digest(value: str) -> int:
@@ -72,6 +78,60 @@ def c_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=True)
 
 
+def arrangement_bindings(row: dict) -> list[tuple[int, int]]:
+    """Return the syntax-directed register-to-selector bindings for a row.
+
+    The semantic operands preserve the presentation syntax, so a dynamic
+    uppercase vector register is followed by its arrangement anchor while a
+    dynamic lowercase scalar register is preceded by its width anchor.  The
+    generated relation is deliberately structural: choosing a selector by
+    nearest distance is incorrect for mixed Ta/Tb forms.  Combined operands
+    such as ``<Va>`` that are themselves arrangement selectors and fixed list
+    members are intentionally left unbound.
+    """
+    operands = row.get("operands", [])
+    selector_indices = {
+        index
+        for index, operand in enumerate(operands)
+        if ARRANGEMENT_SELECTOR_KINDS.intersection(operand.get("kinds", []))
+    }
+    bindings = [(ARRANGEMENT_BINDING_NONE, 0) for _ in operands]
+    for index, operand in enumerate(operands):
+        kinds = set(operand.get("kinds", []))
+        flags = set(operand.get("flags", []))
+        if "simd_register" not in kinds or ARRANGEMENT_SELECTOR_KINDS.intersection(kinds) or "simd_list_member" in flags:
+            continue
+        symbol = operand.get("symbol", "").strip("<>")
+        if symbol.startswith("V"):
+            selector_index = index + 1
+            if selector_index not in selector_indices:
+                # Fixed-suffix registers (for example AES and TBL list
+                # members) obtain their arrangement from assembly syntax.
+                continue
+            bindings[index] = (selector_index, 1)
+        elif symbol in {"d", "n", "m"}:
+            selector_index = index - 1
+            if selector_index not in selector_indices:
+                continue
+            bindings[index] = (selector_index, -1)
+
+    # Every dynamic operand that has an arrangement selector must be directly
+    # adjacent to its anchor.  Keep this invariant in the generator so the
+    # runtime never has to recover ambiguous syntax with a heuristic.
+    for index, (selector_index, direction) in enumerate(bindings):
+        if selector_index == ARRANGEMENT_BINDING_NONE:
+            continue
+        if selector_index < 0 or selector_index >= len(operands) or selector_index not in selector_indices:
+            raise SystemExit(f"invalid arrangement binding in {row['id']}: operand {index} -> {selector_index}")
+        if direction == 1 and selector_index != index + 1:
+            raise SystemExit(f"non-adjacent uppercase arrangement binding in {row['id']}")
+        if direction == -1 and selector_index != index - 1:
+            raise SystemExit(f"non-adjacent scalar arrangement binding in {row['id']}")
+        if direction not in {-1, 1}:
+            raise SystemExit(f"invalid arrangement binding direction in {row['id']}")
+    return bindings
+
+
 def emit_header(rows: list[dict], gaps: list[dict], output: Path) -> None:
     strings = bytearray()
     spans: dict[str, tuple[int, int]] = {}
@@ -84,6 +144,8 @@ def emit_header(rows: list[dict], gaps: list[dict], output: Path) -> None:
         return spans[value]
 
     row_lines: list[str] = []
+    arrangement_binding_rows: list[str] = []
+    arrangement_binding_count = 0
     for index, row in enumerate(rows):
         row_id_offset, row_id_length = span(row["id"])
         assembly_offset, assembly_length = span(row["assembly"])
@@ -101,6 +163,14 @@ def emit_header(rows: list[dict], gaps: list[dict], output: Path) -> None:
                 1,
             )
         )
+        bindings = arrangement_bindings(row)
+        arrangement_binding_count += sum(selector_index != ARRANGEMENT_BINDING_NONE for selector_index, _direction in bindings)
+        binding_values = bindings + [(ARRANGEMENT_BINDING_NONE, 0)] * (EXPECTED_MAX_OPERANDS - len(bindings))
+        arrangement_binding_rows.append(
+            "    { "
+            + ", ".join("{ %du, %d }" % (selector_index, direction) for selector_index, direction in binding_values)
+            + " },"
+        )
 
     pool_parts = [", ".join(f"0x{byte:02x}" for byte in strings[index : index + 32]) for index in range(0, len(strings), 32)]
     pool = ",\n".join(pool_parts)
@@ -114,6 +184,8 @@ def emit_header(rows: list[dict], gaps: list[dict], output: Path) -> None:
 #define BUSTER_A64_DIRECT_SIMD_ROW_COUNT 390u
 #define BUSTER_A64_DIRECT_SIMD_TRANSFORM_ROW_COUNT 263u
 #define BUSTER_A64_DIRECT_SIMD_MAX_OPERANDS 8u
+#define BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_BINDING_NONE 255u
+#define BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_BINDING_COUNT %du
 #define BUSTER_A64_DIRECT_SIMD_EXECUTABLE_ROW_COUNT 390u
 #define BUSTER_A64_DIRECT_SIMD_CROSS_OWNER_GAP_COUNT %du
 #define BUSTER_A64_DIRECT_SIMD_DENOMINATOR_SHA256 "e4fb3407ffefd2e592a09471958a5996139bc0e966b5043e4d48e3ebe7d0a805"
@@ -135,12 +207,25 @@ struct BusterA64DirectSIMDGeneratedRow
 };
 BUSTER_CT_CHECK(sizeof(BusterA64DirectSIMDGeneratedRow) == 32);
 
+typedef struct BusterA64DirectSIMDGeneratedArrangementBinding BusterA64DirectSIMDGeneratedArrangementBinding;
+struct BusterA64DirectSIMDGeneratedArrangementBinding
+{
+    u8 selector_index;
+    s8 direction;
+};
+BUSTER_CT_CHECK(sizeof(BusterA64DirectSIMDGeneratedArrangementBinding) == 2);
+
 static const char8 buster_a64_direct_simd_generated_string_pool[] = {
-""" % (len(gaps), len(strings)) + pool + """
+""" % (arrangement_binding_count, len(gaps), len(strings)) + pool + """
 };
 
 static const BusterA64DirectSIMDGeneratedRow buster_a64_direct_simd_generated_rows[] = {
 """ + "\n".join(row_lines) + """
+};
+
+static const BusterA64DirectSIMDGeneratedArrangementBinding
+    buster_a64_direct_simd_generated_arrangement_bindings[BUSTER_A64_DIRECT_SIMD_ROW_COUNT][BUSTER_A64_DIRECT_SIMD_MAX_OPERANDS] = {
+""" + "\n".join(arrangement_binding_rows) + """
 };
 
 #endif
@@ -164,6 +249,11 @@ def emit_manifest(rows: list[dict], gaps: list[dict], output: Path) -> None:
         "executable_row_count": len(rows),
         "cross_owner_gap_count": len(gaps),
         "max_operands": max(len(row.get("operands", [])) for row in rows),
+        "arrangement_binding_count": sum(
+            selector_index != ARRANGEMENT_BINDING_NONE
+            for row in rows
+            for selector_index, _direction in arrangement_bindings(row)
+        ),
         "metadata_corrections": [
             {
                 "family": "TBL/TBX",
@@ -192,6 +282,15 @@ def emit_manifest(rows: list[dict], gaps: list[dict], output: Path) -> None:
                 "source_digest": row["source_digest"],
                 "status": "executable",
                 "transform_bearing": bool(row.get("transforms")),
+                "arrangement_bindings": [
+                    {
+                        "operand_index": operand_index,
+                        "selector_index": selector_index,
+                        "direction": direction,
+                    }
+                    for operand_index, (selector_index, direction) in enumerate(arrangement_bindings(row))
+                    if selector_index != ARRANGEMENT_BINDING_NONE
+                ],
             }
             for index, row in enumerate(rows)
         ],

@@ -13,6 +13,15 @@ static Target a64_direct_simd_test_target(void)
                     .cpu_features = target_cpu_features_default(CPU_ARCH_AARCH64, CPU_MODEL_A64_APPLE_M1)};
 }
 
+static BusterA64DirectSIMDArrangement a64_direct_simd_alternate_arrangement(BusterA64SemanticVMValue value)
+{
+    if (value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_SCALAR)
+    {
+        return value.aux == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H : BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B;
+    }
+    return value.aux == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B ? BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_8B : BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B;
+}
+
 static u32 a64_direct_simd_audit_mix(u32 value)
 {
     value ^= value >> 16;
@@ -122,7 +131,7 @@ static bool a64_direct_simd_audit_row(Target target, u32 row_index, BusterA64Dir
             return false;
         }
         u32 maximum = field.source_mask;
-        u32 samples[12] = {0};
+        u32 samples[16] = {0};
         u32 sample_count = 0;
         if (field.width <= 4)
         {
@@ -241,6 +250,72 @@ UnitTestResult aarch64_direct_simd_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, addp_decoded.operands[1].kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR &&
                                addp_decoded.operands[1].aux == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_2D);
 
+    /* Every dynamic Ta/Tb/Va/Vb relation is generated from syntax adjacency.
+     * Decode the canonical representative for every row, assert that the
+     * typed register arrangement equals its exact selector, and reject a
+     * deliberately cross-arranged register without changing the output word. */
+    bool arrangement_bindings_ok = true;
+    bool cross_arrangement_rejected = true;
+    u32 arrangement_binding_count = 0;
+    for (u32 row_index = 0; row_index < buster_a64_direct_simd_row_count(); row_index += 1)
+    {
+        BusterA64DirectSIMDRowInfo binding_row = {0};
+        BusterAarch64CanonicalFormInfo binding_form = {0};
+        u32 canonical_index = UINT32_MAX;
+        if (!buster_a64_direct_simd_row(row_index, &binding_row) ||
+            !a64_direct_simd_audit_canonical_form(binding_row.source_digest, &canonical_index, &binding_form))
+        {
+            arrangement_bindings_ok = false;
+            continue;
+        }
+        u32 binding_word = binding_form.representative_word;
+        BusterA64DirectSIMDResult binding_decoded = {0};
+        if (buster_a64_direct_simd_decode_row(target, row_index, binding_word, &binding_decoded) != BUSTER_A64_DIRECT_SIMD_STATUS_OK)
+        {
+            u32 legal_count = 0;
+            binding_word = UINT32_MAX;
+            if (!a64_direct_simd_audit_row(target, row_index, binding_row, canonical_index, binding_form, &legal_count, &binding_word) || legal_count == 0 ||
+                binding_word == UINT32_MAX ||
+                buster_a64_direct_simd_decode_row(target, row_index, binding_word, &binding_decoded) != BUSTER_A64_DIRECT_SIMD_STATUS_OK)
+            {
+                arrangement_bindings_ok = false;
+                continue;
+            }
+        }
+        for (u32 operand_index = 0; operand_index < binding_row.operand_count; operand_index += 1)
+        {
+            BusterA64DirectSIMDArrangementBinding binding = {0};
+            if (!buster_a64_direct_simd_arrangement_binding(row_index, operand_index, &binding))
+            {
+                continue;
+            }
+            arrangement_binding_count += 1;
+            arrangement_bindings_ok = arrangement_bindings_ok && binding.selector_index < binding_decoded.operand_count &&
+                                      ((binding.direction == 1 && binding.selector_index == operand_index + 1) ||
+                                       (binding.direction == -1 && operand_index != 0 && binding.selector_index + 1 == operand_index)) &&
+                                      binding_decoded.operands[binding.selector_index].kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_ARRANGEMENT &&
+                                      binding_decoded.operands[operand_index].aux == binding_decoded.operands[binding.selector_index].aux;
+            if (binding.selector_index >= binding_decoded.operand_count)
+            {
+                cross_arrangement_rejected = false;
+                continue;
+            }
+            BusterA64DirectSIMDInstruction mismatched = {.row_index = row_index, .operand_count = (u8)binding_decoded.operand_count};
+            for (u32 index = 0; index < binding_decoded.operand_count; index += 1)
+            {
+                mismatched.operands[index] = binding_decoded.operands[index];
+            }
+            mismatched.operands[operand_index].aux = a64_direct_simd_alternate_arrangement(mismatched.operands[operand_index]);
+            u32 preserved_word = UINT32_C(0xa5a5a5a5);
+            BusterA64DirectSIMDStatus mismatch_status = buster_a64_direct_simd_encode(target, &mismatched, &preserved_word);
+            cross_arrangement_rejected =
+                cross_arrangement_rejected && mismatch_status != BUSTER_A64_DIRECT_SIMD_STATUS_OK && preserved_word == UINT32_C(0xa5a5a5a5);
+        }
+    }
+    BUSTER_TEST(arguments, arrangement_binding_count == buster_a64_direct_simd_arrangement_binding_count());
+    BUSTER_TEST(arguments, arrangement_bindings_ok);
+    BUSTER_TEST(arguments, cross_arrangement_rejected);
+
     bool audit_join = true;
     bool audit_all_exercised = true;
     u32 audit_rows_exercised = 0;
@@ -278,7 +353,7 @@ UnitTestResult aarch64_direct_simd_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, audit_join);
     BUSTER_TEST(arguments, audit_all_exercised && audit_rows_exercised == buster_a64_direct_simd_row_count());
     BUSTER_TEST(arguments, audit_legal_total >= audit_rows_exercised);
-    BUSTER_TEST(arguments, audit_legal_total == 5962u);
+    BUSTER_TEST(arguments, audit_legal_total == 5959u);
 
     /* Feature filtering and failed-output transactionality are checked on a
      * known legal baseline encoding. */

@@ -338,6 +338,10 @@ u32 buster_a64_direct_simd_max_operands(void)
 {
     return BUSTER_A64_DIRECT_SIMD_MAX_OPERANDS;
 }
+u32 buster_a64_direct_simd_arrangement_binding_count(void)
+{
+    return BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_BINDING_COUNT;
+}
 
 bool buster_a64_direct_simd_row(u32 row_index, BusterA64DirectSIMDRowInfo* result)
 {
@@ -382,6 +386,32 @@ bool buster_a64_direct_simd_find_source_digest(u64 source_digest, u32* row_index
         return false;
     }
     *row_index = selected;
+    return true;
+}
+
+static BusterA64DirectSIMDGeneratedArrangementBinding const* buster_a64_direct_simd_generated_binding(u32 row_index, u32 operand_index)
+{
+    if (row_index >= BUSTER_A64_DIRECT_SIMD_ROW_COUNT || operand_index >= BUSTER_A64_DIRECT_SIMD_MAX_OPERANDS)
+    {
+        return 0;
+    }
+    return &buster_a64_direct_simd_generated_arrangement_bindings[row_index][operand_index];
+}
+
+bool buster_a64_direct_simd_arrangement_binding(u32 row_index, u32 operand_index, BusterA64DirectSIMDArrangementBinding* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    BusterA64DirectSIMDGeneratedRow const* row = 0;
+    BusterA64DirectSIMDGeneratedArrangementBinding const* binding = buster_a64_direct_simd_generated_binding(row_index, operand_index);
+    if (!binding || !buster_a64_direct_simd_row_valid(row_index, &row) || operand_index >= row->operand_count ||
+        binding->selector_index == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_BINDING_NONE)
+    {
+        return false;
+    }
+    *result = (BusterA64DirectSIMDArrangementBinding){.selector_index = binding->selector_index, .direction = binding->direction};
     return true;
 }
 
@@ -859,43 +889,27 @@ static bool buster_a64_direct_simd_register_value_ok(BusterA64SemanticOperand op
     return true;
 }
 
-static bool buster_a64_direct_simd_register_arrangement_ok(BusterA64SemanticForm form, u32 operand_index, BusterA64SemanticVMValue const* values,
+static bool buster_a64_direct_simd_register_arrangement_ok(u32 row_index, BusterA64SemanticForm form, u32 operand_index, BusterA64SemanticVMValue const* values,
                                                            BusterA64SemanticVMValue value)
 {
     if (!values || operand_index >= form.operand_count)
     {
         return false;
     }
-    u32 best_distance = UINT32_MAX;
-    u32 best_index = UINT32_MAX;
-    for (u32 candidate_index = 0; candidate_index < form.operand_count; candidate_index += 1)
-    {
-        BusterA64SemanticOperand candidate = {0};
-        if (!buster_a64_semantic_operand(form.operand_first + candidate_index, &candidate))
-        {
-            return false;
-        }
-        if (candidate.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT && candidate.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR &&
-            candidate.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR)
-        {
-            continue;
-        }
-        u32 distance = candidate_index > operand_index ? candidate_index - operand_index : operand_index - candidate_index;
-        if (distance < best_distance)
-        {
-            best_distance = distance;
-            best_index = candidate_index;
-        }
-    }
-    if (best_index == UINT32_MAX)
+    BusterA64DirectSIMDGeneratedArrangementBinding const* binding = buster_a64_direct_simd_generated_binding(row_index, operand_index);
+    if (!binding || binding->selector_index == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_BINDING_NONE)
     {
         return true;
     }
-    BusterA64SemanticVMValue arrangement = values[best_index];
+    if (binding->selector_index >= form.operand_count)
+    {
+        return false;
+    }
+    BusterA64SemanticVMValue arrangement = values[binding->selector_index];
     return arrangement.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_ARRANGEMENT && arrangement.aux == value.aux;
 }
 
-static bool buster_a64_direct_simd_encode_operand(BusterA64SemanticForm form, u32 operand_index, BusterA64SemanticOperand operand,
+static bool buster_a64_direct_simd_encode_operand(u32 row_index, BusterA64SemanticForm form, u32 operand_index, BusterA64SemanticOperand operand,
                                                   BusterA64SemanticVMValue const* values, BusterA64SemanticVMValue value, u32* fields, u64* assigned)
 {
     if (value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID)
@@ -913,7 +927,7 @@ static bool buster_a64_direct_simd_encode_operand(BusterA64SemanticForm form, u3
     case BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE:
     {
         bool value_ok = buster_a64_direct_simd_register_value_ok(operand, value);
-        bool arrangement_ok = value_ok && buster_a64_direct_simd_register_arrangement_ok(form, operand_index, values, value);
+        bool arrangement_ok = value_ok && buster_a64_direct_simd_register_arrangement_ok(row_index, form, operand_index, values, value);
         bool fields_ok = arrangement_ok && buster_a64_direct_simd_assign_operand_fields(form, operand, value, fields, assigned);
         return value_ok && arrangement_ok && fields_ok;
     }
@@ -1134,37 +1148,7 @@ static bool buster_a64_direct_simd_infer_assembly_arrangement(BusterA64SemanticF
     return false;
 }
 
-static bool buster_a64_direct_simd_nearest_arrangement(BusterA64SemanticForm form, u32 operand_index, BusterA64SemanticVMValue const* values,
-                                                       BusterA64DirectSIMDArrangement* arrangement)
-{
-    if (!values || !arrangement || operand_index >= form.operand_count)
-    {
-        return false;
-    }
-    u32 best_distance = UINT32_MAX;
-    u32 best_index = UINT32_MAX;
-    for (u32 candidate_index = 0; candidate_index < form.operand_count; candidate_index += 1)
-    {
-        if (values[candidate_index].kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_ARRANGEMENT)
-        {
-            continue;
-        }
-        u32 distance = candidate_index > operand_index ? candidate_index - operand_index : operand_index - candidate_index;
-        if (distance < best_distance)
-        {
-            best_distance = distance;
-            best_index = candidate_index;
-        }
-    }
-    if (best_index == UINT32_MAX)
-    {
-        return false;
-    }
-    *arrangement = (BusterA64DirectSIMDArrangement)values[best_index].aux;
-    return *arrangement != BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID && *arrangement < BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_COUNT;
-}
-
-static bool buster_a64_direct_simd_decode_register(BusterA64SemanticForm form, u32 operand_index, BusterA64SemanticOperand operand,
+static bool buster_a64_direct_simd_decode_register(u32 row_index, BusterA64SemanticForm form, u32 operand_index, BusterA64SemanticOperand operand,
                                                    BusterA64SemanticVMFields const* fields, BusterA64SemanticVMValue const* values,
                                                    BusterA64SemanticVMValue* result)
 {
@@ -1181,7 +1165,21 @@ static bool buster_a64_direct_simd_decode_register(BusterA64SemanticForm form, u
     bool is_list = operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST || (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LIST_MEMBER) != 0;
     u32 number = is_list ? fields->values[local] : (fields->values[local] + offset) & 31u;
     BusterA64DirectSIMDArrangement arrangement = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
-    bool arrangement_selected = buster_a64_direct_simd_nearest_arrangement(form, operand_index, values, &arrangement);
+    bool arrangement_selected = false;
+    BusterA64DirectSIMDGeneratedArrangementBinding const* binding = buster_a64_direct_simd_generated_binding(row_index, operand_index);
+    if (binding && binding->selector_index != BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_BINDING_NONE)
+    {
+        if (binding->selector_index >= form.operand_count || values[binding->selector_index].kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_ARRANGEMENT)
+        {
+            return false;
+        }
+        arrangement = (BusterA64DirectSIMDArrangement)values[binding->selector_index].aux;
+        if (arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID || arrangement >= BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_COUNT)
+        {
+            return false;
+        }
+        arrangement_selected = true;
+    }
     if (!arrangement_selected)
     {
         arrangement_selected = buster_a64_direct_simd_infer_assembly_arrangement(form, operand_index, operand, &arrangement);
@@ -1307,7 +1305,8 @@ BusterA64DirectSIMDStatus buster_a64_direct_simd_encode(Target target, BusterA64
     {
         BusterA64SemanticOperand operand = {0};
         if (!buster_a64_semantic_operand(form.operand_first + index, &operand) ||
-            !buster_a64_direct_simd_encode_operand(form, index, operand, instruction->operands, instruction->operands[index], fields, &assigned))
+            !buster_a64_direct_simd_encode_operand(instruction->row_index, form, index, operand, instruction->operands, instruction->operands[index], fields,
+                                                   &assigned))
         {
             return BUSTER_A64_DIRECT_SIMD_STATUS_RANGE;
         }
@@ -1406,7 +1405,7 @@ static BusterA64DirectSIMDStatus buster_a64_direct_simd_decode_internal(Target t
         case BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER:
         case BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST:
         case BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE:
-            if (!buster_a64_direct_simd_decode_register(form, index, operand, &decoded.fields, values, &values[index]))
+            if (!buster_a64_direct_simd_decode_register(row_index, form, index, operand, &decoded.fields, values, &values[index]))
             {
                 return BUSTER_A64_DIRECT_SIMD_STATUS_RANGE;
             }
@@ -1514,6 +1513,30 @@ bool buster_a64_direct_simd_validate(void)
             row->operand_count != form.operand_count)
         {
             return false;
+        }
+        for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+        {
+            BusterA64DirectSIMDGeneratedArrangementBinding const* binding = buster_a64_direct_simd_generated_binding(index, operand_index);
+            if (!binding || binding->selector_index == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_BINDING_NONE)
+            {
+                continue;
+            }
+            if (binding->selector_index >= form.operand_count || (binding->direction != -1 && binding->direction != 1))
+            {
+                return false;
+            }
+            BusterA64SemanticOperand selector = {0};
+            if (!buster_a64_semantic_operand(form.operand_first + binding->selector_index, &selector) ||
+                (selector.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT && selector.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR &&
+                 selector.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR))
+            {
+                return false;
+            }
+            if ((binding->direction == 1 && binding->selector_index != operand_index + 1) ||
+                (binding->direction == -1 && (operand_index == 0 || binding->selector_index + 1 != operand_index)))
+            {
+                return false;
+            }
         }
         previous_form = row->semantic_form_id;
     }

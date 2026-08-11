@@ -70,6 +70,15 @@ struct BusterA64DirectSIMDRowInfo
     u8 reserved;
 };
 
+/* Generated syntax relation: +1 binds an uppercase vector register to the
+ * following selector; -1 binds a scalar d/n/m register to the preceding one. */
+typedef struct BusterA64DirectSIMDArrangementBinding BusterA64DirectSIMDArrangementBinding;
+struct BusterA64DirectSIMDArrangementBinding
+{
+    u8 selector_index;
+    s8 direction;
+};
+
 typedef struct BusterA64DirectSIMDInstruction BusterA64DirectSIMDInstruction;
 struct BusterA64DirectSIMDInstruction
 {
@@ -94,8 +103,10 @@ BUSTER_F_DECL u32 buster_a64_direct_simd_row_count(void);
 BUSTER_F_DECL u32 buster_a64_direct_simd_transform_row_count(void);
 BUSTER_F_DECL u32 buster_a64_direct_simd_executable_row_count(void);
 BUSTER_F_DECL u32 buster_a64_direct_simd_max_operands(void);
+BUSTER_F_DECL u32 buster_a64_direct_simd_arrangement_binding_count(void);
 BUSTER_F_DECL bool buster_a64_direct_simd_row(u32 row_index, BusterA64DirectSIMDRowInfo* result);
 BUSTER_F_DECL bool buster_a64_direct_simd_find_source_digest(u64 source_digest, u32* row_index);
+BUSTER_F_DECL bool buster_a64_direct_simd_arrangement_binding(u32 row_index, u32 operand_index, BusterA64DirectSIMDArrangementBinding* result);
 BUSTER_F_DECL bool buster_a64_direct_simd_arrangement_from_string(String8 text, BusterA64DirectSIMDArrangement* result);
 BUSTER_F_DECL String8 buster_a64_direct_simd_arrangement_string(BusterA64DirectSIMDArrangement arrangement);
 
