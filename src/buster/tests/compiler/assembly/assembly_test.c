@@ -1,6 +1,8 @@
 #include <buster/tests/compiler/assembly/assembly_test.h>
 #if BUSTER_INCLUDE_TESTS
 
+#include <buster/tests/compiler/assembly/generated/aarch64_scalar_integer_corpus.generated.h>
+
 BUSTER_GLOBAL_LOCAL bool assembly_test_bytes_equal(ByteSlice actual, u8 const* expected, u32 expected_count)
 {
     return actual.length == expected_count && (!expected_count || (actual.pointer && expected &&
@@ -2541,12 +2543,62 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         arguments->arena, S8("adcs w1, w2, w3\n"), (AssemblyEncodeOptions){.target = aarch64_target});
     BUSTER_TEST(arguments, aarch64_direct_gpr_generic.diagnostic_count == 1 &&
                                aarch64_direct_gpr_generic.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
+
+    AssemblyEncodeResult aarch64_scalar_integer = assembly_encode(
+        arguments->arena,
+        S8("add x0, x1, #4095\n"
+           "add w0, w1, w2, lsl #31\n"
+           "and x0, x1, #0xff00ff00ff00ff\n"
+           "orr w0, w1, w2, ror #31\n"
+           "ccmn x1, #31, #15, eq\n"
+           "rmif x1, #63, #15\n"
+           "udf #65535\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    static u8 const expected_aarch64_scalar_integer[] = {
+        0x20, 0xfc, 0x3f, 0x91,
+        0x20, 0x7c, 0x02, 0x0b,
+        0x20, 0x9c, 0x00, 0x92,
+        0x20, 0x7c, 0xc2, 0x2a,
+        0x2f, 0x08, 0x5f, 0xba,
+        0x2f, 0x84, 0x1f, 0xba,
+        0xff, 0xff, 0x00, 0x00,
+    };
+    BUSTER_TEST(arguments, aarch64_scalar_integer.diagnostic_count == 0 &&
+                               aarch64_scalar_integer.bytes.length == sizeof(expected_aarch64_scalar_integer) &&
+                               memcmp(aarch64_scalar_integer.bytes.pointer, expected_aarch64_scalar_integer,
+                                      sizeof(expected_aarch64_scalar_integer)) == 0);
+    static String8 const invalid_aarch64_scalar_integer[] = {
+        S8("add lsl #1, x0, x1, x2\n"),
+        S8("add x0, lsl #1, x1, x2\n"),
+        S8("add x0, x1, x2, lsl\n"),
+        S8("ccmn x1, #31, #15, #0\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_scalar_integer); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_scalar = assembly_encode(
+            arguments->arena, invalid_aarch64_scalar_integer[invalid_index], (AssemblyEncodeOptions){.target = aarch64_m1_target});
+        BUSTER_TEST(arguments, invalid_scalar.diagnostic_count > 0 && invalid_scalar.bytes.length == 0);
+    }
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_m1_gpr_corpus) == 80);
     for (u32 corpus_index = 0; corpus_index < BUSTER_ARRAY_LENGTH(assembly_a64_m1_gpr_corpus); corpus_index += 1)
     {
         AssemblyA64M1GprCorpusCase const* test_case = assembly_a64_m1_gpr_corpus + corpus_index;
         AssemblyEncodeResult encoded = assembly_encode(arguments->arena, test_case->source, (AssemblyEncodeOptions){.target = aarch64_m1_target});
         BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, test_case->bytes, sizeof(test_case->bytes)));
+    }
+    BUSTER_TEST(arguments, BUSTER_AARCH64_SCALAR_INTEGER_CORPUS_COUNT == 72);
+    for (u32 corpus_index = 0; corpus_index < BUSTER_AARCH64_SCALAR_INTEGER_CORPUS_COUNT; corpus_index += 1)
+    {
+        BusterAarch64ScalarIntegerCorpusCase const* test_case = buster_aarch64_scalar_integer_corpus + corpus_index;
+        String8 source = string_format(arguments->arena, S8("{S8}\n"), test_case->source);
+        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = aarch64_m1_target});
+        u32 word = 0;
+        if (encoded.bytes.length == 4 && encoded.bytes.pointer)
+        {
+            word = (u32)encoded.bytes.pointer[0] | ((u32)encoded.bytes.pointer[1] << 8) |
+                   ((u32)encoded.bytes.pointer[2] << 16) | ((u32)encoded.bytes.pointer[3] << 24);
+        }
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && encoded.bytes.length == 4 && word == test_case->word);
     }
 
     String8 split_operands[6] = {0};

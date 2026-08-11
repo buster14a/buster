@@ -5,6 +5,7 @@
 #include <buster/lib/string.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
+#include <buster/lib/compiler/assembly/generated/arm-a64-m1-scalar-integer.generated.h>
 #if BUSTER_COMPILER_CLANG
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wignored-attributes"
@@ -13,6 +14,7 @@
 #if BUSTER_COMPILER_CLANG
 #pragma clang diagnostic pop
 #endif
+#include <buster/tests/compiler/assembly/generated/aarch64_scalar_integer_corpus.generated.h>
 
 typedef struct A64EncodingCase A64EncodingCase;
 struct A64EncodingCase
@@ -172,6 +174,149 @@ BUSTER_GLOBAL_LOCAL Target a64_encoding_m1_target(bool explicit_features)
         result.cpu_features = target_cpu_features_default(CPU_ARCH_AARCH64, CPU_MODEL_A64_APPLE_M1);
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_scalar_test_set_register(A64ScalarIntOperand* operand,
+                                                            BusterAarch64ArmM1ScalarIntegerOperand descriptor,
+                                                            u8 index, u8 width)
+{
+    *operand = (A64ScalarIntOperand){
+        .kind = A64_SCALAR_INT_OPERAND_REGISTER,
+        .width = width,
+        .index = index,
+        .stack_pointer = index == 31 && descriptor.register31_role == A64_SCALAR_INT_REGISTER31_SP,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_scalar_test_fixture_operands(BusterAarch64ArmM1ScalarIntegerForm form,
+                                                               A64ScalarIntOperand operands[4],
+                                                               A64ScalarIntModifier* modifier,
+                                                               u32* modifier_count)
+{
+    if (!operands || !modifier || !modifier_count) return false;
+    for (u32 index = 0; index < 4; index += 1) operands[index] = (A64ScalarIntOperand){0};
+    *modifier = (A64ScalarIntModifier){0};
+    *modifier_count = 0;
+    switch ((BusterAarch64ArmM1ScalarIntegerRecipe)form.recipe)
+    {
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_EXT:
+        if (form.operand_count != 3) return false;
+        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
+        aarch64_scalar_test_set_register(operands + 1, form.operands[1], 31, form.operands[1].width);
+        aarch64_scalar_test_set_register(operands + 2, form.operands[2], 2, 32);
+        *modifier = (A64ScalarIntModifier){
+            .kind = A64_SCALAR_INT_MODIFIER_EXTEND,
+            .value = A64_SCALAR_INT_EXTEND_UXTW,
+            .amount = 1,
+            .present = true,
+        };
+        *modifier_count = 1;
+        return true;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_IMM:
+        if (form.operand_count != 3) return false;
+        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
+        aarch64_scalar_test_set_register(operands + 1, form.operands[1], 31, form.operands[1].width);
+        operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 123};
+        return true;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_SHIFT:
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_SHIFT:
+        if (form.operand_count != 3) return false;
+        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
+        aarch64_scalar_test_set_register(operands + 1, form.operands[1], 1, form.operands[1].width);
+        aarch64_scalar_test_set_register(operands + 2, form.operands[2], 2, form.operands[2].width);
+        *modifier = (A64ScalarIntModifier){
+            .kind = A64_SCALAR_INT_MODIFIER_SHIFT,
+            .value = form.recipe == BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_SHIFT ? A64_SCALAR_INT_SHIFT_LSR : A64_SCALAR_INT_SHIFT_LSL,
+            .amount = 3,
+            .present = true,
+        };
+        *modifier_count = 1;
+        return true;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_IMM:
+        if (form.operand_count != 3) return false;
+        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
+        aarch64_scalar_test_set_register(operands + 1, form.operands[1], 1, form.operands[1].width);
+        operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0xff};
+        return true;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_BITFIELD:
+        if (form.operand_count != 4) return false;
+        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
+        aarch64_scalar_test_set_register(operands + 1, form.operands[1], 1, form.operands[1].width);
+        operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 3};
+        operands[3] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 12};
+        return true;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_EXTRACT:
+        if (form.operand_count != 4) return false;
+        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 31, form.operands[0].width);
+        aarch64_scalar_test_set_register(operands + 1, form.operands[1], 1, form.operands[1].width);
+        aarch64_scalar_test_set_register(operands + 2, form.operands[2], 2, form.operands[2].width);
+        operands[3] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 3};
+        return true;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_MOVEWIDE:
+        if (form.operand_count != 2) return false;
+        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 0, form.operands[0].width);
+        operands[1] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0x1234};
+        return true;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COND_CMP_IMM:
+        if (form.operand_count != 4) return false;
+        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 1, form.operands[0].width);
+        operands[1] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 7};
+        operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 5};
+        operands[3] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0};
+        return true;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COND_CMP_REG:
+        if (form.operand_count != 4) return false;
+        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 1, form.operands[0].width);
+        aarch64_scalar_test_set_register(operands + 1, form.operands[1], 2, form.operands[1].width);
+        operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 5};
+        operands[3] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0};
+        return true;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_RMIF:
+        if (form.operand_count != 3) return false;
+        aarch64_scalar_test_set_register(operands + 0, form.operands[0], 1, form.operands[0].width);
+        operands[1] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 3};
+        operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 5};
+        return true;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_UDF:
+        if (form.operand_count != 1) return false;
+        operands[0] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0x1234};
+        return true;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COUNT:
+        return false;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_scalar_test_decode_logical_immediate(u8 width, u32 n, u32 immr, u32 imms, u64* value)
+{
+    if (!value || (width != 32 && width != 64) || n > 1 || immr > 63 || imms > 63) return false;
+    u32 packed = (n << 6) | ((~imms) & 63u);
+    s32 len = -1;
+    for (s32 bit = 6; bit >= 0; bit -= 1)
+    {
+        if (packed & (1u << bit))
+        {
+            len = bit;
+            break;
+        }
+    }
+    if (len < 1 || (width == 32 && (n || len >= 6)) || (width == 64 && len > 6)) return false;
+    u32 levels = (1u << len) - 1u;
+    u32 s = imms & levels;
+    u32 r = immr & levels;
+    if (s == levels) return false;
+    u32 element_width = 1u << len;
+    u64 element_mask = element_width == 64 ? UINT64_MAX : ((UINT64_C(1) << element_width) - 1);
+    u64 element = (UINT64_C(1) << (s + 1u)) - 1;
+    u32 rotation = element_width ? (r % element_width) : 0;
+    if (rotation) element = ((element >> rotation) | (element << (element_width - rotation))) & element_mask;
+    u64 result = 0;
+    for (u32 offset = 0; offset < width; offset += element_width)
+    {
+        result |= element << offset;
+    }
+    *value = result & (width == 32 ? UINT64_C(0xffffffff) : UINT64_MAX);
+    return true;
 }
 
 UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
@@ -1597,6 +1742,476 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, direct_operand_positions == 189);
     BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == 0);
 
+    // The generated scalar-integer projection is structurally bounded and
+    // uses the same fixed-mask discipline as the direct-GPR slice.  Exercise
+    // representative immediate, extension, shift, logical, conditional, and
+    // reserved/undefined forms through the typed public API.
+    BUSTER_TEST(arguments, buster_aarch64_arm_m1_scalar_integer_form_count() == 72);
+    BUSTER_TEST(arguments, buster_aarch64_arm_m1_scalar_integer_target(gpr_target));
+    for (u32 scalar_index = 0; scalar_index < buster_aarch64_arm_m1_scalar_integer_form_count(); scalar_index += 1)
+    {
+        BusterAarch64ArmM1ScalarIntegerForm scalar_form = {0};
+        BUSTER_TEST(arguments, buster_aarch64_arm_m1_scalar_integer_form(scalar_index, &scalar_form) && scalar_form.arm_row_id.length &&
+                                   scalar_form.arm_row_digest && scalar_form.operand_count >= 1 && scalar_form.operand_count <= 4);
+    }
+    A64ScalarIntOperand scalar_operands[4] = {
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 0},
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 1},
+        {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 4095},
+    };
+    u32 scalar_word = 0;
+    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("add"), scalar_operands, 3, 0, 0, &scalar_word) &&
+                               scalar_word == UINT32_C(0x913ffc20));
+    A64ScalarIntModifier scalar_shift = {
+        .kind = A64_SCALAR_INT_MODIFIER_SHIFT, .value = A64_SCALAR_INT_SHIFT_LSL, .amount = 31, .present = true,
+    };
+    scalar_operands[0] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 32, .index = 0};
+    scalar_operands[1] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 32, .index = 1};
+    scalar_operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 32, .index = 2};
+    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("add"), scalar_operands, 3, &scalar_shift, 1,
+                                                                       &scalar_word) &&
+                               scalar_word == UINT32_C(0x0b027c20));
+    scalar_operands[0] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 0};
+    scalar_operands[1] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 1};
+    scalar_operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = UINT64_C(0xff00ff00ff00ff)};
+    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("and"), scalar_operands, 3, 0, 0, &scalar_word) &&
+                               scalar_word == UINT32_C(0x92009c20));
+    scalar_operands[0] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 0};
+    scalar_operands[1] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 1};
+    scalar_operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 2};
+    scalar_shift = (A64ScalarIntModifier){.kind = A64_SCALAR_INT_MODIFIER_SHIFT, .value = A64_SCALAR_INT_SHIFT_ROR, .amount = 31, .present = true};
+    scalar_operands[0].width = 32;
+    scalar_operands[1].width = 32;
+    scalar_operands[2].width = 32;
+    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("orr"), scalar_operands, 3, &scalar_shift, 1,
+                                                                       &scalar_word) &&
+                               scalar_word == UINT32_C(0x2ac27c20));
+    scalar_operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 15};
+    scalar_operands[3] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0};
+    scalar_operands[1] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 31};
+    scalar_operands[0] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 1};
+    bool scalar_ccmn_ok = a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("ccmn"), scalar_operands, 4, 0, 0, &scalar_word);
+    BUSTER_TEST(arguments, scalar_ccmn_ok && scalar_word == UINT32_C(0xba5f082f));
+    scalar_operands[0] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 1};
+    scalar_operands[1] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 63};
+    scalar_operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 15};
+    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("rmif"), scalar_operands, 3, 0, 0, &scalar_word) &&
+                               scalar_word == UINT32_C(0xba1f842f));
+    scalar_operands[0] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 65535};
+    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("udf"), scalar_operands, 1, 0, 0, &scalar_word) &&
+                               scalar_word == UINT32_C(0x0000ffff));
+    u32 unchanged = UINT32_C(0xa5a5a5a5);
+    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("and"), scalar_operands, 1, 0, 0, &unchanged) &&
+                               unchanged == UINT32_C(0xa5a5a5a5));
+
+    // Every generated scalar row has an independent llvm-mc spelling/word
+    // fixture. Exercise both lookup and indexed typed encoding, then mutate
+    // each operand's role/width and metadata to prove the public boundary is
+    // fail-closed without touching the output word on rejection.
+    BUSTER_TEST(arguments, BUSTER_AARCH64_SCALAR_INTEGER_CORPUS_COUNT ==
+                               buster_aarch64_arm_m1_scalar_integer_form_count());
+    bool scalar_fixture_seen[BUSTER_AARCH64_SCALAR_INTEGER_CORPUS_COUNT] = {0};
+    buster_aarch64_metadata_test_reset_packed_access_counter();
+    for (u32 corpus_index = 0; corpus_index < BUSTER_AARCH64_SCALAR_INTEGER_CORPUS_COUNT; corpus_index += 1)
+    {
+        BusterAarch64ScalarIntegerCorpusCase const* test_case = buster_aarch64_scalar_integer_corpus + corpus_index;
+        u32 form_index = UINT32_MAX;
+        BusterAarch64ArmM1ScalarIntegerForm form = {0};
+        for (u32 candidate_index = 0; candidate_index < buster_aarch64_arm_m1_scalar_integer_form_count(); candidate_index += 1)
+        {
+            BusterAarch64ArmM1ScalarIntegerForm candidate = {0};
+            if (buster_aarch64_arm_m1_scalar_integer_form(candidate_index, &candidate) &&
+                string_ends_with_sequence(candidate.arm_row_id, test_case->arm_encoding_name))
+            {
+                form_index = candidate_index;
+                form = candidate;
+                break;
+            }
+        }
+        BUSTER_TEST(arguments, form_index < buster_aarch64_arm_m1_scalar_integer_form_count() && !scalar_fixture_seen[form_index]);
+        if (form_index >= buster_aarch64_arm_m1_scalar_integer_form_count()) continue;
+        scalar_fixture_seen[form_index] = true;
+        A64ScalarIntOperand operands[4] = {0};
+        A64ScalarIntModifier modifier = {0};
+        u32 modifier_count = 0;
+        BUSTER_TEST(arguments, aarch64_scalar_test_fixture_operands(form, operands, &modifier, &modifier_count));
+        u32 found_form = UINT32_MAX;
+        u32 word = UINT32_C(0xa5a5a5a5);
+        BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_find_form(form.mnemonic, operands, form.operand_count,
+                                                                    modifier_count ? &modifier : 0, modifier_count, &found_form) &&
+                               found_form == form_index &&
+                               a64_arm_m1_scalar_integer_encode(gpr_target, form_index, operands, form.operand_count,
+                                                                modifier_count ? &modifier : 0, modifier_count, &word) &&
+                               word == test_case->word);
+        u32 mnemonic_word = 0;
+        BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, form.mnemonic, operands, form.operand_count,
+                                                                           modifier_count ? &modifier : 0, modifier_count,
+                                                                           &mnemonic_word) &&
+                               mnemonic_word == test_case->word);
+
+        for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+        {
+            BusterAarch64ArmM1ScalarIntegerOperand descriptor = form.operands[operand_index];
+            if (descriptor.kind == BUSTER_AARCH64_ARM_M1_SCALAR_OPERAND_REGISTER)
+            {
+                A64ScalarIntOperand width_flip[4] = {0};
+                for (u32 index = 0; index < form.operand_count; index += 1) width_flip[index] = operands[index];
+                width_flip[operand_index].width = width_flip[operand_index].width == 32 ? 64 : 32;
+                u32 unchanged_word = UINT32_C(0x5a5aa5a5);
+                BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, form_index, width_flip, form.operand_count,
+                                                                            modifier_count ? &modifier : 0, modifier_count,
+                                                                            &unchanged_word) &&
+                                       unchanged_word == UINT32_C(0x5a5aa5a5));
+                A64ScalarIntOperand nonzero_value[4] = {0};
+                for (u32 index = 0; index < form.operand_count; index += 1) nonzero_value[index] = operands[index];
+                nonzero_value[operand_index].value = 1;
+                unchanged_word = UINT32_C(0x5a5aa5a5);
+                BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, form_index, nonzero_value,
+                                                                            form.operand_count, modifier_count ? &modifier : 0,
+                                                                            modifier_count, &unchanged_word) &&
+                                       unchanged_word == UINT32_C(0x5a5aa5a5));
+                if (descriptor.register31_role != BUSTER_AARCH64_ARM_M1_SCALAR_REGISTER31_ANY)
+                {
+                    A64ScalarIntOperand role_operands[4] = {0};
+                    for (u32 index = 0; index < form.operand_count; index += 1) role_operands[index] = operands[index];
+                    role_operands[operand_index].index = 31;
+                    role_operands[operand_index].stack_pointer = descriptor.register31_role == BUSTER_AARCH64_ARM_M1_SCALAR_REGISTER31_SP;
+                    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode(gpr_target, form_index, role_operands,
+                                                                              form.operand_count, modifier_count ? &modifier : 0,
+                                                                              modifier_count, &word));
+                    role_operands[operand_index].stack_pointer = !role_operands[operand_index].stack_pointer;
+                    unchanged_word = UINT32_C(0x5a5aa5a5);
+                    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, form_index, role_operands,
+                                                                               form.operand_count, modifier_count ? &modifier : 0,
+                                                                               modifier_count, &unchanged_word) &&
+                                           unchanged_word == UINT32_C(0x5a5aa5a5));
+                }
+            }
+            else
+            {
+                A64ScalarIntOperand malformed[4] = {0};
+                for (u32 index = 0; index < form.operand_count; index += 1) malformed[index] = operands[index];
+                malformed[operand_index].width = 1;
+                u32 unchanged_word = UINT32_C(0x5a5aa5a5);
+                BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, form_index, malformed,
+                                                                            form.operand_count, modifier_count ? &modifier : 0,
+                                                                            modifier_count, &unchanged_word) &&
+                                       unchanged_word == UINT32_C(0x5a5aa5a5));
+                malformed[operand_index] = operands[operand_index];
+                malformed[operand_index].index = 1;
+                unchanged_word = UINT32_C(0x5a5aa5a5);
+                BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, form_index, malformed,
+                                                                            form.operand_count, modifier_count ? &modifier : 0,
+                                                                            modifier_count, &unchanged_word) &&
+                                       unchanged_word == UINT32_C(0x5a5aa5a5));
+            }
+        }
+        if (form.required_feature != TARGET_CPU_FEATURE_NONE)
+        {
+            Target missing = gpr_target;
+            missing.cpu_features = target_cpu_features_remove(missing.cpu_features, form.required_feature);
+            u32 unchanged_word = UINT32_C(0x5a5aa5a5);
+            BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(missing, form_index, operands, form.operand_count,
+                                                                       modifier_count ? &modifier : 0, modifier_count,
+                                                                       &unchanged_word) &&
+                                   unchanged_word == UINT32_C(0x5a5aa5a5));
+        }
+    }
+    for (u32 form_index = 0; form_index < buster_aarch64_arm_m1_scalar_integer_form_count(); form_index += 1)
+    {
+        BUSTER_TEST(arguments, scalar_fixture_seen[form_index]);
+    }
+    BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == 0);
+
+    // Null/count/reserved entry-point hardening is checked against a valid
+    // three-register shift form so every pointer/count path is exercised.
+    A64ScalarIntOperand scalar_harden_operands[3] = {
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 32, .index = 0},
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 32, .index = 1},
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 32, .index = 2},
+    };
+    A64ScalarIntModifier scalar_harden_modifier = {
+        .kind = A64_SCALAR_INT_MODIFIER_SHIFT, .value = A64_SCALAR_INT_SHIFT_LSL, .amount = 0, .present = true,
+    };
+    u32 scalar_harden_form = UINT32_MAX;
+    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_find_form(S8("add"), scalar_harden_operands, 3,
+                                                               &scalar_harden_modifier, 1, &scalar_harden_form));
+    u32 hard_word = UINT32_C(0x5a5aa5a5);
+    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, scalar_harden_form, scalar_harden_operands, 3,
+                                                              &scalar_harden_modifier, 2, &hard_word) &&
+                               hard_word == UINT32_C(0x5a5aa5a5));
+    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, scalar_harden_form, 0, 3,
+                                                              &scalar_harden_modifier, 1, &hard_word));
+    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, scalar_harden_form, scalar_harden_operands, 3,
+                                                              0, 1, &hard_word));
+    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, scalar_harden_form, scalar_harden_operands, 3,
+                                                              &scalar_harden_modifier, 1, 0));
+    A64ScalarIntModifier reserved_modifier = scalar_harden_modifier;
+    reserved_modifier.reserved[0] = 1;
+    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode(gpr_target, scalar_harden_form, scalar_harden_operands, 3,
+                                                              &reserved_modifier, 1, &hard_word));
+    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode((Target){0}, scalar_harden_form, scalar_harden_operands, 3,
+                                                              &scalar_harden_modifier, 1, &hard_word));
+
+    // Ensure no two generated rows share the same semantic key. Fixed bits
+    // are included because aliases with different encodings are intentional.
+    bool duplicate_scalar_key = false;
+    for (u32 left_index = 0; left_index < buster_aarch64_arm_m1_scalar_integer_form_count(); left_index += 1)
+    {
+        BusterAarch64ArmM1ScalarIntegerForm left = {0};
+        buster_aarch64_arm_m1_scalar_integer_form(left_index, &left);
+        for (u32 right_index = left_index + 1; right_index < buster_aarch64_arm_m1_scalar_integer_form_count(); right_index += 1)
+        {
+            BusterAarch64ArmM1ScalarIntegerForm right = {0};
+            buster_aarch64_arm_m1_scalar_integer_form(right_index, &right);
+            bool same = string_equal(left.mnemonic, right.mnemonic) && left.fixed_mask == right.fixed_mask &&
+                        left.fixed_value == right.fixed_value && left.required_feature == right.required_feature &&
+                        left.recipe == right.recipe && left.width == right.width && left.operand_count == right.operand_count;
+            for (u32 operand_index = 0; same && operand_index < left.operand_count; operand_index += 1)
+            {
+                same = memcmp(left.operands + operand_index, right.operands + operand_index,
+                              sizeof(left.operands[operand_index])) == 0;
+            }
+            duplicate_scalar_key |= same;
+        }
+    }
+    BUSTER_TEST(arguments, !duplicate_scalar_key);
+
+    // Exhaustively enumerate the architectural logical-immediate fields for
+    // both widths. Every legal tuple must decode, re-encode to the same
+    // immediate value, and decode again; reserved all-ones encodings and
+    // zero/all-ones semantic values are rejected.
+    u32 logical_32_count = 0;
+    u32 logical_64_n0_count = 0;
+    u32 logical_64_n1_count = 0;
+    for (u8 width = 32; width <= 64; width += 32)
+    {
+        for (u32 n = 0; n <= 1; n += 1)
+        {
+            for (u32 immr = 0; immr < 64; immr += 1)
+            {
+                for (u32 imms = 0; imms < 64; imms += 1)
+                {
+                    u64 immediate = 0;
+                    if (!aarch64_scalar_test_decode_logical_immediate(width, n, immr, imms, &immediate)) continue;
+                    if (width == 32) logical_32_count += 1;
+                    else if (n == 0) logical_64_n0_count += 1;
+                    else logical_64_n1_count += 1;
+                    A64ScalarIntOperand logical_operands[3] = {
+                        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = width, .index = 0},
+                        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = width, .index = 1},
+                        {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = immediate},
+                    };
+                    u32 logical_word = UINT32_C(0x5a5aa5a5);
+                    bool encoded_logical = a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("and"), logical_operands, 3,
+                                                                                        0, 0, &logical_word);
+                    BUSTER_TEST(arguments, encoded_logical);
+                    if (!encoded_logical) continue;
+                    u32 encoded_n = (logical_word >> 22) & 1u;
+                    u32 encoded_immr = (logical_word >> 16) & 63u;
+                    u32 encoded_imms = (logical_word >> 10) & 63u;
+                    u64 round_trip_immediate = 0;
+                    BUSTER_TEST(arguments, aarch64_scalar_test_decode_logical_immediate(width, encoded_n, encoded_immr,
+                                                                                         encoded_imms, &round_trip_immediate) &&
+                                           round_trip_immediate == immediate);
+                }
+            }
+        }
+    }
+    BUSTER_TEST(arguments, logical_32_count == 3648 && logical_64_n0_count == 3648 && logical_64_n1_count == 4032);
+    for (u8 width = 32; width <= 64; width += 32)
+    {
+        A64ScalarIntOperand logical_operands[3] = {
+            {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = width, .index = 0},
+            {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = width, .index = 1},
+            {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0},
+        };
+        u32 logical_word = UINT32_C(0x5a5aa5a5);
+        BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("and"), logical_operands, 3, 0, 0,
+                                                                            &logical_word) &&
+                               logical_word == UINT32_C(0x5a5aa5a5));
+        logical_operands[2].value = width == 32 ? UINT64_C(0xffffffff) : UINT64_MAX;
+        logical_word = UINT32_C(0x5a5aa5a5);
+        BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("and"), logical_operands, 3, 0, 0,
+                                                                            &logical_word) &&
+                               logical_word == UINT32_C(0x5a5aa5a5));
+    }
+    BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == 0);
+
+    // Modifier and field boundaries across every scalar recipe.
+    A64ScalarIntOperand boundary_shift_operands[3] = {
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 32, .index = 0},
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 32, .index = 1},
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 32, .index = 2},
+    };
+    A64ScalarIntModifier boundary_shift = {
+        .kind = A64_SCALAR_INT_MODIFIER_SHIFT, .value = A64_SCALAR_INT_SHIFT_LSL, .present = true,
+    };
+    u32 boundary_word = 0;
+    for (u8 width = 32; width <= 64; width += 32)
+    {
+        for (u32 amount = 0; amount <= (width == 32 ? 31u : 63u); amount += (width == 32 ? 31u : 63u))
+        {
+            boundary_shift_operands[0].width = width;
+            boundary_shift_operands[1].width = width;
+            boundary_shift_operands[2].width = width;
+            boundary_shift.amount = amount;
+            BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("add"), boundary_shift_operands, 3,
+                                                                              &boundary_shift, 1, &boundary_word));
+            BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("and"), boundary_shift_operands, 3,
+                                                                              &boundary_shift, 1, &boundary_word));
+        }
+        boundary_shift_operands[0].width = width;
+        boundary_shift_operands[1].width = width;
+        boundary_shift_operands[2].width = width;
+        boundary_shift.amount = width == 32 ? 32 : 64;
+        boundary_word = UINT32_C(0x5a5aa5a5);
+        BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("add"), boundary_shift_operands, 3,
+                                                                            &boundary_shift, 1, &boundary_word) &&
+                               boundary_word == UINT32_C(0x5a5aa5a5));
+    }
+    boundary_shift_operands[0].width = 32;
+    boundary_shift_operands[1].width = 32;
+    boundary_shift_operands[2].width = 32;
+    boundary_shift.amount = 0;
+    boundary_shift.value = A64_SCALAR_INT_SHIFT_ROR;
+    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("add"), boundary_shift_operands, 3,
+                                                                        &boundary_shift, 1, &boundary_word));
+    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("orr"), boundary_shift_operands, 3,
+                                                                       &boundary_shift, 1, &boundary_word));
+
+    A64ScalarIntOperand boundary_ext_operands[3] = {
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 32, .index = 0},
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 32, .index = 1},
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 32, .index = 2},
+    };
+    A64ScalarIntModifier boundary_extend = {
+        .kind = A64_SCALAR_INT_MODIFIER_EXTEND, .value = A64_SCALAR_INT_EXTEND_UXTW, .present = true,
+    };
+    for (u8 width = 32; width <= 64; width += 32)
+    {
+        boundary_ext_operands[0].width = width;
+        boundary_ext_operands[1].width = width;
+        for (u32 extend = A64_SCALAR_INT_EXTEND_UXTB; extend <= A64_SCALAR_INT_EXTEND_SXTX; extend += 1)
+        {
+            boundary_extend.value = (u8)extend;
+            boundary_ext_operands[2].width = (extend == A64_SCALAR_INT_EXTEND_UXTX || extend == A64_SCALAR_INT_EXTEND_SXTX) ? 64 : 32;
+            bool x_extension = extend == A64_SCALAR_INT_EXTEND_UXTX || extend == A64_SCALAR_INT_EXTEND_SXTX;
+            bool extension_ok = a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("add"), boundary_ext_operands, 3,
+                                                                            &boundary_extend, 1, &boundary_word);
+            BUSTER_TEST(arguments, extension_ok == (width == 64 || !x_extension));
+        }
+        boundary_extend.value = A64_SCALAR_INT_EXTEND_UXTW;
+        boundary_extend.amount = 5;
+        boundary_ext_operands[2].width = 32;
+        boundary_word = UINT32_C(0x5a5aa5a5);
+        BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("add"), boundary_ext_operands, 3,
+                                                                            &boundary_extend, 1, &boundary_word) &&
+                               boundary_word == UINT32_C(0x5a5aa5a5));
+        boundary_extend.amount = 0;
+    }
+    A64ScalarIntOperand boundary_imm_operands[3] = {
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 0},
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 1},
+        {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 4095},
+    };
+    A64ScalarIntModifier boundary_imm_shift = {
+        .kind = A64_SCALAR_INT_MODIFIER_SHIFT, .value = A64_SCALAR_INT_SHIFT_LSL, .present = true,
+    };
+    boundary_imm_shift.amount = 0;
+    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("add"), boundary_imm_operands, 3,
+                                                                       &boundary_imm_shift, 1, &boundary_word));
+    boundary_imm_shift.amount = 12;
+    boundary_imm_operands[2].value = 1;
+    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("add"), boundary_imm_operands, 3,
+                                                                       &boundary_imm_shift, 1, &boundary_word));
+    boundary_imm_shift.amount = 1;
+    boundary_word = UINT32_C(0x5a5aa5a5);
+    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("add"), boundary_imm_operands, 3,
+                                                                        &boundary_imm_shift, 1, &boundary_word) &&
+                               boundary_word == UINT32_C(0x5a5aa5a5));
+
+    A64ScalarIntOperand boundary_bitfield_operands[4] = {
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 0},
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 1},
+        {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 63},
+        {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 63},
+    };
+    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("sbfm"), boundary_bitfield_operands, 4,
+                                                                       0, 0, &boundary_word));
+    boundary_bitfield_operands[2].value = 64;
+    boundary_word = UINT32_C(0x5a5aa5a5);
+    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("sbfm"), boundary_bitfield_operands, 4,
+                                                                        0, 0, &boundary_word) &&
+                               boundary_word == UINT32_C(0x5a5aa5a5));
+    boundary_bitfield_operands[2].value = 63;
+    A64ScalarIntOperand boundary_extract_operands[4] = {
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 0},
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 1},
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 2},
+        {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 63},
+    };
+    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("extr"), boundary_extract_operands, 4,
+                                                                       0, 0, &boundary_word));
+    boundary_extract_operands[3].value = 64;
+    boundary_word = UINT32_C(0x5a5aa5a5);
+    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("extr"), boundary_extract_operands, 4,
+                                                                        0, 0, &boundary_word) &&
+                               boundary_word == UINT32_C(0x5a5aa5a5));
+
+    A64ScalarIntOperand boundary_move_operands[2] = {
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 32, .index = 0},
+        {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0xffff},
+    };
+    A64ScalarIntModifier boundary_move_shift = {
+        .kind = A64_SCALAR_INT_MODIFIER_SHIFT, .value = A64_SCALAR_INT_SHIFT_LSL, .present = true,
+    };
+    for (u32 amount = 0; amount <= 16; amount += 16)
+    {
+        boundary_move_shift.amount = amount;
+        BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("movz"), boundary_move_operands, 2,
+                                                                           &boundary_move_shift, 1, &boundary_word));
+    }
+    boundary_move_shift.amount = 32;
+    boundary_word = UINT32_C(0x5a5aa5a5);
+    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("movz"), boundary_move_operands, 2,
+                                                                        &boundary_move_shift, 1, &boundary_word) &&
+                               boundary_word == UINT32_C(0x5a5aa5a5));
+
+    A64ScalarIntOperand boundary_ccmp_imm[4] = {
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 0},
+        {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 31},
+        {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 15},
+        {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 15},
+    };
+    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("ccmp"), boundary_ccmp_imm, 4, 0, 0,
+                                                                       &boundary_word));
+    boundary_ccmp_imm[1].value = 32;
+    boundary_word = UINT32_C(0x5a5aa5a5);
+    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("ccmp"), boundary_ccmp_imm, 4, 0, 0,
+                                                                        &boundary_word) &&
+                               boundary_word == UINT32_C(0x5a5aa5a5));
+    A64ScalarIntOperand boundary_rmif[3] = {
+        {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = 64, .index = 0},
+        {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 63},
+        {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 15},
+    };
+    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("rmif"), boundary_rmif, 3, 0, 0,
+                                                                       &boundary_word));
+    boundary_rmif[1].value = 64;
+    boundary_word = UINT32_C(0x5a5aa5a5);
+    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("rmif"), boundary_rmif, 3, 0, 0,
+                                                                        &boundary_word) &&
+                               boundary_word == UINT32_C(0x5a5aa5a5));
+    A64ScalarIntOperand boundary_udf[1] = {{.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 0xffff}};
+    BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("udf"), boundary_udf, 1, 0, 0, &boundary_word));
+    boundary_udf[0].value = 0x10000;
+    boundary_word = UINT32_C(0x5a5aa5a5);
+    BUSTER_TEST(arguments, !a64_arm_m1_scalar_integer_encode_mnemonic(gpr_target, S8("udf"), boundary_udf, 1, 0, 0,
+                                                                        &boundary_word) &&
+                               boundary_word == UINT32_C(0x5a5aa5a5));
+    BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == 0);
+
     // Fourteen rows are also present in the pre-existing named production
     // plan. Match those plans by instruction bit position (not field order)
     // and require bit-for-bit equality with the direct projection.
@@ -1650,7 +2265,7 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
                 BusterAarch64GeneratedProductionField const* field =
                     buster_aarch64_generated_production_field_at(plan->field_first + field_index);
                 BusterAarch64GeneratedProductionSegment const* segment =
-                    field && field->segment_count == 1 ? buster_aarch64_generated_production_segment_at(field->segment_first) : 0;
+                    field && field->segment_count ? buster_aarch64_generated_production_segment_at(field->segment_first) : 0;
                 u32 operand_index = UINT32_MAX;
                 for (u32 candidate = 0; candidate < operand_count; candidate += 1)
                 {
@@ -1664,6 +2279,72 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, mapped && buster_aarch64_production_raw_encode(production_form_id, field_values, plan->field_count, &production_word) &&
                                    buster_aarch64_arm_m1_gpr_encode(gpr_target, direct_form_index, direct_operands, operand_count, &direct_word) &&
                                    production_word == direct_word);
+    }
+    BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == 0);
+
+    static struct
+    {
+        u32 production_form_id;
+        String8 mnemonic;
+        u8 width;
+        bool bitfield;
+    } const scalar_production_overlaps[] = {
+        {BUSTER_AARCH64_GENERATED_FORM_ADDWRS, S8_INITIALIZER("add"), 32, false},
+        {BUSTER_AARCH64_GENERATED_FORM_ADDXRS, S8_INITIALIZER("add"), 64, false},
+        {BUSTER_AARCH64_GENERATED_FORM_ANDWRS, S8_INITIALIZER("and"), 32, false},
+        {BUSTER_AARCH64_GENERATED_FORM_ANDXRS, S8_INITIALIZER("and"), 64, false},
+        {BUSTER_AARCH64_GENERATED_FORM_EORWRS, S8_INITIALIZER("eor"), 32, false},
+        {BUSTER_AARCH64_GENERATED_FORM_EORXRS, S8_INITIALIZER("eor"), 64, false},
+        {BUSTER_AARCH64_GENERATED_FORM_ORNWRS, S8_INITIALIZER("orn"), 32, false},
+        {BUSTER_AARCH64_GENERATED_FORM_ORNXRS, S8_INITIALIZER("orn"), 64, false},
+        {BUSTER_AARCH64_GENERATED_FORM_ORRWRS, S8_INITIALIZER("orr"), 32, false},
+        {BUSTER_AARCH64_GENERATED_FORM_ORRXRS, S8_INITIALIZER("orr"), 64, false},
+        {BUSTER_AARCH64_GENERATED_FORM_SBFMXRI, S8_INITIALIZER("sbfm"), 64, true},
+        {BUSTER_AARCH64_GENERATED_FORM_SUBSWRS, S8_INITIALIZER("subs"), 32, false},
+        {BUSTER_AARCH64_GENERATED_FORM_SUBSXRS, S8_INITIALIZER("subs"), 64, false},
+        {BUSTER_AARCH64_GENERATED_FORM_SUBWRS, S8_INITIALIZER("sub"), 32, false},
+        {BUSTER_AARCH64_GENERATED_FORM_SUBXRS, S8_INITIALIZER("sub"), 64, false},
+    };
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(scalar_production_overlaps) == 15);
+    for (u32 overlap_index = 0; overlap_index < BUSTER_ARRAY_LENGTH(scalar_production_overlaps); overlap_index += 1)
+    {
+        u8 width = scalar_production_overlaps[overlap_index].width;
+        A64ScalarIntOperand overlap_operands[4] = {
+            {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = width, .index = 1},
+            {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = width, .index = 2},
+            {.kind = A64_SCALAR_INT_OPERAND_REGISTER, .width = width, .index = 3},
+            {.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 42},
+        };
+        u32 operand_count = scalar_production_overlaps[overlap_index].bitfield ? 4 : 3;
+        if (scalar_production_overlaps[overlap_index].bitfield) overlap_operands[2] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = 7};
+        u32 scalar_form_index = UINT32_MAX;
+        u32 overlap_word = 0;
+        BUSTER_TEST(arguments, a64_arm_m1_scalar_integer_find_form(scalar_production_overlaps[overlap_index].mnemonic, overlap_operands,
+                                                                    operand_count, 0, 0, &scalar_form_index) &&
+                                   a64_arm_m1_scalar_integer_encode(gpr_target, scalar_form_index, overlap_operands, operand_count, 0, 0, &overlap_word));
+        u16 plan_index = buster_aarch64_generated_production_plan_index(scalar_production_overlaps[overlap_index].production_form_id);
+        BusterAarch64GeneratedProductionForm const* plan = buster_aarch64_generated_production_form_at(plan_index);
+        u32 field_values[8] = {0};
+        bool mapped = plan != 0 && plan->field_count == 4;
+        if (mapped && scalar_production_overlaps[overlap_index].bitfield)
+        {
+            field_values[0] = overlap_operands[0].index;
+            field_values[1] = overlap_operands[1].index;
+            field_values[2] = (u32)overlap_operands[3].value;
+            field_values[3] = (u32)overlap_operands[2].value;
+        }
+        else if (mapped)
+        {
+            field_values[0] = overlap_operands[0].index;
+            field_values[1] = overlap_operands[1].index;
+            field_values[2] = 0;
+            field_values[3] = overlap_operands[2].index;
+        }
+        u32 production_word = 0;
+        bool overlap_equal = mapped && buster_aarch64_production_raw_encode(scalar_production_overlaps[overlap_index].production_form_id,
+                                                                              field_values, plan->field_count, &production_word) &&
+                             production_word == overlap_word;
+        BUSTER_TEST(arguments, overlap_equal);
     }
     BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == 0);
 

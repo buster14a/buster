@@ -237,10 +237,19 @@ feature counts baseline/CRC32/FlagM/PAuth 43/8/2/27. Generated rows preserve
 the visible operand order, fixed mask/value, required target feature, Arm row
 ID, and a deterministic source digest; the runtime encoder does not depend on
 LLVM packed metadata or oracle words. The manifest records this header's
-bytes/XXH64 and semantic census. Regeneration writes all four Arm artifacts to
-the requested output directory.
+bytes/XXH64 and semantic census.
 
-Regenerate into a separate directory and compare all four output files byte-for-
+It also emits `arm-a64-m1-scalar-integer.generated.h`, a 72-form structural
+projection of the non-system Apple-M1 scalar-integer families. The census is 23
+mnemonics, arities 1/2/3/4 = 1/6/49/16, baseline/FlagM features 71/1, and
+recipe counts add/sub-ext 8, add/sub-imm 8, add/sub-shift 8, logical-imm 8,
+logical-shift 16, bitfield 6, extract 2, movewide 6, conditional-compare
+immediate/register 4/4, RMIF 1, and UDF 1. The normalized source identity is
+SHA-256 `4429d9ab064a8e98561c794e8c5408a3922bc6a7f07a32015caaa9932ba2c484`;
+all selected rows have an unresolved mask of zero. Regeneration writes five
+Arm artifacts to the requested output directory.
+
+Regenerate into a separate directory and compare all five output files byte-for-
 byte across two runs:
 
 ```sh
@@ -251,14 +260,14 @@ byte across two runs:
 
 The importer rejects source-tree mutations before emitting artifacts and
 rejects duplicate canonical IDs/digests or unresolved alias targets. Run the
-command twice into separate directories and byte-compare all four generated
+command twice into separate directories and byte-compare all five generated
 files (the SHA-256/FNV source identity, SHA-256 `abc` known vector, bounded
-feature-parser tests, direct-GPR structural census, and symmetric-difference
+feature-parser tests, direct-GPR/scalar-integer structural censuses, and symmetric-difference
 gate provide in-process verification).
 
 For a checked-in drift audit, point the importer at the generated directory
 with `BUSTER_ARM_A64_CHECK=1`. This performs the full parse and compares the
-would-be JSONL, manifest, fixed-spelling header, and direct-GPR header bytes
+would-be JSONL, manifest, fixed-spelling, direct-GPR, and scalar-integer header bytes
 plus the bounded canonical README section SHA-256, then exits without writing
 anything.
 Unrelated README sections may be edited without changing importer source:

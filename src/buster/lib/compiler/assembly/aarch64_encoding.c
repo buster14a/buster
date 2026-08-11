@@ -19,6 +19,7 @@
 #include <buster/lib/compiler/assembly/generated/aarch64-production-plan.generated.h>
 #include <buster/lib/compiler/assembly/generated/arm-a64-m1-fixed.generated.h>
 #include <buster/lib/compiler/assembly/generated/arm-a64-m1-gpr.generated.h>
+#include <buster/lib/compiler/assembly/generated/arm-a64-m1-scalar-integer.generated.h>
 
 BUSTER_CT_CHECK((u32)A64_GPR_REGISTER31_ZR == (u32)BUSTER_AARCH64_ARM_M1_GPR_31_ZR);
 BUSTER_CT_CHECK((u32)A64_GPR_REGISTER31_SP == (u32)BUSTER_AARCH64_ARM_M1_GPR_31_SP);
@@ -75,6 +76,13 @@ BUSTER_CT_CHECK(BUSTER_AARCH64_GENERATED_PRODUCTION_FIELD_COUNT == BUSTER_ARRAY_
 BUSTER_CT_CHECK(BUSTER_AARCH64_GENERATED_PRODUCTION_SEGMENT_COUNT == BUSTER_ARRAY_LENGTH(buster_aarch64_generated_production_segments));
 BUSTER_CT_CHECK(BUSTER_AARCH64_GENERATED_PRODUCTION_FORM_COUNT < UINT16_MAX);
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(buster_aarch64_arm_m1_generated_fixed_rows) == BUSTER_AARCH64_ARM_M1_FIXED_SPELLING_COUNT);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_FORM_COUNT == BUSTER_ARRAY_LENGTH(buster_aarch64_arm_m1_scalar_integer_generated_forms));
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_FORM_COUNT == 72);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_MNEMONIC_COUNT == 23);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_ARITY_1_COUNT == 1);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_ARITY_2_COUNT == 6);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_ARITY_3_COUNT == 49);
+BUSTER_CT_CHECK(BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_ARITY_4_COUNT == 16);
 
 #define A64_NO_PC_RELATIVE_OPERAND UINT8_MAX
 
@@ -901,6 +909,391 @@ bool a64_arm_m1_gpr_encode(Target target, u32 form_index, A64GprOperand const* o
 bool a64_arm_m1_gpr_encode_mnemonic(Target target, String8 mnemonic, A64GprOperand const* operands, u32 operand_count, u32* word)
 {
     return buster_aarch64_arm_m1_gpr_encode_mnemonic(target, mnemonic, operands, operand_count, word);
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_scalar_string_equal(String8 string, char const* literal)
+{
+    if (!string.pointer || !string.length || !literal) return false;
+    u64 index = 0;
+    for (;; index += 1)
+    {
+        if (!literal[index]) return index == string.length;
+        if (index >= string.length || a64_gpr_ascii_lower((char)string.pointer[index]) != a64_gpr_ascii_lower(literal[index])) return false;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_scalar_generated_form_valid(BusterAarch64ArmM1ScalarIntegerGeneratedForm const* form)
+{
+    if (!form || !form->mnemonic || !form->arm_row_id || !form->arm_row_digest || form->recipe >= BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COUNT ||
+        (form->fixed_value & ~form->fixed_mask) || (form->width != 32 && form->width != 64) || !form->operand_count ||
+        form->operand_count > 4 || form->reserved ||
+        (form->required_feature != TARGET_CPU_FEATURE_NONE && form->required_feature != TARGET_CPU_FEATURE_AARCH64_FLAGM))
+    {
+        return false;
+    }
+    for (u32 index = 0; index < form->operand_count; index += 1)
+    {
+        BusterAarch64ArmM1ScalarIntegerGeneratedOperand operand = form->operands[index];
+        if (operand.reserved || operand.kind > BUSTER_AARCH64_ARM_M1_SCALAR_OPERAND_IMMEDIATE ||
+            operand.register31_role > BUSTER_AARCH64_ARM_M1_SCALAR_REGISTER31_ANY ||
+            (operand.kind == BUSTER_AARCH64_ARM_M1_SCALAR_OPERAND_REGISTER && operand.width != 0 && operand.width != 32 && operand.width != 64) ||
+            (operand.kind == BUSTER_AARCH64_ARM_M1_SCALAR_OPERAND_IMMEDIATE && operand.width))
+        {
+            return false;
+        }
+    }
+    for (u32 index = form->operand_count; index < 4; index += 1)
+    {
+        if (form->operands[index].kind || form->operands[index].width || form->operands[index].register31_role || form->operands[index].reserved)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_scalar_operand_valid(BusterAarch64ArmM1ScalarIntegerGeneratedOperand expected, A64ScalarIntOperand actual)
+{
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(actual.reserved); index += 1)
+    {
+        if (actual.reserved[index]) return false;
+    }
+    if (actual.kind != expected.kind) return false;
+    if (expected.kind == BUSTER_AARCH64_ARM_M1_SCALAR_OPERAND_IMMEDIATE)
+    {
+        return !actual.width && !actual.index && !actual.stack_pointer;
+    }
+    if (actual.value || (actual.width != 32 && actual.width != 64) || actual.index > 31 || (actual.index != 31 && actual.stack_pointer)) return false;
+    if (expected.width && actual.width != expected.width) return false;
+    if (actual.index == 31 && expected.register31_role != BUSTER_AARCH64_ARM_M1_SCALAR_REGISTER31_ANY &&
+        (actual.stack_pointer ? BUSTER_AARCH64_ARM_M1_SCALAR_REGISTER31_SP : BUSTER_AARCH64_ARM_M1_SCALAR_REGISTER31_ZR) !=
+            expected.register31_role)
+    {
+        return false;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_scalar_modifiers_valid(A64ScalarIntModifier const* modifiers, u32 modifier_count)
+{
+    if (modifier_count > 1 || (modifier_count && !modifiers)) return false;
+    if (!modifier_count) return true;
+    A64ScalarIntModifier modifier = modifiers[0];
+    if (!modifier.present || modifier.kind > A64_SCALAR_INT_MODIFIER_EXTEND ||
+        (modifier.kind == A64_SCALAR_INT_MODIFIER_SHIFT && modifier.value > A64_SCALAR_INT_SHIFT_ROR) ||
+        (modifier.kind == A64_SCALAR_INT_MODIFIER_EXTEND && modifier.value > A64_SCALAR_INT_EXTEND_SXTX))
+    {
+        return false;
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modifier.reserved); index += 1)
+    {
+        if (modifier.reserved[index]) return false;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL u64 a64_scalar_width_mask(u8 width)
+{
+    return width == 32 ? UINT64_C(0xffffffff) : width == 64 ? UINT64_MAX : 0;
+}
+
+BUSTER_GLOBAL_LOCAL u64 a64_scalar_rotate_right(u64 value, u32 rotation, u32 width)
+{
+    u64 mask = width == 64 ? UINT64_MAX : ((UINT64_C(1) << width) - 1);
+    value &= mask;
+    rotation %= width;
+    return rotation ? ((value >> rotation) | (value << (width - rotation))) & mask : value;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_scalar_logical_immediate_encode(u64 value, u8 width, u32* encoded)
+{
+    if (!encoded || (width != 32 && width != 64)) return false;
+    u64 mask = a64_scalar_width_mask(width);
+    if ((value & ~mask) || !value || value == mask) return false;
+    for (u32 element_width = 2; element_width <= width; element_width <<= 1)
+    {
+        u64 element_mask = element_width == 64 ? UINT64_MAX : ((UINT64_C(1) << element_width) - 1);
+        u64 element = value & element_mask;
+        bool replicated = true;
+        for (u32 offset = element_width; offset < width; offset += element_width)
+        {
+            if (((value >> offset) & element_mask) != element)
+            {
+                replicated = false;
+                break;
+            }
+        }
+        if (!replicated || !element || element == element_mask) continue;
+        for (u32 ones = 1; ones < element_width; ones += 1)
+        {
+            u64 ones_mask = (UINT64_C(1) << ones) - 1;
+            for (u32 rotation = 0; rotation < element_width; rotation += 1)
+            {
+                if (a64_scalar_rotate_right(ones_mask, rotation, element_width) != element) continue;
+                u32 levels = (~(element_width * 2u - 1u)) & 0x3fu;
+                *encoded = ((element_width == 64 ? 1u : 0u) << 22) | (rotation << 16) | (levels | (ones - 1u)) << 10;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_scalar_form_shape_matches(BusterAarch64ArmM1ScalarIntegerGeneratedForm const* form,
+                                                         A64ScalarIntOperand const* operands, u32 operand_count,
+                                                         A64ScalarIntModifier const* modifiers, u32 modifier_count)
+{
+    if (!a64_scalar_generated_form_valid(form) || operand_count != form->operand_count || (operand_count && !operands) ||
+        !a64_scalar_modifiers_valid(modifiers, modifier_count))
+    {
+        return false;
+    }
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        if (!a64_scalar_operand_valid(form->operands[index], operands[index])) return false;
+    }
+    if (form->recipe == BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_EXT ||
+        form->recipe == BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_SHIFT)
+    {
+        bool has_stack_pointer = operands[0].stack_pointer || operands[1].stack_pointer;
+        bool explicit_extend = modifier_count && modifiers[0].kind == A64_SCALAR_INT_MODIFIER_EXTEND;
+        bool explicit_shift = modifier_count && modifiers[0].kind == A64_SCALAR_INT_MODIFIER_SHIFT;
+        bool shift_is_lsl = explicit_shift && modifiers[0].value == A64_SCALAR_INT_SHIFT_LSL;
+        if (form->recipe == BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_EXT)
+        {
+            if (!explicit_extend && !(has_stack_pointer && (!explicit_shift || shift_is_lsl))) return false;
+        }
+        else if (explicit_extend || (has_stack_pointer && (!explicit_shift || shift_is_lsl)))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_scalar_recipe_encode(BusterAarch64ArmM1ScalarIntegerGeneratedForm const* form,
+                                                   A64ScalarIntOperand const* operands, u32 operand_count,
+                                                   A64ScalarIntModifier const* modifiers, u32 modifier_count, u32* word)
+{
+    if (!word || !a64_scalar_form_shape_matches(form, operands, operand_count, modifiers, modifier_count)) return false;
+    u32 result = form->fixed_value;
+    u8 shift_kind = A64_SCALAR_INT_SHIFT_LSL;
+    u8 extend_kind = A64_SCALAR_INT_EXTEND_UXTW;
+    u64 amount = 0;
+    bool has_modifier = modifier_count != 0;
+    if (has_modifier)
+    {
+        shift_kind = modifiers[0].value;
+        extend_kind = modifiers[0].value;
+        amount = modifiers[0].amount;
+    }
+    u8 width = form->width;
+    if (modifier_count && form->recipe != BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_EXT &&
+        form->recipe != BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_IMM &&
+        form->recipe != BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_SHIFT &&
+        form->recipe != BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_SHIFT &&
+        form->recipe != BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_MOVEWIDE)
+    {
+        return false;
+    }
+    switch ((BusterAarch64ArmM1ScalarIntegerRecipe)form->recipe)
+    {
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_EXT:
+    {
+        u8 option = A64_SCALAR_INT_EXTEND_UXTW;
+        bool explicit_extend = has_modifier && modifiers[0].kind == A64_SCALAR_INT_MODIFIER_EXTEND;
+        if (explicit_extend) option = extend_kind;
+        else if (width == 64) option = A64_SCALAR_INT_EXTEND_UXTX;
+        if (has_modifier && modifiers[0].kind == A64_SCALAR_INT_MODIFIER_SHIFT)
+        {
+            if (shift_kind != A64_SCALAR_INT_SHIFT_LSL) return false;
+            option = width == 64 ? A64_SCALAR_INT_EXTEND_UXTX : A64_SCALAR_INT_EXTEND_UXTW;
+        }
+        if (amount > 4 || option > A64_SCALAR_INT_EXTEND_SXTX) return false;
+        if (width == 32 && (option == A64_SCALAR_INT_EXTEND_UXTX || option == A64_SCALAR_INT_EXTEND_SXTX)) return false;
+        bool source_x = option == A64_SCALAR_INT_EXTEND_UXTX || option == A64_SCALAR_INT_EXTEND_SXTX;
+        if (operands[2].width != (source_x ? 64u : 32u)) return false;
+        result |= (u32)operands[0].index | ((u32)operands[1].index << 5) | (u32)(amount << 10) | ((u32)option << 13) |
+                  ((u32)operands[2].index << 16);
+    }
+    break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_IMM:
+        if (operands[2].value > 4095 || (has_modifier && modifiers[0].kind != A64_SCALAR_INT_MODIFIER_SHIFT) ||
+            (has_modifier && shift_kind != A64_SCALAR_INT_SHIFT_LSL) || (has_modifier && amount != 0 && amount != 12)) return false;
+        result |= (u32)operands[0].index | ((u32)operands[1].index << 5) | (u32)operands[2].value << 10;
+        if (has_modifier && amount == 12) result |= UINT32_C(1) << 22;
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_SHIFT:
+        if (has_modifier && modifiers[0].kind != A64_SCALAR_INT_MODIFIER_SHIFT) return false;
+        if (shift_kind == A64_SCALAR_INT_SHIFT_ROR || amount > (width == 32 ? 31u : 63u)) return false;
+        result |= (u32)operands[0].index | ((u32)operands[1].index << 5) | (u32)amount << 10 | (u32)operands[2].index << 16;
+        result |= (u32)shift_kind << 22;
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_SHIFT:
+        if (has_modifier && modifiers[0].kind != A64_SCALAR_INT_MODIFIER_SHIFT) return false;
+        if (amount > (width == 32 ? 31u : 63u)) return false;
+        result |= (u32)operands[0].index | ((u32)operands[1].index << 5) | (u32)amount << 10 | (u32)operands[2].index << 16;
+        result |= (u32)shift_kind << 22;
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_IMM:
+    {
+        u32 logical = 0;
+        if (!a64_scalar_logical_immediate_encode(operands[2].value, width, &logical)) return false;
+        result |= logical;
+        result |= (u32)operands[0].index | ((u32)operands[1].index << 5);
+    }
+    break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_BITFIELD:
+        if (operands[2].value >= width || operands[3].value >= width) return false;
+        result |= (u32)operands[0].index | ((u32)operands[1].index << 5) | ((u32)operands[2].value << 16) |
+                  ((u32)operands[3].value << 10);
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_EXTRACT:
+        if (operands[3].value >= width) return false;
+        result |= (u32)operands[0].index | ((u32)operands[1].index << 5) | ((u32)operands[2].index << 16) |
+                  ((u32)operands[3].value << 10);
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_MOVEWIDE:
+        if (operands[1].value > 0xffff || (has_modifier && modifiers[0].kind != A64_SCALAR_INT_MODIFIER_SHIFT) ||
+            (has_modifier && shift_kind != A64_SCALAR_INT_SHIFT_LSL) || amount % 16 || amount > (width == 32 ? 16u : 48u)) return false;
+        result |= (u32)operands[0].index | ((u32)operands[1].value << 5) | ((u32)(amount / 16) << 21);
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COND_CMP_IMM:
+        if (operands[1].value > 31 || operands[2].value > 15 || operands[3].value > 15) return false;
+        result |= ((u32)operands[0].index << 5) | (u32)operands[1].value << 16 | (u32)operands[2].value |
+                  (u32)operands[3].value << 12;
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COND_CMP_REG:
+        if (operands[2].value > 15 || operands[3].value > 15) return false;
+        result |= ((u32)operands[0].index << 5) | (u32)operands[1].index << 16 | (u32)operands[2].value |
+                  (u32)operands[3].value << 12;
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_RMIF:
+        if (operands[1].value > 63 || operands[2].value > 15) return false;
+        result |= (u32)operands[2].value | ((u32)operands[0].index << 5) | ((u32)operands[1].value << 15);
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_UDF:
+        if (operands[0].value > 0xffff) return false;
+        result |= (u32)operands[0].value;
+        break;
+    case BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COUNT:
+        return false;
+    }
+    if ((result & form->fixed_mask) != form->fixed_value)
+    {
+        return false;
+    }
+    *word = result;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_scalar_target_valid(Target target)
+{
+    return target.cpu_arch == CPU_ARCH_AARCH64 && a64_metadata_target_is_m1_profile(target) && target_cpu_features_are_valid(target);
+}
+
+u32 buster_aarch64_arm_m1_scalar_integer_form_count(void)
+{
+    return BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_FORM_COUNT;
+}
+
+bool buster_aarch64_arm_m1_scalar_integer_form(u32 form_index, BusterAarch64ArmM1ScalarIntegerForm* result)
+{
+    if (!result || form_index >= BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_FORM_COUNT) return false;
+    BusterAarch64ArmM1ScalarIntegerGeneratedForm const* form = buster_aarch64_arm_m1_scalar_integer_generated_forms + form_index;
+    if (!a64_scalar_generated_form_valid(form)) return false;
+    *result = (BusterAarch64ArmM1ScalarIntegerForm){
+        .mnemonic = string_from_pointer((char8*)form->mnemonic),
+        .arm_row_id = string_from_pointer((char8*)form->arm_row_id),
+        .arm_row_digest = form->arm_row_digest,
+        .fixed_mask = form->fixed_mask,
+        .fixed_value = form->fixed_value,
+        .required_feature = form->required_feature,
+        .recipe = form->recipe,
+        .width = form->width,
+        .operand_count = form->operand_count,
+    };
+    for (u32 index = 0; index < form->operand_count; index += 1)
+    {
+        result->operands[index] = (BusterAarch64ArmM1ScalarIntegerOperand){
+            .kind = form->operands[index].kind,
+            .width = form->operands[index].width,
+            .register31_role = form->operands[index].register31_role,
+        };
+    }
+    return true;
+}
+
+bool buster_aarch64_arm_m1_scalar_integer_target(Target target)
+{
+    return a64_scalar_target_valid(target);
+}
+
+bool buster_aarch64_arm_m1_scalar_integer_find_form(String8 mnemonic, A64ScalarIntOperand const* operands, u32 operand_count,
+                                                     A64ScalarIntModifier const* modifiers, u32 modifier_count, u32* form_index)
+{
+    if (!form_index || !mnemonic.pointer || !mnemonic.length || operand_count > 4 || (operand_count && !operands) || modifier_count > 1 ||
+        (modifier_count && !modifiers))
+    {
+        return false;
+    }
+    u32 found = UINT32_MAX;
+    for (u32 index = 0; index < BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_FORM_COUNT; index += 1)
+    {
+        BusterAarch64ArmM1ScalarIntegerGeneratedForm const* form = buster_aarch64_arm_m1_scalar_integer_generated_forms + index;
+        if (!a64_scalar_generated_form_valid(form) || !a64_scalar_string_equal(mnemonic, form->mnemonic) ||
+            !a64_scalar_form_shape_matches(form, operands, operand_count, modifiers, modifier_count))
+        {
+            continue;
+        }
+        u32 ignored = 0;
+        if (!a64_scalar_recipe_encode(form, operands, operand_count, modifiers, modifier_count, &ignored)) continue;
+        if (found != UINT32_MAX) return false;
+        found = index;
+    }
+    if (found == UINT32_MAX) return false;
+    *form_index = found;
+    return true;
+}
+
+bool buster_aarch64_arm_m1_scalar_integer_encode(Target target, u32 form_index, A64ScalarIntOperand const* operands, u32 operand_count,
+                                                 A64ScalarIntModifier const* modifiers, u32 modifier_count, u32* word)
+{
+    if (!word || !a64_scalar_target_valid(target) || form_index >= BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_FORM_COUNT) return false;
+    BusterAarch64ArmM1ScalarIntegerGeneratedForm const* form = buster_aarch64_arm_m1_scalar_integer_generated_forms + form_index;
+    if (!a64_scalar_generated_form_valid(form) ||
+        (form->required_feature != TARGET_CPU_FEATURE_NONE && !target_cpu_feature_has(target, form->required_feature)))
+    {
+        return false;
+    }
+    return a64_scalar_recipe_encode(form, operands, operand_count, modifiers, modifier_count, word);
+}
+
+bool buster_aarch64_arm_m1_scalar_integer_encode_mnemonic(Target target, String8 mnemonic, A64ScalarIntOperand const* operands,
+                                                          u32 operand_count, A64ScalarIntModifier const* modifiers, u32 modifier_count,
+                                                          u32* word)
+{
+    u32 form_index = UINT32_MAX;
+    return buster_aarch64_arm_m1_scalar_integer_find_form(mnemonic, operands, operand_count, modifiers, modifier_count, &form_index) &&
+           buster_aarch64_arm_m1_scalar_integer_encode(target, form_index, operands, operand_count, modifiers, modifier_count, word);
+}
+
+bool a64_arm_m1_scalar_integer_find_form(String8 mnemonic, A64ScalarIntOperand const* operands, u32 operand_count,
+                                          A64ScalarIntModifier const* modifiers, u32 modifier_count, u32* form_index)
+{
+    return buster_aarch64_arm_m1_scalar_integer_find_form(mnemonic, operands, operand_count, modifiers, modifier_count, form_index);
+}
+
+bool a64_arm_m1_scalar_integer_encode(Target target, u32 form_index, A64ScalarIntOperand const* operands, u32 operand_count,
+                                      A64ScalarIntModifier const* modifiers, u32 modifier_count, u32* word)
+{
+    return buster_aarch64_arm_m1_scalar_integer_encode(target, form_index, operands, operand_count, modifiers, modifier_count, word);
+}
+
+bool a64_arm_m1_scalar_integer_encode_mnemonic(Target target, String8 mnemonic, A64ScalarIntOperand const* operands, u32 operand_count,
+                                               A64ScalarIntModifier const* modifiers, u32 modifier_count, u32* word)
+{
+    return buster_aarch64_arm_m1_scalar_integer_encode_mnemonic(target, mnemonic, operands, operand_count, modifiers, modifier_count, word);
 }
 
 BusterAarch64MetadataCounts buster_aarch64_metadata_counts(void)

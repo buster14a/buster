@@ -343,6 +343,121 @@ BUSTER_F_DECL bool a64_arm_m1_gpr_encode(Target target, u32 form_index, A64GprOp
 BUSTER_F_DECL bool a64_arm_m1_gpr_encode_mnemonic(Target target, String8 mnemonic, A64GprOperand const* operands, u32 operand_count,
                                                   u32* word);
 
+// Compact semantic API for the generated Apple-M1 scalar-integer slice.  The
+// first array contains architectural operands in source order; optional
+// shift/extend modifiers are carried separately so lookup cannot confuse a
+// logical immediate with a shifted register or a CCMN/CCMP immediate with a
+// register form.
+typedef enum A64ScalarIntOperandKind
+{
+    A64_SCALAR_INT_OPERAND_REGISTER,
+    A64_SCALAR_INT_OPERAND_IMMEDIATE,
+} A64ScalarIntOperandKind;
+
+typedef struct A64ScalarIntOperand A64ScalarIntOperand;
+struct A64ScalarIntOperand
+{
+    u64 value;
+    u8 kind;
+    u8 width;
+    u8 index;
+    bool stack_pointer;
+    u8 reserved[4];
+};
+BUSTER_CT_CHECK(sizeof(A64ScalarIntOperand) == 16);
+
+typedef enum A64ScalarIntModifierKind
+{
+    A64_SCALAR_INT_MODIFIER_SHIFT,
+    A64_SCALAR_INT_MODIFIER_EXTEND,
+} A64ScalarIntModifierKind;
+
+typedef enum A64ScalarIntShift
+{
+    A64_SCALAR_INT_SHIFT_LSL,
+    A64_SCALAR_INT_SHIFT_LSR,
+    A64_SCALAR_INT_SHIFT_ASR,
+    A64_SCALAR_INT_SHIFT_ROR,
+} A64ScalarIntShift;
+
+typedef enum A64ScalarIntExtend
+{
+    A64_SCALAR_INT_EXTEND_UXTB,
+    A64_SCALAR_INT_EXTEND_UXTH,
+    A64_SCALAR_INT_EXTEND_UXTW,
+    A64_SCALAR_INT_EXTEND_UXTX,
+    A64_SCALAR_INT_EXTEND_SXTB,
+    A64_SCALAR_INT_EXTEND_SXTH,
+    A64_SCALAR_INT_EXTEND_SXTW,
+    A64_SCALAR_INT_EXTEND_SXTX,
+} A64ScalarIntExtend;
+
+typedef struct A64ScalarIntModifier A64ScalarIntModifier;
+struct A64ScalarIntModifier
+{
+    u64 amount;
+    u8 kind;
+    u8 value;
+    bool present;
+    u8 reserved[5];
+};
+BUSTER_CT_CHECK(sizeof(A64ScalarIntModifier) == 16);
+
+typedef enum A64ScalarIntRegister31Role
+{
+    A64_SCALAR_INT_REGISTER31_ZR,
+    A64_SCALAR_INT_REGISTER31_SP,
+    A64_SCALAR_INT_REGISTER31_ANY,
+} A64ScalarIntRegister31Role;
+
+typedef struct BusterAarch64ArmM1ScalarIntegerOperand BusterAarch64ArmM1ScalarIntegerOperand;
+struct BusterAarch64ArmM1ScalarIntegerOperand
+{
+    u8 kind;
+    u8 width;
+    u8 register31_role;
+    u8 reserved;
+};
+
+typedef struct BusterAarch64ArmM1ScalarIntegerForm BusterAarch64ArmM1ScalarIntegerForm;
+struct BusterAarch64ArmM1ScalarIntegerForm
+{
+    String8 mnemonic;
+    String8 arm_row_id;
+    u64 arm_row_digest;
+    u32 fixed_mask;
+    u32 fixed_value;
+    TargetCpuFeature required_feature;
+    u8 recipe;
+    u8 width;
+    u8 operand_count;
+    u8 reserved;
+    BusterAarch64ArmM1ScalarIntegerOperand operands[4];
+};
+
+BUSTER_F_DECL u32 buster_aarch64_arm_m1_scalar_integer_form_count(void);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_scalar_integer_form(u32 form_index, BusterAarch64ArmM1ScalarIntegerForm* result);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_scalar_integer_target(Target target);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_scalar_integer_find_form(String8 mnemonic, A64ScalarIntOperand const* operands,
+                                                                  u32 operand_count, A64ScalarIntModifier const* modifiers,
+                                                                  u32 modifier_count, u32* form_index);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_scalar_integer_encode(Target target, u32 form_index, A64ScalarIntOperand const* operands,
+                                                              u32 operand_count, A64ScalarIntModifier const* modifiers,
+                                                              u32 modifier_count, u32* word);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_scalar_integer_encode_mnemonic(Target target, String8 mnemonic,
+                                                                       A64ScalarIntOperand const* operands, u32 operand_count,
+                                                                       A64ScalarIntModifier const* modifiers, u32 modifier_count,
+                                                                       u32* word);
+// Short aliases used by assembler-side code and tests.
+BUSTER_F_DECL bool a64_arm_m1_scalar_integer_find_form(String8 mnemonic, A64ScalarIntOperand const* operands, u32 operand_count,
+                                                       A64ScalarIntModifier const* modifiers, u32 modifier_count, u32* form_index);
+BUSTER_F_DECL bool a64_arm_m1_scalar_integer_encode(Target target, u32 form_index, A64ScalarIntOperand const* operands,
+                                                    u32 operand_count, A64ScalarIntModifier const* modifiers, u32 modifier_count,
+                                                    u32* word);
+BUSTER_F_DECL bool a64_arm_m1_scalar_integer_encode_mnemonic(Target target, String8 mnemonic, A64ScalarIntOperand const* operands,
+                                                             u32 operand_count, A64ScalarIntModifier const* modifiers,
+                                                             u32 modifier_count, u32* word);
+
 // Coverage classification is independent from raw bit-layout completeness.
 // Keep these values aligned with the generated snapshot while exposing a
 // stable public vocabulary to semantic encoder and test layers.

@@ -1914,6 +1914,579 @@ static bool arm_a64_gpr_projection(Arena* arena, ArmA64CanonicalRows rows, ArmA6
     return true;
 }
 
+/* The scalar-integer projection is intentionally recognized from the XML
+   templates and field diagrams, rather than from a checked-in row list.  The
+   suffixes below select instruction families; every candidate is then
+   validated against its architectural field set, widths, and assembly shape. */
+typedef enum ArmA64ScalarRecipe
+{
+    ARM_A64_SCALAR_RECIPE_ADD_SUB_EXT,
+    ARM_A64_SCALAR_RECIPE_ADD_SUB_IMM,
+    ARM_A64_SCALAR_RECIPE_ADD_SUB_SHIFT,
+    ARM_A64_SCALAR_RECIPE_LOGICAL_IMM,
+    ARM_A64_SCALAR_RECIPE_LOGICAL_SHIFT,
+    ARM_A64_SCALAR_RECIPE_BITFIELD,
+    ARM_A64_SCALAR_RECIPE_EXTRACT,
+    ARM_A64_SCALAR_RECIPE_MOVEWIDE,
+    ARM_A64_SCALAR_RECIPE_COND_CMP_IMM,
+    ARM_A64_SCALAR_RECIPE_COND_CMP_REG,
+    ARM_A64_SCALAR_RECIPE_RMIF,
+    ARM_A64_SCALAR_RECIPE_UDF,
+} ArmA64ScalarRecipe;
+
+typedef enum ArmA64ScalarOperandKind
+{
+    ARM_A64_SCALAR_OPERAND_REGISTER,
+    ARM_A64_SCALAR_OPERAND_IMMEDIATE,
+} ArmA64ScalarOperandKind;
+
+typedef enum ArmA64ScalarRegister31Role
+{
+    ARM_A64_SCALAR_REGISTER31_ZR,
+    ARM_A64_SCALAR_REGISTER31_SP,
+    ARM_A64_SCALAR_REGISTER31_ANY,
+} ArmA64ScalarRegister31Role;
+
+typedef struct ArmA64ScalarProjectionOperand ArmA64ScalarProjectionOperand;
+struct ArmA64ScalarProjectionOperand
+{
+    u8 kind;
+    u8 width;
+    u8 register31_role;
+};
+
+typedef struct ArmA64ScalarProjectionRow ArmA64ScalarProjectionRow;
+struct ArmA64ScalarProjectionRow
+{
+    ArmA64CanonicalRow* row;
+    String8 mnemonic;
+    u8 recipe;
+    u8 width;
+    u8 operand_count;
+    ArmA64ScalarProjectionOperand operands[4];
+};
+
+static String8 arm_a64_gpr_feature_name(String8 expression);
+
+static bool arm_a64_scalar_name_in(String8 value, const char* const* names, u32 count)
+{
+    for (u32 index = 0; index < count; index += 1)
+    {
+        if (string_equal(value, string_from_pointer((char8*)names[index]))) return true;
+    }
+    return false;
+}
+
+static ArmA64Field* arm_a64_scalar_field(ArmA64CanonicalRow* row, const char* name)
+{
+    String8 wanted = string_from_pointer((char8*)name);
+    for (u32 index = 0; index < row->field_count; index += 1)
+    {
+        if (string_equal(row->fields[index].name, wanted)) return &row->fields[index];
+    }
+    return 0;
+}
+
+static bool arm_a64_scalar_field_shape(ArmA64CanonicalRow* row, const char* name, u32 bit_count, u32 instruction_lsb)
+{
+    ArmA64Field* field = arm_a64_scalar_field(row, name);
+    return field && field->bit_count == bit_count && field->segment_count == 1 && field->segments[0].width == bit_count &&
+           field->segments[0].value_lsb == 0 && field->segments[0].instruction_lsb == instruction_lsb;
+}
+
+static bool arm_a64_scalar_field_names(ArmA64CanonicalRow* row, const char* const* names, u32 count)
+{
+    if (row->field_count != count) return false;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        if (!arm_a64_scalar_field(row, names[index])) return false;
+    }
+    return true;
+}
+
+static bool arm_a64_scalar_template_contains(ArmA64CanonicalRow* row, const char* text)
+{
+    return string_first_sequence(row->assembly, string_from_pointer((char8*)text)) != BUSTER_STRING_NO_MATCH;
+}
+
+static bool arm_a64_scalar_append_mnemonic(Arena* arena, ArmA64CanonicalRow* row, String8* result)
+{
+    if (!row->assembly.length || !result) return false;
+    u64 end = 0;
+    while (end < row->assembly.length && !character_is_space(row->assembly.pointer[end])) end += 1;
+    if (!end) return false;
+    u64 mark = arena->position;
+    for (u64 index = 0; index < end; index += 1)
+    {
+        char8 c = row->assembly.pointer[index];
+        if (c >= 'A' && c <= 'Z') c = (char8)(c + ('a' - 'A'));
+        arena_append_char8(arena, c);
+    }
+    *result = (String8){.pointer = (char8*)arm_a64_arena_pointer(arena, mark), .length = end};
+    return true;
+}
+
+static bool arm_a64_scalar_set_register(ArmA64ScalarProjectionRow* projection, ArmA64CanonicalRow* row, const char* name, u8 width,
+                                        u8 register31_role)
+{
+    if (projection->operand_count >= BUSTER_ARRAY_LENGTH(projection->operands) || !arm_a64_scalar_field_shape(row, name, 5, name[1] == 'd' ? 0 :
+                                                                                           name[1] == 'n' ? 5 : 16))
+    {
+        return false;
+    }
+    projection->operands[projection->operand_count++] = (ArmA64ScalarProjectionOperand){
+        .kind = ARM_A64_SCALAR_OPERAND_REGISTER, .width = width, .register31_role = register31_role};
+    return true;
+}
+
+static bool arm_a64_scalar_set_immediate(ArmA64ScalarProjectionRow* projection)
+{
+    if (projection->operand_count >= BUSTER_ARRAY_LENGTH(projection->operands)) return false;
+    projection->operands[projection->operand_count++] = (ArmA64ScalarProjectionOperand){
+        .kind = ARM_A64_SCALAR_OPERAND_IMMEDIATE, .width = 0, .register31_role = ARM_A64_SCALAR_REGISTER31_ANY};
+    return true;
+}
+
+static bool arm_a64_scalar_row_parse(Arena* arena, ArmA64CanonicalRow* row, ArmA64ScalarProjectionRow* result)
+{
+    if (!row || !result || !row->apple_m1 || row->system || !string_equal(row->kind, S8("canonical")) || row->unresolved_mask ||
+        !row->assembly.length || (row->status.length && !string_equal(row->status, S8("defined")) &&
+                                  !(string_equal(row->encoding_name, S8("UDF_only_perm_undef")) && string_equal(row->status, S8("undefined")))) ||
+        (row->feature_expression.length && !string_equal(row->feature_expression, S8("FEAT_FlagM"))) ||
+        row->fixed_value & ~row->fixed_mask || row->field_mask != ~row->fixed_mask)
+    {
+        return false;
+    }
+    ArmA64ScalarProjectionRow projection = {.row = row};
+    if (!arm_a64_scalar_append_mnemonic(arena, row, &projection.mnemonic)) return false;
+    static const char* const addsub[] = {"add", "adds", "sub", "subs"};
+    static const char* const logical[] = {"and", "ands", "bic", "bics", "eon", "eor", "orn", "orr"};
+    static const char* const bitfield[] = {"bfm", "sbfm", "ubfm"};
+    static const char* const movewide[] = {"movk", "movn", "movz"};
+    static const char* const condcmp[] = {"ccmn", "ccmp"};
+    String8 suffix = {0};
+    if (string_equal(row->encoding_name, S8("RMIF_only_rmif")))
+    {
+        projection.recipe = ARM_A64_SCALAR_RECIPE_RMIF;
+        projection.width = 64;
+        if (!arm_a64_scalar_template_contains(row, "#<shift>, #<mask>") || !string_equal(projection.mnemonic, S8("rmif")) ||
+            !string_equal(row->feature_expression, S8("FEAT_FlagM")) ||
+            !string_equal(row->instr_class, S8("general")) || !string_equal(row->status, S8("defined")) ||
+            !arm_a64_scalar_field_names(row, (const char* const[]){"mask", "Rn", "imm6"}, 3) ||
+            !arm_a64_scalar_field_shape(row, "mask", 4, 0) || !arm_a64_scalar_field_shape(row, "Rn", 5, 5) ||
+            !arm_a64_scalar_field_shape(row, "imm6", 6, 15) || !arm_a64_scalar_set_register(&projection, row, "Rn", 64, ARM_A64_SCALAR_REGISTER31_ZR) ||
+            !arm_a64_scalar_set_immediate(&projection) || !arm_a64_scalar_set_immediate(&projection))
+        {
+            return false;
+        }
+    }
+    else if (string_equal(row->encoding_name, S8("UDF_only_perm_undef")))
+    {
+        projection.recipe = ARM_A64_SCALAR_RECIPE_UDF;
+        projection.width = 32;
+        if (!arm_a64_scalar_template_contains(row, "#<imm>") || !string_equal(projection.mnemonic, S8("udf")) ||
+            !string_equal(row->instr_class, S8("general")) ||
+            !string_equal(row->status, S8("undefined")) || !arm_a64_scalar_field_names(row, (const char* const[]){"imm16"}, 1) ||
+            !arm_a64_scalar_field_shape(row, "imm16", 16, 0) || !arm_a64_scalar_set_immediate(&projection))
+        {
+            return false;
+        }
+    }
+    else
+    {
+        static const char* const suffixes[] = {"_addsub_ext",  "_addsub_imm",  "_addsub_shift", "_log_imm",     "_log_shift",
+                                                "_bitfield",    "_extract",     "_movewide",     "_condcmp_imm", "_condcmp_reg"};
+        u32 suffix_index = UINT32_MAX;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(suffixes); index += 1)
+        {
+            String8 candidate = string_from_pointer((char8*)suffixes[index]);
+            if (string_ends_with_sequence(row->encoding_name, candidate))
+            {
+                suffix = candidate;
+                suffix_index = index;
+                break;
+            }
+        }
+        if (!suffix.length || !string_equal(row->instr_class, S8("general")) || !string_equal(row->status, S8("defined"))) return false;
+        if (suffix_index <= 2 && !arm_a64_scalar_name_in(projection.mnemonic, addsub, BUSTER_ARRAY_LENGTH(addsub))) return false;
+        if (suffix_index >= 3 && suffix_index <= 4 && !arm_a64_scalar_name_in(projection.mnemonic, logical, BUSTER_ARRAY_LENGTH(logical))) return false;
+        if (suffix_index == 5 && !arm_a64_scalar_name_in(projection.mnemonic, bitfield, BUSTER_ARRAY_LENGTH(bitfield))) return false;
+        if (suffix_index == 6 && !string_equal(projection.mnemonic, S8("extr"))) return false;
+        if (suffix_index == 7 && !arm_a64_scalar_name_in(projection.mnemonic, movewide, BUSTER_ARRAY_LENGTH(movewide))) return false;
+        if (suffix_index >= 8 && !arm_a64_scalar_name_in(projection.mnemonic, condcmp, BUSTER_ARRAY_LENGTH(condcmp))) return false;
+        bool is32 = string_first_sequence(row->encoding_name, S8("_32")) != BUSTER_STRING_NO_MATCH;
+        bool is64 = string_first_sequence(row->encoding_name, S8("_64")) != BUSTER_STRING_NO_MATCH;
+        if (is32 == is64) return false;
+        projection.width = is32 ? 32 : 64;
+        switch (suffix_index)
+        {
+            case 0:
+                projection.recipe = ARM_A64_SCALAR_RECIPE_ADD_SUB_EXT;
+                if (!arm_a64_scalar_template_contains(row, "<extend>") || !arm_a64_scalar_template_contains(row, "#<amount>") ||
+                    !arm_a64_scalar_field_names(row, (const char* const[]){"Rd", "Rn", "imm3", "option", "Rm"}, 5) ||
+                    !arm_a64_scalar_field_shape(row, "Rd", 5, 0) || !arm_a64_scalar_field_shape(row, "Rn", 5, 5) ||
+                    !arm_a64_scalar_field_shape(row, "imm3", 3, 10) || !arm_a64_scalar_field_shape(row, "option", 3, 13) ||
+                    !arm_a64_scalar_field_shape(row, "Rm", 5, 16) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rd", projection.width,
+                                                 string_equal(projection.mnemonic, S8("add")) || string_equal(projection.mnemonic, S8("sub"))
+                                                     ? ARM_A64_SCALAR_REGISTER31_SP
+                                                     : ARM_A64_SCALAR_REGISTER31_ZR) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rn", projection.width, ARM_A64_SCALAR_REGISTER31_SP))
+                {
+                    return false;
+                }
+                if (projection.operand_count >= BUSTER_ARRAY_LENGTH(projection.operands)) return false;
+                projection.operands[projection.operand_count++] = (ArmA64ScalarProjectionOperand){
+                    .kind = ARM_A64_SCALAR_OPERAND_REGISTER, .width = 0, .register31_role = ARM_A64_SCALAR_REGISTER31_ZR};
+                break;
+            case 1:
+                projection.recipe = ARM_A64_SCALAR_RECIPE_ADD_SUB_IMM;
+                if (!arm_a64_scalar_template_contains(row, "#<imm>") || !arm_a64_scalar_template_contains(row, "<shift>") ||
+                    !arm_a64_scalar_field_names(row, (const char* const[]){"Rd", "Rn", "imm12", "sh"}, 4) ||
+                    !arm_a64_scalar_field_shape(row, "Rd", 5, 0) || !arm_a64_scalar_field_shape(row, "Rn", 5, 5) ||
+                    !arm_a64_scalar_field_shape(row, "imm12", 12, 10) || !arm_a64_scalar_field_shape(row, "sh", 1, 22) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rd", projection.width,
+                                                 string_equal(projection.mnemonic, S8("add")) || string_equal(projection.mnemonic, S8("sub"))
+                                                     ? ARM_A64_SCALAR_REGISTER31_SP
+                                                     : ARM_A64_SCALAR_REGISTER31_ZR) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rn", projection.width, ARM_A64_SCALAR_REGISTER31_SP) ||
+                    !arm_a64_scalar_set_immediate(&projection))
+                {
+                    return false;
+                }
+                break;
+            case 2:
+                projection.recipe = ARM_A64_SCALAR_RECIPE_ADD_SUB_SHIFT;
+                if (!arm_a64_scalar_template_contains(row, "<shift> #<amount>") ||
+                    !arm_a64_scalar_field_names(row, (const char* const[]){"Rd", "Rn", "imm6", "Rm", "shift"}, 5) ||
+                    !arm_a64_scalar_field_shape(row, "Rd", 5, 0) || !arm_a64_scalar_field_shape(row, "Rn", 5, 5) ||
+                    !arm_a64_scalar_field_shape(row, "imm6", 6, 10) || !arm_a64_scalar_field_shape(row, "Rm", 5, 16) ||
+                    !arm_a64_scalar_field_shape(row, "shift", 2, 22) || !arm_a64_scalar_set_register(&projection, row, "Rd", projection.width,
+                                                                                                      ARM_A64_SCALAR_REGISTER31_ZR) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rn", projection.width, ARM_A64_SCALAR_REGISTER31_ZR) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rm", projection.width, ARM_A64_SCALAR_REGISTER31_ZR))
+                {
+                    return false;
+                }
+                break;
+            case 3:
+                projection.recipe = ARM_A64_SCALAR_RECIPE_LOGICAL_IMM;
+                if (!arm_a64_scalar_template_contains(row, "#<imm>") ||
+                    (projection.width == 64 ? !arm_a64_scalar_field_names(row, (const char* const[]){"Rd", "Rn", "imms", "immr", "N"}, 5) :
+                                             !arm_a64_scalar_field_names(row, (const char* const[]){"Rd", "Rn", "imms", "immr"}, 4)) ||
+                    !arm_a64_scalar_field_shape(row, "Rd", 5, 0) || !arm_a64_scalar_field_shape(row, "Rn", 5, 5) ||
+                    !arm_a64_scalar_field_shape(row, "imms", 6, 10) || !arm_a64_scalar_field_shape(row, "immr", 6, 16) ||
+                    (projection.width == 64 && !arm_a64_scalar_field_shape(row, "N", 1, 22)) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rd", projection.width,
+                                                 string_equal(projection.mnemonic, S8("ands")) ? ARM_A64_SCALAR_REGISTER31_ZR :
+                                                                                               ARM_A64_SCALAR_REGISTER31_SP) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rn", projection.width, ARM_A64_SCALAR_REGISTER31_ZR) ||
+                    !arm_a64_scalar_set_immediate(&projection))
+                {
+                    return false;
+                }
+                break;
+            case 4:
+                projection.recipe = ARM_A64_SCALAR_RECIPE_LOGICAL_SHIFT;
+                if (!arm_a64_scalar_template_contains(row, "<shift> #<amount>") ||
+                    !arm_a64_scalar_field_names(row, (const char* const[]){"Rd", "Rn", "imm6", "Rm", "shift"}, 5) ||
+                    !arm_a64_scalar_field_shape(row, "Rd", 5, 0) || !arm_a64_scalar_field_shape(row, "Rn", 5, 5) ||
+                    !arm_a64_scalar_field_shape(row, "imm6", 6, 10) || !arm_a64_scalar_field_shape(row, "Rm", 5, 16) ||
+                    !arm_a64_scalar_field_shape(row, "shift", 2, 22) || !arm_a64_scalar_set_register(&projection, row, "Rd", projection.width,
+                                                                                                      ARM_A64_SCALAR_REGISTER31_ZR) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rn", projection.width, ARM_A64_SCALAR_REGISTER31_ZR) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rm", projection.width, ARM_A64_SCALAR_REGISTER31_ZR))
+                {
+                    return false;
+                }
+                break;
+            case 5:
+                projection.recipe = ARM_A64_SCALAR_RECIPE_BITFIELD;
+                if (!arm_a64_scalar_template_contains(row, "#<immr>, #<imms>") ||
+                    !arm_a64_scalar_field_names(row, (const char* const[]){"Rd", "Rn", "imms", "immr"}, 4) ||
+                    !arm_a64_scalar_field_shape(row, "Rd", 5, 0) || !arm_a64_scalar_field_shape(row, "Rn", 5, 5) ||
+                    !arm_a64_scalar_field_shape(row, "imms", 6, 10) || !arm_a64_scalar_field_shape(row, "immr", 6, 16) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rd", projection.width, ARM_A64_SCALAR_REGISTER31_ZR) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rn", projection.width, ARM_A64_SCALAR_REGISTER31_ZR) ||
+                    !arm_a64_scalar_set_immediate(&projection) || !arm_a64_scalar_set_immediate(&projection))
+                {
+                    return false;
+                }
+                break;
+            case 6:
+                projection.recipe = ARM_A64_SCALAR_RECIPE_EXTRACT;
+                if (!arm_a64_scalar_template_contains(row, "#<lsb>") ||
+                    !arm_a64_scalar_field_names(row, (const char* const[]){"Rd", "Rn", "imms", "Rm"}, 4) ||
+                    !arm_a64_scalar_field_shape(row, "Rd", 5, 0) || !arm_a64_scalar_field_shape(row, "Rn", 5, 5) ||
+                    !arm_a64_scalar_field_shape(row, "imms", projection.width == 64 ? 6 : 5, 10) || !arm_a64_scalar_field_shape(row, "Rm", 5, 16) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rd", projection.width, ARM_A64_SCALAR_REGISTER31_ZR) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rn", projection.width, ARM_A64_SCALAR_REGISTER31_ZR) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rm", projection.width, ARM_A64_SCALAR_REGISTER31_ZR) ||
+                    !arm_a64_scalar_set_immediate(&projection))
+                {
+                    return false;
+                }
+                break;
+            case 7:
+                projection.recipe = ARM_A64_SCALAR_RECIPE_MOVEWIDE;
+                if (!arm_a64_scalar_template_contains(row, "#<imm>") || !arm_a64_scalar_template_contains(row, "LSL #<shift>") ||
+                    !arm_a64_scalar_field_names(row, (const char* const[]){"Rd", "imm16", "hw"}, 3) ||
+                    !arm_a64_scalar_field_shape(row, "Rd", 5, 0) || !arm_a64_scalar_field_shape(row, "imm16", 16, 5) ||
+                    !arm_a64_scalar_field_shape(row, "hw", projection.width == 32 ? 1 : 2, 21) ||
+                    !arm_a64_scalar_set_register(&projection, row, "Rd", projection.width, ARM_A64_SCALAR_REGISTER31_ZR) ||
+                    !arm_a64_scalar_set_immediate(&projection))
+                {
+                    return false;
+                }
+                break;
+            case 8:
+            case 9:
+                projection.recipe = suffix_index == 8 ? ARM_A64_SCALAR_RECIPE_COND_CMP_IMM : ARM_A64_SCALAR_RECIPE_COND_CMP_REG;
+                if (!arm_a64_scalar_template_contains(row, "#<nzcv>, <cond>") ||
+                    !arm_a64_scalar_field_shape(row, "nzcv", 4, 0) || !arm_a64_scalar_field_shape(row, "Rn", 5, 5) ||
+                    !arm_a64_scalar_field_shape(row, "cond", 4, 12) || !arm_a64_scalar_set_register(&projection, row, "Rn", projection.width,
+                                                                                                       ARM_A64_SCALAR_REGISTER31_ZR) ||
+                    !arm_a64_scalar_set_immediate(&projection) ||
+                    (suffix_index == 8 && (!arm_a64_scalar_field_names(row, (const char* const[]){"nzcv", "Rn", "cond", "imm5"}, 4) ||
+                                           !arm_a64_scalar_field_shape(row, "imm5", 5, 16))) ||
+                    (suffix_index == 9 && (!arm_a64_scalar_field_names(row, (const char* const[]){"nzcv", "Rn", "cond", "Rm"}, 4) ||
+                                           !arm_a64_scalar_field_shape(row, "Rm", 5, 16))))
+                {
+                    return false;
+                }
+                if (suffix_index == 9)
+                {
+                    projection.operand_count -= 1;
+                    if (!arm_a64_scalar_set_register(&projection, row, "Rm", projection.width, ARM_A64_SCALAR_REGISTER31_ZR)) return false;
+                }
+                if (!arm_a64_scalar_set_immediate(&projection) || !arm_a64_scalar_set_immediate(&projection)) return false;
+                break;
+        }
+    }
+    if (!projection.operand_count || projection.operand_count > 4) return false;
+    if ((projection.recipe == ARM_A64_SCALAR_RECIPE_RMIF && projection.operand_count != 3) ||
+        (projection.recipe == ARM_A64_SCALAR_RECIPE_UDF && projection.operand_count != 1) ||
+        (projection.recipe >= ARM_A64_SCALAR_RECIPE_ADD_SUB_EXT && projection.recipe <= ARM_A64_SCALAR_RECIPE_LOGICAL_SHIFT &&
+         projection.operand_count != 3) ||
+        (projection.recipe == ARM_A64_SCALAR_RECIPE_BITFIELD && projection.operand_count != 4) ||
+        (projection.recipe == ARM_A64_SCALAR_RECIPE_EXTRACT && projection.operand_count != 4) ||
+        (projection.recipe == ARM_A64_SCALAR_RECIPE_MOVEWIDE && projection.operand_count != 2) ||
+        (projection.recipe >= ARM_A64_SCALAR_RECIPE_COND_CMP_IMM && projection.recipe <= ARM_A64_SCALAR_RECIPE_COND_CMP_REG &&
+         projection.operand_count != 4))
+    {
+        return false;
+    }
+    *result = projection;
+    return true;
+}
+
+static void arm_a64_scalar_hex_bare_append(Arena* output, u64 value)
+{
+    static char8 digits[] = "0123456789abcdef";
+    char8 buffer[16];
+    for (u32 index = 0; index < 16; index += 1) buffer[15 - index] = digits[(value >> (index * 4)) & 0xf];
+    u32 first = 0;
+    while (first < 15 && buffer[first] == '0') first += 1;
+    arena_append_string8(output, string_slice((String8){.pointer = buffer, .length = 16}, first, 16));
+}
+
+static bool arm_a64_scalar_projection(Arena* arena, ArmA64CanonicalRows rows, ArmA64ScalarProjectionRow** rows_out, u32* count_out)
+{
+    ArmA64ScalarProjectionRow* projection = arena_allocate(arena, ArmA64ScalarProjectionRow, 128);
+    u32 count = 0;
+    for (u32 index = 0; index < rows.count; index += 1)
+    {
+        ArmA64CanonicalRow* row = &rows.pointer[index];
+        if (!row->apple_m1 || row->system || !string_equal(row->kind, S8("canonical"))) continue;
+        static const char* const structural_suffixes[] = {"_addsub_ext",  "_addsub_imm",  "_addsub_shift", "_log_imm",     "_log_shift",
+                                                           "_bitfield",    "_extract",     "_movewide",     "_condcmp_imm", "_condcmp_reg"};
+        bool structural_candidate = string_equal(row->encoding_name, S8("RMIF_only_rmif")) || string_equal(row->encoding_name, S8("UDF_only_perm_undef"));
+        for (u32 suffix_index = 0; suffix_index < BUSTER_ARRAY_LENGTH(structural_suffixes); suffix_index += 1)
+            structural_candidate |= string_ends_with_sequence(row->encoding_name, string_from_pointer((char8*)structural_suffixes[suffix_index]));
+        if (structural_candidate && row->feature_expression.length && !string_equal(row->feature_expression, S8("FEAT_FlagM"))) return false;
+        ArmA64ScalarProjectionRow candidate = {0};
+        if (!arm_a64_scalar_row_parse(arena, row, &candidate)) continue;
+        if (count >= 128) return false;
+        projection[count++] = candidate;
+    }
+    if (count != 72) return false;
+    u32 arity[5] = {0}, recipe[12] = {0}, feature[2] = {0}, mnemonic_count = 0;
+    ArmA64Sha256 identity;
+    arm_a64_sha256_init(&identity);
+    for (u32 index = 0; index < count; index += 1)
+    {
+        ArmA64ScalarProjectionRow candidate = projection[index];
+        if (candidate.operand_count > 4) return false;
+        arity[candidate.operand_count] += 1;
+        recipe[candidate.recipe] += 1;
+        feature[string_equal(candidate.row->feature_expression, S8("FEAT_FlagM")) ? 1 : 0] += 1;
+        for (u32 prior = 0; prior < index; prior += 1)
+        {
+            if (string_equal(projection[prior].mnemonic, candidate.mnemonic)) break;
+            if (prior + 1 == index) mnemonic_count += 1;
+        }
+        if (!index) mnemonic_count += 1;
+        arm_a64_sha256_update(&identity, (u8*)candidate.row->canonical_id.pointer, candidate.row->canonical_id.length);
+        arm_a64_sha256_update(&identity, (const u8*)" ", 1);
+        arm_a64_sha256_update(&identity, (const u8*)"0x", 2);
+        char8 digest[16];
+        for (u32 nibble = 0; nibble < 16; nibble += 1)
+        {
+            u8 value = (u8)((candidate.row->digest >> ((15 - nibble) * 4)) & 0xf);
+            digest[nibble] = (char8)(value < 10 ? '0' + value : 'a' + value - 10);
+        }
+        u32 first = 0;
+        while (first < 15 && digest[first] == '0') first += 1;
+        arm_a64_sha256_update(&identity, (u8*)digest + first, 16 - first);
+        arm_a64_sha256_update(&identity, (const u8*)"\n", 1);
+    }
+    u8 identity_sha[32] = {0};
+    arm_a64_sha256_final(&identity, identity_sha);
+    static const u8 expected_identity[32] = {
+        0x44, 0x29, 0xd9, 0xab, 0x06, 0x4a, 0x8e, 0x98, 0x56, 0x1c, 0x79, 0x4e, 0x8c, 0x54, 0x08, 0xa3,
+        0x92, 0x2b, 0xc6, 0xa7, 0xf0, 0x7a, 0x32, 0x01, 0x5c, 0xaa, 0xa9, 0x93, 0x2b, 0xa2, 0xc4, 0x84,
+    };
+    if (mnemonic_count != 23 || arity[1] != 1 || arity[2] != 6 || arity[3] != 49 || arity[4] != 16 || feature[0] != 71 || feature[1] != 1 ||
+        recipe[ARM_A64_SCALAR_RECIPE_ADD_SUB_EXT] != 8 || recipe[ARM_A64_SCALAR_RECIPE_ADD_SUB_IMM] != 8 ||
+        recipe[ARM_A64_SCALAR_RECIPE_ADD_SUB_SHIFT] != 8 || recipe[ARM_A64_SCALAR_RECIPE_LOGICAL_IMM] != 8 ||
+        recipe[ARM_A64_SCALAR_RECIPE_LOGICAL_SHIFT] != 16 || recipe[ARM_A64_SCALAR_RECIPE_BITFIELD] != 6 ||
+        recipe[ARM_A64_SCALAR_RECIPE_EXTRACT] != 2 || recipe[ARM_A64_SCALAR_RECIPE_MOVEWIDE] != 6 ||
+        recipe[ARM_A64_SCALAR_RECIPE_COND_CMP_IMM] != 4 || recipe[ARM_A64_SCALAR_RECIPE_COND_CMP_REG] != 4 ||
+        recipe[ARM_A64_SCALAR_RECIPE_RMIF] != 1 || recipe[ARM_A64_SCALAR_RECIPE_UDF] != 1 || memcmp(identity_sha, expected_identity, sizeof(identity_sha)) != 0)
+    {
+        return false;
+    }
+    *rows_out = projection;
+    *count_out = count;
+    return true;
+}
+
+static String8 arm_a64_scalar_recipe_name(u8 recipe)
+{
+    static const char* names[] = {
+        "BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_EXT",   "BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_IMM",
+        "BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_SHIFT", "BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_IMM",
+        "BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_SHIFT", "BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_BITFIELD",
+        "BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_EXTRACT",       "BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_MOVEWIDE",
+        "BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COND_CMP_IMM",  "BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COND_CMP_REG",
+        "BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_RMIF",          "BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_UDF",
+    };
+    return recipe < BUSTER_ARRAY_LENGTH(names) ? string_from_pointer((char8*)names[recipe]) : (String8){0};
+}
+
+static String8 arm_a64_scalar_operand_kind_name(u8 kind)
+{
+    return kind == ARM_A64_SCALAR_OPERAND_REGISTER ? S8("BUSTER_AARCH64_ARM_M1_SCALAR_OPERAND_REGISTER")
+                                                   : S8("BUSTER_AARCH64_ARM_M1_SCALAR_OPERAND_IMMEDIATE");
+}
+
+static String8 arm_a64_scalar_role_name(u8 role)
+{
+    static const char* names[] = {
+        "BUSTER_AARCH64_ARM_M1_SCALAR_REGISTER31_ZR", "BUSTER_AARCH64_ARM_M1_SCALAR_REGISTER31_SP",
+        "BUSTER_AARCH64_ARM_M1_SCALAR_REGISTER31_ANY",
+    };
+    return role < BUSTER_ARRAY_LENGTH(names) ? string_from_pointer((char8*)names[role]) : (String8){0};
+}
+
+static bool arm_a64_append_scalar_header(Arena* output, ArmA64ScalarProjectionRow* rows, u32 count)
+{
+    arena_append_string8(output, S8("/* Generated structurally from the pinned Arm A64 XML; do not edit. */\n"
+                                   "#ifndef BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_GENERATED_H\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_GENERATED_H\n"
+                                   "#include <buster/lib/base.h>\n"
+                                   "#include <buster/lib/target.h>\n\n"
+                                   "typedef enum BusterAarch64ArmM1ScalarIntegerRecipe {\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_EXT,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_IMM,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_ADD_SUB_SHIFT,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_IMM,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_LOGICAL_SHIFT,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_BITFIELD,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_EXTRACT,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_MOVEWIDE,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COND_CMP_IMM,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COND_CMP_REG,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_RMIF,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_UDF,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_RECIPE_COUNT,\n"
+                                   "} BusterAarch64ArmM1ScalarIntegerRecipe;\n\n"
+                                   "typedef enum BusterAarch64ArmM1ScalarIntegerOperandKind {\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_OPERAND_REGISTER,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_OPERAND_IMMEDIATE,\n"
+                                   "} BusterAarch64ArmM1ScalarIntegerOperandKind;\n\n"
+                                   "typedef enum BusterAarch64ArmM1ScalarIntegerRegister31Role {\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_REGISTER31_ZR,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_REGISTER31_SP,\n"
+                                   "    BUSTER_AARCH64_ARM_M1_SCALAR_REGISTER31_ANY,\n"
+                                   "} BusterAarch64ArmM1ScalarIntegerRegister31Role;\n\n"
+                                   "typedef struct BusterAarch64ArmM1ScalarIntegerGeneratedOperand BusterAarch64ArmM1ScalarIntegerGeneratedOperand;\n"
+                                   "struct BusterAarch64ArmM1ScalarIntegerGeneratedOperand {\n"
+                                   "    u8 kind;\n    u8 width;\n    u8 register31_role;\n    u8 reserved;\n};\n\n"
+                                   "typedef struct BusterAarch64ArmM1ScalarIntegerGeneratedForm BusterAarch64ArmM1ScalarIntegerGeneratedForm;\n"
+                                   "struct BusterAarch64ArmM1ScalarIntegerGeneratedForm {\n"
+                                   "    const char* mnemonic;\n    const char* arm_row_id;\n    u64 arm_row_digest;\n    u32 fixed_mask;\n    u32 fixed_value;\n    TargetCpuFeature required_feature;\n    u8 recipe;\n    u8 width;\n    u8 operand_count;\n    u8 reserved;\n    BusterAarch64ArmM1ScalarIntegerGeneratedOperand operands[4];\n};\n\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_FORM_COUNT 72u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_MNEMONIC_COUNT 23u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_ARITY_1_COUNT 1u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_ARITY_2_COUNT 6u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_ARITY_3_COUNT 49u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_ARITY_4_COUNT 16u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_BASELINE_COUNT 71u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_FLAGM_COUNT 1u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_RECIPE_ADD_SUB_EXT_COUNT 8u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_RECIPE_ADD_SUB_IMM_COUNT 8u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_RECIPE_ADD_SUB_SHIFT_COUNT 8u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_RECIPE_LOGICAL_IMM_COUNT 8u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_RECIPE_LOGICAL_SHIFT_COUNT 16u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_RECIPE_BITFIELD_COUNT 6u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_RECIPE_EXTRACT_COUNT 2u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_RECIPE_MOVEWIDE_COUNT 6u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_RECIPE_COND_CMP_IMM_COUNT 4u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_RECIPE_COND_CMP_REG_COUNT 4u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_RECIPE_RMIF_COUNT 1u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_RECIPE_UDF_COUNT 1u\n"
+                                   "#define BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_IDENTITY_SHA256 \"4429d9ab064a8e98561c794e8c5408a3922bc6a7f07a32015caaa9932ba2c484\"\n\n"
+                                   "static const BusterAarch64ArmM1ScalarIntegerGeneratedForm buster_aarch64_arm_m1_scalar_integer_generated_forms[] = {\n"));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        ArmA64ScalarProjectionRow candidate = rows[index];
+        arena_append_string8(output, S8("    {\n        .mnemonic = "));
+        arm_a64_c_string(output, candidate.mnemonic);
+        arena_append_string8(output, S8(", .arm_row_id = "));
+        arm_a64_c_string(output, candidate.row->canonical_id);
+        arena_append_string8(output, S8(", .arm_row_digest = UINT64_C("));
+        arm_a64_hex_append(output, candidate.row->digest);
+        arena_append_string8(output, S8("),\n        .fixed_mask = UINT32_C("));
+        arm_a64_hex32_append(output, candidate.row->fixed_mask);
+        arena_append_string8(output, S8("), .fixed_value = UINT32_C("));
+        arm_a64_hex32_append(output, candidate.row->fixed_value);
+        arena_append_string8(output, S8("),\n        .required_feature = "));
+        arena_append_string8(output, arm_a64_gpr_feature_name(candidate.row->feature_expression));
+        arena_append_string8(output, S8(", .recipe = "));
+        arena_append_string8(output, arm_a64_scalar_recipe_name(candidate.recipe));
+        arena_append_string8(output, S8(", .width = "));
+        arm_a64_append_u64(output, candidate.width);
+        arena_append_string8(output, S8("u, .operand_count = "));
+        arm_a64_append_u64(output, candidate.operand_count);
+        arena_append_string8(output, S8("u,\n        .operands = {\n"));
+        for (u32 operand_index = 0; operand_index < candidate.operand_count; operand_index += 1)
+        {
+            ArmA64ScalarProjectionOperand operand = candidate.operands[operand_index];
+            arena_append_string8(output, S8("            {.kind = "));
+            arena_append_string8(output, arm_a64_scalar_operand_kind_name(operand.kind));
+            arena_append_string8(output, S8(", .width = "));
+            arm_a64_append_u64(output, operand.width);
+            arena_append_string8(output, S8("u, .register31_role = "));
+            arena_append_string8(output, arm_a64_scalar_role_name(operand.register31_role));
+            arena_append_string8(output, S8("},\n"));
+        }
+        arena_append_string8(output, S8("        },\n    },\n"));
+    }
+    arena_append_string8(output, S8("};\nBUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(buster_aarch64_arm_m1_scalar_integer_generated_forms) == BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_FORM_COUNT);\n#endif\n"));
+    return true;
+}
+
 static String8 arm_a64_gpr_feature_name(String8 expression)
 {
     if (!expression.length) return S8("TARGET_CPU_FEATURE_NONE");
@@ -2400,6 +2973,9 @@ static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, const
                                     u64 artifact_bytes, u64 fixed_header_hash, u64 fixed_header_bytes,
                                     u64 gpr_header_hash, u64 gpr_header_bytes, u32 gpr_form_count, u32 gpr_mnemonic_count,
                                     const u32 gpr_arity_counts[4], const u32 gpr_feature_counts[4],
+                                    u64 scalar_header_hash, u64 scalar_header_bytes, u32 scalar_form_count, u32 scalar_mnemonic_count,
+                                    const u32 scalar_arity_counts[4], const u32 scalar_feature_counts[2],
+                                    const u32 scalar_recipe_counts[12], const char* scalar_identity_sha256,
                                     ArmA64CanonicalRows rows, u32 page_count, u32 instruction_pages, u32 alias_pages, u32 pseudocode_pages,
                                     u32 iclass_count, u32 regdiagram_count, u32 selected, u32 selected_canonical,
                                     u32 selected_alias, u32 selected_system, u32 selected_system_canonical, u32 selected_system_alias,
@@ -2450,6 +3026,32 @@ static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, const
     arena_append_string8(output, S8(", \"flagm\": ")); arm_a64_append_u64(output, gpr_feature_counts[2]);
     arena_append_string8(output, S8(", \"pauth\": ")); arm_a64_append_u64(output, gpr_feature_counts[3]);
     arena_append_string8(output, S8("}, \"unresolved_mask\": \"0x00000000\"},\n"));
+    arena_append_string8(output, S8("  \"scalar_integer_artifact\": {\"file\": \"arm-a64-m1-scalar-integer.generated.h\", \"bytes\": "));
+    arm_a64_append_u64(output, scalar_header_bytes);
+    arena_append_string8(output, S8(", \"xxh64\": ")); arm_a64_json_hex(output, scalar_header_hash);
+    arena_append_string8(output, S8(", \"forms\": ")); arm_a64_append_u64(output, scalar_form_count);
+    arena_append_string8(output, S8(", \"mnemonics\": ")); arm_a64_append_u64(output, scalar_mnemonic_count);
+    arena_append_string8(output, S8(", \"arity\": {\"1\": ")); arm_a64_append_u64(output, scalar_arity_counts[0]);
+    arena_append_string8(output, S8(", \"2\": ")); arm_a64_append_u64(output, scalar_arity_counts[1]);
+    arena_append_string8(output, S8(", \"3\": ")); arm_a64_append_u64(output, scalar_arity_counts[2]);
+    arena_append_string8(output, S8(", \"4\": ")); arm_a64_append_u64(output, scalar_arity_counts[3]);
+    arena_append_string8(output, S8("}, \"features\": {\"baseline\": ")); arm_a64_append_u64(output, scalar_feature_counts[0]);
+    arena_append_string8(output, S8(", \"flagm\": ")); arm_a64_append_u64(output, scalar_feature_counts[1]);
+    arena_append_string8(output, S8("}, \"recipes\": {\"add_sub_ext\": ")); arm_a64_append_u64(output, scalar_recipe_counts[0]);
+    arena_append_string8(output, S8(", \"add_sub_imm\": ")); arm_a64_append_u64(output, scalar_recipe_counts[1]);
+    arena_append_string8(output, S8(", \"add_sub_shift\": ")); arm_a64_append_u64(output, scalar_recipe_counts[2]);
+    arena_append_string8(output, S8(", \"logical_imm\": ")); arm_a64_append_u64(output, scalar_recipe_counts[3]);
+    arena_append_string8(output, S8(", \"logical_shift\": ")); arm_a64_append_u64(output, scalar_recipe_counts[4]);
+    arena_append_string8(output, S8(", \"bitfield\": ")); arm_a64_append_u64(output, scalar_recipe_counts[5]);
+    arena_append_string8(output, S8(", \"extract\": ")); arm_a64_append_u64(output, scalar_recipe_counts[6]);
+    arena_append_string8(output, S8(", \"movewide\": ")); arm_a64_append_u64(output, scalar_recipe_counts[7]);
+    arena_append_string8(output, S8(", \"condcmp_imm\": ")); arm_a64_append_u64(output, scalar_recipe_counts[8]);
+    arena_append_string8(output, S8(", \"condcmp_reg\": ")); arm_a64_append_u64(output, scalar_recipe_counts[9]);
+    arena_append_string8(output, S8(", \"rmif\": ")); arm_a64_append_u64(output, scalar_recipe_counts[10]);
+    arena_append_string8(output, S8(", \"udf\": ")); arm_a64_append_u64(output, scalar_recipe_counts[11]);
+    arena_append_string8(output, S8("}, \"normalized_identity_sha256\": "));
+    arm_a64_json_string(output, string_from_pointer((char8*)scalar_identity_sha256));
+    arena_append_string8(output, S8(", \"unresolved_mask\": \"0x00000000\"},\n"));
     arena_append_string8(output, S8("  \"symmetric_difference\": {\"count\": 33, \"excluded_pauth_lr\": 17, \"included_special\": 16, \"inventory\": ["));
     static const char* excluded[] = {"AUTIA171615_64LR_dp_1src","AUTIASPPCR_64LRR_dp_1src","AUTIASPPC_only_dp_1src_imm","AUTIB171615_64LR_dp_1src","AUTIBSPPCR_64LRR_dp_1src","AUTIBSPPC_only_dp_1src_imm","PACIA171615_64LR_dp_1src","PACIASPPC_64LR_dp_1src","PACIB171615_64LR_dp_1src","PACIBSPPC_64LR_dp_1src","PACM_HI_hints","PACNBIASPPC_64LR_dp_1src","PACNBIBSPPC_64LR_dp_1src","RETAASPPCR_64M_branch_reg","RETABSPPCR_64M_branch_reg","RETAASPPC_only_miscbranch","RETABSPPC_only_miscbranch"};
     static const char* included[] = {"ESB_HI_hints","CFP_SYS_CR_systeminstrs","CPP_SYS_CR_systeminstrs","DVP_SYS_CR_systeminstrs","SHA1C_QSV_cryptosha3","SHA1H_SS_cryptosha2","SHA1M_QSV_cryptosha3","SHA1P_QSV_cryptosha3","SHA1SU0_VVV_cryptosha3","SHA1SU1_VV_cryptosha2","SHA512H2_QQV_cryptosha512_3","SHA512H_QQV_cryptosha512_3","SHA512SU0_VV2_cryptosha512_2","SHA512SU1_VVV2_cryptosha512_3","AXFLAG_M_pstate","XAFLAG_M_pstate"};
@@ -2498,7 +3100,8 @@ static bool arm_a64_readme_canonical_section_digest(ByteSlice readme, u8 digest[
     return true;
 }
 
-static bool arm_a64_check_existing_outputs(Arena* arena, String8 output_directory, String8 artifact, String8 manifest, String8 fixed_header, String8 gpr_header)
+static bool arm_a64_check_existing_outputs(Arena* arena, String8 output_directory, String8 artifact, String8 manifest, String8 fixed_header, String8 gpr_header,
+                                           String8 scalar_header)
 {
     TemporalArena scratch_scope = scratch_begin(&arena, 1);
     Arena* scratch = scratch_scope.arena;
@@ -2506,15 +3109,17 @@ static bool arm_a64_check_existing_outputs(Arena* arena, String8 output_director
     String8 manifest_path = path_join(scratch, output_directory, S8("arm-a64-canonical-manifest.json"));
     String8 fixed_header_path = path_join(scratch, output_directory, S8("arm-a64-m1-fixed.generated.h"));
     String8 gpr_header_path = path_join(scratch, output_directory, S8("arm-a64-m1-gpr.generated.h"));
+    String8 scalar_header_path = path_join(scratch, output_directory, S8("arm-a64-m1-scalar-integer.generated.h"));
     String8 readme_path = path_join(scratch, output_directory, S8("README.md"));
     bool valid = arm_a64_check_file(scratch, artifact_path, artifact, "canonical artifact") &&
                  arm_a64_check_file(scratch, manifest_path, manifest, "canonical manifest") &&
                  arm_a64_check_file(scratch, fixed_header_path, fixed_header, "M1 fixed-spelling header") &&
-                 arm_a64_check_file(scratch, gpr_header_path, gpr_header, "M1 direct-GPR header");
+                 arm_a64_check_file(scratch, gpr_header_path, gpr_header, "M1 direct-GPR header") &&
+                 arm_a64_check_file(scratch, scalar_header_path, scalar_header, "M1 scalar-integer header");
     ByteSlice readme = file_read(scratch, readme_path, (FileReadOptions){0});
     static const u8 expected_readme_section_sha256[32] = {
-        0x60, 0x8c, 0x48, 0x1f, 0x5f, 0x8a, 0x0a, 0x04, 0xfb, 0xa3, 0x18, 0xf6, 0xfd, 0xff, 0xe5, 0x7e,
-        0x4a, 0x9f, 0x11, 0x0a, 0x5f, 0xdc, 0x2e, 0xad, 0x64, 0x20, 0x5f, 0x3c, 0xf0, 0xfd, 0x5e, 0x52,
+        0x96, 0x1e, 0x7b, 0x74, 0xf6, 0x58, 0x89, 0x19, 0x1a, 0x9e, 0xfc, 0x86, 0xfe, 0xa7, 0x6d, 0x0d,
+        0x79, 0x68, 0x27, 0x68, 0x03, 0x59, 0x5f, 0x2a, 0x93, 0xbc, 0x6b, 0x4d, 0xf1, 0xf6, 0x5d, 0xdc,
     };
     u8 readme_section_sha256[32] = {0};
     if (!readme.pointer || !readme.length || !arm_a64_readme_canonical_section_digest(readme, readme_section_sha256) ||
@@ -2794,12 +3399,50 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
         else if (string_equal(candidate.row->feature_expression, S8("FEAT_FlagM"))) feature_index = 2;
         gpr_feature_counts[feature_index] += 1;
     }
+    ArmA64ScalarProjectionRow* scalar_rows = 0;
+    u32 scalar_form_count = 0;
+    if (!arm_a64_scalar_projection(arena, rows, &scalar_rows, &scalar_form_count))
+    {
+        string_print(S8("error: Arm A64 scalar-integer projection census or identity gate failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    u64 scalar_header_mark = output_arena->position;
+    if (!arm_a64_append_scalar_header(output_arena, scalar_rows, scalar_form_count))
+    {
+        string_print(S8("error: Arm A64 scalar-integer projection header emission mismatch\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 scalar_header = (String8){.pointer = (char8*)arm_a64_arena_pointer(output_arena, scalar_header_mark), .length = output_arena->position - scalar_header_mark};
+    u32 scalar_arity_counts[4] = {0};
+    u32 scalar_feature_counts[2] = {0};
+    u32 scalar_recipe_counts[12] = {0};
+    u32 scalar_mnemonic_count = 0;
+    for (u32 scalar_index = 0; scalar_index < scalar_form_count; scalar_index += 1)
+    {
+        ArmA64ScalarProjectionRow candidate = scalar_rows[scalar_index];
+        if (candidate.operand_count >= 1 && candidate.operand_count <= 4) scalar_arity_counts[candidate.operand_count - 1] += 1;
+        scalar_feature_counts[string_equal(candidate.row->feature_expression, S8("FEAT_FlagM")) ? 1 : 0] += 1;
+        scalar_recipe_counts[candidate.recipe] += 1;
+        bool seen_mnemonic = false;
+        for (u32 prior = 0; prior < scalar_index; prior += 1)
+        {
+            if (string_equal(scalar_rows[prior].mnemonic, candidate.mnemonic))
+            {
+                seen_mnemonic = true;
+                break;
+            }
+        }
+        if (!seen_mnemonic) scalar_mnemonic_count += 1;
+    }
     u64 manifest_mark = output_arena->position;
     arm_a64_append_manifest(output_arena, source_tree_digest, source_tree_sha256, source_file_count,
                             buster_hash_64((u8*)artifact.pointer, artifact.length), artifact.length,
                             buster_hash_64((u8*)fixed_header.pointer, fixed_header.length), fixed_header.length,
                             buster_hash_64((u8*)gpr_header.pointer, gpr_header.length), gpr_header.length, gpr_form_count, gpr_mnemonic_count,
-                            gpr_arity_counts, gpr_feature_counts, rows, page_count,
+                            gpr_arity_counts, gpr_feature_counts,
+                            buster_hash_64((u8*)scalar_header.pointer, scalar_header.length), scalar_header.length, scalar_form_count, scalar_mnemonic_count,
+                            scalar_arity_counts, scalar_feature_counts, scalar_recipe_counts,
+                            "4429d9ab064a8e98561c794e8c5408a3922bc6a7f07a32015caaa9932ba2c484", rows, page_count,
                             instruction_pages, alias_pages, pseudocode_pages, iclass_count, regdiagram_count, selected, selected_canonical,
                             selected_alias, selected_system, selected_system_canonical, selected_system_alias, selected - selected_system,
                             selected_canonical - selected_system_canonical, selected_alias - selected_system_alias);
@@ -2808,16 +3451,18 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
     String8 manifest_path = path_join(arena, options.output_directory, S8("arm-a64-canonical-manifest.json"));
     String8 fixed_header_path = path_join(arena, options.output_directory, S8("arm-a64-m1-fixed.generated.h"));
     String8 gpr_header_path = path_join(arena, options.output_directory, S8("arm-a64-m1-gpr.generated.h"));
+    String8 scalar_header_path = path_join(arena, options.output_directory, S8("arm-a64-m1-scalar-integer.generated.h"));
     if (arm_a64_check_mode_enabled())
     {
-        if (!arm_a64_check_existing_outputs(arena, options.output_directory, artifact, manifest, fixed_header, gpr_header)) return PROCESS_RESULT_FAILED;
-        string_print(S8("Arm A64 checked-in canonical artifacts, M1 fixed spellings, direct-GPR forms, and README.md canonical section match deterministic import output: {S8}\n"),
+        if (!arm_a64_check_existing_outputs(arena, options.output_directory, artifact, manifest, fixed_header, gpr_header, scalar_header)) return PROCESS_RESULT_FAILED;
+        string_print(S8("Arm A64 checked-in canonical artifacts, M1 fixed spellings, direct-GPR/scalar-integer forms, and README.md canonical section match deterministic import output: {S8}\n"),
                      options.output_directory);
         return PROCESS_RESULT_SUCCESS;
     }
     make_directory_recursive(arena, options.output_directory);
     if (!file_write(artifact_path, BUSTER_SLICE_TO_BYTE_SLICE(artifact)) || !file_write(manifest_path, BUSTER_SLICE_TO_BYTE_SLICE(manifest)) ||
-        !file_write(fixed_header_path, BUSTER_SLICE_TO_BYTE_SLICE(fixed_header)) || !file_write(gpr_header_path, BUSTER_SLICE_TO_BYTE_SLICE(gpr_header)))
+        !file_write(fixed_header_path, BUSTER_SLICE_TO_BYTE_SLICE(fixed_header)) || !file_write(gpr_header_path, BUSTER_SLICE_TO_BYTE_SLICE(gpr_header)) ||
+        !file_write(scalar_header_path, BUSTER_SLICE_TO_BYTE_SLICE(scalar_header)))
     {
         string_print(S8("error: failed to write Arm A64 canonical artifacts\n"));
         return PROCESS_RESULT_FAILED;
