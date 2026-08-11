@@ -164,6 +164,8 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
 #endif
     BUSTER_STRING_TEST(arguments, external_data_program.failing_symbol, imported_data.name);
     BUSTER_TEST(arguments, !external_data_program.allocation_base);
+    jit_program_release(&external_data_program);
+    BUSTER_TEST(arguments, !external_data_program.allocation_base && !external_data_program.object);
 
 #if BUSTER_CPU_ARCH_X86_64
     u64 external_data_value = UINT64_C(0x1122334455667788);
@@ -180,7 +182,32 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, unsupported_data_program.error == JIT_ERROR_EXTERNAL_DATA);
     BUSTER_STRING_TEST(arguments, unsupported_data_program.failing_symbol, imported_data.name);
     BUSTER_TEST(arguments, !unsupported_data_program.allocation_base);
+    jit_program_release(&unsupported_data_program);
+    BUSTER_TEST(arguments, !unsupported_data_program.allocation_base && !unsupported_data_program.object);
 
+    JitHostBinding wrong_kind_data_binding = external_data_binding;
+    wrong_kind_data_binding.kind = OBJECT_SYMBOL_FUNCTION;
+    JitProgram wrong_kind_data_program =
+        jit_link_object(&external_data_object, (JitOptions){.bindings = &wrong_kind_data_binding, .binding_count = 1});
+    BUSTER_TEST(arguments, wrong_kind_data_program.error == JIT_ERROR_BINDING_KIND);
+    BUSTER_STRING_TEST(arguments, wrong_kind_data_program.failing_symbol, imported_data.name);
+    BUSTER_TEST(arguments, !wrong_kind_data_program.allocation_base);
+    jit_program_release(&wrong_kind_data_program);
+    BUSTER_TEST(arguments, !wrong_kind_data_program.allocation_base && !wrong_kind_data_program.object);
+
+    JitHostBinding null_data_binding = external_data_binding;
+    null_data_binding.address = 0;
+    JitProgram null_data_program =
+        jit_link_object(&external_data_object, (JitOptions){.bindings = &null_data_binding, .binding_count = 1});
+    BUSTER_TEST(arguments, null_data_program.error == JIT_ERROR_INVALID_BINDING);
+    BUSTER_STRING_TEST(arguments, null_data_program.failing_symbol, imported_data.name);
+    BUSTER_TEST(arguments, !null_data_program.allocation_base);
+    jit_program_release(&null_data_program);
+    BUSTER_TEST(arguments, !null_data_program.allocation_base && !null_data_program.object);
+
+    // Keep successful direct-link coverage off every macOS build: Apple's public
+    // MAP_JIT contract permits only one region per process, while this test module
+    // already links the native JIT fixture below.
 #if !BUSTER_SANITIZE && !BUSTER_MACOS && !BUSTER_IOS && !BUSTER_ANDROID
     JitProgram bound_data_program =
         jit_link_object(&external_data_object, (JitOptions){.bindings = &external_data_binding, .binding_count = 1});
@@ -198,6 +225,55 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
     }
     jit_program_release(&bound_data_program);
     BUSTER_TEST(arguments, !bound_data_program.allocation_base && !bound_data_program.object);
+
+    absolute_import.addend = 8;
+    JitProgram positive_addend_program =
+        jit_link_object(&external_data_object, (JitOptions){.bindings = &external_data_binding, .binding_count = 1});
+    BUSTER_TEST(arguments, positive_addend_program.error == JIT_ERROR_NONE);
+    if (positive_addend_program.error == JIT_ERROR_NONE && positive_addend_program.section_addresses[0])
+    {
+        u64 linked_address = 0;
+        memcpy(&linked_address, positive_addend_program.section_addresses[0], sizeof(linked_address));
+        BUSTER_TEST(arguments, linked_address == (u64)(uintptr_t)&external_data_value + 8);
+    }
+    jit_program_release(&positive_addend_program);
+    BUSTER_TEST(arguments, !positive_addend_program.allocation_base && !positive_addend_program.object);
+
+    absolute_import.addend = -8;
+    JitProgram negative_addend_program =
+        jit_link_object(&external_data_object, (JitOptions){.bindings = &external_data_binding, .binding_count = 1});
+    BUSTER_TEST(arguments, negative_addend_program.error == JIT_ERROR_NONE);
+    if (negative_addend_program.error == JIT_ERROR_NONE && negative_addend_program.section_addresses[0])
+    {
+        u64 linked_address = 0;
+        memcpy(&linked_address, negative_addend_program.section_addresses[0], sizeof(linked_address));
+        BUSTER_TEST(arguments, linked_address == (u64)(uintptr_t)&external_data_value - 8);
+    }
+    jit_program_release(&negative_addend_program);
+    BUSTER_TEST(arguments, !negative_addend_program.allocation_base && !negative_addend_program.object);
+
+    JitHostBinding overflow_data_binding = external_data_binding;
+    overflow_data_binding.address = (void*)(uintptr_t)UINT64_MAX;
+    absolute_import.addend = 1;
+    JitProgram overflow_data_program =
+        jit_link_object(&external_data_object, (JitOptions){.bindings = &overflow_data_binding, .binding_count = 1});
+    BUSTER_TEST(arguments, overflow_data_program.error == JIT_ERROR_CAPACITY);
+    BUSTER_STRING_TEST(arguments, overflow_data_program.failing_symbol, imported_data.name);
+    BUSTER_TEST(arguments, !overflow_data_program.allocation_base && !overflow_data_program.auxiliary_allocation_base);
+    jit_program_release(&overflow_data_program);
+    BUSTER_TEST(arguments, !overflow_data_program.allocation_base && !overflow_data_program.object);
+
+    JitHostBinding underflow_data_binding = external_data_binding;
+    underflow_data_binding.address = (void*)(uintptr_t)1;
+    absolute_import.addend = -2;
+    JitProgram underflow_data_program =
+        jit_link_object(&external_data_object, (JitOptions){.bindings = &underflow_data_binding, .binding_count = 1});
+    BUSTER_TEST(arguments, underflow_data_program.error == JIT_ERROR_CAPACITY);
+    BUSTER_STRING_TEST(arguments, underflow_data_program.failing_symbol, imported_data.name);
+    BUSTER_TEST(arguments, !underflow_data_program.allocation_base && !underflow_data_program.auxiliary_allocation_base);
+    jit_program_release(&underflow_data_program);
+    BUSTER_TEST(arguments, !underflow_data_program.allocation_base && !underflow_data_program.object);
+    absolute_import.addend = 0;
 #endif
 #endif
 
@@ -279,6 +355,7 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, diagnostic.pointer && diagnostic.length);
     }
     BUSTER_STRING_TEST(arguments, jit_error_string((JitError)JIT_ERROR_COUNT), S8("unknown JIT error"));
+    BUSTER_STRING_TEST(arguments, jit_error_string(JIT_ERROR_EXTERNAL_DATA), S8("external data relocation is unsupported for this JIT target"));
 
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_SANITIZE && !BUSTER_IOS && !BUSTER_ANDROID
     u8 native_text[48] = {0};

@@ -835,7 +835,7 @@ String8 jit_error_string(JitError error)
         case JIT_ERROR_UNSUPPORTED_RELOCATION:
             return S8("unsupported relocation in a loaded JIT section");
         case JIT_ERROR_EXTERNAL_DATA:
-            return S8("external data imports are not supported by the JIT");
+            return S8("external data relocation is unsupported for this JIT target");
         case JIT_ERROR_SYMBOL_BOUNDS:
             return S8("JIT symbol is outside its loaded section");
         case JIT_ERROR_SYMBOL_NOT_FOUND:
