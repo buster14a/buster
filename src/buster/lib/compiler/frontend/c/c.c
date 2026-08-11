@@ -9186,6 +9186,7 @@ struct CParseInitializerInferenceDesignator
     CTypeId value_type;
     u32 value_start;
     u64 selected;
+    u64 selected_end;
     CParseInitializerContinuation* continuations;
     u32 continuation_count;
     bool has_designator;
@@ -9411,6 +9412,72 @@ BUSTER_GLOBAL_LOCAL bool c_parse_initializer_index(CTypeParseMachine* machine, A
     return c_parse_integer_constant_range(machine, arena, preprocess, result, scope, start, end, value_out);
 }
 
+BUSTER_GLOBAL_LOCAL bool c_parse_initializer_index_range(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                         CScopeId scope, u32 start, u32 end, u64* first_out, u64* last_out, bool* range_out)
+{
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    u32 braces = 0;
+    u32 ellipsis = end;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            parentheses += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            parentheses -= parentheses != 0;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            brackets += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            brackets -= brackets != 0;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            braces += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            braces -= braces != 0;
+        }
+        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_ELLIPSIS))
+        {
+            if (ellipsis != end)
+            {
+                return false;
+            }
+            ellipsis = index;
+        }
+    }
+    u64 first = 0;
+    u64 last = 0;
+    bool is_range = ellipsis != end;
+    if (!is_range)
+    {
+        if (!c_parse_initializer_index(machine, arena, preprocess, result, scope, start, end, &first))
+        {
+            return false;
+        }
+        last = first;
+    }
+    else if (ellipsis == start || ellipsis + 1 >= end ||
+             !c_parse_initializer_index(machine, arena, preprocess, result, scope, start, ellipsis, &first) ||
+             !c_parse_initializer_index(machine, arena, preprocess, result, scope, ellipsis + 1, end, &last) || first > last)
+    {
+        return false;
+    }
+    if (first_out) *first_out = first;
+    if (last_out) *last_out = last;
+    if (range_out) *range_out = is_range;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_parse_initializer_designator(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                          CScopeId scope, CParseInitializerInferenceFrame* frame, u32 start, u32 limit,
                                                          CParseInitializerContinuation* continuation_work, u32 continuation_capacity,
@@ -9418,6 +9485,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_initializer_designator(CTypeParseMachine* machi
 {
     CTypeId current = frame->root ? frame->element_type : frame->type;
     u64 selected = frame->next_index;
+    u64 selected_end = selected;
     u32 cursor = start;
     bool first = true;
     bool has_designator = false;
@@ -9434,26 +9502,30 @@ BUSTER_GLOBAL_LOCAL bool c_parse_initializer_designator(CTypeParseMachine* machi
         {
             u32 close = c_parse_matching_delimiter(preprocess, cursor, limit, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
             u64 index = 0;
-            if (close >= limit || close == cursor + 1 || !c_parse_initializer_index(machine, arena, preprocess, result, scope, cursor + 1, close, &index))
+            u64 last = 0;
+            bool is_range = false;
+            if (close >= limit || close == cursor + 1 ||
+                !c_parse_initializer_index_range(machine, arena, preprocess, result, scope, cursor + 1, close, &index, &last, &is_range))
             {
                 return false;
             }
             if (frame->root && first)
             {
                 selected = index;
+                selected_end = last;
                 current = frame->element_type;
             }
             else
             {
                 if (!first)
                 {
-                    if (designator->continuation_count >= continuation_capacity || selected == UINT64_MAX)
+                    if (designator->continuation_count >= continuation_capacity || last == UINT64_MAX)
                     {
                         return false;
                     }
                     designator->continuations[designator->continuation_count++] = (CParseInitializerContinuation){
                         .type = current,
-                        .next_index = index + 1,
+                        .next_index = last + 1,
                     };
                 }
                 if (current.value >= result->type_count || result->types[current.value].kind != C_TYPE_ARRAY)
@@ -9464,13 +9536,14 @@ BUSTER_GLOBAL_LOCAL bool c_parse_initializer_designator(CTypeParseMachine* machi
                     .type = current,
                 };
                 u64 slots = 0;
-                if (!c_parse_initializer_type_slots(machine, arena, preprocess, result, scope, &nested, &slots) || index >= slots)
+                if (!c_parse_initializer_type_slots(machine, arena, preprocess, result, scope, &nested, &slots) || last >= slots)
                 {
                     return false;
                 }
                 if (first)
                 {
                     selected = index;
+                    selected_end = last;
                 }
                 current = result->types[current.value].element_type;
             }
@@ -9560,6 +9633,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_initializer_designator(CTypeParseMachine* machi
         designator->value_type = current;
         designator->value_start = cursor + 1;
         designator->selected = selected;
+        designator->selected_end = selected_end;
         designator->has_designator = true;
         return true;
     }
@@ -9592,6 +9666,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_initializer_designator(CTypeParseMachine* machi
     }
     designator->value_start = start;
     designator->selected = selected;
+    designator->selected_end = selected_end;
     designator->has_designator = false;
     return true;
 }
@@ -9773,9 +9848,14 @@ BUSTER_GLOBAL_LOCAL bool c_parse_infer_initializer_array_count_core(CTypeParseMa
                                                            c_token_is_punctuator(&preprocess.tokens[frame->cursor], C_PUNCTUATOR_DOT));
         if (designated && frame->borrowed)
         {
+            u32 designated_cursor = frame->cursor;
             while (frame_count && frames[frame_count - 1].borrowed)
             {
                 frame_count -= 1;
+                if (frame_count)
+                {
+                    frames[frame_count - 1].cursor = designated_cursor;
+                }
             }
             if (!frame_count)
             {
@@ -9816,15 +9896,15 @@ BUSTER_GLOBAL_LOCAL bool c_parse_infer_initializer_array_count_core(CTypeParseMa
         CParseInitializerInferenceDesignator designator = {0};
         if (!c_parse_initializer_designator(machine, result_arena, preprocess, result, scope, frame, frame->cursor, frame->limit, continuation_work,
                                              (u32)(span + 1), &designator) ||
-            designator.selected == UINT64_MAX)
+            designator.selected_end == UINT64_MAX)
         {
             return false;
         }
         if (frame->root)
         {
-            count = BUSTER_MAX(count, designator.selected + 1);
+            count = BUSTER_MAX(count, designator.selected_end + 1);
         }
-        frame->next_index = designator.selected + 1;
+        frame->next_index = designator.selected_end + 1;
         if (designator.value_type.value >= result->type_count || designator.value_start >= frame->limit)
         {
             return false;
@@ -28606,6 +28686,18 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, I
 
 BUSTER_GLOBAL_LOCAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out);
 
+BUSTER_GLOBAL_LOCAL bool c_ir_array_designator_has_range(CIntegerIrBuilder* builder, u32 start, u32 close)
+{
+    for (u32 index = start + 1; index < close; index += 1)
+    {
+        if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_ELLIPSIS))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -28742,6 +28834,10 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuild
                 if (close >= index || close + 1 >= index || !c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_ASSIGN) ||
                     close != item_start + 2)
                 {
+                    if (close < index && c_ir_array_designator_has_range(builder, item_start, close))
+                    {
+                        builder->failure_message = S8("range designators are only supported for static aggregate initializers");
+                    }
                     goto c_ir_nested_compound_failed;
                 }
                 CToken designator = builder->preprocess.tokens[item_start + 1];
@@ -29121,6 +29217,15 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* bui
             if (designator_close >= close || designator_close == index + 1 || designator_close + 1 >= close ||
                 !c_token_is_punctuator(&builder->preprocess.tokens[designator_close + 1], C_PUNCTUATOR_ASSIGN))
             {
+                if (designator_close < close && c_ir_array_designator_has_range(builder, index, designator_close))
+                {
+                    builder->failure_message = S8("range designators are only supported for static aggregate initializers");
+                }
+                goto c_ir_compound_literal_failed;
+            }
+            if (c_ir_array_designator_has_range(builder, index, designator_close))
+            {
+                builder->failure_message = S8("range designators are only supported for static aggregate initializers");
                 goto c_ir_compound_literal_failed;
             }
             u64 designated_index = UINT64_MAX;
@@ -37250,9 +37355,34 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* buil
 
 BUSTER_GLOBAL_LOCAL String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out)
 {
+    u32 initializer_parentheses = 0;
+    u32 initializer_brackets = 0;
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            initializer_parentheses += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            initializer_parentheses -= initializer_parentheses != 0;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            initializer_brackets += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            initializer_brackets -= initializer_brackets != 0;
+        }
+        else if (!initializer_parentheses && initializer_brackets == 1 && c_token_is_punctuator(&token, C_PUNCTUATOR_ELLIPSIS))
+        {
+            *token_index_out = index;
+            return c_preprocess_dialect_is_gnu(preprocess.dialect)
+                       ? (String8){0}
+                       : S8("GNU initializer ranges are only available in GNU dialects");
+        }
         if (token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("goto")) && index + 1 < end &&
             c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR))
         {
@@ -40478,6 +40608,28 @@ BUSTER_GLOBAL_LOCAL u64 c_ir_constant_initializer_child_offset(IrType* type, u64
 BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_type, u8* bytes, u64 byte_count,
                                                          IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity);
 
+BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, u32 start, u32 end, IrTypeId root_type,
+                                                              u8* bytes, u64 byte_count, IrGlobalRelocation* relocations, u32* relocation_count,
+                                                              u32 relocation_capacity);
+
+BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_relocation_capacity(CIntegerIrBuilder* builder, u64 byte_count, u64 token_span, u32* capacity_out)
+{
+    if (!builder || !capacity_out || token_span >= UINT64_MAX)
+    {
+        return false;
+    }
+    u32 pointer_size = builder->program->data_layout.pointer.size;
+    u64 slots = pointer_size ? byte_count / pointer_size + 1 : 1;
+    u64 capacity = token_span + 1;
+    if (slots > UINT64_MAX - capacity || slots + capacity > UINT32_MAX)
+    {
+        return false;
+    }
+    *capacity_out = (u32)(slots + capacity);
+    return true;
+}
+
+
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL u64 c_test_ir_initializer_slot_count(IrType* type)
 {
@@ -40648,6 +40800,7 @@ struct CIrInitializerInferenceDesignator
     IrTypeId value_type;
     u32 value_start;
     u64 selected;
+    u64 selected_end;
     CIrInitializerContinuation* continuations;
     u32 continuation_count;
     bool has_designator;
@@ -40743,13 +40896,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_index_fits_target(CIntegerIr
 BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_index_value(CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out,
                                                                  String8* message_out, u32* token_out)
 {
-    for (u32 index = start; index < end; index += 1)
-    {
-        if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_ELLIPSIS))
-        {
-            return c_ir_initializer_inference_fail(message_out, token_out, S8("range designators are not supported for static aggregate initializers"), index);
-        }
-    }
     CIrConstantValue value = {0};
     if (!c_ir_constant_evaluate(builder, start, end, &value) || value.kind != C_IR_CONSTANT_INTEGER)
     {
@@ -40764,6 +40910,80 @@ BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_index_value(CIntegerIrBuilde
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_index_range(CIntegerIrBuilder* builder, u32 start, u32 end, u64* first_out, u64* last_out,
+                                                                bool* range_out, String8* message_out, u32* token_out)
+{
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    u32 braces = 0;
+    u32 ellipsis = end;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            parentheses += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            parentheses -= parentheses != 0;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            brackets += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            brackets -= brackets != 0;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            braces += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            braces -= braces != 0;
+        }
+        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_ELLIPSIS))
+        {
+            if (!c_preprocess_dialect_is_gnu(builder->preprocess.dialect))
+            {
+                return c_ir_initializer_inference_fail(message_out, token_out, S8("GNU initializer ranges are only available in GNU dialects"), index);
+            }
+            if (ellipsis != end)
+            {
+                return c_ir_initializer_inference_fail(message_out, token_out, S8("array designator range has multiple ellipses"), index);
+            }
+            ellipsis = index;
+        }
+    }
+    u64 first = 0;
+    u64 last = 0;
+    bool is_range = ellipsis != end;
+    if (!is_range)
+    {
+        if (!c_ir_initializer_inference_index_value(builder, start, end, &first, message_out, token_out))
+        {
+            return false;
+        }
+        last = first;
+    }
+    else if (ellipsis == start || ellipsis + 1 >= end ||
+             !c_ir_initializer_inference_index_value(builder, start, ellipsis, &first, message_out, token_out) ||
+             !c_ir_initializer_inference_index_value(builder, ellipsis + 1, end, &last, message_out, token_out))
+    {
+        return false;
+    }
+    if (is_range && first > last)
+    {
+        return c_ir_initializer_inference_fail(message_out, token_out, S8("array designator range is empty"), ellipsis);
+    }
+    if (first_out) *first_out = first;
+    if (last_out) *last_out = last;
+    if (range_out) *range_out = is_range;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_designator(CIntegerIrBuilder* builder, CIrInitializerInferenceFrame* frame, u32 start, u32 limit,
                                                                CIrInitializerContinuation* continuation_work, u32 continuation_capacity,
                                                                CIrInitializerInferenceDesignator* designator, String8* message_out,
@@ -40771,6 +40991,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_designator(CIntegerIrBuilder
 {
     IrTypeId current = frame->root ? frame->element_type : frame->type;
     u64 selected = frame->next_index;
+    u64 selected_end = selected;
     u32 cursor = start;
     bool first = true;
     bool has_designator = false;
@@ -40787,40 +41008,44 @@ BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_designator(CIntegerIrBuilder
         {
             u32 close = c_ir_matching_delimiter_cached(builder, cursor, limit, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
             u64 index = 0;
+            u64 last = 0;
+            bool is_range = false;
             if (close >= limit || close == cursor + 1 ||
-                !c_ir_initializer_inference_index_value(builder, cursor + 1, close, &index, message_out, token_out))
+                !c_ir_initializer_inference_index_range(builder, cursor + 1, close, &index, &last, &is_range, message_out, token_out))
             {
                 return false;
             }
             IrType* container = !first || !frame->root ? ir_type_from_id(&builder->program->types, current) : 0;
             if (frame->root && first)
             {
-                if (!c_ir_initializer_inference_index_fits_target(builder, current, index))
+                if (!c_ir_initializer_inference_index_fits_target(builder, current, last))
                 {
                     return c_ir_initializer_inference_fail(message_out, token_out, S8("array designator index exceeds the target object size"), cursor);
                 }
                 selected = index;
+                selected_end = last;
             }
             else
             {
                 if (!first)
                 {
-                    if (designator->continuation_count >= continuation_capacity || index == UINT64_MAX)
+                    if (designator->continuation_count >= continuation_capacity || last == UINT64_MAX)
                     {
                         return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer designator exceeds its capacity"), cursor);
                     }
                     designator->continuations[designator->continuation_count++] = (CIrInitializerContinuation){
                         .type = current,
-                        .next_index = index + 1,
+                        .next_index = last + 1,
                     };
                 }
-                if (!container || container->kind != IR_TYPE_ARRAY || index >= container->element_count)
+                if (!container || container->kind != IR_TYPE_ARRAY || last >= container->element_count)
                 {
                     return c_ir_initializer_inference_fail(message_out, token_out, S8("array designator index is outside the array bounds"), cursor);
                 }
                 if (first)
                 {
                     selected = index;
+                    selected_end = last;
                 }
                 current = container->element_type;
             }
@@ -40902,6 +41127,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_designator(CIntegerIrBuilder
         designator->value_start = cursor + 1;
         designator->value_type = current;
         designator->selected = selected;
+        designator->selected_end = selected_end;
         designator->has_designator = true;
         return designator->value_start < limit;
     }
@@ -40933,6 +41159,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_initializer_inference_designator(CIntegerIrBuilder
     }
     designator->value_start = start;
     designator->selected = selected;
+    designator->selected_end = selected_end;
     designator->has_designator = false;
     return true;
 }
@@ -41017,9 +41244,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuild
                                                            c_token_is_punctuator(&builder->preprocess.tokens[frame->cursor], C_PUNCTUATOR_DOT));
         if (designated && frame->borrowed)
         {
+            u32 designated_cursor = frame->cursor;
             while (frame_count && frames[frame_count - 1].borrowed)
             {
                 frame_count -= 1;
+                if (frame_count)
+                {
+                    frames[frame_count - 1].cursor = designated_cursor;
+                }
             }
             if (!frame_count)
             {
@@ -41069,19 +41301,19 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuild
         {
             return false;
         }
-        if (frame->root && !c_ir_initializer_inference_index_fits_target(builder, frame->element_type, designator.selected))
-        {
-            return c_ir_initializer_inference_fail(message_out, token_out, S8("array initializer exceeds the target object size"), frame->cursor);
-        }
-        if (designator.selected == UINT64_MAX)
+        if (designator.selected_end == UINT64_MAX)
         {
             return c_ir_initializer_inference_fail(message_out, token_out, S8("array initializer index overflows the target size"), frame->cursor);
         }
+        if (frame->root && !c_ir_initializer_inference_index_fits_target(builder, frame->element_type, designator.selected_end))
+        {
+            return c_ir_initializer_inference_fail(message_out, token_out, S8("array initializer exceeds the target object size"), frame->cursor);
+        }
         if (frame->root)
         {
-            count = BUSTER_MAX(count, designator.selected + 1);
+            count = BUSTER_MAX(count, designator.selected_end + 1);
         }
-        frame->next_index = designator.selected + 1;
+        frame->next_index = designator.selected_end + 1;
         IrType* value_type = ir_type_from_id(&builder->program->types, designator.value_type);
         if (!value_type || !value_type->layout.resolved || designator.value_start >= frame->limit)
         {
@@ -41352,11 +41584,20 @@ BUSTER_GLOBAL_LOCAL bool c_ir_infer_incomplete_array_bounds(CIntegerIrBuilder* b
 
 typedef struct CIrConstantInitializerDesignator CIrConstantInitializerDesignator;
 typedef struct CIrConstantInitializerContinuation CIrConstantInitializerContinuation;
+typedef struct CIrConstantInitializerRange CIrConstantInitializerRange;
 struct CIrConstantInitializerContinuation
 {
     IrTypeId type;
     u64 offset;
     u64 next_index;
+    u32 range_count;
+};
+
+struct CIrConstantInitializerRange
+{
+    u64 first;
+    u64 last;
+    u64 stride;
 };
 
 struct CIrConstantInitializerDesignator
@@ -41366,32 +41607,245 @@ struct CIrConstantInitializerDesignator
     u64 value_offset;
     u32 value_start;
     u64 selected;
+    u64 selected_end;
     u64 clear_offset;
     u64 clear_size;
+    u32 clear_range_count;
+    CIrConstantInitializerRange* ranges;
+    u32 range_count;
     CIrConstantInitializerContinuation* continuations;
     u32 continuation_count;
     bool clear_union;
     bool has_designator;
 };
 
+typedef struct CIrConstantInitializerPendingRange CIrConstantInitializerPendingRange;
+typedef struct CIrConstantInitializerContext CIrConstantInitializerContext;
+typedef enum CIrConstantInitializerContextStep
+{
+    C_IR_CONSTANT_INITIALIZER_CONTEXT_FAILED,
+    C_IR_CONSTANT_INITIALIZER_CONTEXT_DONE,
+    C_IR_CONSTANT_INITIALIZER_CONTEXT_PUSH_RANGE,
+} CIrConstantInitializerContextStep;
+
+struct CIrConstantInitializerPendingRange
+{
+    CIrConstantInitializerDesignator designator;
+    u32 value_start;
+    u32 value_end;
+    u8* value_bytes;
+    u64 value_byte_count;
+    IrGlobalRelocation* value_relocations;
+    u32 value_relocation_count;
+    u32 value_relocation_capacity;
+};
+
+struct CIrConstantInitializerContext
+{
+    u8* bytes;
+    u64 byte_count;
+    IrGlobalRelocation* relocations;
+    u32* relocation_count;
+    u32 relocation_capacity;
+    CIrConstantInitializerFrame* frames;
+    CIrConstantInitializerContinuation* continuation_work;
+    CIrConstantInitializerRange* range_work;
+    u32 frame_capacity;
+    u32 frame_count;
+    u32 span;
+    bool finished;
+    bool reserved[3];
+    CIrConstantInitializerContextStep step;
+    CIrConstantInitializerPendingRange pending_range;
+};
+
+BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_range_delta(CIrConstantInitializerRange* ranges, u32 range_count, u64* offset_out)
+{
+    u64 offset = 0;
+    for (u32 range_index = 0; range_index < range_count; range_index += 1)
+    {
+        CIrConstantInitializerRange range = ranges[range_index];
+        u64 count = range.last - range.first;
+        if (count && range.stride > UINT64_MAX / count)
+        {
+            return false;
+        }
+        u64 delta = count * range.stride;
+        if (delta > UINT64_MAX - offset)
+        {
+            return false;
+        }
+        offset += delta;
+    }
+    if (offset_out) *offset_out = offset;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_range_offset(CIrConstantInitializerRange* ranges, u32 range_count, u64* indices,
+                                                                 u64 base, u64* offset_out)
+{
+    u64 offset = base;
+    for (u32 range_index = 0; range_index < range_count; range_index += 1)
+    {
+        CIrConstantInitializerRange range = ranges[range_index];
+        u64 count = indices[range_index] - range.first;
+        if (count && range.stride > UINT64_MAX / count)
+        {
+            return false;
+        }
+        u64 delta = count * range.stride;
+        if (delta > UINT64_MAX - offset)
+        {
+            return false;
+        }
+        offset += delta;
+    }
+    if (offset_out) *offset_out = offset;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_apply_materialized_range(CIntegerIrBuilder* builder, Arena* task_arena,
+                                                                              CIrConstantInitializerDesignator* designator,
+                                                                              u8* value_bytes, IrGlobalRelocation* value_relocations,
+                                                                              u32 value_relocation_count, u8* bytes, u64 byte_count,
+                                                                              IrGlobalRelocation* relocations, u32* relocation_count,
+                                                                              u32 relocation_capacity)
+{
+    IrType* child = ir_type_from_id(&builder->program->types, designator->value_type);
+    if (!child || !child->layout.resolved || !value_bytes)
+    {
+        return false;
+    }
+    u64* indices = arena_allocate(task_arena, u64, designator->range_count ? designator->range_count : 1);
+    if (!indices)
+    {
+        return false;
+    }
+    for (u32 range_index = 0; range_index < designator->range_count; range_index += 1)
+    {
+        indices[range_index] = designator->ranges[range_index].first;
+    }
+    bool done = false;
+    while (!done)
+    {
+        u64 target_offset = 0;
+        if (!c_ir_constant_initializer_range_offset(designator->ranges, designator->range_count, indices, designator->value_offset, &target_offset) ||
+            target_offset > byte_count || child->layout.size > byte_count - target_offset)
+        {
+            return false;
+        }
+        bool clear_value = designator->clear_union || !designator->value_field || !designator->value_field->is_bit_field;
+        u64 clear_offset = target_offset;
+        u64 clear_size = child->layout.size;
+        if (designator->clear_union)
+        {
+            if (!c_ir_constant_initializer_range_offset(designator->ranges, designator->clear_range_count, indices, designator->clear_offset, &clear_offset))
+            {
+                return false;
+            }
+            clear_size = designator->clear_size;
+        }
+        if (clear_value &&
+            !c_ir_constant_initializer_clear_subobject(builder, bytes, byte_count, clear_offset, clear_size, 0, relocations, relocation_count))
+        {
+            return false;
+        }
+        if (designator->value_field && designator->value_field->is_bit_field)
+        {
+            if (!child->layout.size || child->layout.size > sizeof(u64) || designator->value_field->bit_width == 0 ||
+                designator->value_field->bit_width > child->layout.size * 8 ||
+                designator->value_field->bit_offset > child->layout.size * 8 - designator->value_field->bit_width)
+            {
+                return false;
+            }
+            u64 value = 0;
+            for (u64 byte_index = 0; byte_index < child->layout.size; byte_index += 1)
+            {
+                u64 target_index = builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte_index : child->layout.size - byte_index - 1;
+                value |= (u64)value_bytes[byte_index] << (u32)(target_index * 8);
+            }
+            u64 storage = 0;
+            for (u64 byte_index = 0; byte_index < child->layout.size; byte_index += 1)
+            {
+                u64 target_index = builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte_index : child->layout.size - byte_index - 1;
+                storage |= (u64)bytes[target_offset + byte_index] << (u32)(target_index * 8);
+            }
+            u64 mask = designator->value_field->bit_width == 64 ? UINT64_MAX : ((u64)1 << designator->value_field->bit_width) - 1;
+            storage = (storage & ~(mask << designator->value_field->bit_offset)) | ((value & mask) << designator->value_field->bit_offset);
+            c_ir_constant_store_bits(builder->program, child, bytes, target_offset, storage, false);
+        }
+        else
+        {
+            memcpy(bytes + target_offset, value_bytes, child->layout.size);
+            for (u32 relocation_index = 0; relocation_index < value_relocation_count; relocation_index += 1)
+            {
+                IrGlobalRelocation relocation = value_relocations[relocation_index];
+                if (relocation.offset > UINT64_MAX - target_offset || !relocations || !relocation_count || *relocation_count >= relocation_capacity)
+                {
+                    return false;
+                }
+                relocation.offset += target_offset;
+                relocations[(*relocation_count)++] = relocation;
+            }
+        }
+        if (designator->range_count == 0)
+        {
+            done = true;
+        }
+        else
+        {
+            done = true;
+            for (u32 reverse = designator->range_count; reverse; reverse -= 1)
+            {
+                u32 range_index = reverse - 1;
+                CIrConstantInitializerRange range = designator->ranges[range_index];
+                // A zero-sized GNU element has a zero stride, so every index
+                // in this dimension materializes at the same byte offset.
+                // Treat that dimension as already exhausted; otherwise a
+                // large range such as [0 ... UINT64_MAX - 1] would walk the
+                // same zero-byte subobject once per index.
+                if (!range.stride)
+                {
+                    indices[range_index] = range.first;
+                    continue;
+                }
+                if (indices[range_index] < range.last)
+                {
+                    indices[range_index] += 1;
+                    done = false;
+                    break;
+                }
+                indices[range_index] = range.first;
+            }
+        }
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder* builder, CIrConstantInitializerFrame* frame,
                                                                CIrConstantInitializerContinuation* continuation_work, u32 continuation_capacity,
+                                                               CIrConstantInitializerRange* range_work, u32 range_capacity,
                                                                CIrConstantInitializerDesignator* result)
 {
     IrTypeId current_type = frame->type;
     u64 current_offset = frame->offset;
     IrField* current_field = 0;
     u64 selected = frame->next_index;
+    u64 selected_end = selected;
     u32 cursor = frame->cursor;
     bool first = true;
     bool has_designator = false;
-    if (!continuation_work || !continuation_capacity || continuation_capacity > UINT32_MAX / sizeof(CIrConstantInitializerContinuation))
+    if (!continuation_work || !continuation_capacity || continuation_capacity > UINT32_MAX / sizeof(CIrConstantInitializerContinuation) ||
+        !range_work || !range_capacity || range_capacity > UINT32_MAX / sizeof(CIrConstantInitializerRange))
     {
         return c_ir_constant_initializer_fail(builder, S8("initializer designator exceeds its capacity"), frame->cursor);
     }
     result->continuations = continuation_work;
     result->continuation_count = 0;
     result->clear_union = false;
+    result->clear_range_count = 0;
+    result->ranges = range_work;
+    result->range_count = 0;
     IrType* frame_type = ir_type_from_id(&builder->program->types, frame->type);
     while (cursor < frame->limit && (c_token_is_punctuator(&builder->preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACKET) ||
                                      c_token_is_punctuator(&builder->preprocess.tokens[cursor], C_PUNCTUATOR_DOT)))
@@ -41409,26 +41863,29 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder*
                 return c_ir_constant_initializer_fail(builder, S8("unterminated array designator"), cursor);
             }
             u64 designated = 0;
+            u64 designated_last = 0;
+            bool is_range = false;
             String8 failure = {0};
             u32 failure_token = cursor + 1;
-            if (!c_ir_initializer_inference_index_value(builder, cursor + 1, close, &designated, &failure, &failure_token))
+            if (!c_ir_initializer_inference_index_range(builder, cursor + 1, close, &designated, &designated_last, &is_range, &failure, &failure_token))
             {
                 return c_ir_constant_initializer_fail(builder, failure.length ? failure : S8("invalid array designator index"), failure_token);
             }
-            if (designated >= container->element_count)
+            if (designated_last >= container->element_count)
             {
                 return c_ir_constant_initializer_fail(builder, S8("array designator index is outside the array bounds"), cursor);
             }
             if (!first)
             {
-                if (result->continuation_count >= continuation_capacity || designated == UINT64_MAX)
+                if (result->continuation_count >= continuation_capacity || designated_last == UINT64_MAX)
                 {
                     return c_ir_constant_initializer_fail(builder, S8("initializer designator exceeds its capacity"), cursor);
                 }
                 result->continuations[result->continuation_count++] = (CIrConstantInitializerContinuation){
                     .type = current_type,
                     .offset = current_offset,
-                    .next_index = designated + 1,
+                    .next_index = designated_last + 1,
+                    .range_count = result->range_count,
                 };
             }
             if (container->kind == IR_TYPE_UNION)
@@ -41444,11 +41901,25 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder*
                 return c_ir_constant_initializer_fail(builder, S8("array designator offset overflows the target object"), cursor);
             }
             current_offset += element->layout.size * designated;
+            if (is_range)
+            {
+                if (result->range_count >= range_capacity ||
+                    (designated_last - designated && element->layout.size > UINT64_MAX / (designated_last - designated)))
+                {
+                    return c_ir_constant_initializer_fail(builder, S8("initializer designator exceeds its capacity"), cursor);
+                }
+                result->ranges[result->range_count++] = (CIrConstantInitializerRange){
+                    .first = designated,
+                    .last = designated_last,
+                    .stride = element->layout.size,
+                };
+            }
             current_type = container->element_type;
             current_field = 0;
             if (first)
             {
                 selected = designated;
+                selected_end = designated_last;
             }
             cursor = close + 1;
         }
@@ -41480,6 +41951,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder*
                 result->clear_union = true;
                 result->clear_offset = current_offset + path.union_offset;
                 result->clear_size = path.union_size;
+                result->clear_range_count = result->range_count;
             }
             u32 member_slot = c_ir_constant_initializer_field_slot(container, path.root_field);
             if (member_slot == UINT32_MAX || member_slot == UINT32_MAX - 1)
@@ -41496,6 +41968,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder*
                     .type = container_id,
                     .offset = current_offset,
                     .next_index = member_slot + 1,
+                    .range_count = result->range_count,
                 };
             }
             if (path.offset > UINT64_MAX - current_offset)
@@ -41529,11 +42002,23 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder*
         {
             return c_ir_constant_initializer_fail(builder, S8("aggregate designator must be followed by '='"), cursor);
         }
+        for (u32 continuation_index = 0; continuation_index < result->continuation_count; continuation_index += 1)
+        {
+            CIrConstantInitializerContinuation* continuation = result->continuations + continuation_index;
+            u64 delta = 0;
+            if (!c_ir_constant_initializer_range_delta(result->ranges, continuation->range_count, &delta) ||
+                delta > UINT64_MAX - continuation->offset)
+            {
+                return c_ir_constant_initializer_fail(builder, S8("aggregate initializer offset overflows the target object"), cursor);
+            }
+            continuation->offset += delta;
+        }
         result->value_type = current_type;
         result->value_field = current_field;
         result->value_offset = current_offset;
         result->value_start = cursor + 1;
         result->selected = selected;
+        result->selected_end = selected_end;
         result->has_designator = true;
         return true;
     }
@@ -41563,6 +42048,9 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder*
     result->value_offset = frame->offset + scaled_offset;
     result->value_start = frame->cursor;
     result->selected = selected;
+    result->selected_end = selected;
+    result->ranges = range_work;
+    result->range_count = 0;
     result->has_designator = false;
     return true;
 }
@@ -41570,62 +42058,19 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder*
 BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_type, u8* bytes, u64 byte_count,
                                                          IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity);
 
-BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, u32 start, u32 end, IrTypeId root_type,
-                                                              u8* bytes, u64 byte_count, IrGlobalRelocation* relocations, u32* relocation_count,
-                                                              u32 relocation_capacity)
+BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder* builder, CIrConstantInitializerContext* context)
 {
-    IrType* root = ir_type_from_id(&builder->program->types, root_type);
-    if (!root || !root->layout.resolved || start >= end)
-    {
-        return false;
-    }
-    bool brace_root = c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) &&
-                      c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
-                      c_ir_matching_delimiter(builder->preprocess, start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1;
-    if (!brace_root)
-    {
-        u32 compound_open = 0;
-        u32 compound_close = 0;
-        u32 compound_type_start = 0;
-        u32 compound_type_end = 0;
-        if (!c_ir_initializer_compound_literal_info(builder, start, end, &compound_open, &compound_close, &compound_type_start, &compound_type_end))
-        {
-            return c_ir_constant_initializer_bytes_legacy(builder, start, end, root_type, bytes, byte_count, 0, relocations, relocation_count,
-                                                          relocation_capacity);
-        }
-        IrTypeId compound_type = c_ir_compound_literal_type(builder, compound_type_start, compound_type_end, compound_open, compound_close);
-        if (compound_type.value == IR_ID_UNDERLYING_INVALID || !c_ir_types_compatible(builder, compound_type, root_type))
-        {
-            return c_ir_constant_initializer_fail(builder, S8("compound literal type is incompatible with the destination object"), start);
-        }
-        start = compound_open;
-        end = compound_close + 1;
-    }
-    bool string_handled = false;
-    if (!c_ir_constant_initializer_string_range(builder, start, end, root_type, bytes, byte_count, &string_handled))
-    {
-        return c_ir_constant_initializer_fail(builder, S8("invalid string initializer for aggregate"), start);
-    }
-    if (string_handled)
-    {
-        return true;
-    }
-    u64 span = (u64)end - start;
-    if (span > UINT32_MAX - 2 || span + 2 > UINT32_MAX / sizeof(CIrConstantInitializerFrame) ||
-        span + 1 > UINT32_MAX / sizeof(CIrConstantInitializerContinuation))
-    {
-        return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
-    }
-    u32 capacity = (u32)(span + 2);
-    CIrConstantInitializerFrame* frames = arena_allocate(task_arena, CIrConstantInitializerFrame, capacity);
-    CIrConstantInitializerContinuation* continuation_work = arena_allocate(task_arena, CIrConstantInitializerContinuation, (u32)(span + 1));
-    u32 frame_count = 1;
-    frames[0] = (CIrConstantInitializerFrame){
-        .type = root_type,
-        .cursor = start + 1,
-        .limit = end - 1,
-        .root = true,
-    };
+    CIrConstantInitializerFrame* frames = context->frames;
+    CIrConstantInitializerContinuation* continuation_work = context->continuation_work;
+    CIrConstantInitializerRange* range_work = context->range_work;
+    u8* bytes = context->bytes;
+    u64 byte_count = context->byte_count;
+    IrGlobalRelocation* relocations = context->relocations;
+    u32* relocation_count = context->relocation_count;
+    u32 relocation_capacity = context->relocation_capacity;
+    u32 capacity = context->frame_capacity;
+    u32 frame_count = context->frame_count;
+    u64 span = context->span;
     while (frame_count)
     {
         CIrConstantInitializerFrame* frame = frames + frame_count - 1;
@@ -41637,9 +42082,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder*
                                                            c_token_is_punctuator(&builder->preprocess.tokens[frame->cursor], C_PUNCTUATOR_DOT));
         if (designated && frame->borrowed)
         {
+            u32 designated_cursor = frame->cursor;
             while (frame_count && frames[frame_count - 1].borrowed)
             {
                 frame_count -= 1;
+                if (frame_count)
+                {
+                    frames[frame_count - 1].cursor = designated_cursor;
+                }
             }
             if (!frame_count)
             {
@@ -41668,10 +42118,10 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder*
             continue;
         }
         CIrConstantInitializerDesignator designator = {0};
-        if (!c_ir_constant_initializer_designator(builder, frame, continuation_work, (u32)(span + 1), &designator)) return false;
+        if (!c_ir_constant_initializer_designator(builder, frame, continuation_work, (u32)(span + 1), range_work, (u32)(span + 1), &designator)) return false;
         u64 selected = designator.selected;
         u32 value_start = designator.value_start;
-        if ((!designator.has_designator && selected >= slot_count) || (type && type->kind == IR_TYPE_ARRAY && selected >= slot_count))
+        if ((!designator.has_designator && designator.selected_end >= slot_count) || (type && type->kind == IR_TYPE_ARRAY && designator.selected_end >= slot_count))
         {
             return c_ir_constant_initializer_fail(builder, S8("array designator index is outside the array bounds"), frame->cursor);
         }
@@ -41679,6 +42129,20 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder*
         IrType* child = ir_type_from_id(&builder->program->types, child_type);
         u64 child_offset = designator.value_offset;
         if (!child) return false;
+        u32 value_end = c_ir_constant_initializer_value_end(builder, value_start, frame->limit);
+        if (value_end <= value_start)
+        {
+            return c_ir_constant_initializer_fail(builder, S8("invalid aggregate initializer element"), value_start);
+        }
+        if (designator.range_count)
+        {
+            context->pending_range.designator = designator;
+            context->pending_range.value_start = value_start;
+            context->pending_range.value_end = value_end;
+            context->frame_count = frame_count;
+            context->step = C_IR_CONSTANT_INITIALIZER_CONTEXT_PUSH_RANGE;
+            return true;
+        }
         u64 clear_offset = designator.clear_union ? designator.clear_offset : child_offset;
         u64 clear_size = designator.clear_union ? designator.clear_size : child->layout.size;
         bool clear_value = designator.has_designator && (designator.clear_union || !designator.value_field || !designator.value_field->is_bit_field);
@@ -41688,11 +42152,6 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder*
             return c_ir_constant_initializer_fail(builder, S8("designated initializer exceeds the target object"), value_start);
         }
         bool aggregate = child && (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION);
-        u32 value_end = c_ir_constant_initializer_value_end(builder, value_start, frame->limit);
-        if (value_end <= value_start)
-        {
-            return c_ir_constant_initializer_fail(builder, S8("invalid aggregate initializer element"), value_start);
-        }
         if (aggregate)
         {
             bool child_string_handled = false;
@@ -41906,6 +42365,192 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder*
                 .next_index = continuation.next_index,
                 .borrowed = true,
             };
+        }
+    }
+    context->frame_count = frame_count;
+    context->step = C_IR_CONSTANT_INITIALIZER_CONTEXT_DONE;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_context_begin(CIntegerIrBuilder* builder, Arena* task_arena, u32 start, u32 end, IrTypeId root_type,
+                                                                  u8* bytes, u64 byte_count, IrGlobalRelocation* relocations,
+                                                                  u32* relocation_count, u32 relocation_capacity,
+                                                                  CIrConstantInitializerContext* context)
+{
+    *context = (CIrConstantInitializerContext){
+        .bytes = bytes,
+        .byte_count = byte_count,
+        .relocations = relocations,
+        .relocation_count = relocation_count,
+        .relocation_capacity = relocation_capacity,
+        .step = C_IR_CONSTANT_INITIALIZER_CONTEXT_FAILED,
+    };
+    IrType* root = ir_type_from_id(&builder->program->types, root_type);
+    if (!root || !root->layout.resolved || start >= end)
+    {
+        return false;
+    }
+    bool brace_root = c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) &&
+                      c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
+                      c_ir_matching_delimiter(builder->preprocess, start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1;
+    if (!brace_root)
+    {
+        u32 compound_open = 0;
+        u32 compound_close = 0;
+        u32 compound_type_start = 0;
+        u32 compound_type_end = 0;
+        if (!c_ir_initializer_compound_literal_info(builder, start, end, &compound_open, &compound_close, &compound_type_start, &compound_type_end))
+        {
+            context->finished = true;
+            return c_ir_constant_initializer_bytes_legacy(builder, start, end, root_type, bytes, byte_count, 0, relocations, relocation_count,
+                                                          relocation_capacity);
+        }
+        IrTypeId compound_type = c_ir_compound_literal_type(builder, compound_type_start, compound_type_end, compound_open, compound_close);
+        if (compound_type.value == IR_ID_UNDERLYING_INVALID || !c_ir_types_compatible(builder, compound_type, root_type))
+        {
+            return c_ir_constant_initializer_fail(builder, S8("compound literal type is incompatible with the destination object"), start);
+        }
+        start = compound_open;
+        end = compound_close + 1;
+    }
+    bool string_handled = false;
+    if (!c_ir_constant_initializer_string_range(builder, start, end, root_type, bytes, byte_count, &string_handled))
+    {
+        return c_ir_constant_initializer_fail(builder, S8("invalid string initializer for aggregate"), start);
+    }
+    if (string_handled)
+    {
+        context->finished = true;
+        return true;
+    }
+    u64 span = (u64)end - start;
+    if (span > UINT32_MAX - 2 || span + 2 > UINT32_MAX / sizeof(CIrConstantInitializerFrame) ||
+        span + 1 > UINT32_MAX / sizeof(CIrConstantInitializerContinuation) || span + 1 > UINT32_MAX / sizeof(CIrConstantInitializerRange))
+    {
+        return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
+    }
+    context->span = (u32)span;
+    context->frame_capacity = (u32)(span + 2);
+    context->frames = arena_allocate(task_arena, CIrConstantInitializerFrame, context->frame_capacity);
+    context->continuation_work = arena_allocate(task_arena, CIrConstantInitializerContinuation, (u32)(span + 1));
+    context->range_work = arena_allocate(task_arena, CIrConstantInitializerRange, (u32)(span + 1));
+    if (!context->frames || !context->continuation_work || !context->range_work)
+    {
+        return false;
+    }
+    context->frame_count = 1;
+    context->frames[0] = (CIrConstantInitializerFrame){
+        .type = root_type,
+        .cursor = start + 1,
+        .limit = end - 1,
+        .root = true,
+    };
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, u32 start, u32 end, IrTypeId root_type,
+                                                              u8* bytes, u64 byte_count, IrGlobalRelocation* relocations, u32* relocation_count,
+                                                              u32 relocation_capacity)
+{
+    if (!builder || !task_arena || start >= end || end - start > UINT32_MAX - 2)
+    {
+        return false;
+    }
+    u64 context_capacity_u64 = (u64)end - start + 2;
+    if (context_capacity_u64 > UINT32_MAX || context_capacity_u64 > UINT32_MAX / sizeof(CIrConstantInitializerContext))
+    {
+        return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
+    }
+    u32 context_capacity = (u32)context_capacity_u64;
+    CIrConstantInitializerContext* contexts = arena_allocate(task_arena, CIrConstantInitializerContext, context_capacity);
+    if (!contexts || !c_ir_constant_initializer_context_begin(builder, task_arena, start, end, root_type, bytes, byte_count, relocations,
+                                                               relocation_count, relocation_capacity, contexts))
+    {
+        return false;
+    }
+    u32 context_count = 1;
+    while (context_count)
+    {
+        CIrConstantInitializerContext* context = contexts + context_count - 1;
+        if (context->finished)
+        {
+            if (context_count == 1)
+            {
+                return true;
+            }
+            CIrConstantInitializerContext* parent = contexts + context_count - 2;
+            CIrConstantInitializerPendingRange* pending = &parent->pending_range;
+            if (!c_ir_constant_initializer_apply_materialized_range(builder, task_arena, &pending->designator, pending->value_bytes,
+                                                                      pending->value_relocations, pending->value_relocation_count, parent->bytes,
+                                                                      parent->byte_count, parent->relocations, parent->relocation_count,
+                                                                      parent->relocation_capacity))
+            {
+                return c_ir_constant_initializer_fail(builder, S8("range initializer exceeds the target object"), pending->value_start);
+            }
+            if (pending->designator.selected_end == UINT64_MAX || parent->frame_count == 0 ||
+                parent->frame_count + pending->designator.continuation_count > parent->frame_capacity)
+            {
+                return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), pending->value_start);
+            }
+            CIrConstantInitializerFrame* frame = parent->frames + parent->frame_count - 1;
+            frame->cursor = pending->value_end;
+            frame->next_index = pending->designator.selected_end + 1;
+            for (u32 continuation_index = 0; continuation_index < pending->designator.continuation_count; continuation_index += 1)
+            {
+                CIrConstantInitializerContinuation continuation = pending->designator.continuations[continuation_index];
+                parent->frames[parent->frame_count++] = (CIrConstantInitializerFrame){
+                    .type = continuation.type,
+                    .offset = continuation.offset,
+                    .cursor = pending->value_end,
+                    .limit = frame->limit,
+                    .next_index = continuation.next_index,
+                    .borrowed = true,
+                };
+            }
+            parent->pending_range = (CIrConstantInitializerPendingRange){0};
+            context_count -= 1;
+            continue;
+        }
+        if (!c_ir_constant_initializer_context_step(builder, context))
+        {
+            return false;
+        }
+        if (context->step == C_IR_CONSTANT_INITIALIZER_CONTEXT_DONE)
+        {
+            context->finished = true;
+            continue;
+        }
+        if (context->step != C_IR_CONSTANT_INITIALIZER_CONTEXT_PUSH_RANGE || context_count >= context_capacity)
+        {
+            return false;
+        }
+        CIrConstantInitializerPendingRange* pending = &context->pending_range;
+        IrType* value_type = ir_type_from_id(&builder->program->types, pending->designator.value_type);
+        if (!value_type || !value_type->layout.resolved || pending->value_start >= pending->value_end)
+        {
+            return c_ir_constant_initializer_fail(builder, S8("range initializer exceeds the target object"), pending->value_start);
+        }
+        if (!c_ir_constant_initializer_relocation_capacity(builder, value_type->layout.size,
+                                                            (u64)pending->value_end - pending->value_start,
+                                                            &pending->value_relocation_capacity))
+        {
+            return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), pending->value_start);
+        }
+        pending->value_bytes = arena_allocate(task_arena, u8, value_type->layout.size ? value_type->layout.size : 1);
+        pending->value_relocations = arena_allocate(task_arena, IrGlobalRelocation, pending->value_relocation_capacity);
+        if (!pending->value_bytes || !pending->value_relocations)
+        {
+            return false;
+        }
+        memset(pending->value_bytes, 0, value_type->layout.size);
+        pending->value_relocation_count = 0;
+        CIrConstantInitializerContext* child = contexts + context_count++;
+        if (!c_ir_constant_initializer_context_begin(builder, task_arena, pending->value_start, pending->value_end,
+                                                     pending->designator.value_type, pending->value_bytes, value_type->layout.size,
+                                                     pending->value_relocations, &pending->value_relocation_count,
+                                                     pending->value_relocation_capacity, child))
+        {
+            return false;
         }
     }
     return true;
@@ -43939,7 +44584,11 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDe
                            compound_aggregate_initializer))
     {
         u8* bytes = arena_allocate(arena, u8, type->layout.size);
-        u32 relocation_capacity = end - start + 1;
+        u32 relocation_capacity = 0;
+        if (!c_ir_constant_initializer_relocation_capacity(builder, type->layout.size, (u64)end - start, &relocation_capacity))
+        {
+            return false;
+        }
         IrGlobalRelocation* relocations = arena_allocate(arena, IrGlobalRelocation, relocation_capacity);
         u32 relocation_count = 0;
         memset(bytes, 0, type->layout.size);

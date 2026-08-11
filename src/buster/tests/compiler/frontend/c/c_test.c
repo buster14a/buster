@@ -498,6 +498,266 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_static_aggregates(UnitTestArgume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_range_designators(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult preprocess = c_preprocess(
+        temporary.arena,
+        S8("struct RangePair { int first; int second; };"
+           " struct RangeNested { int values[3]; };"
+           " union RangeUnion { int first; int second; };"
+           " struct RangeEmpty {};"
+           " struct RangeZeroNested { struct RangeEmpty values[18446744073709551615ULL]; };"
+           " static int range_target;"
+           " static const int range_scalar[] = { [0 ... 2] = 3, [1] = 4, [2 ... 4] = 5 };"
+           " static const struct RangePair range_pairs[] = { [1 ... 3] = { 7, 8 }, [2].first = 9 };"
+           " static const struct RangeNested range_nested[] = { [1 ... 2].values[1 ... 2] = 6 };"
+           " static const struct RangeNested range_nested_values[] = { [0 ... 1] = (struct RangeNested){ .values = { [0 ... 2] = 9 } } };"
+           " struct RangeBits { unsigned first : 3; unsigned second : 5; };"
+           " static const struct RangeBits range_bits[] = { [0 ... 2].first = 5, [1].second = 17 };"
+           " static int *range_ptrs[] = { [0 ... 2] = &range_target };"
+           " static int *range_overlap_ptrs[] = { [0 ... 2] = &range_target, [1] = 0 };"
+           " static const int range_singleton[] = { [2 ... 2] = 11 };"
+           " static union RangeUnion range_unions[] = { [0 ... 2].second = 7, [1].first = 9 };"
+           " static struct RangeEmpty range_zero[18446744073709551615ULL] = { [0 ... 18446744073709551614ULL] = {} };"
+           " static struct RangeZeroNested range_zero_nested[18446744073709551615ULL] = { [0 ... 18446744073709551614ULL].values[0 ... 18446744073709551614ULL] = {} };"
+           " static int range_probe(void) {"
+           " static const int local_ranges[] = { [1 ... 3] = 4, [2] = 5 };"
+           " return local_ranges[0] + local_ranges[1] + local_ranges[2] + local_ranges[3]; }"
+           " int main(void) { return range_probe() == 13 ? 0 : 1; }\n"),
+        (CPreprocessOptions){
+            .target = target_native,
+            .data_layout = target_data_layout(target_native),
+            .dialect = C_PREPROCESS_DIALECT_GNU23,
+        });
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("static-range-designators.c"), preprocess, parse, target_native);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+    if (lowered.program)
+    {
+        IrModule* module = &lowered.program->modules[0];
+        IrGlobal* scalar = 0;
+        IrGlobal* pairs = 0;
+        IrGlobal* nested = 0;
+        IrGlobal* nested_values = 0;
+        IrGlobal* bits = 0;
+        IrGlobal* pointers = 0;
+        IrGlobal* overlap_pointers = 0;
+        IrGlobal* singleton = 0;
+        IrGlobal* unions = 0;
+        IrGlobal* zero = 0;
+        IrGlobal* zero_nested = 0;
+        IrGlobal* locals = 0;
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            IrGlobal* global = module->globals + global_index;
+            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, global->symbol);
+            if (!symbol)
+            {
+                continue;
+            }
+            if (string_equal(symbol->name, S8("range_scalar"))) scalar = global;
+            if (string_equal(symbol->name, S8("range_pairs"))) pairs = global;
+            if (string_equal(symbol->name, S8("range_nested"))) nested = global;
+            if (string_equal(symbol->name, S8("range_nested_values"))) nested_values = global;
+            if (string_equal(symbol->name, S8("range_bits"))) bits = global;
+            if (string_equal(symbol->name, S8("range_ptrs"))) pointers = global;
+            if (string_equal(symbol->name, S8("range_overlap_ptrs"))) overlap_pointers = global;
+            if (string_equal(symbol->name, S8("range_singleton"))) singleton = global;
+            if (string_equal(symbol->name, S8("range_unions"))) unions = global;
+            if (string_equal(symbol->name, S8("range_zero"))) zero = global;
+            if (string_equal(symbol->name, S8("range_zero_nested"))) zero_nested = global;
+            if (string_equal(symbol->name, S8("local_ranges")) || string_starts_with_sequence(symbol->link_name, S8(".L.range_probe.local_ranges."))) locals = global;
+        }
+        BUSTER_TEST(arguments, scalar != 0);
+        BUSTER_TEST(arguments, pairs != 0);
+        BUSTER_TEST(arguments, nested != 0);
+        BUSTER_TEST(arguments, nested_values != 0);
+        BUSTER_TEST(arguments, bits != 0);
+        BUSTER_TEST(arguments, pointers != 0);
+        BUSTER_TEST(arguments, overlap_pointers != 0);
+        BUSTER_TEST(arguments, singleton != 0);
+        BUSTER_TEST(arguments, unions != 0);
+        BUSTER_TEST(arguments, zero != 0);
+        BUSTER_TEST(arguments, zero_nested != 0);
+        BUSTER_TEST(arguments, locals != 0);
+        if (scalar)
+        {
+            BUSTER_TEST(arguments, scalar->bytes.length == 5 * sizeof(u32));
+            if (scalar->bytes.pointer && scalar->bytes.length == 5 * sizeof(u32))
+            {
+                u32 expected[5] = {3, 4, 5, 5, 5};
+                for (u32 index = 0; index < 5; index += 1)
+                {
+                    u32 value = 0;
+                    memcpy(&value, scalar->bytes.pointer + index * sizeof(value), sizeof(value));
+                    BUSTER_TEST(arguments, value == expected[index]);
+                }
+            }
+        }
+        if (pairs)
+        {
+            BUSTER_TEST(arguments, pairs->bytes.length == 4 * 2 * sizeof(u32));
+            if (pairs->bytes.pointer && pairs->bytes.length == 4 * 2 * sizeof(u32))
+            {
+                u32 expected[8] = {0, 0, 7, 8, 9, 8, 7, 8};
+                for (u32 index = 0; index < 8; index += 1)
+                {
+                    u32 value = 0;
+                    memcpy(&value, pairs->bytes.pointer + index * sizeof(value), sizeof(value));
+                    BUSTER_TEST(arguments, value == expected[index]);
+                }
+            }
+        }
+        if (nested)
+        {
+            BUSTER_TEST(arguments, nested->bytes.length == 3 * 3 * sizeof(u32));
+            if (nested->bytes.pointer && nested->bytes.length == 3 * 3 * sizeof(u32))
+            {
+                for (u32 index = 0; index < 3; index += 1)
+                {
+                    for (u32 value_index = 0; value_index < 3; value_index += 1)
+                    {
+                        u32 value = 0;
+                        memcpy(&value, nested->bytes.pointer + (index * 3 + value_index) * sizeof(value), sizeof(value));
+                        BUSTER_TEST(arguments, value == ((index != 0 && value_index != 0) ? 6 : 0));
+                    }
+                }
+            }
+        }
+        if (pointers)
+        {
+            BUSTER_TEST(arguments, pointers->relocation_count == 3);
+            if (pointers->relocations && pointers->relocation_count == 3)
+            {
+                for (u32 index = 0; index < pointers->relocation_count; index += 1)
+                {
+                    IrGlobalRelocation relocation = pointers->relocations[index];
+                    IrSymbol* target = ir_symbol_from_id(&lowered.program->symbols, relocation.symbol);
+                    BUSTER_TEST(arguments, target && string_equal(target->name, S8("range_target")));
+                    BUSTER_TEST(arguments, relocation.offset == index * target_data_layout(target_native).pointer.size);
+                }
+            }
+        }
+        if (nested_values)
+        {
+            BUSTER_TEST(arguments, nested_values->bytes.length == 2 * 3 * sizeof(u32));
+            if (nested_values->bytes.pointer && nested_values->bytes.length == 2 * 3 * sizeof(u32))
+            {
+                for (u32 index = 0; index < 2 * 3; index += 1)
+                {
+                    u32 value = 0;
+                    memcpy(&value, nested_values->bytes.pointer + index * sizeof(value), sizeof(value));
+                    BUSTER_TEST(arguments, value == 9);
+                }
+            }
+        }
+        if (bits)
+        {
+            BUSTER_TEST(arguments, bits->bytes.length == 3 * sizeof(u32));
+            if (bits->bytes.pointer && bits->bytes.length == 3 * sizeof(u32))
+            {
+                u32 expected[3] = {5, 5 | (17u << 3), 5};
+                for (u32 index = 0; index < 3; index += 1)
+                {
+                    u32 value = 0;
+                    memcpy(&value, bits->bytes.pointer + index * sizeof(value), sizeof(value));
+                    BUSTER_TEST(arguments, value == expected[index]);
+                }
+            }
+        }
+        if (overlap_pointers)
+        {
+            BUSTER_TEST(arguments, overlap_pointers->relocation_count == 2);
+            if (overlap_pointers->relocations && overlap_pointers->relocation_count == 2)
+            {
+                for (u32 index = 0; index < overlap_pointers->relocation_count; index += 1)
+                {
+                    IrGlobalRelocation relocation = overlap_pointers->relocations[index];
+                    IrSymbol* target = ir_symbol_from_id(&lowered.program->symbols, relocation.symbol);
+                    BUSTER_TEST(arguments, target && string_equal(target->name, S8("range_target")));
+                    BUSTER_TEST(arguments, relocation.offset == index * 2 * target_data_layout(target_native).pointer.size);
+                }
+            }
+        }
+        if (singleton)
+        {
+            BUSTER_TEST(arguments, singleton->bytes.length == 3 * sizeof(u32));
+            if (singleton->bytes.pointer && singleton->bytes.length == 3 * sizeof(u32))
+            {
+                u32 value = 0;
+                memcpy(&value, singleton->bytes.pointer + 2 * sizeof(value), sizeof(value));
+                BUSTER_TEST(arguments, value == 11);
+            }
+        }
+        if (unions)
+        {
+            BUSTER_TEST(arguments, unions->bytes.length == 3 * sizeof(u32));
+            if (unions->bytes.pointer && unions->bytes.length == 3 * sizeof(u32))
+            {
+                u32 expected[3] = {7, 9, 7};
+                for (u32 index = 0; index < 3; index += 1)
+                {
+                    u32 value = 0;
+                    memcpy(&value, unions->bytes.pointer + index * sizeof(value), sizeof(value));
+                    BUSTER_TEST(arguments, value == expected[index]);
+                }
+            }
+        }
+        if (zero)
+        {
+            BUSTER_TEST(arguments, zero->bytes.length == 0);
+            BUSTER_TEST(arguments, zero->relocation_count == 0);
+        }
+        if (zero_nested)
+        {
+            BUSTER_TEST(arguments, zero_nested->bytes.length == 0);
+            BUSTER_TEST(arguments, zero_nested->relocation_count == 0);
+        }
+        if (locals)
+        {
+            BUSTER_TEST(arguments, locals->bytes.length == 4 * sizeof(u32));
+            if (locals->bytes.pointer && locals->bytes.length == 4 * sizeof(u32))
+            {
+                u32 expected[4] = {0, 4, 5, 4};
+                for (u32 index = 0; index < 4; index += 1)
+                {
+                    u32 value = 0;
+                    memcpy(&value, locals->bytes.pointer + index * sizeof(value), sizeof(value));
+                    BUSTER_TEST(arguments, value == expected[index]);
+                }
+            }
+        }
+        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+    }
+    c_test_case_range_lower_diagnostic(
+        arguments, &result,
+        S8("int runtime_range_scalar(void) { return ((int[4]){ [1 ... 2] = 3 })[1]; }\n"),
+        S8("in function 'runtime_range_scalar': range designators are only supported for static aggregate initializers"));
+    c_test_case_range_lower_diagnostic(
+        arguments, &result,
+        S8("struct RuntimeRangePair { int first; int second; };"
+           " int runtime_range_aggregate(void) {"
+           " return ((struct RuntimeRangePair[2]){ [0 ... 1] = { 3, 4 } })[1].second; }\n"),
+        S8("in function 'runtime_range_aggregate': range designators are only supported for static aggregate initializers"));
+    c_test_auto_type_diagnostic(
+        arguments, &result,
+        S8("int strict_initializer_range_c11(void) { static int values[2] = { [0 ... 1] = 1 }; return values[0]; }\n"),
+        C_PREPROCESS_DIALECT_C11, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+        S8("in function 'strict_initializer_range_c11': GNU initializer ranges are only available in GNU dialects"));
+    c_test_auto_type_diagnostic(
+        arguments, &result,
+        S8("int strict_initializer_range_c17(void) { static int values[2] = { [0 ... 1] = 1 }; return values[0]; }\n"),
+        C_PREPROCESS_DIALECT_C17, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+        S8("in function 'strict_initializer_range_c17': GNU initializer ranges are only available in GNU dialects"));
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_u64_initializer_slots(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1487,7 +1747,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_designators(UnitTestArguments*
            " static int invalid_designator_nonconstant[] = { [invalid_designator_value] = 1 };"
            " static int invalid_designator_negative[] = { [-1] = 1 };"
            " static int invalid_designator_overflow[] = { [18446744073709551615ULL] = 1 };"
-           " static int invalid_designator_range[] = { [2 ... 5] = 1 };"
+           " static int invalid_designator_empty_range[8] = { [5 ... 2] = 1 };"
+           " static int invalid_designator_multiple_range[8] = { [1 ... 2 ... 3] = 1 };"
+           " static int invalid_designator_negative_range[8] = { [-1 ... 2] = 1 };"
+           " static int invalid_designator_outside_range[4] = { [2 ... 5] = 1 };"
            " static int invalid_designator_fixed_nonconstant[1] = { [invalid_designator_value] = 1 };"
            " static int invalid_designator_fixed_negative[1] = { [-1] = 1 };"
            " static int invalid_designator_fixed_overflow[1] = { [2] = 1 };\n"),
@@ -1498,7 +1761,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_designators(UnitTestArguments*
     bool found_nonconstant = false;
     bool found_negative = false;
     bool found_overflow = false;
-    bool found_range = false;
+    bool found_empty_range = false;
+    bool found_multiple_range = false;
+    bool found_negative_range = false;
+    bool found_outside_range = false;
     bool found_outside_bounds = false;
     for (u32 diagnostic_index = 0; diagnostic_index < invalid_designator_ir.diagnostic_count; diagnostic_index += 1)
     {
@@ -1506,16 +1772,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_designators(UnitTestArguments*
         found_nonconstant |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is not an integer constant expression"));
         found_negative |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is negative"));
         found_overflow |= string_starts_with_sequence(message, S8("C IR lowering: array designator index exceeds the target object size"));
-        found_range |= string_starts_with_sequence(message, S8("C IR lowering: range designators are not supported for static aggregate initializers"));
+        found_empty_range |= string_starts_with_sequence(message, S8("C IR lowering: array designator range is empty"));
+        found_multiple_range |= string_starts_with_sequence(message, S8("C IR lowering: array designator range has multiple ellipses"));
+        found_negative_range |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is negative"));
+        found_outside_range |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is outside the array bounds"));
         found_outside_bounds |= string_starts_with_sequence(message, S8("C IR lowering: array designator index is outside the array bounds"));
     }
     BUSTER_TEST(arguments, invalid_designator_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, invalid_designator_parse.diagnostic_count == 0);
-    BUSTER_TEST(arguments, invalid_designator_ir.diagnostic_count == 7);
+    BUSTER_TEST(arguments, invalid_designator_ir.diagnostic_count == 10);
     BUSTER_TEST(arguments, found_nonconstant);
     BUSTER_TEST(arguments, found_negative);
     BUSTER_TEST(arguments, found_overflow);
-    BUSTER_TEST(arguments, found_range);
+    BUSTER_TEST(arguments, found_empty_range);
+    BUSTER_TEST(arguments, found_multiple_range);
+    BUSTER_TEST(arguments, found_negative_range);
+    BUSTER_TEST(arguments, found_outside_range);
     BUSTER_TEST(arguments, found_outside_bounds);
     scratch_end(invalid_designator_temporary);
     return result;
@@ -7182,6 +7454,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));
     c_test_result_add(&result, c_test_frontend_vla_and_ir(arguments));
     c_test_result_add(&result, c_test_local_static_aggregates(arguments));
+
+    c_test_result_add(&result, c_test_static_range_designators(arguments));
 
     c_test_result_add(&result, c_test_u64_initializer_slots(arguments));
 
