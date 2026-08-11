@@ -2015,9 +2015,14 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
                      buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOPNE"));
     if ((pattern.has_modep5 || pattern.has_rep_selector) && !loop_form)
         buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
-    if (pattern.has_modep5 && pattern.modep5_value != 0)
+    // MODEP5 and REP selectors are the legacy LOOP-family control fields.
+    // Their documented forms are byte-level prefix variants, so leave them
+    // available to the encoder when the row is one of the LOOP mnemonics.
+    // Other forms carrying these controls remain schema-blocked until their
+    // semantics are modeled explicitly.
+    if (pattern.has_modep5 && pattern.modep5_value != 0 && !loop_form)
         buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
-    if (pattern.has_rep_selector)
+    if (pattern.has_rep_selector && !loop_form)
         buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
     if (pattern.immune66_loop64 && buster_x86_metadata_emit_string_has(form.attributes, S8("UNDOCUMENTED")))
         buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
@@ -4317,6 +4322,11 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if (query.attributes.notrack && (query.attributes.lock || query.attributes.rep || query.attributes.repne))
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+    bool loop_form = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOP")) ||
+                     buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOPE")) ||
+                     buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOPNE"));
+    if (loop_form && query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64 && query.address_size == 16)
+        return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
     bool jecxz_form = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("JECXZ"));
     bool implicit_eamode32 = jecxz_form && pattern.required_address_size == 32 && !pattern.has_memory &&
                              query.address_size == 64 && query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64;
@@ -5361,6 +5371,20 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
             continue;
         }
         saw_allowed = true;
+        // The unprefixed LOOP-family spelling has a documented MODEP5=0
+        // form and a MODEP5=1 REP=0 alias with identical bytes.  Keep source
+        // selection on the ordinary no-control row when no REP modifier was
+        // requested; MODEP5=1 remains available for the explicit REP/REPNE
+        // spellings below and stays visible to the coverage ledger.
+        bool loop_form = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOP")) ||
+                         buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOPE")) ||
+                         buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOPNE"));
+        if (loop_form && !query.attributes.rep && !query.attributes.repne)
+        {
+            BusterX86MetadataPatternSemantics pattern = {0};
+            if (buster_x86_metadata_emit_parse_pattern(form, &pattern) && pattern.has_modep5 && pattern.modep5_value != 0)
+                continue;
+        }
         u32 expected_operand_count = 0;
         if (!buster_x86_metadata_emit_form_operand_count(query, form, &expected_operand_count))
         {

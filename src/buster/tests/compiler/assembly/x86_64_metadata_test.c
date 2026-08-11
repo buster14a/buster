@@ -2916,15 +2916,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         // contributes the four indirect CALL/JMP rows. These are disjoint
         // normalized rows on top of the fixed NOT16 rows; REP_MONTMUL's
         // EAMODE16 row remains schema-blocked under XED's long-mode mapping.
-        BUSTER_TEST(arguments, audit.emitted_count == 10602 && audit.blocked_count == 411 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10602 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 411);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10710 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 34);
+        BUSTER_TEST(arguments, audit.emitted_count == 10606 && audit.blocked_count == 407 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10606 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 407);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10714 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 30);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 198, 5, 1644, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1779, 197, 5, 1644, 176, 6728, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {33, 1, 0, 0, 0, 0, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1783, 197, 5, 1644, 176, 6728, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {29, 1, 0, 0, 0, 0, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2934,7 +2934,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10602, 268, 108, 34, 0, 1, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10606, 268, 108, 30, 0, 1, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -3572,15 +3572,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         };
         static u32 const residual_total_expected[] = {42, 34, 15, 4};
         static u32 const residual_normalized_expected[] = {40, 26, 15, 4};
-        static u32 const residual_blocked_expected[] = {6, 0, 6, 0};
-        static u32 const residual_emitted_expected[] = {34, 26, 9, 4};
+        static u32 const residual_blocked_expected[] = {2, 0, 2, 0};
+        static u32 const residual_emitted_expected[] = {38, 26, 13, 4};
         static u32 const residual_blocked_ids[][10] = {
-            {10042, 10043, 10045, 10046, 10047, 10049},
+            {10045, 10049},
             {0},
-            {10042, 10043, 10045, 10046, 10047, 10049},
+            {10045, 10049},
             {0},
         };
-        static u32 const residual_blocked_id_count[] = {6, 0, 6, 0};
+        static u32 const residual_blocked_id_count[] = {2, 0, 2, 0};
         u32 residual_total[4] = {0};
         u32 residual_normalized[4] = {0};
         u32 residual_blocked[4] = {0};
@@ -4465,6 +4465,84 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             S8("LOOP"), 10050, &loop_disp8, 1, (BusterX86MetadataPhysicalAttributes){.rep = true}, 0, 0,
             guard_output, sizeof(guard_output), 0, 0);
         BUSTER_TEST(arguments, loop_rep_result.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION);
+
+        // XED's documented MODEP5/REP-selector LOOP rows have ordinary
+        // legacy encodings.  The REP selector is emitted after an optional
+        // address-size override, matching LLVM MC's 67/F2/F3 prefix order.
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("LOOPNE"), 10042, &loop_disp8, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xe0, 0x00}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("LOOPNE"), 10043, &loop_disp8, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){.repne = true}, 0, 0,
+                                                                 (u8 const[]){0xf2, 0xe0, 0x00}, 3));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("LOOPE"), 10046, &loop_disp8, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xe1, 0x00}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("LOOPE"), 10047, &loop_disp8, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){.rep = true}, 0, 0,
+                                                                 (u8 const[]){0xf3, 0xe1, 0x00}, 3));
+
+        BusterX86MetadataPhysicalQuery loop_addr32_query = x86_64_metadata_test_physical_query(
+            S8("LOOPNE"), &loop_disp8, 1, (BusterX86MetadataPhysicalAttributes){.repne = true}, 0, 0);
+        loop_addr32_query.address_size = 32;
+        u8 loop_addr32_output[8] = {0};
+        BusterX86MetadataEmitResult loop_addr32_repne = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = loop_addr32_query, .form_id = 10043, .output = loop_addr32_output,
+            .output_capacity = BUSTER_ARRAY_LENGTH(loop_addr32_output),
+        });
+        BUSTER_TEST(arguments, loop_addr32_repne.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   x86_64_metadata_test_bytes_equal(loop_addr32_output, loop_addr32_repne.byte_count,
+                                                                    (u8 const[]){0x67, 0xf2, 0xe0, 0x00}, 4));
+
+        loop_addr32_query.mnemonic = S8("LOOPE");
+        loop_addr32_query.attributes = (BusterX86MetadataPhysicalAttributes){.rep = true};
+        memset(loop_addr32_output, 0, sizeof(loop_addr32_output));
+        BusterX86MetadataEmitResult loop_addr32_rep = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = loop_addr32_query, .form_id = 10047, .output = loop_addr32_output,
+            .output_capacity = BUSTER_ARRAY_LENGTH(loop_addr32_output),
+        });
+        BUSTER_TEST(arguments, loop_addr32_rep.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   x86_64_metadata_test_bytes_equal(loop_addr32_output, loop_addr32_rep.byte_count,
+                                                                    (u8 const[]){0x67, 0xf3, 0xe1, 0x00}, 4));
+
+        BusterX86MetadataPhysicalQuery loop_plain_query = x86_64_metadata_test_physical_query(
+            S8("LOOPNE"), &loop_disp8, 1, (BusterX86MetadataPhysicalAttributes){0}, 0, 0);
+        loop_plain_query.source_semantics = true;
+        BusterX86MetadataSelectResult loop_plain_selection = buster_x86_metadata_select_form(loop_plain_query);
+        loop_plain_query.attributes = (BusterX86MetadataPhysicalAttributes){.repne = true};
+        BusterX86MetadataSelectResult loop_repne_selection = buster_x86_metadata_select_form(loop_plain_query);
+        loop_plain_query.mnemonic = S8("LOOPE");
+        loop_plain_query.attributes = (BusterX86MetadataPhysicalAttributes){.rep = true};
+        BusterX86MetadataSelectResult loop_rep_selection = buster_x86_metadata_select_form(loop_plain_query);
+        BUSTER_TEST(arguments, loop_plain_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   loop_plain_selection.form_id == 10044 &&
+                                   loop_repne_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   loop_repne_selection.form_id == 10043 &&
+                                   loop_rep_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   loop_rep_selection.form_id == 10047);
+
+        BusterX86MetadataPhysicalQuery loop_addr16_query = loop_plain_query;
+        loop_addr16_query.mnemonic = S8("LOOPNE");
+        loop_addr16_query.attributes = (BusterX86MetadataPhysicalAttributes){.repne = true};
+        loop_addr16_query.address_size = 16;
+        BusterX86MetadataSelectResult loop_addr16_selection = buster_x86_metadata_select_form(loop_addr16_query);
+        BusterX86MetadataEmitResult loop_wrong_rep = x86_64_metadata_test_emit_form(
+            S8("LOOPNE"), 10043, &loop_disp8, 1, (BusterX86MetadataPhysicalAttributes){.rep = true}, 0, 0,
+            guard_output, sizeof(guard_output), 0, 0);
+        BusterX86MetadataEmitResult loop_wrong_repne = x86_64_metadata_test_emit_form(
+            S8("LOOPE"), 10047, &loop_disp8, 1, (BusterX86MetadataPhysicalAttributes){.repne = true}, 0, 0,
+            guard_output, sizeof(guard_output), 0, 0);
+        BusterX86MetadataEmitResult undocumented_loopne = x86_64_metadata_test_emit_form(
+            S8("LOOPNE"), 10045, &loop_disp8, 1, (BusterX86MetadataPhysicalAttributes){.repne = true}, 0, 0,
+            guard_output, sizeof(guard_output), 0, 0);
+        BusterX86MetadataEmitResult undocumented_loope = x86_64_metadata_test_emit_form(
+            S8("LOOPE"), 10049, &loop_disp8, 1, (BusterX86MetadataPhysicalAttributes){.rep = true}, 0, 0,
+            guard_output, sizeof(guard_output), 0, 0);
+        BUSTER_TEST(arguments, loop_addr16_selection.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   loop_wrong_rep.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION &&
+                                   loop_wrong_repne.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION &&
+                                   undocumented_loopne.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA &&
+                                   undocumented_loope.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA);
 
         // CET_NO_TRACK is an optional 0x3e prefix on the four real indirect
         // CALL/JMP rows.  The same rows must retain their ordinary FF /2,/4

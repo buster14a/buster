@@ -6370,6 +6370,47 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    explicit_addr32_loop.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC8 &&
                                    explicit_addr32_loop.relocations[0].offset == 2);
 
+        AssemblyEncodeResult loop_repeat_external = assembly_encode(
+            arguments->arena,
+            S8("repne loopne external_loopne\n"
+               "rep loope external_loope\n"
+               "addr32 repne loopne external_addr32_loopne\n"
+               "addr32 rep loope external_addr32_loope\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 const expected_loop_repeat_external[] = {
+            0xf2, 0xe0, 0x00,
+            0xf3, 0xe1, 0x00,
+            0x67, 0xf2, 0xe0, 0x00,
+            0x67, 0xf3, 0xe1, 0x00,
+        };
+        BUSTER_TEST(arguments, loop_repeat_external.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(loop_repeat_external.bytes, expected_loop_repeat_external,
+                                                             BUSTER_ARRAY_LENGTH(expected_loop_repeat_external)) &&
+                                   loop_repeat_external.relocation_count == 4 && loop_repeat_external.symbol_count == 4 &&
+                                   loop_repeat_external.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC8 &&
+                                   loop_repeat_external.relocations[1].kind == ASSEMBLY_RELOCATION_X86_PC8 &&
+                                   loop_repeat_external.relocations[2].kind == ASSEMBLY_RELOCATION_X86_PC8 &&
+                                   loop_repeat_external.relocations[3].kind == ASSEMBLY_RELOCATION_X86_PC8 &&
+                                   loop_repeat_external.relocations[0].offset == 2 &&
+                                   loop_repeat_external.relocations[1].offset == 5 &&
+                                   loop_repeat_external.relocations[2].offset == 9 &&
+                                   loop_repeat_external.relocations[3].offset == 13);
+
+        AssemblyEncodeResult loop_repeat_aliases = assembly_encode(
+            arguments->arena, S8("repe loope loop_target\nloop_target:\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        u8 const expected_loop_repeat_aliases[] = {0xf3, 0xe1, 0x00};
+        BUSTER_TEST(arguments, loop_repeat_aliases.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(loop_repeat_aliases.bytes, expected_loop_repeat_aliases,
+                                                             BUSTER_ARRAY_LENGTH(expected_loop_repeat_aliases)) &&
+                                   loop_repeat_aliases.relocation_count == 0 && loop_repeat_aliases.symbol_count == 1);
+
+        AssemblyEncodeResult invalid_loop_controls = assembly_encode(
+            arguments->arena, S8("addr16 loop external_addr16\nrep repne loopne external_duplicate\nrepne loop external_loop\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, invalid_loop_controls.diagnostic_count == 3 && invalid_loop_controls.bytes.length == 0 &&
+                                   invalid_loop_controls.relocation_count == 0 && invalid_loop_controls.symbol_count == 0);
+
         AssemblyEncodeResult invalid_addr32_jrcxz = assembly_encode(
             arguments->arena, S8("addr32 jrcxz external\n"),
             (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
