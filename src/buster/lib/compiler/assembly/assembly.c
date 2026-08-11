@@ -6097,6 +6097,7 @@ BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, Strin
         TARGET_CPU_FEATURE_X86_WRMSRNS,
         TARGET_CPU_FEATURE_X86_XSAVE,
         TARGET_CPU_FEATURE_X86_XSAVES,
+        TARGET_CPU_FEATURE_X86_ACE_1,
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(feature_bits) == (u32)TARGET_CPU_FEATURE_COUNT - 3);
     if (!names || capacity < BUSTER_ARRAY_LENGTH(feature_bits))

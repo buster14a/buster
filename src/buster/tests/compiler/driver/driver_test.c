@@ -961,6 +961,26 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_MOVRS));
     BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_VMX));
     BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_SVM));
+    String8 ace_feature_command_line[] = {
+        S8("--target=x86_64-linux"),
+        S8("-march=haswell"),
+        S8("-mattr=+ace-1"),
+        S8("source.c"),
+    };
+    CompilerDriverInvocation ace_feature_invocation =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(ace_feature_command_line));
+    BUSTER_TEST(arguments, ace_feature_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, target_cpu_feature_has(ace_feature_invocation.target, TARGET_CPU_FEATURE_X86_ACE_1));
+    String8 invalid_ace_spelling_command_line[] = {
+        S8("--target=x86_64-linux"),
+        S8("-march=haswell"),
+        S8("-mattr=+ACE_1"),
+        S8("source.c"),
+    };
+    CompilerDriverInvocation invalid_ace_spelling =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_ace_spelling_command_line));
+    BUSTER_TEST(arguments, invalid_ace_spelling.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, invalid_ace_spelling.diagnostic, S8("unsupported target feature: ACE_1"));
     BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, feature_invocation.target),
                        S8("avx,avx2,avx512bw,avx512f,avx512vl,bmi1,cldemote,cx16,ibt,lzcnt,movrs,pclmul,popcnt,prefetchi,shstk,sse2,sse3,svm,vmx"));
     String8 invalid_avx512_dependency_command_line[] = {

@@ -14,6 +14,40 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         .cpu_arch = CPU_ARCH_X86_64,
         .os = OPERATING_SYSTEM_LINUX,
     };
+    Target ace_target = x86_target;
+    ace_target.cpu_model = CPU_MODEL_BASELINE;
+    ace_target.cpu_features_explicit = true;
+    ace_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+                                                                                         TARGET_CPU_FEATURE_X86_ACE_1},
+                                                              2);
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(ace_target));
+    AssemblyEncodeResult ace_intel = assembly_encode(arguments->arena, S8("bsrmovf zmm0, zmm0\n"),
+                                                      (AssemblyEncodeOptions){.target = ace_target,
+                                                                               .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_ace_bsr_movf[] = {0x62, 0xf6, 0xfc, 0x48, 0x95, 0xc0};
+    BUSTER_TEST(arguments, ace_intel.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(ace_intel.bytes, expected_ace_bsr_movf,
+                                                         BUSTER_ARRAY_LENGTH(expected_ace_bsr_movf)));
+    AssemblyEncodeResult ace_att = assembly_encode(arguments->arena, S8("bsrmovf %zmm0, %zmm0\n"),
+                                                    (AssemblyEncodeOptions){.target = ace_target,
+                                                                             .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, ace_att.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(ace_att.bytes, expected_ace_bsr_movf,
+                                                         BUSTER_ARRAY_LENGTH(expected_ace_bsr_movf)));
+    Target amx_tile_only_target = ace_target;
+    amx_tile_only_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+                                                                                                  TARGET_CPU_FEATURE_X86_AMX_TILE},
+                                                                       2);
+    AssemblyEncodeResult ace_without_feature = assembly_encode(
+        arguments->arena, S8("bsrmovf zmm0, zmm1\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult ace_with_amx_tile = assembly_encode(
+        arguments->arena, S8("bsrmovf zmm0, zmm1\n"),
+        (AssemblyEncodeOptions){.target = amx_tile_only_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, ace_without_feature.diagnostic_count == 1 &&
+                               ace_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    BUSTER_TEST(arguments, ace_with_amx_tile.diagnostic_count == 1 &&
+                               ace_with_amx_tile.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     Target sse4a_target = x86_target;
     sse4a_target.cpu_model = CPU_MODEL_AMD_AMD_FAMILY_10;
     sse4a_target.cpu_features_explicit = true;

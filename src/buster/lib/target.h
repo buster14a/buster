@@ -343,6 +343,11 @@ typedef enum TargetCpuFeature
     // feature after the existing IDs so serialized feature bitsets retain
     // their established layout.
     TARGET_CPU_FEATURE_X86_SSE4A,
+    // ACE_1 is an explicit instruction-set gate used by the imported x86
+    // metadata. It has no generic CPUID bit in the target interfaces, so it
+    // remains opt-in through -mattr=+ace-1 and is appended to preserve every
+    // existing serialized feature identity.
+    TARGET_CPU_FEATURE_X86_ACE_1,
     TARGET_CPU_FEATURE_COUNT,
 } TargetCpuFeature;
 

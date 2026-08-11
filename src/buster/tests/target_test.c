@@ -564,6 +564,14 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_IBT, TARGET_CPU_FEATURE_X86_CLDEMOTE, TARGET_CPU_FEATURE_X86_PREFETCHI, TARGET_CPU_FEATURE_X86_MOVRS, TARGET_CPU_FEATURE_X86_SHSTK}, 6),
     };
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_metadata_features));
+    Target valid_ace_feature = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .cpu_features_explicit = true,
+        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+                                                                                  TARGET_CPU_FEATURE_X86_ACE_1}, 2),
+    };
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_ace_feature));
     Target invalid_xsaves_without_xsave = valid_metadata_features;
     invalid_xsaves_without_xsave.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
         TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_XSAVES}, 2);
@@ -577,6 +585,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     } feature_names[] = {
         {S8("3dnow"), TARGET_CPU_FEATURE_X86_3DNOW},
         {S8("3dnowa"), TARGET_CPU_FEATURE_X86_3DNOWA},
+        {S8("ace-1"), TARGET_CPU_FEATURE_X86_ACE_1},
         {S8("aes"), TARGET_CPU_FEATURE_X86_AES},
         {S8("amx-avx512"), TARGET_CPU_FEATURE_X86_AMX_AVX512},
         {S8("amx-bf16"), TARGET_CPU_FEATURE_X86_AMX_BF16},
@@ -674,6 +683,8 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     invalid_out_of_range.cpu_features.words[TARGET_CPU_FEATURE_WORD_COUNT - 1] = UINT64_C(0x8000000000000000);
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_out_of_range));
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("avx2")) == TARGET_CPU_FEATURE_X86_AVX2);
+    BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("ace-1")) == TARGET_CPU_FEATURE_X86_ACE_1);
+    BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("ACE_1")) == TARGET_CPU_FEATURE_NONE);
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("avx10-vnni-int")) == TARGET_CPU_FEATURE_NONE);
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("sse3")) == TARGET_CPU_FEATURE_X86_SSE3);
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("sse4a")) == TARGET_CPU_FEATURE_X86_SSE4A);
@@ -692,6 +703,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(TARGET_CPU_FEATURE_X86_BMI1), S8("bmi1"));
     BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(TARGET_CPU_FEATURE_X86_CX16), S8("cx16"));
     BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(TARGET_CPU_FEATURE_X86_SSE4A), S8("sse4a"));
+    BUSTER_STRING_TEST(arguments, target_cpu_feature_to_string(TARGET_CPU_FEATURE_X86_ACE_1), S8("ace-1"));
 #if BUSTER_CPU_ARCH_X86_64
     X86_64CpuFeatureInput full_cpuid = {
         .maximum_basic_leaf = 0x29,

@@ -1108,6 +1108,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         bool gate_query_built = x86_64_metadata_test_build_gate_query(6, &gate_query, gate_operands, gate_mnemonic);
         String8 ace_feature[] = {S8("ACE_1")};
         String8 ace_lower_feature[] = {S8("ace_1")};
+        String8 ace_cli_feature[] = {S8("ace-1")};
         String8 amx_tile_feature[] = {S8("AMX_TILE")};
         String8 ace_extension_feature[] = {S8("ACE")};
         String8 no_feature[] = {0};
@@ -1117,6 +1118,9 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         gate_query.features.names = ace_lower_feature;
         gate_query.features.count = BUSTER_ARRAY_LENGTH(ace_lower_feature);
         BusterX86MetadataSelectResult ace_lower_selected = buster_x86_metadata_select_form(gate_query);
+        gate_query.features.names = ace_cli_feature;
+        gate_query.features.count = BUSTER_ARRAY_LENGTH(ace_cli_feature);
+        BusterX86MetadataSelectResult ace_cli_selected = buster_x86_metadata_select_form(gate_query);
         gate_query.features.names = amx_tile_feature;
         gate_query.features.count = BUSTER_ARRAY_LENGTH(amx_tile_feature);
         BusterX86MetadataSelectResult amx_tile_rejected = buster_x86_metadata_select_form(gate_query);
@@ -1128,6 +1132,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BusterX86MetadataSelectResult no_feature_rejected = buster_x86_metadata_select_form(gate_query);
         BUSTER_TEST(arguments, gate_query_built && ace_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && ace_selected.form_id == 6 &&
                                    ace_lower_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && ace_lower_selected.form_id == 6 &&
+                                   ace_cli_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && ace_cli_selected.form_id == 6 &&
                                    amx_tile_rejected.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
                                    ace_extension_rejected.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
                                    no_feature_rejected.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE);

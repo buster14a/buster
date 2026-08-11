@@ -6894,6 +6894,15 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_canonical_feature_matches(u32 offse
         return buster_x86_metadata_feature_input_contains_all(input, S8("xsave"), S8(""), S8(""), S8(""));
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("XSAVES")))
         return buster_x86_metadata_feature_input_contains_all(input, S8("xsaves"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("ACE_1")))
+    {
+        // The driver exposes the canonical CLI spelling, while direct
+        // metadata clients historically supplied the generated ISA-set name.
+        // Accept both exact spellings (case-insensitively), but do not let the
+        // category (AMX_TILE) or extension (ACE) authorize this gate.
+        return buster_x86_metadata_feature_input_contains_literal(input, S8("ace-1")) ||
+               buster_x86_metadata_feature_input_contains_literal(input, S8("ACE_1"));
+    }
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("CMPXCHG16B")))
         return buster_x86_metadata_feature_input_contains_all(input, S8("cx16"), S8(""), S8(""), S8(""));
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SSE3X87")))
