@@ -411,7 +411,7 @@ UnitTestResult aarch64_direct_simd_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, buster_a64_direct_simd_decode_row(target, row_index, table_word, &table_decoded) == BUSTER_A64_DIRECT_SIMD_STATUS_OK);
         BUSTER_TEST(arguments, table_decoded.operands[0].kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR && table_decoded.operands[0].width == 64);
         BUSTER_TEST(arguments, table_decoded.operands[2].kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST && table_decoded.operands[2].payload == 31 &&
-                                   table_decoded.operands[2].aux2 == list_count);
+                                   table_decoded.operands[2].aux2 == list_count && table_decoded.operands[2].aux == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B);
         BUSTER_TEST(arguments, table_decoded.operands[2 + list_count].kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR);
         BUSTER_TEST(arguments, table_decoded.operands[2 + list_count].payload == 2);
         BUSTER_TEST(arguments, buster_a64_direct_simd_encode(target, &table, &table_word) == BUSTER_A64_DIRECT_SIMD_STATUS_OK);
