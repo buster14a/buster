@@ -453,6 +453,11 @@ typedef enum AssemblyOperandSplitStatus
     ASSEMBLY_OPERAND_SPLIT_INVALID,
 } AssemblyOperandSplitStatus;
 
+enum
+{
+    ASSEMBLY_OPERAND_DELIMITER_CAPACITY = 64,
+};
+
 BUSTER_GLOBAL_LOCAL AssemblyOperandSplitStatus assembly_operand_split_next(String8 text, u64* cursor, String8* result)
 {
     if (*cursor >= text.length)
@@ -461,55 +466,35 @@ BUSTER_GLOBAL_LOCAL AssemblyOperandSplitStatus assembly_operand_split_next(Strin
     }
     u64 operand_start = *cursor;
     u64 operand_end = operand_start;
-    u64 parenthesis_depth = 0;
-    u64 bracket_depth = 0;
-    u64 brace_depth = 0;
+    char8 delimiter_stack[ASSEMBLY_OPERAND_DELIMITER_CAPACITY] = {0};
+    u32 delimiter_count = 0;
     while (operand_end < text.length)
     {
         char8 character = text.pointer[operand_end];
-        if (character == '(')
+        if (character == '(' || character == '[' || character == '{')
         {
-            parenthesis_depth += 1;
-        }
-        else if (character == ')')
-        {
-            if (!parenthesis_depth)
+            if (delimiter_count == BUSTER_ARRAY_LENGTH(delimiter_stack))
             {
                 return ASSEMBLY_OPERAND_SPLIT_INVALID;
             }
-            parenthesis_depth -= 1;
+            delimiter_stack[delimiter_count++] = character;
         }
-        else if (character == '[')
+        else if (character == ')' || character == ']' || character == '}')
         {
-            bracket_depth += 1;
-        }
-        else if (character == ']')
-        {
-            if (!bracket_depth)
+            char8 expected = character == ')' ? '(' : character == ']' ? '[' : '{';
+            if (!delimiter_count || delimiter_stack[delimiter_count - 1] != expected)
             {
                 return ASSEMBLY_OPERAND_SPLIT_INVALID;
             }
-            bracket_depth -= 1;
+            delimiter_count -= 1;
         }
-        else if (character == '{')
-        {
-            brace_depth += 1;
-        }
-        else if (character == '}')
-        {
-            if (!brace_depth)
-            {
-                return ASSEMBLY_OPERAND_SPLIT_INVALID;
-            }
-            brace_depth -= 1;
-        }
-        else if (character == ',' && !parenthesis_depth && !bracket_depth && !brace_depth)
+        else if (character == ',' && !delimiter_count)
         {
             break;
         }
         operand_end += 1;
     }
-    if (parenthesis_depth || bracket_depth || brace_depth)
+    if (delimiter_count)
     {
         return ASSEMBLY_OPERAND_SPLIT_INVALID;
     }
@@ -565,11 +550,20 @@ BUSTER_GLOBAL_LOCAL u64 assembly_leading_label_colon(String8 statement)
     {
         colon += 1;
     }
-    // A separated label colon must itself be a token.  In particular, the
-    // colon that begins an AArch64 modifier such as `:lo12:symbol` belongs to
-    // the operand after the mnemonic, not to the mnemonic as a label.
-    if (colon < statement.length && statement.pointer[colon] == ':' &&
-        (colon + 1 == statement.length || assembly_space(statement.pointer[colon + 1])))
+    if (colon >= statement.length || statement.pointer[colon] != ':')
+    {
+        return BUSTER_STRING_NO_MATCH;
+    }
+    // A separated colon can be followed immediately by the instruction, as
+    // in `label :nop`.  The exception is an AArch64 modifier token such as
+    // `:lo12:symbol`, whose second colon makes the first one part of the
+    // operand after the mnemonic rather than a label separator.
+    u64 modifier_end = colon + 1;
+    while (modifier_end < statement.length && assembly_character_identifier(statement.pointer[modifier_end]))
+    {
+        modifier_end += 1;
+    }
+    if (modifier_end == colon + 1 || modifier_end >= statement.length || statement.pointer[modifier_end] != ':')
     {
         return colon;
     }

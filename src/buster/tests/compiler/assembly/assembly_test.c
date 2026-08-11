@@ -2359,6 +2359,21 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !assembly_test_split_operands(
                                S8("{v0.4s, v1.4s, x0"), split_operands,
                                BUSTER_ARRAY_LENGTH(split_operands), &split_operand_count));
+    BUSTER_TEST(arguments, !assembly_test_split_operands(
+                               S8("([x0, x1)]"), split_operands,
+                               BUSTER_ARRAY_LENGTH(split_operands), &split_operand_count));
+    BUSTER_TEST(arguments, !assembly_test_split_operands(
+                               S8("{[x0, x1}]"), split_operands,
+                               BUSTER_ARRAY_LENGTH(split_operands), &split_operand_count));
+    bool split_nested = assembly_test_split_operands(
+        S8("({[x0, x1]}), x2"), split_operands,
+        BUSTER_ARRAY_LENGTH(split_operands), &split_operand_count);
+    BUSTER_TEST(arguments, split_nested && split_operand_count == 2);
+    if (split_nested && split_operand_count == 2)
+    {
+        BUSTER_STRING_TEST(arguments, split_operands[0], S8("({[x0, x1]})"));
+        BUSTER_STRING_TEST(arguments, split_operands[1], S8("x2"));
+    }
 
     bool split_six = assembly_test_split_operands(
         S8("x0, x1, x2, x3, x4, x5"), split_operands,
@@ -2379,6 +2394,16 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                aarch64_same_line_label.bytes.length == sizeof(expected_aarch64_jump) &&
                                memcmp(aarch64_same_line_label.bytes.pointer, expected_aarch64_jump,
                                       sizeof(expected_aarch64_jump)) == 0);
+    AssemblyEncodeResult aarch64_separated_label_without_space = assembly_encode(
+        arguments->arena, S8("leading_label_without_space :nop\n"),
+        (AssemblyEncodeOptions){.target = aarch64_target});
+    BUSTER_TEST(arguments, aarch64_separated_label_without_space.diagnostic_count == 0 &&
+                               aarch64_separated_label_without_space.symbol_count == 1 &&
+                               aarch64_separated_label_without_space.symbols[0].defined &&
+                               aarch64_separated_label_without_space.symbols[0].offset == 0 &&
+                               string_equal(aarch64_separated_label_without_space.symbols[0].name,
+                                            S8("leading_label_without_space")) &&
+                               aarch64_separated_label_without_space.bytes.length == 4);
     AssemblyEncodeResult aarch64_modifier_operand = assembly_encode(
         arguments->arena, S8("b :lo12:target\n"),
         (AssemblyEncodeOptions){.target = aarch64_target});
