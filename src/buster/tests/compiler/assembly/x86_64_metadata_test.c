@@ -781,7 +781,6 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_mem128_forms(void)
 UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_UNUSED(arguments);
 
     {
         // This is the complete normalized residual cohort: the sixteen X87
@@ -1008,6 +1007,177 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_64_metadata_test_raw_conjunction_rejected(1886, S8("APX_F_MOVDIR64B")));
     BUSTER_TEST(arguments, buster_x86_metadata_test_eamode_alias_forms(423, 424) &&
                                !buster_x86_metadata_test_eamode_alias_forms(423, 10993));
+
+    {
+        // XED's long-mode address-size mapping keeps the EAMODE16 PadLock
+        // row (9011) out of the encoder.  The valid long-mode spelling is
+        // the EAMODE32 alias (9012), which requires 67 and emits
+        // 67 F3 0F A6 C0.  Keep the hidden operand topology and dialect
+        // lookup checks here while making the source/decoder contract
+        // explicit.
+        BusterX86MetadataForm montmul_eamode16 = {0};
+        BusterX86MetadataForm montmul_eamode32 = {0};
+        bool montmul_records = buster_x86_metadata_form(9011, &montmul_eamode16) &&
+                               buster_x86_metadata_form(9012, &montmul_eamode32);
+        bool montmul_hidden_topology = montmul_records && montmul_eamode16.operand_count == 6;
+        for (u32 operand_index = 0; montmul_hidden_topology && operand_index < montmul_eamode16.operand_count; operand_index += 1)
+        {
+            BusterX86MetadataOperand operand = {0};
+            montmul_hidden_topology &= buster_x86_metadata_operand(9011, operand_index, &operand) && !operand.visible &&
+                                       (operand.access & BUSTER_X86_METADATA_ACCESS_SUPPRESSED) != 0;
+        }
+        BusterX86MetadataCandidateRange montmul_lower = buster_x86_metadata_lookup_mnemonic(S8("montmul"));
+        BusterX86MetadataCandidateRange montmul_upper = buster_x86_metadata_lookup_mnemonic(S8("MONTMUL"));
+        bool montmul_aliases = montmul_lower.count == montmul_upper.count && montmul_lower.count >= 2;
+        bool montmul_lower_has_9011 = false;
+        bool montmul_lower_has_9012 = false;
+        bool montmul_upper_has_9011 = false;
+        bool montmul_upper_has_9012 = false;
+        for (u32 position = 0; position < montmul_lower.count; position += 1)
+        {
+            u32 form_id = 0;
+            if (x86_64_metadata_test_candidate(montmul_lower, position, &form_id))
+            {
+                montmul_lower_has_9011 |= form_id == 9011;
+                montmul_lower_has_9012 |= form_id == 9012;
+            }
+        }
+        for (u32 position = 0; position < montmul_upper.count; position += 1)
+        {
+            u32 form_id = 0;
+            if (x86_64_metadata_test_candidate(montmul_upper, position, &form_id))
+            {
+                montmul_upper_has_9011 |= form_id == 9011;
+                montmul_upper_has_9012 |= form_id == 9012;
+            }
+        }
+        montmul_aliases &= montmul_lower_has_9011 && montmul_lower_has_9012 && montmul_upper_has_9011 && montmul_upper_has_9012;
+        BUSTER_TEST(arguments, montmul_records && montmul_eamode16.stable_hash == UINT64_C(0x43ea6607300874ad) &&
+                                   montmul_eamode16.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                   montmul_eamode16.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY &&
+                                   montmul_eamode16.mode_flags == BUSTER_X86_METADATA_MODE_EA16 &&
+                                   montmul_eamode32.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                   montmul_eamode32.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY &&
+                                   montmul_eamode32.mode_flags == BUSTER_X86_METADATA_MODE_EA32 && montmul_hidden_topology &&
+                                   montmul_aliases && x86_64_metadata_test_pattern_has_token(montmul_eamode16.pattern, S8("eamode16")) &&
+                                   x86_64_metadata_test_pattern_has_token(montmul_eamode32.pattern, S8("eamode32")));
+
+        String8 montmul_features[1] = {S8("*")};
+        u8 montmul_output[8] = {0};
+        BusterX86MetadataRelocation montmul_relocations[1] = {0};
+        BusterX86MetadataPhysicalQuery montmul_query = x86_64_metadata_test_physical_query(
+            S8("montmul"), 0, 0, (BusterX86MetadataPhysicalAttributes){0}, montmul_features,
+            BUSTER_ARRAY_LENGTH(montmul_features));
+        BusterX86MetadataSelectResult montmul_default = buster_x86_metadata_select_form(montmul_query);
+        u32 montmul_default_ids[4] = {0};
+        BusterX86MetadataResolveResult montmul_default_resolved = buster_x86_metadata_resolve(
+            (BusterX86MetadataResolveQuery){
+                .mnemonic = S8("montmul"),
+                .features = {.names = montmul_features, .count = BUSTER_ARRAY_LENGTH(montmul_features)},
+                .address_size = 64,
+                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+            },
+            montmul_default_ids, BUSTER_ARRAY_LENGTH(montmul_default_ids));
+        BusterX86MetadataEmitResult montmul_eamode16_emit = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = montmul_query,
+            .form_id = 9011,
+            .output = montmul_output,
+            .output_capacity = sizeof(montmul_output),
+            .relocations = montmul_relocations,
+            .relocation_capacity = BUSTER_ARRAY_LENGTH(montmul_relocations),
+        });
+        BUSTER_TEST(arguments, montmul_default.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   montmul_default_resolved.status != BUSTER_X86_METADATA_RESOLVE_SUCCESS &&
+                                   montmul_eamode16_emit.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA);
+
+        montmul_query.address_size = 32;
+        BusterX86MetadataSelectResult montmul_addr32 = buster_x86_metadata_select_form(montmul_query);
+        u32 montmul_addr32_ids[4] = {0};
+        BusterX86MetadataResolveResult montmul_addr32_resolved = buster_x86_metadata_resolve(
+            (BusterX86MetadataResolveQuery){
+                .mnemonic = S8("montmul"),
+                .features = {.names = montmul_features, .count = BUSTER_ARRAY_LENGTH(montmul_features)},
+                .address_size = 32,
+                .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+            },
+            montmul_addr32_ids, BUSTER_ARRAY_LENGTH(montmul_addr32_ids));
+        BusterX86MetadataEmitResult montmul_eamode32_emit = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = montmul_query,
+            .form_id = 9012,
+            .output = montmul_output,
+            .output_capacity = sizeof(montmul_output),
+            .relocations = montmul_relocations,
+            .relocation_capacity = BUSTER_ARRAY_LENGTH(montmul_relocations),
+        });
+        BUSTER_TEST(arguments, montmul_addr32.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   montmul_addr32.form_id == 9012 && montmul_addr32.selected_byte_count == 5 &&
+                                   montmul_addr32_resolved.status == BUSTER_X86_METADATA_RESOLVE_SUCCESS &&
+                                   montmul_addr32_resolved.candidate_count == 1 && montmul_addr32_ids[0] == 9012 &&
+                                   montmul_eamode32_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   montmul_eamode32_emit.form_id == 9012 && montmul_eamode32_emit.byte_count == 5 &&
+                                   montmul_eamode32_emit.relocation_count == 0 &&
+                                   x86_64_metadata_test_bytes_equal(montmul_output, montmul_eamode32_emit.byte_count,
+                                                                     (u8 const[]){0x67, 0xf3, 0x0f, 0xa6, 0xc0}, 5));
+
+        montmul_query.address_size = 16;
+        BusterX86MetadataSelectResult montmul_addr16 = buster_x86_metadata_select_form(montmul_query);
+        montmul_query.address_size = 32;
+        montmul_query.attributes.repne = true;
+        BusterX86MetadataSelectResult montmul_wrong_prefix = buster_x86_metadata_select_form(montmul_query);
+        BusterX86MetadataEmitResult montmul_wrong_prefix_emit = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = montmul_query,
+            .form_id = 9012,
+            .output = montmul_output,
+            .output_capacity = sizeof(montmul_output),
+            .relocations = montmul_relocations,
+            .relocation_capacity = BUSTER_ARRAY_LENGTH(montmul_relocations),
+        });
+        montmul_query.attributes = (BusterX86MetadataPhysicalAttributes){0};
+        String8 wrong_montmul_features[1] = {S8("sse2")};
+        montmul_query.features.names = wrong_montmul_features;
+        montmul_query.features.count = 1;
+        BusterX86MetadataSelectResult montmul_wrong_feature = buster_x86_metadata_select_form(montmul_query);
+        BusterX86MetadataEmitResult montmul_wrong_feature_emit = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = montmul_query,
+            .form_id = 9012,
+            .output = montmul_output,
+            .output_capacity = sizeof(montmul_output),
+            .relocations = montmul_relocations,
+            .relocation_capacity = BUSTER_ARRAY_LENGTH(montmul_relocations),
+        });
+        BusterX86MetadataPhysicalOperand montmul_wrong_operand =
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 32);
+        montmul_query.features.names = montmul_features;
+        montmul_query.features.count = 1;
+        montmul_query.operands = &montmul_wrong_operand;
+        montmul_query.operand_count = 1;
+        BusterX86MetadataSelectResult montmul_wrong_operands = buster_x86_metadata_select_form(montmul_query);
+        BUSTER_TEST(arguments, montmul_addr16.status != BUSTER_X86_METADATA_ENCODE_SUCCESS);
+        BUSTER_TEST(arguments, montmul_wrong_prefix.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   montmul_wrong_prefix_emit.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION);
+        BUSTER_TEST(arguments, montmul_wrong_feature.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   montmul_wrong_feature_emit.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE);
+        BUSTER_TEST(arguments, montmul_wrong_operands.status == BUSTER_X86_METADATA_ENCODE_WRONG_OPERAND_COUNT);
+
+        BusterX86MetadataPhysicalOperand jcxz_operands[16] = {0};
+        char8 jcxz_mnemonic_buffer[128] = {0};
+        BusterX86MetadataPhysicalQuery jcxz_query = {0};
+        bool jcxz_built = x86_64_metadata_test_build_gate_query(10051, &jcxz_query, jcxz_operands, jcxz_mnemonic_buffer);
+        jcxz_query.features.names = montmul_features;
+        jcxz_query.features.count = 1;
+        jcxz_query.include_not64 = false;
+        jcxz_query.execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64;
+        BusterX86MetadataSelectResult jcxz_default = buster_x86_metadata_select_form(jcxz_query);
+        BusterX86MetadataPhysicalOperand monitor_operands[16] = {0};
+        char8 monitor_mnemonic_buffer[128] = {0};
+        BusterX86MetadataPhysicalQuery monitor_query = {0};
+        bool monitor_built = x86_64_metadata_test_build_gate_query(9598, &monitor_query, monitor_operands, monitor_mnemonic_buffer);
+        monitor_query.include_privileged = false;
+        BusterX86MetadataSelectResult monitor_default = buster_x86_metadata_select_form(monitor_query);
+        BUSTER_TEST(arguments, jcxz_built && jcxz_default.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   monitor_built && monitor_default.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE);
+    }
+
     BusterX86MetadataCounts counts = buster_x86_metadata_counts();
     BusterX86MetadataValidationResult validation = {0};
     BUSTER_TEST(arguments, buster_x86_metadata_schema_version() == 2);
@@ -2743,8 +2913,9 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         // boolean row, the ACE R4 cohort contributes ten, BSRINIT adds one,
         // and the fixed CET/IBHF NOP cohort contributes eleven newly capable
         // rows. MASKMOV contributes two more legacy rows, and CET_NO_TRACK
-        // contributes the four indirect CALL/JMP rows. These are
-        // disjoint normalized rows on top of the fixed NOT16 rows.
+        // contributes the four indirect CALL/JMP rows. These are disjoint
+        // normalized rows on top of the fixed NOT16 rows; REP_MONTMUL's
+        // EAMODE16 row remains schema-blocked under XED's long-mode mapping.
         BUSTER_TEST(arguments, audit.emitted_count == 10602 && audit.blocked_count == 411 &&
                                    audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10602 &&
                                    audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 411);
@@ -2768,6 +2939,27 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
         BUSTER_TEST(arguments, blocker_counts_match);
+        BusterX86MetadataCoverageLedgerEntry montmul_ledger = ledger[9011];
+        BusterX86MetadataCoverageLedgerEntry montmul_eamode32_ledger = ledger[9012];
+        BusterX86MetadataCoverageLedgerEntry jcxz_ledger = ledger[10051];
+        BusterX86MetadataCoverageLedgerEntry monitor_ledger = ledger[9598];
+        BUSTER_TEST(arguments, montmul_ledger.form_id == 9011 && montmul_ledger.stable_hash == UINT64_C(0x43ea6607300874ad) &&
+                                   montmul_ledger.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                   montmul_ledger.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY &&
+                                   montmul_ledger.disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
+                                   montmul_ledger.blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS &&
+                                   !montmul_ledger.encoder_capable && !montmul_ledger.policy_excluded &&
+                                   montmul_eamode32_ledger.form_id == 9012 &&
+                                   montmul_eamode32_ledger.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
+                                   montmul_eamode32_ledger.blocker == BUSTER_X86_METADATA_BLOCKER_NONE &&
+                                   montmul_eamode32_ledger.encoder_capable && jcxz_ledger.form_id == 10051 &&
+                                   jcxz_ledger.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                   jcxz_ledger.disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
+                                   jcxz_ledger.blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS && !jcxz_ledger.encoder_capable &&
+                                   monitor_ledger.form_id == 9598 && monitor_ledger.coverage_class == BUSTER_X86_METADATA_COVERAGE_PRIVILEGED &&
+                                   monitor_ledger.disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
+                                   monitor_ledger.blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS &&
+                                   !monitor_ledger.encoder_capable && monitor_ledger.policy_excluded);
 
         // The moffs OVERRIDE_SEG0 cohort is deliberately closed over the
         // four A0-A3 MOV rows.  MASKMOVQ/MASKMOVDQU carry the same source
