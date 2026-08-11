@@ -21334,6 +21334,1101 @@ BUSTER_GLOBAL_LOCAL bool c_ir_float_parse(String8 spelling, f64* value_out, char
     return true;
 }
 
+// Static x87 long doubles use the 80-bit value followed by six ABI padding
+// bytes.  Keep the conversion here entirely integer based: the host long
+// double format is neither stable across targets nor available to the
+// self-hosted compiler.  The bounded bignum is deliberately local to this
+// narrow literal path; no generic IR wide-float constant is introduced.
+#define C_IR_EXT80_BIG_LIMBS 1024
+typedef struct CIrExt80Big CIrExt80Big;
+struct CIrExt80Big
+{
+    u32 limbs[C_IR_EXT80_BIG_LIMBS];
+    u32 count;
+};
+
+BUSTER_GLOBAL_LOCAL void c_ir_ext80_big_normalize(CIrExt80Big* value)
+{
+    while (value->count && value->limbs[value->count - 1] == 0)
+    {
+        value->count -= 1;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void c_ir_ext80_big_set_u64(CIrExt80Big* value, u64 bits)
+{
+    memset(value, 0, sizeof(*value));
+    if (bits)
+    {
+        value->limbs[0] = (u32)bits;
+        value->limbs[1] = (u32)(bits >> 32);
+        value->count = value->limbs[1] ? 2 : 1;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_big_mul_small(CIrExt80Big* value, u32 multiplier)
+{
+    u64 carry = 0;
+    for (u32 index = 0; index < value->count; index += 1)
+    {
+        u64 product = (u64)value->limbs[index] * multiplier + carry;
+        value->limbs[index] = (u32)product;
+        carry = product >> 32;
+    }
+    if (carry)
+    {
+        if (value->count >= C_IR_EXT80_BIG_LIMBS)
+        {
+            return false;
+        }
+        value->limbs[value->count++] = (u32)carry;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_big_add_small(CIrExt80Big* value, u32 addend)
+{
+    u64 carry = addend;
+    u32 index = 0;
+    while (carry && index < value->count)
+    {
+        u64 sum = (u64)value->limbs[index] + carry;
+        value->limbs[index] = (u32)sum;
+        carry = sum >> 32;
+        index += 1;
+    }
+    if (carry)
+    {
+        if (value->count >= C_IR_EXT80_BIG_LIMBS)
+        {
+            return false;
+        }
+        value->limbs[value->count++] = (u32)carry;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_big_shift_left(CIrExt80Big* value, u32 shift)
+{
+    if (!shift || !value->count)
+    {
+        return true;
+    }
+    u32 limb_shift = shift / 32;
+    u32 bit_shift = shift % 32;
+    if (limb_shift >= C_IR_EXT80_BIG_LIMBS || value->count > C_IR_EXT80_BIG_LIMBS - limb_shift)
+    {
+        return false;
+    }
+    CIrExt80Big shifted = {0};
+    for (u32 index = 0; index < value->count; index += 1)
+    {
+        u64 part = (u64)value->limbs[index] << bit_shift;
+        u32 destination = index + limb_shift;
+        shifted.limbs[destination] |= (u32)part;
+        if (part >> 32)
+        {
+            if (destination + 1 >= C_IR_EXT80_BIG_LIMBS)
+            {
+                return false;
+            }
+            shifted.limbs[destination + 1] |= (u32)(part >> 32);
+        }
+    }
+    shifted.count = value->count + limb_shift;
+    if (bit_shift && shifted.count < C_IR_EXT80_BIG_LIMBS && shifted.limbs[shifted.count])
+    {
+        shifted.count += 1;
+    }
+    c_ir_ext80_big_normalize(&shifted);
+    *value = shifted;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL s32 c_ir_ext80_big_compare(CIrExt80Big const* left, CIrExt80Big const* right)
+{
+    if (left->count != right->count)
+    {
+        return left->count < right->count ? -1 : 1;
+    }
+    for (u32 index = left->count; index; index -= 1)
+    {
+        u32 limb_index = index - 1;
+        if (left->limbs[limb_index] != right->limbs[limb_index])
+        {
+            return left->limbs[limb_index] < right->limbs[limb_index] ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL s32 c_ir_ext80_big_compare_shifted(CIrExt80Big const* left, CIrExt80Big const* right, s32 shift)
+{
+    CIrExt80Big shifted = *right;
+    if (shift >= 0)
+    {
+        if (!c_ir_ext80_big_shift_left(&shifted, (u32)shift))
+        {
+            return -1;
+        }
+        return c_ir_ext80_big_compare(left, &shifted);
+    }
+    shifted = *left;
+    if (shift == INT32_MIN)
+    {
+        return shifted.count ? 1 : c_ir_ext80_big_compare(&shifted, right);
+    }
+    if (!c_ir_ext80_big_shift_left(&shifted, (u32)(-shift)))
+    {
+        return 1;
+    }
+    return c_ir_ext80_big_compare(&shifted, right);
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_big_subtract_shifted(CIrExt80Big* left, CIrExt80Big const* right, u32 shift)
+{
+    CIrExt80Big shifted = *right;
+    if (!c_ir_ext80_big_shift_left(&shifted, shift) || c_ir_ext80_big_compare(left, &shifted) < 0)
+    {
+        return false;
+    }
+    u64 borrow = 0;
+    for (u32 index = 0; index < left->count; index += 1)
+    {
+        u64 subtrahend = (u64)(index < shifted.count ? shifted.limbs[index] : 0) + borrow;
+        u64 minuend = left->limbs[index];
+        left->limbs[index] = (u32)(minuend - subtrahend);
+        borrow = minuend < subtrahend;
+    }
+    c_ir_ext80_big_normalize(left);
+    return borrow == 0;
+}
+
+BUSTER_GLOBAL_LOCAL u32 c_ir_ext80_big_bit_length(CIrExt80Big const* value)
+{
+    if (!value || !value->count)
+    {
+        return 0;
+    }
+    u32 top = value->limbs[value->count - 1];
+    u32 bits = 0;
+    while (top)
+    {
+        top >>= 1;
+        bits += 1;
+    }
+    return (value->count - 1) * 32 + bits;
+}
+
+// Divide a non-negative integer by another while retaining only the 65
+// quotient bits needed for a 64-bit significand.  The remainder is kept in
+// the local copy, so the final comparison implements round-to-nearest-even.
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_big_divide_round(CIrExt80Big const* numerator, CIrExt80Big const* denominator, u64* quotient_out,
+                                                     bool* round_up_out, bool* overflow_out)
+{
+    if (!numerator || !denominator || !denominator->count)
+    {
+        return false;
+    }
+    CIrExt80Big remainder = *numerator;
+    u64 quotient = 0;
+    bool overflow = false;
+    for (s32 bit = 64; bit >= 0; bit -= 1)
+    {
+        if (c_ir_ext80_big_compare_shifted(&remainder, denominator, bit) >= 0)
+        {
+            if (!c_ir_ext80_big_subtract_shifted(&remainder, denominator, (u32)bit))
+            {
+                return false;
+            }
+            if (bit == 64)
+            {
+                overflow = true;
+            }
+            else
+            {
+                quotient |= (u64)1 << (u32)bit;
+            }
+        }
+    }
+    s32 twice_remainder = c_ir_ext80_big_compare_shifted(&remainder, denominator, -1);
+    bool round_up = twice_remainder > 0 || (twice_remainder == 0 && (quotient & 1));
+    *quotient_out = quotient;
+    *round_up_out = round_up;
+    *overflow_out = overflow;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ieee_big_divide_round(CIrExt80Big const* numerator, CIrExt80Big const* denominator, u32 fraction_bits,
+                                                    u64* quotient_out, bool* round_up_out, bool* overflow_out)
+{
+    if (!numerator || !denominator || !denominator->count || fraction_bits >= 63)
+    {
+        return false;
+    }
+    CIrExt80Big remainder = *numerator;
+    u64 quotient = 0;
+    bool overflow = false;
+    for (s32 bit = (s32)fraction_bits + 1; bit >= 0; bit -= 1)
+    {
+        if (c_ir_ext80_big_compare_shifted(&remainder, denominator, bit) >= 0)
+        {
+            if (!c_ir_ext80_big_subtract_shifted(&remainder, denominator, (u32)bit))
+            {
+                return false;
+            }
+            if (bit == (s32)fraction_bits + 1)
+            {
+                overflow = true;
+            }
+            else
+            {
+                quotient |= (u64)1 << (u32)bit;
+            }
+        }
+    }
+    s32 twice_remainder = c_ir_ext80_big_compare_shifted(&remainder, denominator, -1);
+    bool round_up = twice_remainder > 0 || (twice_remainder == 0 && (quotient & 1));
+    *quotient_out = quotient;
+    *round_up_out = round_up;
+    *overflow_out = overflow;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ieee_from_rational(CIrExt80Big numerator, CIrExt80Big denominator, s32 binary_exponent, bool negative,
+                                                 u32 fraction_bits, s32 min_exponent, s32 max_exponent, u32 exponent_bits,
+                                                 u64* bits_out)
+{
+    if (!denominator.count || !bits_out || !fraction_bits || fraction_bits >= 62 || !exponent_bits || exponent_bits >= 32 ||
+        exponent_bits > 63 - fraction_bits ||
+        min_exponent >= max_exponent)
+    {
+        return false;
+    }
+    u64 sign_bit = (u64)1 << (fraction_bits + exponent_bits);
+    if (!numerator.count)
+    {
+        *bits_out = negative ? sign_bit : 0;
+        return true;
+    }
+
+    s64 exponent = (s64)c_ir_ext80_big_bit_length(&numerator) - (s64)c_ir_ext80_big_bit_length(&denominator) + binary_exponent;
+    // Correct the one-bit estimate from the operand lengths into floor(log2).
+    for (u32 iteration = 0; iteration < 2; iteration += 1)
+    {
+        s64 shift = exponent - binary_exponent;
+        s32 comparison = shift <= INT32_MIN || shift > INT32_MAX ? (shift < 0 ? 1 : -1)
+                                                                : c_ir_ext80_big_compare_shifted(&numerator, &denominator, (s32)shift);
+        if (comparison < 0)
+        {
+            exponent -= 1;
+            continue;
+        }
+        s64 next_shift = shift + 1;
+        s32 next_comparison = next_shift <= INT32_MIN || next_shift > INT32_MAX
+                                  ? (next_shift < 0 ? 1 : -1)
+                                  : c_ir_ext80_big_compare_shifted(&numerator, &denominator, (s32)next_shift);
+        if (next_comparison >= 0)
+        {
+            exponent += 1;
+            continue;
+        }
+        break;
+    }
+
+    bool subnormal = exponent < min_exponent;
+    if (!subnormal && exponent > max_exponent)
+    {
+        return false;
+    }
+    s64 scaling = subnormal ? (s64)binary_exponent + fraction_bits - min_exponent : (s64)binary_exponent + fraction_bits - exponent;
+    CIrExt80Big scaled_numerator = numerator;
+    CIrExt80Big scaled_denominator = denominator;
+    if (scaling >= 0)
+    {
+        if (scaling > UINT32_MAX || !c_ir_ext80_big_shift_left(&scaled_numerator, (u32)scaling))
+        {
+            return false;
+        }
+    }
+    else
+    {
+        s64 magnitude = -scaling;
+        if (magnitude > UINT32_MAX || !c_ir_ext80_big_shift_left(&scaled_denominator, (u32)magnitude))
+        {
+            return false;
+        }
+    }
+
+    u64 significand = 0;
+    bool round_up = false;
+    bool quotient_overflow = false;
+    if (!c_ir_ieee_big_divide_round(&scaled_numerator, &scaled_denominator, fraction_bits, &significand, &round_up, &quotient_overflow))
+    {
+        return false;
+    }
+    if (quotient_overflow)
+    {
+        // The estimate was one bit low.  Recompute at the next exponent
+        // rather than allowing the extra quotient bit to leak into the
+        // encoded fraction.
+        if (subnormal)
+        {
+            return false;
+        }
+        exponent += 1;
+        if (exponent > max_exponent)
+        {
+            return false;
+        }
+        scaling = (s64)binary_exponent + fraction_bits - exponent;
+        scaled_numerator = numerator;
+        scaled_denominator = denominator;
+        if (scaling >= 0)
+        {
+            if (scaling > UINT32_MAX || !c_ir_ext80_big_shift_left(&scaled_numerator, (u32)scaling))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            s64 magnitude = -scaling;
+            if (magnitude > UINT32_MAX || !c_ir_ext80_big_shift_left(&scaled_denominator, (u32)magnitude))
+            {
+                return false;
+            }
+        }
+        if (!c_ir_ieee_big_divide_round(&scaled_numerator, &scaled_denominator, fraction_bits, &significand, &round_up, &quotient_overflow) ||
+            quotient_overflow)
+        {
+            return false;
+        }
+    }
+
+    u64 normal_bit = (u64)1 << fraction_bits;
+    u64 quotient_max = (normal_bit << 1) - 1;
+    if (round_up)
+    {
+        if (subnormal)
+        {
+            if (significand == normal_bit - 1)
+            {
+                // Rounding the largest subnormal crosses the normal
+                // boundary and becomes the minimum normal value.
+                significand = normal_bit;
+                exponent = min_exponent;
+                subnormal = false;
+            }
+            else
+            {
+                significand += 1;
+            }
+        }
+        else if (significand == quotient_max)
+        {
+            significand = normal_bit;
+            exponent += 1;
+            if (exponent > max_exponent)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            significand += 1;
+        }
+    }
+    if (!significand)
+    {
+        // A nonzero source that rounds all the way to zero is not a
+        // representable static initializer for this lowering path.
+        return false;
+    }
+    if (subnormal)
+    {
+        if (significand >= normal_bit)
+        {
+            return false;
+        }
+        *bits_out = (negative ? sign_bit : 0) | significand;
+    }
+    else
+    {
+        if (significand < normal_bit || exponent < min_exponent || exponent > max_exponent)
+        {
+            return false;
+        }
+        u64 exponent_bias = ((u64)1 << (exponent_bits - 1)) - 1;
+        u64 exponent_field = (u64)exponent + exponent_bias;
+        *bits_out = (negative ? sign_bit : 0) | (exponent_field << fraction_bits) | (significand - normal_bit);
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL u32 c_ir_ext80_digit(u8 byte)
+{
+    if (byte >= '0' && byte <= '9')
+    {
+        return (u32)(byte - '0');
+    }
+    if (byte >= 'a' && byte <= 'f')
+    {
+        return (u32)(byte - 'a') + 10;
+    }
+    if (byte >= 'A' && byte <= 'F')
+    {
+        return (u32)(byte - 'A') + 10;
+    }
+    return UINT32_MAX;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_spelling_nonzero(String8 spelling)
+{
+    u64 end = spelling.length;
+    if (end && (spelling.pointer[end - 1] == 'f' || spelling.pointer[end - 1] == 'F' || spelling.pointer[end - 1] == 'l' ||
+                spelling.pointer[end - 1] == 'L'))
+    {
+        end -= 1;
+    }
+    bool hexadecimal = end >= 2 && spelling.pointer[0] == '0' && (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X');
+    for (u64 index = 0; index < end; index += 1)
+    {
+        u8 byte = spelling.pointer[index];
+        if ((!hexadecimal && (byte == 'e' || byte == 'E')) || (hexadecimal && (byte == 'p' || byte == 'P')))
+        {
+            break;
+        }
+        u32 digit = c_ir_ext80_digit(byte);
+        if (digit != UINT32_MAX && digit != 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_parse_exponent(String8 spelling, u64* index, s32* exponent_out)
+{
+    bool negative = false;
+    if (*index < spelling.length && (spelling.pointer[*index] == '+' || spelling.pointer[*index] == '-'))
+    {
+        negative = spelling.pointer[*index] == '-';
+        *index += 1;
+    }
+    u32 digits = 0;
+    bool saw_digit = false;
+    while (*index < spelling.length)
+    {
+        u8 byte = spelling.pointer[(*index)++];
+        if (byte < '0' || byte > '9' || digits > 20000)
+        {
+            return false;
+        }
+        saw_digit = true;
+        digits = digits * 10 + (u32)(byte - '0');
+        if (digits > 20000)
+        {
+            return false;
+        }
+    }
+    if (!saw_digit)
+    {
+        return false;
+    }
+    *exponent_out = negative ? -(s32)digits : (s32)digits;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_parse_rational_literal(String8 spelling, CIrExt80Big* numerator_out, CIrExt80Big* denominator_out,
+                                                           s32* binary_exponent_out)
+{
+    if (!numerator_out || !denominator_out || !binary_exponent_out || !spelling.length)
+    {
+        return false;
+    }
+    char8 suffix = spelling.pointer[spelling.length - 1];
+    if (suffix == 'f' || suffix == 'F' || suffix == 'l' || suffix == 'L')
+    {
+        spelling.length -= 1;
+    }
+    if (!spelling.length)
+    {
+        return false;
+    }
+    bool hexadecimal = spelling.length >= 2 && spelling.pointer[0] == '0' && (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X');
+    u64 index = hexadecimal ? 2 : 0;
+    bool fraction = false;
+    bool saw_digit = false;
+    u32 fraction_digits = 0;
+    CIrExt80Big numerator = {0};
+    while (index < spelling.length)
+    {
+        u8 byte = spelling.pointer[index];
+        if (byte == '.')
+        {
+            if (fraction)
+            {
+                return false;
+            }
+            fraction = true;
+            index += 1;
+            continue;
+        }
+        bool exponent_marker = hexadecimal ? (byte == 'p' || byte == 'P') : (byte == 'e' || byte == 'E');
+        if (exponent_marker)
+        {
+            break;
+        }
+        u32 digit = c_ir_ext80_digit(byte);
+        if (digit >= (hexadecimal ? 16u : 10u))
+        {
+            return false;
+        }
+        if (!c_ir_ext80_big_mul_small(&numerator, hexadecimal ? 16 : 10) || !c_ir_ext80_big_add_small(&numerator, digit))
+        {
+            return false;
+        }
+        saw_digit = true;
+        if (fraction)
+        {
+            if (fraction_digits == UINT32_MAX)
+            {
+                return false;
+            }
+            fraction_digits += 1;
+        }
+        index += 1;
+    }
+    if (!saw_digit || fraction_digits > 20000)
+    {
+        return false;
+    }
+    s32 exponent = 0;
+    if (index < spelling.length)
+    {
+        if (hexadecimal ? !(spelling.pointer[index] == 'p' || spelling.pointer[index] == 'P')
+                        : !(spelling.pointer[index] == 'e' || spelling.pointer[index] == 'E'))
+        {
+            return false;
+        }
+        index += 1;
+        if (!c_ir_ext80_parse_exponent(spelling, &index, &exponent))
+        {
+            return false;
+        }
+    }
+    else if (hexadecimal)
+    {
+        return false;
+    }
+    CIrExt80Big denominator = {0};
+    c_ir_ext80_big_set_u64(&denominator, 1);
+    if (!numerator.count)
+    {
+        *numerator_out = numerator;
+        *denominator_out = denominator;
+        *binary_exponent_out = 0;
+        return true;
+    }
+    s64 binary_exponent = exponent;
+    if (hexadecimal)
+    {
+        binary_exponent -= (s64)fraction_digits * 4;
+    }
+    else
+    {
+        s64 decimal_scale = (s64)exponent - fraction_digits;
+        if (decimal_scale > 20000 || decimal_scale < -20000)
+        {
+            return false;
+        }
+        if (decimal_scale >= 0)
+        {
+            for (u32 count = 0; count < (u32)decimal_scale; count += 1)
+            {
+                if (!c_ir_ext80_big_mul_small(&numerator, 5))
+                {
+                    return false;
+                }
+            }
+        }
+        else
+        {
+            for (u32 count = 0; count < (u32)-decimal_scale; count += 1)
+            {
+                if (!c_ir_ext80_big_mul_small(&denominator, 5))
+                {
+                    return false;
+                }
+            }
+        }
+        binary_exponent = decimal_scale;
+    }
+    if (binary_exponent > INT32_MAX || binary_exponent < INT32_MIN)
+    {
+        return false;
+    }
+    *numerator_out = numerator;
+    *denominator_out = denominator;
+    *binary_exponent_out = (s32)binary_exponent;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_from_rational(CIrExt80Big numerator, CIrExt80Big denominator, s32 binary_exponent, bool negative,
+                                                  u64* significand_out, u16* exponent_sign_out)
+{
+    if (!denominator.count)
+    {
+        return false;
+    }
+    if (!numerator.count)
+    {
+        *significand_out = 0;
+        *exponent_sign_out = negative ? UINT16_C(0x8000) : 0;
+        return true;
+    }
+    s64 exponent = (s64)c_ir_ext80_big_bit_length(&numerator) - (s64)c_ir_ext80_big_bit_length(&denominator) + binary_exponent;
+    // Correct the one-bit estimate from the operand lengths into floor(log2).
+    for (u32 iteration = 0; iteration < 2; iteration += 1)
+    {
+        s64 shift = exponent - binary_exponent;
+        s32 comparison = shift <= INT32_MIN || shift > INT32_MAX ? (shift < 0 ? 1 : -1)
+                                                                : c_ir_ext80_big_compare_shifted(&numerator, &denominator, (s32)shift);
+        if (comparison < 0)
+        {
+            exponent -= 1;
+            continue;
+        }
+        s64 next_shift = shift + 1;
+        s32 next_comparison = next_shift <= INT32_MIN || next_shift > INT32_MAX
+                                  ? (next_shift < 0 ? 1 : -1)
+                                  : c_ir_ext80_big_compare_shifted(&numerator, &denominator, (s32)next_shift);
+        if (next_comparison >= 0)
+        {
+            exponent += 1;
+            continue;
+        }
+        break;
+    }
+    bool subnormal = exponent < -16382;
+    if (!subnormal && exponent > 16383)
+    {
+        return false;
+    }
+    s64 scaling = subnormal ? (s64)binary_exponent + 16445 : (s64)binary_exponent + 63 - exponent;
+    CIrExt80Big scaled_numerator = numerator;
+    CIrExt80Big scaled_denominator = denominator;
+    if (scaling >= 0)
+    {
+        if (scaling > UINT32_MAX || !c_ir_ext80_big_shift_left(&scaled_numerator, (u32)scaling))
+        {
+            return false;
+        }
+    }
+    else if (scaling < INT32_MIN || !c_ir_ext80_big_shift_left(&scaled_denominator, (u32)(-scaling)))
+    {
+        return false;
+    }
+    u64 significand = 0;
+    bool round_up = false;
+    bool quotient_overflow = false;
+    if (!c_ir_ext80_big_divide_round(&scaled_numerator, &scaled_denominator, &significand, &round_up, &quotient_overflow))
+    {
+        return false;
+    }
+    if (quotient_overflow)
+    {
+        // The estimate was one bit low.  Recompute at the next exponent
+        // rather than allowing a 65th quotient bit to wrap a u64.
+        exponent += 1;
+        if (subnormal || exponent > 16383)
+        {
+            return false;
+        }
+        scaling = (s64)binary_exponent + 63 - exponent;
+        scaled_numerator = numerator;
+        scaled_denominator = denominator;
+        if (scaling >= 0)
+        {
+            if (scaling > UINT32_MAX || !c_ir_ext80_big_shift_left(&scaled_numerator, (u32)scaling))
+            {
+                return false;
+            }
+        }
+        else if (scaling < INT32_MIN || !c_ir_ext80_big_shift_left(&scaled_denominator, (u32)(-scaling)))
+        {
+            return false;
+        }
+        if (!c_ir_ext80_big_divide_round(&scaled_numerator, &scaled_denominator, &significand, &round_up, &quotient_overflow) || quotient_overflow)
+        {
+            return false;
+        }
+    }
+    if (round_up)
+    {
+        if (significand == UINT64_MAX)
+        {
+            significand = UINT64_C(0x8000000000000000);
+            exponent += 1;
+            if (subnormal)
+            {
+                // Rounding the largest subnormal crosses the normal
+                // boundary and becomes the minimum normal value.
+                if (exponent != -16382)
+                {
+                    return false;
+                }
+                subnormal = false;
+            }
+            if (exponent > 16383)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            significand += 1;
+        }
+    }
+    if (subnormal)
+    {
+        if (!significand)
+        {
+            return false;
+        }
+        if (significand >= UINT64_C(0x8000000000000000))
+        {
+            *exponent_sign_out = (u16)(negative ? UINT16_C(0x8001) : 1);
+        }
+        else
+        {
+            *exponent_sign_out = negative ? UINT16_C(0x8000) : 0;
+        }
+    }
+    else
+    {
+        if (significand < UINT64_C(0x8000000000000000))
+        {
+            return false;
+        }
+        *exponent_sign_out = (u16)((negative ? UINT16_C(0x8000) : 0) | (u16)(exponent + 16383));
+    }
+    *significand_out = significand;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_from_ieee64(u64 bits, bool negative, u64* significand_out, u16* exponent_sign_out)
+{
+    bool source_negative = (bits >> 63) != 0;
+    u32 exponent_bits = (u32)((bits >> 52) & 0x7ff);
+    u64 fraction = bits & UINT64_C(0x000fffffffffffff);
+    if (exponent_bits == 0x7ff || (!exponent_bits && !fraction))
+    {
+        if (exponent_bits == 0x7ff)
+        {
+            return false;
+        }
+        *significand_out = 0;
+        *exponent_sign_out = (source_negative ^ negative) ? UINT16_C(0x8000) : 0;
+        return true;
+    }
+    CIrExt80Big numerator = {0};
+    CIrExt80Big denominator = {0};
+    if (exponent_bits)
+    {
+        c_ir_ext80_big_set_u64(&numerator, UINT64_C(0x0010000000000000) | fraction);
+        c_ir_ext80_big_set_u64(&denominator, 1);
+        return c_ir_ext80_from_rational(numerator, denominator, (s32)exponent_bits - 1023 - 52, source_negative ^ negative,
+                                        significand_out, exponent_sign_out);
+    }
+    c_ir_ext80_big_set_u64(&numerator, fraction);
+    c_ir_ext80_big_set_u64(&denominator, 1);
+    return c_ir_ext80_from_rational(numerator, denominator, -1074, source_negative ^ negative, significand_out, exponent_sign_out);
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_from_ieee32(u32 bits, bool negative, u64* significand_out, u16* exponent_sign_out)
+{
+    bool source_negative = (bits >> 31) != 0;
+    u32 exponent_bits = (bits >> 23) & 0xff;
+    u32 fraction = bits & UINT32_C(0x007fffff);
+    if (exponent_bits == 0xff || (!exponent_bits && !fraction))
+    {
+        if (exponent_bits == 0xff)
+        {
+            return false;
+        }
+        *significand_out = 0;
+        *exponent_sign_out = (source_negative ^ negative) ? UINT16_C(0x8000) : 0;
+        return true;
+    }
+    CIrExt80Big numerator = {0};
+    CIrExt80Big denominator = {0};
+    if (exponent_bits)
+    {
+        c_ir_ext80_big_set_u64(&numerator, UINT64_C(0x00800000) | fraction);
+        c_ir_ext80_big_set_u64(&denominator, 1);
+        return c_ir_ext80_from_rational(numerator, denominator, (s32)exponent_bits - 127 - 23, source_negative ^ negative,
+                                        significand_out, exponent_sign_out);
+    }
+    c_ir_ext80_big_set_u64(&numerator, fraction);
+    c_ir_ext80_big_set_u64(&denominator, 1);
+    return c_ir_ext80_from_rational(numerator, denominator, -149, source_negative ^ negative, significand_out, exponent_sign_out);
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_parse_long_literal(String8 spelling, bool negative, u64* significand_out, u16* exponent_sign_out)
+{
+    if (spelling.length < 2 || (spelling.pointer[spelling.length - 1] != 'l' && spelling.pointer[spelling.length - 1] != 'L'))
+    {
+        return false;
+    }
+    CIrExt80Big numerator = {0};
+    CIrExt80Big denominator = {0};
+    s32 binary_exponent = 0;
+    if (!c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
+    {
+        return false;
+    }
+    return c_ir_ext80_from_rational(numerator, denominator, binary_exponent, negative, significand_out, exponent_sign_out);
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_integer_suffix_valid(String8 suffix)
+{
+    if (!suffix.length)
+    {
+        return true;
+    }
+    bool msvc_i64 = suffix.length == 3 && (suffix.pointer[0] == 'i' || suffix.pointer[0] == 'I') && suffix.pointer[1] == '6' && suffix.pointer[2] == '4';
+    bool msvc_ui64 = suffix.length == 4 && (suffix.pointer[0] == 'u' || suffix.pointer[0] == 'U') && (suffix.pointer[1] == 'i' || suffix.pointer[1] == 'I') &&
+                     suffix.pointer[2] == '6' && suffix.pointer[3] == '4';
+    if (msvc_i64 || msvc_ui64)
+    {
+        return true;
+    }
+    bool first_unsigned = suffix.pointer[0] == 'u' || suffix.pointer[0] == 'U';
+    bool first_long = suffix.pointer[0] == 'l' || suffix.pointer[0] == 'L';
+    if (suffix.length == 1)
+    {
+        return first_unsigned || first_long;
+    }
+    bool second_unsigned = suffix.pointer[1] == 'u' || suffix.pointer[1] == 'U';
+    bool second_long = suffix.pointer[1] == 'l' || suffix.pointer[1] == 'L';
+    if (suffix.length == 2)
+    {
+        bool long_pair = first_long && second_long && suffix.pointer[0] == suffix.pointer[1];
+        return long_pair || (first_unsigned && second_long) || (first_long && second_unsigned);
+    }
+    if (suffix.length == 3)
+    {
+        bool third_unsigned = suffix.pointer[2] == 'u' || suffix.pointer[2] == 'U';
+        bool third_long = suffix.pointer[2] == 'l' || suffix.pointer[2] == 'L';
+        bool leading_unsigned = first_unsigned && second_long && third_long && suffix.pointer[1] == suffix.pointer[2];
+        bool trailing_unsigned = first_long && second_long && third_unsigned && suffix.pointer[0] == suffix.pointer[1];
+        return leading_unsigned || trailing_unsigned;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_parse_integer(String8 spelling, u64* value_out)
+{
+    u32 base = 10;
+    u64 index = 0;
+    if (spelling.length >= 2 && spelling.pointer[0] == '0')
+    {
+        if (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X')
+        {
+            base = 16;
+            index = 2;
+        }
+        else if (spelling.pointer[1] == 'b' || spelling.pointer[1] == 'B')
+        {
+            base = 2;
+            index = 2;
+        }
+        else
+        {
+            base = 8;
+        }
+    }
+    u64 value = 0;
+    bool saw_digit = false;
+    while (index < spelling.length)
+    {
+        u8 byte = spelling.pointer[index];
+        if (byte == '\'')
+        {
+            index += 1;
+            continue;
+        }
+        u32 digit = c_ir_ext80_digit(byte);
+        if (digit >= base)
+        {
+            break;
+        }
+        if (value > (UINT64_MAX - digit) / base)
+        {
+            return false;
+        }
+        value = value * base + digit;
+        saw_digit = true;
+        index += 1;
+    }
+    if (!saw_digit)
+    {
+        return false;
+    }
+    if (!c_ir_ext80_integer_suffix_valid((String8){.pointer = spelling.pointer + index, .length = spelling.length - index}))
+    {
+        return false;
+    }
+    *value_out = value;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_static_scalar_target(Target target, IrType* type)
+{
+    TargetDataLayout layout = target_data_layout(target);
+    return target.cpu_arch == CPU_ARCH_X86_64 &&
+           (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS) && type &&
+           type->kind == IR_TYPE_FLOAT && type->bit_width == 80 && type->layout.size == 16 && layout.endianness == TARGET_ENDIAN_LITTLE;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_ext80_global_literal(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, u32 start, u32 end,
+                                                   IrGlobal* global)
+{
+    if (!builder || !type || !global || start >= end)
+    {
+        return false;
+    }
+    if (builder->function)
+    {
+        builder->failure_message = S8("x86 long double static initialization is only supported at file scope");
+        builder->failure_token_index = start;
+        return false;
+    }
+    while (end > start + 1 && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 close = c_ir_matching_delimiter(builder->preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close != end - 1)
+        {
+            break;
+        }
+        start += 1;
+        end -= 1;
+    }
+    bool negative = false;
+    if (end == start + 2 && (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_PLUS) ||
+                             c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_MINUS)))
+    {
+        negative = c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_MINUS);
+        start += 1;
+    }
+    if (end != start + 1 || builder->preprocess.tokens[start].kind != C_TOKEN_PREPROCESSING_NUMBER)
+    {
+        return false;
+    }
+    String8 spelling = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]);
+    u64 significand = 0;
+    u16 exponent_sign = 0;
+    bool floating = c_ir_number_is_float(spelling);
+    char8 suffix = spelling.length ? spelling.pointer[spelling.length - 1] : 0;
+    bool long_suffix = suffix == 'l' || suffix == 'L';
+    bool valid = false;
+    if (floating && long_suffix)
+    {
+        valid = c_ir_ext80_parse_long_literal(spelling, negative, &significand, &exponent_sign);
+    }
+    else if (floating)
+    {
+        bool single = suffix == 'f' || suffix == 'F';
+        CIrExt80Big numerator = {0};
+        CIrExt80Big denominator = {0};
+        s32 binary_exponent = 0;
+        if (c_ir_ext80_parse_rational_literal(spelling, &numerator, &denominator, &binary_exponent))
+        {
+            u64 ieee_bits = 0;
+            bool source_nonzero = c_ir_ext80_spelling_nonzero(spelling);
+            if (single)
+            {
+                valid = c_ir_ieee_from_rational(numerator, denominator, binary_exponent, negative, 23, -126, 127, 8, &ieee_bits);
+                u32 bits = (u32)ieee_bits;
+                valid = valid && (!source_nonzero || (bits & UINT32_C(0x7fffffff)) != 0) &&
+                        c_ir_ext80_from_ieee32(bits, false, &significand, &exponent_sign);
+            }
+            else
+            {
+                valid = c_ir_ieee_from_rational(numerator, denominator, binary_exponent, negative, 52, -1022, 1023, 11, &ieee_bits);
+                valid = valid && (!source_nonzero || (ieee_bits & UINT64_C(0x7fffffffffffffff)) != 0) &&
+                        c_ir_ext80_from_ieee64(ieee_bits, false, &significand, &exponent_sign);
+            }
+        }
+    }
+    else
+    {
+        u64 integer = 0;
+        if (c_ir_ext80_parse_integer(spelling, &integer))
+        {
+            IrTypeId integer_type_id = c_ir_integer_literal_type(builder, spelling, integer);
+            IrType* integer_type = ir_type_from_id(&builder->program->types, integer_type_id);
+            if (!integer_type || !c_ir_constant_type_is_integer(integer_type))
+            {
+                builder->failure_message = S8("unsupported integer in x86 long double static initializer");
+                builder->failure_token_index = start;
+                return false;
+            }
+            if (negative)
+            {
+                if (integer_type->is_signed)
+                {
+                    negative = integer != 0;
+                }
+                else
+                {
+                    integer = 0 - integer;
+                    if (integer_type->bit_width < 64)
+                    {
+                        integer &= ((u64)1 << integer_type->bit_width) - 1;
+                    }
+                    // Unary minus on an unsigned integer wraps in that
+                    // integer type before the conversion to long double.
+                    negative = false;
+                }
+            }
+            CIrExt80Big numerator = {0};
+            CIrExt80Big denominator = {0};
+            c_ir_ext80_big_set_u64(&numerator, integer);
+            c_ir_ext80_big_set_u64(&denominator, 1);
+            valid = c_ir_ext80_from_rational(numerator, denominator, 0, negative, &significand, &exponent_sign);
+        }
+    }
+    if (!valid)
+    {
+        builder->failure_message = S8("unsupported x86 long double static initializer");
+        builder->failure_token_index = start;
+        return false;
+    }
+    u8* bytes = arena_allocate(builder->arena, u8, 16);
+    if (!bytes)
+    {
+        return false;
+    }
+    memset(bytes, 0, 16);
+    memcpy(bytes, &significand, sizeof(significand));
+    bytes[8] = (u8)exponent_sign;
+    bytes[9] = (u8)(exponent_sign >> 8);
+    global->bytes = (ByteSlice){.pointer = bytes, .length = 16};
+    global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
+    // Signed zero is observable in x87 storage.  Only the ordinary mutable
+    // positive zero takes the existing BSS/ZERO shortcut.
+    if (!global->is_read_only && !significand && exponent_sign == 0)
+    {
+        global->bytes = (ByteSlice){0};
+        global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
+    }
+    BUSTER_UNUSED(declaration);
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_float(CIntegerIrBuilder* builder, CToken token)
 {
     f64 value = 0.0;
@@ -26388,6 +27483,12 @@ BUSTER_GLOBAL_LOCAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CInte
             if (separator == argument_start || separator >= selected->close_index || result_type.value == IR_ID_UNDERLYING_INVALID)
             {
                 return false;
+            }
+            if (c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, result_type))
+            {
+                builder->failure_message = S8("C IR lowering does not yet support wide floating-point va_arg");
+                builder->failure_token_index = selected->token_index;
+                return C_IR_PREPARED_CALL_STEP_FAILED;
             }
             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_ARG)
             {
@@ -44609,6 +45710,14 @@ BUSTER_GLOBAL_LOCAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDe
             builder->failure_message = S8("invalid initializer separator");
             return false;
         }
+    }
+    if (c_ir_ext80_static_scalar_target(builder->target, type))
+    {
+        // This deliberately covers only file-scope objects.  Local static
+        // declarations still take the ordinary lowering path and therefore
+        // remain rejected along with arithmetic, casts, aggregates, calls,
+        // and all other wide-float uses.
+        return c_ir_ext80_global_literal(builder, declaration, type, start, end, global);
     }
     if (type->kind == IR_TYPE_POINTER)
     {

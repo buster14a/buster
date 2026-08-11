@@ -7763,6 +7763,394 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(Uni
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL IrGlobal* c_test_find_ir_global(IrModule* module, IrProgram* program, String8 name)
+{
+    if (!module || !program)
+    {
+        return 0;
+    }
+    for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+    {
+        IrGlobal* global = module->globals + global_index;
+        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global->symbol);
+        if (symbol && string_equal(symbol->name, name))
+        {
+            return global;
+        }
+    }
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_test_ext80_global_bytes(IrProgram* program, IrGlobal* global, u8 const* expected, u32 length)
+{
+    IrType* type = program && global ? ir_type_from_id(&program->types, global->type) : 0;
+    bool padding_zero = global && global->bytes.pointer && global->bytes.length >= 16;
+    if (padding_zero)
+    {
+        for (u32 index = 10; index < 16; index += 1)
+        {
+            if (global->bytes.pointer[index])
+            {
+                padding_zero = false;
+                break;
+            }
+        }
+    }
+    bool bytes_match = global && global->bytes.pointer && global->bytes.length == length;
+    if (bytes_match)
+    {
+        for (u32 index = 0; index < length; index += 1)
+        {
+            if (global->bytes.pointer[index] != expected[index])
+            {
+                bytes_match = false;
+                break;
+            }
+        }
+    }
+    return type && type->kind == IR_TYPE_FLOAT && type->bit_width == 80 && type->layout.size == 16 && global &&
+           global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && bytes_match && padding_zero;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_initializers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    String8 source = S8("long double l_hex = 0x1.0000000000001p+0L;"
+                        " long double l_decimal = 0.1L;"
+                        " long double f64_widen = 0.1;"
+                        " long double f32_widen = 0.1f;"
+                        " long double hex_f64_round = 0x50a41ed3aeedba5.p36;"
+                        " long double hex_f32_round = 0x50a41ed3aeedba5.p36f;"
+                        " long double decimal_halfway = 1.00000000000000011102230246251565404236316680908203125;"
+                        " long double decimal_halfway_f32 = 1.000000059604644775390625f;"
+                        " long double decimal_double_round = 0.7e188;"
+                        " long double parenthesized = ((1.0L));"
+                        " long double parenthesized_sign = (((-1.0L)));"
+                        " long double int_wide = 0x123456789abcdef0ULL;"
+                        " long double i64_wide = 1i64;"
+                        " long double ui64_wide = 2ui64;"
+                        " long double suffix_ul = 3uL;"
+                        " long double suffix_lu = 4Lu;"
+                        " long double suffix_ll = 5LL;"
+                        " long double suffix_ull = 6ull;"
+                        " long double suffix_llu = 7LLU;"
+                        " long double unsigned_neg = -0xffffffffffffffffULL;"
+                        " long double mutable_zero = 0.0L;"
+                        " long double negative_zero = -0.0L;"
+                        " const long double const_zero = 0.0L;"
+                        " int main(void) { return 0; }");
+    String8 target_triples[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-apple-macos"),
+        S8("x86_64-apple-ios"),
+        S8("x86_64-pc-windows-msvc"),
+    };
+    u8 expected_l_hex[] = {0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_l_decimal[] = {0xcd, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xfb, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_f64[] = {0x00, 0xd0, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xfb, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_f32[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0xcd, 0xcc, 0xcc, 0xfb, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_hex_f64_round[] = {0x00, 0x78, 0xdb, 0x5d, 0xa7, 0x3d, 0x48, 0xa1, 0x5d, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_hex_f32_round[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x3e, 0x48, 0xa1, 0x5d, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_decimal_halfway[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_decimal_halfway_f32[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_decimal_double_round[] = {0x00, 0xd0, 0xd6, 0x21, 0x87, 0x1f, 0xb4, 0x80, 0x6f, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_parenthesized[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_parenthesized_sign[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0xbf, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_integer[] = {0x80, 0xf7, 0xe6, 0xd5, 0xc4, 0xb3, 0xa2, 0x91, 0x3b, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_i64[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_ui64[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_suffix_ul[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_suffix_lu[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_suffix_ll[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_suffix_ull[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_suffix_llu[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    u8 expected_unsigned_neg[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
+    {
+        TargetParseResult parsed_target = target_parse_triple(target_triples[target_index]);
+        BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+        {
+            continue;
+        }
+        Target target = parsed_target.target;
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], target, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        if (lowered.program)
+        {
+            IrModule* module = lowered.program->modules;
+            IrGlobal* l_hex = c_test_find_ir_global(module, lowered.program, S8("l_hex"));
+            IrGlobal* l_decimal = c_test_find_ir_global(module, lowered.program, S8("l_decimal"));
+            IrGlobal* f64_widen = c_test_find_ir_global(module, lowered.program, S8("f64_widen"));
+            IrGlobal* f32_widen = c_test_find_ir_global(module, lowered.program, S8("f32_widen"));
+            IrGlobal* hex_f64_round = c_test_find_ir_global(module, lowered.program, S8("hex_f64_round"));
+            IrGlobal* hex_f32_round = c_test_find_ir_global(module, lowered.program, S8("hex_f32_round"));
+            IrGlobal* decimal_halfway = c_test_find_ir_global(module, lowered.program, S8("decimal_halfway"));
+            IrGlobal* decimal_halfway_f32 = c_test_find_ir_global(module, lowered.program, S8("decimal_halfway_f32"));
+            IrGlobal* decimal_double_round = c_test_find_ir_global(module, lowered.program, S8("decimal_double_round"));
+            IrGlobal* parenthesized = c_test_find_ir_global(module, lowered.program, S8("parenthesized"));
+            IrGlobal* parenthesized_sign = c_test_find_ir_global(module, lowered.program, S8("parenthesized_sign"));
+            IrGlobal* int_wide = c_test_find_ir_global(module, lowered.program, S8("int_wide"));
+            IrGlobal* i64_wide = c_test_find_ir_global(module, lowered.program, S8("i64_wide"));
+            IrGlobal* ui64_wide = c_test_find_ir_global(module, lowered.program, S8("ui64_wide"));
+            IrGlobal* suffix_ul = c_test_find_ir_global(module, lowered.program, S8("suffix_ul"));
+            IrGlobal* suffix_lu = c_test_find_ir_global(module, lowered.program, S8("suffix_lu"));
+            IrGlobal* suffix_ll = c_test_find_ir_global(module, lowered.program, S8("suffix_ll"));
+            IrGlobal* suffix_ull = c_test_find_ir_global(module, lowered.program, S8("suffix_ull"));
+            IrGlobal* suffix_llu = c_test_find_ir_global(module, lowered.program, S8("suffix_llu"));
+            IrGlobal* unsigned_neg = c_test_find_ir_global(module, lowered.program, S8("unsigned_neg"));
+            IrGlobal* mutable_zero = c_test_find_ir_global(module, lowered.program, S8("mutable_zero"));
+            IrGlobal* negative_zero = c_test_find_ir_global(module, lowered.program, S8("negative_zero"));
+            IrGlobal* const_zero = c_test_find_ir_global(module, lowered.program, S8("const_zero"));
+            bool ext80 = target.cpu_arch == CPU_ARCH_X86_64 &&
+                         (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS);
+            if (ext80)
+            {
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, l_hex, expected_l_hex, sizeof(expected_l_hex)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, l_decimal, expected_l_decimal, sizeof(expected_l_decimal)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, f64_widen, expected_f64, sizeof(expected_f64)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, f32_widen, expected_f32, sizeof(expected_f32)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, hex_f64_round, expected_hex_f64_round, sizeof(expected_hex_f64_round)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, hex_f32_round, expected_hex_f32_round, sizeof(expected_hex_f32_round)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, decimal_halfway, expected_decimal_halfway, sizeof(expected_decimal_halfway)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, decimal_halfway_f32, expected_decimal_halfway_f32, sizeof(expected_decimal_halfway_f32)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, decimal_double_round, expected_decimal_double_round, sizeof(expected_decimal_double_round)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, parenthesized, expected_parenthesized, sizeof(expected_parenthesized)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, parenthesized_sign, expected_parenthesized_sign, sizeof(expected_parenthesized_sign)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, int_wide, expected_integer, sizeof(expected_integer)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, i64_wide, expected_i64, sizeof(expected_i64)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, ui64_wide, expected_ui64, sizeof(expected_ui64)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, suffix_ul, expected_suffix_ul, sizeof(expected_suffix_ul)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, suffix_lu, expected_suffix_lu, sizeof(expected_suffix_lu)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, suffix_ll, expected_suffix_ll, sizeof(expected_suffix_ll)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, suffix_ull, expected_suffix_ull, sizeof(expected_suffix_ull)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, suffix_llu, expected_suffix_llu, sizeof(expected_suffix_llu)));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, unsigned_neg, expected_unsigned_neg, sizeof(expected_unsigned_neg)));
+                BUSTER_TEST(arguments, mutable_zero && mutable_zero->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO);
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, negative_zero, (u8[]){0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0, 0, 0, 0, 0, 0}, 16));
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, const_zero, (u8[16]){0}, 16));
+            }
+            else
+            {
+                BUSTER_TEST(arguments, l_hex && l_hex->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT);
+                BUSTER_TEST(arguments, l_decimal && l_decimal->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT);
+                BUSTER_TEST(arguments, f64_widen && f64_widen->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT);
+                BUSTER_TEST(arguments, f32_widen && f32_widen->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT);
+                BUSTER_TEST(arguments, int_wide && int_wide->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT);
+                BUSTER_TEST(arguments, mutable_zero && mutable_zero->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO);
+                BUSTER_TEST(arguments, negative_zero && negative_zero->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    String8 target_triples[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-apple-macos"),
+        S8("x86_64-apple-ios"),
+    };
+    String8 sources[] = {
+        S8("long double arithmetic = 1.0L + 2.0L; int main(void) { return 0; }"),
+        S8("long double parenthesized_arithmetic = (1.0L + 2.0L); int main(void) { return 0; }"),
+        S8("long double cast_value = (long double)1; int main(void) { return 0; }"),
+        S8("long double aggregate[1] = { 1.0L }; int main(void) { return 0; }"),
+        S8("void local_static(void) { static long double local = 1.0L; } int main(void) { return 0; }"),
+        S8("typedef void *va_list; int take(int count, ...) { va_list arguments; long double value = __builtin_va_arg(arguments, long double); return value != 0; } int main(void) { return 0; }"),
+        S8("long double overflow = 0x1p+16384L; int main(void) { return 0; }"),
+        S8("long double underflow = 0x1p-16446L; int main(void) { return 0; }"),
+        S8("long double malformed_exponent = 0x1pL; int main(void) { return 0; }"),
+        S8("long double hex_f64_underflow = 0x0.ep-10000; int main(void) { return 0; }"),
+        S8("long double hex_f32_underflow = 0x0.ep-1000f; int main(void) { return 0; }"),
+        S8("long double decimal_underflow = 1e-10000; int main(void) { return 0; }"),
+        S8("long double invalid_i_suffix = 123i; int main(void) { return 0; }"),
+        S8("long double invalid_i65_suffix = 123i65; int main(void) { return 0; }"),
+        S8("long double invalid_u64_suffix = 123u64; int main(void) { return 0; }"),
+        S8("long double invalid_lUl_suffix = 123lUl; int main(void) { return 0; }"),
+        S8("long double invalid_lL_suffix = 123lL; int main(void) { return 0; }"),
+        S8("long double invalid_uLl_suffix = 123uLl; int main(void) { return 0; }"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
+    {
+        TargetParseResult parsed_target = target_parse_triple(target_triples[target_index]);
+        BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+        {
+            continue;
+        }
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult preprocess = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, sources[source_index], target_triples[target_index],
+                                                         parsed_target.target, &preprocess, &parse);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 1);
+            if (lowered.diagnostic_count == 1)
+            {
+                BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_android_rejection(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    String8 target_triple = S8("x86_64-unknown-android");
+    TargetParseResult parsed_target = target_parse_triple(target_triple);
+    BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+    if (parsed_target.error == TARGET_PARSE_ERROR_NONE)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, S8("long double android_value = 1.0L; int main(void) { return 0; }"),
+                                                     target_triple, parsed_target.target, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 1);
+        if (lowered.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_boundaries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    String8 source = S8("long double min_normal = 0x1p-16382L;"
+                        " long double min_subnormal = 0x1p-16445L;"
+                        " long double max_finite = 0x1.fffffffffffffffep+16383L;"
+                        " long double normal_tie_down = 0x1.0000000000000001p+0L;"
+                        " long double normal_tie_up = 0x1.0000000000000003p+0L;"
+                        " long double subnormal_tie_up = 0x3p-16446L;"
+                        " long double subnormal_tie_down = 0x5p-16446L;"
+                        " long double subnormal_to_normal = 0x0.ffffffffffffffffp-16382L;"
+                        " long double decimal_boundary = 1e-4932L;"
+                        " long double exponent_boundary = 0x1p+16383L;"
+                        " int main(void) { return 0; }");
+    String8 names[] = {
+        S8("min_normal"),
+        S8("min_subnormal"),
+        S8("max_finite"),
+        S8("normal_tie_down"),
+        S8("normal_tie_up"),
+        S8("subnormal_tie_up"),
+        S8("subnormal_tie_down"),
+        S8("subnormal_to_normal"),
+        S8("decimal_boundary"),
+        S8("exponent_boundary"),
+    };
+    // Oracle payloads emitted by GCC for x86_64 SysV long double objects.
+    u8 expected[][16] = {
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0xf0, 0x57, 0x93, 0xf2, 0xc8, 0x47, 0x12, 0x26, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xfe, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+    };
+    String8 target_triples[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-apple-macos"),
+        S8("x86_64-apple-ios"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
+    {
+        TargetParseResult parsed_target = target_parse_triple(target_triples[target_index]);
+        BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+        {
+            continue;
+        }
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], parsed_target.target, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        if (lowered.program)
+        {
+            IrModule* module = lowered.program->modules;
+            for (u32 global_index = 0; global_index < BUSTER_ARRAY_LENGTH(names); global_index += 1)
+            {
+                IrGlobal* global = c_test_find_ir_global(module, lowered.program, names[global_index]);
+                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, global, expected[global_index], 16));
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_braces(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    String8 source = S8("long double brace = { 1.0L };"
+                        " long double brace_trailing = { 0x1p+0L, };"
+                        " int main(void) { return 0; }");
+    u8 expected[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    String8 target_triples[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-apple-macos"),
+        S8("x86_64-apple-ios"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
+    {
+        TargetParseResult parsed_target = target_parse_triple(target_triples[target_index]);
+        BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+        {
+            continue;
+        }
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], parsed_target.target, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        if (lowered.program)
+        {
+            IrModule* module = lowered.program->modules;
+            IrGlobal* brace = c_test_find_ir_global(module, lowered.program, S8("brace"));
+            IrGlobal* brace_trailing = c_test_find_ir_global(module, lowered.program, S8("brace_trailing"));
+            BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, brace, expected, sizeof(expected)));
+            BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, brace_trailing, expected, sizeof(expected)));
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 #if BUSTER_COMPILER_CLANG
 __attribute__((optnone))
 #endif
@@ -7786,6 +8174,11 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_wide_float_function_signatures(arguments));
     c_test_result_add(&result, c_test_wide_float_signature_calls(arguments));
     c_test_result_add(&result, c_test_wide_float_cleanup_signature_calls(arguments));
+    c_test_result_add(&result, c_test_wide_float_global_initializers(arguments));
+    c_test_result_add(&result, c_test_wide_float_global_rejections(arguments));
+    c_test_result_add(&result, c_test_wide_float_android_rejection(arguments));
+    c_test_result_add(&result, c_test_wide_float_global_boundaries(arguments));
+    c_test_result_add(&result, c_test_wide_float_global_braces(arguments));
 
     c_test_result_add(&result, c_test_static_range_designators(arguments));
 
