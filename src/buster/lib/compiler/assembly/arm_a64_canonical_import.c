@@ -1,3 +1,5 @@
+#include <stdlib.h>
+
 /*
  * Bounded, dependency-free importer for the official Arm A64 XML snapshot.
  *
@@ -72,6 +74,15 @@ struct ArmA64BoxConstraint
     u8 width;
 };
 
+typedef struct ArmA64AliasPreference ArmA64AliasPreference;
+struct ArmA64AliasPreference
+{
+    String8 alias_file;
+    String8 alias_id;
+    String8 condition;
+    u32 rank;
+};
+
 typedef struct ArmA64Layout ArmA64Layout;
 struct ArmA64Layout
 {
@@ -120,6 +131,8 @@ struct ArmA64CanonicalRow
     String8 alias_to_file;
     String8 alias_to_id;
     String8 alias_to_encoding_id;
+    String8 alias_preference_condition;
+    u32 alias_preference_rank;
     String8 assembly;
     String8 equivalent;
     String8 alias_condition;
@@ -137,6 +150,8 @@ struct ArmA64CanonicalRow
     ArmA64Field fields[32];
     u32 box_count;
     ArmA64BoxConstraint boxes[64];
+    u32 alias_preference_count;
+    ArmA64AliasPreference alias_preferences[32];
     bool apple_m1;
     bool system;
     u64 digest;
@@ -416,6 +431,20 @@ static void arm_a64_json_hex32(Arena* output, u32 value)
     arena_append_char8(output, '"');
 }
 
+static void arm_a64_json_sha256(Arena* output, const u8 digest[32])
+{
+    static const char8 digits[] = "0123456789abcdef";
+    char8 buffer[64];
+    for (u32 index = 0; index < 32; index += 1)
+    {
+        buffer[index * 2] = digits[digest[index] >> 4];
+        buffer[index * 2 + 1] = digits[digest[index] & 0xf];
+    }
+    arena_append_char8(output, '"');
+    arena_append_string8(output, (String8){.pointer = buffer, .length = sizeof(buffer)});
+    arena_append_char8(output, '"');
+}
+
 static bool arm_a64_parse_index(Arena* arena, String8 source, ArmA64Page* pages, u32 capacity, u32* count_out)
 {
     String8 path = path_join(arena, source, S8("index.xml"));
@@ -573,7 +602,132 @@ static u64 arm_a64_fnv1a_update(u64 hash, const u8* pointer, u64 length)
     return hash;
 }
 
-static bool arm_a64_source_tree_digest(Arena* arena, String8 source, u32* file_count_out, u64* digest_out)
+typedef struct ArmA64Sha256 ArmA64Sha256;
+struct ArmA64Sha256
+{
+    u32 state[8];
+    u64 byte_count;
+    u32 block_count;
+    u8 block[64];
+};
+
+static u32 arm_a64_sha256_rotr(u32 value, u32 amount)
+{
+    return (value >> amount) | (value << (32 - amount));
+}
+
+static void arm_a64_sha256_transform(ArmA64Sha256* context)
+{
+    static const u32 constants[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    };
+    u32 words[64];
+    for (u32 index = 0; index < 16; index += 1)
+    {
+        u32 offset = index * 4;
+        words[index] = ((u32)context->block[offset] << 24) | ((u32)context->block[offset + 1] << 16) |
+                       ((u32)context->block[offset + 2] << 8) | context->block[offset + 3];
+    }
+    for (u32 index = 16; index < 64; index += 1)
+    {
+        u32 first = arm_a64_sha256_rotr(words[index - 15], 7) ^ arm_a64_sha256_rotr(words[index - 15], 18) ^ (words[index - 15] >> 3);
+        u32 second = arm_a64_sha256_rotr(words[index - 2], 17) ^ arm_a64_sha256_rotr(words[index - 2], 19) ^ (words[index - 2] >> 10);
+        words[index] = words[index - 16] + first + words[index - 7] + second;
+    }
+    u32 a = context->state[0], b = context->state[1], c = context->state[2], d = context->state[3];
+    u32 e = context->state[4], f = context->state[5], g = context->state[6], h = context->state[7];
+    for (u32 index = 0; index < 64; index += 1)
+    {
+        u32 sigma1 = arm_a64_sha256_rotr(e, 6) ^ arm_a64_sha256_rotr(e, 11) ^ arm_a64_sha256_rotr(e, 25);
+        u32 choice = (e & f) ^ ((~e) & g);
+        u32 temp1 = h + sigma1 + choice + constants[index] + words[index];
+        u32 sigma0 = arm_a64_sha256_rotr(a, 2) ^ arm_a64_sha256_rotr(a, 13) ^ arm_a64_sha256_rotr(a, 22);
+        u32 majority = (a & b) ^ (a & c) ^ (b & c);
+        u32 temp2 = sigma0 + majority;
+        h = g; g = f; f = e; e = d + temp1; d = c; c = b; b = a; a = temp1 + temp2;
+    }
+    context->state[0] += a; context->state[1] += b; context->state[2] += c; context->state[3] += d;
+    context->state[4] += e; context->state[5] += f; context->state[6] += g; context->state[7] += h;
+}
+
+static void arm_a64_sha256_init(ArmA64Sha256* context)
+{
+    memset(context, 0, sizeof(*context));
+    context->state[0] = 0x6a09e667; context->state[1] = 0xbb67ae85; context->state[2] = 0x3c6ef372; context->state[3] = 0xa54ff53a;
+    context->state[4] = 0x510e527f; context->state[5] = 0x9b05688c; context->state[6] = 0x1f83d9ab; context->state[7] = 0x5be0cd19;
+}
+
+static void arm_a64_sha256_update(ArmA64Sha256* context, const u8* pointer, u64 length)
+{
+    context->byte_count += length;
+    while (length)
+    {
+        u32 available = 64 - context->block_count;
+        u32 amount = (u32)BUSTER_MIN((u64)available, length);
+        memcpy(context->block + context->block_count, pointer, amount);
+        context->block_count += amount;
+        pointer += amount;
+        length -= amount;
+        if (context->block_count == 64)
+        {
+            arm_a64_sha256_transform(context);
+            context->block_count = 0;
+        }
+    }
+}
+
+static void arm_a64_sha256_final(ArmA64Sha256* context, u8 output[32])
+{
+    u64 bit_count = context->byte_count * 8;
+    context->block[context->block_count++] = 0x80;
+    if (context->block_count > 56)
+    {
+        memset(context->block + context->block_count, 0, 64 - context->block_count);
+        arm_a64_sha256_transform(context);
+        context->block_count = 0;
+    }
+    memset(context->block + context->block_count, 0, 56 - context->block_count);
+    for (u32 index = 0; index < 8; index += 1) context->block[56 + index] = (u8)(bit_count >> (56 - index * 8));
+    arm_a64_sha256_transform(context);
+    for (u32 index = 0; index < 8; index += 1)
+    {
+        output[index * 4] = (u8)(context->state[index] >> 24);
+        output[index * 4 + 1] = (u8)(context->state[index] >> 16);
+        output[index * 4 + 2] = (u8)(context->state[index] >> 8);
+        output[index * 4 + 3] = (u8)context->state[index];
+    }
+}
+
+static void arm_a64_sha256_bytes(const u8* bytes, u64 length, u8 output[32])
+{
+    ArmA64Sha256 context;
+    arm_a64_sha256_init(&context);
+    arm_a64_sha256_update(&context, bytes, length);
+    arm_a64_sha256_final(&context, output);
+}
+
+static bool arm_a64_sha256_self_test(void)
+{
+    static const u8 expected[32] = {
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
+        0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+    };
+    ArmA64Sha256 context;
+    u8 actual[32];
+    arm_a64_sha256_init(&context);
+    arm_a64_sha256_update(&context, (const u8*)"abc", 3);
+    arm_a64_sha256_final(&context, actual);
+    return memcmp(actual, expected, sizeof(expected)) == 0;
+}
+
+static bool arm_a64_source_tree_digest(Arena* arena, String8 source, u32* file_count_out, u64* digest_out, u8 sha256_out[32])
 {
     TemporalArena scratch_scope = scratch_begin(&arena, 1);
     Arena* scratch = scratch_scope.arena;
@@ -586,11 +740,15 @@ static bool arm_a64_source_tree_digest(Arena* arena, String8 source, u32* file_c
     }
     qsort(files, file_count, sizeof(files[0]), arm_a64_source_file_compare);
     u64 digest = UINT64_C(14695981039346656037);
+    ArmA64Sha256 sha256;
+    arm_a64_sha256_init(&sha256);
     for (u32 index = 0; index < file_count; index += 1)
     {
         ArmA64SourceFile file = files[index];
         digest = arm_a64_fnv1a_update(digest, (u8*)file.relative.pointer, file.relative.length);
         digest = arm_a64_fnv1a_update(digest, (u8*)"\0", 1);
+        arm_a64_sha256_update(&sha256, (u8*)file.relative.pointer, file.relative.length);
+        arm_a64_sha256_update(&sha256, (u8*)"\0", 1);
         String8 path = path_join(scratch, source, file.relative);
         ByteSlice bytes = file_read(scratch, path, (FileReadOptions){.end_padding = 1});
         if (!bytes.pointer && bytes.length) { scratch_end(scratch_scope); return false; }
@@ -599,10 +757,13 @@ static bool arm_a64_source_tree_digest(Arena* arena, String8 source, u32* file_c
         for (u32 byte = 0; byte < 8; byte += 1) length_bytes[byte] = (u8)(length >> (byte * 8));
         digest = arm_a64_fnv1a_update(digest, length_bytes, 8);
         digest = arm_a64_fnv1a_update(digest, bytes.pointer, bytes.length);
+        arm_a64_sha256_update(&sha256, length_bytes, 8);
+        arm_a64_sha256_update(&sha256, bytes.pointer, bytes.length);
         arena_set_position(scratch, scratch_scope.position);
     }
     *file_count_out = file_count;
     *digest_out = digest;
+    arm_a64_sha256_final(&sha256, sha256_out);
     scratch_end(scratch_scope);
     return true;
 }
@@ -1178,9 +1339,57 @@ static String8 arm_a64_join_feature_tags(Arena* arena, String8 left, String8 rig
     return (String8){.pointer = (char8*)arm_a64_arena_pointer(arena, mark), .length = arena->position - mark};
 }
 
-static bool arm_a64_feature_allowed(String8 name)
+static bool arm_a64_feature_known(String8 name)
 {
-    static String8 allowed[] = {
+    /* Complete FEAT_* atom catalog observed in the pinned 2026-06 release.
+       This is deliberately separate from the M1 support closure below:
+       known-but-disabled features evaluate false rather than becoming
+       unknown parse errors. */
+    static String8 known[] = {
+        S8_INITIALIZER("FEAT_AES"), S8_INITIALIZER("FEAT_ASMv8p2"), S8_INITIALIZER("FEAT_ATS1A"), S8_INITIALIZER("FEAT_AdvSIMD"),
+        S8_INITIALIZER("FEAT_BF16"), S8_INITIALIZER("FEAT_BRBE"), S8_INITIALIZER("FEAT_BTI"), S8_INITIALIZER("FEAT_CHK"),
+        S8_INITIALIZER("FEAT_CLRBHB"), S8_INITIALIZER("FEAT_CMH"), S8_INITIALIZER("FEAT_CMPBR"), S8_INITIALIZER("FEAT_CPA"),
+        S8_INITIALIZER("FEAT_CRC32"), S8_INITIALIZER("FEAT_CSSC"), S8_INITIALIZER("FEAT_D128"), S8_INITIALIZER("FEAT_DGH"),
+        S8_INITIALIZER("FEAT_DIT"), S8_INITIALIZER("FEAT_DPB"), S8_INITIALIZER("FEAT_DPB2"), S8_INITIALIZER("FEAT_DotProd"),
+        S8_INITIALIZER("FEAT_EBEP"), S8_INITIALIZER("FEAT_F16F32DOT"), S8_INITIALIZER("FEAT_F16F32MM"), S8_INITIALIZER("FEAT_F16MM"),
+        S8_INITIALIZER("FEAT_F32MM"), S8_INITIALIZER("FEAT_F64MM"), S8_INITIALIZER("FEAT_F8F16MM"), S8_INITIALIZER("FEAT_F8F32MM"),
+        S8_INITIALIZER("FEAT_FAMINMAX"), S8_INITIALIZER("FEAT_FCMA"), S8_INITIALIZER("FEAT_FHM"), S8_INITIALIZER("FEAT_FP"),
+        S8_INITIALIZER("FEAT_FP16"), S8_INITIALIZER("FEAT_FP8"), S8_INITIALIZER("FEAT_FP8DOT2"), S8_INITIALIZER("FEAT_FP8DOT4"),
+        S8_INITIALIZER("FEAT_FP8FMA"), S8_INITIALIZER("FEAT_FPRCVT"), S8_INITIALIZER("FEAT_FRINTTS"), S8_INITIALIZER("FEAT_FlagM"),
+        S8_INITIALIZER("FEAT_FlagM2"), S8_INITIALIZER("FEAT_GCIE"), S8_INITIALIZER("FEAT_GCS"), S8_INITIALIZER("FEAT_HBC"),
+        S8_INITIALIZER("FEAT_HINTE"), S8_INITIALIZER("FEAT_I8MM"), S8_INITIALIZER("FEAT_ITE"), S8_INITIALIZER("FEAT_JSCVT"),
+        S8_INITIALIZER("FEAT_LOR"), S8_INITIALIZER("FEAT_LRCPC"), S8_INITIALIZER("FEAT_LRCPC2"), S8_INITIALIZER("FEAT_LRCPC3"),
+        S8_INITIALIZER("FEAT_LS64"), S8_INITIALIZER("FEAT_LS64_ACCDATA"), S8_INITIALIZER("FEAT_LS64_V"), S8_INITIALIZER("FEAT_LSCP"),
+        S8_INITIALIZER("FEAT_LSE"), S8_INITIALIZER("FEAT_LSE128"), S8_INITIALIZER("FEAT_LSFE"), S8_INITIALIZER("FEAT_LSUI"),
+        S8_INITIALIZER("FEAT_LUT"), S8_INITIALIZER("FEAT_MEC"), S8_INITIALIZER("FEAT_MOPS"), S8_INITIALIZER("FEAT_MTE"),
+        S8_INITIALIZER("FEAT_MTE2"), S8_INITIALIZER("FEAT_MTETC"), S8_INITIALIZER("FEAT_NMI"), S8_INITIALIZER("FEAT_OCCMO"),
+        S8_INITIALIZER("FEAT_PAN"), S8_INITIALIZER("FEAT_PAN2"), S8_INITIALIZER("FEAT_PAuth"), S8_INITIALIZER("FEAT_PAuth_LR"),
+        S8_INITIALIZER("FEAT_PCDPHINT"), S8_INITIALIZER("FEAT_PRFMSLC"), S8_INITIALIZER("FEAT_PoPS"), S8_INITIALIZER("FEAT_RAS"),
+        S8_INITIALIZER("FEAT_RDM"), S8_INITIALIZER("FEAT_RME"), S8_INITIALIZER("FEAT_RME_GPC3"), S8_INITIALIZER("FEAT_RPRFM"),
+        S8_INITIALIZER("FEAT_SB"), S8_INITIALIZER("FEAT_SHA1"), S8_INITIALIZER("FEAT_SHA256"), S8_INITIALIZER("FEAT_SHA3"),
+        S8_INITIALIZER("FEAT_SHA512"), S8_INITIALIZER("FEAT_SM3"), S8_INITIALIZER("FEAT_SM4"), S8_INITIALIZER("FEAT_SME"),
+        S8_INITIALIZER("FEAT_SME2"), S8_INITIALIZER("FEAT_SME2p1"), S8_INITIALIZER("FEAT_SME2p2"), S8_INITIALIZER("FEAT_SME2p3"),
+        S8_INITIALIZER("FEAT_SME_B16B16"), S8_INITIALIZER("FEAT_SME_F16F16"), S8_INITIALIZER("FEAT_SME_F64F64"),
+        S8_INITIALIZER("FEAT_SME_F8F16"), S8_INITIALIZER("FEAT_SME_F8F32"), S8_INITIALIZER("FEAT_SME_I16I64"),
+        S8_INITIALIZER("FEAT_SME_LUTv2"), S8_INITIALIZER("FEAT_SME_MOP4"), S8_INITIALIZER("FEAT_SME_TMOP"), S8_INITIALIZER("FEAT_SPE"),
+        S8_INITIALIZER("FEAT_SPECRES"), S8_INITIALIZER("FEAT_SPECRES2"), S8_INITIALIZER("FEAT_SPE_EXC"), S8_INITIALIZER("FEAT_SSBS"),
+        S8_INITIALIZER("FEAT_SSVE_FEXPA"), S8_INITIALIZER("FEAT_SSVE_FP8DOT2"), S8_INITIALIZER("FEAT_SSVE_FP8DOT4"),
+        S8_INITIALIZER("FEAT_SSVE_FP8FMA"), S8_INITIALIZER("FEAT_SVE"), S8_INITIALIZER("FEAT_SVE2"), S8_INITIALIZER("FEAT_SVE2p1"),
+        S8_INITIALIZER("FEAT_SVE2p2"), S8_INITIALIZER("FEAT_SVE2p3"), S8_INITIALIZER("FEAT_SVE_AES"), S8_INITIALIZER("FEAT_SVE_AES2"),
+        S8_INITIALIZER("FEAT_SVE_B16B16"), S8_INITIALIZER("FEAT_SVE_B16MM"), S8_INITIALIZER("FEAT_SVE_BFSCALE"),
+        S8_INITIALIZER("FEAT_SVE_BitPerm"), S8_INITIALIZER("FEAT_SVE_F16F32MM"), S8_INITIALIZER("FEAT_SVE_PMULL128"),
+        S8_INITIALIZER("FEAT_SVE_SHA3"), S8_INITIALIZER("FEAT_SVE_SM4"), S8_INITIALIZER("FEAT_SYSINSTR128"), S8_INITIALIZER("FEAT_SYSREG128"),
+        S8_INITIALIZER("FEAT_THE"), S8_INITIALIZER("FEAT_TLBID"), S8_INITIALIZER("FEAT_TLBIOS"), S8_INITIALIZER("FEAT_TLBIRANGE"),
+        S8_INITIALIZER("FEAT_TLBIW"), S8_INITIALIZER("FEAT_TRBE_EXC"), S8_INITIALIZER("FEAT_TRF"), S8_INITIALIZER("FEAT_UAO"),
+        S8_INITIALIZER("FEAT_WFxT"), S8_INITIALIZER("FEAT_XS"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(known); index += 1) if (string_equal(name, known[index])) return true;
+    return false;
+}
+
+static bool arm_a64_feature_m1_supported(String8 name)
+{
+    static String8 supported[] = {
         S8_INITIALIZER("FEAT_AES"), S8_INITIALIZER("FEAT_AdvSIMD"), S8_INITIALIZER("FEAT_CRC32"), S8_INITIALIZER("FEAT_DotProd"),
         S8_INITIALIZER("FEAT_FCMA"), S8_INITIALIZER("FEAT_FHM"), S8_INITIALIZER("FEAT_FP"), S8_INITIALIZER("FEAT_FP16"),
         S8_INITIALIZER("FEAT_FRINTTS"), S8_INITIALIZER("FEAT_FlagM"), S8_INITIALIZER("FEAT_FlagM2"), S8_INITIALIZER("FEAT_JSCVT"),
@@ -1189,7 +1398,7 @@ static bool arm_a64_feature_allowed(String8 name)
         S8_INITIALIZER("FEAT_SHA1"), S8_INITIALIZER("FEAT_SHA256"), S8_INITIALIZER("FEAT_SHA3"), S8_INITIALIZER("FEAT_SHA512"),
         S8_INITIALIZER("FEAT_SPECRES"), S8_INITIALIZER("FEAT_TRF"),
     };
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(allowed); index += 1) if (string_equal(name, allowed[index])) return true;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(supported); index += 1) if (string_equal(name, supported[index])) return true;
     return false;
 }
 
@@ -1226,8 +1435,9 @@ static u32 arm_a64_feature_operator_precedence(ArmA64FeatureOperator operation)
     return operation == ARM_A64_FEATURE_OR ? 1 : (operation == ARM_A64_FEATURE_AND ? 2 : (operation == ARM_A64_FEATURE_NOT ? 3 : 0));
 }
 
-static bool arm_a64_feature_expression_allowed(String8 expression)
+static bool arm_a64_feature_expression_evaluate(String8 expression, bool* valid_out)
 {
+    *valid_out = true;
     if (!expression.length) return true;
     /* Shunting-yard evaluation keeps parser stack usage bounded even for a
        hostile expression with thousands of nested parentheses/not operators. */
@@ -1238,6 +1448,7 @@ static bool arm_a64_feature_expression_allowed(String8 expression)
     u32 value_count = 0;
     u64 position = 0;
     bool expect_operand = true;
+#define ARM_A64_FEATURE_INVALID() do { *valid_out = false; return false; } while (0)
     while (position < expression.length)
     {
         arm_a64_feature_skip_space(expression, &position);
@@ -1247,14 +1458,14 @@ static bool arm_a64_feature_expression_allowed(String8 expression)
         {
             if (c == '!')
             {
-                if (operator_count >= ARM_A64_FEATURE_STACK_CAPACITY) return false;
+                if (operator_count >= ARM_A64_FEATURE_STACK_CAPACITY) ARM_A64_FEATURE_INVALID();
                 operators[operator_count++] = ARM_A64_FEATURE_NOT;
                 position += 1;
                 continue;
             }
             if (c == '(')
             {
-                if (operator_count >= ARM_A64_FEATURE_STACK_CAPACITY) return false;
+                if (operator_count >= ARM_A64_FEATURE_STACK_CAPACITY) ARM_A64_FEATURE_INVALID();
                 operators[operator_count++] = ARM_A64_FEATURE_LPAREN;
                 position += 1;
                 continue;
@@ -1267,7 +1478,7 @@ static bool arm_a64_feature_expression_allowed(String8 expression)
                 if (!name_char) break;
                 position += 1;
             }
-            if (start == position || value_count >= ARM_A64_FEATURE_STACK_CAPACITY) return false;
+            if (start == position || value_count >= ARM_A64_FEATURE_STACK_CAPACITY) ARM_A64_FEATURE_INVALID();
             String8 name = string_slice(expression, start, position);
             arm_a64_feature_skip_space(expression, &position);
             bool parameterized = false;
@@ -1285,7 +1496,7 @@ static bool arm_a64_feature_expression_allowed(String8 expression)
                     char8 quote = expression.pointer[position++];
                     u64 value_start = position;
                     while (position < expression.length && expression.pointer[position] != quote) position += 1;
-                    if (position >= expression.length || position == value_start) return false;
+                    if (position >= expression.length || position == value_start) ARM_A64_FEATURE_INVALID();
                     position += 1;
                 }
                 else
@@ -1294,7 +1505,7 @@ static bool arm_a64_feature_expression_allowed(String8 expression)
                     while (position < expression.length && expression.pointer[position] != ')' && expression.pointer[position] != '&' &&
                            expression.pointer[position] != '|')
                         position += 1;
-                    if (value_start == position) return false;
+                    if (value_start == position) ARM_A64_FEATURE_INVALID();
                 }
             }
             /* Parameterized predicates are syntactically known but cannot be
@@ -1303,21 +1514,22 @@ static bool arm_a64_feature_expression_allowed(String8 expression)
             bool atom_value = false;
             if (parameterized)
             {
+                if (string_starts_with_sequence(name, S8("FEAT_")) && !arm_a64_feature_known(name)) ARM_A64_FEATURE_INVALID();
                 atom_value = false;
             }
-            else if (string_starts_with_sequence(name, S8("FEAT_")) && arm_a64_feature_allowed(name))
+            else if (string_starts_with_sequence(name, S8("FEAT_")) && arm_a64_feature_known(name))
             {
-                atom_value = true;
+                atom_value = arm_a64_feature_m1_supported(name);
             }
             else
             {
-                return false;
+                ARM_A64_FEATURE_INVALID();
             }
             values[value_count++] = atom_value;
             expect_operand = false;
             while (operator_count && operators[operator_count - 1] == ARM_A64_FEATURE_NOT)
             {
-                if (!arm_a64_feature_apply_operator(ARM_A64_FEATURE_NOT, values, &value_count)) return false;
+                if (!arm_a64_feature_apply_operator(ARM_A64_FEATURE_NOT, values, &value_count)) ARM_A64_FEATURE_INVALID();
                 operator_count -= 1;
             }
             continue;
@@ -1329,13 +1541,13 @@ static bool arm_a64_feature_expression_allowed(String8 expression)
             {
                 ArmA64FeatureOperator operation = operators[--operator_count];
                 if (operation == ARM_A64_FEATURE_LPAREN) { found = true; break; }
-                if (!arm_a64_feature_apply_operator(operation, values, &value_count)) return false;
+                if (!arm_a64_feature_apply_operator(operation, values, &value_count)) ARM_A64_FEATURE_INVALID();
             }
-            if (!found || !value_count) return false;
+            if (!found || !value_count) ARM_A64_FEATURE_INVALID();
             position += 1;
             while (operator_count && operators[operator_count - 1] == ARM_A64_FEATURE_NOT)
             {
-                if (!arm_a64_feature_apply_operator(ARM_A64_FEATURE_NOT, values, &value_count)) return false;
+                if (!arm_a64_feature_apply_operator(ARM_A64_FEATURE_NOT, values, &value_count)) ARM_A64_FEATURE_INVALID();
                 operator_count -= 1;
             }
             continue;
@@ -1351,32 +1563,51 @@ static bool arm_a64_feature_expression_allowed(String8 expression)
         }
         else
         {
-            return false;
+            ARM_A64_FEATURE_INVALID();
         }
         position += 2;
         while (operator_count && operators[operator_count - 1] != ARM_A64_FEATURE_LPAREN &&
                arm_a64_feature_operator_precedence(operators[operator_count - 1]) >= arm_a64_feature_operator_precedence(operation))
         {
             ArmA64FeatureOperator pending = operators[--operator_count];
-            if (!arm_a64_feature_apply_operator(pending, values, &value_count)) return false;
+            if (!arm_a64_feature_apply_operator(pending, values, &value_count)) ARM_A64_FEATURE_INVALID();
         }
-        if (operator_count >= ARM_A64_FEATURE_STACK_CAPACITY) return false;
+        if (operator_count >= ARM_A64_FEATURE_STACK_CAPACITY) ARM_A64_FEATURE_INVALID();
         operators[operator_count++] = operation;
         expect_operand = true;
     }
-    if (expect_operand) return false;
+    if (expect_operand) ARM_A64_FEATURE_INVALID();
     while (operator_count)
     {
         ArmA64FeatureOperator operation = operators[--operator_count];
-        if (operation == ARM_A64_FEATURE_LPAREN || !arm_a64_feature_apply_operator(operation, values, &value_count)) return false;
+        if (operation == ARM_A64_FEATURE_LPAREN || !arm_a64_feature_apply_operator(operation, values, &value_count)) ARM_A64_FEATURE_INVALID();
     }
-    return value_count == 1 && values[0];
+#undef ARM_A64_FEATURE_INVALID
+    if (value_count != 1) { *valid_out = false; return false; }
+    return values[0];
+}
+
+static bool arm_a64_feature_expression_allowed(String8 expression)
+{
+    bool valid = false;
+    bool value = arm_a64_feature_expression_evaluate(expression, &valid);
+    return valid && value;
 }
 
 static bool arm_a64_feature_parser_self_test(void)
 {
+    bool valid = false;
     if (!arm_a64_feature_expression_allowed(S8("FEAT_FP && FEAT_AdvSIMD"))) return false;
-    if (arm_a64_feature_expression_allowed(S8("!FEAT_SME"))) return false;
+    if (!arm_a64_feature_expression_allowed(S8("FEAT_SME || FEAT_FP"))) return false;
+    if (!arm_a64_feature_expression_allowed(S8("!FEAT_SME"))) return false;
+    if (!arm_a64_feature_expression_allowed(S8("FEAT_FP || FEAT_SME && FEAT_SVE"))) return false;
+    if (arm_a64_feature_expression_allowed(S8("FEAT_SME || FEAT_FP && FEAT_SVE"))) return false;
+    if (arm_a64_feature_expression_allowed(S8("!FEAT_UNKNOWN_IN_2026_06"))) return false;
+    if (arm_a64_feature_expression_allowed(S8("FEAT_UNKNOWN_IN_2026_06 == 'x'"))) return false;
+    if (arm_a64_feature_expression_evaluate(S8("FEAT_UNKNOWN_IN_2026_06"), &valid) || valid) return false;
+    if (arm_a64_feature_expression_evaluate(S8("FEAT_UNKNOWN_IN_2026_06 == 'x'"), &valid) || valid) return false;
+    if (arm_a64_feature_expression_evaluate(S8("FEAT_FP &&"), &valid) || valid) return false;
+    if (arm_a64_feature_expression_evaluate(S8("FEAT_SME"), &valid) || !valid) return false;
     char8 nested[256];
     u32 cursor = 0;
     for (u32 depth = 0; depth < 64; depth += 1) nested[cursor++] = '(';
@@ -1496,6 +1727,43 @@ static bool arm_a64_validate_rows(ArmA64CanonicalRows rows)
     return true;
 }
 
+static bool arm_a64_validate_symmetric_difference(ArmA64CanonicalRows rows)
+{
+    static const char* excluded[] = {
+        "AUTIA171615_64LR_dp_1src", "AUTIASPPCR_64LRR_dp_1src", "AUTIASPPC_only_dp_1src_imm", "AUTIB171615_64LR_dp_1src",
+        "AUTIBSPPCR_64LRR_dp_1src", "AUTIBSPPC_only_dp_1src_imm", "PACIA171615_64LR_dp_1src", "PACIASPPC_64LR_dp_1src",
+        "PACIB171615_64LR_dp_1src", "PACIBSPPC_64LR_dp_1src", "PACM_HI_hints", "PACNBIASPPC_64LR_dp_1src",
+        "PACNBIBSPPC_64LR_dp_1src", "RETAASPPCR_64M_branch_reg", "RETABSPPCR_64M_branch_reg", "RETAASPPC_only_miscbranch",
+        "RETABSPPC_only_miscbranch",
+    };
+    static const char* included[] = {
+        "ESB_HI_hints", "CFP_SYS_CR_systeminstrs", "CPP_SYS_CR_systeminstrs", "DVP_SYS_CR_systeminstrs", "SHA1C_QSV_cryptosha3",
+        "SHA1H_SS_cryptosha2", "SHA1M_QSV_cryptosha3", "SHA1P_QSV_cryptosha3", "SHA1SU0_VVV_cryptosha3", "SHA1SU1_VV_cryptosha2",
+        "SHA512H2_QQV_cryptosha512_3", "SHA512H_QQV_cryptosha512_3", "SHA512SU0_VV2_cryptosha512_2", "SHA512SU1_VVV2_cryptosha512_3",
+        "AXFLAG_M_pstate", "XAFLAG_M_pstate",
+    };
+    for (u32 group = 0; group < 2; group += 1)
+    {
+        const char** names = group ? included : excluded;
+        u32 count = group ? BUSTER_ARRAY_LENGTH(included) : BUSTER_ARRAY_LENGTH(excluded);
+        for (u32 index = 0; index < count; index += 1)
+        {
+            u32 matches = 0;
+            bool selected = false;
+            for (u32 row_index = 0; row_index < rows.count; row_index += 1)
+            {
+                if (string_equal(rows.pointer[row_index].encoding_name, string_from_pointer((char8*)names[index])))
+                {
+                    matches += 1;
+                    selected = rows.pointer[row_index].apple_m1;
+                }
+            }
+            if (matches != 1 || selected != (group != 0)) return false;
+        }
+    }
+    return true;
+}
+
 static void arm_a64_row_digest(Arena* arena, ArmA64CanonicalRow* row)
 {
     u64 mark = arena->position;
@@ -1528,6 +1796,19 @@ static void arm_a64_row_digest(Arena* arena, ArmA64CanonicalRow* row)
     arena_append_string8(arena, row->alias_condition);
     arena_append_char8(arena, '|');
     arena_append_string8(arena, row->alias_to_encoding_id);
+    arena_append_char8(arena, '|');
+    arena_append_string8(arena, row->alias_preference_condition);
+    arena_append_char8(arena, ':');
+    arm_a64_append_u64(arena, row->alias_preference_rank);
+    for (u32 preference_index = 0; preference_index < row->alias_preference_count; preference_index += 1)
+    {
+        ArmA64AliasPreference preference = row->alias_preferences[preference_index];
+        arena_append_char8(arena, '|');
+        arm_a64_append_u64(arena, preference.rank);
+        arena_append_char8(arena, ':'); arena_append_string8(arena, preference.alias_file);
+        arena_append_char8(arena, ':'); arena_append_string8(arena, preference.alias_id);
+        arena_append_char8(arena, ':'); arena_append_string8(arena, preference.condition);
+    }
     for (u32 index = 0; index < row->box_count; index += 1)
     {
         ArmA64BoxConstraint box = row->boxes[index];
@@ -1542,9 +1823,47 @@ static void arm_a64_row_digest(Arena* arena, ArmA64CanonicalRow* row)
     arena_set_position(arena, mark);
 }
 
+static bool arm_a64_link_alias_preferences(Arena* arena, ArmA64CanonicalRows rows)
+{
+    for (u32 index = 0; index < rows.count; index += 1)
+    {
+        ArmA64CanonicalRow* alias = &rows.pointer[index];
+        if (!string_equal(alias->kind, S8("alias"))) continue;
+        ArmA64CanonicalRow* target = 0;
+        u32 target_count = 0;
+        for (u32 target_index = 0; target_index < rows.count; target_index += 1)
+        {
+            ArmA64CanonicalRow* candidate = &rows.pointer[target_index];
+            if (string_equal(candidate->kind, S8("canonical")) && string_equal(candidate->iform_file, alias->alias_to_file) &&
+                string_equal(candidate->iform_id, alias->alias_to_id) && string_equal(candidate->encoding_name, alias->alias_to_encoding_id))
+            {
+                target = candidate;
+                target_count += 1;
+            }
+        }
+        if (target_count != 1) return false;
+        u32 preference_count = 0;
+        ArmA64AliasPreference preference = {0};
+        for (u32 preference_index = 0; preference_index < target->alias_preference_count; preference_index += 1)
+        {
+            ArmA64AliasPreference candidate = target->alias_preferences[preference_index];
+            if (string_equal(candidate.alias_file, alias->iform_file) && string_equal(candidate.alias_id, alias->iform_id))
+            {
+                preference = candidate;
+                preference_count += 1;
+            }
+        }
+        if (preference_count != 1) return false;
+        alias->alias_preference_condition = string_duplicate_arena(arena, preference.condition, true);
+        alias->alias_preference_rank = preference.rank;
+    }
+    for (u32 index = 0; index < rows.count; index += 1) arm_a64_row_digest(arena, &rows.pointer[index]);
+    return true;
+}
+
 static bool arm_a64_append_row_json(Arena* output, ArmA64CanonicalRow* row)
 {
-    arena_append_string8(output, S8("{\"id\":")); arm_a64_json_string(output, row->canonical_id);
+    arena_append_string8(output, S8("{\"schema_version\":2,\"id\":")); arm_a64_json_string(output, row->canonical_id);
     arena_append_string8(output, S8(",\"encoding_name\":")); arm_a64_json_string(output, row->encoding_name);
     arena_append_string8(output, S8(",\"page_id\":")); arm_a64_json_string(output, row->page_id);
     arena_append_string8(output, S8(",\"iform_file\":")); arm_a64_json_string(output, row->iform_file);
@@ -1559,6 +1878,22 @@ static bool arm_a64_append_row_json(Arena* output, ArmA64CanonicalRow* row)
     arena_append_string8(output, S8(",\"encoding_id\":"));
     if (row->alias_to_encoding_id.length) arm_a64_json_string(output, row->alias_to_encoding_id); else arena_append_string8(output, S8("null"));
     arena_append_string8(output, S8("}"));
+    arena_append_string8(output, S8(",\"alias_preference_condition\":"));
+    if (row->alias_preference_condition.length) arm_a64_json_string(output, row->alias_preference_condition); else arena_append_string8(output, S8("null"));
+    arena_append_string8(output, S8(",\"alias_preference_rank\":"));
+    if (row->alias_preference_condition.length) arm_a64_append_u64(output, row->alias_preference_rank); else arena_append_string8(output, S8("null"));
+    arena_append_string8(output, S8(",\"alias_preferences\":["));
+    for (u32 preference_index = 0; preference_index < row->alias_preference_count; preference_index += 1)
+    {
+        if (preference_index) arena_append_char8(output, ',');
+        ArmA64AliasPreference preference = row->alias_preferences[preference_index];
+        arena_append_string8(output, S8("{\"rank\":")); arm_a64_append_u64(output, preference.rank);
+        arena_append_string8(output, S8(",\"alias_file\":")); arm_a64_json_string(output, preference.alias_file);
+        arena_append_string8(output, S8(",\"alias_id\":")); arm_a64_json_string(output, preference.alias_id);
+        arena_append_string8(output, S8(",\"condition\":")); arm_a64_json_string(output, preference.condition);
+        arena_append_char8(output, '}');
+    }
+    arena_append_string8(output, S8("]"));
     arena_append_string8(output, S8(",\"assembly\":"));
     if (row->assembly.length) arm_a64_json_string(output, row->assembly); else arena_append_string8(output, S8("null"));
     arena_append_string8(output, S8(",\"equivalent\":"));
@@ -1651,6 +1986,8 @@ static bool arm_a64_parse_page(Arena* arena, Arena* scratch, String8 source, Arm
     if (!arm_a64_collect_docvar(text, root.end, root_end, S8("instr-class"), &page_instr_class)) return false;
     String8 alias_to_file = {0};
     String8 alias_to_id = {0};
+    ArmA64AliasPreference page_alias_preferences[32] = {0};
+    u32 page_alias_preference_count = 0;
     ArmA64XmlCursor root_scan = {.text = text, .position = root.end};
     ArmA64XmlTag scan_tag = {0};
     while (arm_a64_xml_next(&root_scan, &scan_tag))
@@ -1660,6 +1997,20 @@ static bool arm_a64_parse_page(Arena* arena, Arena* scratch, String8 source, Arm
         {
             alias_to_file = arm_a64_tag_attr(scan_tag, S8("refiform"));
             alias_to_id = arm_a64_tag_attr(scan_tag, S8("iformid"));
+        }
+        else if (scan_tag.kind == ARM_A64_XML_TAG_OPEN && arm_a64_tag_name_is(scan_tag, "aliasref"))
+        {
+            if (page_alias_preference_count >= BUSTER_ARRAY_LENGTH(page_alias_preferences)) return false;
+            u64 aliasref_end = scan_tag.end;
+            if (!scan_tag.self_closing && !arm_a64_find_element_end(text, scan_tag.start, S8("aliasref"), &aliasref_end)) return false;
+            ArmA64AliasPreference* preference = &page_alias_preferences[page_alias_preference_count];
+            preference->alias_file = arm_a64_tag_attr(scan_tag, S8("aliasfile"));
+            preference->alias_id = arm_a64_tag_attr(scan_tag, S8("aliaspageid"));
+            if (!preference->alias_file.length || !preference->alias_id.length ||
+                !arm_a64_xml_first_functional_element(arena, text, scan_tag.end, aliasref_end, "aliaspref", &preference->condition, 0))
+                return false;
+            preference->rank = page_alias_preference_count++;
+            root_scan.position = aliasref_end;
         }
     }
     *alias_count += string_equal(page_type, S8("alias"));
@@ -1719,6 +2070,14 @@ static bool arm_a64_parse_page(Arena* arena, Arena* scratch, String8 source, Arm
             row->kind = string_equal(page_type, S8("alias")) ? S8("alias") : S8("canonical");
             row->alias_to_file = string_duplicate_arena(arena, alias_to_file, true);
             row->alias_to_id = string_duplicate_arena(arena, alias_to_id, true);
+            row->alias_preference_count = page_alias_preference_count;
+            for (u32 preference_index = 0; preference_index < page_alias_preference_count; preference_index += 1)
+            {
+                row->alias_preferences[preference_index] = page_alias_preferences[preference_index];
+                row->alias_preferences[preference_index].alias_file = string_duplicate_arena(arena, page_alias_preferences[preference_index].alias_file, true);
+                row->alias_preferences[preference_index].alias_id = string_duplicate_arena(arena, page_alias_preferences[preference_index].alias_id, true);
+                row->alias_preferences[preference_index].condition = string_duplicate_arena(arena, page_alias_preferences[preference_index].condition, true);
+            }
             row->instr_class = string_duplicate_arena(arena, page_instr_class, true);
             row->system = string_equal(page_instr_class, S8("system"));
             u64 id_mark = arena->position;
@@ -1769,7 +2128,9 @@ static bool arm_a64_parse_page(Arena* arena, Arena* scratch, String8 source, Arm
                           (string_starts_with_sequence(row->encoding_name, S8("UDF_")) ? S8("undefined") : S8("defined"));
             arm_a64_collect_fields(arena, row, layout);
             if ((row->fixed_mask | row->field_mask | row->unresolved_mask) != UINT32_MAX) return false;
-            row->apple_m1 = arm_a64_feature_expression_allowed(row->feature_expression);
+            bool feature_expression_valid = false;
+            row->apple_m1 = arm_a64_feature_expression_evaluate(row->feature_expression, &feature_expression_valid);
+            if (!feature_expression_valid) return false;
             arm_a64_row_digest(arena, row);
             if ((row->fixed_mask & row->field_mask) || (row->fixed_mask & row->unresolved_mask) || (row->field_mask & row->unresolved_mask) ||
                 (row->fixed_mask | row->field_mask | row->unresolved_mask) != UINT32_MAX)
@@ -1779,17 +2140,19 @@ static bool arm_a64_parse_page(Arena* arena, Arena* scratch, String8 source, Arm
     return true;
 }
 
-static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, u32 source_file_count, u64 artifact_hash, u64 artifact_bytes,
+static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, const u8 source_tree_sha256[32], u32 source_file_count, u64 artifact_hash, u64 artifact_bytes,
                                     ArmA64CanonicalRows rows, u32 page_count, u32 instruction_pages, u32 alias_pages, u32 pseudocode_pages,
                                     u32 iclass_count, u32 regdiagram_count, u32 selected, u32 selected_canonical,
                                     u32 selected_alias, u32 selected_system, u32 selected_system_canonical, u32 selected_system_alias,
                                     u32 selected_non_system, u32 selected_non_system_canonical, u32 selected_non_system_alias)
 {
-    arena_append_string8(output, S8("{\n  \"schema_version\": 1,\n  \"status\": \"provisional-canonical-foundation\",\n  \"acceptance\": \"blocked\",\n"));
+    arena_append_string8(output, S8("{\n  \"schema_version\": 2,\n  \"artifact_schema_version\": 2,\n  \"status\": \"provisional-canonical-foundation\",\n  \"acceptance\": \"blocked\",\n"));
     arena_append_string8(output,
-                         S8("  \"source\": {\"release\": \"2026-06\", \"source_url\": \"https://developer.arm.com/-/cdn-downloads/permalink/Exploration-Tools-A64-ISA/ISA_A64/ISA_A64_xml_A_profile-2026-06.tar.gz\", \"archive_sha256\": \"63a01a1696483bbe2edfef9e0f0cd053d6c1c619ec0587876cb7a60bb344f354\", \"archive_identity_verified\": true, \"archive_identity_basis\": \"pinned archive SHA-256 is the cryptographic anchor; importer verifies exact extracted top-level tree digest before attribution\", \"tree_digest_algorithm\": \"fnv1a64-v1\", \"tree_digest_scope\": \"sorted top-level regular filenames + NUL + little-endian uint64 byte length + bytes; subdirectories including xhtml/ generated presentation are excluded\", \"raw_xml_policy\": \"non-vendored-license-restricted\"},\n"));
+                         S8("  \"source\": {\"release\": \"2026-06\", \"source_url\": \"https://developer.arm.com/-/cdn-downloads/permalink/Exploration-Tools-A64-ISA/ISA_A64/ISA_A64_xml_A_profile-2026-06.tar.gz\", \"archive_sha256\": \"63a01a1696483bbe2edfef9e0f0cd053d6c1c619ec0587876cb7a60bb344f354\", \"archive_sha256_role\": \"external-pinned-archive-identity; archive bytes are not read by this importer\", \"archive_identity_verified\": false, \"extracted_tree_sha256_verified\": true, \"tree_digest_algorithm\": \"sha256-v1 (FNV-1a64 convenience digest also recorded)\", \"tree_digest_scope\": \"sorted top-level regular filenames + NUL + little-endian uint64 byte length + bytes; subdirectories including xhtml/ generated presentation are excluded\", \"raw_xml_policy\": \"non-vendored-license-restricted\"},\n"));
     arena_append_string8(output, S8("  \"source_tree\": {\"regular_file_count\": ")); arm_a64_append_u64(output, source_file_count);
-    arena_append_string8(output, S8(", \"digest\": ")); arm_a64_json_hex(output, source_tree_digest); arena_append_string8(output, S8(", \"pinned_digest\": \"0xba0c8fc560297896\"},\n"));
+    arena_append_string8(output, S8(", \"fnv1a64\": ")); arm_a64_json_hex(output, source_tree_digest);
+    arena_append_string8(output, S8(", \"sha256\": ")); arm_a64_json_sha256(output, source_tree_sha256);
+    arena_append_string8(output, S8(", \"pinned_sha256\": \"0ee17fd2fe7ed165adda377d90f8f284d009e14d2300577f231c87ca6a45916d\"},\n"));
     arena_append_string8(output, S8("  \"inventory\": {\"pages\": ")); arm_a64_append_u64(output, page_count);
     arena_append_string8(output, S8(", \"instruction_pages\": ")); arm_a64_append_u64(output, instruction_pages);
     arena_append_string8(output, S8(", \"alias_pages\": ")); arm_a64_append_u64(output, alias_pages);
@@ -1827,9 +2190,70 @@ static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, u32 s
     return true;
 }
 
+static bool arm_a64_check_mode_enabled(void)
+{
+    const char* value = getenv("BUSTER_ARM_A64_CHECK");
+    return value && value[0] == '1' && value[1] == 0;
+}
+
+static bool arm_a64_check_file(Arena* scratch, String8 path, String8 expected, const char* label)
+{
+    ByteSlice actual = file_read(scratch, path, (FileReadOptions){0});
+    if (actual.length != expected.length || (expected.length && (!actual.pointer || memcmp(actual.pointer, expected.pointer, expected.length) != 0)))
+    {
+        fprintf(stderr, "error: Arm A64 checked-in %s drifted or is missing (%.*s)\n", label, (int)path.length, path.pointer);
+        return false;
+    }
+    return true;
+}
+
+static bool arm_a64_readme_canonical_section_digest(ByteSlice readme, u8 digest[32])
+{
+    String8 text = {.pointer = (char8*)readme.pointer, .length = readme.length};
+    String8 begin_marker = S8("<!-- arm-a64-canonical-check:start -->");
+    String8 end_marker = S8("<!-- arm-a64-canonical-check:end -->");
+    u64 begin = string_first_sequence(text, begin_marker);
+    if (begin == BUSTER_STRING_NO_MATCH) return false;
+    u64 end_relative = string_first_sequence(string_slice(text, begin + begin_marker.length, text.length), end_marker);
+    if (end_relative == BUSTER_STRING_NO_MATCH) return false;
+    u64 end = begin + begin_marker.length + end_relative + end_marker.length;
+    arm_a64_sha256_bytes((u8*)text.pointer + begin, end - begin, digest);
+    return true;
+}
+
+static bool arm_a64_check_existing_outputs(Arena* arena, String8 output_directory, String8 artifact, String8 manifest)
+{
+    TemporalArena scratch_scope = scratch_begin(&arena, 1);
+    Arena* scratch = scratch_scope.arena;
+    String8 artifact_path = path_join(scratch, output_directory, S8("arm-a64-canonical.generated.jsonl"));
+    String8 manifest_path = path_join(scratch, output_directory, S8("arm-a64-canonical-manifest.json"));
+    String8 readme_path = path_join(scratch, output_directory, S8("README.md"));
+    bool valid = arm_a64_check_file(scratch, artifact_path, artifact, "canonical artifact") &&
+                 arm_a64_check_file(scratch, manifest_path, manifest, "canonical manifest");
+    ByteSlice readme = file_read(scratch, readme_path, (FileReadOptions){0});
+    static const u8 expected_readme_section_sha256[32] = {
+        0xdf, 0x3c, 0x88, 0xf6, 0xf2, 0x6e, 0xcd, 0x85, 0xec, 0xa0, 0x98, 0x10, 0x8f, 0x2c, 0x32, 0xd2,
+        0x0b, 0xe2, 0x25, 0x0b, 0x7b, 0xd8, 0x11, 0x9f, 0xb0, 0x60, 0x73, 0x44, 0x2e, 0xdd, 0x5e, 0x8f,
+    };
+    u8 readme_section_sha256[32] = {0};
+    if (!readme.pointer || !readme.length || !arm_a64_readme_canonical_section_digest(readme, readme_section_sha256) ||
+        memcmp(readme_section_sha256, expected_readme_section_sha256, sizeof(expected_readme_section_sha256)) != 0)
+    {
+        fprintf(stderr, "error: Arm A64 checked-in README.md canonical section drifted or is missing (%.*s)\n", (int)readme_path.length, readme_path.pointer);
+        valid = false;
+    }
+    scratch_end(scratch_scope);
+    return valid;
+}
+
 static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalImportOptions options)
 {
     if (!options.source_directory.length || !options.output_directory.length) return PROCESS_RESULT_FAILED;
+    if (!arm_a64_sha256_self_test())
+    {
+        string_print(S8("error: Arm A64 SHA-256 self-test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
     if (!arm_a64_feature_parser_self_test())
     {
         string_print(S8("error: Arm A64 feature parser self-test failed\n"));
@@ -1837,10 +2261,16 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
     }
     u32 source_file_count = 0;
     u64 source_tree_digest = 0;
-    if (!arm_a64_source_tree_digest(arena, options.source_directory, &source_file_count, &source_tree_digest) ||
-        source_file_count != 2316 || source_tree_digest != UINT64_C(0xba0c8fc560297896))
+    u8 source_tree_sha256[32] = {0};
+    static const u8 expected_source_tree_sha256[32] = {
+        0x0e, 0xe1, 0x7f, 0xd2, 0xfe, 0x7e, 0xd1, 0x65, 0xad, 0xda, 0x37, 0x7d, 0x90, 0xf8, 0xf2, 0x84,
+        0xd0, 0x09, 0xe1, 0x4d, 0x23, 0x00, 0x57, 0x7f, 0x23, 0x1c, 0x87, 0xca, 0x6a, 0x45, 0x91, 0x6d,
+    };
+    if (!arm_a64_source_tree_digest(arena, options.source_directory, &source_file_count, &source_tree_digest, source_tree_sha256) ||
+        source_file_count != 2316 || source_tree_digest != UINT64_C(0xba0c8fc560297896) ||
+        memcmp(source_tree_sha256, expected_source_tree_sha256, sizeof(expected_source_tree_sha256)) != 0)
     {
-        string_print(S8("error: Arm A64 source tree identity mismatch files={u32} digest={u64} expected-files=2316 expected-digest=0xba0c8fc560297896\n"),
+        string_print(S8("error: Arm A64 source tree identity mismatch files={u32} digest={u64} expected-files=2316 expected-fnv=0xba0c8fc560297896\n"),
                      source_file_count, source_tree_digest);
         return PROCESS_RESULT_FAILED;
     }
@@ -1912,6 +2342,16 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
         string_print(S8("error: Arm A64 canonical IDs/digests or alias target links are not unique\n"));
         return PROCESS_RESULT_FAILED;
     }
+    if (!arm_a64_validate_symmetric_difference(rows))
+    {
+        string_print(S8("error: Arm A64 LLVM symmetric-difference membership gate failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    if (!arm_a64_link_alias_preferences(arena, rows) || !arm_a64_validate_rows(rows))
+    {
+        string_print(S8("error: Arm A64 alias preference links are not unique\n"));
+        return PROCESS_RESULT_FAILED;
+    }
     Arena* output_arena = arena;
     u64 artifact_mark = output_arena->position;
     for (u32 index = 0; index < rows.count; index += 1) arm_a64_append_row_json(output_arena, &rows.pointer[index]);
@@ -1939,14 +2379,20 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
     }
     String8 manifest = {0};
     u64 manifest_mark = output_arena->position;
-    arm_a64_append_manifest(output_arena, source_tree_digest, source_file_count, buster_hash_64((u8*)artifact.pointer, artifact.length), artifact.length,
+    arm_a64_append_manifest(output_arena, source_tree_digest, source_tree_sha256, source_file_count, buster_hash_64((u8*)artifact.pointer, artifact.length), artifact.length,
                             rows, page_count, instruction_pages, alias_pages, pseudocode_pages, iclass_count, regdiagram_count, selected, selected_canonical,
                             selected_alias, selected_system, selected_system_canonical, selected_system_alias, selected - selected_system,
                             selected_canonical - selected_system_canonical, selected_alias - selected_system_alias);
     manifest = (String8){.pointer = (char8*)arm_a64_arena_pointer(output_arena, manifest_mark), .length = output_arena->position - manifest_mark};
-    make_directory_recursive(arena, options.output_directory);
     String8 artifact_path = path_join(arena, options.output_directory, S8("arm-a64-canonical.generated.jsonl"));
     String8 manifest_path = path_join(arena, options.output_directory, S8("arm-a64-canonical-manifest.json"));
+    if (arm_a64_check_mode_enabled())
+    {
+        if (!arm_a64_check_existing_outputs(arena, options.output_directory, artifact, manifest)) return PROCESS_RESULT_FAILED;
+        string_print(S8("Arm A64 checked-in canonical artifacts and README.md canonical section match deterministic import output: {S8}\n"), options.output_directory);
+        return PROCESS_RESULT_SUCCESS;
+    }
+    make_directory_recursive(arena, options.output_directory);
     if (!file_write(artifact_path, BUSTER_SLICE_TO_BYTE_SLICE(artifact)) || !file_write(manifest_path, BUSTER_SLICE_TO_BYTE_SLICE(manifest)))
     {
         string_print(S8("error: failed to write Arm A64 canonical artifacts\n"));
