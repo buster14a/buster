@@ -2340,6 +2340,46 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, invalid.diagnostics[2].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
     }
 
+    Target aarch64_m1_target = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_A64_APPLE_M1,
+        .os = OPERATING_SYSTEM_MACOS,
+    };
+    AssemblyEncodeResult aarch64_fixed = assembly_encode(
+        arguments->arena,
+        S8("NOP\n"
+           "aUtIaSp\n"
+           "RETAA\n"
+           "AXFLAG\n"
+           "PSSBB\n"
+           "TSB    CSYNC\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    static u8 const expected_aarch64_fixed[] = {
+        0x1f, 0x20, 0x03, 0xd5,
+        0xbf, 0x23, 0x03, 0xd5,
+        0xff, 0x0b, 0x5f, 0xd6,
+        0x5f, 0x40, 0x00, 0xd5,
+        0x9f, 0x34, 0x03, 0xd5,
+        0x5f, 0x22, 0x03, 0xd5,
+    };
+    BUSTER_TEST(arguments, aarch64_fixed.diagnostic_count == 0 &&
+                               aarch64_fixed.bytes.length == sizeof(expected_aarch64_fixed) &&
+                               memcmp(aarch64_fixed.bytes.pointer, expected_aarch64_fixed, sizeof(expected_aarch64_fixed)) == 0);
+    AssemblyEncodeResult aarch64_fixed_bad_operand = assembly_encode(
+        arguments->arena, S8("NOP x0\n"), (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    BUSTER_TEST(arguments, aarch64_fixed_bad_operand.diagnostic_count == 1 &&
+                               aarch64_fixed_bad_operand.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    AssemblyEncodeResult aarch64_fixed_bad_token = assembly_encode(
+        arguments->arena, S8("AUTIASP x0\nTSB CSYNC extra\n"), (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    BUSTER_TEST(arguments, aarch64_fixed_bad_token.diagnostic_count == 2 &&
+                               aarch64_fixed_bad_token.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
+                               aarch64_fixed_bad_token.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
+    AssemblyEncodeResult aarch64_fixed_generic = assembly_encode(
+        arguments->arena, S8("AUTIASP\nRETAA\n"), (AssemblyEncodeOptions){.target = aarch64_target});
+    BUSTER_TEST(arguments, aarch64_fixed_generic.diagnostic_count == 2 &&
+                               aarch64_fixed_generic.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
+                               aarch64_fixed_generic.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
+
     String8 split_operands[6] = {0};
     u32 split_operand_count = 0;
     bool split_lists = assembly_test_split_operands(

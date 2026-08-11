@@ -219,7 +219,14 @@ with the wrong decision fail the import. The manifest's `schema_version` and
 interchangeable because schema 2 adds alias identities/preferences, box
 constraints, and explicit mask semantics.
 
-Regenerate into a separate directory and compare both output files byte-for-
+The same importer emits `arm-a64-m1-fixed.generated.h`, a deterministic
+34-row spelling-to-word table for Apple-M1 rows whose Arm masks are fully
+fixed (`fixed_mask == 0xffffffff`, with no field or unresolved bits). It keeps
+32 canonical rows and the two `PSSBB`/`SSBB` aliases, including each Arm row
+ID and digest for provenance. Regeneration writes all three Arm artifacts to
+the requested output directory.
+
+Regenerate into a separate directory and compare all three output files byte-for-
 byte across two runs:
 
 ```sh
@@ -230,16 +237,16 @@ byte across two runs:
 
 The importer rejects source-tree mutations before emitting artifacts and
 rejects duplicate canonical IDs/digests or unresolved alias targets. Run the
-command twice into separate directories and byte-compare both generated
+command twice into separate directories and byte-compare all three generated
 files (the SHA-256/FNV source identity, SHA-256 `abc` known vector, bounded
 feature-parser tests, and symmetric-difference gate provide in-process
 verification).
 
 For a checked-in drift audit, point the importer at the generated directory
 with `BUSTER_ARM_A64_CHECK=1`. This performs the full parse and compares the
-would-be JSONL and manifest bytes plus the bounded canonical README section
-SHA-256, then exits without writing anything. Unrelated README sections may be
-edited without changing importer source:
+would-be JSONL, manifest, and fixed-spelling header bytes plus the bounded
+canonical README section SHA-256, then exits without writing anything.
+Unrelated README sections may be edited without changing importer source:
 
 ```sh
 BUSTER_ARM_A64_CHECK=1 ./build.sh import_arm_a64_metadata \

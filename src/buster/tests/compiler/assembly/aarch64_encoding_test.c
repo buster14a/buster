@@ -2,6 +2,7 @@
 
 #if BUSTER_INCLUDE_TESTS
 
+#include <buster/lib/string.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
 #if BUSTER_COMPILER_CLANG
@@ -386,6 +387,150 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
                               metadata_counts.operand_count == 26262 && metadata_counts.predicate_count == 7855 && metadata_counts.string_pool_size == 337490);
     BUSTER_TEST(arguments, metadata_counts.apple_m1_supported_count == 2898 && metadata_counts.apple_m1_raw_layout_complete_count == 2898 &&
                               metadata_counts.apple_m1_raw_layout_incomplete_count == 0);
+
+    // The packed LLVM mnemonic index is a candidate catalog, not an encoder
+    // denominator. Exercise every range, candidate bound, case-folded lookup,
+    // and malformed caller-supplied descriptor through the public ABI.
+    u32 mnemonic_range_count = buster_aarch64_metadata_mnemonic_range_count();
+    BUSTER_TEST(arguments, mnemonic_range_count == 1557);
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_mnemonic_range(mnemonic_range_count, 0));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_mnemonic_range(0, 0));
+    BusterAarch64MetadataCandidateRange first_mnemonic_range = {0};
+    for (u32 range_index = 0; range_index < mnemonic_range_count; range_index += 1)
+    {
+        BusterAarch64MetadataCandidateRange range = {0};
+        BUSTER_TEST(arguments, buster_aarch64_metadata_mnemonic_range(range_index, &range));
+        if (!range.key.length)
+        {
+            continue;
+        }
+        if (!first_mnemonic_range.key.length)
+        {
+            first_mnemonic_range = range;
+        }
+        BUSTER_TEST(arguments, range.candidate_count != 0);
+        BUSTER_TEST(arguments, range.candidate_first <= UINT32_MAX - range.candidate_count);
+        char8* mixed_key = arena_allocate(arguments->arena, char8, range.key.length);
+        for (u32 key_index = 0; key_index < range.key.length; key_index += 1)
+        {
+            char8 key_byte = (char8)buster_aarch64_metadata_string_byte(range.key, key_index);
+            mixed_key[key_index] = (key_index & 1) && key_byte >= 'a' && key_byte <= 'z' ? (char8)(key_byte - ('a' - 'A')) : key_byte;
+        }
+        BusterAarch64MetadataCandidateRange looked_up = {0};
+        BUSTER_TEST(arguments, buster_aarch64_metadata_mnemonic_lookup((String8){.pointer = mixed_key, .length = range.key.length}, &looked_up) &&
+                                  looked_up.key.offset == range.key.offset && looked_up.key.length == range.key.length &&
+                                  looked_up.candidate_first == range.candidate_first && looked_up.candidate_count == range.candidate_count);
+        for (u32 candidate_index = 0; candidate_index < range.candidate_count; candidate_index += 1)
+        {
+            u32 form_id = UINT32_MAX;
+            BUSTER_TEST(arguments, buster_aarch64_metadata_mnemonic_candidate(range, candidate_index, &form_id) && form_id < metadata_counts.form_count);
+        }
+        u32 ignored_form = 0;
+        BUSTER_TEST(arguments, !buster_aarch64_metadata_mnemonic_candidate(range, range.candidate_count, &ignored_form));
+        BUSTER_TEST(arguments, !buster_aarch64_metadata_mnemonic_candidate(range, 0, 0));
+    }
+    BUSTER_TEST(arguments, first_mnemonic_range.key.length != 0);
+    BusterAarch64MetadataCandidateRange malformed_range = first_mnemonic_range;
+    malformed_range.key.offset = metadata_counts.string_pool_size - 1;
+    malformed_range.key.length = 2;
+    u32 ignored_form = 0;
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_mnemonic_candidate(malformed_range, 0, &ignored_form));
+    malformed_range.key.offset = UINT32_MAX;
+    malformed_range.key.length = 1;
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_mnemonic_candidate(malformed_range, 0, &ignored_form));
+    malformed_range = first_mnemonic_range;
+    malformed_range.candidate_first = UINT32_MAX;
+    malformed_range.candidate_count = 2;
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_mnemonic_candidate(malformed_range, 0, &ignored_form));
+    BusterAarch64MetadataCandidateRange nop_range = {0};
+    BUSTER_TEST(arguments, buster_aarch64_metadata_mnemonic_lookup(S8("aDd"), &nop_range));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_mnemonic_lookup(S8("definitely-not-a-mnemonic"), &nop_range));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_mnemonic_lookup(S8("add"), 0));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_mnemonic_lookup((String8){0}, &nop_range));
+
+    // Arm XML fixed-mask closure: every exported row is checked against the
+    // literal 32-bit word, provenance digest, spelling, and census metadata.
+    typedef struct A64FixedExpected A64FixedExpected;
+    struct A64FixedExpected
+    {
+        char const* spelling;
+        u32 word;
+        u64 digest;
+        bool canonical;
+        bool alias;
+        bool system;
+    };
+    static A64FixedExpected const fixed_expected[] = {
+        {"AUTIA1716", UINT32_C(0xd503219f), UINT64_C(0x4c2656c391a4966c), true, false, false},
+        {"AUTIASP", UINT32_C(0xd50323bf), UINT64_C(0x5567e863f3d616e0), true, false, false},
+        {"AUTIAZ", UINT32_C(0xd503239f), UINT64_C(0x9699c5ffd43a6808), true, false, false},
+        {"AUTIB1716", UINT32_C(0xd50321df), UINT64_C(0xacf7c54eec74b3c3), true, false, false},
+        {"AUTIBSP", UINT32_C(0xd50323ff), UINT64_C(0x939a92d709d81a66), true, false, false},
+        {"AUTIBZ", UINT32_C(0xd50323df), UINT64_C(0x6119a8e8b5ff8a15), true, false, false},
+        {"AXFLAG", UINT32_C(0xd500405f), UINT64_C(0x49c394281e2fc2f5), true, false, true},
+        {"CFINV", UINT32_C(0xd500401f), UINT64_C(0x25ca8e13c465633d), true, false, true},
+        {"CSDB", UINT32_C(0xd503229f), UINT64_C(0x182068db72f77b13), true, false, true},
+        {"DRPS", UINT32_C(0xd6bf03e0), UINT64_C(0x95ef2ef129769bd4), true, false, true},
+        {"ERETAA", UINT32_C(0xd69f0bff), UINT64_C(0x2a7f1e76dd24adb9), true, false, false},
+        {"ERETAB", UINT32_C(0xd69f0fff), UINT64_C(0xe6e709b5613a2b09), true, false, false},
+        {"ERET", UINT32_C(0xd69f03e0), UINT64_C(0xab3ab861cc573c94), true, false, true},
+        {"ESB", UINT32_C(0xd503221f), UINT64_C(0x72f940bfcf15dff), true, false, true},
+        {"NOP", UINT32_C(0xd503201f), UINT64_C(0xea53054d40adc052), true, false, true},
+        {"PACIA1716", UINT32_C(0xd503211f), UINT64_C(0x5b904b5fd7060d08), true, false, false},
+        {"PACIASP", UINT32_C(0xd503233f), UINT64_C(0xce9b6d29440e3fdf), true, false, false},
+        {"PACIAZ", UINT32_C(0xd503231f), UINT64_C(0x6fdf88f4d5dadad9), true, false, false},
+        {"PACIB1716", UINT32_C(0xd503215f), UINT64_C(0x31f30b69302bbf8), true, false, false},
+        {"PACIBSP", UINT32_C(0xd503237f), UINT64_C(0x30fbc69814916509), true, false, false},
+        {"PACIBZ", UINT32_C(0xd503235f), UINT64_C(0x7dd3b3468d22f0be), true, false, false},
+        {"PSSBB", UINT32_C(0xd503349f), UINT64_C(0x417057ed639e7b26), false, true, true},
+        {"RETAA", UINT32_C(0xd65f0bff), UINT64_C(0x66f4f4eb4f669ae9), true, false, false},
+        {"RETAB", UINT32_C(0xd65f0fff), UINT64_C(0xceaceb4ec61650c7), true, false, false},
+        {"SB", UINT32_C(0xd50330ff), UINT64_C(0x8cc3feea57025837), true, false, true},
+        {"SEVL", UINT32_C(0xd50320bf), UINT64_C(0xd0d6393b6e21b729), true, false, true},
+        {"SEV", UINT32_C(0xd503209f), UINT64_C(0x35a28a4c138c7f53), true, false, true},
+        {"SSBB", UINT32_C(0xd503309f), UINT64_C(0x4e30d76289b575ab), false, true, true},
+        {"TSB CSYNC", UINT32_C(0xd503225f), UINT64_C(0x42334eece1165443), true, false, true},
+        {"WFE", UINT32_C(0xd503205f), UINT64_C(0x3e02f75540bdf550), true, false, true},
+        {"WFI", UINT32_C(0xd503207f), UINT64_C(0x270d238e9531f5a3), true, false, true},
+        {"XAFLAG", UINT32_C(0xd500403f), UINT64_C(0xdf00807b13d10f08), true, false, true},
+        {"XPACLRI", UINT32_C(0xd50320ff), UINT64_C(0x423e63bdcef213ee), true, false, false},
+        {"YIELD", UINT32_C(0xd503203f), UINT64_C(0xd48ce72c3fefa9cc), true, false, true},
+    };
+    BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_spelling_count() == BUSTER_ARRAY_LENGTH(fixed_expected));
+    u32 fixed_canonical_count = 0;
+    u32 fixed_alias_count = 0;
+    u32 fixed_system_count = 0;
+    for (u32 fixed_index = 0; fixed_index < BUSTER_ARRAY_LENGTH(fixed_expected); fixed_index += 1)
+    {
+        BusterAarch64ArmM1FixedSpelling fixed = {0};
+        BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_spelling(fixed_index, &fixed));
+        BUSTER_TEST(arguments, string_equal(fixed.spelling, string_from_pointer((char8*)fixed_expected[fixed_index].spelling)) &&
+                                  fixed.word == fixed_expected[fixed_index].word && fixed.arm_row_digest == fixed_expected[fixed_index].digest &&
+                                  fixed.canonical == fixed_expected[fixed_index].canonical && fixed.alias == fixed_expected[fixed_index].alias &&
+                                  fixed.system == fixed_expected[fixed_index].system);
+        BusterAarch64ArmM1FixedSpelling looked_up_fixed = {0};
+        BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_lookup(fixed.spelling, &looked_up_fixed) && looked_up_fixed.word == fixed.word);
+        fixed_canonical_count += fixed.canonical;
+        fixed_alias_count += fixed.alias;
+        fixed_system_count += fixed.system;
+    }
+    BUSTER_TEST(arguments, fixed_canonical_count == 32 && fixed_alias_count == 2 && fixed_system_count == 17);
+    BusterAarch64ArmM1FixedSpelling fixed = {0};
+    BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_lookup(S8("aUtIaSp"), &fixed) && fixed.word == UINT32_C(0xd50323bf));
+    BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_lookup(S8("tsb   csync"), &fixed) && fixed.word == UINT32_C(0xd503225f));
+    BUSTER_TEST(arguments, !buster_aarch64_arm_m1_fixed_lookup(S8("TSB C"), &fixed));
+    BUSTER_TEST(arguments, !buster_aarch64_arm_m1_fixed_lookup(S8("NOP extra"), &fixed));
+    BUSTER_TEST(arguments, !buster_aarch64_arm_m1_fixed_lookup(S8("AUTIASP, x0"), &fixed));
+    BUSTER_TEST(arguments, !buster_aarch64_arm_m1_fixed_spelling(buster_aarch64_arm_m1_fixed_spelling_count(), &fixed));
+    BUSTER_TEST(arguments, !buster_aarch64_arm_m1_fixed_spelling(0, 0));
+    Target fixed_m1_target = a64_encoding_m1_target(false);
+    BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_target(fixed_m1_target));
+    Target generic_m1_arch = fixed_m1_target;
+    generic_m1_arch.cpu_model = CPU_MODEL_A64_GENERIC;
+    BUSTER_TEST(arguments, !buster_aarch64_arm_m1_fixed_target(generic_m1_arch));
+    Target x86_m1_arch = fixed_m1_target;
+    x86_m1_arch.cpu_arch = CPU_ARCH_X86_64;
+    BUSTER_TEST(arguments, !buster_aarch64_arm_m1_fixed_target(x86_m1_arch));
 
     // Target-aware predicate evaluation is the authority behind the legacy
     // Apple-M1 enum classifier. Explicit feature subtraction remains valid and

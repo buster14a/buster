@@ -234,6 +234,46 @@ struct BusterAarch64MetadataCounts
     u32 apple_m1_raw_layout_incomplete_count;
 };
 
+// The LLVM-derived mnemonic index is exposed as an implementation-candidate
+// catalog.  It is useful for diagnostics and future semantic selection, but
+// it is not the canonical supported-form denominator and must not be used as
+// one.  Ranges and candidates are validated against the checked-in generated
+// snapshot on every access; callers can therefore safely probe arbitrary
+// indices and malformed ranges.
+typedef struct BusterAarch64MetadataCandidateRange BusterAarch64MetadataCandidateRange;
+struct BusterAarch64MetadataCandidateRange
+{
+    BusterAarch64MetadataString key;
+    u32 candidate_first;
+    u32 candidate_count;
+};
+
+BUSTER_F_DECL u32 buster_aarch64_metadata_mnemonic_range_count(void);
+BUSTER_F_DECL bool buster_aarch64_metadata_mnemonic_range(u32 range_index, BusterAarch64MetadataCandidateRange* result);
+BUSTER_F_DECL bool buster_aarch64_metadata_mnemonic_lookup(String8 mnemonic, BusterAarch64MetadataCandidateRange* result);
+BUSTER_F_DECL bool buster_aarch64_metadata_mnemonic_candidate(BusterAarch64MetadataCandidateRange range, u32 candidate_index, u32* form_id);
+
+// Arm's canonical Apple-M1 fixed-spelling projection is an independent,
+// compact catalog.  Unlike the LLVM candidate index above, these rows are
+// selected directly from the Arm canonical artifact and are safe for the
+// explicit Apple-M1 target parser path only.
+typedef struct BusterAarch64ArmM1FixedSpelling BusterAarch64ArmM1FixedSpelling;
+struct BusterAarch64ArmM1FixedSpelling
+{
+    String8 spelling;
+    String8 arm_row_id;
+    u32 word;
+    u64 arm_row_digest;
+    bool canonical;
+    bool alias;
+    bool system;
+};
+
+BUSTER_F_DECL u32 buster_aarch64_arm_m1_fixed_spelling_count(void);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_fixed_spelling(u32 index, BusterAarch64ArmM1FixedSpelling* result);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_fixed_lookup(String8 spelling, BusterAarch64ArmM1FixedSpelling* result);
+BUSTER_F_DECL bool buster_aarch64_arm_m1_fixed_target(Target target);
+
 // Coverage classification is independent from raw bit-layout completeness.
 // Keep these values aligned with the generated snapshot while exposing a
 // stable public vocabulary to semantic encoder and test layers.

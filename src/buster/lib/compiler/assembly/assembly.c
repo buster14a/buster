@@ -375,6 +375,13 @@ enum
 };
 
 typedef struct AssemblyInstruction AssemblyInstruction;
+
+typedef enum AssemblyEncodingKind
+{
+    ASSEMBLY_ENCODING_HANDWRITTEN,
+    ASSEMBLY_ENCODING_AARCH64_FIXED_WORD,
+} AssemblyEncodingKind;
+
 struct AssemblyInstruction
 {
     AssemblyOperand operands[ASSEMBLY_MAX_OPERANDS];
@@ -383,6 +390,7 @@ struct AssemblyInstruction
     u32 column;
     u32 size;
     AssemblyOpcode opcode;
+    AssemblyEncodingKind encoding_kind;
     u8 operand_count;
     u16 width;
     u8 condition;
@@ -396,6 +404,7 @@ struct AssemblyInstruction
     u8 metadata_operand_count;
     u16 metadata_reserved;
     u32 metadata_form_id;
+    u32 fixed_word;
     String8 metadata_mnemonic;
     u8 metadata_address_size;
     u8 metadata_reserved_address[3];
@@ -1390,6 +1399,8 @@ struct AssemblyInstructionInfo
     u8 source_width;
     u8 condition;
     bool no_flags;
+    AssemblyEncodingKind encoding_kind;
+    u32 fixed_word;
     AssemblyAmdForm const* amd_form;
 };
 
@@ -2077,6 +2088,25 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
         return true;
     }
     return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_fixed_instruction_lookup(Target target, String8 statement, AssemblyInstructionInfo* result)
+{
+    if (!result || !buster_aarch64_arm_m1_fixed_target(target))
+    {
+        return false;
+    }
+    BusterAarch64ArmM1FixedSpelling fixed = {0};
+    if (!buster_aarch64_arm_m1_fixed_lookup(statement, &fixed))
+    {
+        return false;
+    }
+    *result = (AssemblyInstructionInfo){
+        .opcode = ASSEMBLY_OPCODE_COUNT,
+        .encoding_kind = ASSEMBLY_ENCODING_AARCH64_FIXED_WORD,
+        .fixed_word = fixed.word,
+    };
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_opcode_is_sse2(AssemblyOpcode opcode)
@@ -5587,6 +5617,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
     }
     String8 mnemonic = {.pointer = statement.pointer, .length = mnemonic_end};
     String8 operands = assembly_trim((String8){.pointer = statement.pointer + mnemonic_end, .length = statement.length - mnemonic_end});
+    String8 full_statement = assembly_trim(statement);
     u8 leading_rounding = 0;
     u8 leading_sae = false;
     if (target.cpu_arch == CPU_ARCH_X86_64 && operands.length && operands.pointer[0] == '{')
@@ -5622,10 +5653,23 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         }
     }
     AssemblyInstructionInfo info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+    bool fixed_spelling = false;
     if (!assembly_instruction_lookup(target, syntax, mnemonic, &info))
     {
-        assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION, line, column, (u32)mnemonic.length, S8("unknown instruction"));
-        return;
+        fixed_spelling = assembly_aarch64_fixed_instruction_lookup(target, full_statement, &info);
+        if (!fixed_spelling)
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION, line, column, (u32)mnemonic.length, S8("unknown instruction"));
+            return;
+        }
+    }
+    if (fixed_spelling)
+    {
+        // A fixed spelling is matched as one complete instruction, including
+        // the sole internal separator in `TSB CSYNC`; it has no operands.
+        mnemonic_end = statement.length;
+        mnemonic = full_statement;
+        operands = (String8){0};
     }
     if (info.amd_form && !target_cpu_feature_has(target, info.amd_form->feature))
     {
@@ -5710,12 +5754,14 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         .line = line,
         .column = column,
         .opcode = info.opcode,
+        .encoding_kind = info.encoding_kind,
         .operand_count = info.operand_count,
         .condition = info.condition,
         .lock_prefix = lock_prefix,
         .no_flags = pseudo_no_flags || info.no_flags,
         .amd_mnemonic = mnemonic,
         .amd_form = info.amd_form,
+        .fixed_word = info.fixed_word,
     };
     u8 parsed_operand_count = 0;
     u64 operand_start = 0;
@@ -9623,6 +9669,11 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             {
                 return;
             }
+            continue;
+        }
+        if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_FIXED_WORD)
+        {
+            assembly_emit_u32(builder, instruction->fixed_word);
             continue;
         }
         if (instruction->lock_prefix)

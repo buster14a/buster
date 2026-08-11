@@ -16,6 +16,7 @@
 #pragma GCC diagnostic pop
 #endif
 #include <buster/lib/compiler/assembly/generated/aarch64-production-plan.generated.h>
+#include <buster/lib/compiler/assembly/generated/arm-a64-m1-fixed.generated.h>
 
 BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_COVERAGE_DIRECT == (u32)BUSTER_AARCH64_GENERATED_COVERAGE_DIRECT);
 BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_COVERAGE_NORMALIZED == (u32)BUSTER_AARCH64_GENERATED_COVERAGE_NORMALIZED);
@@ -58,6 +59,7 @@ BUSTER_CT_CHECK(BUSTER_AARCH64_GENERATED_PRODUCTION_FORM_COUNT == BUSTER_ARRAY_L
 BUSTER_CT_CHECK(BUSTER_AARCH64_GENERATED_PRODUCTION_FIELD_COUNT == BUSTER_ARRAY_LENGTH(buster_aarch64_generated_production_fields));
 BUSTER_CT_CHECK(BUSTER_AARCH64_GENERATED_PRODUCTION_SEGMENT_COUNT == BUSTER_ARRAY_LENGTH(buster_aarch64_generated_production_segments));
 BUSTER_CT_CHECK(BUSTER_AARCH64_GENERATED_PRODUCTION_FORM_COUNT < UINT16_MAX);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(buster_aarch64_arm_m1_generated_fixed_rows) == BUSTER_AARCH64_ARM_M1_FIXED_SPELLING_COUNT);
 
 #define A64_NO_PC_RELATIVE_OPERAND UINT8_MAX
 
@@ -439,6 +441,225 @@ u32 buster_aarch64_metadata_predicate_count(void)
 u32 buster_aarch64_metadata_string_pool_size(void)
 {
     return BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE;
+}
+
+BUSTER_GLOBAL_LOCAL char8 a64_metadata_ascii_lower(char8 value)
+{
+    return value >= 'A' && value <= 'Z' ? (char8)(value + ('a' - 'A')) : value;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_string_case_equal(BusterAarch64MetadataString string, String8 wanted)
+{
+    if (!wanted.pointer || !wanted.length || string.length != wanted.length || string.offset >= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE ||
+        wanted.length > BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE - string.offset)
+    {
+        return false;
+    }
+    for (u32 index = 0; index < string.length; index += 1)
+    {
+        char8 actual = (char8)buster_aarch64_generated_string_byte((u64)string.offset + index);
+        if (a64_metadata_ascii_lower(actual) != a64_metadata_ascii_lower(wanted.pointer[index]))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_candidate_range_valid(BusterAarch64MetadataCandidateRange range)
+{
+    return range.key.length != 0 && range.key.offset < BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE &&
+           range.key.length <= BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE - range.key.offset &&
+           a64_metadata_count_range_valid(BUSTER_AARCH64_GENERATED_MNEMONIC_CANDIDATE_COUNT, range.candidate_first, range.candidate_count);
+}
+
+u32 buster_aarch64_metadata_mnemonic_range_count(void)
+{
+    return BUSTER_AARCH64_GENERATED_MNEMONIC_RANGE_COUNT;
+}
+
+bool buster_aarch64_metadata_mnemonic_range(u32 range_index, BusterAarch64MetadataCandidateRange* result)
+{
+    A64_METADATA_PACKED_ACCESS();
+    if (!result || range_index >= BUSTER_AARCH64_GENERATED_MNEMONIC_RANGE_COUNT)
+    {
+        return false;
+    }
+    BusterAarch64GeneratedMnemonicRange generated = buster_aarch64_generated_mnemonic_range_at(range_index);
+    BusterAarch64MetadataString key = {0};
+    if (!a64_metadata_string_descriptor(generated.key_offset, &key))
+    {
+        return false;
+    }
+    BusterAarch64MetadataCandidateRange candidate_range = {
+        .key = key,
+        .candidate_first = generated.candidate_first,
+        .candidate_count = generated.candidate_count,
+    };
+    if (!a64_metadata_candidate_range_valid(candidate_range))
+    {
+        return false;
+    }
+    *result = candidate_range;
+    return true;
+}
+
+bool buster_aarch64_metadata_mnemonic_lookup(String8 mnemonic, BusterAarch64MetadataCandidateRange* result)
+{
+    A64_METADATA_PACKED_ACCESS();
+    if (!result || !mnemonic.pointer || !mnemonic.length)
+    {
+        return false;
+    }
+    for (u32 range_index = 0; range_index < BUSTER_AARCH64_GENERATED_MNEMONIC_RANGE_COUNT; range_index += 1)
+    {
+        BusterAarch64MetadataCandidateRange candidate_range = {0};
+        if (!buster_aarch64_metadata_mnemonic_range(range_index, &candidate_range))
+        {
+            return false;
+        }
+        if (a64_metadata_string_case_equal(candidate_range.key, mnemonic))
+        {
+            *result = candidate_range;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool buster_aarch64_metadata_mnemonic_candidate(BusterAarch64MetadataCandidateRange range, u32 candidate_index, u32* form_id)
+{
+    A64_METADATA_PACKED_ACCESS();
+    if (!form_id || !a64_metadata_candidate_range_valid(range) || candidate_index >= range.candidate_count)
+    {
+        return false;
+    }
+    u32 absolute_index = range.candidate_first + candidate_index;
+    u32 candidate = buster_aarch64_generated_mnemonic_candidate_at(absolute_index);
+    if (candidate == UINT32_MAX || candidate >= BUSTER_AARCH64_GENERATED_FORM_COUNT)
+    {
+        return false;
+    }
+    *form_id = candidate;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL u32 a64_fixed_row_string_length(char const* string)
+{
+    if (!string)
+    {
+        return 0;
+    }
+    u32 length = 0;
+    while (string[length])
+    {
+        if (length == UINT32_MAX)
+        {
+            return 0;
+        }
+        length += 1;
+    }
+    return length;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_fixed_row_space(char8 value)
+{
+    return value == ' ' || value == '\t' || value == '\r';
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_fixed_row_spelling_equal(String8 wanted, char const* expected)
+{
+    // Canonical rows contain a single space only for TSB CSYNC. Treat runs of
+    // the existing parser whitespace as one separator, without accepting any
+    // additional token or changing punctuation/operand spelling.
+    u64 wanted_index = 0;
+    u32 expected_index = 0;
+    while (wanted_index < wanted.length || (expected && expected[expected_index]))
+    {
+        while (wanted_index < wanted.length && a64_fixed_row_space(wanted.pointer[wanted_index]))
+        {
+            wanted_index += 1;
+        }
+        while (expected && expected[expected_index] && a64_fixed_row_space((char8)expected[expected_index]))
+        {
+            expected_index += 1;
+        }
+        bool wanted_end = wanted_index == wanted.length;
+        bool expected_end = !expected || !expected[expected_index];
+        if (wanted_end || expected_end)
+        {
+            return wanted_end && expected_end;
+        }
+        while (wanted_index < wanted.length && !a64_fixed_row_space(wanted.pointer[wanted_index]) && expected[expected_index] &&
+               !a64_fixed_row_space((char8)expected[expected_index]))
+        {
+            if (a64_metadata_ascii_lower(wanted.pointer[wanted_index]) != a64_metadata_ascii_lower((char8)expected[expected_index]))
+            {
+                return false;
+            }
+            wanted_index += 1;
+            expected_index += 1;
+        }
+        bool wanted_token_end = wanted_index == wanted.length || a64_fixed_row_space(wanted.pointer[wanted_index]);
+        bool expected_token_end = !expected[expected_index] || a64_fixed_row_space((char8)expected[expected_index]);
+        if (wanted_token_end != expected_token_end)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+u32 buster_aarch64_arm_m1_fixed_spelling_count(void)
+{
+    return BUSTER_AARCH64_ARM_M1_FIXED_SPELLING_COUNT;
+}
+
+bool buster_aarch64_arm_m1_fixed_spelling(u32 index, BusterAarch64ArmM1FixedSpelling* result)
+{
+    if (!result || index >= BUSTER_AARCH64_ARM_M1_FIXED_SPELLING_COUNT)
+    {
+        return false;
+    }
+    BusterAarch64ArmM1GeneratedFixedRow const* row = buster_aarch64_arm_m1_generated_fixed_rows + index;
+    u32 spelling_length = a64_fixed_row_string_length(row->spelling);
+    u32 row_id_length = a64_fixed_row_string_length(row->arm_row_id);
+    if (!spelling_length || !row_id_length || (row->word & ~BUSTER_AARCH64_ARM_M1_FIXED_MASK) || row->canonical == row->alias)
+    {
+        return false;
+    }
+    *result = (BusterAarch64ArmM1FixedSpelling){
+        .spelling = {.pointer = (char8*)row->spelling, .length = spelling_length},
+        .arm_row_id = {.pointer = (char8*)row->arm_row_id, .length = row_id_length},
+        .word = row->word,
+        .arm_row_digest = row->arm_row_digest,
+        .canonical = row->canonical,
+        .alias = row->alias,
+        .system = row->system,
+    };
+    return true;
+}
+
+bool buster_aarch64_arm_m1_fixed_lookup(String8 spelling, BusterAarch64ArmM1FixedSpelling* result)
+{
+    if (!result || !spelling.pointer || !spelling.length)
+    {
+        return false;
+    }
+    for (u32 index = 0; index < BUSTER_AARCH64_ARM_M1_FIXED_SPELLING_COUNT; index += 1)
+    {
+        BusterAarch64ArmM1GeneratedFixedRow const* row = buster_aarch64_arm_m1_generated_fixed_rows + index;
+        if (a64_fixed_row_spelling_equal(spelling, row->spelling))
+        {
+            return buster_aarch64_arm_m1_fixed_spelling(index, result);
+        }
+    }
+    return false;
+}
+
+bool buster_aarch64_arm_m1_fixed_target(Target target)
+{
+    return target.cpu_arch == CPU_ARCH_AARCH64 && a64_metadata_target_is_m1_profile(target);
 }
 
 BusterAarch64MetadataCounts buster_aarch64_metadata_counts(void)
