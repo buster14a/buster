@@ -53,6 +53,21 @@ BUSTER_GLOBAL_LOCAL bool a64_encoding_round_trip(A64EncodingCase test)
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL Target a64_encoding_m1_target(bool explicit_features)
+{
+    Target result = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_A64_APPLE_M1,
+        .os = OPERATING_SYSTEM_MACOS,
+        .cpu_features_explicit = explicit_features,
+    };
+    if (explicit_features)
+    {
+        result.cpu_features = target_cpu_features_default(CPU_ARCH_AARCH64, CPU_MODEL_A64_APPLE_M1);
+    }
+    return result;
+}
+
 UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -362,6 +377,52 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
                               metadata_counts.operand_count == 26262 && metadata_counts.predicate_count == 7854 && metadata_counts.string_pool_size == 337490);
     BUSTER_TEST(arguments, metadata_counts.apple_m1_supported_count == 2899 && metadata_counts.apple_m1_complete_count == 2873 &&
                               metadata_counts.apple_m1_incomplete_count == 26);
+
+    // Target-aware predicate evaluation is the authority behind the legacy
+    // Apple-M1 enum classifier. Explicit feature subtraction remains valid and
+    // changes only forms gated by the removed extension.
+    Target m1_target = a64_encoding_m1_target(false);
+    Target m1_explicit_target = a64_encoding_m1_target(true);
+    BUSTER_TEST(arguments, buster_aarch64_metadata_form_supported_for_target(85, m1_target));
+    BUSTER_TEST(arguments, buster_aarch64_metadata_form_supported_for_target(85, m1_explicit_target));
+    BUSTER_TEST(arguments, buster_aarch64_metadata_form_supported_for_target(162, m1_target));
+    BUSTER_TEST(arguments, buster_aarch64_metadata_form_supported_for_target(229, m1_target));
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_form_supported_for_target(162,
+                                                                                (Target){
+                                                                                    .cpu_arch = CPU_ARCH_AARCH64,
+                                                                                    .cpu_model = CPU_MODEL_BASELINE,
+                                                                                    .os = OPERATING_SYSTEM_MACOS,
+                                                                                }));
+    Target no_lor_target = m1_explicit_target;
+    no_lor_target.cpu_features = target_cpu_features_remove(no_lor_target.cpu_features, TARGET_CPU_FEATURE_AARCH64_LOR);
+    Target no_trace_target = m1_explicit_target;
+    no_trace_target.cpu_features = target_cpu_features_remove(no_trace_target.cpu_features, TARGET_CPU_FEATURE_AARCH64_TRACEV8_4);
+    u32 no_lor_count = 0;
+    u32 no_trace_count = 0;
+    for (u32 form_id = 0; form_id < metadata_counts.form_count; form_id += 1)
+    {
+        bool m1_supported = buster_aarch64_metadata_form_supported_for_target(form_id, m1_explicit_target);
+        bool no_lor_supported = buster_aarch64_metadata_form_supported_for_target(form_id, no_lor_target);
+        bool no_trace_supported = buster_aarch64_metadata_form_supported_for_target(form_id, no_trace_target);
+        if (m1_supported && !no_lor_supported)
+        {
+            no_lor_count += 1;
+        }
+        if (m1_supported && !no_trace_supported)
+        {
+            no_trace_count += 1;
+        }
+    }
+    BUSTER_TEST(arguments, no_lor_count == 8 && no_trace_count == 1);
+    Target invalid_target = m1_explicit_target;
+    invalid_target.cpu_features = target_cpu_features_singleton(TARGET_CPU_FEATURE_AARCH64_AES);
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_form_supported_for_target(162, invalid_target));
+    Target non_aarch64_target = m1_target;
+    non_aarch64_target.cpu_arch = CPU_ARCH_X86_64;
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_form_supported_for_target(85, non_aarch64_target));
+    Target unknown_feature_target = m1_explicit_target;
+    unknown_feature_target.cpu_features.words[3] |= UINT64_C(1) << 63;
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_form_supported_for_target(85, unknown_feature_target));
 
     u32 complete_count = 0;
     u32 m1_count = 0;

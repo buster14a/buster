@@ -183,32 +183,123 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_form_layout_complete(u32 form_id, BusterAa
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool a64_metadata_form_m1_predicates(BusterAarch64GeneratedForm form)
+BUSTER_GLOBAL_LOCAL Target a64_metadata_apple_m1_target(void)
 {
-    static char const* const true_predicates[] = {
-        "HasAES",       "HasAltNZCV",   "HasCRC",      "HasComplxNum", "HasDotProd",  "HasEL3",       "HasFP16FML",
-        "HasFPARMv8",   "HasFRInt3264", "HasFlagM",    "HasFullFP16",  "HasJS",       "HasLOR",       "HasLSE",
-        "HasNEON",      "HasNEONandIsStreamingSafe",  "HasPAuth",     "HasRCPC",      "HasRCPC_IMMO", "HasRDM",
-        "HasSB",        "HasSHA2",      "HasSHA3",      "HasTRACEV8_4",
+    // Keep the policy target independent of the host running the compiler.
+    // The feature set is intentionally implicit here so target.c remains the
+    // single authority for the pinned Apple-M1 default profile.
+    return (Target){
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_A64_APPLE_M1,
+        .os = OPERATING_SYSTEM_MACOS,
+        .cpu_features_explicit = false,
     };
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_target_is_m1_profile(Target target)
+{
+    if (target.cpu_model == CPU_MODEL_A64_APPLE_M1)
+    {
+        return true;
+    }
+    return target.cpu_model == CPU_MODEL_NATIVE && target_native.cpu_arch == CPU_ARCH_AARCH64 &&
+           target_native.cpu_model == CPU_MODEL_A64_APPLE_M1;
+}
+
+typedef struct A64MetadataPredicateFeature A64MetadataPredicateFeature;
+struct A64MetadataPredicateFeature
+{
+    char const* name;
+    TargetCpuFeature feature;
+};
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_predicate_feature(u32 predicate_offset, TargetCpuFeature* feature)
+{
+    static A64MetadataPredicateFeature const predicate_features[] = {
+        {.name = "HasAES", .feature = TARGET_CPU_FEATURE_AARCH64_AES},
+        {.name = "HasAltNZCV", .feature = TARGET_CPU_FEATURE_AARCH64_ALTNZCV},
+        {.name = "HasCRC", .feature = TARGET_CPU_FEATURE_AARCH64_CRC},
+        {.name = "HasComplxNum", .feature = TARGET_CPU_FEATURE_AARCH64_COMPLXNUM},
+        {.name = "HasDotProd", .feature = TARGET_CPU_FEATURE_AARCH64_DOTPROD},
+        {.name = "HasFP16FML", .feature = TARGET_CPU_FEATURE_AARCH64_FP16FML},
+        {.name = "HasFPARMv8", .feature = TARGET_CPU_FEATURE_AARCH64_FP_ARMV8},
+        {.name = "HasFRInt3264", .feature = TARGET_CPU_FEATURE_AARCH64_FPTOINT},
+        {.name = "HasFlagM", .feature = TARGET_CPU_FEATURE_AARCH64_FLAGM},
+        {.name = "HasFullFP16", .feature = TARGET_CPU_FEATURE_AARCH64_FULLFP16},
+        {.name = "HasJS", .feature = TARGET_CPU_FEATURE_AARCH64_JSCONV},
+        {.name = "HasLOR", .feature = TARGET_CPU_FEATURE_AARCH64_LOR},
+        {.name = "HasLSE", .feature = TARGET_CPU_FEATURE_AARCH64_LSE},
+        {.name = "HasNEON", .feature = TARGET_CPU_FEATURE_AARCH64_NEON},
+        {.name = "HasPAuth", .feature = TARGET_CPU_FEATURE_AARCH64_PAUTH},
+        {.name = "HasRCPC", .feature = TARGET_CPU_FEATURE_AARCH64_RCPC},
+        {.name = "HasRCPC_IMMO", .feature = TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO},
+        {.name = "HasRDM", .feature = TARGET_CPU_FEATURE_AARCH64_RDM},
+        {.name = "HasSB", .feature = TARGET_CPU_FEATURE_AARCH64_SB},
+        {.name = "HasSHA2", .feature = TARGET_CPU_FEATURE_AARCH64_SHA2},
+        {.name = "HasSHA3", .feature = TARGET_CPU_FEATURE_AARCH64_SHA3},
+        {.name = "HasTRACEV8_4", .feature = TARGET_CPU_FEATURE_AARCH64_TRACEV8_4},
+    };
+    if (!feature)
+    {
+        return false;
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(predicate_features); index += 1)
+    {
+        if (a64_metadata_string_equals(predicate_offset, predicate_features[index].name))
+        {
+            *feature = predicate_features[index].feature;
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_form_predicates_supported(BusterAarch64GeneratedForm form, Target target)
+{
+    if (target.cpu_arch != CPU_ARCH_AARCH64 || !target_cpu_features_are_valid(target))
+    {
+        return false;
+    }
+    TargetCpuFeatures features = target_cpu_features_effective(target);
+    bool m1_profile = a64_metadata_target_is_m1_profile(target);
     for (u32 predicate_index = 0; predicate_index < form.predicate_count; predicate_index += 1)
     {
         u32 offset = buster_aarch64_generated_predicate_at(form.predicate_first + predicate_index);
-        bool known = false;
-        for (u32 true_index = 0; true_index < BUSTER_ARRAY_LENGTH(true_predicates); true_index += 1)
+        if (a64_metadata_string_equals(offset, "HasEL3"))
         {
-            if (a64_metadata_string_equals(offset, true_predicates[true_index]))
+            // EL3 is deliberately not represented as a generic feature bit.
+            // Keep it visible as a privileged/system predicate and gate it by
+            // the pinned model capability only.
+            if (!m1_profile)
             {
-                known = true;
-                break;
+                return false;
             }
+            continue;
         }
-        if (!known)
+        if (a64_metadata_string_equals(offset, "HasNEONandIsStreamingSafe"))
         {
+            // The runtime has no streaming-mode state. A non-streaming A64
+            // target therefore treats this LLVM predicate as NEON support.
+            if (!target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_NEON))
+            {
+                return false;
+            }
+            continue;
+        }
+        TargetCpuFeature feature = TARGET_CPU_FEATURE_NONE;
+        if (!a64_metadata_predicate_feature(offset, &feature) || !target_cpu_features_contains(features, feature))
+        {
+            // Unknown predicates fail closed, as do known predicates whose
+            // corresponding target extension is disabled.
             return false;
         }
     }
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_metadata_form_m1_predicates(BusterAarch64GeneratedForm form)
+{
+    return a64_metadata_form_predicates_supported(form, a64_metadata_apple_m1_target());
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_metadata_form_and_layout(u32 form_id, BusterAarch64GeneratedForm* form, bool* complete)
@@ -487,17 +578,22 @@ bool buster_aarch64_metadata_predicate(u32 form_id, u32 predicate_index, BusterA
     return a64_metadata_string_descriptor(buster_aarch64_generated_predicate_at(form.predicate_first + predicate_index), result);
 }
 
-bool buster_aarch64_metadata_form_supported(u32 form_id, BusterAarch64MetadataTarget target)
+bool buster_aarch64_metadata_form_supported_for_target(u32 form_id, Target target)
 {
     BusterAarch64GeneratedForm form = {0};
-    if (target >= BUSTER_AARCH64_METADATA_TARGET_COUNT || !a64_metadata_generated_form(form_id, &form))
+    return a64_metadata_generated_form(form_id, &form) && a64_metadata_form_predicates_supported(form, target);
+}
+
+bool buster_aarch64_metadata_form_supported(u32 form_id, BusterAarch64MetadataTarget target)
+{
+    if (target >= BUSTER_AARCH64_METADATA_TARGET_COUNT)
     {
         return false;
     }
     switch (target)
     {
     case BUSTER_AARCH64_METADATA_TARGET_APPLE_M1:
-        return a64_metadata_form_m1_predicates(form);
+        return buster_aarch64_metadata_form_supported_for_target(form_id, a64_metadata_apple_m1_target());
     case BUSTER_AARCH64_METADATA_TARGET_COUNT:
         return false;
     }

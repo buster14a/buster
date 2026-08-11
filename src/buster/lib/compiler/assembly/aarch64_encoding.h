@@ -1,6 +1,7 @@
 #pragma once
 
 #include <buster/lib/base.h>
+#include <buster/lib/target.h>
 
 // Exact architectural forms used at the AArch64 MC boundary. These IDs are
 // deliberately distinct from MachineOpcode: machine rows may still be
@@ -244,8 +245,13 @@ BUSTER_F_DECL bool buster_aarch64_metadata_operand(u32 form_id, u32 operand_inde
 BUSTER_F_DECL bool buster_aarch64_metadata_predicate(u32 form_id, u32 predicate_index, BusterAarch64MetadataString* result);
 
 // The target classifier is deliberately conservative: an empty predicate
-// list is supported, every predicate must be one of the explicit Apple-M1
-// true set, and an unknown predicate makes the form unsupported.
+// list is supported, every predicate must be one of the explicitly modelled
+// AArch64 predicates, and an unknown predicate makes the form unsupported.
+// Invalid targets and non-AArch64 targets are rejected before effective
+// features are inspected. HasEL3 is a model/platform capability, not an
+// ordinary extension feature: it is true only for Apple M1 or a native target
+// which has already resolved to Apple M1.
+BUSTER_F_DECL bool buster_aarch64_metadata_form_supported_for_target(u32 form_id, Target target);
 BUSTER_F_DECL bool buster_aarch64_metadata_form_supported(u32 form_id, BusterAarch64MetadataTarget target);
 BUSTER_F_DECL bool buster_aarch64_metadata_form_provisionally_apple_m1_supported(u32 form_id);
 BUSTER_F_DECL bool buster_aarch64_metadata_form_is_complete(u32 form_id);
