@@ -50,6 +50,12 @@ BUSTER_GLOBAL_LOCAL BusterAarch64SystemInstruction a64_system_test_fixture(u32 r
         result.fields[0].value = 15;
         result.defaulted_mask = 1;
     }
+    else if (row == BUSTER_AARCH64_SYSTEM_FORM_DMB || row == BUSTER_AARCH64_SYSTEM_FORM_DSB)
+    {
+        // CRm=15 (`sy`) is the independent LLVM representative for both
+        // barriers; DSB's #0/#4 aliases remain exercised below.
+        result.fields[0].value = 15;
+    }
     return result;
 }
 
@@ -87,6 +93,22 @@ UnitTestResult aarch64_system_semantics_tests(UnitTestArguments* arguments)
     {
         BusterAarch64SystemSemanticRecord metadata = {0};
         BUSTER_TEST(arguments, buster_aarch64_system_semantic_row(row, &metadata) && metadata.form == row && metadata.field_count > 0);
+        if (row == BUSTER_AARCH64_SYSTEM_FORM_DMB)
+        {
+            BUSTER_TEST(arguments, metadata.constraint_field == 0 && metadata.constraint_mask == UINT16_C(0xeeee));
+        }
+        else if (row == BUSTER_AARCH64_SYSTEM_FORM_DSB)
+        {
+            BUSTER_TEST(arguments, metadata.constraint_field == 0 && metadata.constraint_mask == UINT16_C(0xeeff));
+        }
+        else if (row == BUSTER_AARCH64_SYSTEM_FORM_ISB)
+        {
+            BUSTER_TEST(arguments, metadata.constraint_field == 0 && metadata.constraint_mask == UINT16_C(0x8000));
+        }
+        else
+        {
+            BUSTER_TEST(arguments, metadata.constraint_field == UINT8_MAX && metadata.constraint_mask == 0);
+        }
         BusterAarch64SystemInstruction fixture = a64_system_test_fixture(row);
         u32 word = UINT32_C(0xfeedface);
         BUSTER_TEST(arguments, buster_aarch64_system_semantic_encode(m1, &fixture, &word));
@@ -158,6 +180,82 @@ UnitTestResult aarch64_system_semantics_tests(UnitTestArguments* arguments)
             BusterAarch64SystemInstruction boundary_decoded = {0};
             BUSTER_TEST(arguments, buster_aarch64_system_semantic_decode(m1, boundary_word, &boundary_decoded) && boundary_decoded.row == row);
         }
+    }
+
+    // Barrier option constraints are checked exhaustively at both encode and
+    // form-directed decode boundaries.  DSB #0/#4 are allocated aliases whose
+    // words are owned by fixed canonical SSBB/PSSBB rows in word-first mode.
+    static u32 const barrier_rows[] = {
+        BUSTER_AARCH64_SYSTEM_FORM_DMB,
+        BUSTER_AARCH64_SYSTEM_FORM_DSB,
+        BUSTER_AARCH64_SYSTEM_FORM_ISB,
+    };
+    static u16 const barrier_masks[] = {UINT16_C(0xeeee), UINT16_C(0xeeff), UINT16_C(0x8000)};
+    for (u32 barrier_index = 0; barrier_index < BUSTER_ARRAY_LENGTH(barrier_rows); barrier_index += 1)
+    {
+        u32 row = barrier_rows[barrier_index];
+        BusterAarch64SystemInstruction barrier = a64_system_test_fixture(row);
+        barrier.defaulted_mask = 0;
+        for (u32 option = 0; option < 16; option += 1)
+        {
+            barrier.fields[0].value = option;
+            bool allocated = (barrier_masks[barrier_index] & (UINT16_C(1) << option)) != 0;
+            u32 encoded = UINT32_C(0x2468ace0);
+            bool encoded_ok = buster_aarch64_system_semantic_encode(m1, &barrier, &encoded);
+            BUSTER_TEST(arguments, encoded_ok == allocated);
+            if (!allocated)
+            {
+                BUSTER_TEST(arguments, encoded == UINT32_C(0x2468ace0));
+                BusterAarch64SystemInstruction rejected = {.row = UINT16_MAX, .field_count = UINT8_MAX, .defaulted_mask = UINT8_MAX};
+                BUSTER_TEST(arguments, !buster_aarch64_system_semantic_decode_form(m1, row,
+                                                                                     UINT32_C(0xd5033000) | (option << 8) |
+                                                                                         (row == BUSTER_AARCH64_SYSTEM_FORM_DMB ? UINT32_C(0xbf) :
+                                                                                          row == BUSTER_AARCH64_SYSTEM_FORM_DSB ? UINT32_C(0x9f) : UINT32_C(0xdf)),
+                                                                                     &rejected) &&
+                                       rejected.row == UINT16_MAX && rejected.field_count == UINT8_MAX &&
+                                       rejected.defaulted_mask == UINT8_MAX);
+                continue;
+            }
+            BusterAarch64SystemInstruction decoded = {.row = UINT16_MAX, .field_count = UINT8_MAX, .defaulted_mask = UINT8_MAX};
+            BUSTER_TEST(arguments, buster_aarch64_system_semantic_decode_form(m1, row, encoded, &decoded) && decoded.row == row &&
+                                   decoded.fields[0].value == option);
+            u32 round_trip = UINT32_C(0);
+            BUSTER_TEST(arguments, buster_aarch64_system_semantic_encode(m1, &decoded, &round_trip) && round_trip == encoded);
+
+            BusterAarch64SystemInstruction word_first = {.row = UINT16_MAX, .field_count = UINT8_MAX, .defaulted_mask = UINT8_MAX};
+            bool alias = row == BUSTER_AARCH64_SYSTEM_FORM_DSB && (option == 0 || option == 4);
+            if (alias)
+            {
+                BusterAarch64ArmM1FixedSpelling fixed_alias = {0};
+                String8 alias_name = option == 0 ? S8("SSBB") : S8("PSSBB");
+                BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_lookup(alias_name, &fixed_alias) && fixed_alias.word == encoded &&
+                                       fixed_alias.system && fixed_alias.alias && !fixed_alias.canonical);
+                BUSTER_TEST(arguments, buster_aarch64_system_semantic_decode(m1, encoded, &word_first) &&
+                                       word_first.row == row && word_first.fields[0].value == option);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, buster_aarch64_system_semantic_decode(m1, encoded, &word_first) &&
+                                       word_first.row == row && word_first.fields[0].value == option);
+            }
+        }
+    }
+
+    // CLREX is the unconstrained four-bit barrier form: every CRm value
+    // remains allocated and round-trips through both decode paths.
+    BusterAarch64SystemInstruction clrex = a64_system_test_fixture(BUSTER_AARCH64_SYSTEM_FORM_CLREX);
+    clrex.defaulted_mask = 0;
+    for (u32 option = 0; option < 16; option += 1)
+    {
+        clrex.fields[0].value = option;
+        u32 encoded = UINT32_C(0x2468ace0);
+        BUSTER_TEST(arguments, buster_aarch64_system_semantic_encode(m1, &clrex, &encoded));
+        BusterAarch64SystemInstruction decoded = {0};
+        BUSTER_TEST(arguments, buster_aarch64_system_semantic_decode_form(m1, BUSTER_AARCH64_SYSTEM_FORM_CLREX, encoded, &decoded) &&
+                               decoded.fields[0].value == option);
+        BusterAarch64SystemInstruction word_first = {0};
+        BUSTER_TEST(arguments, buster_aarch64_system_semantic_decode(m1, encoded, &word_first) &&
+                               word_first.row == BUSTER_AARCH64_SYSTEM_FORM_CLREX && word_first.fields[0].value == option);
     }
 
     // MRS/MSR use Arm's one-bit o0 field while S<op0> uses 2/3.

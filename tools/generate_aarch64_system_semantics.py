@@ -53,6 +53,17 @@ KIND = {
 
 FORM = {name: i for i, name in enumerate(ROWS_ORDER)}
 
+# The checked-in Arm rows leave the option constraints implicit in their
+# machine-readable field width.  These architectural masks are part of the
+# pinned Apple-M1 closure and are emitted into the generated metadata so the
+# encoder and both decode paths consume one deterministic constraint source.
+# Bit N permits CRm=N.
+VALUE_CONSTRAINTS = {
+    "DMB_BO_barriers": (0, sum(1 << value for value in (1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15))),
+    "DSB_BO_barriers": (0, sum(1 << value for value in (0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 13, 14, 15))),
+    "ISB_BI_barriers": (0, 1 << 15),
+}
+
 
 def load_rows() -> list[dict]:
     rows = []
@@ -141,6 +152,7 @@ def generate() -> str:
             flags = 2
         elif row["encoding_name"] in {"MRS_RS_systemmove", "MSR_SR_systemmove"}:
             flags = 4
+        constraint_field, constraint_mask = VALUE_CONSTRAINTS.get(row["encoding_name"], (0xFF, 0))
         row_meta.append(
             {
                 "id": string_ref(row["id"]),
@@ -156,6 +168,8 @@ def generate() -> str:
                 "optional_mask": optional_mask,
                 "default_value": default_value,
                 "flags": flags,
+                "constraint_field": constraint_field,
+                "constraint_mask": constraint_mask,
             }
         )
 
@@ -170,7 +184,7 @@ def generate() -> str:
             "#define BUSTER_AARCH64_SYSTEM_SEMANTICS_GENERATED_H",
             "#include <buster/lib/base.h>",
             "",
-            "#define BUSTER_AARCH64_SYSTEM_SEMANTICS_GENERATED_SCHEMA_VERSION 1u",
+            "#define BUSTER_AARCH64_SYSTEM_SEMANTICS_GENERATED_SCHEMA_VERSION 2u",
             f"#define BUSTER_AARCH64_SYSTEM_SEMANTICS_GENERATED_ROW_COUNT {len(rows)}u",
             f"#define BUSTER_AARCH64_SYSTEM_SEMANTICS_GENERATED_FIELD_COUNT {len(fields)}u",
             f'#define BUSTER_AARCH64_SYSTEM_SEMANTICS_GENERATED_DIGEST "{digest}"',
@@ -191,7 +205,8 @@ def generate() -> str:
             "    u64 row_digest;",
             "    u32 fixed_mask; u32 fixed_value; u32 field_mask;",
             "    u16 field_first; u8 field_count; u8 optional_mask;",
-            "    u8 default_value; u8 flags; u8 reserved[2];",
+            "    u8 default_value; u8 flags; u8 constraint_field; u8 reserved;",
+            "    u16 constraint_mask;",
             "};",
             "",
             "static const char8 buster_aarch64_system_generated_string_pool[] =",
@@ -216,7 +231,7 @@ def generate() -> str:
         out.append(
             "    {{ {{UINT32_C({}), UINT32_C({})}}, {{UINT32_C({}), UINT32_C({})}}, {{UINT32_C({}), UINT32_C({})}}, "
             "{{UINT32_C({}), UINT32_C({})}}, UINT64_C(0x{:016x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), "
-            "UINT32_C(0x{:08x}), {}, {}, {}, {}, {}, {{0, 0}} }},".format(
+            "UINT32_C(0x{:08x}), {}, {}, {}, {}, {}, {}, 0, UINT16_C(0x{:04x}) }},".format(
                 row["id"][0],
                 row["id"][1],
                 row["encoding_name"][0],
@@ -234,6 +249,8 @@ def generate() -> str:
                 row["optional_mask"],
                 row["default_value"],
                 row["flags"],
+                row["constraint_field"],
+                row["constraint_mask"],
             )
         )
     out.extend(

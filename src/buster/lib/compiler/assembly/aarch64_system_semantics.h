@@ -86,7 +86,13 @@ struct BusterAarch64SystemSemanticRecord
     u8 optional_field_mask;
     u8 default_value;
     u8 flags;
-    u8 reserved[3];
+    // If constraint_field is not UINT8_MAX, bit N in constraint_mask permits
+    // value N for that raw field.  The pinned barrier rows use this metadata
+    // for their architectural CRm allocations; unconstrained rows use the
+    // UINT8_MAX/zero pair.
+    u8 constraint_field;
+    u16 constraint_mask;
+    u8 reserved[2];
 };
 
 typedef struct BusterAarch64SystemOperandValue BusterAarch64SystemOperandValue;
@@ -134,7 +140,9 @@ BUSTER_F_DECL bool buster_aarch64_system_op0_decode(u32 o0, u32* op0);
 // unsupported M1 extensions or reserved encodings are rejected.  `fields` are
 // the Arm source fields in the order published by the canonical row.  Optional
 // fields retain their slot and are marked in defaulted_mask (CLREX/ISB default
-// to #15; SYS Rt defaults to XZR/Rt=31).
+// to #15; SYS Rt defaults to XZR/Rt=31).  Generated row metadata carries the
+// pinned DMB/DSB/ISB CRm allocation masks; CLREX remains valid for every
+// four-bit CRm value.
 BUSTER_F_DECL bool buster_aarch64_system_semantic_encode(Target target, BusterAarch64SystemInstruction const* instruction, u32* word);
 // Decode a word as one explicitly selected variable canonical form.  This is
 // the path that retains HINT #imm support when its word is also a fixed

@@ -78,9 +78,19 @@ with fixed canonical rows (DSB's SSBB/PSSBB aliases remain outside this
 canonical word-first table), and their form-directed and word-first decodes are
 compared in the tests.
 
-Barrier options are retained as raw Arm fields.  DMB/DSB accept the complete
-architectural four-bit `CRm` range (including `#15`/`sy` and the DSB `#0`/`ssbb`
-and `#4`/`pssbb` aliases, which remain fixed spellings); CLREX and ISB retain
-the optional `#15` default.  These are distinct from HINT's unallocated
-immediate values, which are rejected even when LLVM happens to assemble a
-generic spelling.
+Barrier options are retained as raw Arm fields, with the pinned architectural
+allocation masks emitted in the generated metadata and enforced by both
+encode and form-directed decode:
+
+* DMB permits `CRm` `{1,2,3,5,6,7,9,10,11,13,14,15}`; `{0,4,8,12}` is reserved.
+* DSB permits `CRm` `{0,1,2,3,4,5,6,7,9,10,11,13,14,15}`; `{8,12}` is reserved.
+  `#0`/`ssbb` and `#4`/`pssbb` are allocated aliases whose exact words remain
+  fixed spellings in canonical word-first decoding.
+* ISB's assembly syntax permits `#imm`, but the architectural explanation
+  allocates only `CRm=15` (`sy`); `#0` through `#14` are rejected.  The
+  optional operand therefore defaults to `#15`.
+
+CLREX remains fully defined for `CRm=0..15` with an optional `#15` default.
+These barrier constraints are distinct from HINT's unallocated immediate
+values, which are rejected even when LLVM happens to assemble a generic
+spelling.

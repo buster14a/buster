@@ -5,6 +5,7 @@
 
 BUSTER_CT_CHECK(BUSTER_AARCH64_SYSTEM_SEMANTICS_GENERATED_ROW_COUNT == BUSTER_AARCH64_SYSTEM_SEMANTIC_ROW_COUNT);
 BUSTER_CT_CHECK(BUSTER_AARCH64_SYSTEM_SEMANTICS_GENERATED_FIELD_COUNT == 39u);
+BUSTER_CT_CHECK(BUSTER_AARCH64_SYSTEM_SEMANTICS_GENERATED_SCHEMA_VERSION == 2u);
 
 BUSTER_GLOBAL_LOCAL BusterAarch64SystemGeneratedRow const* a64_system_generated_row(u32 row)
 {
@@ -111,6 +112,8 @@ bool buster_aarch64_system_semantic_row(u32 row, BusterAarch64SystemSemanticReco
         .optional_field_mask = source->optional_mask,
         .default_value = source->default_value,
         .flags = source->flags,
+        .constraint_field = source->constraint_field,
+        .constraint_mask = source->constraint_mask,
     };
     return true;
 }
@@ -207,6 +210,12 @@ BUSTER_GLOBAL_LOCAL bool a64_system_values_valid(Target target, u32 row_index, B
         BusterAarch64SystemFieldSchema schema = {0};
         if (!a64_system_field_schema(row_index, field, &schema) || !a64_system_operand_valid(schema, fields[field])) return false;
     }
+    if (row->constraint_field != UINT8_MAX)
+    {
+        if (row->constraint_field >= row->field_count) return false;
+        u32 value = (u32)fields[row->constraint_field].value;
+        if (value >= 16 || !(row->constraint_mask & (UINT16_C(1) << value))) return false;
+    }
     if (row->flags & BUSTER_AARCH64_SYSTEM_ROW_HINT)
     {
         // HINT's architectural immediate is op2:CRm in the Arm field table.
@@ -246,8 +255,10 @@ bool buster_aarch64_system_semantic_validate(void)
             row->field_count > 6 || row->optional_mask & ~((UINT32_C(1) << row->field_count) - 1u) ||
             row->fixed_value != (row->fixed_value & row->fixed_mask) || (row->fixed_mask & row->field_mask) != 0 ||
             (row->fixed_mask | row->field_mask) != UINT32_MAX || !row->field_count ||
-            (row->reserved[0] | row->reserved[1]) || (row->flags & ~(BUSTER_AARCH64_SYSTEM_ROW_HINT | BUSTER_AARCH64_SYSTEM_ROW_PSTATE |
-                                                                    BUSTER_AARCH64_SYSTEM_ROW_SYSTEM_REGISTER)) ||
+            row->reserved || (row->flags & ~(BUSTER_AARCH64_SYSTEM_ROW_HINT | BUSTER_AARCH64_SYSTEM_ROW_PSTATE |
+                                             BUSTER_AARCH64_SYSTEM_ROW_SYSTEM_REGISTER)) ||
+            (row->constraint_field == UINT8_MAX && row->constraint_mask) ||
+            (row->constraint_field != UINT8_MAX && (row->constraint_field >= row->field_count || !row->constraint_mask)) ||
             (!row->optional_mask && row->default_value != 0) || (row->optional_mask && row->default_value > 31))
         {
             return false;
@@ -274,6 +285,13 @@ bool buster_aarch64_system_semantic_validate(void)
             if (!a64_system_field_schema(index, field, &schema)) return false;
             u32 field_mask = ((schema.width == 32 ? UINT32_MAX : a64_system_field_max(schema.width)) << schema.instruction_lsb);
             if ((field_mask & row->fixed_mask) != 0 || (field_mask & row->field_mask) != field_mask) return false;
+        }
+        if (row->constraint_field != UINT8_MAX)
+        {
+            BusterAarch64SystemFieldSchema schema = {0};
+            if (!a64_system_field_schema(index, row->constraint_field, &schema) || schema.width > 4) return false;
+            u32 value_mask = (UINT32_C(1) << (UINT32_C(1) << schema.width)) - 1u;
+            if (((u32)row->constraint_mask & ~value_mask) != 0) return false;
         }
     }
     return true;
