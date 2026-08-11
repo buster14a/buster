@@ -50,6 +50,15 @@ def mutate_kind(path: Path) -> None:
     path.write_bytes(data.replace(b'"kind":"canonical"', b'"kind":"alias"', 1))
 
 
+def static_runtime_guard() -> None:
+    runtime = (ROOT / "src/buster/lib/compiler/assembly/aarch64_syntax.c").read_text()
+    header = (ROOT / "src/buster/lib/compiler/assembly/aarch64_syntax.h").read_text()
+    forbidden = ("BusterAarch64SyntaxCallbacks", "Callback", "callback", "match_node", "print_node", "match_children", "print_children")
+    for name in forbidden:
+        if name in runtime or name in header:
+            raise SystemExit(f"forbidden callback/recursive runtime surface: {name}")
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="aarch64-syntax-valid-") as directory:
         output = Path(directory) / "generated"
@@ -67,7 +76,8 @@ def main() -> None:
     expect_rejected("duplicate", mutate_duplicate)
     expect_rejected("missing", mutate_missing)
     expect_rejected("kind", mutate_kind)
-    print("valid source and content/duplicate/missing/kind mutations verified")
+    static_runtime_guard()
+    print("valid source, mutation, callback-surface, and recursion guards verified")
 
 
 if __name__ == "__main__":

@@ -70,7 +70,7 @@ class Node:
 
 
 def anchor_bounds(node: Node) -> tuple[int, int]:
-    """Return the minimum/maximum callback occurrences for one AST node.
+    """Return the minimum/maximum anchor occurrences for one AST node.
 
     An ALT accepts one branch in the compact spelling, while its canonical
     spelling contains every branch between the delimiters.  The upper bound
@@ -105,6 +105,11 @@ def anchor_bounds(node: Node) -> tuple[int, int]:
     child_min = sum(anchor_bounds(child)[0] for child in node.children)
     child_max = sum(anchor_bounds(child)[1] for child in node.children)
     return child_min, child_max
+
+
+def choice_count(node: Node) -> int:
+    """Count ALT and OPTIONAL decisions reachable from one AST node."""
+    return (node.kind in (K_OPTIONAL, K_ALT)) + sum(choice_count(child) for child in node.children)
 
 
 class SyntaxParser:
@@ -581,6 +586,10 @@ def generate(source: Path, header: Path, jsonl: Path, manifest: Path) -> None:
         "max_delimiter_nesting": max(max_delimiter_depth(root) for root in roots),
         "max_top_level_comma_groups": max(max_top_level_comma_groups(root) for root in roots),
         "max_anchor_operands": max(row["anchor_count"] for row in generated_rows),
+        "max_choice_count": max(choice_count(root) for root in roots),
+        "max_assembly_bytes": max(len(row["assembly"].encode("utf-8")) for row in rows),
+        "max_work_items": max(len(flatten(root)) for root in roots) * 4 + 16,
+        "max_backtrack_frames": max(choice_count(root) for root in roots) + 4,
         "input_digest": input_digest,
         "id_digest": id_digest,
         "kind_digest": kind_digest,
@@ -602,6 +611,8 @@ def generate(source: Path, header: Path, jsonl: Path, manifest: Path) -> None:
                        "max_total_ast_nodes": 29, "max_non_lit_non_seq_nodes": 13,
                        "max_optional_depth": 2, "max_delimiter_nesting": 3,
                        "max_top_level_comma_groups": 5, "max_anchor_operands": 10,
+                       "max_choice_count": 4, "max_assembly_bytes": 74,
+                       "max_work_items": 132, "max_backtrack_frames": 8,
                        "generic_shape_count": GENERIC_SHAPE_COUNT, "exact_shape_count": EXACT_SHAPE_COUNT,
                        "generic_shape_digest": GENERIC_SHAPE_DIGEST, "generic_row_digest": GENERIC_ROW_DIGEST,
                        "exact_shape_digest": EXACT_SHAPE_DIGEST, "exact_row_digest": EXACT_ROW_DIGEST}
@@ -646,6 +657,10 @@ def generate(source: Path, header: Path, jsonl: Path, manifest: Path) -> None:
         f"#define BUSTER_AARCH64_SYNTAX_GENERATED_MAX_DELIMITER_NESTING {counts['max_delimiter_nesting']}u",
         f"#define BUSTER_AARCH64_SYNTAX_GENERATED_MAX_TOP_LEVEL_COMMA_GROUPS {counts['max_top_level_comma_groups']}u",
         f"#define BUSTER_AARCH64_SYNTAX_GENERATED_MAX_ANCHOR_OPERANDS {counts['max_anchor_operands']}u",
+        f"#define BUSTER_AARCH64_SYNTAX_GENERATED_MAX_CHOICE_COUNT {counts['max_choice_count']}u",
+        f"#define BUSTER_AARCH64_SYNTAX_GENERATED_MAX_ASSEMBLY_BYTES {counts['max_assembly_bytes']}u",
+        f"#define BUSTER_AARCH64_SYNTAX_GENERATED_MAX_WORK_ITEMS {counts['max_work_items']}u",
+        f"#define BUSTER_AARCH64_SYNTAX_GENERATED_MAX_BACKTRACK_FRAMES {counts['max_backtrack_frames']}u",
         f"#define BUSTER_AARCH64_SYNTAX_GENERATED_SOURCE_SHA256 \"{source_digest}\"",
         f"#define BUSTER_AARCH64_SYNTAX_GENERATED_INPUT_DIGEST \"{input_digest}\"",
         f"#define BUSTER_AARCH64_SYNTAX_GENERATED_GENERIC_SHAPE_DIGEST \"{counts['generic_shape_digest']}\"",

@@ -157,35 +157,47 @@ struct BusterAarch64SyntaxCounts
     u32 fixed_numeric_literal_count;
 };
 
-typedef struct BusterAarch64SyntaxAnchor BusterAarch64SyntaxAnchor;
-struct BusterAarch64SyntaxAnchor
+/* Captures and choices are caller-owned flat records.  A matcher writes these
+ * records only after the entire row succeeds; a failed or undersized request
+ * leaves every caller buffer and count untouched.  `spelling` is the exact
+ * consumed input span (including angle brackets when the input uses the
+ * display-template spelling). */
+typedef struct BusterAarch64SyntaxCapture BusterAarch64SyntaxCapture;
+struct BusterAarch64SyntaxCapture
 {
     u32 node_index;
     u32 occurrence;
-    u8 flags;
-    u8 reserved[3];
     String8 spelling;
 };
 
-typedef bool BusterAarch64SyntaxMatchAnchorCallback(void* user, BusterAarch64SyntaxAnchor anchor, String8 input,
-                                                     u64* cursor);
-typedef bool BusterAarch64SyntaxPrintAnchorCallback(void* user, BusterAarch64SyntaxAnchor anchor, String8* spelling);
-typedef u64 BusterAarch64SyntaxCheckpointCallback(void* user);
-typedef void BusterAarch64SyntaxRestoreCallback(void* user, u64 token);
-typedef bool BusterAarch64SyntaxSelectAlternativeCallback(void* user, BusterAarch64SyntaxNode node, u32 branch_count,
-                                                            u32* branch_index);
-typedef bool BusterAarch64SyntaxSelectOptionalCallback(void* user, BusterAarch64SyntaxNode node, bool* present);
-
-typedef struct BusterAarch64SyntaxCallbacks BusterAarch64SyntaxCallbacks;
-struct BusterAarch64SyntaxCallbacks
+typedef struct BusterAarch64SyntaxChoice BusterAarch64SyntaxChoice;
+struct BusterAarch64SyntaxChoice
 {
-    BusterAarch64SyntaxMatchAnchorCallback* match_anchor;
-    BusterAarch64SyntaxPrintAnchorCallback* print_anchor;
-    void* user;
-    BusterAarch64SyntaxCheckpointCallback* checkpoint;
-    BusterAarch64SyntaxRestoreCallback* restore;
-    BusterAarch64SyntaxSelectAlternativeCallback* select_alternative;
-    BusterAarch64SyntaxSelectOptionalCallback* select_optional;
+    u32 node_index;
+    u32 value;
+};
+
+#define BUSTER_AARCH64_SYNTAX_CHOICE_CANONICAL UINT32_MAX
+
+typedef struct BusterAarch64SyntaxMatchResult BusterAarch64SyntaxMatchResult;
+struct BusterAarch64SyntaxMatchResult
+{
+    BusterAarch64SyntaxCapture* captures;
+    u32 capture_capacity;
+    u32 capture_count;
+    BusterAarch64SyntaxChoice* choices;
+    u32 choice_capacity;
+    u32 choice_count;
+    u64 consumed;
+};
+
+typedef struct BusterAarch64SyntaxPrintRequest BusterAarch64SyntaxPrintRequest;
+struct BusterAarch64SyntaxPrintRequest
+{
+    BusterAarch64SyntaxCapture const* captures;
+    u32 capture_count;
+    BusterAarch64SyntaxChoice const* choices;
+    u32 choice_count;
 };
 
 typedef struct BusterAarch64SyntaxOutput BusterAarch64SyntaxOutput;
@@ -207,6 +219,10 @@ struct BusterAarch64SyntaxStats
     u32 max_delimiter_nesting;
     u32 max_top_level_comma_groups;
     u32 max_anchor_operands;
+    u32 max_choice_count;
+    u32 max_assembly_bytes;
+    u32 max_work_items;
+    u32 max_backtrack_frames;
     u64 input_digest_hi;
     u64 input_digest_lo;
 };
@@ -230,16 +246,15 @@ BUSTER_F_DECL bool buster_aarch64_syntax_mnemonic_lookup(String8 mnemonic, Buste
 BUSTER_F_DECL bool buster_aarch64_syntax_mnemonic_candidate(BusterAarch64SyntaxMnemonicRange range, u32 index, u32* row_index);
 BUSTER_F_DECL bool buster_aarch64_syntax_validate(void);
 
-/* Transactional syntax matcher and display-template printer.  Both require a complete row and
- * reject trailing input/output failures; branch attempts restore cursor,
- * anchor occurrence, and logical output length before trying the next branch.
- * print_row emits the source display template, including optional braces and
- * ALT separators.  print_concrete_row uses the selector callbacks below to
- * omit display-only delimiters and emit one legal concrete spelling.
+/* Transactional syntax matcher and display/concrete printers.  All traversal
+ * uses bounded caller-independent work stacks; no user code is dispatched.
+ * The matcher captures wildcard spans and records branch/optional choices.
+ * `print_row` emits the canonical display template.  The concrete printer
+ * consumes caller-provided captures and choices and omits display delimiters.
  */
 BUSTER_F_DECL bool buster_aarch64_syntax_match_row(u32 row_index, String8 input,
-                                                    BusterAarch64SyntaxCallbacks callbacks);
-BUSTER_F_DECL bool buster_aarch64_syntax_print_row(u32 row_index, BusterAarch64SyntaxCallbacks callbacks,
+                                                    BusterAarch64SyntaxMatchResult* result);
+BUSTER_F_DECL bool buster_aarch64_syntax_print_row(u32 row_index, BusterAarch64SyntaxPrintRequest request,
                                                     BusterAarch64SyntaxOutput* output);
-BUSTER_F_DECL bool buster_aarch64_syntax_print_concrete_row(u32 row_index, BusterAarch64SyntaxCallbacks callbacks,
+BUSTER_F_DECL bool buster_aarch64_syntax_print_concrete_row(u32 row_index, BusterAarch64SyntaxPrintRequest request,
                                                              BusterAarch64SyntaxOutput* output);

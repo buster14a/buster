@@ -15,38 +15,83 @@
 #pragma GCC diagnostic pop
 #endif
 
-typedef struct BusterAarch64SyntaxMatchState BusterAarch64SyntaxMatchState;
-struct BusterAarch64SyntaxMatchState
+typedef enum BusterAarch64SyntaxMatchTaskKind
+{
+    BUSTER_AARCH64_SYNTAX_MATCH_TASK_NODE,
+    BUSTER_AARCH64_SYNTAX_MATCH_TASK_LITERAL,
+} BusterAarch64SyntaxMatchTaskKind;
+
+typedef struct BusterAarch64SyntaxMatchTask BusterAarch64SyntaxMatchTask;
+struct BusterAarch64SyntaxMatchTask
+{
+    BusterAarch64SyntaxMatchTaskKind kind;
+    u32 node_index;
+    String8 literal;
+    bool mnemonic;
+};
+
+typedef enum BusterAarch64SyntaxMatchBacktrackKind
+{
+    BUSTER_AARCH64_SYNTAX_MATCH_BACKTRACK_ALT,
+    BUSTER_AARCH64_SYNTAX_MATCH_BACKTRACK_OPTIONAL,
+} BusterAarch64SyntaxMatchBacktrackKind;
+
+typedef struct BusterAarch64SyntaxMatchBacktrack BusterAarch64SyntaxMatchBacktrack;
+struct BusterAarch64SyntaxMatchBacktrack
+{
+    BusterAarch64SyntaxMatchBacktrackKind kind;
+    u64 cursor;
+    u32 capture_count;
+    u32 choice_count;
+    u32 task_count;
+    u32 node_index;
+    u32 next_branch;
+    u32 branch_count;
+};
+
+typedef struct BusterAarch64SyntaxMatchMachine BusterAarch64SyntaxMatchMachine;
+struct BusterAarch64SyntaxMatchMachine
 {
     String8 input;
     u64 cursor;
-    u32 anchor_index;
-    BusterAarch64SyntaxCallbacks callbacks;
+    u32 capture_count;
+    u32 choice_count;
+    u32 task_count;
+    u32 backtrack_count;
+    BusterAarch64SyntaxCapture captures[BUSTER_AARCH64_SYNTAX_GENERATED_MAX_ANCHOR_OPERANDS];
+    BusterAarch64SyntaxChoice choices[BUSTER_AARCH64_SYNTAX_GENERATED_MAX_CHOICE_COUNT];
+    BusterAarch64SyntaxMatchTask tasks[BUSTER_AARCH64_SYNTAX_GENERATED_MAX_WORK_ITEMS];
+    BusterAarch64SyntaxMatchBacktrack backtracks[BUSTER_AARCH64_SYNTAX_GENERATED_MAX_BACKTRACK_FRAMES];
 };
 
-typedef struct BusterAarch64SyntaxPrintState BusterAarch64SyntaxPrintState;
-struct BusterAarch64SyntaxPrintState
+typedef enum BusterAarch64SyntaxPrintTaskKind
 {
-    BusterAarch64SyntaxOutput* output;
-    u32 anchor_index;
+    BUSTER_AARCH64_SYNTAX_PRINT_TASK_NODE,
+    BUSTER_AARCH64_SYNTAX_PRINT_TASK_LITERAL,
+} BusterAarch64SyntaxPrintTaskKind;
+
+typedef struct BusterAarch64SyntaxPrintTask BusterAarch64SyntaxPrintTask;
+struct BusterAarch64SyntaxPrintTask
+{
+    BusterAarch64SyntaxPrintTaskKind kind;
+    u32 node_index;
+    String8 literal;
+    bool mnemonic;
+};
+
+typedef struct BusterAarch64SyntaxPrintMachine BusterAarch64SyntaxPrintMachine;
+struct BusterAarch64SyntaxPrintMachine
+{
+    BusterAarch64SyntaxPrintRequest request;
     bool concrete;
-    BusterAarch64SyntaxCallbacks callbacks;
+    char8* output;
+    u64 capacity;
+    u64 length;
+    u32 anchor_count;
+    u32 choice_count;
+    u32 task_count;
+    BusterAarch64SyntaxPrintTask tasks[BUSTER_AARCH64_SYNTAX_GENERATED_MAX_WORK_ITEMS];
 };
-
-BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_callbacks_transactional(BusterAarch64SyntaxCallbacks callbacks)
-{
-    return (callbacks.checkpoint == 0) == (callbacks.restore == 0);
-}
-
-BUSTER_GLOBAL_LOCAL u64 buster_aarch64_syntax_callback_checkpoint(BusterAarch64SyntaxCallbacks callbacks)
-{
-    return callbacks.checkpoint ? callbacks.checkpoint(callbacks.user) : 0;
-}
-
-BUSTER_GLOBAL_LOCAL void buster_aarch64_syntax_callback_restore(BusterAarch64SyntaxCallbacks callbacks, u64 token)
-{
-    if (callbacks.restore) callbacks.restore(callbacks.user, token);
-}
 
 BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_pool_range_valid(u32 offset, u32 length)
 {
@@ -457,6 +502,10 @@ BUSTER_F_DECL BusterAarch64SyntaxStats buster_aarch64_syntax_stats(void)
         .max_delimiter_nesting = BUSTER_AARCH64_SYNTAX_GENERATED_MAX_DELIMITER_NESTING,
         .max_top_level_comma_groups = BUSTER_AARCH64_SYNTAX_GENERATED_MAX_TOP_LEVEL_COMMA_GROUPS,
         .max_anchor_operands = BUSTER_AARCH64_SYNTAX_GENERATED_MAX_ANCHOR_OPERANDS,
+        .max_choice_count = BUSTER_AARCH64_SYNTAX_GENERATED_MAX_CHOICE_COUNT,
+        .max_assembly_bytes = BUSTER_AARCH64_SYNTAX_GENERATED_MAX_ASSEMBLY_BYTES,
+        .max_work_items = BUSTER_AARCH64_SYNTAX_GENERATED_MAX_WORK_ITEMS,
+        .max_backtrack_frames = BUSTER_AARCH64_SYNTAX_GENERATED_MAX_BACKTRACK_FRAMES,
         .input_digest_hi = UINT64_C(0xeea16d7f094badc6),
         .input_digest_lo = UINT64_C(0x5614aed988621f48),
     };
@@ -489,7 +538,9 @@ BUSTER_F_DECL String8 buster_aarch64_syntax_exact_row_digest(void)
 
 BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_input_take(String8 input, u64* cursor, String8 literal)
 {
-    if (!cursor || *cursor > input.length || literal.length > input.length - *cursor) return false;
+    if (!cursor || *cursor > input.length || literal.length > input.length - *cursor ||
+        (!input.pointer && input.length) || (!literal.pointer && literal.length)) return false;
+    if (!literal.length) return true;
     if (!buster_aarch64_syntax_ascii_bytes_equal((String8){.pointer = input.pointer + *cursor, .length = literal.length}, literal)) return false;
     *cursor += literal.length;
     return true;
@@ -497,357 +548,538 @@ BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_input_take(String8 input, u64* cu
 
 BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_input_take_mnemonic(String8 input, u64* cursor, String8 literal)
 {
-    if (!cursor || *cursor > input.length || literal.length > input.length - *cursor) return false;
-    for (u64 offset = 0; offset < literal.length; offset += 1)
-    {
-        u8 expected = (u8)literal.pointer[offset];
-        u8 actual = (u8)input.pointer[*cursor + offset];
-        if (expected >= 'a' && expected <= 'z') expected = (u8)(expected - 'a' + 'A');
-        if (actual >= 'a' && actual <= 'z') actual = (u8)(actual - 'a' + 'A');
-        if (expected != actual) return false;
-    }
-    *cursor += literal.length;
+    return buster_aarch64_syntax_input_take(input, cursor, literal);
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_push_task(BusterAarch64SyntaxMatchMachine* machine,
+                                                                BusterAarch64SyntaxMatchTask task)
+{
+    if (!machine || machine->task_count >= BUSTER_AARCH64_SYNTAX_GENERATED_MAX_WORK_ITEMS) return false;
+    machine->tasks[machine->task_count] = task;
+    machine->task_count += 1;
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_node(u32 index, BusterAarch64SyntaxMatchState* state, u32 optional_depth);
-
-BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_children(u32 first, u32 count, BusterAarch64SyntaxMatchState* state,
-                                                               u32 optional_depth)
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_push_node(BusterAarch64SyntaxMatchMachine* machine, u32 node_index)
 {
-    if (!buster_aarch64_syntax_child_range_valid(first, count)) return false;
-    for (u32 child_offset = 0; child_offset < count; child_offset += 1)
+    return buster_aarch64_syntax_match_push_task(machine, (BusterAarch64SyntaxMatchTask){
+        .kind = BUSTER_AARCH64_SYNTAX_MATCH_TASK_NODE, .node_index = node_index});
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_push_literal(BusterAarch64SyntaxMatchMachine* machine, String8 literal,
+                                                                    bool mnemonic)
+{
+    return buster_aarch64_syntax_match_push_task(machine, (BusterAarch64SyntaxMatchTask){
+        .kind = BUSTER_AARCH64_SYNTAX_MATCH_TASK_LITERAL, .literal = literal, .mnemonic = mnemonic});
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_push_children_reverse(BusterAarch64SyntaxMatchMachine* machine,
+                                                                              u32 first, u32 count)
+{
+    if (!machine || !buster_aarch64_syntax_child_range_valid(first, count)) return false;
+    for (u32 offset = count; offset > 0; offset -= 1)
     {
         u32 child = 0;
-        if (!buster_aarch64_syntax_generated_child_at(first + child_offset, &child)) return false;
-        if (!buster_aarch64_syntax_match_node(child, state, optional_depth)) return false;
+        if (!buster_aarch64_syntax_generated_child_at(first + offset - 1, &child) ||
+            !buster_aarch64_syntax_match_push_node(machine, child)) return false;
     }
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_anchor(u32 index, BusterAarch64SyntaxMatchState* state)
+/* Optional groups carry their source-template braces as delimiter literals.
+   They are part of the display spelling, but concrete assembly omits those
+   notation braces.  Select the form by peeking at the next input byte, while
+   leaving the cursor untouched so the normal task machine remains
+   transactional. */
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_push_optional_body(BusterAarch64SyntaxMatchMachine* machine,
+                                                                          BusterAarch64SyntaxNode node)
 {
-    BusterAarch64SyntaxNode node = {0};
-    if (!buster_aarch64_syntax_node(index, &node) || node.kind != BUSTER_AARCH64_SYNTAX_ANCHOR ||
-        !state->callbacks.match_anchor || state->anchor_index == UINT32_MAX)
-        return false;
-    BusterAarch64SyntaxAnchor anchor = {
-        .node_index = index,
-        .occurrence = state->anchor_index,
-        .flags = node.flags,
-        .spelling = node.text,
-    };
-    u64 cursor = state->cursor;
-    u64 token = buster_aarch64_syntax_callback_checkpoint(state->callbacks);
-    if (!state->callbacks.match_anchor(state->callbacks.user, anchor, state->input, &cursor) || cursor > state->input.length)
-    {
-        buster_aarch64_syntax_callback_restore(state->callbacks, token);
-        return false;
-    }
-    state->cursor = cursor;
-    state->anchor_index += 1;
-    return true;
-}
+    if (!machine || !buster_aarch64_syntax_child_range_valid(node.child_first, node.child_count)) return false;
+    u32 first = node.child_first;
+    u32 count = node.child_count;
+    if (!count) return true;
 
-BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_alt(u32 index, BusterAarch64SyntaxNode node,
-                                                          BusterAarch64SyntaxMatchState* state, u32 optional_depth)
-{
-    BUSTER_UNUSED(index);
-    bool delimited = !(node.flags & BUSTER_AARCH64_SYNTAX_ALT_IMPLICIT_DELIMITER);
-    bool implicit_canonical = false;
-    if (!delimited)
+    u32 child = 0;
+    BusterAarch64SyntaxNode delimiter = {0};
+    bool has_delimiters = false;
+    if (buster_aarch64_syntax_generated_child_at(first, &child) && buster_aarch64_syntax_node(child, &delimiter) &&
+        delimiter.kind == BUSTER_AARCH64_SYNTAX_LIT && (delimiter.flags & BUSTER_AARCH64_SYNTAX_LIT_DELIMITER))
     {
-        u64 look = state->cursor;
-        for (; look < state->input.length && state->input.pointer[look] != '}'; look += 1)
-        {
-            if (state->input.pointer[look] == '|')
-            {
-                implicit_canonical = true;
-                break;
-            }
-        }
-    }
-    if ((delimited && state->cursor < state->input.length && state->input.pointer[state->cursor] == '(') || implicit_canonical)
-    {
-        u64 saved_cursor = state->cursor;
-        u32 saved_anchor_index = state->anchor_index;
-        u64 saved_token = buster_aarch64_syntax_callback_checkpoint(state->callbacks);
-        if (delimited)
-        {
-            u64 cursor = state->cursor;
-            if (!buster_aarch64_syntax_input_take(state->input, &cursor, S8("(")))
-            {
-                buster_aarch64_syntax_callback_restore(state->callbacks, saved_token);
-                return false;
-            }
-            state->cursor = cursor;
-        }
-        if (!buster_aarch64_syntax_match_children(node.child_first, node.child_count, state, optional_depth) ||
-            (delimited && !buster_aarch64_syntax_input_take(state->input, &state->cursor, S8(")"))))
-        {
-            state->cursor = saved_cursor;
-            state->anchor_index = saved_anchor_index;
-            buster_aarch64_syntax_callback_restore(state->callbacks, saved_token);
-            return false;
-        }
-        return true;
+        has_delimiters = true;
     }
 
-    /* Branch separators are literal `|` nodes at this level. */
-    u32 branch_first = node.child_first;
-    u32 remaining = node.child_count;
-    for (;;)
+    bool display_form = true;
+    if (has_delimiters)
     {
-        u32 branch_count = 0;
-        while (branch_count < remaining)
-        {
-            BusterAarch64SyntaxNode separator = {0};
-            bool is_separator = false;
-            if (branch_count < remaining)
-            {
-                u32 separator_index = 0;
-                is_separator = buster_aarch64_syntax_generated_child_at(branch_first + branch_count, &separator_index) &&
-                               buster_aarch64_syntax_node(separator_index, &separator) && separator.kind == BUSTER_AARCH64_SYNTAX_LIT &&
-                               buster_aarch64_syntax_bytes_equal(separator.text, S8("|"));
-            }
-            if (is_separator)
-                break;
-            branch_count += 1;
-        }
-        u64 cursor = state->cursor;
-        u32 anchor_index = state->anchor_index;
-        u64 token = buster_aarch64_syntax_callback_checkpoint(state->callbacks);
-        if (buster_aarch64_syntax_match_children(branch_first, branch_count, state, optional_depth)) return true;
-        state->cursor = cursor;
-        state->anchor_index = anchor_index;
-        buster_aarch64_syntax_callback_restore(state->callbacks, token);
-        if (branch_count == remaining) break;
-        branch_first += branch_count + 1;
-        remaining -= branch_count + 1;
+        display_form = machine->cursor <= machine->input.length && delimiter.text.length <= machine->input.length - machine->cursor &&
+                       buster_aarch64_syntax_ascii_bytes_equal(
+                           (String8){.pointer = machine->input.pointer + machine->cursor, .length = delimiter.text.length},
+                           delimiter.text);
     }
-    return false;
-}
-
-BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_node(u32 index, BusterAarch64SyntaxMatchState* state, u32 optional_depth)
-{
-    BusterAarch64SyntaxNode node = {0};
-    if (!state || !buster_aarch64_syntax_node(index, &node)) return false;
-    if (node.kind == BUSTER_AARCH64_SYNTAX_SEQ || node.kind == BUSTER_AARCH64_SYNTAX_MEM ||
-        node.kind == BUSTER_AARCH64_SYNTAX_LIST || node.kind == BUSTER_AARCH64_SYNTAX_LANE ||
-        node.kind == BUSTER_AARCH64_SYNTAX_MNEMONIC)
+    if (!display_form)
     {
-        if (node.kind == BUSTER_AARCH64_SYNTAX_MNEMONIC)
-            return buster_aarch64_syntax_input_take_mnemonic(state->input, &state->cursor, node.text);
-        return buster_aarch64_syntax_match_children(node.child_first, node.child_count, state, optional_depth);
-    }
-    if (node.kind == BUSTER_AARCH64_SYNTAX_LIT)
-        return buster_aarch64_syntax_input_take(state->input, &state->cursor, node.text);
-    if (node.kind == BUSTER_AARCH64_SYNTAX_ANCHOR) return buster_aarch64_syntax_match_anchor(index, state);
-    if (node.kind == BUSTER_AARCH64_SYNTAX_ALT) return buster_aarch64_syntax_match_alt(index, node, state, optional_depth);
-    if (node.kind == BUSTER_AARCH64_SYNTAX_OPTIONAL)
-    {
-        if (optional_depth >= 2) return false;
-        u64 cursor = state->cursor;
-        u32 anchor_index = state->anchor_index;
-        u64 token = buster_aarch64_syntax_callback_checkpoint(state->callbacks);
-        if (buster_aarch64_syntax_match_children(node.child_first, node.child_count, state, optional_depth + 1)) return true;
-        state->cursor = cursor;
-        state->anchor_index = anchor_index;
-        buster_aarch64_syntax_callback_restore(state->callbacks, token);
-        return true;
-    }
-    return false;
-}
-
-BUSTER_F_DECL bool buster_aarch64_syntax_match_row(u32 row_index, String8 input, BusterAarch64SyntaxCallbacks callbacks)
-{
-    BusterAarch64SyntaxRow row = {0};
-    if (!buster_aarch64_syntax_row(row_index, &row) || (!input.pointer && input.length) || !callbacks.match_anchor ||
-        !buster_aarch64_syntax_callbacks_transactional(callbacks)) return false;
-    BusterAarch64SyntaxMatchState state = {.input = input, .callbacks = callbacks};
-    u64 initial_token = buster_aarch64_syntax_callback_checkpoint(callbacks);
-    bool matched = buster_aarch64_syntax_match_node(row.node_first, &state, 0);
-    if (!matched || state.cursor != input.length || state.anchor_index < row.anchor_min || state.anchor_index > row.anchor_max)
-    {
-        buster_aarch64_syntax_callback_restore(callbacks, initial_token);
-        return false;
-    }
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_output_append(BusterAarch64SyntaxOutput* output, String8 text)
-{
-    if (!output || (!text.pointer && text.length) || output->length > output->capacity || text.length > output->capacity - output->length) return false;
-    if (text.length) memcpy(output->pointer + output->length, text.pointer, (size_t)text.length);
-    output->length += text.length;
-    return true;
-}
-
-/* Output traversal is kept separate from matching so a print callback cannot
- * accidentally observe a cursor or mutate matcher state. */
-BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_node_impl(u32 index, BusterAarch64SyntaxPrintState* state);
-
-BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_children_range(u32 first, u32 count,
-                                                                      BusterAarch64SyntaxPrintState* state)
-{
-    if (!buster_aarch64_syntax_child_range_valid(first, count)) return false;
-    for (u32 print_offset = 0; print_offset < count; print_offset += 1)
-    {
-        u32 child = 0;
-        if (!buster_aarch64_syntax_generated_child_at(first + print_offset, &child) ||
-            !buster_aarch64_syntax_print_node_impl(child, state)) return false;
-    }
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_children(u32 first, u32 count, BusterAarch64SyntaxPrintState* state)
-{
-    return buster_aarch64_syntax_print_children_range(first, count, state);
-}
-
-BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_node_impl(u32 index, BusterAarch64SyntaxPrintState* state)
-{
-    BusterAarch64SyntaxNode node = {0};
-    if (!state || !buster_aarch64_syntax_node(index, &node)) return false;
-    if (node.kind == BUSTER_AARCH64_SYNTAX_LIT || node.kind == BUSTER_AARCH64_SYNTAX_MNEMONIC)
-        return buster_aarch64_syntax_output_append(state->output, node.text);
-    if (node.kind == BUSTER_AARCH64_SYNTAX_ANCHOR)
-    {
-        if (!state->callbacks.print_anchor || state->anchor_index == UINT32_MAX) return false;
-        BusterAarch64SyntaxAnchor anchor = {.node_index = index, .occurrence = state->anchor_index, .flags = node.flags, .spelling = node.text};
-        String8 spelling = {0};
-        u64 token = buster_aarch64_syntax_callback_checkpoint(state->callbacks);
-        if (!state->callbacks.print_anchor(state->callbacks.user, anchor, &spelling))
-        {
-            buster_aarch64_syntax_callback_restore(state->callbacks, token);
-            return false;
-        }
-        if (!spelling.pointer && spelling.length)
-        {
-            buster_aarch64_syntax_callback_restore(state->callbacks, token);
-            return false;
-        }
-        state->anchor_index += 1;
-        if (state->concrete) return buster_aarch64_syntax_output_append(state->output, spelling);
-        if (spelling.length >= 2 && spelling.pointer[0] == '<' && spelling.pointer[spelling.length - 1] == '>')
-            return buster_aarch64_syntax_output_append(state->output, spelling);
-        return buster_aarch64_syntax_output_append(state->output, S8("<")) &&
-               buster_aarch64_syntax_output_append(state->output, spelling) &&
-               buster_aarch64_syntax_output_append(state->output, S8(">"));
-    }
-    if (node.kind == BUSTER_AARCH64_SYNTAX_ALT && state->concrete)
-    {
-        if (!state->callbacks.select_alternative) return false;
-        u32 branch_count = 1;
-        for (u32 offset = 0; offset < node.child_count; offset += 1)
-        {
-            u32 child = 0;
-            BusterAarch64SyntaxNode separator = {0};
-            if (!buster_aarch64_syntax_generated_child_at(node.child_first + offset, &child) ||
-                !buster_aarch64_syntax_node(child, &separator)) return false;
-            if (separator.kind == BUSTER_AARCH64_SYNTAX_LIT && buster_aarch64_syntax_bytes_equal(separator.text, S8("|"))) branch_count += 1;
-        }
-        u32 selected = 0;
-        u64 token = buster_aarch64_syntax_callback_checkpoint(state->callbacks);
-        if (!state->callbacks.select_alternative(state->callbacks.user, node, branch_count, &selected) || selected >= branch_count)
-        {
-            buster_aarch64_syntax_callback_restore(state->callbacks, token);
-            return false;
-        }
-        u32 branch = 0;
-        u32 branch_start = 0;
-        for (u32 offset = 0; offset <= node.child_count; offset += 1)
-        {
-            bool separator_at_offset = offset == node.child_count;
-            u32 child = 0;
-            BusterAarch64SyntaxNode separator = {0};
-            if (!separator_at_offset)
-            {
-                if (!buster_aarch64_syntax_generated_child_at(node.child_first + offset, &child) ||
-                    !buster_aarch64_syntax_node(child, &separator)) return false;
-                separator_at_offset = separator.kind == BUSTER_AARCH64_SYNTAX_LIT && buster_aarch64_syntax_bytes_equal(separator.text, S8("|"));
-            }
-            if (separator_at_offset)
-            {
-                if (branch == selected && !buster_aarch64_syntax_print_children_range(node.child_first + branch_start,
-                                                                                         offset - branch_start, state)) return false;
-                branch += 1;
-                branch_start = offset + 1;
-            }
-        }
-        return true;
-    }
-    if (node.kind == BUSTER_AARCH64_SYNTAX_OPTIONAL && state->concrete)
-    {
-        if (!state->callbacks.select_optional) return false;
-        bool present = false;
-        u64 token = buster_aarch64_syntax_callback_checkpoint(state->callbacks);
-        if (!state->callbacks.select_optional(state->callbacks.user, node, &present))
-        {
-            buster_aarch64_syntax_callback_restore(state->callbacks, token);
-            return false;
-        }
-        if (!present) return true;
-        u32 first = node.child_first;
-        u32 count = node.child_count;
+        first += 1;
+        count -= 1;
         if (count)
         {
-            u32 child = 0;
-            BusterAarch64SyntaxNode delimiter = {0};
-            if (!buster_aarch64_syntax_generated_child_at(first, &child) || !buster_aarch64_syntax_node(child, &delimiter)) return false;
-            if (delimiter.kind == BUSTER_AARCH64_SYNTAX_LIT && (delimiter.flags & BUSTER_AARCH64_SYNTAX_LIT_DELIMITER))
-            {
-                first += 1;
-                count -= 1;
-            }
-        }
-        if (count)
-        {
-            u32 child = 0;
-            BusterAarch64SyntaxNode delimiter = {0};
-            if (!buster_aarch64_syntax_generated_child_at(first + count - 1, &child) || !buster_aarch64_syntax_node(child, &delimiter)) return false;
+            if (!buster_aarch64_syntax_generated_child_at(first + count - 1, &child) ||
+                !buster_aarch64_syntax_node(child, &delimiter)) return false;
             if (delimiter.kind == BUSTER_AARCH64_SYNTAX_LIT && (delimiter.flags & BUSTER_AARCH64_SYNTAX_LIT_DELIMITER)) count -= 1;
         }
-        return buster_aarch64_syntax_print_children_range(first, count, state);
     }
-    if (node.kind == BUSTER_AARCH64_SYNTAX_ALT && !(node.flags & BUSTER_AARCH64_SYNTAX_ALT_IMPLICIT_DELIMITER) &&
-        !buster_aarch64_syntax_output_append(state->output, S8("("))) return false;
-    if (!buster_aarch64_syntax_print_children(node.child_first, node.child_count, state)) return false;
-    if (node.kind == BUSTER_AARCH64_SYNTAX_ALT && !(node.flags & BUSTER_AARCH64_SYNTAX_ALT_IMPLICIT_DELIMITER) &&
-        !buster_aarch64_syntax_output_append(state->output, S8(")"))) return false;
+    return buster_aarch64_syntax_match_push_children_reverse(machine, first, count);
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_node_is_separator(BusterAarch64SyntaxNode node)
+{
+    return node.kind == BUSTER_AARCH64_SYNTAX_LIT && buster_aarch64_syntax_bytes_equal(node.text, S8("|"));
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_branch_range(BusterAarch64SyntaxNode node, u32 target,
+                                                              u32* first, u32* count, u32* total)
+{
+    u32 branch = 0;
+    u32 branch_first = 0;
+    u32 branch_count = 0;
+    bool found = false;
+    for (u32 offset = 0; offset <= node.child_count; offset += 1)
+    {
+        bool separator = offset == node.child_count;
+        if (!separator)
+        {
+            u32 child = 0;
+            BusterAarch64SyntaxNode child_node = {0};
+            separator = buster_aarch64_syntax_generated_child_at(node.child_first + offset, &child) &&
+                        buster_aarch64_syntax_node(child, &child_node) &&
+                        buster_aarch64_syntax_node_is_separator(child_node);
+        }
+        if (separator)
+        {
+            if (branch == target)
+            {
+                if (first) *first = node.child_first + branch_first;
+                if (count) *count = branch_count;
+                found = true;
+            }
+            branch += 1;
+            branch_first = offset + 1;
+            branch_count = 0;
+        }
+        else
+        {
+            branch_count += 1;
+        }
+    }
+    if (total) *total = branch;
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_input_has_implicit_separator(String8 input, u64 cursor)
+{
+    if (!input.pointer || cursor > input.length) return false;
+    for (u64 index = cursor; index < input.length && input.pointer[index] != '}'; index += 1)
+    {
+        if (input.pointer[index] == '<')
+        {
+            while (index < input.length && input.pointer[index] != '>') index += 1;
+        }
+        else if (input.pointer[index] == '|')
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_record_choice(BusterAarch64SyntaxMatchMachine* machine,
+                                                                     u32 node_index, u32 value)
+{
+    if (!machine || machine->choice_count >= BUSTER_AARCH64_SYNTAX_GENERATED_MAX_CHOICE_COUNT) return false;
+    machine->choices[machine->choice_count++] = (BusterAarch64SyntaxChoice){.node_index = node_index, .value = value};
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_row_mode(u32 row_index, BusterAarch64SyntaxCallbacks callbacks,
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_anchor(BusterAarch64SyntaxMatchMachine* machine, u32 node_index,
+                                                              BusterAarch64SyntaxNode node)
+{
+    if (!machine || !machine->input.pointer || machine->cursor >= machine->input.length ||
+        machine->capture_count >= BUSTER_AARCH64_SYNTAX_GENERATED_MAX_ANCHOR_OPERANDS) return false;
+    u64 start = machine->cursor;
+    if (machine->input.pointer[machine->cursor] == '<')
+    {
+        machine->cursor += 1;
+        while (machine->cursor < machine->input.length && machine->input.pointer[machine->cursor] != '>') machine->cursor += 1;
+        if (machine->cursor >= machine->input.length) return false;
+        machine->cursor += 1;
+    }
+    else
+    {
+        while (machine->cursor < machine->input.length)
+        {
+            char8 character = machine->input.pointer[machine->cursor];
+            if (character == ' ' || character == '\t' || character == ',' || character == '[' || character == ']' ||
+                character == '{' || character == '}' || character == '(' || character == ')' || character == '|' ||
+                character == '!' || character == '.') break;
+            machine->cursor += 1;
+        }
+        if (machine->cursor == start) return false;
+    }
+    machine->captures[machine->capture_count++] = (BusterAarch64SyntaxCapture){
+        .node_index = node_index, .occurrence = machine->capture_count - 1,
+        .spelling = {.pointer = machine->input.pointer + start, .length = machine->cursor - start}};
+    BUSTER_UNUSED(node);
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_setup_branch(BusterAarch64SyntaxMatchMachine* machine,
+                                                                    BusterAarch64SyntaxMatchBacktrack frame)
+{
+    BusterAarch64SyntaxNode node = {0};
+    u32 first = 0;
+    u32 count = 0;
+    u32 total = 0;
+    if (!machine || !buster_aarch64_syntax_node(frame.node_index, &node) ||
+        !buster_aarch64_syntax_branch_range(node, frame.next_branch, &first, &count, &total) ||
+        frame.next_branch >= total || !buster_aarch64_syntax_match_record_choice(machine, frame.node_index, frame.next_branch)) return false;
+    if (frame.next_branch + 1 < total)
+    {
+        if (machine->backtrack_count >= BUSTER_AARCH64_SYNTAX_GENERATED_MAX_BACKTRACK_FRAMES) return false;
+        frame.branch_count = total;
+        frame.next_branch += 1;
+        machine->backtracks[machine->backtrack_count++] = frame;
+    }
+    return buster_aarch64_syntax_match_push_children_reverse(machine, first, count);
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_backtrack(BusterAarch64SyntaxMatchMachine* machine)
+{
+    while (machine && machine->backtrack_count)
+    {
+        BusterAarch64SyntaxMatchBacktrack frame = machine->backtracks[--machine->backtrack_count];
+        machine->cursor = frame.cursor;
+        machine->capture_count = frame.capture_count;
+        machine->choice_count = frame.choice_count;
+        machine->task_count = frame.task_count;
+        if (frame.kind == BUSTER_AARCH64_SYNTAX_MATCH_BACKTRACK_OPTIONAL)
+        {
+            if (buster_aarch64_syntax_match_record_choice(machine, frame.node_index, 0)) return true;
+        }
+        else if (frame.next_branch < frame.branch_count)
+        {
+            if (buster_aarch64_syntax_match_setup_branch(machine, frame)) return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_process_node(BusterAarch64SyntaxMatchMachine* machine, u32 index,
+                                                                    BusterAarch64SyntaxNode node)
+{
+    if (node.kind == BUSTER_AARCH64_SYNTAX_LIT || node.kind == BUSTER_AARCH64_SYNTAX_MNEMONIC)
+        return buster_aarch64_syntax_input_take_mnemonic(machine->input, &machine->cursor, node.text);
+    if (node.kind == BUSTER_AARCH64_SYNTAX_ANCHOR) return buster_aarch64_syntax_match_anchor(machine, index, node);
+    if (node.kind == BUSTER_AARCH64_SYNTAX_SEQ || node.kind == BUSTER_AARCH64_SYNTAX_MEM ||
+        node.kind == BUSTER_AARCH64_SYNTAX_LIST || node.kind == BUSTER_AARCH64_SYNTAX_LANE)
+        return buster_aarch64_syntax_match_push_children_reverse(machine, node.child_first, node.child_count);
+    if (node.kind == BUSTER_AARCH64_SYNTAX_OPTIONAL)
+    {
+        if (!buster_aarch64_syntax_match_record_choice(machine, index, 1) ||
+            machine->backtrack_count >= BUSTER_AARCH64_SYNTAX_GENERATED_MAX_BACKTRACK_FRAMES)
+            return false;
+        BusterAarch64SyntaxMatchBacktrack frame = {
+            .kind = BUSTER_AARCH64_SYNTAX_MATCH_BACKTRACK_OPTIONAL,
+            .cursor = machine->cursor,
+            .capture_count = machine->capture_count,
+            .choice_count = machine->choice_count - 1,
+            .task_count = machine->task_count,
+            .node_index = index,
+        };
+        machine->backtracks[machine->backtrack_count++] = frame;
+        return buster_aarch64_syntax_match_push_optional_body(machine, node);
+    }
+    if (node.kind == BUSTER_AARCH64_SYNTAX_ALT)
+    {
+        bool delimited = !(node.flags & BUSTER_AARCH64_SYNTAX_ALT_IMPLICIT_DELIMITER);
+        bool canonical = delimited ? (machine->cursor < machine->input.length && machine->input.pointer[machine->cursor] == '(') :
+                                    buster_aarch64_syntax_input_has_implicit_separator(machine->input, machine->cursor);
+        if (canonical)
+        {
+            if (delimited && !buster_aarch64_syntax_input_take(machine->input, &machine->cursor, S8("("))) return false;
+            if (!buster_aarch64_syntax_match_record_choice(machine, index, BUSTER_AARCH64_SYNTAX_CHOICE_CANONICAL)) return false;
+            if (delimited && !buster_aarch64_syntax_match_push_literal(machine, S8(")"), false)) return false;
+            return buster_aarch64_syntax_match_push_children_reverse(machine, node.child_first, node.child_count);
+        }
+        u32 first = 0;
+        u32 count = 0;
+        u32 total = 0;
+        if (!buster_aarch64_syntax_branch_range(node, 0, &first, &count, &total) || !total ||
+            !buster_aarch64_syntax_match_record_choice(machine, index, 0)) return false;
+        if (total > 1)
+        {
+            if (machine->backtrack_count >= BUSTER_AARCH64_SYNTAX_GENERATED_MAX_BACKTRACK_FRAMES) return false;
+            machine->backtracks[machine->backtrack_count++] = (BusterAarch64SyntaxMatchBacktrack){
+                .kind = BUSTER_AARCH64_SYNTAX_MATCH_BACKTRACK_ALT,
+                .cursor = machine->cursor,
+                .capture_count = machine->capture_count,
+                .choice_count = machine->choice_count - 1,
+                .task_count = machine->task_count,
+                .node_index = index,
+                .next_branch = 1,
+                .branch_count = total,
+            };
+        }
+        return buster_aarch64_syntax_match_push_children_reverse(machine, first, count);
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_match_process_task(BusterAarch64SyntaxMatchMachine* machine,
+                                                                    BusterAarch64SyntaxMatchTask task)
+{
+    if (task.kind == BUSTER_AARCH64_SYNTAX_MATCH_TASK_LITERAL)
+        return buster_aarch64_syntax_input_take_mnemonic(machine->input, &machine->cursor, task.literal);
+    BusterAarch64SyntaxNode node = {0};
+    return buster_aarch64_syntax_node(task.node_index, &node) &&
+           buster_aarch64_syntax_match_process_node(machine, task.node_index, node);
+}
+
+BUSTER_F_DECL bool buster_aarch64_syntax_match_row(u32 row_index, String8 input, BusterAarch64SyntaxMatchResult* result)
+{
+    BusterAarch64SyntaxRow row = {0};
+    if (!buster_aarch64_syntax_row(row_index, &row) || (!input.pointer && input.length) ||
+        (result && result->capture_capacity && !result->captures) || (result && result->choice_capacity && !result->choices)) return false;
+    BusterAarch64SyntaxMatchMachine machine = {.input = input};
+    if (!buster_aarch64_syntax_match_push_node(&machine, row.node_first)) return false;
+    bool matched = false;
+    while (!matched)
+    {
+        if (!machine.task_count)
+        {
+            if (machine.cursor == input.length && machine.capture_count >= row.anchor_min && machine.capture_count <= row.anchor_max)
+            {
+                matched = true;
+                break;
+            }
+            if (!buster_aarch64_syntax_match_backtrack(&machine)) return false;
+            continue;
+        }
+        BusterAarch64SyntaxMatchTask task = machine.tasks[--machine.task_count];
+        if (!buster_aarch64_syntax_match_process_task(&machine, task) && !buster_aarch64_syntax_match_backtrack(&machine)) return false;
+    }
+    if (result)
+    {
+        if (machine.capture_count > result->capture_capacity || machine.choice_count > result->choice_capacity) return false;
+        for (u32 index = 0; index < machine.capture_count; index += 1) result->captures[index] = machine.captures[index];
+        for (u32 index = 0; index < machine.choice_count; index += 1) result->choices[index] = machine.choices[index];
+        result->capture_count = machine.capture_count;
+        result->choice_count = machine.choice_count;
+        result->consumed = machine.cursor;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_push_task(BusterAarch64SyntaxPrintMachine* machine,
+                                                                BusterAarch64SyntaxPrintTask task)
+{
+    if (!machine || machine->task_count >= BUSTER_AARCH64_SYNTAX_GENERATED_MAX_WORK_ITEMS) return false;
+    machine->tasks[machine->task_count++] = task;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_push_node(BusterAarch64SyntaxPrintMachine* machine, u32 node_index)
+{
+    return buster_aarch64_syntax_print_push_task(machine, (BusterAarch64SyntaxPrintTask){
+        .kind = BUSTER_AARCH64_SYNTAX_PRINT_TASK_NODE, .node_index = node_index});
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_push_literal(BusterAarch64SyntaxPrintMachine* machine, String8 literal)
+{
+    return buster_aarch64_syntax_print_push_task(machine, (BusterAarch64SyntaxPrintTask){
+        .kind = BUSTER_AARCH64_SYNTAX_PRINT_TASK_LITERAL, .literal = literal});
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_push_children_reverse(BusterAarch64SyntaxPrintMachine* machine,
+                                                                              u32 first, u32 count)
+{
+    if (!machine || !buster_aarch64_syntax_child_range_valid(first, count)) return false;
+    for (u32 offset = count; offset > 0; offset -= 1)
+    {
+        u32 child = 0;
+        if (!buster_aarch64_syntax_generated_child_at(first + offset - 1, &child) ||
+            !buster_aarch64_syntax_print_push_node(machine, child)) return false;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_push_optional_body(BusterAarch64SyntaxPrintMachine* machine,
+                                                                          BusterAarch64SyntaxNode node)
+{
+    if (!machine || !buster_aarch64_syntax_child_range_valid(node.child_first, node.child_count)) return false;
+    u32 first = node.child_first;
+    u32 count = node.child_count;
+    if (machine->concrete && count)
+    {
+        u32 child = 0;
+        BusterAarch64SyntaxNode delimiter = {0};
+        if (!buster_aarch64_syntax_generated_child_at(first, &child) || !buster_aarch64_syntax_node(child, &delimiter)) return false;
+        if (delimiter.kind == BUSTER_AARCH64_SYNTAX_LIT && (delimiter.flags & BUSTER_AARCH64_SYNTAX_LIT_DELIMITER))
+        {
+            first += 1;
+            count -= 1;
+        }
+        if (count)
+        {
+            if (!buster_aarch64_syntax_generated_child_at(first + count - 1, &child) ||
+                !buster_aarch64_syntax_node(child, &delimiter)) return false;
+            if (delimiter.kind == BUSTER_AARCH64_SYNTAX_LIT && (delimiter.flags & BUSTER_AARCH64_SYNTAX_LIT_DELIMITER)) count -= 1;
+        }
+    }
+    return buster_aarch64_syntax_print_push_children_reverse(machine, first, count);
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_emit(BusterAarch64SyntaxPrintMachine* machine, String8 text)
+{
+    if (!machine || (!text.pointer && text.length) || text.length > UINT64_MAX - machine->length) return false;
+    if (machine->output && (machine->length > machine->capacity || text.length > machine->capacity - machine->length)) return false;
+    if (machine->output && text.length) memcpy(machine->output + machine->length, text.pointer, (size_t)text.length);
+    machine->length += text.length;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_choice(BusterAarch64SyntaxPrintMachine* machine, u32 node_index, u32* value)
+{
+    if (!machine || !value) return false;
+    bool found = false;
+    for (u32 index = 0; index < machine->request.choice_count; index += 1)
+    {
+        BusterAarch64SyntaxChoice choice = machine->request.choices[index];
+        if (choice.node_index == node_index)
+        {
+            if (found) return false;
+            *value = choice.value;
+            machine->choice_count += 1;
+            found = true;
+        }
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_branch(BusterAarch64SyntaxPrintMachine* machine,
+                                                              BusterAarch64SyntaxNode node, u32 branch)
+{
+    u32 first = 0;
+    u32 count = 0;
+    u32 total = 0;
+    if (!buster_aarch64_syntax_branch_range(node, branch, &first, &count, &total) || branch >= total) return false;
+    return buster_aarch64_syntax_print_push_children_reverse(machine, first, count);
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_process_node(BusterAarch64SyntaxPrintMachine* machine, u32 index,
+                                                                    BusterAarch64SyntaxNode node)
+{
+    if (node.kind == BUSTER_AARCH64_SYNTAX_LIT || node.kind == BUSTER_AARCH64_SYNTAX_MNEMONIC)
+        return buster_aarch64_syntax_print_emit(machine, node.text);
+    if (node.kind == BUSTER_AARCH64_SYNTAX_ANCHOR)
+    {
+        u32 occurrence = machine->anchor_count++;
+        if (!machine->concrete)
+        {
+            return buster_aarch64_syntax_print_emit(machine, S8("<")) &&
+                   buster_aarch64_syntax_print_emit(machine, node.text) && buster_aarch64_syntax_print_emit(machine, S8(">"));
+        }
+        if (occurrence >= machine->request.capture_count) return false;
+        return buster_aarch64_syntax_print_emit(machine, machine->request.captures[occurrence].spelling);
+    }
+    if (node.kind == BUSTER_AARCH64_SYNTAX_SEQ || node.kind == BUSTER_AARCH64_SYNTAX_MEM ||
+        node.kind == BUSTER_AARCH64_SYNTAX_LIST || node.kind == BUSTER_AARCH64_SYNTAX_LANE)
+        return buster_aarch64_syntax_print_push_children_reverse(machine, node.child_first, node.child_count);
+    if (node.kind == BUSTER_AARCH64_SYNTAX_OPTIONAL)
+    {
+        if (!machine->concrete) return buster_aarch64_syntax_print_push_children_reverse(machine, node.child_first, node.child_count);
+        u32 present = 0;
+        if (!buster_aarch64_syntax_print_choice(machine, index, &present) || present > 1) return false;
+        if (!present) return true;
+        return buster_aarch64_syntax_print_push_optional_body(machine, node);
+    }
+    if (node.kind == BUSTER_AARCH64_SYNTAX_ALT)
+    {
+        bool delimited = !(node.flags & BUSTER_AARCH64_SYNTAX_ALT_IMPLICIT_DELIMITER);
+        if (!machine->concrete)
+        {
+            if (delimited && !buster_aarch64_syntax_print_emit(machine, S8("("))) return false;
+            if (delimited && !buster_aarch64_syntax_print_push_literal(machine, S8(")"))) return false;
+            return buster_aarch64_syntax_print_push_children_reverse(machine, node.child_first, node.child_count);
+        }
+        u32 selected = 0;
+        if (!buster_aarch64_syntax_print_choice(machine, index, &selected) || selected == BUSTER_AARCH64_SYNTAX_CHOICE_CANONICAL)
+            return false;
+        return buster_aarch64_syntax_print_branch(machine, node, selected);
+    }
+    BUSTER_UNUSED(index);
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_process_task(BusterAarch64SyntaxPrintMachine* machine,
+                                                                    BusterAarch64SyntaxPrintTask task)
+{
+    if (task.kind == BUSTER_AARCH64_SYNTAX_PRINT_TASK_LITERAL) return buster_aarch64_syntax_print_emit(machine, task.literal);
+    BusterAarch64SyntaxNode node = {0};
+    return buster_aarch64_syntax_node(task.node_index, &node) &&
+           buster_aarch64_syntax_print_process_node(machine, task.node_index, node);
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_walk(BusterAarch64SyntaxRow row, BusterAarch64SyntaxPrintRequest request,
+                                                            bool concrete, char8* output, u64 capacity, u64* length)
+{
+    if (concrete && ((request.capture_count && !request.captures) || (request.choice_count && !request.choices))) return false;
+    BusterAarch64SyntaxPrintMachine machine = {.request = request, .concrete = concrete, .output = output, .capacity = capacity};
+    if (!buster_aarch64_syntax_print_push_node(&machine, row.node_first)) return false;
+    while (machine.task_count)
+    {
+        BusterAarch64SyntaxPrintTask task = machine.tasks[--machine.task_count];
+        if (!buster_aarch64_syntax_print_process_task(&machine, task)) return false;
+        /* The first walk is a measure-only pass (output == NULL), so a zero
+           capacity there must not reject otherwise valid output.  Capacity is
+           enforced during the write pass, and the measured size is checked
+           before any bytes are emitted. */
+        if (machine.output && machine.length > capacity) return false;
+    }
+    if (machine.anchor_count != (concrete ? request.capture_count : row.anchor_count)) return false;
+    if (concrete && machine.choice_count != request.choice_count) return false;
+    if (concrete && machine.anchor_count < row.anchor_min) return false;
+    if (length) *length = machine.length;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_aarch64_syntax_print_row_mode(u32 row_index, BusterAarch64SyntaxPrintRequest request,
                                                                BusterAarch64SyntaxOutput* output, bool concrete)
 {
     BusterAarch64SyntaxRow row = {0};
-    if (!output || !buster_aarch64_syntax_row(row_index, &row) || !callbacks.print_anchor ||
-        (!output->pointer && output->capacity) || !buster_aarch64_syntax_callbacks_transactional(callbacks)) return false;
-    u64 original_length = output->length;
-    u64 initial_token = buster_aarch64_syntax_callback_checkpoint(callbacks);
-    BusterAarch64SyntaxPrintState state = {.output = output, .concrete = concrete, .callbacks = callbacks};
-    if (!buster_aarch64_syntax_print_node_impl(row.node_first, &state) ||
-        (concrete ? (state.anchor_index < row.anchor_min || state.anchor_index > row.anchor_max) : state.anchor_index != row.anchor_count))
-    {
-        output->length = original_length;
-        buster_aarch64_syntax_callback_restore(callbacks, initial_token);
+    if (!output || !buster_aarch64_syntax_row(row_index, &row) || output->length > output->capacity ||
+        (!output->pointer && output->capacity) || request.capture_count > BUSTER_AARCH64_SYNTAX_GENERATED_MAX_ANCHOR_OPERANDS ||
+        request.choice_count > BUSTER_AARCH64_SYNTAX_GENERATED_MAX_CHOICE_COUNT)
         return false;
-    }
+    u64 required = 0;
+    if (!buster_aarch64_syntax_print_walk(row, request, concrete, 0, 0, &required) || required > output->capacity - output->length) return false;
+    u64 original_length = output->length;
+    u64 written = 0;
+    char8* write_pointer = output->pointer ? output->pointer + original_length : 0;
+    if (!buster_aarch64_syntax_print_walk(row, request, concrete, write_pointer,
+                                          output->capacity - original_length, &written) || written != required) return false;
+    output->length = original_length + written;
     return true;
 }
 
-BUSTER_F_DECL bool buster_aarch64_syntax_print_row(u32 row_index, BusterAarch64SyntaxCallbacks callbacks,
+BUSTER_F_DECL bool buster_aarch64_syntax_print_row(u32 row_index, BusterAarch64SyntaxPrintRequest request,
                                                     BusterAarch64SyntaxOutput* output)
 {
-    return buster_aarch64_syntax_print_row_mode(row_index, callbacks, output, false);
+    return buster_aarch64_syntax_print_row_mode(row_index, request, output, false);
 }
 
-BUSTER_F_DECL bool buster_aarch64_syntax_print_concrete_row(u32 row_index, BusterAarch64SyntaxCallbacks callbacks,
+BUSTER_F_DECL bool buster_aarch64_syntax_print_concrete_row(u32 row_index, BusterAarch64SyntaxPrintRequest request,
                                                              BusterAarch64SyntaxOutput* output)
 {
-    if (!callbacks.select_alternative || !callbacks.select_optional) return false;
-    return buster_aarch64_syntax_print_row_mode(row_index, callbacks, output, true);
+    return buster_aarch64_syntax_print_row_mode(row_index, request, output, true);
 }
 
 BUSTER_GLOBAL_LOCAL u64 buster_aarch64_syntax_hash_append(u64 hash, String8 text)
@@ -936,7 +1168,10 @@ BUSTER_F_DECL bool buster_aarch64_syntax_validate(void)
         if (row.node_first != expected_node_first || row.kind >= BUSTER_AARCH64_SYNTAX_ROW_KIND_COUNT ||
             row.id.length == 0 || row.encoding_name.length == 0 || row.assembly.length == 0 ||
             buster_aarch64_syntax_source_hash(row) != row.source_hash || row.anchor_min > row.anchor_max ||
-            row.anchor_max > row.anchor_count)
+            row.anchor_max > row.anchor_count || row.node_count > BUSTER_AARCH64_SYNTAX_GENERATED_MAX_TOTAL_AST_NODES ||
+            row.node_count > BUSTER_AARCH64_SYNTAX_GENERATED_MAX_WORK_ITEMS ||
+            row.anchor_count > BUSTER_AARCH64_SYNTAX_GENERATED_MAX_ANCHOR_OPERANDS ||
+            row.assembly.length > BUSTER_AARCH64_SYNTAX_GENERATED_MAX_ASSEMBLY_BYTES)
             return false;
         if (row_index)
         {
@@ -948,14 +1183,18 @@ BUSTER_F_DECL bool buster_aarch64_syntax_validate(void)
         if (!buster_aarch64_syntax_row_lexical_mnemonic(row, &lexical_mnemonic) ||
             !buster_aarch64_syntax_ascii_bytes_equal(lexical_mnemonic, row.mnemonic)) return false;
         u32 anchors = 0;
+        u32 choices = 0;
         for (u32 validation_offset = 0; validation_offset < row.node_count; validation_offset += 1)
         {
             BusterAarch64SyntaxNode node = {0};
             if (!buster_aarch64_syntax_node(row.node_first + validation_offset, &node)) return false;
             if (node.kind == BUSTER_AARCH64_SYNTAX_ANCHOR) anchors += 1;
+            if (node.kind == BUSTER_AARCH64_SYNTAX_OPTIONAL || node.kind == BUSTER_AARCH64_SYNTAX_ALT) choices += 1;
             if (!buster_aarch64_syntax_child_range_valid(node.child_first, node.child_count)) return false;
         }
-        if (anchors != row.anchor_count) return false;
+        if (anchors != row.anchor_count || choices > BUSTER_AARCH64_SYNTAX_GENERATED_MAX_CHOICE_COUNT ||
+            choices > BUSTER_AARCH64_SYNTAX_GENERATED_MAX_BACKTRACK_FRAMES)
+            return false;
         expected_node_first += row.node_count;
     }
     if (expected_node_first != counts.node_count) return false;

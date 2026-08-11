@@ -3,171 +3,63 @@
 
 #if BUSTER_INCLUDE_TESTS
 
-typedef struct Aarch64SyntaxTestAnchorState Aarch64SyntaxTestAnchorState;
-struct Aarch64SyntaxTestAnchorState
+typedef struct Aarch64SyntaxTestRows Aarch64SyntaxTestRows;
+struct Aarch64SyntaxTestRows
 {
-    u32 callback_count;
-    u32 failed_branch_count;
-    u32 first_failed_occurrence;
-    u32 transactional_value;
-    u32 restore_count;
-    u32 selected_branch;
-    u32 optional_present;
-    u32 fail_print;
-    u32 concrete_profile;
+    u32 index;
+    String8 assembly;
 };
 
-BUSTER_GLOBAL_LOCAL u64 aarch64_syntax_test_checkpoint(void* user)
+BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_row_contains(String8 assembly, u32* row_index)
 {
-    Aarch64SyntaxTestAnchorState* state = (Aarch64SyntaxTestAnchorState*)user;
-    return state ? state->transactional_value : 0;
-}
-
-BUSTER_GLOBAL_LOCAL void aarch64_syntax_test_restore(void* user, u64 token)
-{
-    Aarch64SyntaxTestAnchorState* state = (Aarch64SyntaxTestAnchorState*)user;
-    if (state)
-    {
-        state->transactional_value = (u32)token;
-        state->restore_count += 1;
-    }
-}
-
-BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_match_anchor(void* user, BusterAarch64SyntaxAnchor anchor, String8 input,
-                                                           u64* cursor)
-{
-    Aarch64SyntaxTestAnchorState* state = (Aarch64SyntaxTestAnchorState*)user;
-    if (state) state->callback_count += 1;
-    if (!cursor || *cursor >= input.length || input.pointer[*cursor] != '<') return false;
-    u64 close = *cursor + 1;
-    while (close < input.length && input.pointer[close] != '>') close += 1;
-    if (close >= input.length) return false;
-    String8 spelling = {.pointer = input.pointer + *cursor + 1, .length = close - *cursor - 1};
-    if (spelling.length != anchor.spelling.length || memcmp(spelling.pointer, anchor.spelling.pointer, (size_t)spelling.length) != 0)
-        return false;
-    *cursor = close + 1;
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_match_anchor_branch_rollback(void* user, BusterAarch64SyntaxAnchor anchor,
-                                                                            String8 input, u64* cursor)
-{
-    Aarch64SyntaxTestAnchorState* state = (Aarch64SyntaxTestAnchorState*)user;
-    if (state && anchor.spelling.length == 6 && memcmp(anchor.spelling.pointer, "option", 6) == 0)
-    {
-        state->failed_branch_count += 1;
-        state->first_failed_occurrence = anchor.occurrence;
-        state->transactional_value = 99;
-        return false;
-    }
-    return aarch64_syntax_test_match_anchor(user, anchor, input, cursor);
-}
-
-BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_match_anchor_mutating(void* user, BusterAarch64SyntaxAnchor anchor, String8 input,
-                                                                    u64* cursor)
-{
-    Aarch64SyntaxTestAnchorState* state = (Aarch64SyntaxTestAnchorState*)user;
-    if (state) state->transactional_value += 1;
-    return aarch64_syntax_test_match_anchor(user, anchor, input, cursor);
-}
-
-BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_print_anchor(void* user, BusterAarch64SyntaxAnchor anchor, String8* spelling)
-{
-    BUSTER_UNUSED(user);
-    if (!spelling) return false;
-    *spelling = anchor.spelling;
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_print_anchor_malicious(void* user, BusterAarch64SyntaxAnchor anchor, String8* spelling)
-{
-    BUSTER_UNUSED(anchor);
-    Aarch64SyntaxTestAnchorState* state = (Aarch64SyntaxTestAnchorState*)user;
-    if (!spelling) return false;
-    if (state) state->transactional_value = 88;
-    *spelling = (String8){.pointer = 0, .length = 2};
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_select_alternative(void* user, BusterAarch64SyntaxNode node, u32 branch_count,
-                                                                  u32* branch_index)
-{
-    BUSTER_UNUSED(node);
-    Aarch64SyntaxTestAnchorState* state = (Aarch64SyntaxTestAnchorState*)user;
-    if (!branch_index || !branch_count) return false;
-    *branch_index = state && state->selected_branch < branch_count ? state->selected_branch : 0;
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_select_optional(void* user, BusterAarch64SyntaxNode node, bool* present)
-{
-    BUSTER_UNUSED(node);
-    Aarch64SyntaxTestAnchorState* state = (Aarch64SyntaxTestAnchorState*)user;
-    if (!present) return false;
-    *present = state && state->optional_present;
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_print_anchor_concrete(void* user, BusterAarch64SyntaxAnchor anchor, String8* spelling)
-{
-    Aarch64SyntaxTestAnchorState* state = (Aarch64SyntaxTestAnchorState*)user;
-    if (!spelling) return false;
-    if (state && state->fail_print && anchor.spelling.length == 6 && memcmp(anchor.spelling.pointer, "extend", 6) == 0)
-    {
-        state->transactional_value = 77;
-        return false;
-    }
-    if (state && state->concrete_profile == 1)
-    {
-        if (anchor.occurrence == 0) *spelling = S8("w0");
-        else if (anchor.occurrence == 1) *spelling = S8("w1");
-        else if (anchor.occurrence == 2) *spelling = S8("x2");
-        else *spelling = S8("0");
-    }
-    else if (state && state->concrete_profile == 2)
-    {
-        if (anchor.occurrence == 0) *spelling = S8("v0");
-        else if (anchor.occurrence == 1) *spelling = S8("4s");
-        else if (anchor.occurrence == 2) *spelling = S8("v1");
-        else if (anchor.occurrence == 3) *spelling = S8("4s");
-        else *spelling = S8("x2");
-    }
-    else if (state && state->concrete_profile == 3)
-    {
-        if (anchor.occurrence == 0) *spelling = S8("v0");
-        else if (anchor.occurrence == 1) *spelling = S8("4s");
-        else if (anchor.occurrence == 2) *spelling = S8("v1");
-        else if (anchor.occurrence == 3) *spelling = S8("s");
-        else *spelling = S8("0");
-    }
-    else if (anchor.spelling.length >= 1 && anchor.spelling.pointer[0] == 'W') *spelling = S8("w0");
-    else if (anchor.spelling.length >= 1 && anchor.spelling.pointer[0] == 'X') *spelling = S8("x0");
-    else if (anchor.spelling.length >= 1 && anchor.spelling.pointer[0] == 'V') *spelling = S8("v0");
-    else if (anchor.spelling.length == 1 && anchor.spelling.pointer[0] == 'R') *spelling = S8("x0");
-    else if (anchor.spelling.length >= 1 && anchor.spelling.pointer[0] == 'T') *spelling = S8("4s");
-    else if (anchor.spelling.length == 5 && memcmp(anchor.spelling.pointer, "prfop", 5) == 0) *spelling = S8("pldl1keep");
-    else if (anchor.spelling.length == 6 && memcmp(anchor.spelling.pointer, "option", 6) == 0) *spelling = S8("sy");
-    else if (anchor.spelling.length == 6 && memcmp(anchor.spelling.pointer, "extend", 6) == 0) *spelling = S8("lsl");
-    else if (anchor.spelling.length == 4 && memcmp(anchor.spelling.pointer, "cond", 4) == 0) *spelling = S8("eq");
-    else if (anchor.spelling.length == 5 && memcmp(anchor.spelling.pointer, "label", 5) == 0) *spelling = S8("label");
-    else *spelling = S8("0");
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_row_contains(String8 assembly, String8 needle, u32* row_index)
-{
-    for (u32 index = 0; index < buster_aarch64_syntax_counts().row_count; index += 1)
+    BusterAarch64SyntaxCounts counts = buster_aarch64_syntax_counts();
+    for (u32 index = 0; index < counts.row_count; index += 1)
     {
         BusterAarch64SyntaxRow row = {0};
-        if (!buster_aarch64_syntax_row(index, &row)) continue;
-        if (row.assembly.length == assembly.length && memcmp(row.assembly.pointer, assembly.pointer, (size_t)assembly.length) == 0)
+        if (buster_aarch64_syntax_row(index, &row) && row.assembly.length == assembly.length &&
+            memcmp(row.assembly.pointer, assembly.pointer, (size_t)assembly.length) == 0)
         {
             if (row_index) *row_index = index;
             return true;
         }
     }
-    BUSTER_UNUSED(needle);
     return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_string_equal(String8 left, String8 right)
+{
+    return left.length == right.length && (!left.length || (left.pointer && right.pointer &&
+                                                               memcmp(left.pointer, right.pointer, (size_t)left.length) == 0));
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_print_display(u32 row_index, String8 expected, char8* bytes, u64 capacity)
+{
+    BusterAarch64SyntaxOutput output = {.pointer = bytes, .capacity = capacity};
+    if (!buster_aarch64_syntax_print_row(row_index, (BusterAarch64SyntaxPrintRequest){0}, &output)) return false;
+    return aarch64_syntax_test_string_equal((String8){.pointer = output.pointer, .length = output.length}, expected);
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_syntax_test_match_and_print_concrete(u32 row_index, String8 spelling)
+{
+    BusterAarch64SyntaxCapture captures[10] = {0};
+    BusterAarch64SyntaxChoice choices[4] = {0};
+    BusterAarch64SyntaxMatchResult result = {
+        .captures = captures,
+        .capture_capacity = 10,
+        .choices = choices,
+        .choice_capacity = 4,
+    };
+    if (!buster_aarch64_syntax_match_row(row_index, spelling, &result)) return false;
+    char8 output_bytes[256] = {0};
+    BusterAarch64SyntaxPrintRequest request = {
+        .captures = captures,
+        .capture_count = result.capture_count,
+        .choices = choices,
+        .choice_count = result.choice_count,
+    };
+    BusterAarch64SyntaxOutput output = {.pointer = output_bytes, .capacity = sizeof(output_bytes)};
+    if (!buster_aarch64_syntax_print_concrete_row(row_index, request, &output)) return false;
+    return aarch64_syntax_test_string_equal((String8){.pointer = output.pointer, .length = output.length}, spelling);
 }
 
 UnitTestResult aarch64_syntax_tests(UnitTestArguments* arguments)
@@ -188,13 +80,16 @@ UnitTestResult aarch64_syntax_tests(UnitTestArguments* arguments)
                        S8("eea16d7f094badc65614aed988621f48aca5495890847294bb29decc4be1c31c"));
     BUSTER_STRING_TEST(arguments, buster_aarch64_syntax_source_digest(),
                        S8("8485c5c61835d5394d325757ab2964890e8bdfea304c6faa8fd4c23e4c7aabec"));
-    BUSTER_TEST(arguments, stats.generic_shape_count == 1165 && stats.exact_shape_count == 1635 && stats.max_total_ast_nodes == 29 &&
-                         stats.max_non_lit_non_seq_nodes == 13 && stats.max_optional_depth == 2 && stats.max_delimiter_nesting == 3 &&
-                         stats.max_top_level_comma_groups == 5 && stats.max_anchor_operands == 10);
+    BUSTER_TEST(arguments, stats.generic_shape_count == 1165 && stats.exact_shape_count == 1635 &&
+                         stats.max_total_ast_nodes == 29 && stats.max_non_lit_non_seq_nodes == 13 &&
+                         stats.max_optional_depth == 2 && stats.max_delimiter_nesting == 3 &&
+                         stats.max_top_level_comma_groups == 5 && stats.max_anchor_operands == 10 &&
+                         stats.max_choice_count == 4 && stats.max_assembly_bytes == 74 &&
+                         stats.max_work_items == 132 && stats.max_backtrack_frames == 8);
     BUSTER_TEST(arguments, buster_aarch64_syntax_validate());
 
     BusterAarch64SyntaxRow first = {0};
-    BUSTER_TEST(arguments, buster_aarch64_syntax_row(0, &first) && first.assembly.length != 0);
+    BUSTER_TEST(arguments, buster_aarch64_syntax_row(0, &first) && first.assembly.length != 0 && first.encoding_name.length != 0);
     BUSTER_TEST(arguments, !buster_aarch64_syntax_row(counts.row_count, &first));
     BUSTER_TEST(arguments, !buster_aarch64_syntax_node(counts.node_count, (BusterAarch64SyntaxNode*)&first));
     BUSTER_TEST(arguments, !buster_aarch64_syntax_string(counts.string_pool_bytes, 1, &first.assembly));
@@ -208,30 +103,6 @@ UnitTestResult aarch64_syntax_tests(UnitTestArguments* arguments)
     malformed_range.candidate_first = counts.mnemonic_candidate_count - 1;
     malformed_range.candidate_count = 2;
     BUSTER_TEST(arguments, !buster_aarch64_syntax_mnemonic_candidate(malformed_range, 0, &candidate_row));
-
-    BusterAarch64SyntaxCallbacks callbacks = {
-        .match_anchor = &aarch64_syntax_test_match_anchor,
-        .print_anchor = &aarch64_syntax_test_print_anchor,
-        .checkpoint = &aarch64_syntax_test_checkpoint,
-        .restore = &aarch64_syntax_test_restore,
-    };
-    char8 output_bytes[256] = {0};
-    u32 print_failures = 0;
-    u32 match_failures = 0;
-    for (u32 index = 0; index < counts.row_count; index += 1)
-    {
-        BusterAarch64SyntaxRow row = {0};
-        BusterAarch64SyntaxOutput output = {.pointer = output_bytes, .capacity = sizeof(output_bytes)};
-        bool row_ok = buster_aarch64_syntax_row(index, &row);
-        bool printed = row_ok && buster_aarch64_syntax_print_row(index, callbacks, &output) &&
-                      output.length == row.assembly.length && memcmp(output.pointer, row.assembly.pointer, (size_t)output.length) == 0;
-        bool matched = row_ok && buster_aarch64_syntax_match_row(index, row.assembly, callbacks);
-        print_failures += !printed;
-        match_failures += !matched;
-    }
-    BUSTER_TEST(arguments, print_failures == 0 && match_failures == 0);
-    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(0, S8("abs <Vd>.<T>, <Vn>.<T>"), callbacks));
-    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(1, S8("aBs d<d>, D<n>"), callbacks));
     BUSTER_TEST(arguments, counts.mnemonic_range_count == 695);
     BusterAarch64SyntaxMnemonicRange fixed_prefix_range = {0};
     BUSTER_TEST(arguments, buster_aarch64_syntax_mnemonic_lookup(S8("ABS"), &fixed_prefix_range) &&
@@ -244,118 +115,178 @@ UnitTestResult aarch64_syntax_tests(UnitTestArguments* arguments)
                          mnemonic_node.kind == BUSTER_AARCH64_SYNTAX_MNEMONIC &&
                          mnemonic_node.text.length == S8("ABS ").length &&
                          memcmp(mnemonic_node.text.pointer, S8("ABS ").pointer, (size_t)mnemonic_node.text.length) == 0);
+
+    /* Every canonical source template must survive the direct flat matcher and
+     * printer.  This exercises all alternatives, optionals, memory/list/lane
+     * groups, punctuation and the maximum-depth rows without user dispatch. */
+    u32 match_failures = 0;
+    u32 print_failures = 0;
+    u32 max_assembly_row = 0;
+    u32 max_assembly_length = 0;
+    u32 max_anchor_row = 0;
+    u32 max_anchor_count = 0;
+    char8 display_bytes[256] = {0};
+    BusterAarch64SyntaxCapture captures[10] = {0};
+    BusterAarch64SyntaxChoice choices[4] = {0};
+    for (u32 index = 0; index < counts.row_count; index += 1)
+    {
+        BusterAarch64SyntaxRow row = {0};
+        BusterAarch64SyntaxMatchResult match = {
+            .captures = captures,
+            .capture_capacity = 10,
+            .choices = choices,
+            .choice_capacity = 4,
+        };
+        bool matched = buster_aarch64_syntax_row(index, &row) && buster_aarch64_syntax_match_row(index, row.assembly, &match) &&
+                       match.consumed == row.assembly.length;
+        bool printed = aarch64_syntax_test_print_display(index, row.assembly, display_bytes, sizeof(display_bytes));
+        match_failures += !matched;
+        print_failures += !printed;
+        if (row.assembly.length > max_assembly_length)
+        {
+            max_assembly_length = (u32)row.assembly.length;
+            max_assembly_row = index;
+        }
+        if (row.anchor_count > max_anchor_count)
+        {
+            max_anchor_count = row.anchor_count;
+            max_anchor_row = index;
+        }
+    }
+    BUSTER_TEST(arguments, match_failures == 0 && print_failures == 0);
+    BusterAarch64SyntaxMatchResult direct_match = {
+        .captures = captures, .capture_capacity = 10, .choices = choices, .choice_capacity = 4,
+    };
+    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(0, S8("abs <Vd>.<T>, <Vn>.<T>"), &direct_match));
+    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(1, S8("aBs d<d>, D<n>"), &direct_match));
+
+    /* Exercise the generated maxima explicitly, including one-byte-short
+     * transactional output and one-slot-short capture storage. */
+    BusterAarch64SyntaxRow max_assembly = {0};
+    BUSTER_TEST(arguments, buster_aarch64_syntax_row(max_assembly_row, &max_assembly) &&
+                         max_assembly.assembly.length == max_assembly_length && max_assembly_length == stats.max_assembly_bytes);
+    char8 max_output_bytes[128] = {0};
+    BusterAarch64SyntaxOutput max_output = {.pointer = max_output_bytes, .capacity = sizeof(max_output_bytes)};
+    BUSTER_TEST(arguments, buster_aarch64_syntax_print_row(max_assembly_row, (BusterAarch64SyntaxPrintRequest){0}, &max_output) &&
+                         max_output.length == max_assembly_length);
+    char8 short_output_bytes[128];
+    memset(short_output_bytes, 0xa5, sizeof(short_output_bytes));
+    char8 short_output_before[128];
+    memcpy(short_output_before, short_output_bytes, sizeof(short_output_before));
+    BusterAarch64SyntaxOutput short_output = {
+        .pointer = short_output_bytes, .length = 3, .capacity = 3 + max_assembly_length - 1,
+    };
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_print_row(max_assembly_row, (BusterAarch64SyntaxPrintRequest){0}, &short_output) &&
+                         short_output.length == 3 && memcmp(short_output_bytes, short_output_before,
+                                                             sizeof(short_output_bytes)) == 0);
+
+    BusterAarch64SyntaxRow max_anchor = {0};
+    BUSTER_TEST(arguments, buster_aarch64_syntax_row(max_anchor_row, &max_anchor) && max_anchor.anchor_count == max_anchor_count &&
+                         max_anchor_count == stats.max_anchor_operands);
+    BusterAarch64SyntaxCapture max_capture_storage[10] = {0};
+    BusterAarch64SyntaxChoice max_choice_storage[4] = {0};
+    BusterAarch64SyntaxMatchResult short_match = {
+        .captures = max_capture_storage,
+        .capture_capacity = max_anchor_count - 1,
+        .capture_count = 2,
+        .choices = max_choice_storage,
+        .choice_capacity = 4,
+        .choice_count = 1,
+        .consumed = 123,
+    };
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(max_anchor_row, max_anchor.assembly, &short_match) &&
+                         short_match.capture_count == 2 && short_match.choice_count == 1 && short_match.consumed == 123);
+
     u32 condition_row = 0;
-    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("B.<cond> <label>"), S8("B"), &condition_row));
-    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(condition_row, S8("b.<cond> <label>"), callbacks));
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("B.<cond> <label>"), &condition_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(condition_row, S8("B.eq label")));
 
     u32 branch_row = 0;
-    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("DMB (<option>|#<imm>)"), S8("DMB"), &branch_row));
-    Aarch64SyntaxTestAnchorState branch_state = {0};
-    BusterAarch64SyntaxCallbacks branch_callbacks = {
-        .match_anchor = &aarch64_syntax_test_match_anchor_branch_rollback,
-        .checkpoint = &aarch64_syntax_test_checkpoint,
-        .restore = &aarch64_syntax_test_restore,
-        .user = &branch_state,
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("DMB (<option>|#<imm>)"), &branch_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(branch_row, S8("DMB #0")));
+    BusterAarch64SyntaxCapture rollback_captures[2] = {{.spelling = S8("old")}};
+    BusterAarch64SyntaxChoice rollback_choices[2] = {{.node_index = 77, .value = 88}};
+    BusterAarch64SyntaxMatchResult rollback = {
+        .captures = rollback_captures, .capture_capacity = 2, .capture_count = 1,
+        .choices = rollback_choices, .choice_capacity = 2, .choice_count = 1, .consumed = 91,
     };
-    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(branch_row, S8("DMB #<imm>"), branch_callbacks));
-    BUSTER_TEST(arguments, branch_state.failed_branch_count == 1 && branch_state.first_failed_occurrence == 0 &&
-                         branch_state.transactional_value == 0 && branch_state.restore_count != 0);
-    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(branch_row, S8("DMB #<imm> trailing"), branch_callbacks));
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(branch_row, S8("DMB #0 trailing"), &rollback) &&
+                         rollback.capture_count == 1 && rollback.choice_count == 1 && rollback.consumed == 91 &&
+                         aarch64_syntax_test_string_equal(rollback_captures[0].spelling, S8("old")) &&
+                         rollback_choices[0].node_index == 77 && rollback_choices[0].value == 88);
 
     u32 nested_optional_row = 0;
-    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("ADDS <Wd>, <Wn|WSP>, <Wm>{, <extend> {#<amount>}}"), S8("ADDS"),
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("ADDS <Wd>, <Wn|WSP>, <Wm>{, <extend> {#<amount>}}"),
                                                             &nested_optional_row));
-    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(nested_optional_row, S8("ADDS <Wd>, <Wn|WSP>, <Wm>"), callbacks));
-    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(nested_optional_row, S8("ADDS <Wd>, <Wn|WSP>, <Wm>{"), callbacks));
-
-    Aarch64SyntaxTestAnchorState nested_state = {0};
-    BusterAarch64SyntaxCallbacks nested_callbacks = callbacks;
-    nested_callbacks.match_anchor = &aarch64_syntax_test_match_anchor_mutating;
-    nested_callbacks.user = &nested_state;
-    String8 nested_partial = S8("ADDS <Wd>, <Wn|WSP>, <Wm>{, <extend> {#<amount>");
-    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(nested_optional_row, nested_partial, nested_callbacks) &&
-                         nested_state.transactional_value == 0);
+    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(nested_optional_row,
+                                                            S8("ADDS <Wd>, <Wn|WSP>, <Wm>{, <extend> {#<amount>}}"),
+                                                            &direct_match));
+    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(nested_optional_row, S8("ADDS w0, w0, w0"), 0));
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(nested_optional_row, S8("ADDS <Wd>, <Wn|WSP>, <Wm>{"), 0));
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(
+                         nested_optional_row, S8("ADDS <Wd>, <Wn|WSP>, <Wm>{, <extend> {#<amount>"), 0));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(nested_optional_row,
+                                                                          S8("ADDS w0, w0, w0, lsl #0")));
+    BusterAarch64SyntaxCapture nested_rollback_captures[10] = {{.spelling = S8("keep")}};
+    BusterAarch64SyntaxChoice nested_rollback_choices[4] = {{.node_index = 31, .value = 41}};
+    BusterAarch64SyntaxMatchResult nested_rollback = {
+        .captures = nested_rollback_captures, .capture_capacity = 10, .capture_count = 1,
+        .choices = nested_rollback_choices, .choice_capacity = 4, .choice_count = 1, .consumed = 79,
+    };
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(nested_optional_row,
+                                                              S8("ADDS w0, w0, w0, lsl #0 trailing"), &nested_rollback) &&
+                         nested_rollback.capture_count == 1 && nested_rollback.choice_count == 1 &&
+                         nested_rollback.consumed == 79 &&
+                         aarch64_syntax_test_string_equal(nested_rollback_captures[0].spelling, S8("keep")) &&
+                         nested_rollback_choices[0].node_index == 31 && nested_rollback_choices[0].value == 41);
     u32 modifier_row = 0;
-    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("BIC <Vd>.<T>, #<imm8>{, LSL #<amount>}"), S8("BIC"), &modifier_row));
-    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(modifier_row, S8("bic <Vd>.<T>, #<imm8>{, lSl #<amount>}"), callbacks));
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("BIC <Vd>.<T>, #<imm8>{, LSL #<amount>}"), &modifier_row));
+    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(modifier_row,
+                                                            S8("bic <Vd>.<T>, #<imm8>{, lSl #<amount>}"), &direct_match));
 
     u32 list_row = 0;
-    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("LD1 { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>]"), S8("LD1"), &list_row));
-    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(list_row, S8("LD1 { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>]"), callbacks));
     u32 lane_row = 0;
-    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("DUP <Vd>.<T>, <Vn>.<Ts>[<index>]"), S8("DUP"), &lane_row));
-    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(lane_row, S8("DUP <Vd>.<T>, <Vn>.<Ts>[<index>]"), callbacks));
     u32 writeback_row = 0;
-    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("LDP <Wt1>, <Wt2>, [<Xn|SP>, #<imm>]!"), S8("LDP"), &writeback_row));
-    BUSTER_TEST(arguments, buster_aarch64_syntax_match_row(writeback_row, S8("LDP <Wt1>, <Wt2>, [<Xn|SP>, #<imm>]!"), callbacks));
-
-    output_bytes[0] = 'x';
-    BusterAarch64SyntaxOutput tiny = {.pointer = output_bytes, .length = 1, .capacity = 1};
-    BUSTER_TEST(arguments, !buster_aarch64_syntax_print_row(0, callbacks, &tiny) && tiny.length == 1 && output_bytes[0] == 'x');
-
-    Aarch64SyntaxTestAnchorState concrete_state = {.selected_branch = 0, .optional_present = 0};
-    BusterAarch64SyntaxCallbacks concrete_callbacks = {
-        .match_anchor = &aarch64_syntax_test_match_anchor,
-        .print_anchor = &aarch64_syntax_test_print_anchor_concrete,
-        .user = &concrete_state,
-        .checkpoint = &aarch64_syntax_test_checkpoint,
-        .restore = &aarch64_syntax_test_restore,
-        .select_alternative = &aarch64_syntax_test_select_alternative,
-        .select_optional = &aarch64_syntax_test_select_optional,
-    };
-    char8 concrete_bytes[256] = {0};
-    BusterAarch64SyntaxOutput concrete_output = {.pointer = concrete_bytes, .capacity = sizeof(concrete_bytes)};
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("LD1 { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>]"), &list_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("DUP <Vd>.<T>, <Vn>.<Ts>[<index>]"), &lane_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("LDP <Wt1>, <Wt2>, [<Xn|SP>, #<imm>]!"), &writeback_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(list_row, S8("LD1 { v0.4s, v1.4s }, [x2]")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(lane_row, S8("DUP v0.4s, v1.s[0]")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(writeback_row, S8("LDP w0, w1, [x2, #0]!")));
     u32 prfm_row = 0;
-    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("PRFM (<prfop>|#<imm5>), [<Xn|SP>{, #<pimm>}]"), S8("PRFM"), &prfm_row));
-    concrete_state.selected_branch = 1;
-    BUSTER_TEST(arguments, buster_aarch64_syntax_print_concrete_row(prfm_row, concrete_callbacks, &concrete_output) &&
-                         concrete_output.length == S8("PRFM #0, [x0]").length &&
-                         memcmp(concrete_output.pointer, S8("PRFM #0, [x0]").pointer, (size_t)concrete_output.length) == 0);
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("PRFM (<prfop>|#<imm5>), [<Xn|SP>{, #<pimm>}]"), &prfm_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(prfm_row, S8("PRFM #0, [x0]")));
     u32 ret_row = 0;
-    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("RET {<Xn>}"), S8("RET"), &ret_row));
-    concrete_output.length = 0;
-    concrete_state.selected_branch = 0;
-    concrete_state.optional_present = 0;
-    BUSTER_TEST(arguments, buster_aarch64_syntax_print_concrete_row(ret_row, concrete_callbacks, &concrete_output) &&
-                         concrete_output.length == S8("RET ").length &&
-                         memcmp(concrete_output.pointer, S8("RET ").pointer, (size_t)concrete_output.length) == 0);
-    concrete_output.length = 0;
-    concrete_state.optional_present = 1;
-    BUSTER_TEST(arguments, buster_aarch64_syntax_print_concrete_row(nested_optional_row, concrete_callbacks, &concrete_output) &&
-                         concrete_output.length == S8("ADDS w0, w0, w0, lsl #0").length &&
-                         memcmp(concrete_output.pointer, S8("ADDS w0, w0, w0, lsl #0").pointer, (size_t)concrete_output.length) == 0);
-    concrete_output.length = 0;
-    concrete_state.optional_present = 0;
-    concrete_state.concrete_profile = 1;
-    BUSTER_TEST(arguments, buster_aarch64_syntax_print_concrete_row(writeback_row, concrete_callbacks, &concrete_output) &&
-                         concrete_output.length == S8("LDP w0, w1, [x2, #0]!").length &&
-                         memcmp(concrete_output.pointer, S8("LDP w0, w1, [x2, #0]!").pointer, (size_t)concrete_output.length) == 0);
-    concrete_output.length = 0;
-    concrete_state.concrete_profile = 2;
-    BUSTER_TEST(arguments, buster_aarch64_syntax_print_concrete_row(list_row, concrete_callbacks, &concrete_output) &&
-                         concrete_output.length == S8("LD1 { v0.4s, v1.4s }, [x2]").length &&
-                         memcmp(concrete_output.pointer, S8("LD1 { v0.4s, v1.4s }, [x2]").pointer, (size_t)concrete_output.length) == 0);
-    concrete_output.length = 0;
-    concrete_state.concrete_profile = 3;
-    BUSTER_TEST(arguments, buster_aarch64_syntax_print_concrete_row(lane_row, concrete_callbacks, &concrete_output) &&
-                         concrete_output.length == S8("DUP v0.4s, v1.s[0]").length &&
-                         memcmp(concrete_output.pointer, S8("DUP v0.4s, v1.s[0]").pointer, (size_t)concrete_output.length) == 0);
-    concrete_output.length = 1;
-    concrete_bytes[0] = 'y';
-    concrete_state.fail_print = 1;
-    concrete_state.optional_present = 1;
-    concrete_state.transactional_value = 0;
-    BUSTER_TEST(arguments, !buster_aarch64_syntax_print_concrete_row(nested_optional_row, concrete_callbacks, &concrete_output) &&
-                         concrete_output.length == 1 && concrete_bytes[0] == 'y' && concrete_state.transactional_value == 0);
-    Aarch64SyntaxTestAnchorState malicious_state = {0};
-    BusterAarch64SyntaxCallbacks malicious_callbacks = callbacks;
-    malicious_callbacks.print_anchor = &aarch64_syntax_test_print_anchor_malicious;
-    malicious_callbacks.user = &malicious_state;
-    concrete_output.length = 1;
-    concrete_bytes[0] = 'z';
-    BUSTER_TEST(arguments, !buster_aarch64_syntax_print_row(0, malicious_callbacks, &concrete_output) &&
-                         concrete_output.length == 1 && concrete_bytes[0] == 'z' && malicious_state.transactional_value == 0 &&
-                         malicious_state.restore_count != 0);
+    BUSTER_TEST(arguments, aarch64_syntax_test_row_contains(S8("RET {<Xn>}"), &ret_row));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(ret_row, S8("RET ")));
+    BUSTER_TEST(arguments, aarch64_syntax_test_match_and_print_concrete(ret_row, S8("RET x0")));
+
+    /* Undersized arrays, malformed spans and output overflow are transactional:
+     * all pre-existing caller state and bytes remain untouched. */
+    BusterAarch64SyntaxCapture tiny_capture = {.spelling = S8("sentinel")};
+    BusterAarch64SyntaxChoice tiny_choice = {.node_index = 19, .value = 23};
+    BusterAarch64SyntaxMatchResult tiny_result = {
+        .captures = &tiny_capture, .capture_capacity = 0, .capture_count = 7,
+        .choices = &tiny_choice, .choice_capacity = 0, .choice_count = 9, .consumed = 17,
+    };
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(0, first.assembly, &tiny_result) && tiny_result.capture_count == 7 &&
+                         tiny_result.choice_count == 9 && tiny_result.consumed == 17 &&
+                         aarch64_syntax_test_string_equal(tiny_capture.spelling, S8("sentinel")));
+    BusterAarch64SyntaxMatchResult malformed = {.capture_capacity = 1, .captures = 0};
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(0, first.assembly, &malformed));
+    String8 malformed_input = {.pointer = 0, .length = 1};
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_match_row(0, malformed_input, 0));
+    char8 output_bytes[256] = {'z'};
+    BusterAarch64SyntaxOutput tiny_output = {.pointer = output_bytes, .length = 1, .capacity = 1};
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_print_row(0, (BusterAarch64SyntaxPrintRequest){0}, &tiny_output) &&
+                         tiny_output.length == 1 && output_bytes[0] == 'z');
+    BusterAarch64SyntaxOutput malformed_output = {.pointer = 0, .length = 0, .capacity = 1};
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_print_row(0, (BusterAarch64SyntaxPrintRequest){0}, &malformed_output) &&
+                         malformed_output.length == 0);
+    BusterAarch64SyntaxPrintRequest malformed_request = {.captures = 0, .capture_count = 1};
+    BusterAarch64SyntaxOutput valid_output = {.pointer = output_bytes, .capacity = sizeof(output_bytes)};
+    BUSTER_TEST(arguments, !buster_aarch64_syntax_print_concrete_row(writeback_row, malformed_request, &valid_output) &&
+                         valid_output.length == 0);
     return result;
 }
 
