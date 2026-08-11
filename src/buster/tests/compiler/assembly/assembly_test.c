@@ -1209,6 +1209,38 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         arguments->arena, x86_att_condition_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
     BUSTER_TEST(arguments, x86_att_conditions.diagnostic_count == 0 && x86_att_conditions.bytes.length == sizeof(expected_x86_conditions) &&
                                memcmp(x86_att_conditions.bytes.pointer, expected_x86_conditions, sizeof(expected_x86_conditions)) == 0);
+
+    // CS/DS are the architectural not-taken/taken branch-hint prefixes.  A
+    // literal targets exercise short-displacement sizing (including the
+    // prefix byte) and force a 32-bit displacement for a distant target in
+    // both source syntaxes.
+    AssemblyEncodeResult x86_intel_branch_hints = assembly_encode(
+        arguments->arena, S8("cs jz 0\n"
+                             "ds jnz 0\n"
+                             "cs jz 1000\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_x86_intel_branch_hints[] = {
+        0x2e, 0x74, 0xfd,
+        0x3e, 0x75, 0xfa,
+        0x2e, 0x0f, 0x84, 0xdb, 0x03, 0x00, 0x00,
+    };
+    BUSTER_TEST(arguments, x86_intel_branch_hints.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(x86_intel_branch_hints.bytes, expected_x86_intel_branch_hints,
+                                                         sizeof(expected_x86_intel_branch_hints)));
+    AssemblyEncodeResult x86_att_branch_hints = assembly_encode(
+        arguments->arena, S8("cs jz $0\n"
+                             "ds jnz $0\n"
+                             "cs jz $1000\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, x86_att_branch_hints.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(x86_att_branch_hints.bytes, expected_x86_intel_branch_hints,
+                                                         sizeof(expected_x86_intel_branch_hints)));
+    AssemblyEncodeResult x86_invalid_branch_hints = assembly_encode(
+        arguments->arena, S8("cs mov rax, rbx\n"
+                             "cs ds jz 0\n"
+                             "cs cs jz 0\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, x86_invalid_branch_hints.diagnostic_count == 3);
     Target x86_avx_target = x86_target;
     x86_avx_target.cpu_features_explicit = true;
     x86_avx_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){

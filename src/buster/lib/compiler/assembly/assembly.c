@@ -6686,6 +6686,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     bool lock = false;
     bool rep = false;
     bool repne = false;
+    u8 branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NONE;
     bool source_address_size_seen = false;
     u8 source_address_size = 64;
     String8 work = assembly_trim(statement);
@@ -6730,6 +6731,21 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             }
             source_address_size = 32;
             source_address_size_seen = true;
+        }
+        else if (assembly_word_equal(prefix, S8("cs")) || assembly_word_equal(prefix, S8("ds")))
+        {
+            u8 requested_branch_hint = assembly_word_equal(prefix, S8("cs"))
+                                           ? BUSTER_X86_METADATA_BRANCH_HINT_NOT_TAKEN
+                                           : BUSTER_X86_METADATA_BRANCH_HINT_TAKEN;
+            if (branch_hint != BUSTER_X86_METADATA_BRANCH_HINT_NONE && branch_hint != requested_branch_hint)
+            {
+                return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+            }
+            if (branch_hint == requested_branch_hint)
+            {
+                return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+            }
+            branch_hint = requested_branch_hint;
         }
         else
         {
@@ -7004,6 +7020,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         .lock = lock,
         .rep = rep,
         .repne = repne,
+        .branch_hint = branch_hint,
         .no_flags = no_flags,
         .dfv = dfv,
         .has_dfv = has_dfv,

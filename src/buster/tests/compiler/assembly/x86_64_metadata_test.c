@@ -2093,15 +2093,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        BUSTER_TEST(arguments, audit.emitted_count == 10340 && audit.blocked_count == 673 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10340 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 673);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10448 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 296);
+        BUSTER_TEST(arguments, audit.emitted_count == 10372 && audit.blocked_count == 641 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10372 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 641);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10480 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 264);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 199, 5, 1643, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1533, 192, 5, 1643, 176, 6718, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {279, 7, 0, 0, 0, 10, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1565, 192, 5, 1643, 176, 6718, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {247, 7, 0, 0, 0, 10, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2111,7 +2111,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10340, 268, 108, 99, 0, 198, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10372, 268, 108, 99, 0, 166, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -2438,19 +2438,25 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                    xop_coverage.encoder_family == BUSTER_X86_METADATA_ENCODER_XOP);
 
         u32 branch_hint_count = 0;
-        bool branch_hint_blocked = true;
+        u32 branch_hint_emitted = 0;
+        u32 branch_hint_not64 = 0;
         for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
         {
             BusterX86MetadataForm form = {0};
             if (!buster_x86_metadata_form(form_id, &form)) continue;
-            if (form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
-                x86_64_metadata_test_string_contains(form.pattern, S8("BRANCH_HINT")))
+            if (x86_64_metadata_test_string_contains(form.pattern, S8("BRANCH_HINT")))
             {
-                branch_hint_count += 1;
-                branch_hint_blocked &= ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
+                bool exact_mode64_branch = form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                            (form.mode_flags & BUSTER_X86_METADATA_MODE_64) != 0 &&
+                                            x86_64_metadata_test_string_contains(form.pattern, S8("norex2_prefix")) &&
+                                            x86_64_metadata_test_string_contains(form.pattern, S8("FORCE64()")) &&
+                                            x86_64_metadata_test_string_contains(form.pattern, S8("BRDISP"));
+                branch_hint_count += exact_mode64_branch;
+                branch_hint_emitted += exact_mode64_branch && ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED;
+                branch_hint_not64 += form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64;
             }
         }
-        BUSTER_TEST(arguments, branch_hint_count > 0 && branch_hint_blocked);
+        BUSTER_TEST(arguments, branch_hint_count == 32 && branch_hint_emitted == 32 && branch_hint_not64 == 32);
     }
 
     {
@@ -4620,6 +4626,93 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                    branch32_emit.byte_count == 5 && branch32_relocations[0].offset == 1 &&
                                    branch32_relocations[0].width == 4 && branch32_relocations[0].kind == BUSTER_X86_METADATA_RELOCATION_PC32 &&
                                    branch32_relocations[0].addend == -4);
+
+        // BRANCH_HINT() is a typed legacy CS/DS prefix control.  The raw
+        // cohort's ordinary spelling remains unprefixed, while CS and DS
+        // select the architecturally defined not-taken/taken hints.
+        BusterX86MetadataPhysicalOperand jz_short = x86_64_metadata_test_physical_relative(0, 8);
+        BusterX86MetadataPhysicalAttributes no_hint = {0};
+        BusterX86MetadataPhysicalAttributes not_taken = {.branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NOT_TAKEN};
+        BusterX86MetadataPhysicalAttributes taken = {.branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_TAKEN};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("JZ"), 9805, &jz_short, 1, no_hint, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), (u8[]){0x74, 0x00}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("JZ"), 9805, &jz_short, 1, not_taken, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), (u8[]){0x2e, 0x74, 0x00}, 3));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("JZ"), 9805, &jz_short, 1, taken, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), (u8[]){0x3e, 0x74, 0x00}, 3));
+        BusterX86MetadataPhysicalOperand jz_short_min = x86_64_metadata_test_physical_relative(-128, 8);
+        BusterX86MetadataPhysicalOperand jz_short_max = x86_64_metadata_test_physical_relative(127, 8);
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("JZ"), 9805, &jz_short_min, 1, not_taken, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), (u8[]){0x2e, 0x74, 0x80}, 3));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("JZ"), 9805, &jz_short_max, 1, taken, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), (u8[]){0x3e, 0x74, 0x7f}, 3));
+        BusterX86MetadataPhysicalOperand jz_short_below = x86_64_metadata_test_physical_relative(-129, 8);
+        BusterX86MetadataPhysicalOperand jz_short_above = x86_64_metadata_test_physical_relative(128, 8);
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_form(
+                                   (BusterX86MetadataEmitQuery){.physical = x86_64_metadata_test_physical_query(
+                                                                    S8("JZ"), &jz_short_below, 1, not_taken, wildcard,
+                                                                    BUSTER_ARRAY_LENGTH(wildcard)),
+                                                                .form_id = 9805, .output = (u8[8]){0}, .output_capacity = 8})
+                                   .status == BUSTER_X86_METADATA_ENCODE_RELATIVE_RANGE &&
+                               x86_64_metadata_test_emit_form(
+                                   S8("JZ"), 9805, &jz_short_above, 1, taken, wildcard, BUSTER_ARRAY_LENGTH(wildcard),
+                                   (u8[8]){0}, 8, 0, 0)
+                                       .status == BUSTER_X86_METADATA_ENCODE_RELATIVE_RANGE);
+        BusterX86MetadataPhysicalOperand jz_near = x86_64_metadata_test_physical_relative(0, 32);
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("JZ"), 10249, &jz_near, 1, no_hint, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard),
+                                                                 (u8[]){0x0f, 0x84, 0x00, 0x00, 0x00, 0x00}, 6));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("JZ"), 10249, &jz_near, 1, not_taken, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard),
+                                                                 (u8[]){0x2e, 0x0f, 0x84, 0x00, 0x00, 0x00, 0x00}, 7));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("JZ"), 10249, &jz_near, 1, taken, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard),
+                                                                 (u8[]){0x3e, 0x0f, 0x84, 0x00, 0x00, 0x00, 0x00}, 7));
+        BusterX86MetadataPhysicalOperand jz_symbol = {
+            .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE,
+            .width = 8,
+            .symbol = S8("target"),
+            .has_symbol = true,
+        };
+        BusterX86MetadataRelocation jz_symbol_relocations[2] = {0};
+        BusterX86MetadataPhysicalQuery jz_symbol_query = x86_64_metadata_test_physical_query(
+            S8("JZ"), &jz_symbol, 1, not_taken, wildcard, BUSTER_ARRAY_LENGTH(wildcard));
+        u8 jz_symbol_bytes[8] = {0};
+        BusterX86MetadataEmitResult jz_symbol_emit = buster_x86_metadata_emit_form(
+            (BusterX86MetadataEmitQuery){.physical = jz_symbol_query, .form_id = 9805, .output = jz_symbol_bytes,
+                                         .output_capacity = sizeof(jz_symbol_bytes), .relocations = jz_symbol_relocations,
+                                         .relocation_capacity = BUSTER_ARRAY_LENGTH(jz_symbol_relocations)});
+        BUSTER_TEST(arguments, jz_symbol_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && jz_symbol_emit.byte_count == 3 &&
+                                   jz_symbol_emit.relocation_count == 1 && jz_symbol_relocations[0].offset == 2 &&
+                                   jz_symbol_relocations[0].width == 1 && jz_symbol_relocations[0].kind == BUSTER_X86_METADATA_RELOCATION_PC8 &&
+                                   jz_symbol_relocations[0].addend == -1);
+        BusterX86MetadataPhysicalOperand jz_near_symbol = {
+            .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE,
+            .width = 32,
+            .symbol = S8("target32"),
+            .has_symbol = true,
+        };
+        BusterX86MetadataRelocation jz_near_symbol_relocations[2] = {0};
+        BusterX86MetadataPhysicalQuery jz_near_symbol_query = x86_64_metadata_test_physical_query(
+            S8("JZ"), &jz_near_symbol, 1, taken, wildcard, BUSTER_ARRAY_LENGTH(wildcard));
+        u8 jz_near_symbol_bytes[8] = {0};
+        BusterX86MetadataEmitResult jz_near_symbol_emit = buster_x86_metadata_emit_form(
+            (BusterX86MetadataEmitQuery){.physical = jz_near_symbol_query, .form_id = 10249, .output = jz_near_symbol_bytes,
+                                         .output_capacity = sizeof(jz_near_symbol_bytes),
+                                         .relocations = jz_near_symbol_relocations,
+                                         .relocation_capacity = BUSTER_ARRAY_LENGTH(jz_near_symbol_relocations)});
+        BUSTER_TEST(arguments, jz_near_symbol_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   jz_near_symbol_emit.byte_count == 7 && jz_near_symbol_emit.relocation_count == 1 &&
+                                   jz_near_symbol_relocations[0].offset == 3 && jz_near_symbol_relocations[0].width == 4 &&
+                                   jz_near_symbol_relocations[0].kind == BUSTER_X86_METADATA_RELOCATION_PC32 &&
+                                   jz_near_symbol_relocations[0].addend == -4);
+        BusterX86MetadataPhysicalQuery jz_bad_hint_query = x86_64_metadata_test_physical_query(
+            S8("JZ"), &jz_short, 1, (BusterX86MetadataPhysicalAttributes){.branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_COUNT}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard));
+        BUSTER_TEST(arguments, buster_x86_metadata_select_form(jz_bad_hint_query).status == BUSTER_X86_METADATA_ENCODE_INVALID_INPUT);
+        BusterX86MetadataPhysicalQuery mov_bad_hint_query = x86_64_metadata_test_physical_query(
+            S8("MOV"), 0, 0, not_taken, wildcard, BUSTER_ARRAY_LENGTH(wildcard));
+        BUSTER_TEST(arguments, buster_x86_metadata_select_form(mov_bad_hint_query).status != BUSTER_X86_METADATA_ENCODE_SUCCESS);
         BusterX86MetadataPhysicalOperand branch_auto = x86_64_metadata_test_physical_relative(0, 0);
         BusterX86MetadataPhysicalQuery branch_auto_query = x86_64_metadata_test_physical_query(
             S8("JMP"), &branch_auto, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard));

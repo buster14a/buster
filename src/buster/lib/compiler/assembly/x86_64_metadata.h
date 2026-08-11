@@ -641,6 +641,18 @@ typedef enum BusterX86MetadataRoundingMode
     BUSTER_X86_METADATA_ROUNDING_COUNT,
 } BusterX86MetadataRoundingMode;
 
+// Legacy x86 conditional branches accept CS/DS segment-prefix spellings as
+// static branch hints.  Keep this as a typed control rather than folding it
+// into the unrelated REP/segment-memory attributes: NONE emits the ordinary
+// branch, NOT_TAKEN emits CS (2e), and TAKEN emits DS (3e).
+typedef enum BusterX86MetadataBranchHint
+{
+    BUSTER_X86_METADATA_BRANCH_HINT_NONE,
+    BUSTER_X86_METADATA_BRANCH_HINT_NOT_TAKEN,
+    BUSTER_X86_METADATA_BRANCH_HINT_TAKEN,
+    BUSTER_X86_METADATA_BRANCH_HINT_COUNT,
+} BusterX86MetadataBranchHint;
+
 typedef struct BusterX86MetadataPhysicalAttributes BusterX86MetadataPhysicalAttributes;
 struct BusterX86MetadataPhysicalAttributes
 {
@@ -657,6 +669,7 @@ struct BusterX86MetadataPhysicalAttributes
     bool lock;
     bool rep;
     bool repne;
+    u8 branch_hint;
     u8 dfv;
     bool has_dfv;
     u8 reserved[1];

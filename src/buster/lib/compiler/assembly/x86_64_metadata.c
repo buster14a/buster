@@ -655,6 +655,8 @@ struct BusterX86MetadataPatternSemantics
     u8 has_dynamic_opcode;
     u8 has_unsupported_token;
     u8 has_prefix_control;
+    u8 has_branch_hint_control;
+    u8 has_force64_control;
     u8 has_address_control;
     u8 has_decorator_control;
     u8 has_apx_control;
@@ -1520,6 +1522,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("FORCE64()")))
         {
             pattern.has_prefix_control = 1;
+            if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("FORCE64()")))
+                pattern.has_force64_control = 1;
             if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("no_refining_prefix")))
                 pattern.forbid_mandatory_prefix = 1;
         }
@@ -1563,9 +1567,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
         {
             pattern.has_prefix_control = 1;
             // Legacy branch hints are CS/DS overrides (2e/3e), not REP/F2/F3.
-            // The typed API has no branch-hint field, so do not infer one from
-            // the unrelated string-repeat attributes.
-            buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS);
+            // Keep this as a dedicated control so the exact mode64/norex2
+            // conditional-branch cohort can select either hint or no hint.
+            pattern.has_branch_hint_control = 1;
         }
         else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("BCRC=")))
         {
@@ -1787,6 +1791,15 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
     // carry the corresponding constraint into the byte path.
     if (pattern.has_prefix_kind && form.prefix_kind != pattern.prefix_kind)
         return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
+    // BRANCH_HINT is only implemented for the normalized 64-bit conditional
+    // branch rows carrying the legacy/no-REX2 contract.  Keep adjacent
+    // not64/policy rows and any future non-relative use blocked rather than
+    // treating the token as a generic prefix permission.
+    if (pattern.has_branch_hint_control &&
+        (!(form.mode_flags & BUSTER_X86_METADATA_MODE_64) || !pattern.no_rex2 || !pattern.has_force64_control ||
+         pattern.relative_count != 1 ||
+         (pattern.relative_width != 1 && pattern.relative_width != 4)))
+        return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
     if (pattern.has_ignore_66 && pattern.mandatory_prefix == 0x66)
         return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
     if (pattern.rep_not_f3 && (pattern.mandatory_prefix == 0xf3 || form.mandatory_prefix == 0xf3))
@@ -1808,6 +1821,7 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
                                  pattern.no_vector_source || pattern.no_scc || pattern.forbid_mandatory_prefix ||
                                  pattern.lock_control || pattern.rep_control || pattern.rep_not_f3 || pattern.no_rex2 ||
                                  pattern.has_modep5 || pattern.has_rep_selector || pattern.has_segment_override ||
+                                 pattern.has_branch_hint_control ||
                                  pattern.immune66_loop64 || buster_x86_metadata_emit_canonical_df64(form, pattern) ||
                                  (form.mode_flags & (BUSTER_X86_METADATA_MODE_16 | BUSTER_X86_METADATA_MODE_32 |
                                                      BUSTER_X86_METADATA_MODE_64 | BUSTER_X86_METADATA_MODE_NOT64));
@@ -1942,6 +1956,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_physical_query_valid(BusterX86
         query.attributes.decorator_flags & ~BUSTER_X86_METADATA_DECORATOR_FLAGS_ALL ||
         query.attributes.apx_flags & ~BUSTER_X86_METADATA_APX_FLAGS_ALL ||
         query.attributes.amx_flags & ~BUSTER_X86_METADATA_AMX_FLAGS_ALL ||
+        query.attributes.branch_hint >= BUSTER_X86_METADATA_BRANCH_HINT_COUNT ||
         // The scalar fields are the typed payload and decorator_flags is the
         // compact resolver-facing projection.  They must agree in both
         // directions; otherwise selection can choose a decorated form while
@@ -3537,6 +3552,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     BusterX86MetadataPatternSemantics pattern = {0};
     if (!buster_x86_metadata_emit_parse_pattern(form, &pattern)) return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
     if (pattern.unresolved_blocker) return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
+    if (query.attributes.branch_hint != BUSTER_X86_METADATA_BRANCH_HINT_NONE && !pattern.has_branch_hint_control)
+        return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+    if (pattern.has_branch_hint_control && (query.attributes.lock || query.attributes.rep || query.attributes.repne))
+        return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if (!buster_x86_metadata_prefetchit_address_valid(query)) return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
     if (buster_x86_metadata_emit_pattern_control_blocker(form, pattern) != BUSTER_X86_METADATA_BLOCKER_NONE)
         return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
@@ -3943,6 +3962,12 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     if (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY || form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX ||
         form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2)
     {
+        if (pattern.has_branch_hint_control && query.attributes.branch_hint != BUSTER_X86_METADATA_BRANCH_HINT_NONE)
+        {
+            u8 branch_hint_prefix = query.attributes.branch_hint == BUSTER_X86_METADATA_BRANCH_HINT_NOT_TAKEN ? 0x2e : 0x3e;
+            if (!buster_x86_metadata_emit_write_byte(scratch, branch_hint_prefix))
+                return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
+        }
         if (query.attributes.lock && !buster_x86_metadata_emit_write_byte(scratch, 0xf0)) return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
         if (query.attributes.rep && mandatory_prefix != 0xf3 && !buster_x86_metadata_emit_write_byte(scratch, 0xf3))
             return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
@@ -4390,6 +4415,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_eamode_alias_forms(BusterX86Metadat
         first_pattern.has_dynamic_opcode != second_pattern.has_dynamic_opcode ||
         first_pattern.has_unsupported_token != second_pattern.has_unsupported_token ||
         first_pattern.has_prefix_control != second_pattern.has_prefix_control ||
+        first_pattern.has_branch_hint_control != second_pattern.has_branch_hint_control ||
+        first_pattern.has_force64_control != second_pattern.has_force64_control ||
         first_pattern.has_address_control != second_pattern.has_address_control ||
         first_pattern.has_decorator_control != second_pattern.has_decorator_control ||
         first_pattern.has_apx_control != second_pattern.has_apx_control || first_pattern.has_amx_control != second_pattern.has_amx_control ||
