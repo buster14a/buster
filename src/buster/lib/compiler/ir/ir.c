@@ -4577,6 +4577,44 @@ struct IrAbiClassificationTask
     u64 offset;
 };
 
+BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_class_is_x87(IrAbiClass abi_class)
+{
+    return abi_class == IR_ABI_CLASS_X87 || abi_class == IR_ABI_CLASS_X87_UP;
+}
+
+// Merge one field's class into an eightbyte using the System V AMD64
+// post-merge precedence.  The existing IR model has one SSE-like FLOAT class
+// (rather than separate SSE/SSEUP classes); preserve that behavior while
+// making x87 classes explicit.  An x87 class may only merge with the same
+// x87 class.  Any other overlap is MEMORY, which also invalidates an X87_UP
+// tail that no longer accompanies X87.
+BUSTER_GLOBAL_LOCAL IrAbiClass ir_system_v_abi_class_merge(IrAbiClass left, IrAbiClass right)
+{
+    if (left == IR_ABI_CLASS_MEMORY || right == IR_ABI_CLASS_MEMORY)
+    {
+        return IR_ABI_CLASS_MEMORY;
+    }
+    if (left == IR_ABI_CLASS_NONE)
+    {
+        return right;
+    }
+    if (right == IR_ABI_CLASS_NONE)
+    {
+        return left;
+    }
+    if (left == right)
+    {
+        return left;
+    }
+    if (ir_system_v_abi_class_is_x87(left) || ir_system_v_abi_class_is_x87(right))
+    {
+        return IR_ABI_CLASS_MEMORY;
+    }
+    // Preserve the previous INTEGER-over-FLOAT merge for all existing
+    // scalar/vector aggregates.  There are no SSEUP classes in this model.
+    return IR_ABI_CLASS_INTEGER;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId root_type, IrAbiClass classes[2])
 {
     IrType* root = ir_type_from_id(&program->types, root_type);
@@ -4635,6 +4673,22 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
             }
             continue;
         }
+        if (type->kind == IR_TYPE_FLOAT && type->bit_width == 80 && type->layout.size == 16)
+        {
+            // SysV's 80-bit long double occupies two eightbytes: X87 for the
+            // value and X87_UP for the trailing storage/padding.  The layout
+            // alignment check above requires the X87 value to begin on a
+            // 16-byte boundary, as the target ABI does.
+            u32 first = (u32)(task.offset / 8);
+            if (first >= 2 || first + 1 >= 2)
+            {
+                valid = false;
+                break;
+            }
+            classes[first] = ir_system_v_abi_class_merge(classes[first], IR_ABI_CLASS_X87);
+            classes[first + 1] = ir_system_v_abi_class_merge(classes[first + 1], IR_ABI_CLASS_X87_UP);
+            continue;
+        }
         IrAbiClass abi_class = type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_VECTOR ? IR_ABI_CLASS_FLOAT : IR_ABI_CLASS_INTEGER;
         bool scalar = type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_POINTER ||
                       type->kind == IR_TYPE_FUNCTION || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_ENUM;
@@ -4652,14 +4706,7 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
                 valid = false;
                 break;
             }
-            if (classes[part] == IR_ABI_CLASS_NONE)
-            {
-                classes[part] = abi_class;
-            }
-            else if (classes[part] != abi_class)
-            {
-                classes[part] = IR_ABI_CLASS_INTEGER;
-            }
+            classes[part] = ir_system_v_abi_class_merge(classes[part], abi_class);
         }
     }
     scratch_end(temporary);
@@ -4751,6 +4798,40 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
     {
         if (type->kind == IR_TYPE_FLOAT)
         {
+            if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && type->bit_width == 80 && size == 16)
+            {
+                if (is_result)
+                {
+                    // A scalar long double returns directly in ST0.  Keep
+                    // both eightbyte classes in the neutral ABI model so a
+                    // consumer can validate the x87 result shape without
+                    // inventing a hidden result pointer.
+                    value.part_count = 2;
+                    value.parts[0] = (IrAbiPart){
+                        .abi_class = IR_ABI_CLASS_X87,
+                        .value_offset = 0,
+                        .size = 8,
+                    };
+                    value.parts[1] = (IrAbiPart){
+                        .abi_class = IR_ABI_CLASS_X87_UP,
+                        .value_offset = 8,
+                        .size = 8,
+                    };
+                }
+                else
+                {
+                    // SysV arguments (including variadic arguments) carry
+                    // long double by value in a 16-byte-aligned memory slot;
+                    // this is not an indirect/sret pointer argument.
+                    value.part_count = 1;
+                    value.memory = true;
+                    value.parts[0] = (IrAbiPart){
+                        .abi_class = IR_ABI_CLASS_MEMORY,
+                        .size = (u32)size,
+                    };
+                }
+                return value;
+            }
             if (type->bit_width > 64)
             {
                 value.part_count = 1;
@@ -4939,6 +5020,43 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
     IrAbiClass classes[2] = {0};
     if (!ir_system_v_abi_classes(program, type_id, classes))
     {
+        value.part_count = 1;
+        value.indirect = is_result;
+        value.memory = !is_result;
+        value.parts[0] = (IrAbiPart){
+            .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+            .size = is_result ? 8 : (u32)size,
+        };
+        return value;
+    }
+    bool has_x87 = false;
+    bool has_memory = false;
+    for (u32 part = 0; part < 2; part += 1)
+    {
+        has_x87 |= ir_system_v_abi_class_is_x87(classes[part]);
+        has_memory |= classes[part] == IR_ABI_CLASS_MEMORY;
+    }
+    if (has_memory || (has_x87 && !is_result))
+    {
+        // X87/X87_UP arguments are memory-class values in SysV, as are
+        // aggregates whose fields merged incompatibly with an x87 class.
+        // Keep `indirect` clear for arguments: only a result uses a hidden
+        // pointer when the aggregate cannot be returned directly.
+        value.part_count = 1;
+        value.indirect = is_result;
+        value.memory = !is_result;
+        value.parts[0] = (IrAbiPart){
+            .abi_class = is_result ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_MEMORY,
+            .size = is_result ? 8 : (u32)size,
+        };
+        return value;
+    }
+    if (has_x87 && (classes[0] != IR_ABI_CLASS_X87 || classes[1] != IR_ABI_CLASS_X87_UP || size != 16))
+    {
+        // X87_UP is meaningful only as the second half of the canonical
+        // long-double pair.  A malformed/incompatible aggregate is therefore
+        // returned indirectly rather than exposing a register shape that no
+        // SysV caller can consume.
         value.part_count = 1;
         value.indirect = is_result;
         value.memory = !is_result;

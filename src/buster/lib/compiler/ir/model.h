@@ -217,6 +217,12 @@ typedef enum IrAbiClass
     IR_ABI_CLASS_POINTER,
     IR_ABI_CLASS_AGGREGATE,
     IR_ABI_CLASS_MEMORY,
+    // System V x86-64 uses this pair for an 80-bit x87 value.  The upper
+    // eightbyte is padding/storage rather than a second independent value,
+    // but keeping the X87_UP class explicit lets aggregate postprocessing
+    // distinguish a valid long-double result from an incompatible merge.
+    IR_ABI_CLASS_X87,
+    IR_ABI_CLASS_X87_UP,
     IR_ABI_CLASS_COUNT,
 } IrAbiClass;
 
