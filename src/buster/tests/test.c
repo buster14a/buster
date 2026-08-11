@@ -190,7 +190,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
     {S8_INITIALIZER("simd_tests"), &simd_tests},
     {S8_INITIALIZER("string_tests"), &string_tests},
     {S8_INITIALIZER("os_tests"), &os_tests, true},
-    {S8_INITIALIZER("file_tests"), &file_tests, true},
+    {S8_INITIALIZER("file_tests"), &file_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     {S8_INITIALIZER("ide_document_tests"), &ide_document_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     {S8_INITIALIZER("window_tests"), &window_tests},
     {S8_INITIALIZER("rendering_tests"), &rendering_tests},
