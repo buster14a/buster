@@ -710,6 +710,15 @@ struct BusterX86MetadataPatternSemantics
     u8 unresolved_blocker;
 };
 
+enum
+{
+    // XED publishes NELEM_MEM128 forms with the ordinary FULL tuple kind, but
+    // their memory width and compressed-displacement scale are fixed at 128
+    // bits.  Keep that distinction in the parsed pattern only; the generated
+    // and public tuple enums remain byte-for-byte compatible with XED.
+    BUSTER_X86_METADATA_PATTERN_TUPLE_MEM128 = BUSTER_X86_METADATA_TUPLE_COUNT,
+};
+
 typedef struct BusterX86MetadataPhysicalBinding BusterX86MetadataPhysicalBinding;
 struct BusterX86MetadataPhysicalBinding
 {
@@ -1366,9 +1375,10 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             {
                 pattern.has_tuple_control = 1;
                 if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("NELEM_FULL()")) ||
-                    buster_x86_metadata_emit_token_equal(token_buffer, length, S8("NELEM_FULLMEM()")) ||
-                    buster_x86_metadata_emit_token_equal(token_buffer, length, S8("NELEM_MEM128()")))
+                    buster_x86_metadata_emit_token_equal(token_buffer, length, S8("NELEM_FULLMEM()")))
                     pattern.tuple_control_kind = BUSTER_X86_METADATA_TUPLE_FULL;
+                else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("NELEM_MEM128()")))
+                    pattern.tuple_control_kind = BUSTER_X86_METADATA_PATTERN_TUPLE_MEM128;
                 else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("NELEM_HALF()")) ||
                          buster_x86_metadata_emit_token_equal(token_buffer, length, S8("NELEM_HALFMEM()")))
                     pattern.tuple_control_kind = BUSTER_X86_METADATA_TUPLE_HALF;
@@ -1756,9 +1766,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_apx_fixed_width_no_w(BusterX86
 }
 
 BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_element_size_bits(BusterX86MetadataForm form);
-BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_has_memory128_tuple(BusterX86MetadataForm form);
-BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_tuple_memory_width(BusterX86MetadataForm form,
-                                                                     BusterX86MetadataPatternSemantics pattern);
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_tuple_memory_width(BusterX86MetadataPatternSemantics pattern);
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_has_implicit_immediate(BusterX86MetadataForm form)
 {
@@ -1828,8 +1836,13 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
         return BUSTER_X86_METADATA_BLOCKER_DECORATOR_FIELDS;
     if (pattern.has_rounding_control && !(form.decorator_flags & BUSTER_X86_METADATA_DECORATOR_ROUNDING))
         return BUSTER_X86_METADATA_BLOCKER_DECORATOR_FIELDS;
-    if (pattern.has_tuple_control && form.tuple_kind != pattern.tuple_control_kind)
-        return BUSTER_X86_METADATA_BLOCKER_ADDRESSING_FIELDS;
+    if (pattern.has_tuple_control)
+    {
+        u8 required_tuple_kind = pattern.tuple_control_kind == BUSTER_X86_METADATA_PATTERN_TUPLE_MEM128
+                                     ? BUSTER_X86_METADATA_TUPLE_FULL
+                                     : pattern.tuple_control_kind;
+        if (form.tuple_kind != required_tuple_kind) return BUSTER_X86_METADATA_BLOCKER_ADDRESSING_FIELDS;
+    }
     if (pattern.has_vsib_control && !(form.field_flags & BUSTER_X86_METADATA_FIELD_VSIB))
         return BUSTER_X86_METADATA_BLOCKER_ADDRESSING_FIELDS;
     if (pattern.has_element_size_control && buster_x86_metadata_emit_element_size_bits(form) != pattern.element_size_bits)
@@ -2935,7 +2948,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_semantics(BusterX
         }
         if (binding.physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && binding.physical.memory.source_width > 64)
         {
-            u16 tuple_memory_width = buster_x86_metadata_emit_tuple_memory_width(form, pattern);
+            u16 tuple_memory_width = buster_x86_metadata_emit_tuple_memory_width(pattern);
             if (tuple_memory_width && binding.physical.memory.source_width != tuple_memory_width) return false;
             u16 source_width_flags = buster_x86_metadata_emit_width_flags(binding.physical.memory.source_width);
             u16 schema_width_flags = binding.metadata.physical_width_flags;
@@ -3197,16 +3210,10 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_element_size_bits(BusterX86Meta
     return 8;
 }
 
-BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_has_memory128_tuple(BusterX86MetadataForm form)
-{
-    return buster_x86_metadata_emit_string_has(form.pattern, S8("NELEM_MEM128()"));
-}
-
-BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_tuple_memory_width(BusterX86MetadataForm form,
-                                                                     BusterX86MetadataPatternSemantics pattern)
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_tuple_memory_width(BusterX86MetadataPatternSemantics pattern)
 {
     if (!pattern.has_tuple_control || !pattern.vector_length) return 0;
-    if (buster_x86_metadata_emit_form_has_memory128_tuple(form)) return 128;
+    if (pattern.tuple_control_kind == BUSTER_X86_METADATA_PATTERN_TUPLE_MEM128) return 128;
     u16 divisor = 0;
     switch (pattern.tuple_control_kind)
     {
@@ -3224,7 +3231,7 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_tuple_scale(BusterX86MetadataFor
                                                               BusterX86MetadataPatternSemantics pattern)
 {
     if (!form.displacement_scale) return 1;
-    if (buster_x86_metadata_emit_form_has_memory128_tuple(form)) return 16;
+    if (pattern.tuple_control_kind == BUSTER_X86_METADATA_PATTERN_TUPLE_MEM128) return 16;
     u16 element_bits = pattern.has_element_size_control ? pattern.element_size_bits
                                                          : buster_x86_metadata_emit_element_size_bits(form);
     u32 element = element_bits && element_bits % 8 == 0 ? element_bits / 8 : 0;
@@ -4367,7 +4374,6 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_eamode_alias_forms(BusterX86Metadat
         first_pattern.apx_fixed_width_no_w_isa != second_pattern.apx_fixed_width_no_w_isa ||
         first_pattern.no_scc != second_pattern.no_scc || first_pattern.short_ud0 != second_pattern.short_ud0 ||
         first_pattern.has_tuple_control != second_pattern.has_tuple_control || first_pattern.tuple_control_kind != second_pattern.tuple_control_kind ||
-        buster_x86_metadata_emit_form_has_memory128_tuple(first) != buster_x86_metadata_emit_form_has_memory128_tuple(second) ||
         first_pattern.has_tile_control != second_pattern.has_tile_control ||
         first_pattern.vsib_vector_length != second_pattern.vsib_vector_length ||
         first_pattern.has_element_size_control != second_pattern.has_element_size_control ||
