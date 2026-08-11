@@ -843,6 +843,7 @@ buster_register_module(compiler_aarch64_encoding "${BUSTER_SOURCE_DIR}/compiler/
 buster_register_module(compiler_aarch64_control_semantics "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_control_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_system_registers "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_system_registers${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_semantics "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_semantics${COMMON_EXTENSION}")
+buster_register_module(compiler_aarch64_system_semantics "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_system_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly "${BUSTER_SOURCE_DIR}/compiler/assembly/assembly${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly_metadata "${BUSTER_SOURCE_DIR}/compiler/assembly/x86_64_metadata${COMMON_EXTENSION}")
 buster_register_module(compiler_ir "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTENSION}")
@@ -892,6 +893,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c
     src/buster/tests/compiler/assembly/aarch64_system_registers_test.c
     src/buster/tests/compiler/assembly/aarch64_semantics_test.c
+    src/buster/tests/compiler/assembly/aarch64_system_semantics_test.c
     src/buster/tests/compiler/assembly/assembly_test.c
     src/buster/tests/compiler/assembly/x86_64_metadata_test.c
     src/buster/tests/compiler/ir/ir_test.c
@@ -928,6 +930,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.h
     src/buster/tests/compiler/assembly/aarch64_system_registers_test.h
     src/buster/tests/compiler/assembly/aarch64_semantics_test.h
+    src/buster/tests/compiler/assembly/aarch64_system_semantics_test.h
     src/buster/tests/compiler/assembly/assembly_test.h
     src/buster/tests/compiler/assembly/x86_64_metadata_test.h
     src/buster/tests/compiler/ir/ir_test.h
@@ -1771,6 +1774,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_aarch64_control_semantics
     compiler_aarch64_system_registers
     compiler_aarch64_semantics
+    compiler_aarch64_system_semantics
     compiler_assembly
     compiler_assembly_metadata
     compiler_ir
