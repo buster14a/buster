@@ -169,17 +169,24 @@ not only the 516-page convenience index, and retains one row per encoding with
 fixed bits, split fields, unresolved constraints, aliases, assembly templates,
 functional equivalent-template text and alias conditions with source markup
 and descriptive attributes removed,
-page-level instruction class, and the original `arch_variant` predicate. Hex
-bit masks and values are JSON strings (for example `"0xff800000"`) so the
-JSONL remains standards-compliant while preserving the canonical spelling.
+page-level instruction class, named box/cell constraints, and the original
+`arch_variant` predicate. Alias rows retain a separately sanitized target
+encoding ID and are checked to resolve to exactly one canonical row. Hex bit
+masks and values are JSON strings (for example `"0xff800000"`) so the JSONL
+remains standards-compliant while preserving the canonical spelling.
 
 The release archive is `ISA_A64_xml_A_profile-2026-06.tar.gz` with SHA-256
 `63a01a1696483bbe2edfef9e0f0cd053d6c1c619ec0587876cb7a60bb344f354`. The raw
 XML remains outside the repository under Arm's distribution terms; the
 manifest records the stable source URL, archive checksum, and aggregate source
-hash without embedding a machine-local directory. The pinned
-snapshot has 2,292 pages (2,122 instruction and 170 alias), 3,502
-iclasses/regdiagrams, and 4,623 encodings. Its Apple-A14/M1 Boolean closure
+hash without embedding a machine-local directory. The pinned snapshot has
+2,292 pages (2,121 instruction, 170 alias, and 1 pseudocode),
+3,502 iclasses/regdiagrams, and 4,623 encodings. The importer verifies the
+complete 2,316-file top-level regular-input set (2,299 XML plus DTD/XSL/CSS/SVG
+support files; nested `xhtml/` and diff presentation trees are excluded) using
+FNV-1a-64 digest `0xba0c8fc560297896` before attributing the archive identity.
+The archive SHA-256 remains the cryptographic anchor; the FNV digest is the
+deterministic extracted-tree verification seam. Its Apple-A14/M1 Boolean closure
 selects 1,695 rows (1,523 canonical and 172 aliases), including 42 page-level
 system rows; excluding system rows leaves 1,653 (1,490 canonical and 163
 aliases). Acceptance remains blocked pending semantic operand and
@@ -194,10 +201,11 @@ byte across two runs:
   /tmp/arm-a64-generated
 ```
 
-The reduced source does not contain an `AArch64InstAlias` class, so its alias
-count is honestly zero and no alias preservation is claimed. The full raw
-path detects an alias class if present and blocks because separate alias
-record import/canonical linking is not implemented in this tranche.
+The importer rejects source-tree mutations before emitting artifacts and
+rejects duplicate canonical IDs/digests or unresolved alias targets. Run the
+command twice into separate directories and byte-compare both generated
+files (the source digest and parser self-tests provide an in-process
+deterministic verification seam).
 
 ## Regeneration
 

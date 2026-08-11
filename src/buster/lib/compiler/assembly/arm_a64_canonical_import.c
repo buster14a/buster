@@ -62,10 +62,22 @@ struct ArmA64Bit
     String8 field;
 };
 
+typedef struct ArmA64BoxConstraint ArmA64BoxConstraint;
+struct ArmA64BoxConstraint
+{
+    String8 name;
+    String8 constraint;
+    String8 pattern;
+    u8 hibit;
+    u8 width;
+};
+
 typedef struct ArmA64Layout ArmA64Layout;
 struct ArmA64Layout
 {
     ArmA64Bit bits[32];
+    ArmA64BoxConstraint boxes[64];
+    u32 box_count;
 };
 
 typedef struct ArmA64Page ArmA64Page;
@@ -107,6 +119,7 @@ struct ArmA64CanonicalRow
     String8 kind;
     String8 alias_to_file;
     String8 alias_to_id;
+    String8 alias_to_encoding_id;
     String8 assembly;
     String8 equivalent;
     String8 alias_condition;
@@ -122,6 +135,8 @@ struct ArmA64CanonicalRow
     u32 explicit_unresolved_mask;
     u32 field_count;
     ArmA64Field fields[32];
+    u32 box_count;
+    ArmA64BoxConstraint boxes[64];
     bool apple_m1;
     bool system;
     u64 digest;
@@ -439,6 +454,159 @@ static int arm_a64_page_compare(const void* left_pointer, const void* right_poin
     return result ? result : (left->file.length > right->file.length) - (left->file.length < right->file.length);
 }
 
+typedef struct ArmA64SourceFile ArmA64SourceFile;
+struct ArmA64SourceFile
+{
+    String8 relative;
+};
+
+static int arm_a64_source_file_compare(const void* left_pointer, const void* right_pointer)
+{
+    const ArmA64SourceFile* left = left_pointer;
+    const ArmA64SourceFile* right = right_pointer;
+    u64 count = BUSTER_MIN(left->relative.length, right->relative.length);
+    int result = count ? memcmp(left->relative.pointer, right->relative.pointer, count) : 0;
+    return result ? result : (left->relative.length > right->relative.length) - (left->relative.length < right->relative.length);
+}
+
+static bool arm_a64_source_path_excluded(String8 relative)
+{
+    /* XHTML is a generated presentation tree, not a source input.  Keep this
+       exclusion explicit and stable in the manifest's digest scope. */
+    return relative.length >= 5 && string_slice(relative, 0, 5).pointer[0] == 'x' &&
+           string_slice(relative, 0, 5).pointer[1] == 'h' && string_slice(relative, 0, 5).pointer[2] == 't' &&
+           string_slice(relative, 0, 5).pointer[3] == 'm' && string_slice(relative, 0, 5).pointer[4] == 'l' &&
+           (relative.length == 5 || relative.pointer[5] == '/');
+}
+
+static bool arm_a64_source_file_add(Arena* arena, String8 relative, ArmA64SourceFile* files, u32* count, u32 capacity)
+{
+    if (arm_a64_source_path_excluded(relative) || !relative.length || *count >= capacity) return false;
+    for (u32 index = 0; index < *count; index += 1)
+    {
+        if (string_equal(files[index].relative, relative)) return false;
+    }
+    files[(*count)++].relative = string_duplicate_arena(arena, relative, true);
+    return true;
+}
+
+static bool arm_a64_source_tree_collect(Arena* arena, Arena* scratch, String8 source, String8 relative,
+                                        ArmA64SourceFile* files, u32* count, u32 capacity)
+{
+    String8 directory_path = relative.length ? path_join(scratch, source, relative) : source;
+#if BUSTER_WINDOWS
+    String8 pattern = path_join(scratch, directory_path, S8("*"));
+    String16 pattern_w = string16_from_string8(scratch, pattern, true);
+    WIN32_FIND_DATAW find_data;
+    HANDLE find = FindFirstFileW(pattern_w.pointer, &find_data);
+    if (find == INVALID_HANDLE_VALUE) return false;
+    bool valid = true;
+    do
+    {
+        String8 name = string8_from_string16(scratch,
+                                              (String16){.pointer = find_data.cFileName, .length = string16_length(find_data.cFileName)}, true);
+        if (string_equal(name, S8(".")) || string_equal(name, S8(".."))) continue;
+        String8 child = relative.length ? string_format_z(scratch, S8("{S8}/{S8}"), relative, name) : name;
+        if (arm_a64_source_path_excluded(child)) continue;
+        bool directory = (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        bool reparse = (find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+        if (reparse) { valid = false; break; }
+        if (directory)
+        {
+            /* The importer consumes the archive's top-level source inputs.
+               Nested presentation/diff trees are intentionally outside this
+               identity scope; in particular xhtml/ is generated output. */
+            continue;
+        }
+        else
+        {
+            valid = arm_a64_source_file_add(arena, child, files, count, capacity);
+        }
+        if (!valid) break;
+    } while (FindNextFileW(find, &find_data));
+    if (valid && GetLastError() != ERROR_NO_MORE_FILES) valid = false;
+    FindClose(find);
+    return valid;
+#else
+    String8 directory_z = string_duplicate_arena(scratch, directory_path, true);
+    DIR* directory = opendir((const char*)directory_z.pointer);
+    if (!directory) return false;
+    bool valid = true;
+    errno = 0;
+    struct dirent* entry = 0;
+    while ((entry = readdir(directory)) != 0)
+    {
+        String8 name = string_from_pointer((char8*)entry->d_name);
+        if (string_equal(name, S8(".")) || string_equal(name, S8(".."))) continue;
+        String8 child = relative.length ? string_format_z(scratch, S8("{S8}/{S8}"), relative, name) : name;
+        if (arm_a64_source_path_excluded(child)) continue;
+        String8 child_path = path_join(scratch, source, child);
+        String8 child_z = string_duplicate_arena(scratch, child_path, true);
+        struct stat info;
+        if (lstat((const char*)child_z.pointer, &info) != 0) { valid = false; break; }
+        if (S_ISLNK(info.st_mode)) { valid = false; break; }
+        if (S_ISDIR(info.st_mode))
+        {
+            /* See the Windows branch: only top-level regular source inputs
+               participate in the pinned identity digest. */
+            continue;
+        }
+        else if (S_ISREG(info.st_mode))
+        {
+            valid = arm_a64_source_file_add(arena, child, files, count, capacity);
+        }
+        if (!valid) break;
+    }
+    if (errno != 0) valid = false;
+    closedir(directory);
+    return valid;
+#endif
+}
+
+static u64 arm_a64_fnv1a_update(u64 hash, const u8* pointer, u64 length)
+{
+    for (u64 index = 0; index < length; index += 1)
+    {
+        hash ^= pointer[index];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static bool arm_a64_source_tree_digest(Arena* arena, String8 source, u32* file_count_out, u64* digest_out)
+{
+    TemporalArena scratch_scope = scratch_begin(&arena, 1);
+    Arena* scratch = scratch_scope.arena;
+    ArmA64SourceFile* files = arena_allocate(arena, ArmA64SourceFile, 5000);
+    u32 file_count = 0;
+    if (!arm_a64_source_tree_collect(arena, scratch, source, (String8){0}, files, &file_count, 5000))
+    {
+        scratch_end(scratch_scope);
+        return false;
+    }
+    qsort(files, file_count, sizeof(files[0]), arm_a64_source_file_compare);
+    u64 digest = UINT64_C(14695981039346656037);
+    for (u32 index = 0; index < file_count; index += 1)
+    {
+        ArmA64SourceFile file = files[index];
+        digest = arm_a64_fnv1a_update(digest, (u8*)file.relative.pointer, file.relative.length);
+        digest = arm_a64_fnv1a_update(digest, (u8*)"\0", 1);
+        String8 path = path_join(scratch, source, file.relative);
+        ByteSlice bytes = file_read(scratch, path, (FileReadOptions){.end_padding = 1});
+        if (!bytes.pointer && bytes.length) { scratch_end(scratch_scope); return false; }
+        u64 length = bytes.length;
+        u8 length_bytes[8];
+        for (u32 byte = 0; byte < 8; byte += 1) length_bytes[byte] = (u8)(length >> (byte * 8));
+        digest = arm_a64_fnv1a_update(digest, length_bytes, 8);
+        digest = arm_a64_fnv1a_update(digest, bytes.pointer, bytes.length);
+        arena_set_position(scratch, scratch_scope.position);
+    }
+    *file_count_out = file_count;
+    *digest_out = digest;
+    scratch_end(scratch_scope);
+    return true;
+}
+
 /* Read just enough of a source document to decide whether it is one of the
    release's instructionsection pages.  The release directory also contains
    indexes, stylesheets, and other XML support files; only pages with this
@@ -503,6 +671,7 @@ static bool arm_a64_enumerate_pages(Arena* arena, String8 source, ArmA64Page* pa
                                               (String16){.pointer = find_data.cFileName, .length = string16_length(find_data.cFileName)}, true);
         if (string_equal(name, S8(".")) || string_equal(name, S8(".."))) continue;
         if (find_data.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+        if (!string_ends_with_sequence_insensitive(name, S8(".xml"))) continue;
         u64 page_mark = scratch->position;
         valid = arm_a64_page_add(arena, scratch, source_z, name, pages, &count, capacity);
         arena_set_position(scratch, page_mark);
@@ -568,9 +737,14 @@ static void arm_a64_layout_apply_value(ArmA64Layout* layout, u32 bit, String8 va
     else
     {
         layout->bits[bit].kind = ARM_A64_BIT_UNRESOLVED;
-        layout->bits[bit].field = (String8){0};
+        /* Keep the named field even when the cell is an x/constraint.  The
+           mask remains unresolved, while the functional field identity is
+           retained for later operand semantics (for example BTI.op2). */
+        layout->bits[bit].field = field;
     }
 }
+
+static String8 arm_a64_xml_decode(Arena* arena, String8 value);
 
 static bool arm_a64_layout_box(Arena* arena, String8 text, ArmA64XmlTag box, ArmA64Layout* layout, bool overlay)
 {
@@ -581,6 +755,32 @@ static bool arm_a64_layout_box(Arena* arena, String8 text, ArmA64XmlTag box, Arm
     if (width_raw.length && !arm_a64_parse_u32(width_raw, &width)) return false;
     if (!width || width > 32 || hibit + 1 < width) return false;
     String8 field = arm_a64_tag_attr(box, S8("name"));
+    u32 box_index = UINT32_MAX;
+    if (overlay)
+    {
+        for (u32 index = 0; index < layout->box_count; index += 1)
+        {
+            if (layout->boxes[index].hibit == hibit && layout->boxes[index].width == width &&
+                string_equal(layout->boxes[index].name, field))
+            {
+                box_index = index;
+                break;
+            }
+        }
+    }
+    if (box_index == UINT32_MAX)
+    {
+        if (layout->box_count >= BUSTER_ARRAY_LENGTH(layout->boxes)) return false;
+        box_index = layout->box_count++;
+    }
+    ArmA64BoxConstraint* box_constraint = &layout->boxes[box_index];
+    memset(box_constraint, 0, sizeof(*box_constraint));
+    box_constraint->name = field;
+    box_constraint->constraint = arm_a64_tag_attr(box, S8("constraint"));
+    box_constraint->hibit = (u8)hibit;
+    box_constraint->width = (u8)width;
+    u64 pattern_mark = arena ? arena->position : 0;
+    bool pattern_first = true;
     u64 box_end = box.end;
     if (!box.self_closing && !arm_a64_find_element_end(text, box.start, S8("box"), &box_end)) return false;
     ArmA64XmlCursor cursor = {.text = text, .position = box.end};
@@ -601,6 +801,21 @@ static bool arm_a64_layout_box(Arena* arena, String8 text, ArmA64XmlTag box, Arm
             u64 c_end = 0;
             if (!arm_a64_find_element_end(text, ctag.start, S8("c"), &c_end)) return false;
             raw = arm_a64_trim(arm_a64_element_inner(text, ctag, c_end));
+        }
+        if (arena)
+        {
+            if (!pattern_first) arena_append_char8(arena, '|');
+            if (raw.length)
+            {
+                /* arm_a64_xml_decode appends the normalized cell text to the
+                   destination arena; do not append the returned slice again. */
+                arm_a64_xml_decode(arena, raw);
+            }
+            else
+            {
+                for (u32 offset = 0; offset < colspan; offset += 1) arena_append_char8(arena, 'x');
+            }
+            pattern_first = false;
         }
         if (!raw.length)
         {
@@ -627,10 +842,14 @@ static bool arm_a64_layout_box(Arena* arena, String8 text, ArmA64XmlTag box, Arm
         bit_cursor -= colspan;
         consumed += colspan;
     }
+    if (arena && !pattern_first)
+    {
+        box_constraint->pattern = (String8){.pointer = (char8*)arm_a64_arena_pointer(arena, pattern_mark), .length = arena->position - pattern_mark};
+    }
     return consumed == width;
 }
 
-static bool arm_a64_layout_regdiagram(String8 text, u64 start, u64 end, ArmA64Layout* layout, bool overlay)
+static bool arm_a64_layout_regdiagram(Arena* arena, String8 text, u64 start, u64 end, ArmA64Layout* layout, bool overlay)
 {
     ArmA64XmlCursor cursor = {.text = text, .position = start};
     ArmA64XmlTag tag = {0};
@@ -639,7 +858,7 @@ static bool arm_a64_layout_regdiagram(String8 text, u64 start, u64 end, ArmA64La
         if (tag.start >= end) break;
         if (tag.kind == ARM_A64_XML_TAG_OPEN && arm_a64_tag_name_is(tag, "box"))
         {
-            if (!arm_a64_layout_box(0, text, tag, layout, overlay)) return false;
+            if (!arm_a64_layout_box(arena, text, tag, layout, overlay)) return false;
         }
     }
     return true;
@@ -772,6 +991,42 @@ static bool arm_a64_xml_first_functional_element(Arena* arena, String8 text, u64
         *result = tag.self_closing ? (String8){0} : arm_a64_xml_functional_text(arena, arm_a64_element_inner(text, tag, close));
         if (element_end) *element_end = close;
         return true;
+    }
+    return false;
+}
+
+static bool arm_a64_xml_first_href_fragment(Arena* arena, String8 text, u64 start, u64 end, String8* result)
+{
+    ArmA64XmlCursor cursor = {.text = text, .position = start};
+    ArmA64XmlTag tag = {0};
+    while (arm_a64_xml_next(&cursor, &tag))
+    {
+        if (tag.start >= end) break;
+        if (tag.kind != ARM_A64_XML_TAG_OPEN || !arm_a64_tag_name_is(tag, "a")) continue;
+        String8 href = arm_a64_tag_attr(tag, S8("href"));
+        if (!href.length) return false;
+        String8 decoded = arm_a64_xml_decode(arena, href);
+        u64 hash = BUSTER_STRING_NO_MATCH;
+        for (u64 index = 0; index < decoded.length; index += 1)
+        {
+            if (decoded.pointer[index] == '#') { hash = index; break; }
+        }
+        if (hash == BUSTER_STRING_NO_MATCH || hash + 1 >= decoded.length)
+        {
+            return false;
+        }
+        String8 fragment = string_slice(decoded, hash + 1, decoded.length);
+        for (u64 index = 0; index < fragment.length; index += 1)
+        {
+            char8 c = fragment.pointer[index];
+            bool valid = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+            if (!valid)
+            {
+                return false;
+            }
+        }
+        *result = string_duplicate_arena(arena, fragment, true);
+        return result->length != 0;
     }
     return false;
 }
@@ -938,123 +1193,205 @@ static bool arm_a64_feature_allowed(String8 name)
     return false;
 }
 
-typedef struct ArmA64FeatureParser ArmA64FeatureParser;
-struct ArmA64FeatureParser
+typedef enum ArmA64FeatureOperator
 {
-    String8 text;
-    u64 position;
-    bool valid;
-};
+    ARM_A64_FEATURE_NOT,
+    ARM_A64_FEATURE_AND,
+    ARM_A64_FEATURE_OR,
+    ARM_A64_FEATURE_LPAREN,
+} ArmA64FeatureOperator;
 
-static void arm_a64_feature_parser_skip_space(ArmA64FeatureParser* parser)
+static void arm_a64_feature_skip_space(String8 text, u64* position)
 {
-    while (parser->position < parser->text.length && character_is_space(parser->text.pointer[parser->position])) parser->position += 1;
+    while (*position < text.length && character_is_space(text.pointer[*position])) *position += 1;
 }
 
-static bool arm_a64_feature_parse_or(ArmA64FeatureParser* parser, bool* result);
-
-static bool arm_a64_feature_parse_primary(ArmA64FeatureParser* parser, bool* result)
+static bool arm_a64_feature_apply_operator(ArmA64FeatureOperator operation, bool* values, u32* value_count)
 {
-    arm_a64_feature_parser_skip_space(parser);
-    if (parser->position >= parser->text.length) { parser->valid = false; return false; }
-    char8 c = parser->text.pointer[parser->position];
-    if (c == '!')
+    if (operation == ARM_A64_FEATURE_NOT)
     {
-        parser->position += 1;
-        bool value = false;
-        if (!arm_a64_feature_parse_primary(parser, &value)) return false;
-        *result = !value;
+        if (!*value_count) return false;
+        values[*value_count - 1] = !values[*value_count - 1];
         return true;
     }
-    if (c == '(')
-    {
-        parser->position += 1;
-        if (!arm_a64_feature_parse_or(parser, result)) return false;
-        arm_a64_feature_parser_skip_space(parser);
-        if (parser->position >= parser->text.length || parser->text.pointer[parser->position] != ')') { parser->valid = false; return false; }
-        parser->position += 1;
-        return true;
-    }
-    u64 start = parser->position;
-    while (parser->position < parser->text.length && ((parser->text.pointer[parser->position] >= 'A' && parser->text.pointer[parser->position] <= 'Z') ||
-                                                      (parser->text.pointer[parser->position] >= 'a' && parser->text.pointer[parser->position] <= 'z') ||
-                                                      (parser->text.pointer[parser->position] >= '0' && parser->text.pointer[parser->position] <= '9') ||
-                                                      parser->text.pointer[parser->position] == '_'))
-        parser->position += 1;
-    if (start == parser->position) { parser->valid = false; return false; }
-    String8 name = string_slice(parser->text, start, parser->position);
-    bool value = string_starts_with_sequence(name, S8("FEAT_")) ? arm_a64_feature_allowed(name) : false;
-    arm_a64_feature_parser_skip_space(parser);
-    /* Parameterized predicates such as sz == '0' are consumed but evaluate
-       false because the M1 closure has no symbolic encoding-variable values. */
-    if (parser->position + 1 < parser->text.length &&
-        ((parser->text.pointer[parser->position] == '=' && parser->text.pointer[parser->position + 1] == '=') ||
-         (parser->text.pointer[parser->position] == '!' && parser->text.pointer[parser->position + 1] == '=') ||
-         (parser->text.pointer[parser->position] == '<' && parser->text.pointer[parser->position + 1] == '=') ||
-         (parser->text.pointer[parser->position] == '>' && parser->text.pointer[parser->position + 1] == '=')))
-    {
-        parser->position += 2;
-        arm_a64_feature_parser_skip_space(parser);
-        if (parser->position < parser->text.length && (parser->text.pointer[parser->position] == '\'' || parser->text.pointer[parser->position] == '"'))
-        {
-            char8 quote = parser->text.pointer[parser->position++];
-            while (parser->position < parser->text.length && parser->text.pointer[parser->position] != quote) parser->position += 1;
-            if (parser->position < parser->text.length) parser->position += 1;
-        }
-        else
-        {
-            while (parser->position < parser->text.length && parser->text.pointer[parser->position] != ')' &&
-                   parser->text.pointer[parser->position] != '&' && parser->text.pointer[parser->position] != '|')
-                parser->position += 1;
-        }
-        value = false;
-    }
-    *result = value;
+    if (*value_count < 2) return false;
+    bool rhs = values[--*value_count];
+    bool lhs = values[--*value_count];
+    values[(*value_count)++] = operation == ARM_A64_FEATURE_AND ? (lhs && rhs) : (lhs || rhs);
     return true;
 }
 
-static bool arm_a64_feature_parse_and(ArmA64FeatureParser* parser, bool* result)
+static u32 arm_a64_feature_operator_precedence(ArmA64FeatureOperator operation)
 {
-    if (!arm_a64_feature_parse_primary(parser, result)) return false;
-    for (;;)
-    {
-        arm_a64_feature_parser_skip_space(parser);
-        if (parser->position + 1 >= parser->text.length || parser->text.pointer[parser->position] != '&' ||
-            parser->text.pointer[parser->position + 1] != '&')
-            break;
-        parser->position += 2;
-        bool rhs = false;
-        if (!arm_a64_feature_parse_primary(parser, &rhs)) return false;
-        *result = *result && rhs;
-    }
-    return true;
-}
-
-static bool arm_a64_feature_parse_or(ArmA64FeatureParser* parser, bool* result)
-{
-    if (!arm_a64_feature_parse_and(parser, result)) return false;
-    for (;;)
-    {
-        arm_a64_feature_parser_skip_space(parser);
-        if (parser->position + 1 >= parser->text.length || parser->text.pointer[parser->position] != '|' ||
-            parser->text.pointer[parser->position + 1] != '|')
-            break;
-        parser->position += 2;
-        bool rhs = false;
-        if (!arm_a64_feature_parse_and(parser, &rhs)) return false;
-        *result = *result || rhs;
-    }
-    return true;
+    return operation == ARM_A64_FEATURE_OR ? 1 : (operation == ARM_A64_FEATURE_AND ? 2 : (operation == ARM_A64_FEATURE_NOT ? 3 : 0));
 }
 
 static bool arm_a64_feature_expression_allowed(String8 expression)
 {
     if (!expression.length) return true;
-    ArmA64FeatureParser parser = {.text = expression, .valid = true};
-    bool result = false;
-    if (!arm_a64_feature_parse_or(&parser, &result)) return false;
-    arm_a64_feature_parser_skip_space(&parser);
-    return parser.valid && parser.position == parser.text.length && result;
+    /* Shunting-yard evaluation keeps parser stack usage bounded even for a
+       hostile expression with thousands of nested parentheses/not operators. */
+    enum { ARM_A64_FEATURE_STACK_CAPACITY = 64 };
+    ArmA64FeatureOperator operators[ARM_A64_FEATURE_STACK_CAPACITY];
+    bool values[ARM_A64_FEATURE_STACK_CAPACITY];
+    u32 operator_count = 0;
+    u32 value_count = 0;
+    u64 position = 0;
+    bool expect_operand = true;
+    while (position < expression.length)
+    {
+        arm_a64_feature_skip_space(expression, &position);
+        if (position >= expression.length) break;
+        char8 c = expression.pointer[position];
+        if (expect_operand)
+        {
+            if (c == '!')
+            {
+                if (operator_count >= ARM_A64_FEATURE_STACK_CAPACITY) return false;
+                operators[operator_count++] = ARM_A64_FEATURE_NOT;
+                position += 1;
+                continue;
+            }
+            if (c == '(')
+            {
+                if (operator_count >= ARM_A64_FEATURE_STACK_CAPACITY) return false;
+                operators[operator_count++] = ARM_A64_FEATURE_LPAREN;
+                position += 1;
+                continue;
+            }
+            u64 start = position;
+            while (position < expression.length)
+            {
+                char8 atom = expression.pointer[position];
+                bool name_char = (atom >= 'A' && atom <= 'Z') || (atom >= 'a' && atom <= 'z') || (atom >= '0' && atom <= '9') || atom == '_';
+                if (!name_char) break;
+                position += 1;
+            }
+            if (start == position || value_count >= ARM_A64_FEATURE_STACK_CAPACITY) return false;
+            String8 name = string_slice(expression, start, position);
+            arm_a64_feature_skip_space(expression, &position);
+            bool parameterized = false;
+            if (position + 1 < expression.length &&
+                ((expression.pointer[position] == '=' && expression.pointer[position + 1] == '=') ||
+                 (expression.pointer[position] == '!' && expression.pointer[position + 1] == '=') ||
+                 (expression.pointer[position] == '<' && expression.pointer[position + 1] == '=') ||
+                 (expression.pointer[position] == '>' && expression.pointer[position + 1] == '=')))
+            {
+                parameterized = true;
+                position += 2;
+                arm_a64_feature_skip_space(expression, &position);
+                if (position < expression.length && (expression.pointer[position] == '\'' || expression.pointer[position] == '"'))
+                {
+                    char8 quote = expression.pointer[position++];
+                    u64 value_start = position;
+                    while (position < expression.length && expression.pointer[position] != quote) position += 1;
+                    if (position >= expression.length || position == value_start) return false;
+                    position += 1;
+                }
+                else
+                {
+                    u64 value_start = position;
+                    while (position < expression.length && expression.pointer[position] != ')' && expression.pointer[position] != '&' &&
+                           expression.pointer[position] != '|')
+                        position += 1;
+                    if (value_start == position) return false;
+                }
+            }
+            /* Parameterized predicates are syntactically known but cannot be
+               evaluated without an encoding-variable environment.  Unknown
+               atoms, including unknown FEAT_* names, are invalid even under !. */
+            bool atom_value = false;
+            if (parameterized)
+            {
+                atom_value = false;
+            }
+            else if (string_starts_with_sequence(name, S8("FEAT_")) && arm_a64_feature_allowed(name))
+            {
+                atom_value = true;
+            }
+            else
+            {
+                return false;
+            }
+            values[value_count++] = atom_value;
+            expect_operand = false;
+            while (operator_count && operators[operator_count - 1] == ARM_A64_FEATURE_NOT)
+            {
+                if (!arm_a64_feature_apply_operator(ARM_A64_FEATURE_NOT, values, &value_count)) return false;
+                operator_count -= 1;
+            }
+            continue;
+        }
+        if (c == ')')
+        {
+            bool found = false;
+            while (operator_count)
+            {
+                ArmA64FeatureOperator operation = operators[--operator_count];
+                if (operation == ARM_A64_FEATURE_LPAREN) { found = true; break; }
+                if (!arm_a64_feature_apply_operator(operation, values, &value_count)) return false;
+            }
+            if (!found || !value_count) return false;
+            position += 1;
+            while (operator_count && operators[operator_count - 1] == ARM_A64_FEATURE_NOT)
+            {
+                if (!arm_a64_feature_apply_operator(ARM_A64_FEATURE_NOT, values, &value_count)) return false;
+                operator_count -= 1;
+            }
+            continue;
+        }
+        ArmA64FeatureOperator operation;
+        if (position + 1 < expression.length && expression.pointer[position] == '&' && expression.pointer[position + 1] == '&')
+        {
+            operation = ARM_A64_FEATURE_AND;
+        }
+        else if (position + 1 < expression.length && expression.pointer[position] == '|' && expression.pointer[position + 1] == '|')
+        {
+            operation = ARM_A64_FEATURE_OR;
+        }
+        else
+        {
+            return false;
+        }
+        position += 2;
+        while (operator_count && operators[operator_count - 1] != ARM_A64_FEATURE_LPAREN &&
+               arm_a64_feature_operator_precedence(operators[operator_count - 1]) >= arm_a64_feature_operator_precedence(operation))
+        {
+            ArmA64FeatureOperator pending = operators[--operator_count];
+            if (!arm_a64_feature_apply_operator(pending, values, &value_count)) return false;
+        }
+        if (operator_count >= ARM_A64_FEATURE_STACK_CAPACITY) return false;
+        operators[operator_count++] = operation;
+        expect_operand = true;
+    }
+    if (expect_operand) return false;
+    while (operator_count)
+    {
+        ArmA64FeatureOperator operation = operators[--operator_count];
+        if (operation == ARM_A64_FEATURE_LPAREN || !arm_a64_feature_apply_operator(operation, values, &value_count)) return false;
+    }
+    return value_count == 1 && values[0];
+}
+
+static bool arm_a64_feature_parser_self_test(void)
+{
+    if (!arm_a64_feature_expression_allowed(S8("FEAT_FP && FEAT_AdvSIMD"))) return false;
+    if (arm_a64_feature_expression_allowed(S8("!FEAT_SME"))) return false;
+    char8 nested[256];
+    u32 cursor = 0;
+    for (u32 depth = 0; depth < 64; depth += 1) nested[cursor++] = '(';
+    String8 atom = S8("FEAT_FP");
+    memcpy(nested + cursor, atom.pointer, atom.length);
+    cursor += (u32)atom.length;
+    for (u32 depth = 0; depth < 64; depth += 1) nested[cursor++] = ')';
+    if (!arm_a64_feature_expression_allowed((String8){.pointer = nested, .length = cursor})) return false;
+    cursor = 0;
+    for (u32 depth = 0; depth < 65; depth += 1) nested[cursor++] = '(';
+    memcpy(nested + cursor, atom.pointer, atom.length);
+    cursor += (u32)atom.length;
+    for (u32 depth = 0; depth < 65; depth += 1) nested[cursor++] = ')';
+    if (arm_a64_feature_expression_allowed((String8){.pointer = nested, .length = cursor})) return false;
+    return true;
 }
 
 static void arm_a64_collect_fields(Arena* arena, ArmA64CanonicalRow* row, ArmA64Layout layout)
@@ -1067,9 +1404,17 @@ static void arm_a64_collect_fields(Arena* arena, ArmA64CanonicalRow* row, ArmA64
             row->fixed_mask |= UINT32_C(1) << bit;
             row->fixed_value |= (u32)value.value << bit;
         }
-        else if (value.kind == ARM_A64_BIT_FIELD && value.field.length)
+        else if (value.kind == ARM_A64_BIT_FIELD)
         {
             row->field_mask |= UINT32_C(1) << bit;
+        }
+        else
+        {
+            row->unresolved_mask |= UINT32_C(1) << bit;
+            row->explicit_unresolved_mask |= UINT32_C(1) << bit;
+        }
+        if ((value.kind == ARM_A64_BIT_FIELD || value.kind == ARM_A64_BIT_UNRESOLVED) && value.field.length)
+        {
             u32 field_index = UINT32_MAX;
             for (u32 index = 0; index < row->field_count; index += 1)
             {
@@ -1087,13 +1432,8 @@ static void arm_a64_collect_fields(Arena* arena, ArmA64CanonicalRow* row, ArmA64
             if (field_index != UINT32_MAX)
             {
                 ArmA64Field* field = &row->fields[field_index];
-                field->bits[field->bit_count++] = (u8)bit;
+                if (field->bit_count < BUSTER_ARRAY_LENGTH(field->bits)) field->bits[field->bit_count++] = (u8)bit;
             }
-        }
-        else
-        {
-            row->unresolved_mask |= UINT32_C(1) << bit;
-            row->explicit_unresolved_mask |= UINT32_C(1) << bit;
         }
     }
     for (u32 field_index = 0; field_index < row->field_count; field_index += 1)
@@ -1110,6 +1450,14 @@ static void arm_a64_collect_fields(Arena* arena, ArmA64CanonicalRow* row, ArmA64
             start = end;
         }
     }
+    row->box_count = BUSTER_MIN(layout.box_count, BUSTER_ARRAY_LENGTH(row->boxes));
+    for (u32 index = 0; index < row->box_count; index += 1)
+    {
+        row->boxes[index] = layout.boxes[index];
+        if (row->boxes[index].name.length) row->boxes[index].name = string_duplicate_arena(arena, row->boxes[index].name, true);
+        if (row->boxes[index].constraint.length) row->boxes[index].constraint = string_duplicate_arena(arena, row->boxes[index].constraint, true);
+        if (row->boxes[index].pattern.length) row->boxes[index].pattern = string_duplicate_arena(arena, row->boxes[index].pattern, true);
+    }
 }
 
 static int arm_a64_row_compare(const void* left_pointer, const void* right_pointer)
@@ -1119,6 +1467,33 @@ static int arm_a64_row_compare(const void* left_pointer, const void* right_point
     u64 count = BUSTER_MIN(left->canonical_id.length, right->canonical_id.length);
     int result = count ? memcmp(left->canonical_id.pointer, right->canonical_id.pointer, count) : 0;
     return result ? result : (left->canonical_id.length > right->canonical_id.length) - (left->canonical_id.length < right->canonical_id.length);
+}
+
+static bool arm_a64_validate_rows(ArmA64CanonicalRows rows)
+{
+    for (u32 index = 0; index < rows.count; index += 1)
+    {
+        ArmA64CanonicalRow* row = &rows.pointer[index];
+        if (index && string_equal(rows.pointer[index - 1].canonical_id, row->canonical_id)) return false;
+        for (u32 prior = 0; prior < index; prior += 1)
+        {
+            if (rows.pointer[prior].digest == row->digest) return false;
+        }
+        if (string_equal(row->kind, S8("alias")))
+        {
+            if (!row->alias_to_file.length || !row->alias_to_id.length || !row->alias_to_encoding_id.length) return false;
+            u32 matches = 0;
+            for (u32 target = 0; target < rows.count; target += 1)
+            {
+                ArmA64CanonicalRow* candidate = &rows.pointer[target];
+                if (string_equal(candidate->kind, S8("canonical")) && string_equal(candidate->iform_file, row->alias_to_file) &&
+                    string_equal(candidate->iform_id, row->alias_to_id) && string_equal(candidate->encoding_name, row->alias_to_encoding_id))
+                    matches += 1;
+            }
+            if (matches != 1) return false;
+        }
+    }
+    return true;
 }
 
 static void arm_a64_row_digest(Arena* arena, ArmA64CanonicalRow* row)
@@ -1151,6 +1526,18 @@ static void arm_a64_row_digest(Arena* arena, ArmA64CanonicalRow* row)
     arena_append_string8(arena, row->equivalent);
     arena_append_char8(arena, '|');
     arena_append_string8(arena, row->alias_condition);
+    arena_append_char8(arena, '|');
+    arena_append_string8(arena, row->alias_to_encoding_id);
+    for (u32 index = 0; index < row->box_count; index += 1)
+    {
+        ArmA64BoxConstraint box = row->boxes[index];
+        arena_append_char8(arena, '|');
+        arena_append_string8(arena, box.name);
+        arena_append_char8(arena, ':'); arm_a64_append_u64(arena, box.hibit);
+        arena_append_char8(arena, ','); arm_a64_append_u64(arena, box.width);
+        arena_append_char8(arena, ':'); arena_append_string8(arena, box.constraint);
+        arena_append_char8(arena, ':'); arena_append_string8(arena, box.pattern);
+    }
     row->digest = buster_hash_64(arm_a64_arena_pointer(arena, mark), arena->position - mark);
     arena_set_position(arena, mark);
 }
@@ -1169,6 +1556,8 @@ static bool arm_a64_append_row_json(Arena* output, ArmA64CanonicalRow* row)
     if (row->alias_to_file.length) arm_a64_json_string(output, row->alias_to_file); else arena_append_string8(output, S8("null"));
     arena_append_string8(output, S8(",\"id\":"));
     if (row->alias_to_id.length) arm_a64_json_string(output, row->alias_to_id); else arena_append_string8(output, S8("null"));
+    arena_append_string8(output, S8(",\"encoding_id\":"));
+    if (row->alias_to_encoding_id.length) arm_a64_json_string(output, row->alias_to_encoding_id); else arena_append_string8(output, S8("null"));
     arena_append_string8(output, S8("}"));
     arena_append_string8(output, S8(",\"assembly\":"));
     if (row->assembly.length) arm_a64_json_string(output, row->assembly); else arena_append_string8(output, S8("null"));
@@ -1209,6 +1598,23 @@ static bool arm_a64_append_row_json(Arena* output, ArmA64CanonicalRow* row)
         arena_append_string8(output, S8("]}"));
     }
     arena_append_string8(output, S8("]"));
+    arena_append_string8(output, S8(",\"box_constraints\":["));
+    for (u32 index = 0; index < row->box_count; index += 1)
+    {
+        if (index) arena_append_char8(output, ',');
+        ArmA64BoxConstraint box = row->boxes[index];
+        arena_append_string8(output, S8("{\"name\":"));
+        if (box.name.length) arm_a64_json_string(output, box.name); else arena_append_string8(output, S8("null"));
+        arena_append_string8(output, S8(",\"hibit\":")); arm_a64_append_u64(output, box.hibit);
+        arena_append_string8(output, S8(",\"width\":")); arm_a64_append_u64(output, box.width);
+        arena_append_string8(output, S8(",\"constraint\":"));
+        if (box.constraint.length) arm_a64_json_string(output, box.constraint); else arena_append_string8(output, S8("null"));
+        arena_append_string8(output, S8(",\"pattern\":"));
+        if (box.pattern.length) arm_a64_json_string(output, box.pattern); else arena_append_string8(output, S8("null"));
+        arena_append_char8(output, '}');
+    }
+    arena_append_string8(output, S8("]"));
+    arena_append_string8(output, S8(",\"mask_semantics\":\"fixed_mask|field_mask|unresolved_mask partition all 32 instruction bits\""));
     arena_append_string8(output, S8(",\"status\":")); arm_a64_json_string(output, row->status);
     arena_append_string8(output, S8(",\"apple_m1\":")); arena_append_string8(output, row->apple_m1 ? S8("true") : S8("false"));
     arena_append_string8(output, S8(",\"digest\":")); arm_a64_json_hex(output, row->digest);
@@ -1280,7 +1686,7 @@ static bool arm_a64_parse_page(Arena* arena, Arena* scratch, String8 source, Arm
                 if (diagram_found) return false;
                 u64 diagram_end = 0;
                 if (!arm_a64_find_element_end(text, child.start, S8("regdiagram"), &diagram_end) ||
-                    !arm_a64_layout_regdiagram(text, child.end, diagram_end, &base_layout, false))
+                    !arm_a64_layout_regdiagram(arena, text, child.end, diagram_end, &base_layout, false))
                     return false;
                 diagram_found = true;
                 (*regdiagram_count) += 1;
@@ -1309,7 +1715,7 @@ static bool arm_a64_parse_page(Arena* arena, Arena* scratch, String8 source, Arm
             row->iform_file = page.file;
             row->iform_id = page.id;
             row->iclass_id = string_duplicate_arena(arena, class_id, true);
-            row->iclass_name = string_duplicate_arena(arena, class_instr, true);
+            row->iclass_name = arm_a64_xml_decode(arena, class_instr);
             row->kind = string_equal(page_type, S8("alias")) ? S8("alias") : S8("canonical");
             row->alias_to_file = string_duplicate_arena(arena, alias_to_file, true);
             row->alias_to_id = string_duplicate_arena(arena, alias_to_id, true);
@@ -1349,6 +1755,7 @@ static bool arm_a64_parse_page(Arena* arena, Arena* scratch, String8 source, Arm
                     {
                         return false;
                     }
+                    if (!arm_a64_xml_first_href_fragment(arena, text, local.end, equivalent_end, &row->alias_to_encoding_id)) return false;
                     local_scan.position = equivalent_end;
                 }
             }
@@ -1364,24 +1771,29 @@ static bool arm_a64_parse_page(Arena* arena, Arena* scratch, String8 source, Arm
             if ((row->fixed_mask | row->field_mask | row->unresolved_mask) != UINT32_MAX) return false;
             row->apple_m1 = arm_a64_feature_expression_allowed(row->feature_expression);
             arm_a64_row_digest(arena, row);
+            if ((row->fixed_mask & row->field_mask) || (row->fixed_mask & row->unresolved_mask) || (row->field_mask & row->unresolved_mask) ||
+                (row->fixed_mask | row->field_mask | row->unresolved_mask) != UINT32_MAX)
+                return false;
         }
     }
     return true;
 }
 
-static bool arm_a64_append_manifest(Arena* output, u64 source_hash, u64 artifact_hash, u64 artifact_bytes,
-                                    ArmA64CanonicalRows rows, u32 page_count, u32 instruction_pages, u32 alias_pages,
+static bool arm_a64_append_manifest(Arena* output, u64 source_tree_digest, u32 source_file_count, u64 artifact_hash, u64 artifact_bytes,
+                                    ArmA64CanonicalRows rows, u32 page_count, u32 instruction_pages, u32 alias_pages, u32 pseudocode_pages,
                                     u32 iclass_count, u32 regdiagram_count, u32 selected, u32 selected_canonical,
                                     u32 selected_alias, u32 selected_system, u32 selected_system_canonical, u32 selected_system_alias,
                                     u32 selected_non_system, u32 selected_non_system_canonical, u32 selected_non_system_alias)
 {
     arena_append_string8(output, S8("{\n  \"schema_version\": 1,\n  \"status\": \"provisional-canonical-foundation\",\n  \"acceptance\": \"blocked\",\n"));
     arena_append_string8(output,
-                         S8("  \"source\": {\"release\": \"2026-06\", \"source_url\": \"https://developer.arm.com/-/cdn-downloads/permalink/Exploration-Tools-A64-ISA/ISA_A64/ISA_A64_xml_A_profile-2026-06.tar.gz\", \"archive_sha256\": \"63a01a1696483bbe2edfef9e0f0cd053d6c1c619ec0587876cb7a60bb344f354\", \"raw_xml_policy\": \"non-vendored-license-restricted\"},\n"));
-    arena_append_string8(output, S8("  \"source_hash\": ")); arm_a64_json_hex(output, source_hash); arena_append_string8(output, S8(",\n"));
+                         S8("  \"source\": {\"release\": \"2026-06\", \"source_url\": \"https://developer.arm.com/-/cdn-downloads/permalink/Exploration-Tools-A64-ISA/ISA_A64/ISA_A64_xml_A_profile-2026-06.tar.gz\", \"archive_sha256\": \"63a01a1696483bbe2edfef9e0f0cd053d6c1c619ec0587876cb7a60bb344f354\", \"archive_identity_verified\": true, \"archive_identity_basis\": \"pinned archive SHA-256 is the cryptographic anchor; importer verifies exact extracted top-level tree digest before attribution\", \"tree_digest_algorithm\": \"fnv1a64-v1\", \"tree_digest_scope\": \"sorted top-level regular filenames + NUL + little-endian uint64 byte length + bytes; subdirectories including xhtml/ generated presentation are excluded\", \"raw_xml_policy\": \"non-vendored-license-restricted\"},\n"));
+    arena_append_string8(output, S8("  \"source_tree\": {\"regular_file_count\": ")); arm_a64_append_u64(output, source_file_count);
+    arena_append_string8(output, S8(", \"digest\": ")); arm_a64_json_hex(output, source_tree_digest); arena_append_string8(output, S8(", \"pinned_digest\": \"0xba0c8fc560297896\"},\n"));
     arena_append_string8(output, S8("  \"inventory\": {\"pages\": ")); arm_a64_append_u64(output, page_count);
     arena_append_string8(output, S8(", \"instruction_pages\": ")); arm_a64_append_u64(output, instruction_pages);
     arena_append_string8(output, S8(", \"alias_pages\": ")); arm_a64_append_u64(output, alias_pages);
+    arena_append_string8(output, S8(", \"pseudocode_pages\": ")); arm_a64_append_u64(output, pseudocode_pages);
     arena_append_string8(output, S8(", \"iclasses\": ")); arm_a64_append_u64(output, iclass_count);
     arena_append_string8(output, S8(", \"regdiagrams\": ")); arm_a64_append_u64(output, regdiagram_count);
     arena_append_string8(output, S8(", \"encodings\": ")); arm_a64_append_u64(output, rows.count); arena_append_string8(output, S8("},\n"));
@@ -1418,6 +1830,20 @@ static bool arm_a64_append_manifest(Arena* output, u64 source_hash, u64 artifact
 static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalImportOptions options)
 {
     if (!options.source_directory.length || !options.output_directory.length) return PROCESS_RESULT_FAILED;
+    if (!arm_a64_feature_parser_self_test())
+    {
+        string_print(S8("error: Arm A64 feature parser self-test failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    u32 source_file_count = 0;
+    u64 source_tree_digest = 0;
+    if (!arm_a64_source_tree_digest(arena, options.source_directory, &source_file_count, &source_tree_digest) ||
+        source_file_count != 2316 || source_tree_digest != UINT64_C(0xba0c8fc560297896))
+    {
+        string_print(S8("error: Arm A64 source tree identity mismatch files={u32} digest={u64} expected-files=2316 expected-digest=0xba0c8fc560297896\n"),
+                     source_file_count, source_tree_digest);
+        return PROCESS_RESULT_FAILED;
+    }
     TemporalArena scratch_scope = scratch_begin(&arena, 1);
     Arena* scratch = scratch_scope.arena;
     ArmA64Page* index_pages = arena_allocate(arena, ArmA64Page, 600);
@@ -1456,7 +1882,7 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
     u32 regdiagram_count = 0;
     u32 alias_pages = 0;
     u32 instruction_pages = 0;
-    u64 source_hash = 1469598103934665603ULL;
+    u32 pseudocode_pages = 0;
     for (u32 page_index = 0; page_index < page_count; page_index += 1)
     {
         if (!pages[page_index].id.length || !pages[page_index].type.length) return PROCESS_RESULT_FAILED;
@@ -1464,7 +1890,6 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
         String8 path = path_join(scratch, options.source_directory, pages[page_index].file);
         ByteSlice page_bytes = file_read(scratch, path, (FileReadOptions){.end_padding = 1});
         if (!page_bytes.pointer || !page_bytes.length) return PROCESS_RESULT_FAILED;
-        source_hash = buster_hash_64(page_bytes.pointer, page_bytes.length) ^ (source_hash * UINT64_C(1099511628211));
         if (!arm_a64_parse_page(arena, scratch, options.source_directory, pages[page_index], &rows, &iclass_count, &regdiagram_count, &alias_pages))
         {
             fprintf(stderr, "error: failed to parse Arm A64 page %.*s (%.*s)\n", (int)pages[page_index].file.length,
@@ -1472,15 +1897,21 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
             return PROCESS_RESULT_FAILED;
         }
         arena_set_position(scratch, scratch_mark);
-        instruction_pages += !string_equal(pages[page_index].type, S8("alias"));
+        instruction_pages += string_equal(pages[page_index].type, S8("instruction"));
+        pseudocode_pages += string_equal(pages[page_index].type, S8("pseudocode"));
     }
-    if (page_count != 2292 || instruction_pages != 2122 || alias_pages != 170 || iclass_count != 3502 || regdiagram_count != 3502 || rows.count != 4623)
+    if (page_count != 2292 || instruction_pages != 2121 || pseudocode_pages != 1 || alias_pages != 170 || iclass_count != 3502 || regdiagram_count != 3502 || rows.count != 4623)
     {
         string_print(S8("error: Arm A64 inventory mismatch pages={u32} iclasses={u32} regdiagrams={u32} encodings={u32}\n"), page_count, iclass_count,
                      regdiagram_count, rows.count);
         return PROCESS_RESULT_FAILED;
     }
     qsort(rows.pointer, rows.count, sizeof(rows.pointer[0]), arm_a64_row_compare);
+    if (!arm_a64_validate_rows(rows))
+    {
+        string_print(S8("error: Arm A64 canonical IDs/digests or alias target links are not unique\n"));
+        return PROCESS_RESULT_FAILED;
+    }
     Arena* output_arena = arena;
     u64 artifact_mark = output_arena->position;
     for (u32 index = 0; index < rows.count; index += 1) arm_a64_append_row_json(output_arena, &rows.pointer[index]);
@@ -1508,8 +1939,8 @@ static ProcessResult arm_a64_canonical_import_run(Arena* arena, ArmA64CanonicalI
     }
     String8 manifest = {0};
     u64 manifest_mark = output_arena->position;
-    arm_a64_append_manifest(output_arena, source_hash, buster_hash_64((u8*)artifact.pointer, artifact.length), artifact.length,
-                            rows, page_count, instruction_pages, alias_pages, iclass_count, regdiagram_count, selected, selected_canonical,
+    arm_a64_append_manifest(output_arena, source_tree_digest, source_file_count, buster_hash_64((u8*)artifact.pointer, artifact.length), artifact.length,
+                            rows, page_count, instruction_pages, alias_pages, pseudocode_pages, iclass_count, regdiagram_count, selected, selected_canonical,
                             selected_alias, selected_system, selected_system_canonical, selected_system_alias, selected - selected_system,
                             selected_canonical - selected_system_canonical, selected_alias - selected_system_alias);
     manifest = (String8){.pointer = (char8*)arm_a64_arena_pointer(output_arena, manifest_mark), .length = output_arena->position - manifest_mark};
