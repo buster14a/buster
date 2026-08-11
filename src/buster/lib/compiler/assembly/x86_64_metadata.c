@@ -701,7 +701,7 @@ struct BusterX86MetadataPatternSemantics
     u8 has_tile_control;
     u16 vsib_vector_length;
     u8 has_element_size_control;
-    u8 element_size_bytes;
+    u16 element_size_bits;
     u8 has_sae_control;
     u8 has_rounding_control;
     u8 mask_control;
@@ -1399,11 +1399,12 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("ESIZE_")))
             {
                 pattern.has_element_size_control = 1;
-                if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("ESIZE_8_BITS()"))) pattern.element_size_bytes = 1;
-                else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("ESIZE_16_BITS()"))) pattern.element_size_bytes = 2;
-                else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("ESIZE_32_BITS()"))) pattern.element_size_bytes = 4;
-                else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("ESIZE_64_BITS()"))) pattern.element_size_bytes = 8;
-                else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("ESIZE_128_BITS()"))) pattern.element_size_bytes = 16;
+                if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("ESIZE_4_BITS()"))) pattern.element_size_bits = 4;
+                else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("ESIZE_8_BITS()"))) pattern.element_size_bits = 8;
+                else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("ESIZE_16_BITS()"))) pattern.element_size_bits = 16;
+                else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("ESIZE_32_BITS()"))) pattern.element_size_bits = 32;
+                else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("ESIZE_64_BITS()"))) pattern.element_size_bits = 64;
+                else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("ESIZE_128_BITS()"))) pattern.element_size_bits = 128;
                 else buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_ADDRESSING_FIELDS);
             }
             if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("TILE"))) pattern.has_tile_control = 1;
@@ -1754,7 +1755,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_apx_fixed_width_no_w(BusterX86
            pattern.has_memory;
 }
 
-BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_element_size(BusterX86MetadataForm form);
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_element_size_bits(BusterX86MetadataForm form);
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_tuple_memory_width(BusterX86MetadataPatternSemantics pattern);
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_has_implicit_immediate(BusterX86MetadataForm form)
 {
@@ -1828,7 +1830,7 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
         return BUSTER_X86_METADATA_BLOCKER_ADDRESSING_FIELDS;
     if (pattern.has_vsib_control && !(form.field_flags & BUSTER_X86_METADATA_FIELD_VSIB))
         return BUSTER_X86_METADATA_BLOCKER_ADDRESSING_FIELDS;
-    if (pattern.has_element_size_control && buster_x86_metadata_emit_element_size(form) != pattern.element_size_bytes)
+    if (pattern.has_element_size_control && buster_x86_metadata_emit_element_size_bits(form) != pattern.element_size_bits)
         return BUSTER_X86_METADATA_BLOCKER_ADDRESSING_FIELDS;
     if (pattern.has_implicit_one && (pattern.immediate_count || !buster_x86_metadata_emit_form_has_implicit_immediate(form)))
         return BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
@@ -2931,15 +2933,19 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_semantics(BusterX
         }
         if (binding.physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && binding.physical.memory.source_width > 64)
         {
+            u16 tuple_memory_width = buster_x86_metadata_emit_tuple_memory_width(pattern);
+            if (tuple_memory_width && binding.physical.memory.source_width != tuple_memory_width) return false;
             u16 source_width_flags = buster_x86_metadata_emit_width_flags(binding.physical.memory.source_width);
             u16 schema_width_flags = binding.metadata.physical_width_flags;
             u16 aggregate_schema_flags = schema_width_flags &
                                           (BUSTER_X86_METADATA_PHYSICAL_WIDTH_80 | BUSTER_X86_METADATA_PHYSICAL_WIDTH_128 |
                                            BUSTER_X86_METADATA_PHYSICAL_WIDTH_256 | BUSTER_X86_METADATA_PHYSICAL_WIDTH_512 |
                                            BUSTER_X86_METADATA_PHYSICAL_WIDTH_1024);
+            bool tuple_width_match = tuple_memory_width && binding.physical.memory.source_width == tuple_memory_width;
             if (!source_width_flags ||
                 (aggregate_schema_flags ? !(aggregate_schema_flags & source_width_flags)
-                                        : (!pattern.vector_length || binding.physical.memory.source_width != pattern.vector_length) &&
+                                        : !tuple_width_match &&
+                                              (!pattern.vector_length || binding.physical.memory.source_width != pattern.vector_length) &&
                                               !(apx_fixed_width_no_w && binding.physical.memory.source_width == 512)))
             {
                 return false;
@@ -3178,21 +3184,41 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_iform_requires_dfv(BusterX86Me
     return buster_x86_metadata_emit_string_has(form.iform, S8("_DFV_"));
 }
 
-BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_element_size(BusterX86MetadataForm form)
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_element_size_bits(BusterX86MetadataForm form)
 {
-    if (buster_x86_metadata_emit_string_has(form.element_size, S8("128_BITS"))) return 16;
-    if (buster_x86_metadata_emit_string_has(form.element_size, S8("64_BITS"))) return 8;
-    if (buster_x86_metadata_emit_string_has(form.element_size, S8("32_BITS"))) return 4;
-    if (buster_x86_metadata_emit_string_has(form.element_size, S8("16_BITS"))) return 2;
-    if (buster_x86_metadata_emit_string_has(form.element_size, S8("8_BITS"))) return 1;
-    return 1;
+    if (buster_x86_metadata_emit_string_has(form.element_size, S8("128_BITS"))) return 128;
+    if (buster_x86_metadata_emit_string_has(form.element_size, S8("64_BITS"))) return 64;
+    if (buster_x86_metadata_emit_string_has(form.element_size, S8("32_BITS"))) return 32;
+    if (buster_x86_metadata_emit_string_has(form.element_size, S8("16_BITS"))) return 16;
+    if (buster_x86_metadata_emit_string_has(form.element_size, S8("8_BITS"))) return 8;
+    if (buster_x86_metadata_emit_string_has(form.element_size, S8("4_BITS"))) return 4;
+    return 8;
+}
+
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_tuple_memory_width(BusterX86MetadataPatternSemantics pattern)
+{
+    if (!pattern.has_tuple_control || !pattern.vector_length) return 0;
+    u16 divisor = 0;
+    switch (pattern.tuple_control_kind)
+    {
+    case BUSTER_X86_METADATA_TUPLE_FULL: divisor = 1; break;
+    case BUSTER_X86_METADATA_TUPLE_HALF: divisor = 2; break;
+    case BUSTER_X86_METADATA_TUPLE_QUARTER: divisor = 4; break;
+    case BUSTER_X86_METADATA_TUPLE_EIGHTH: divisor = 8; break;
+    default: return 0;
+    }
+    if (!divisor || pattern.vector_length % divisor) return 0;
+    return (u16)(pattern.vector_length / divisor);
 }
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_tuple_scale(BusterX86MetadataForm form,
                                                               BusterX86MetadataPatternSemantics pattern)
 {
     if (!form.displacement_scale) return 1;
-    u32 element = buster_x86_metadata_emit_element_size(form);
+    u16 element_bits = pattern.has_element_size_control ? pattern.element_size_bits
+                                                         : buster_x86_metadata_emit_element_size_bits(form);
+    u32 element = element_bits && element_bits % 8 == 0 ? element_bits / 8 : 0;
+    if (pattern.vector_length && pattern.vector_length % 8) return 0;
     u32 vector = pattern.vector_length ? pattern.vector_length / 8 : 16;
     u32 result = 0;
     switch (form.tuple_kind)
@@ -3211,7 +3237,8 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_tuple_scale(BusterX86MetadataFor
     case BUSTER_X86_METADATA_TUPLE_TUPLE8: result = element * 8; break;
     default: result = 1; break;
     }
-    return (u8)BUSTER_MAX(result, 1u);
+    if (!result || result > UINT8_MAX) return 0;
+    return (u8)result;
 }
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_broadcast_elements(BusterX86MetadataForm form,
@@ -3223,9 +3250,10 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_broadcast_elements(BusterX86Meta
     if (!(form.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) || !pattern.vector_length)
         return 0;
     if (pattern.tuple_control_kind == BUSTER_X86_METADATA_TUPLE_SCALAR) return 1;
-    u8 element_size = pattern.has_element_size_control ? pattern.element_size_bytes : buster_x86_metadata_emit_element_size(form);
-    if (!element_size || pattern.vector_length / 8 < element_size || (pattern.vector_length / 8) % element_size) return 0;
-    u32 elements = (pattern.vector_length / 8) / element_size;
+    u16 element_size_bits = pattern.has_element_size_control ? pattern.element_size_bits
+                                                              : buster_x86_metadata_emit_element_size_bits(form);
+    if (!element_size_bits || pattern.vector_length < element_size_bits || pattern.vector_length % element_size_bits) return 0;
+    u32 elements = pattern.vector_length / element_size_bits;
     return elements <= UINT8_MAX ? (u8)elements : 0;
 }
 
@@ -3331,6 +3359,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_address(BusterX86MetadataPhysi
         {
             u8 forced_width = form.displacement_width && !form.relocation_base ? form.displacement_width : 0;
             u8 tuple_scale = buster_x86_metadata_emit_tuple_scale(form, pattern);
+            if (form.displacement_scale && !tuple_scale) return false;
             bool compressed_displacement = form.displacement_scale && tuple_scale > 1;
             if (forced_width == 1 || compressed_displacement)
             {
@@ -4331,7 +4360,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_eamode_alias_forms(BusterX86Metadat
         first_pattern.has_tile_control != second_pattern.has_tile_control ||
         first_pattern.vsib_vector_length != second_pattern.vsib_vector_length ||
         first_pattern.has_element_size_control != second_pattern.has_element_size_control ||
-        first_pattern.element_size_bytes != second_pattern.element_size_bytes || first_pattern.has_sae_control != second_pattern.has_sae_control ||
+        first_pattern.element_size_bits != second_pattern.element_size_bits || first_pattern.has_sae_control != second_pattern.has_sae_control ||
         first_pattern.has_rounding_control != second_pattern.has_rounding_control || first_pattern.mask_control != second_pattern.mask_control ||
         first_pattern.zeroing_control != second_pattern.zeroing_control || first_pattern.rounding_length != second_pattern.rounding_length ||
         first_pattern.unresolved_blocker != second_pattern.unresolved_blocker)

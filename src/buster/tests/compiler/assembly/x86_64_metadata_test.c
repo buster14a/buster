@@ -2058,15 +2058,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        BUSTER_TEST(arguments, audit.emitted_count == 10289 && audit.blocked_count == 724 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10289 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 724);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10397 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 347);
+        BUSTER_TEST(arguments, audit.emitted_count == 10292 && audit.blocked_count == 721 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10292 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 721);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10400 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 344);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 199, 5, 1643, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1485, 192, 5, 1643, 176, 6715, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {327, 7, 0, 0, 0, 13, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1485, 192, 5, 1643, 176, 6718, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {327, 7, 0, 0, 0, 10, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2076,7 +2076,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10289, 268, 108, 99, 0, 198, 3, 0, 0, 48, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10292, 268, 108, 99, 0, 198, 0, 0, 0, 48, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -3794,11 +3794,130 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             .has_mask_register = true,
             .mask_register = 1,
         };
+
+        // AVX10.2 AUX BF4 memory forms use an exact four-bit element size
+        // while their tuple displacement remains a byte-sized half-vector.
+        // Keep the in-repo XED metadata form ids and byte oracles explicit
+        // here: LLVM does not yet accept the VCVTBF42HF8 mnemonic.
+        String8 bf4_features_128[2] = {S8("avx10.2"), S8("avx10-v1-aux")};
+        String8 bf4_features_512[3] = {S8("avx10.2"), S8("avx10-v1-aux"), S8("avx10-512")};
+        BusterX86MetadataPhysicalOperand bf4_xmm_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 0, 128),
+            x86_64_metadata_test_physical_mem_base(0, 64, 0),
+        };
+        BusterX86MetadataPhysicalOperand bf4_ymm_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM, 0, 256),
+            x86_64_metadata_test_physical_mem_base(0, 128, 0),
+        };
+        BusterX86MetadataPhysicalOperand bf4_zmm_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+            x86_64_metadata_test_physical_mem_base(0, 256, 0),
+        };
+        u8 bf4_xmm_bytes[] = {0x62, 0xf5, 0x7c, 0x08, 0x37, 0x00};
+        u8 bf4_ymm_bytes[] = {0x62, 0xf5, 0x7c, 0x28, 0x37, 0x00};
+        u8 bf4_zmm_bytes[] = {0x62, 0xf5, 0x7c, 0x48, 0x37, 0x00};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTBF42HF8"), 3777, bf4_xmm_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, bf4_features_128,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_features_128), bf4_xmm_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_xmm_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTBF42HF8"), 3779, bf4_ymm_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, bf4_features_128,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_features_128), bf4_ymm_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_ymm_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTBF42HF8"), 3781, bf4_zmm_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, bf4_features_512,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_features_512), bf4_zmm_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_zmm_bytes)));
+        BusterX86MetadataPhysicalAttributes bf4_mask = {
+            .decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK,
+            .has_mask_register = true,
+            .mask_register = 1,
+        };
         u8 emx_evex_bytes[] = {0x62, 0xf2, 0x7d, 0x29, 0x18, 0x00};
         BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VBROADCASTSS"), 5135, emx_evex_operands, 3,
                                                                  emx_evex_attributes, (String8[2]){S8("avx512f"), S8("avx512vl")},
                                                                  2, emx_evex_bytes,
                                                                  BUSTER_ARRAY_LENGTH(emx_evex_bytes)));
+
+        u8 bf4_xmm_mask_bytes[] = {0x62, 0xf5, 0x7c, 0x09, 0x37, 0x00};
+        u8 bf4_ymm_mask_bytes[] = {0x62, 0xf5, 0x7c, 0x29, 0x37, 0x00};
+        u8 bf4_zmm_mask_bytes[] = {0x62, 0xf5, 0x7c, 0x49, 0x37, 0x00};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTBF42HF8"), 3777, bf4_xmm_operands, 2, bf4_mask,
+                                                                 bf4_features_128, BUSTER_ARRAY_LENGTH(bf4_features_128),
+                                                                 bf4_xmm_mask_bytes, BUSTER_ARRAY_LENGTH(bf4_xmm_mask_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTBF42HF8"), 3779, bf4_ymm_operands, 2, bf4_mask,
+                                                                 bf4_features_128, BUSTER_ARRAY_LENGTH(bf4_features_128),
+                                                                 bf4_ymm_mask_bytes, BUSTER_ARRAY_LENGTH(bf4_ymm_mask_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTBF42HF8"), 3781, bf4_zmm_operands, 2, bf4_mask,
+                                                                 bf4_features_512, BUSTER_ARRAY_LENGTH(bf4_features_512),
+                                                                 bf4_zmm_mask_bytes, BUSTER_ARRAY_LENGTH(bf4_zmm_mask_bytes)));
+
+        BusterX86MetadataPhysicalOperand bf4_xmm_wrong_width = bf4_xmm_operands[1];
+        bf4_xmm_wrong_width.width = 0;
+        bf4_xmm_wrong_width.memory.source_width = 128;
+        BusterX86MetadataPhysicalOperand bf4_wrong_xmm_operands[2] = {bf4_xmm_operands[0], bf4_xmm_wrong_width};
+        BusterX86MetadataPhysicalQuery bf4_wrong_xmm_query = x86_64_metadata_test_physical_query(
+            S8("VCVTBF42HF8"), bf4_wrong_xmm_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, bf4_features_128,
+            BUSTER_ARRAY_LENGTH(bf4_features_128));
+        bf4_wrong_xmm_query.source_semantics = true;
+        u8 bf4_wrong_output[16] = {0};
+        BusterX86MetadataRelocation bf4_wrong_relocations[2] = {0};
+        BusterX86MetadataEmitResult bf4_wrong_xmm = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = bf4_wrong_xmm_query,
+            .form_id = 3777,
+            .output = bf4_wrong_output,
+            .output_capacity = sizeof(bf4_wrong_output),
+            .relocations = bf4_wrong_relocations,
+            .relocation_capacity = BUSTER_ARRAY_LENGTH(bf4_wrong_relocations),
+        });
+        BUSTER_TEST(arguments, bf4_wrong_xmm.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
+
+        BusterX86MetadataPhysicalOperand bf4_ymm_wrong_width = bf4_ymm_operands[1];
+        bf4_ymm_wrong_width.width = 0;
+        bf4_ymm_wrong_width.memory.source_width = 256;
+        BusterX86MetadataPhysicalOperand bf4_wrong_ymm_operands[2] = {bf4_ymm_operands[0], bf4_ymm_wrong_width};
+        BusterX86MetadataPhysicalQuery bf4_wrong_ymm_query = x86_64_metadata_test_physical_query(
+            S8("VCVTBF42HF8"), bf4_wrong_ymm_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, bf4_features_128,
+            BUSTER_ARRAY_LENGTH(bf4_features_128));
+        bf4_wrong_ymm_query.source_semantics = true;
+        BusterX86MetadataEmitResult bf4_wrong_ymm = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = bf4_wrong_ymm_query,
+            .form_id = 3779,
+            .output = bf4_wrong_output,
+            .output_capacity = sizeof(bf4_wrong_output),
+            .relocations = bf4_wrong_relocations,
+            .relocation_capacity = BUSTER_ARRAY_LENGTH(bf4_wrong_relocations),
+        });
+        BUSTER_TEST(arguments, bf4_wrong_ymm.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
+
+        BusterX86MetadataPhysicalOperand bf4_zmm_wrong_width = bf4_zmm_operands[1];
+        bf4_zmm_wrong_width.width = 0;
+        bf4_zmm_wrong_width.memory.source_width = 512;
+        BusterX86MetadataPhysicalOperand bf4_wrong_zmm_operands[2] = {bf4_zmm_operands[0], bf4_zmm_wrong_width};
+        BusterX86MetadataPhysicalQuery bf4_wrong_zmm_query = x86_64_metadata_test_physical_query(
+            S8("VCVTBF42HF8"), bf4_wrong_zmm_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, bf4_features_512,
+            BUSTER_ARRAY_LENGTH(bf4_features_512));
+        bf4_wrong_zmm_query.source_semantics = true;
+        BusterX86MetadataEmitResult bf4_wrong_zmm = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = bf4_wrong_zmm_query,
+            .form_id = 3781,
+            .output = bf4_wrong_output,
+            .output_capacity = sizeof(bf4_wrong_output),
+            .relocations = bf4_wrong_relocations,
+            .relocation_capacity = BUSTER_ARRAY_LENGTH(bf4_wrong_relocations),
+        });
+        BUSTER_TEST(arguments, bf4_wrong_zmm.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
+
+        BusterX86MetadataPhysicalOperand bf4_full_disp = bf4_xmm_operands[1];
+        bf4_full_disp.memory.displacement = 4;
+        bf4_full_disp.memory.has_displacement = true;
+        BusterX86MetadataPhysicalOperand bf4_full_disp_operands[2] = {bf4_xmm_operands[0], bf4_full_disp};
+        u8 bf4_full_disp_bytes[] = {0x62, 0xf5, 0x7c, 0x08, 0x37, 0x80, 0x04, 0x00, 0x00, 0x00};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(
+                                   S8("VCVTBF42HF8"), 3777, bf4_full_disp_operands, 2,
+                                   (BusterX86MetadataPhysicalAttributes){0}, bf4_features_128,
+                                   BUSTER_ARRAY_LENGTH(bf4_features_128), bf4_full_disp_bytes,
+                                   BUSTER_ARRAY_LENGTH(bf4_full_disp_bytes)));
 
         BusterX86MetadataPhysicalOperand tile_memory_operands[2] = {
             x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_TMM, 0, 1024),

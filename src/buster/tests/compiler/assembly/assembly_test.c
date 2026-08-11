@@ -3232,6 +3232,59 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, avx10_512.diagnostic_count == 0 && avx10_512.bytes.length == sizeof(expected_avx10_512) &&
                                memcmp(avx10_512.bytes.pointer, expected_avx10_512, sizeof(expected_avx10_512)) == 0);
 
+    Target avx10_aux_target = x86_target;
+    avx10_aux_target.cpu_features_explicit = true;
+    avx10_aux_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX10_2,
+        TARGET_CPU_FEATURE_X86_AVX10_V1_AUX, TARGET_CPU_FEATURE_X86_AVX10_512}, 5);
+    String8 avx10_aux_intel_source =
+        S8("vcvtbf42hf8 xmm0, qword ptr [rax]\n"
+           "vcvtbf42hf8 ymm0, xmmword ptr [rax]\n"
+           "vcvtbf42hf8 zmm0, ymmword ptr [rax]\n"
+           "vcvtbf42hf8 xmm0 {k1}, qword ptr [rax]\n"
+           "vcvtbf42hf8 zmm0 {k1}, ymmword ptr [rax]\n"
+           "vcvtbf42hf8 xmm0, qword ptr [rax + 4]\n");
+    u8 expected_avx10_aux_intel[] = {
+        0x62, 0xf5, 0x7c, 0x08, 0x37, 0x00,
+        0x62, 0xf5, 0x7c, 0x28, 0x37, 0x00,
+        0x62, 0xf5, 0x7c, 0x48, 0x37, 0x00,
+        0x62, 0xf5, 0x7c, 0x09, 0x37, 0x00,
+        0x62, 0xf5, 0x7c, 0x49, 0x37, 0x00,
+        0x62, 0xf5, 0x7c, 0x08, 0x37, 0x80, 0x04, 0x00, 0x00, 0x00,
+    };
+    AssemblyEncodeResult avx10_aux_intel = assembly_encode(
+        arguments->arena, avx10_aux_intel_source,
+        (AssemblyEncodeOptions){.target = avx10_aux_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, avx10_aux_intel.diagnostic_count == 0 && avx10_aux_intel.bytes.length == sizeof(expected_avx10_aux_intel) &&
+                               memcmp(avx10_aux_intel.bytes.pointer, expected_avx10_aux_intel,
+                                      sizeof(expected_avx10_aux_intel)) == 0);
+
+    String8 avx10_aux_att_source =
+        S8("vcvtbf42hf8 (%rax), %xmm0\n"
+           "vcvtbf42hf8 (%rax), %ymm0\n"
+           "vcvtbf42hf8 (%rax), %zmm0\n"
+           "vcvtbf42hf8 (%rax), %xmm0 {%k1}\n"
+           "vcvtbf42hf8 (%rax), %zmm0 {%k1}\n"
+           "vcvtbf42hf8 4(%rax), %xmm0\n");
+    AssemblyEncodeResult avx10_aux_att = assembly_encode(
+        arguments->arena, avx10_aux_att_source,
+        (AssemblyEncodeOptions){.target = avx10_aux_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, avx10_aux_att.diagnostic_count == 0 && avx10_aux_att.bytes.length == sizeof(expected_avx10_aux_intel) &&
+                               memcmp(avx10_aux_att.bytes.pointer, expected_avx10_aux_intel,
+                                      sizeof(expected_avx10_aux_intel)) == 0);
+
+    AssemblyEncodeResult invalid_avx10_aux_widths = assembly_encode(
+        arguments->arena,
+        S8("vcvtbf42hf8 xmm0, xmmword ptr [rax]\n"
+           "vcvtbf42hf8 ymm0, ymmword ptr [rax]\n"
+           "vcvtbf42hf8 zmm0, zmmword ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = avx10_aux_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, invalid_avx10_aux_widths.diagnostic_count == 3 && invalid_avx10_aux_widths.bytes.length == 0);
+    for (u32 diagnostic_index = 0; diagnostic_index < invalid_avx10_aux_widths.diagnostic_count; diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, invalid_avx10_aux_widths.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
     Target fixed_round_len_target = advanced_target;
     fixed_round_len_target.cpu_features = target_cpu_features_add(fixed_round_len_target.cpu_features, TARGET_CPU_FEATURE_X86_AVX512FP16);
     AssemblyEncodeResult fixed_round_len512_intel = assembly_encode(
