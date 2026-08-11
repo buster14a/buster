@@ -86,7 +86,7 @@ The current audit output has 7,491 coverage rows, 7,491 canonical forms,
 bytes (checksum `ec5065a9b4503e40`), and the sorted string pool is 337,490
 bytes. Lookup
 indexes contain 1,557 mnemonic ranges and candidates for all 7,491 records;
-the proven-signature index contains 4,310 ranges and 4,310 candidates.
+the proven-signature index contains 4,333 ranges and 4,333 candidates.
 
 Coverage is intentionally blocked:
 
@@ -140,7 +140,7 @@ explicit `SVCROperand` SME custom-parser gate despite its empty LLVM
 `custom_operand_requires_sme`, and it remains raw-layout complete. Raw layout
 closure is complete for all 2,898 in-profile rows (2,898/2,898); this is a
 bit-layout guarantee, not semantic encoder coverage. The emitted profile is
-2,537,262 bytes with checksum `05e3912bebea41d3`.
+2,537,273 bytes with checksum `edebd9b8f95920c4`.
 
 The MRS/MSR system forms with immediate operands remain in the M1 denominator
 when their feature predicates permit them. Their operand-value semantics are
