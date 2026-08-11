@@ -2726,18 +2726,19 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                    ledger[30].blocker == BUSTER_X86_METADATA_BLOCKER_NONE && ledger[30].encoder_capable);
         // The residual-control stack contributes sixteen rows, legacy
         // DF64/IMMUNE controls contribute seventeen, IBHF=1 contributes one
-        // boolean row, the ACE R4 cohort contributes ten, and BSRINIT adds
-        // one.  These are disjoint normalized rows on top of the fixed NOT16
+        // boolean row, the ACE R4 cohort contributes ten, BSRINIT adds one,
+        // and the fixed CET/IBHF NOP cohort contributes eleven newly capable
+        // rows.  These are disjoint normalized rows on top of the fixed NOT16
         // rows.
-        BUSTER_TEST(arguments, audit.emitted_count == 10585 && audit.blocked_count == 428 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10585 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 428);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10693 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 51);
+        BUSTER_TEST(arguments, audit.emitted_count == 10596 && audit.blocked_count == 417 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10596 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 417);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10704 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 40);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 198, 5, 1644, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1763, 196, 5, 1644, 176, 6728, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {49, 2, 0, 0, 0, 0, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1773, 197, 5, 1644, 176, 6728, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {39, 1, 0, 0, 0, 0, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2747,7 +2748,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10585, 268, 108, 40, 0, 12, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10596, 268, 108, 40, 0, 1, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -3143,6 +3144,130 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                                                       refining_byte_cases[case_index].byte_count);
         }
         BUSTER_TEST(arguments, refining_bytes_exact);
+
+        // The fixed CET/IBHF NOP rows are a metadata-only two-register
+        // coverage cohort.  Keep the complete twelve-row inventory explicit:
+        // eleven rows have safe fixed bytes, while the generic F8 row remains
+        // blocked because its REX.W spelling is IBHF=1.
+        static u32 const fixed_nop_ids[] = {7954, 7955, 7956, 7957, 7958, 7959, 7960, 7961, 7962, 7963, 7964, 8693};
+        static String8 const fixed_nop_reg_tokens[] = {
+            S8("REG[0b010]"), S8("REG[0b011]"), S8("REG[0b100]"), S8("REG[0b101]"), S8("REG[0b111]"),
+            S8("REG[0b111]"), S8("REG[0b111]"), S8("REG[0b111]"), S8("REG[0b110]"), S8("REG[0b111]"),
+            S8("REG[0b111]"), S8("REG[0b111]"),
+        };
+        static String8 const fixed_nop_rm_tokens[] = {
+            S8("RM[nnn]"), S8("RM[nnn]"), S8("RM[nnn]"), S8("RM[nnn]"), S8("RM[0b001]"), S8("RM[0b101]"),
+            S8("RM[0b110]"), S8("RM[0b111]"), S8("RM[nnn]"), S8("RM[0b000]"), S8("RM[0b100]"), S8("RM[0b000]"),
+        };
+        bool fixed_nop_inventory = true;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fixed_nop_ids); index += 1)
+        {
+            BusterX86MetadataForm form = {0};
+            bool retrieved = buster_x86_metadata_form(fixed_nop_ids[index], &form);
+            bool raw_signature = retrieved && form.fixed_byte_count == 2 && form.fixed_bytes[0] == 0x0f &&
+                                 form.fixed_bytes[1] == 0x1e && form.mandatory_prefix == 0xf3 &&
+                                 form.map == BUSTER_X86_METADATA_MAP_0F && form.operand_count == 2 &&
+                                 (form.field_flags & (BUSTER_X86_METADATA_FIELD_MODRM | BUSTER_X86_METADATA_FIELD_REGISTER)) ==
+                                     (BUSTER_X86_METADATA_FIELD_MODRM | BUSTER_X86_METADATA_FIELD_REGISTER);
+            bool collision = index == 9;
+            bool expected_coverage = !collision;
+            fixed_nop_inventory &= retrieved && x86_64_metadata_test_string_equal(form.iclass, S8("NOP")) &&
+                                   x86_64_metadata_test_string_equal(form.isa_set, S8("PPRO")) &&
+                                   x86_64_metadata_test_string_equal(form.category, S8("WIDENOP")) &&
+                                   x86_64_metadata_test_string_equal(form.extension, S8("BASE")) && raw_signature &&
+                                   x86_64_metadata_test_pattern_has_token(form.pattern, S8("0x0F")) &&
+                                   x86_64_metadata_test_pattern_has_token(form.pattern, S8("0x1E")) &&
+                                   x86_64_metadata_test_pattern_has_token(form.pattern, S8("MOD[0b11]")) &&
+                                   x86_64_metadata_test_pattern_has_token(form.pattern, S8("MOD=3")) &&
+                                   x86_64_metadata_test_pattern_has_token(form.pattern, fixed_nop_reg_tokens[index]) &&
+                                   x86_64_metadata_test_pattern_has_token(form.pattern, fixed_nop_rm_tokens[index]) &&
+                                   (index == 11 ? x86_64_metadata_test_pattern_has_token(form.pattern, S8("norexw_prefix"))
+                                                : !x86_64_metadata_test_pattern_has_token(form.pattern, S8("norexw_prefix"))) &&
+                                   ledger[fixed_nop_ids[index]].encoder_capable == expected_coverage &&
+                                   ledger[fixed_nop_ids[index]].disposition ==
+                                       (expected_coverage ? BUSTER_X86_METADATA_COVERAGE_EMITTED
+                                                           : BUSTER_X86_METADATA_COVERAGE_BLOCKED) &&
+                                   ledger[fixed_nop_ids[index]].blocker ==
+                                       (expected_coverage ? BUSTER_X86_METADATA_BLOCKER_NONE
+                                                           : BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS);
+        }
+        BUSTER_TEST(arguments, fixed_nop_inventory);
+
+        struct
+        {
+            u32 form_id;
+            u8 rm;
+            u8 reg;
+            u8 bytes32[5];
+            u8 bytes32_count;
+            u8 bytes64[5];
+            u8 bytes64_count;
+        } const fixed_nop_byte_cases[] = {
+            {7954, 0, 2, {0xf3, 0x0f, 0x1e, 0xd0, 0}, 4, {0xf3, 0x48, 0x0f, 0x1e, 0xd0}, 5},
+            {7955, 0, 3, {0xf3, 0x0f, 0x1e, 0xd8, 0}, 4, {0xf3, 0x48, 0x0f, 0x1e, 0xd8}, 5},
+            {7956, 0, 4, {0xf3, 0x0f, 0x1e, 0xe0, 0}, 4, {0xf3, 0x48, 0x0f, 0x1e, 0xe0}, 5},
+            {7957, 0, 5, {0xf3, 0x0f, 0x1e, 0xe8, 0}, 4, {0xf3, 0x48, 0x0f, 0x1e, 0xe8}, 5},
+            {7958, 1, 7, {0xf3, 0x0f, 0x1e, 0xf9, 0}, 4, {0xf3, 0x48, 0x0f, 0x1e, 0xf9}, 5},
+            {7959, 5, 7, {0xf3, 0x0f, 0x1e, 0xfd, 0}, 4, {0xf3, 0x48, 0x0f, 0x1e, 0xfd}, 5},
+            {7960, 6, 7, {0xf3, 0x0f, 0x1e, 0xfe, 0}, 4, {0xf3, 0x48, 0x0f, 0x1e, 0xfe}, 5},
+            {7961, 7, 7, {0xf3, 0x0f, 0x1e, 0xff, 0}, 4, {0xf3, 0x48, 0x0f, 0x1e, 0xff}, 5},
+            {7962, 0, 6, {0xf3, 0x0f, 0x1e, 0xf0, 0}, 4, {0xf3, 0x48, 0x0f, 0x1e, 0xf0}, 5},
+            {7964, 4, 7, {0xf3, 0x0f, 0x1e, 0xfc, 0}, 4, {0xf3, 0x48, 0x0f, 0x1e, 0xfc}, 5},
+            {8693, 0, 7, {0xf3, 0x0f, 0x1e, 0xf8, 0}, 4, {0, 0, 0, 0, 0}, 0},
+        };
+        bool fixed_nop_bytes_exact = true;
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(fixed_nop_byte_cases); case_index += 1)
+        {
+            u32 form_id = fixed_nop_byte_cases[case_index].form_id;
+            BusterX86MetadataPhysicalOperand operands32[2] = {
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, fixed_nop_byte_cases[case_index].rm, 32),
+                x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, fixed_nop_byte_cases[case_index].reg, 32),
+            };
+            bool case_exact = x86_64_metadata_test_emit_exact(
+                S8("NOP"), form_id, operands32, BUSTER_ARRAY_LENGTH(operands32), (BusterX86MetadataPhysicalAttributes){0},
+                wildcard, BUSTER_ARRAY_LENGTH(wildcard), fixed_nop_byte_cases[case_index].bytes32,
+                fixed_nop_byte_cases[case_index].bytes32_count);
+            if (fixed_nop_byte_cases[case_index].bytes64_count)
+            {
+                BusterX86MetadataPhysicalOperand operands64[2] = {
+                    x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, fixed_nop_byte_cases[case_index].rm, 64),
+                    x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, fixed_nop_byte_cases[case_index].reg, 64),
+                };
+                case_exact &= x86_64_metadata_test_emit_exact(
+                    S8("NOP"), form_id, operands64, BUSTER_ARRAY_LENGTH(operands64), (BusterX86MetadataPhysicalAttributes){0},
+                    wildcard, BUSTER_ARRAY_LENGTH(wildcard), fixed_nop_byte_cases[case_index].bytes64,
+                    fixed_nop_byte_cases[case_index].bytes64_count);
+            }
+            fixed_nop_bytes_exact &= case_exact;
+        }
+        BUSTER_TEST(arguments, fixed_nop_bytes_exact);
+
+        BusterX86MetadataPhysicalOperand generic_collision_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 7, 64),
+        };
+        BusterX86MetadataEmitResult generic_collision = x86_64_metadata_test_emit_form(
+            S8("NOP"), 7963, generic_collision_operands, BUSTER_ARRAY_LENGTH(generic_collision_operands),
+            (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 1, 0, 0);
+        BUSTER_TEST(arguments, generic_collision.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA);
+
+        // ID8693 is the explicit no-REX spelling: it is valid regardless of
+        // the IBHF feature state and must never acquire the 0x48 prefix.
+        String8 fixed_nop_no_boolean_features[] = {S8("i386")};
+        BusterX86MetadataPhysicalOperand no_rex_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 32),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 7, 32),
+        };
+        u8 no_rex_bytes[] = {0xf3, 0x0f, 0x1e, 0xf8};
+        bool no_rex_exact = x86_64_metadata_test_emit_exact(
+                                S8("NOP"), 8693, no_rex_operands, BUSTER_ARRAY_LENGTH(no_rex_operands),
+                                (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard), no_rex_bytes,
+                                BUSTER_ARRAY_LENGTH(no_rex_bytes)) &&
+                            x86_64_metadata_test_emit_exact(
+                                S8("NOP"), 8693, no_rex_operands, BUSTER_ARRAY_LENGTH(no_rex_operands),
+                                (BusterX86MetadataPhysicalAttributes){0}, fixed_nop_no_boolean_features,
+                                BUSTER_ARRAY_LENGTH(fixed_nop_no_boolean_features), no_rex_bytes, BUSTER_ARRAY_LENGTH(no_rex_bytes));
+        BUSTER_TEST(arguments, no_rex_exact);
 
         BusterX86MetadataPhysicalOperand wrong_operands[16] = {0};
         char8 wrong_mnemonic_buffer[128] = {0};

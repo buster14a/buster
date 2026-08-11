@@ -2203,6 +2203,22 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_fixed_bsrinit_no_zeroing(
            pattern.mode_control == BUSTER_X86_METADATA_PATTERN_MODE_64 && pattern.no_vector_source && pattern.has_prefix_control;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_ibhf_generic_nop_collision(BusterX86MetadataForm form,
+                                                                                BusterX86MetadataPatternSemantics pattern)
+{
+    // The generic BASE NOP row for F3 0F 1E F8 also admits REX.W.  That
+    // spelling is IBHF=1, so retaining the generic row would let a source
+    // query select bytes whose architectural meaning changes with IBHF.  The
+    // IBHF rows and the explicit no-REX row carry typed controls and are not
+    // covered by this predicate.
+    return buster_x86_metadata_string_input_equal(form.iclass.offset, S8("NOP")) &&
+           buster_x86_metadata_string_input_equal(form.isa_set.offset, S8("PPRO")) &&
+           buster_x86_metadata_string_input_equal(form.extension.offset, S8("BASE")) &&
+           form.mandatory_prefix == 0xf3 && pattern.opcode_count == 2 && pattern.opcode[0] == 0x0f &&
+           pattern.opcode[1] == 0x1e && pattern.mod_kind == BUSTER_X86_METADATA_PATTERN_MOD_REGISTER &&
+           pattern.reg_fixed == 7 && pattern.rm_fixed == 0 && !pattern.has_w;
+}
+
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX86MetadataForm form,
                                                                           BusterX86MetadataPatternSemantics pattern)
 {
@@ -2211,6 +2227,8 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
     // carry the corresponding constraint into the byte path.
     if (!buster_x86_metadata_emit_boolean_control_matches(form, pattern))
         return BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
+    if (buster_x86_metadata_emit_ibhf_generic_nop_collision(form, pattern))
+        return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
     if (pattern.has_prefix_kind && form.prefix_kind != pattern.prefix_kind)
         return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
     // BRANCH_HINT is only implemented for the normalized 64-bit conditional
@@ -5495,6 +5513,23 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_register(BusterX86Metadata
             }
         }
         if (index == 32) return false;
+    }
+    else
+    {
+        // Fixed ModRM REG/RM rows expose both fields as ordinary visible
+        // register operands (for example the CET/IBHF NOP cohort).  Select
+        // the exact field value for coverage instead of defaulting every
+        // operand to rax and turning a representable row into a register
+        // encoding blocker.  The effective source handles operand aliases
+        // and x87's REG/RM inversion without making the two-register spelling
+        // part of the public source resolver contract.
+        u8 field_source = buster_x86_metadata_emit_effective_field_source_pattern(metadata, pattern);
+        if (field_source == BUSTER_X86_METADATA_FIELD_SOURCE_REG &&
+            pattern.reg_fixed != BUSTER_X86_METADATA_PATTERN_FIXED_ANY)
+            reg.index = pattern.reg_fixed;
+        else if (field_source == BUSTER_X86_METADATA_FIELD_SOURCE_RM &&
+                 pattern.rm_fixed != BUSTER_X86_METADATA_PATTERN_FIXED_ANY)
+            reg.index = pattern.rm_fixed;
     }
     *result = (BusterX86MetadataPhysicalOperand){
         .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
