@@ -105,6 +105,20 @@ BUSTER_GLOBAL_LOCAL u32 c_test_ir_direct_call_count(IrProgram* program, IrFuncti
     return count;
 }
 
+BUSTER_GLOBAL_LOCAL u32 c_test_ir_call_count(IrFunction* function)
+{
+    if (!function)
+    {
+        return 0;
+    }
+    u32 count = 0;
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        count += function->instructions[instruction_index].opcode == IR_OPCODE_CALL;
+    }
+    return count;
+}
+
 BUSTER_GLOBAL_LOCAL CIRLowerResult c_test_lower_source(Arena* arena, String8 source, String8 source_path, Target target,
                                                        CPreprocessResult* preprocess_out, CParseResult* parse_out)
 {
@@ -7435,6 +7449,320 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    String8 source = S8("typedef struct WideStruct { long double value; } WideStruct;"
+                        " typedef union WideUnion { long double value; int integer; } WideUnion;"
+                        " typedef struct NestedStruct { WideStruct value; } NestedStruct;"
+                        " typedef struct WideArray { long double values[2]; } WideArray;"
+                        " typedef struct LargeStruct { long double values[2]; int tail; } LargeStruct;"
+                        " typedef struct F64Struct { double value; } F64Struct;"
+                        " long double long_double_round_trip(long double value) { return value; }"
+                        " WideStruct struct_round_trip(WideStruct value) { return value; }"
+                        " WideUnion union_round_trip(WideUnion value) { return value; }"
+                        " NestedStruct nested_round_trip(NestedStruct value) { return value; }"
+                        " WideArray array_round_trip(WideArray value) { return value; }"
+                        " LargeStruct large_round_trip(LargeStruct value) { return value; }"
+                        " long double *pointer_round_trip(long double *value) { return value; }"
+                        " WideStruct *aggregate_pointer_round_trip(WideStruct *value) { return value; }"
+                        " int decayed_array(long double values[2]) { return values != 0; }"
+                        " F64Struct f64_round_trip(F64Struct value) { return value; }");
+    String8 target_triples[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-pc-windows-msvc"),
+        S8("x86_64-apple-macos"),
+        S8("aarch64-unknown-linux-gnu"),
+        S8("aarch64-apple-macos"),
+        S8("aarch64-pc-windows-msvc"),
+    };
+    String8 function_names[] = {
+        S8("long_double_round_trip"),
+        S8("struct_round_trip"),
+        S8("union_round_trip"),
+        S8("nested_round_trip"),
+        S8("array_round_trip"),
+        S8("large_round_trip"),
+        S8("pointer_round_trip"),
+        S8("aggregate_pointer_round_trip"),
+        S8("decayed_array"),
+        S8("f64_round_trip"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
+    {
+        TargetParseResult parsed_target = target_parse_triple(target_triples[target_index]);
+        BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+        {
+            continue;
+        }
+        Target target = parsed_target.target;
+        bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                    (CPreprocessOptions){
+                                                        .target = target,
+                                                        .data_layout = target_data_layout(target),
+                                                    });
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, target_triples[target_index], preprocess, parse, target);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == (wide_long_double ? 6 : 0));
+        for (u32 diagnostic_index = 0; diagnostic_index < lowered.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = lowered.diagnostics[diagnostic_index];
+            BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+            BUSTER_TEST(arguments,
+                        string_starts_with_sequence(diagnostic.message,
+                                                     S8("C IR lowering does not yet support the parameter or return value types of function '")));
+        }
+        BUSTER_TEST(arguments, lowered.program != 0);
+        if (lowered.program)
+        {
+            IrModule* module = lowered.program->modules;
+            BUSTER_TEST(arguments, module->function_count == BUSTER_ARRAY_LENGTH(function_names));
+            for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(function_names); function_index += 1)
+            {
+                IrFunction* function = c_test_find_ir_function(module, function_names[function_index]);
+                BUSTER_TEST(arguments, function != 0);
+                if (!function)
+                {
+                    continue;
+                }
+                bool expected_rejected = wide_long_double && function_index < 6;
+                BUSTER_TEST(arguments, function->state == (expected_rejected ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
+            }
+            if (wide_long_double)
+            {
+                IrFunction* struct_function = c_test_find_ir_function(module, S8("struct_round_trip"));
+                IrFunction* large_function = c_test_find_ir_function(module, S8("large_round_trip"));
+                IrType* struct_function_type = struct_function ? ir_type_from_id(&lowered.program->types, struct_function->canonical_type) : 0;
+                IrType* large_function_type = large_function ? ir_type_from_id(&lowered.program->types, large_function->canonical_type) : 0;
+                IrTypeId struct_type_id = struct_function_type && struct_function_type->parameter_count
+                                               ? struct_function_type->parameter_types[0]
+                                               : IR_TYPE_ID_INVALID;
+                IrAbiValue struct_abi = ir_type_abi_value(lowered.program, struct_type_id,
+                                                           ir_abi_convention_for_target(target), IR_ABI_USE_ARGUMENT);
+                IrTypeId large_type_id = large_function_type ? large_function_type->return_type : IR_TYPE_ID_INVALID;
+                IrAbiValue large_abi = ir_type_abi_value(lowered.program, large_type_id,
+                                                          ir_abi_convention_for_target(target), IR_ABI_USE_RESULT);
+                BUSTER_TEST(arguments, struct_abi.part_count != 0);
+                BUSTER_TEST(arguments, large_abi.part_count != 0 && large_abi.indirect);
+            }
+            BUSTER_TEST(arguments, module->rejected_function_count == (wide_long_double ? 6 : 0));
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    String8 source = S8("typedef struct WideStruct { long double value; } WideStruct;"
+                        " typedef union WideUnion { long double value; int integer; } WideUnion;"
+                        " typedef struct NestedStruct { WideStruct value; } NestedStruct;"
+                        " extern long double extern_scalar_target(void);"
+                        " extern WideStruct extern_struct_target(WideStruct value);"
+                        " extern WideUnion extern_union_target(WideUnion value);"
+                        " extern NestedStruct extern_nested_target(NestedStruct value);"
+                        " extern void variadic_scalar_target(int fixed, ...);"
+                        " extern void variadic_aggregate_target(int fixed, ...);"
+                        " extern void variadic_f64_target(int fixed, ...);"
+                        " extern void pointer_target(long double *value);"
+                        " void function_pointer_sink(long double (*value)(void)) { (void)value; }"
+                        " void call_scalar(void) { extern_scalar_target(); }"
+                        " void call_struct(void) { WideStruct value = { 0 }; extern_struct_target(value); }"
+                        " void call_union(void) { WideUnion value = { 0 }; extern_union_target(value); }"
+                        " void call_nested(void) { NestedStruct value = { 0 }; extern_nested_target(value); }"
+                        " void call_function_pointer(void) { long double (*value)(void) = extern_scalar_target; value(); }"
+                        " void address_only(void) { function_pointer_sink(extern_scalar_target); }"
+                        " void pointer_transport(long double *value) { pointer_target(value); }"
+                        " void call_variadic_scalar(void) { long double value = 0; variadic_scalar_target(0, value); }"
+                        " void call_variadic_aggregate(void) { WideStruct value = { 0 }; variadic_aggregate_target(0, value); }"
+                        " void call_variadic_f64(void) { double value = 0; variadic_f64_target(0, value); }"
+                        " int main(void) { return 0; }");
+    String8 target_triples[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-pc-windows-msvc"),
+        S8("x86_64-apple-macos"),
+        S8("aarch64-unknown-linux-gnu"),
+        S8("aarch64-apple-macos"),
+        S8("aarch64-pc-windows-msvc"),
+    };
+    String8 rejected_names[] = {
+        S8("call_scalar"),
+        S8("call_struct"),
+        S8("call_union"),
+        S8("call_nested"),
+        S8("call_function_pointer"),
+        S8("call_variadic_scalar"),
+        S8("call_variadic_aggregate"),
+    };
+    String8 preserved_names[] = {
+        S8("address_only"),
+        S8("pointer_transport"),
+        S8("call_variadic_f64"),
+        S8("function_pointer_sink"),
+        S8("main"),
+    };
+    String8 extern_names[] = {
+        S8("extern_scalar_target"),
+        S8("extern_struct_target"),
+        S8("extern_union_target"),
+        S8("extern_nested_target"),
+        S8("variadic_scalar_target"),
+        S8("variadic_aggregate_target"),
+        S8("variadic_f64_target"),
+        S8("pointer_target"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
+    {
+        TargetParseResult parsed_target = target_parse_triple(target_triples[target_index]);
+        BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+        {
+            continue;
+        }
+        Target target = parsed_target.target;
+        bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], target, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == (wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
+        for (u32 diagnostic_index = 0; diagnostic_index < lowered.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = lowered.diagnostics[diagnostic_index];
+            BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+            BUSTER_TEST(arguments,
+                        string_first_sequence(diagnostic.message,
+                                              S8("C IR lowering does not yet support the parameter or return value types of function '")) !=
+                            BUSTER_STRING_NO_MATCH);
+        }
+        BUSTER_TEST(arguments, lowered.program != 0);
+        if (lowered.program)
+        {
+            IrModule* module = lowered.program->modules;
+            for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(rejected_names); function_index += 1)
+            {
+                IrFunction* function = c_test_find_ir_function(module, rejected_names[function_index]);
+                BUSTER_TEST(arguments, function != 0);
+                if (!function)
+                {
+                    continue;
+                }
+                BUSTER_TEST(arguments, function->state == (wide_long_double ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
+                if (wide_long_double)
+                {
+                    BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                }
+            }
+            for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(preserved_names); function_index += 1)
+            {
+                IrFunction* function = c_test_find_ir_function(module, preserved_names[function_index]);
+                BUSTER_TEST(arguments, function != 0);
+                BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_LOWERED);
+            }
+            for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(extern_names); function_index += 1)
+            {
+                IrFunction* function = c_test_find_ir_function(module, extern_names[function_index]);
+                BUSTER_TEST(arguments, function != 0);
+                BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_DECLARATION);
+            }
+            BUSTER_TEST(arguments, module->rejected_function_count == (wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    String8 source = S8("extern long double cleanup_wide(long double *value);"
+                        " void cleanup_owner(void) {"
+                        " long double value __attribute__((cleanup(cleanup_wide))) = 0;"
+                        " return;"
+                        " }"
+                        " int main(void) { return 0; }");
+    String8 target_triples[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-pc-windows-msvc"),
+        S8("x86_64-apple-macos"),
+        S8("aarch64-unknown-linux-gnu"),
+        S8("aarch64-apple-macos"),
+        S8("aarch64-pc-windows-msvc"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
+    {
+        TargetParseResult parsed_target = target_parse_triple(target_triples[target_index]);
+        BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+        {
+            continue;
+        }
+        Target target = parsed_target.target;
+        bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        preprocess = c_preprocess(temporary.arena, source,
+                                  (CPreprocessOptions){
+                                      .dialect = C_PREPROCESS_DIALECT_GNU23,
+                                      .target = target,
+                                      .data_layout = target_data_layout(target),
+                                  });
+        parse = c_parse(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, target_triples[target_index], preprocess, parse, target);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == (wide_long_double ? 1 : 0));
+        if (wide_long_double && lowered.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+            BUSTER_TEST(arguments,
+                        string_first_sequence(lowered.diagnostics[0].message,
+                                              S8("C IR lowering does not yet support the parameter or return value types of function '")) !=
+                            BUSTER_STRING_NO_MATCH);
+        }
+        BUSTER_TEST(arguments, lowered.program != 0);
+        if (lowered.program)
+        {
+            IrModule* module = lowered.program->modules;
+            IrFunction* callback = c_test_find_ir_function(module, S8("cleanup_wide"));
+            IrFunction* owner = c_test_find_ir_function(module, S8("cleanup_owner"));
+            BUSTER_TEST(arguments, callback != 0 && callback->state == IR_FUNCTION_DECLARATION);
+            BUSTER_TEST(arguments, owner != 0);
+            if (owner)
+            {
+                u32 call_count = 0;
+                u32 branch_count = 0;
+                for (u32 instruction_index = 0; instruction_index < owner->instruction_count; instruction_index += 1)
+                {
+                    IrOpcode opcode = owner->instructions[instruction_index].opcode;
+                    call_count += opcode == IR_OPCODE_CALL;
+                    branch_count += opcode == IR_OPCODE_BRANCH || opcode == IR_OPCODE_BRANCH_IF;
+                }
+                BUSTER_TEST(arguments, owner->state == (wide_long_double ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
+                BUSTER_TEST(arguments, call_count == (wide_long_double ? 0 : 1));
+                BUSTER_TEST(arguments, wide_long_double ? branch_count == 0 : branch_count != 0);
+            }
+            BUSTER_TEST(arguments, module->rejected_function_count == (wide_long_double ? 1 : 0));
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 #if BUSTER_COMPILER_CLANG
 __attribute__((optnone))
 #endif
@@ -7454,6 +7782,10 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));
     c_test_result_add(&result, c_test_frontend_vla_and_ir(arguments));
     c_test_result_add(&result, c_test_local_static_aggregates(arguments));
+
+    c_test_result_add(&result, c_test_wide_float_function_signatures(arguments));
+    c_test_result_add(&result, c_test_wide_float_signature_calls(arguments));
+    c_test_result_add(&result, c_test_wide_float_cleanup_signature_calls(arguments));
 
     c_test_result_add(&result, c_test_static_range_designators(arguments));
 

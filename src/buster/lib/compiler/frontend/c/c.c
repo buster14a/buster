@@ -17636,6 +17636,203 @@ BUSTER_GLOBAL_LOCAL bool c_ir_va_list_parameter_decays(Target target)
            (target.cpu_arch == CPU_ARCH_X86_64 || target.os == OPERATING_SYSTEM_WINDOWS);
 }
 
+typedef enum CIrWideFloatState
+{
+    C_IR_WIDE_FLOAT_UNKNOWN,
+    C_IR_WIDE_FLOAT_VISITING,
+    C_IR_WIDE_FLOAT_SAFE,
+    C_IR_WIDE_FLOAT_UNSUPPORTED,
+} CIrWideFloatState;
+
+typedef struct CIrWideFloatWork CIrWideFloatWork;
+struct CIrWideFloatWork
+{
+    IrTypeId type;
+    u32 next_child;
+};
+
+typedef struct CIrWideFloatCache CIrWideFloatCache;
+struct CIrWideFloatCache
+{
+    u8* state;
+    CIrWideFloatWork* work;
+    u32 capacity;
+    bool allocation_failed;
+    u8 reserved[3];
+};
+
+BUSTER_GLOBAL_LOCAL CIrWideFloatCache c_ir_wide_float_cache_initialize(Arena* arena, IrProgram* program)
+{
+    CIrWideFloatCache result = {
+        .capacity = program ? program->types.capacity : 0,
+    };
+    if (!arena || !program || !result.capacity)
+    {
+        result.allocation_failed = true;
+        return result;
+    }
+    result.state = arena_allocate(arena, u8, result.capacity);
+    result.work = arena_allocate(arena, CIrWideFloatWork, result.capacity);
+    if (!result.state || !result.work)
+    {
+        result.allocation_failed = true;
+        return result;
+    }
+    memset(result.state, C_IR_WIDE_FLOAT_UNKNOWN, result.capacity * sizeof(*result.state));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_type_contains_wide_float(IrProgram* program, CIrWideFloatCache* cache, IrTypeId root_type)
+{
+    if (!program || !cache || cache->allocation_failed || !cache->state || !cache->work || root_type.value == IR_ID_UNDERLYING_INVALID ||
+        root_type.value >= program->types.count || root_type.value >= cache->capacity)
+    {
+        return true;
+    }
+    u8 root_state = cache->state[root_type.value];
+    if (root_state == C_IR_WIDE_FLOAT_SAFE)
+    {
+        return false;
+    }
+    if (root_state == C_IR_WIDE_FLOAT_UNSUPPORTED)
+    {
+        return true;
+    }
+    u32 work_count = 0;
+    cache->state[root_type.value] = C_IR_WIDE_FLOAT_VISITING;
+    cache->work[work_count++] = (CIrWideFloatWork){.type = root_type};
+    while (work_count)
+    {
+        CIrWideFloatWork* frame = &cache->work[work_count - 1];
+        IrTypeId type_id = frame->type;
+        if (type_id.value >= program->types.count || type_id.value >= cache->capacity)
+        {
+            if (type_id.value < cache->capacity)
+            {
+                cache->state[type_id.value] = C_IR_WIDE_FLOAT_UNSUPPORTED;
+            }
+            work_count -= 1;
+            continue;
+        }
+        u8 state = cache->state[type_id.value];
+        if (state == C_IR_WIDE_FLOAT_SAFE || state == C_IR_WIDE_FLOAT_UNSUPPORTED)
+        {
+            work_count -= 1;
+            continue;
+        }
+        IrType* type = ir_type_from_id(&program->types, type_id);
+        if (!type)
+        {
+            cache->state[type_id.value] = C_IR_WIDE_FLOAT_UNSUPPORTED;
+            work_count -= 1;
+            continue;
+        }
+        if (type->kind == IR_TYPE_FLOAT)
+        {
+            cache->state[type_id.value] = type->bit_width > 64 ? C_IR_WIDE_FLOAT_UNSUPPORTED : C_IR_WIDE_FLOAT_SAFE;
+            work_count -= 1;
+            continue;
+        }
+        u32 child_count = 0;
+        if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
+        {
+            child_count = 1;
+        }
+        else if (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
+        {
+            child_count = type->field_count;
+        }
+        if (frame->next_child >= child_count)
+        {
+            cache->state[type_id.value] = C_IR_WIDE_FLOAT_SAFE;
+            work_count -= 1;
+            continue;
+        }
+        u32 child_index = frame->next_child;
+        IrTypeId child = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_type
+                                                      : (type->fields ? type->fields[child_index].type : IR_TYPE_ID_INVALID);
+        if (child.value == IR_ID_UNDERLYING_INVALID || child.value >= program->types.count || child.value >= cache->capacity)
+        {
+            cache->state[type_id.value] = C_IR_WIDE_FLOAT_UNSUPPORTED;
+            work_count -= 1;
+            continue;
+        }
+        u8 child_state = cache->state[child.value];
+        if (child_state == C_IR_WIDE_FLOAT_UNSUPPORTED)
+        {
+            cache->state[type_id.value] = C_IR_WIDE_FLOAT_UNSUPPORTED;
+            work_count -= 1;
+        }
+        else if (child_state == C_IR_WIDE_FLOAT_VISITING)
+        {
+            cache->state[child.value] = C_IR_WIDE_FLOAT_UNSUPPORTED;
+            cache->state[type_id.value] = C_IR_WIDE_FLOAT_UNSUPPORTED;
+            work_count -= 1;
+        }
+        else if (child_state == C_IR_WIDE_FLOAT_UNKNOWN)
+        {
+            cache->state[child.value] = C_IR_WIDE_FLOAT_VISITING;
+            if (work_count >= cache->capacity)
+            {
+                cache->state[type_id.value] = C_IR_WIDE_FLOAT_UNSUPPORTED;
+                work_count -= 1;
+            }
+            else
+            {
+                cache->work[work_count++] = (CIrWideFloatWork){.type = child};
+            }
+        }
+        else
+        {
+            frame->next_child += 1;
+        }
+    }
+    return cache->state[root_type.value] == C_IR_WIDE_FLOAT_UNSUPPORTED;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_signature_type_supported(IrProgram* program, CIrWideFloatCache* wide_float_cache, IrTypeId type_id,
+                                                       bool result_type, Target target)
+{
+    if (!program)
+    {
+        return false;
+    }
+    IrType* type = ir_type_from_id(&program->types, type_id);
+    if (!type || !type->layout.resolved)
+    {
+        return false;
+    }
+    if (result_type && type->kind == IR_TYPE_VOID)
+    {
+        return true;
+    }
+    if (c_ir_type_contains_wide_float(program, wide_float_cache, type_id))
+    {
+        return false;
+    }
+    IrAbiValue abi = ir_type_abi_value(program, type_id, ir_abi_convention_for_target(target),
+                                       result_type ? IR_ABI_USE_RESULT : IR_ABI_USE_ARGUMENT);
+    return type->kind != IR_TYPE_FUNCTION && (type->kind != IR_TYPE_VECTOR || type->layout.size <= 64) &&
+           (type->kind != IR_TYPE_VA_LIST || type->layout.size <= 32) && abi.part_count;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_signature_body_supported(IrProgram* program, CIrWideFloatCache* wide_float_cache, IrTypeId return_type,
+                                                        IrTypeId* parameter_types, u32 parameter_count, Target target)
+{
+    if ((parameter_count && !parameter_types) || !c_ir_signature_type_supported(program, wide_float_cache, return_type, true, target))
+    {
+        return false;
+    }
+    for (u32 parameter_index = 0; parameter_index < parameter_count; parameter_index += 1)
+    {
+        if (!c_ir_signature_type_supported(program, wide_float_cache, parameter_types[parameter_index], false, target))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 CType* c_type_from_id(CParseResult* parse, CTypeId id)
 {
     if (!parse || id.value == C_ID_UNDERLYING_INVALID || id.value >= parse->type_count)
@@ -17645,8 +17842,9 @@ CType* c_type_from_id(CParseResult* parse, CTypeId id)
     return &parse->types[id.value];
 }
 
-BUSTER_GLOBAL_LOCAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* program, CIrPointerTypeCache* pointer_types, CParseResult* parse,
-                                                         CDeclaration declaration, IrTypeId* c_type_ir_map, Target target)
+BUSTER_GLOBAL_LOCAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* program, CIrPointerTypeCache* pointer_types,
+                                                         CIrWideFloatCache* wide_float_cache, CParseResult* parse, CDeclaration declaration,
+                                                         IrTypeId* c_type_ir_map, Target target)
 {
     CIrSignature result = {
         .return_type = IR_TYPE_ID_INVALID,
@@ -17675,18 +17873,10 @@ BUSTER_GLOBAL_LOCAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram
         return (CIrSignature){0};
     }
     result.parameter_types = arena_allocate(arena, IrTypeId, result.parameter_count);
-    IrType* canonical_return = ir_type_from_id(&program->types, result.return_type);
     // No eager whole-program ABI sweep here.  Every read of a type's ABI goes
     // through ir_type_abi_value, which resolves the type on demand, so this
     // was pre-warming only -- and running it once per function declaration
     // made signature lowering cost O(functions * types).
-    result.body_supported = canonical_return && canonical_return->layout.resolved &&
-                             (canonical_return->kind == IR_TYPE_VOID ||
-                              ((canonical_return->kind != IR_TYPE_FLOAT || canonical_return->bit_width <= 64) &&
-                               (canonical_return->kind != IR_TYPE_VECTOR || canonical_return->layout.size <= 64) &&
-                               (canonical_return->kind != IR_TYPE_VA_LIST || canonical_return->layout.size <= 32) &&
-                               (canonical_return->kind != IR_TYPE_FUNCTION) &&
-                               ir_type_abi_value(program, result.return_type, ir_abi_convention_for_target(target), IR_ABI_USE_RESULT).part_count));
     for (u32 parameter_index = 0; parameter_index < result.parameter_count; parameter_index += 1)
     {
         CType* parameter_type = c_type_from_id(parse, result.parameters[parameter_index].type);
@@ -17726,13 +17916,9 @@ BUSTER_GLOBAL_LOCAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram
         {
             return (CIrSignature){0};
         }
-        IrType* canonical_parameter = ir_type_from_id(&program->types, result.parameter_types[parameter_index]);
-        IrAbiValue parameter_abi = ir_type_abi_value(program, result.parameter_types[parameter_index], ir_abi_convention_for_target(target), IR_ABI_USE_ARGUMENT);
-        result.body_supported &= canonical_parameter && canonical_parameter->layout.resolved && canonical_parameter->kind != IR_TYPE_FUNCTION &&
-                                 (canonical_parameter->kind != IR_TYPE_FLOAT || canonical_parameter->bit_width <= 64) &&
-                                 (canonical_parameter->kind != IR_TYPE_VECTOR || canonical_parameter->layout.size <= 64) &&
-                                 (canonical_parameter->kind != IR_TYPE_VA_LIST || canonical_parameter->layout.size <= 32) && parameter_abi.part_count;
     }
+    result.body_supported = c_ir_signature_body_supported(program, wide_float_cache, result.return_type, result.parameter_types,
+                                                          result.parameter_count, target);
     result.valid = true;
     return result;
 }
@@ -18241,6 +18427,7 @@ struct CIntegerIrBuilder
     CIrPreparedCall* prepared_calls;
     CIrFunctionNameIndex* function_names;
     CIrPointerTypeCache* pointer_types;
+    CIrWideFloatCache* wide_float_cache;
     u32* prepared_call_indices;
     u32* matching_delimiters;
     u32 prepared_call_count;
@@ -23657,10 +23844,38 @@ BUSTER_GLOBAL_LOCAL bool c_ir_constexpr_initializer_valid(IrType* type, IrGlobal
            initializer->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_ir_report_unsupported_signature(CIntegerIrBuilder* builder, String8 name)
+{
+    if (!name.length)
+    {
+        name = S8("<function pointer>");
+    }
+    if (!builder->failure_message.length)
+    {
+        builder->failure_message = string_format(builder->arena,
+                                                 S8("C IR lowering does not yet support the parameter or return value types of function '{S8}'"),
+                                                 name);
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ir_signature_call_supported(CIntegerIrBuilder* builder, CIrSignature signature, String8 name)
+{
+    if (!signature.valid || signature.body_supported)
+    {
+        return signature.valid;
+    }
+    return c_ir_report_unsupported_signature(builder, name);
+}
+
 BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CToken token, IrFunction* target, CIrSignature signature,
                                                      IrValueId* arguments, u32 argument_count)
 {
     if (!target)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    if (!c_ir_signature_call_supported(builder, signature, target->name))
     {
         return IR_VALUE_ID_INVALID;
     }
@@ -26433,24 +26648,59 @@ BUSTER_GLOBAL_LOCAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CInte
                     pointer_type && pointer_type->kind == IR_TYPE_POINTER ? ir_type_from_id(&builder->program->types, pointer_type->element_type) : 0;
                 IrType* return_type =
                     function_type && function_type->kind == IR_TYPE_FUNCTION ? ir_type_from_id(&builder->program->types, function_type->return_type) : 0;
-                if (!function_type || !return_type)
+                if (!function_type || !return_type || (function_type->parameter_count && !function_type->parameter_types))
                 {
                     builder->failure_token_index = selected->open_index - 1;
                     return false;
+                }
+                IrTypeId* indirect_parameter_types = arena_allocate(builder->arena, IrTypeId, function_type->parameter_count);
+                for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
+                {
+                    IrTypeId parameter_type = function_type->parameter_types[parameter_index];
+                    IrType* parameter = ir_type_from_id(&builder->program->types, parameter_type);
+                    if (!parameter)
+                    {
+                        builder->failure_token_index = selected->open_index - 1;
+                        return C_IR_PREPARED_CALL_STEP_FAILED;
+                    }
+                    if (parameter->kind == IR_TYPE_ARRAY)
+                    {
+                        parameter_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, parameter->element_type);
+                    }
+                    else if (parameter->kind == IR_TYPE_FUNCTION)
+                    {
+                        parameter_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, parameter_type);
+                    }
+                    else if (parameter->kind == IR_TYPE_VA_LIST && c_ir_va_list_parameter_decays(builder->target))
+                    {
+                        parameter_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, parameter_type);
+                    }
+                    if (parameter_type.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        builder->failure_token_index = selected->open_index - 1;
+                        return C_IR_PREPARED_CALL_STEP_FAILED;
+                    }
+                    indirect_parameter_types[parameter_index] = parameter_type;
+                }
+                signature = (CIrSignature){
+                    .parameter_types = indirect_parameter_types,
+                    .return_type = function_type->return_type,
+                    .parameter_count = function_type->parameter_count,
+                    .valid = true,
+                    .returns_void = return_type->kind == IR_TYPE_VOID,
+                    .is_variadic = function_type->is_variadic,
+                };
+                signature.body_supported = c_ir_signature_body_supported(builder->program, builder->wide_float_cache, signature.return_type,
+                                                                           signature.parameter_types, signature.parameter_count, builder->target);
+                builder->failure_token_index = selected->open_index - 1;
+                if (!c_ir_signature_call_supported(builder, signature, S8("<function pointer>")))
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
                 }
                 indirect_callee = builder->function->values[callee.value].category == IR_VALUE_PLACE
                                       ? c_ir_emit_load_place(builder, callee, pointer_type_id,
                                                              c_ir_token_source_range(builder, token))
                                       : callee;
-                signature = (CIrSignature){
-                    .parameter_types = function_type->parameter_types,
-                    .return_type = function_type->return_type,
-                    .parameter_count = function_type->parameter_count,
-                    .valid = true,
-                    .body_supported = true,
-                    .returns_void = return_type->kind == IR_TYPE_VOID,
-                    .is_variadic = function_type->is_variadic,
-                };
             }
         }
         else
@@ -26466,6 +26716,12 @@ BUSTER_GLOBAL_LOCAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CInte
         if (!signature.valid)
         {
             return false;
+        }
+        if (!c_ir_signature_call_supported(builder, signature,
+                                           selected->indirect ? S8("<function pointer>")
+                                                              : c_token_spelling(builder->preprocess.spelling_base, token)))
+        {
+            return C_IR_PREPARED_CALL_STEP_FAILED;
         }
         if (continuation != C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT)
         {
@@ -26530,6 +26786,14 @@ BUSTER_GLOBAL_LOCAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CInte
             if (value.value == IR_ID_UNDERLYING_INVALID)
             {
                 return false;
+            }
+            if (argument_count >= signature.parameter_count &&
+                c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache,
+                                              builder->function->values[value.value].canonical_type))
+            {
+                c_ir_report_unsupported_signature(builder, selected->indirect ? S8("<function pointer>")
+                                                                                 : c_token_spelling(builder->preprocess.spelling_base, token));
+                return C_IR_PREPARED_CALL_STEP_FAILED;
             }
             selected->arguments[argument_count++] = value;
             index = frame->as.prepared_call.state->separator + 1;
@@ -34820,20 +35084,20 @@ BUSTER_GLOBAL_LOCAL bool c_ir_cleanup_function_target(CIntegerIrBuilder* builder
     {
         return false;
     }
+    CEntity* entity = &builder->parse.entities[entity_id.value];
     if (builder->cleanup_functions && builder->cleanup_functions[entity_id.value])
     {
         *target_out = builder->cleanup_functions[entity_id.value];
         *signature_out = builder->cleanup_signatures[entity_id.value];
-        return signature_out->valid;
+        return c_ir_signature_call_supported(builder, *signature_out, entity->name);
     }
     u32 declaration_index = c_ir_function_declaration_for_entity(&builder->parse, entity_id);
     if (declaration_index != UINT32_MAX && builder->declaration_functions[declaration_index] && builder->signatures[declaration_index].valid)
     {
         *target_out = builder->declaration_functions[declaration_index];
         *signature_out = builder->signatures[declaration_index];
-        return true;
+        return c_ir_signature_call_supported(builder, *signature_out, entity->name);
     }
-    CEntity* entity = &builder->parse.entities[entity_id.value];
     CType* function_type = c_type_from_id(&builder->parse, entity->type);
     IrTypeId canonical_type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : IR_TYPE_ID_INVALID;
     if (!function_type || function_type->kind != C_TYPE_FUNCTION || canonical_type.value == IR_ID_UNDERLYING_INVALID)
@@ -34849,9 +35113,13 @@ BUSTER_GLOBAL_LOCAL bool c_ir_cleanup_function_target(CIntegerIrBuilder* builder
         .entity = entity_id,
         .kind = C_DECLARATION_FUNCTION,
     };
-    CIrSignature signature = c_ir_function_signature(builder->arena, builder->program, builder->pointer_types, &builder->parse, synthetic,
-                                                      builder->c_type_ir_map, builder->target);
+    CIrSignature signature = c_ir_function_signature(builder->arena, builder->program, builder->pointer_types, builder->wide_float_cache,
+                                                      &builder->parse, synthetic, builder->c_type_ir_map, builder->target);
     if (!signature.valid)
+    {
+        return false;
+    }
+    if (!c_ir_signature_call_supported(builder, signature, entity->name))
     {
         return false;
     }
@@ -35066,6 +35334,15 @@ BUSTER_GLOBAL_LOCAL bool c_ir_emit_cleanup_calls(CIntegerIrBuilder* builder, CIr
         {
             continue;
         }
+        IrFunction* callback_function = 0;
+        CIrSignature callback_signature = {0};
+        bool callback_resolved = c_ir_cleanup_function_target(builder, entity->cleanup_function, &callback_function, &callback_signature);
+        IrTypeId variable_type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : IR_TYPE_ID_INVALID;
+        if (!callback_resolved || variable_type.value == IR_ID_UNDERLYING_INVALID || callback_signature.parameter_count != 1)
+        {
+            return false;
+        }
+        CToken callback_token = c_ir_space_name_token(builder, entity->name);
         IrValueId flag = builder->cleanup_flags[cleanup_index - 1];
         IrValueId active = c_ir_emit_load_place_raw(builder, flag, builder->bool_type, source);
         active = active.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_truth_value(builder, active, source);
@@ -35080,26 +35357,9 @@ BUSTER_GLOBAL_LOCAL bool c_ir_emit_cleanup_calls(CIntegerIrBuilder* builder, CIr
         {
             return false;
         }
-        IrFunction* callback_function = 0;
-        CIrSignature callback_signature = {0};
-        bool callback_resolved = c_ir_cleanup_function_target(builder, entity->cleanup_function, &callback_function, &callback_signature);
-        IrTypeId variable_type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : IR_TYPE_ID_INVALID;
-        if (variable_type.value == IR_ID_UNDERLYING_INVALID)
-        {
-            return false;
-        }
-        if (!callback_resolved)
-        {
-            return false;
-        }
-        if (callback_signature.parameter_count != 1)
-        {
-            return false;
-        }
         IrValueId address = c_ir_emit_address_of_place(builder, local->place, variable_type, source);
         IrValueId arguments[1] = {address};
         arguments[0] = c_ir_emit_cast(builder, arguments[0], callback_signature.parameter_types[0], source);
-        CToken callback_token = c_ir_space_name_token(builder, entity->name);
         if (address.value == IR_ID_UNDERLYING_INVALID || arguments[0].value == IR_ID_UNDERLYING_INVALID ||
             c_ir_emit_call_target(builder, callback_token, callback_function, callback_signature, arguments, BUSTER_ARRAY_LENGTH(arguments)).value ==
                 IR_ID_UNDERLYING_INVALID)
@@ -46172,13 +46432,15 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         }
         ir_module_add_global(arena, module, global);
     }
+    CIrWideFloatCache wide_float_cache = c_ir_wide_float_cache_initialize(arena, program);
     CIrSignature* signatures = arena_allocate(arena, CIrSignature, parse.declaration_count);
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
         if (declaration.kind == C_DECLARATION_FUNCTION)
         {
-            signatures[declaration_index] = c_ir_function_signature(arena, program, &pointer_types, &parse, declaration, c_type_ir_map, target);
+            signatures[declaration_index] = c_ir_function_signature(arena, program, &pointer_types, &wide_float_cache, &parse, declaration,
+                                                                     c_type_ir_map, target);
         }
     }
     bool* function_needed = arena_allocate(arena, bool, parse.declaration_count);
@@ -46538,6 +46800,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 },
             .function_names = &function_names,
             .pointer_types = &pointer_types,
+            .wide_float_cache = &wide_float_cache,
             .signatures = signatures,
             .c_type_ir_map = c_type_ir_map,
             .scalar_types = type_context.scalar_types,
