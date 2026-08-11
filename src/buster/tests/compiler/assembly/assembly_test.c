@@ -6165,6 +6165,111 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                        address_size_att.relocation_count == 0 && address_size_att.symbol_count == 0);
         }
 
+        typedef struct ClassicSegmentPrefixEncodingCase ClassicSegmentPrefixEncodingCase;
+        struct ClassicSegmentPrefixEncodingCase
+        {
+            String8 intel;
+            String8 att;
+            u8 bytes[4];
+            u8 byte_count;
+        };
+        static ClassicSegmentPrefixEncodingCase const classic_segment_prefix_matrix[] = {
+            {S8_INITIALIZER("es movsb"), S8_INITIALIZER("es movsb"), {0x26, 0xa4}, 2},
+            {S8_INITIALIZER("cs movsb"), S8_INITIALIZER("cs movsb"), {0x2e, 0xa4}, 2},
+            {S8_INITIALIZER("ss movsb"), S8_INITIALIZER("ss movsb"), {0x36, 0xa4}, 2},
+            {S8_INITIALIZER("ds movsb"), S8_INITIALIZER("ds movsb"), {0x3e, 0xa4}, 2},
+            {S8_INITIALIZER("fs movsb"), S8_INITIALIZER("fs movsb"), {0x64, 0xa4}, 2},
+            {S8_INITIALIZER("gs movsb"), S8_INITIALIZER("gs movsb"), {0x65, 0xa4}, 2},
+            {S8_INITIALIZER("fs rep movsw"), S8_INITIALIZER("fs rep movsw"), {0x64, 0xf3, 0x66, 0xa5}, 4},
+            {S8_INITIALIZER("addr32 fs rep movsb"), S8_INITIALIZER("addr32 fs rep movsb"), {0x64, 0x67, 0xf3, 0xa4}, 4},
+            {S8_INITIALIZER("fs addr32 rep movsb"), S8_INITIALIZER("fs addr32 rep movsb"), {0x64, 0x67, 0xf3, 0xa4}, 4},
+            {S8_INITIALIZER("gs outsb"), S8_INITIALIZER("gs outsb"), {0x65, 0x6e}, 2},
+            {S8_INITIALIZER("cs cmpsb"), S8_INITIALIZER("cs cmpsb"), {0x2e, 0xa6}, 2},
+            {S8_INITIALIZER("ss lodsb"), S8_INITIALIZER("ss lodsb"), {0x36, 0xac}, 2},
+            {S8_INITIALIZER("ds xlat"), S8_INITIALIZER("ds xlat"), {0x3e, 0xd7}, 2},
+            {S8_INITIALIZER("fs xlatb"), S8_INITIALIZER("fs xlatb"), {0x64, 0xd7}, 2},
+        };
+        for (u32 segment_index = 0; segment_index < BUSTER_ARRAY_LENGTH(classic_segment_prefix_matrix); segment_index += 1)
+        {
+            ClassicSegmentPrefixEncodingCase segment_case = classic_segment_prefix_matrix[segment_index];
+            AssemblyEncodeResult segment_intel = assembly_encode(
+                arguments->arena, segment_case.intel,
+                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult segment_att = assembly_encode(
+                arguments->arena, segment_case.att,
+                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            BUSTER_TEST(arguments, segment_intel.diagnostic_count == 0 &&
+                                       assembly_test_bytes_equal(segment_intel.bytes, segment_case.bytes, segment_case.byte_count) &&
+                                       segment_intel.relocation_count == 0 && segment_intel.symbol_count == 0 &&
+                                       segment_att.diagnostic_count == 0 &&
+                                       assembly_test_bytes_equal(segment_att.bytes, segment_case.bytes, segment_case.byte_count) &&
+                                       segment_att.relocation_count == 0 && segment_att.symbol_count == 0);
+        }
+
+        String8 const invalid_segment_prefixes[] = {
+            S8("fs insb"),
+            S8("fs stosb"),
+            S8("fs scasb"),
+            S8("%fs movsb"),
+            S8("fs: movsb"),
+            S8("fs fs movsb"),
+            S8("fs gs movsb"),
+            S8("fs lock movsb"),
+            S8("fs jz 0"),
+        };
+        for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_segment_prefixes); invalid_index += 1)
+        {
+            AssemblyEncodeResult invalid_intel = assembly_encode(
+                arguments->arena, invalid_segment_prefixes[invalid_index],
+                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult invalid_att = assembly_encode(
+                arguments->arena, invalid_segment_prefixes[invalid_index],
+                (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            BUSTER_TEST(arguments, invalid_intel.diagnostic_count > 0 && invalid_intel.bytes.length == 0 &&
+                                       invalid_intel.relocation_count == 0 && invalid_intel.symbol_count == 0 &&
+                                       invalid_att.diagnostic_count > 0 && invalid_att.bytes.length == 0 &&
+                                       invalid_att.relocation_count == 0 && invalid_att.symbol_count == 0);
+        }
+        AssemblyEncodeResult invalid_visible_segment = assembly_encode(
+            arguments->arena, S8("fs mov rax, fs:[rbx]\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, invalid_visible_segment.diagnostic_count > 0 && invalid_visible_segment.bytes.length == 0 &&
+                                   invalid_visible_segment.relocation_count == 0 && invalid_visible_segment.symbol_count == 0);
+        AssemblyEncodeResult invalid_moffs_segment = assembly_encode(
+            arguments->arena, S8("fs mov al, byte ptr fs:[0x1234]\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, invalid_moffs_segment.diagnostic_count > 0 && invalid_moffs_segment.bytes.length == 0 &&
+                                   invalid_moffs_segment.relocation_count == 0 && invalid_moffs_segment.symbol_count == 0);
+
+        AssemblyEncodeResult segment_label_intel = assembly_encode(
+            arguments->arena, S8("fs:\nmovsb\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult segment_label_att = assembly_encode(
+            arguments->arena, S8("fs:\nmovsb\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, segment_label_intel.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(segment_label_intel.bytes, (u8 const[]){0xa4}, 1) &&
+                                   segment_label_intel.relocation_count == 0 && segment_label_intel.symbol_count == 1 &&
+                                   segment_label_att.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(segment_label_att.bytes, (u8 const[]){0xa4}, 1) &&
+                                   segment_label_att.relocation_count == 0 && segment_label_att.symbol_count == 1);
+
+        AssemblyEncodeResult segment_memory_intel = assembly_encode(
+            arguments->arena, S8("mov eax, dword ptr fs:[rbx]\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult segment_memory_att = assembly_encode(
+            arguments->arena, S8("movl %fs:(%rbx), %eax\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        u8 const expected_segment_memory[] = {0x64, 0x8b, 0x03};
+        BUSTER_TEST(arguments, segment_memory_intel.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(segment_memory_intel.bytes, expected_segment_memory,
+                                                             BUSTER_ARRAY_LENGTH(expected_segment_memory)) &&
+                                   segment_memory_intel.relocation_count == 0 && segment_memory_intel.symbol_count == 0 &&
+                                   segment_memory_att.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(segment_memory_att.bytes, expected_segment_memory,
+                                                             BUSTER_ARRAY_LENGTH(expected_segment_memory)) &&
+                                   segment_memory_att.relocation_count == 0 && segment_memory_att.symbol_count == 0);
+
         u8 const expected_classic_repeat[] = {
             0xf3, 0xa4,
             0xf3, 0xa6,

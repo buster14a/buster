@@ -2448,7 +2448,10 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_physical_query_valid(BusterX86
         query.attributes.decorator_flags & ~BUSTER_X86_METADATA_DECORATOR_FLAGS_ALL ||
         query.attributes.apx_flags & ~BUSTER_X86_METADATA_APX_FLAGS_ALL ||
         query.attributes.amx_flags & ~BUSTER_X86_METADATA_AMX_FLAGS_ALL ||
+        query.attributes.implicit_segment >= BUSTER_X86_METADATA_SEGMENT_COUNT ||
         query.attributes.branch_hint >= BUSTER_X86_METADATA_BRANCH_HINT_COUNT ||
+        (query.attributes.implicit_segment != BUSTER_X86_METADATA_SEGMENT_NONE &&
+         query.attributes.branch_hint != BUSTER_X86_METADATA_BRANCH_HINT_NONE) ||
         // The scalar fields are the typed payload and decorator_flags is the
         // compact resolver-facing projection.  They must agree in both
         // directions; otherwise selection can choose a decorated form while
@@ -2475,6 +2478,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_physical_query_valid(BusterX86
     {
         physical_has_memory |= query.operands[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY;
     }
+    if (query.attributes.implicit_segment != BUSTER_X86_METADATA_SEGMENT_NONE && physical_has_memory) return false;
     if (broadcast_flag && !physical_has_memory) return false;
     BusterX86MetadataResolveQuery resolver_query = {
         .mnemonic = query.mnemonic,
@@ -3037,6 +3041,20 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_moffs_source_accumulator(Buste
             query.operands[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER);
 }
 
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_segment_prefix(u8 segment)
+{
+    switch (segment)
+    {
+    case BUSTER_X86_METADATA_SEGMENT_ES: return 0x26;
+    case BUSTER_X86_METADATA_SEGMENT_CS: return 0x2e;
+    case BUSTER_X86_METADATA_SEGMENT_SS: return 0x36;
+    case BUSTER_X86_METADATA_SEGMENT_DS: return 0x3e;
+    case BUSTER_X86_METADATA_SEGMENT_FS: return 0x64;
+    case BUSTER_X86_METADATA_SEGMENT_GS: return 0x65;
+    default: return 0;
+    }
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_segment_override(BusterX86MetadataForm form,
                                                                                 BusterX86MetadataPatternSemantics pattern)
 {
@@ -3110,6 +3128,16 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_cet_no_track(BusterX
             return false;
     }
     return visible_count == 1;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_hidden_segment_override(
+    BusterX86MetadataForm form, BusterX86MetadataPatternSemantics pattern)
+{
+    // Moffs rows carry a visible absolute memory operand.  Their segment
+    // prefix is emitted from PhysicalMemory.segment and must never be
+    // supplied through the hidden-operand attribute.
+    if (buster_x86_metadata_emit_is_moffs(form, pattern)) return false;
+    return buster_x86_metadata_emit_canonical_segment_override(form, pattern);
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_df64(BusterX86MetadataForm form,
@@ -4276,6 +4304,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     if (!buster_x86_metadata_emit_parse_pattern(form, &pattern)) return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
     if (pattern.unresolved_blocker) return BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
     bool moffs_form = buster_x86_metadata_emit_is_moffs(form, pattern);
+    if (query.attributes.implicit_segment != BUSTER_X86_METADATA_SEGMENT_NONE &&
+        (!pattern.has_segment_override || !buster_x86_metadata_emit_canonical_hidden_segment_override(form, pattern)))
+        return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if (query.attributes.branch_hint != BUSTER_X86_METADATA_BRANCH_HINT_NONE && !pattern.has_branch_hint_control)
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if (pattern.has_branch_hint_control && (query.attributes.lock || query.attributes.rep || query.attributes.repne))
@@ -4723,15 +4754,17 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if (query.attributes.notrack && !buster_x86_metadata_emit_write_byte(scratch, 0x3e))
         return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
+    if (query.attributes.implicit_segment != BUSTER_X86_METADATA_SEGMENT_NONE)
+    {
+        u8 segment_prefix = buster_x86_metadata_emit_segment_prefix(query.attributes.implicit_segment);
+        if (!segment_prefix || !buster_x86_metadata_emit_write_byte(scratch, segment_prefix))
+            return segment_prefix ? BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY : BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+    }
     if (has_memory && memory.has_segment)
     {
-        u8 segment_prefix = memory.segment == BUSTER_X86_METADATA_SEGMENT_ES ? 0x26
-                            : memory.segment == BUSTER_X86_METADATA_SEGMENT_CS ? 0x2e
-                            : memory.segment == BUSTER_X86_METADATA_SEGMENT_SS ? 0x36
-                            : memory.segment == BUSTER_X86_METADATA_SEGMENT_DS ? 0x3e
-                            : memory.segment == BUSTER_X86_METADATA_SEGMENT_FS ? 0x64
-                                                                              : 0x65;
-        if (!buster_x86_metadata_emit_write_byte(scratch, segment_prefix)) return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
+        u8 segment_prefix = buster_x86_metadata_emit_segment_prefix(memory.segment);
+        if (!segment_prefix || !buster_x86_metadata_emit_write_byte(scratch, segment_prefix))
+            return segment_prefix ? BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY : BUSTER_X86_METADATA_ENCODE_ADDRESSING;
     }
     if (has_memory && memory.address_size != 64)
     {

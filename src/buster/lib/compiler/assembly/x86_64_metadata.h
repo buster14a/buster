@@ -675,6 +675,10 @@ struct BusterX86MetadataPhysicalAttributes
     bool lock;
     bool rep;
     bool repne;
+    // A segment prefix attached to a form's hidden/suppressed memory
+    // operand.  This is distinct from PhysicalMemory.segment, which models
+    // an explicitly written memory operand.
+    u8 implicit_segment;
     u8 branch_hint;
     // CET indirect-branch tracking is a typed source/query prefix.  It uses
     // the legacy 0x3e byte, but is distinct from the conditional branch-hint

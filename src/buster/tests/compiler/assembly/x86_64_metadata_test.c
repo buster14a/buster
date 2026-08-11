@@ -2958,6 +2958,12 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, segment_rep.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION &&
                                    segment_rep.byte_count == 0 && segment_rep.relocation_count == 0 &&
                                    segment_rep.diagnostic_operand == 0 && segment_rep.diagnostic_value == 0);
+        BusterX86MetadataEmitResult hidden_segment_moffs = x86_64_metadata_test_emit_form(
+            S8("MOV"), 9891, &segment_moffs,
+            1, (BusterX86MetadataPhysicalAttributes){.implicit_segment = BUSTER_X86_METADATA_SEGMENT_FS}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[32]){0}, 32, 0, 0);
+        BUSTER_TEST(arguments, hidden_segment_moffs.status == BUSTER_X86_METADATA_ENCODE_INVALID_INPUT &&
+                                   hidden_segment_moffs.byte_count == 0 && hidden_segment_moffs.relocation_count == 0);
 
         BusterX86MetadataPhysicalOperand address32_moffs = moffs64;
         address32_moffs.memory.address_size = 32;
@@ -3910,6 +3916,99 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         });
         BUSTER_TEST(arguments, wrong_mode_result.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
                                    wrong_mode_result.byte_count == 0 && wrong_mode_result.relocation_count == 0);
+    }
+
+    {
+        // Hidden string memory has one typed segment-prefix attribute.  The
+        // six architectural segment bytes are emitted before address-size,
+        // REP, and operand-size prefixes just as they are for explicit
+        // PhysicalMemory segments.
+        typedef struct X86_64MetadataImplicitSegmentCase X86_64MetadataImplicitSegmentCase;
+        struct X86_64MetadataImplicitSegmentCase
+        {
+            u32 form_id;
+            String8 mnemonic;
+            u8 opcode;
+        };
+        static X86_64MetadataImplicitSegmentCase const cases[] = {
+            {9897, S8_INITIALIZER("MOVSB"), 0xa4},
+            {9775, S8_INITIALIZER("OUTSB"), 0x6e},
+            {9921, S8_INITIALIZER("CMPSB"), 0xa6},
+            {9971, S8_INITIALIZER("LODSB"), 0xac},
+            {10041, S8_INITIALIZER("XLAT"), 0xd7},
+        };
+        static u8 const segments[] = {
+            BUSTER_X86_METADATA_SEGMENT_ES,
+            BUSTER_X86_METADATA_SEGMENT_CS,
+            BUSTER_X86_METADATA_SEGMENT_SS,
+            BUSTER_X86_METADATA_SEGMENT_DS,
+            BUSTER_X86_METADATA_SEGMENT_FS,
+            BUSTER_X86_METADATA_SEGMENT_GS,
+        };
+        String8 wildcard[1] = {S8("*")};
+        bool implicit_segment_bytes_pass = true;
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            X86_64MetadataImplicitSegmentCase test_case = cases[case_index];
+            for (u32 segment_index = 0; segment_index < BUSTER_ARRAY_LENGTH(segments); segment_index += 1)
+            {
+                BusterX86MetadataPhysicalAttributes attributes = {
+                    .implicit_segment = segments[segment_index],
+                };
+                u8 expected[] = {
+                    segments[segment_index] == BUSTER_X86_METADATA_SEGMENT_ES ? 0x26
+                    : segments[segment_index] == BUSTER_X86_METADATA_SEGMENT_CS ? 0x2e
+                    : segments[segment_index] == BUSTER_X86_METADATA_SEGMENT_SS ? 0x36
+                    : segments[segment_index] == BUSTER_X86_METADATA_SEGMENT_DS ? 0x3e
+                    : segments[segment_index] == BUSTER_X86_METADATA_SEGMENT_FS ? 0x64
+                                                                                : 0x65,
+                    test_case.opcode,
+                };
+                implicit_segment_bytes_pass &= x86_64_metadata_test_emit_exact(
+                    test_case.mnemonic, test_case.form_id, 0, 0, attributes, wildcard, BUSTER_ARRAY_LENGTH(wildcard), expected,
+                    BUSTER_ARRAY_LENGTH(expected));
+            }
+        }
+        BUSTER_TEST(arguments, implicit_segment_bytes_pass);
+
+        BusterX86MetadataPhysicalQuery ordered_query = x86_64_metadata_test_physical_query(
+            S8("MOVSB"), 0, 0,
+            (BusterX86MetadataPhysicalAttributes){.implicit_segment = BUSTER_X86_METADATA_SEGMENT_FS, .rep = true}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard));
+        ordered_query.address_size = 32;
+        u8 ordered_output[8] = {0};
+        BusterX86MetadataEmitResult ordered_result = buster_x86_metadata_emit_form(
+            (BusterX86MetadataEmitQuery){.physical = ordered_query, .form_id = 9895, .output = ordered_output,
+                                         .output_capacity = BUSTER_ARRAY_LENGTH(ordered_output)});
+        BUSTER_TEST(arguments, ordered_result.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && ordered_result.byte_count == 4 &&
+                                   x86_64_metadata_test_bytes_equal(ordered_output, ordered_result.byte_count,
+                                                                     (u8[]){0x64, 0x67, 0xf3, 0xa4}, 4));
+
+        BusterX86MetadataPhysicalQuery branch_conflict = x86_64_metadata_test_physical_query(
+            S8("JZ"), 0, 0,
+            (BusterX86MetadataPhysicalAttributes){.implicit_segment = BUSTER_X86_METADATA_SEGMENT_FS,
+                                                  .branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NOT_TAKEN},
+            wildcard, BUSTER_ARRAY_LENGTH(wildcard));
+        BUSTER_TEST(arguments, buster_x86_metadata_select_form(branch_conflict).status == BUSTER_X86_METADATA_ENCODE_INVALID_INPUT);
+
+        BusterX86MetadataPhysicalOperand explicit_memory = x86_64_metadata_test_physical_mem_base(3, 64, 0);
+        BusterX86MetadataPhysicalQuery visible_segment = x86_64_metadata_test_physical_query(
+            S8("MOV"), &explicit_memory, 1,
+            (BusterX86MetadataPhysicalAttributes){.implicit_segment = BUSTER_X86_METADATA_SEGMENT_FS}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard));
+        BUSTER_TEST(arguments, buster_x86_metadata_select_form(visible_segment).status == BUSTER_X86_METADATA_ENCODE_INVALID_INPUT);
+
+        BusterX86MetadataPhysicalQuery invalid_segment = x86_64_metadata_test_physical_query(
+            S8("MOVSB"), 0, 0,
+            (BusterX86MetadataPhysicalAttributes){.implicit_segment = BUSTER_X86_METADATA_SEGMENT_COUNT}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard));
+        BUSTER_TEST(arguments, buster_x86_metadata_select_form(invalid_segment).status == BUSTER_X86_METADATA_ENCODE_INVALID_INPUT);
+
+        BusterX86MetadataPhysicalQuery fixed_es = x86_64_metadata_test_physical_query(
+            S8("STOSB"), 0, 0,
+            (BusterX86MetadataPhysicalAttributes){.implicit_segment = BUSTER_X86_METADATA_SEGMENT_FS}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard));
+        BUSTER_TEST(arguments, buster_x86_metadata_select_form(fixed_es).status != BUSTER_X86_METADATA_ENCODE_SUCCESS);
     }
 
     {

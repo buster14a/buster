@@ -6695,8 +6695,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     bool lock = false;
     bool rep = false;
     bool repne = false;
-    u8 branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NONE;
     bool notrack = false;
+    u8 segment_override = BUSTER_X86_METADATA_SEGMENT_NONE;
+    bool segment_override_seen = false;
     bool source_address_size_seen = false;
     u8 source_address_size = 64;
     String8 work = assembly_trim(statement);
@@ -6750,24 +6751,19 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             source_address_size = 32;
             source_address_size_seen = true;
         }
-        else if (assembly_word_equal(prefix, S8("cs")) || assembly_word_equal(prefix, S8("ds")))
-        {
-            u8 requested_branch_hint = assembly_word_equal(prefix, S8("cs"))
-                                           ? BUSTER_X86_METADATA_BRANCH_HINT_NOT_TAKEN
-                                           : BUSTER_X86_METADATA_BRANCH_HINT_TAKEN;
-            if (branch_hint != BUSTER_X86_METADATA_BRANCH_HINT_NONE && branch_hint != requested_branch_hint)
-            {
-                return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
-            }
-            if (branch_hint == requested_branch_hint)
-            {
-                return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
-            }
-            branch_hint = requested_branch_hint;
-        }
         else
         {
-            break;
+            u8 requested_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+            if (!assembly_x86_segment_parse(prefix, ASSEMBLY_SYNTAX_INTEL, &requested_segment))
+            {
+                break;
+            }
+            if (segment_override_seen)
+            {
+                return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+            }
+            segment_override = requested_segment;
+            segment_override_seen = true;
         }
         work = assembly_trim(string_slice(work, prefix_end, work.length));
     }
@@ -6839,6 +6835,24 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     u32 operand_count = 0;
     u64 operand_start = 0;
     bool relative = assembly_x86_metadata_relative_mnemonic(mnemonic);
+    u8 branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NONE;
+    u8 implicit_segment = segment_override;
+    if (segment_override == BUSTER_X86_METADATA_SEGMENT_CS)
+    {
+        if (relative)
+        {
+            branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NOT_TAKEN;
+            implicit_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+        }
+    }
+    else if (segment_override == BUSTER_X86_METADATA_SEGMENT_DS)
+    {
+        if (relative)
+        {
+            branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_TAKEN;
+            implicit_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+        }
+    }
     bool mnemonic_requires_dfv = assembly_x86_metadata_mnemonic_requires_dfv(mnemonic);
     u32 symbol_count_before_dfv = builder->result.symbol_count;
     bool has_dfv = false;
@@ -7044,6 +7058,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         .lock = lock,
         .rep = rep,
         .repne = repne,
+        .implicit_segment = implicit_segment,
         .branch_hint = branch_hint,
         .notrack = notrack,
         .no_flags = no_flags,
@@ -7495,7 +7510,7 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
         {
             u64 colon = string_first_code_unit(statement, ':');
             bool segment_override = false;
-            bool standalone_segment_prefix = false;
+            bool segment_colon_error = false;
             if (colon < statement.length)
             {
                 u64 segment_start = colon;
@@ -7517,21 +7532,25 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
                     String8 after_segment = string_slice(statement, following_index, statement.length);
                     memory_after_segment = string_first_code_unit(after_segment, '(') < after_segment.length;
                 }
-                bool segment_name = assembly_x86_segment_parse(segment, syntax, &segment_index);
-                segment_override = memory_after_segment && segment_name;
-                if (!segment_override && segment_name && (segment_index == 5 || segment_index == 6))
+                segment_override = memory_after_segment && assembly_x86_segment_parse(segment, syntax, &segment_index);
+                if (!segment_override)
                 {
-                    // FS:/GS: before an instruction is not a typed operand
-                    // in the metadata front door.  Treating it as a label
-                    // would silently discard the requested segment override
-                    // (notably for MASKMOV's hidden DI destination), so reject
-                    // it until an implicit-segment query can carry the intent.
-                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT, line, column, (u32)segment.length,
-                                        S8("standalone FS/GS segment prefix requires an explicit memory operand"));
-                    standalone_segment_prefix = true;
+                    // A bare segment word followed by ':' is only a memory
+                    // operand spelling.  Keep a label-only line such as
+                    // `fs:` usable, but reject `fs: movsb` instead of
+                    // silently turning the prefix-looking token into a
+                    // label and encoding the instruction without it.
+                    u8 segment_label_index = 0;
+                    if (assembly_x86_segment_parse(segment, ASSEMBLY_SYNTAX_INTEL, &segment_label_index) &&
+                        following_index < statement.length)
+                    {
+                        assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT, line, column,
+                                            (u32)(colon + 1), S8("segment prefix requires a memory operand"));
+                        segment_colon_error = true;
+                    }
                 }
             }
-            if (colon < statement.length && !segment_override && !standalone_segment_prefix)
+            if (colon < statement.length && !segment_override && !segment_colon_error)
             {
                 String8 label = assembly_trim((String8){.pointer = statement.pointer, .length = colon});
                 if (!assembly_identifier(label))
@@ -7560,11 +7579,7 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
                 statement = assembly_trim((String8){.pointer = statement.pointer + colon + 1, .length = statement.length - colon - 1});
                 column = statement.length ? (u32)(statement.pointer - original.pointer) + 1 : column;
             }
-            if (standalone_segment_prefix)
-            {
-                statement = (String8){0};
-            }
-            if (statement.length)
+            if (statement.length && !segment_colon_error)
             {
                 u64 directive_end = 0;
                 while (directive_end < statement.length && !assembly_space(statement.pointer[directive_end]))
