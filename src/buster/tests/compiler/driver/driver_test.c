@@ -1056,7 +1056,18 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     CompilerDriverInvocation aarch64_features =
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(aarch64_feature_command_line));
     BUSTER_TEST(arguments, aarch64_features.error == COMPILER_DRIVER_ERROR_NONE);
-    BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, aarch64_features.target), S8("none"));
+    BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, aarch64_features.target), S8("fp-armv8"));
+    String8 invalid_aarch64_feature_command_line[] = {S8("--target=aarch64-linux"), S8("-mattr=-fp-armv8"), S8("source.c")};
+    CompilerDriverInvocation invalid_aarch64_features =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_aarch64_feature_command_line));
+    BUSTER_TEST(arguments, invalid_aarch64_features.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, invalid_aarch64_features.diagnostic, S8("invalid target feature combination: neon"));
+    String8 apple_m1_command_line[] = {S8("--target=aarch64-macos"), S8("-mcpu=apple-m1"), S8("source.c")};
+    CompilerDriverInvocation apple_m1 =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(apple_m1_command_line));
+    BUSTER_TEST(arguments, apple_m1.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, target_cpu_feature_has(apple_m1.target, TARGET_CPU_FEATURE_AARCH64_LOR));
+    BUSTER_TEST(arguments, target_cpu_feature_has(apple_m1.target, TARGET_CPU_FEATURE_AARCH64_TRACEV8_4));
     String8 incompatible_assembly_syntax_command_line[] = {S8("--target=aarch64-linux"), S8("-masm=intel"), S8("source.c")};
     CompilerDriverInvocation incompatible_assembly_syntax =
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(incompatible_assembly_syntax_command_line));

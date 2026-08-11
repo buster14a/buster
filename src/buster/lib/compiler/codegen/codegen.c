@@ -666,7 +666,10 @@ Target codegen_target_for_abi(CodegenAbi abi)
                                               TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
                                               TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F,
                                               TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW}, 6)
-                                    : target_cpu_features_singleton(TARGET_CPU_FEATURE_AARCH64_NEON),
+                                    : target_cpu_features_from_array((TargetCpuFeature const[]){
+                                          TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
+                                          TARGET_CPU_FEATURE_AARCH64_NEON,
+                                      }, 2),
             };
         }
         codegen_abi_targets_built = true;

@@ -475,11 +475,17 @@ CpuModel cpu_detect_model(void)
     target_native.cpu_features = cpu_detect_features_x86_64();
 #elif BUSTER_CPU_ARCH_AARCH64
     cpu_model = cpu_detect_model_aarch64();
-    target_native.cpu_features = target_cpu_features_singleton(TARGET_CPU_FEATURE_AARCH64_NEON);
 #else
 #error TODO: implement CPU detection code for this architecture
 #endif
     cpu_model = cpu_model_resolve_detected(cpu_model);
+#if BUSTER_CPU_ARCH_AARCH64
+    // AArch64 model detection is the feature oracle until per-feature system
+    // register probing is available.  In particular, a detected Apple M1 must
+    // inherit the complete pinned M1 profile rather than the generic NEON
+    // fallback.
+    target_native.cpu_features = target_cpu_features_default(CPU_ARCH_AARCH64, cpu_model);
+#endif
     target_native.cpu_model = cpu_model;
     target_native.cpu_features_explicit = true;
     return cpu_model;
@@ -542,6 +548,7 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
                 TARGET_CPU_FEATURE_AARCH64_FULLFP16,
                 TARGET_CPU_FEATURE_AARCH64_JSCONV,
                 TARGET_CPU_FEATURE_AARCH64_LSE,
+                TARGET_CPU_FEATURE_AARCH64_LOR,
                 TARGET_CPU_FEATURE_AARCH64_NEON,
                 TARGET_CPU_FEATURE_AARCH64_PAUTH,
                 TARGET_CPU_FEATURE_AARCH64_PERFMON,
@@ -555,9 +562,13 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
                 TARGET_CPU_FEATURE_AARCH64_SHA3,
                 TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT,
                 TARGET_CPU_FEATURE_AARCH64_SSBS,
-            }, 28);
+                TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
+            }, 30);
         }
-        return target_cpu_features_singleton(TARGET_CPU_FEATURE_AARCH64_NEON);
+        return target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
+            TARGET_CPU_FEATURE_AARCH64_NEON,
+        }, 2);
     }
     if (arch != CPU_ARCH_X86_64)
     {
@@ -839,6 +850,7 @@ bool target_cpu_features_are_valid(Target target)
             TARGET_CPU_FEATURE_AARCH64_FULLFP16,
             TARGET_CPU_FEATURE_AARCH64_JSCONV,
             TARGET_CPU_FEATURE_AARCH64_LSE,
+            TARGET_CPU_FEATURE_AARCH64_LOR,
             TARGET_CPU_FEATURE_AARCH64_NEON,
             TARGET_CPU_FEATURE_AARCH64_PAUTH,
             TARGET_CPU_FEATURE_AARCH64_PERFMON,
@@ -852,9 +864,46 @@ bool target_cpu_features_are_valid(Target target)
             TARGET_CPU_FEATURE_AARCH64_SHA3,
             TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT,
             TARGET_CPU_FEATURE_AARCH64_SSBS,
+            TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
         };
         TargetCpuFeatures known = target_cpu_features_from_array(known_feature_list, (u32)BUSTER_ARRAY_LENGTH(known_feature_list));
-        return target_cpu_features_subset(features, known);
+        if (!target_cpu_features_subset(features, known))
+        {
+            return false;
+        }
+        TargetCpuFeatures neon_dependents = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_AARCH64_AES,
+            TARGET_CPU_FEATURE_AARCH64_COMPLXNUM,
+            TARGET_CPU_FEATURE_AARCH64_DOTPROD,
+            TARGET_CPU_FEATURE_AARCH64_FP16FML,
+            TARGET_CPU_FEATURE_AARCH64_RDM,
+            TARGET_CPU_FEATURE_AARCH64_SHA2,
+            TARGET_CPU_FEATURE_AARCH64_SHA3,
+        }, 7);
+        TargetCpuFeatures fp_dependents = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_AARCH64_FPTOINT,
+            TARGET_CPU_FEATURE_AARCH64_FULLFP16,
+            TARGET_CPU_FEATURE_AARCH64_JSCONV,
+            TARGET_CPU_FEATURE_AARCH64_NEON,
+        }, 4);
+        if ((target_cpu_features_any(target_cpu_features_intersection(features, neon_dependents)) &&
+             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_NEON)) ||
+            (target_cpu_features_any(target_cpu_features_intersection(features, fp_dependents)) &&
+             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_FP_ARMV8)) ||
+            (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_ALTNZCV) &&
+             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_FLAGM)) ||
+            (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_CCDP) &&
+             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_CCPP)) ||
+            (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_FP16FML) &&
+             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_FULLFP16)) ||
+            (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO) &&
+             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_RCPC)) ||
+            (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_SHA3) &&
+             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_SHA2)))
+        {
+            return false;
+        }
+        return true;
     }
     if (target.cpu_arch != CPU_ARCH_X86_64)
     {
@@ -1175,6 +1224,7 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("jsconv"), .feature = TARGET_CPU_FEATURE_AARCH64_JSCONV, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("keylocker"), .feature = TARGET_CPU_FEATURE_X86_KEYLOCKER, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("lkgs"), .feature = TARGET_CPU_FEATURE_X86_LKGS, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("lor"), .feature = TARGET_CPU_FEATURE_AARCH64_LOR, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("lse"), .feature = TARGET_CPU_FEATURE_AARCH64_LSE, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("lwp"), .feature = TARGET_CPU_FEATURE_X86_LWP, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("lzcnt"), .feature = TARGET_CPU_FEATURE_X86_LZCNT, .arch = CPU_ARCH_X86_64},
@@ -1222,6 +1272,7 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("svm"), .feature = TARGET_CPU_FEATURE_X86_SVM, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("tbm"), .feature = TARGET_CPU_FEATURE_X86_TBM, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("tdx"), .feature = TARGET_CPU_FEATURE_X86_TDX, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("tracev8.4"), .feature = TARGET_CPU_FEATURE_AARCH64_TRACEV8_4, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("tsxldtrk"), .feature = TARGET_CPU_FEATURE_X86_TSXLDTRK, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("uintr"), .feature = TARGET_CPU_FEATURE_X86_UINTR, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("v8.4a"), .feature = TARGET_CPU_FEATURE_AARCH64_V8_4A, .arch = CPU_ARCH_AARCH64},
