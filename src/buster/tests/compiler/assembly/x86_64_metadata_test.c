@@ -781,6 +781,182 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_UNUSED(arguments);
+
+    {
+        // This is the complete normalized residual cohort: the sixteen X87
+        // environment rows followed by the thirty-two BASE legacy rows.
+        // LLVM/GNU probes agree on the opcode and 66-byte choices for the
+        // accepted FLDENV/FNSTENV/FRSTOR/FNSAVE, PUSHA/POPA/BOUND, CBW/CWD,
+        // PUSHF/POPF, and IRET spellings.  Their current assemblers reject the
+        // legacy aliases pushad, popad, and iretd, so those entries use the
+        // authoritative XED bytes.  The X87 16-bit-address oracle is also
+        // outside this emitter's 32/64-bit address-size contract; the direct
+        // cases use its canonical 64-bit-address operand shape and check the
+        // opcode/prefix semantics.
+        static struct
+        {
+            u32 form_id;
+            u8 byte_count;
+            u8 bytes[3];
+            bool x87;
+        } const mode66_cases[] = {
+            {9106, 2, {0xd9, 0x20}, true},  {9107, 3, {0x66, 0xd9, 0x20}, true},
+            {9109, 3, {0x66, 0xd9, 0x20}, true}, {9110, 2, {0xd9, 0x20}, true},
+            {9114, 2, {0xd9, 0x30}, true},  {9115, 3, {0x66, 0xd9, 0x30}, true},
+            {9117, 3, {0x66, 0xd9, 0x30}, true}, {9118, 2, {0xd9, 0x30}, true},
+            {9199, 2, {0xdd, 0x20}, true},  {9200, 3, {0x66, 0xdd, 0x20}, true},
+            {9202, 3, {0x66, 0xdd, 0x20}, true}, {9203, 2, {0xdd, 0x20}, true},
+            {9206, 2, {0xdd, 0x30}, true},  {9207, 3, {0x66, 0xdd, 0x30}, true},
+            {9209, 3, {0x66, 0xdd, 0x30}, true}, {9210, 2, {0xdd, 0x30}, true},
+            {9726, 1, {0x60}, false},         {9727, 2, {0x66, 0x60}, false},
+            {9728, 2, {0x66, 0x60}, false},   {9729, 1, {0x60}, false},
+            {9730, 1, {0x61}, false},         {9731, 2, {0x66, 0x61}, false},
+            {9732, 2, {0x66, 0x61}, false},   {9733, 1, {0x61}, false},
+            {9734, 2, {0x62, 0x00}, false},   {9735, 3, {0x66, 0x62, 0x00}, false},
+            {9736, 3, {0x66, 0x62, 0x00}, false}, {9737, 2, {0x62, 0x00}, false},
+            {9858, 1, {0x98}, false},         {9859, 2, {0x66, 0x98}, false},
+            {9862, 2, {0x66, 0x98}, false},   {9863, 1, {0x98}, false},
+            {9865, 1, {0x99}, false},         {9866, 2, {0x66, 0x99}, false},
+            {9869, 2, {0x66, 0x99}, false},   {9870, 1, {0x99}, false},
+            {9875, 1, {0x9c}, false},         {9876, 2, {0x66, 0x9c}, false},
+            {9878, 1, {0x9c}, false},         {9879, 2, {0x66, 0x9c}, false},
+            {9882, 1, {0x9d}, false},         {9883, 2, {0x66, 0x9d}, false},
+            {9885, 2, {0x66, 0x9d}, false},   {9886, 1, {0x9d}, false},
+            {10030, 1, {0xcf}, false},        {10031, 2, {0x66, 0xcf}, false},
+            {10033, 2, {0x66, 0xcf}, false},  {10034, 1, {0xcf}, false},
+        };
+        String8 wildcard_features[1] = {S8("*")};
+        bool exact_bytes = BUSTER_ARRAY_LENGTH(mode66_cases) == 48;
+        bool raw_predicates = true;
+        bool class_counts = true;
+        bool mode_guard = true;
+        u32 x87_count = 0;
+        u32 base_count = 0;
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(mode66_cases); case_index += 1)
+        {
+            BusterX86MetadataForm form = {0};
+            bool retrieved = buster_x86_metadata_form(mode66_cases[case_index].form_id, &form);
+            bool mode16 = retrieved && x86_64_metadata_test_pattern_has_token(form.pattern, S8("mode16"));
+            bool mode32 = retrieved && x86_64_metadata_test_pattern_has_token(form.pattern, S8("mode32"));
+            bool mode64 = retrieved && x86_64_metadata_test_pattern_has_token(form.pattern, S8("mode64"));
+            bool not64 = retrieved && x86_64_metadata_test_pattern_has_token(form.pattern, S8("not64"));
+            bool prefix66 = retrieved && x86_64_metadata_test_pattern_has_token(form.pattern, S8("66_prefix"));
+            bool prefix_no66 = retrieved && x86_64_metadata_test_pattern_has_token(form.pattern, S8("no66_prefix"));
+            String8 const forbidden_tokens[] = {
+                S8("repe"), S8("repne"), S8("norep"), S8("OVERRIDE_SEG"), S8("ADDR32"), S8("DF64()"),
+                S8("REX2"), S8("EVEX"), S8("APX"), S8("AMX"), S8("SCC"), S8("BCRC"), S8("UBIT"),
+            };
+            bool no_adjacent_control = retrieved;
+            for (u32 token_index = 0; token_index < BUSTER_ARRAY_LENGTH(forbidden_tokens); token_index += 1)
+                no_adjacent_control &= !x86_64_metadata_test_string_contains(form.pattern, forbidden_tokens[token_index]);
+            bool expected_extension = retrieved &&
+                                      x86_64_metadata_test_string_equal(form.extension, mode66_cases[case_index].x87 ? S8("X87") : S8("BASE"));
+            raw_predicates &= retrieved && form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                              form.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY && (mode16 ^ mode32) && !mode64 && !not64 &&
+                              (prefix66 ^ prefix_no66) && (prefix66 == (form.mandatory_prefix == 0x66)) && no_adjacent_control &&
+                              expected_extension;
+            BusterX86MetadataPhysicalOperand operands[16] = {0};
+            char8 mnemonic_buffer[128] = {0};
+            BusterX86MetadataPhysicalQuery query = {0};
+            bool built = x86_64_metadata_test_build_gate_query(mode66_cases[case_index].form_id, &query, operands, mnemonic_buffer);
+            query.features.names = wildcard_features;
+            query.features.count = BUSTER_ARRAY_LENGTH(wildcard_features);
+            query.execution_mode = mode16 ? BUSTER_X86_METADATA_EXECUTION_MODE_16 : BUSTER_X86_METADATA_EXECUTION_MODE_32;
+            query.include_not64 = false;
+            u8 output[16] = {0};
+            BusterX86MetadataRelocation relocations[2] = {0};
+            BusterX86MetadataEmitResult emitted = {0};
+            if (built)
+            {
+                emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                    .physical = query,
+                    .form_id = mode66_cases[case_index].form_id,
+                    .output = output,
+                    .output_capacity = sizeof(output),
+                    .relocations = relocations,
+                    .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+                });
+            }
+            exact_bytes &= built && emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.relocation_count == 0 &&
+                           x86_64_metadata_test_bytes_equal(output, emitted.byte_count, mode66_cases[case_index].bytes,
+                                                            mode66_cases[case_index].byte_count);
+            x87_count += mode66_cases[case_index].x87;
+            base_count += !mode66_cases[case_index].x87;
+            BusterX86MetadataPhysicalQuery ordinary = query;
+            ordinary.execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64;
+            ordinary.include_not64 = false;
+            BusterX86MetadataEmitResult ordinary_result = {0};
+            BusterX86MetadataPhysicalQuery wrong_mode = query;
+            wrong_mode.execution_mode = mode16 ? BUSTER_X86_METADATA_EXECUTION_MODE_32 : BUSTER_X86_METADATA_EXECUTION_MODE_16;
+            BusterX86MetadataEmitResult wrong_mode_result = {0};
+            BusterX86MetadataPhysicalQuery include_only = query;
+            include_only.execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64;
+            include_only.include_not64 = true;
+            BusterX86MetadataEmitResult include_only_result = {0};
+            BusterX86MetadataPhysicalQuery any_without_include = query;
+            any_without_include.execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_ANY;
+            any_without_include.include_not64 = false;
+            BusterX86MetadataEmitResult any_without_include_result = {0};
+            BusterX86MetadataPhysicalQuery any_inspection = query;
+            any_inspection.execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_ANY;
+            any_inspection.include_not64 = true;
+            BusterX86MetadataEmitResult any_inspection_result = {0};
+            if (built)
+            {
+                ordinary_result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                    .physical = ordinary,
+                    .form_id = mode66_cases[case_index].form_id,
+                    .output = output,
+                    .output_capacity = sizeof(output),
+                    .relocations = relocations,
+                    .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+                });
+                wrong_mode_result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                    .physical = wrong_mode,
+                    .form_id = mode66_cases[case_index].form_id,
+                    .output = output,
+                    .output_capacity = sizeof(output),
+                    .relocations = relocations,
+                    .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+                });
+                include_only_result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                    .physical = include_only,
+                    .form_id = mode66_cases[case_index].form_id,
+                    .output = output,
+                    .output_capacity = sizeof(output),
+                    .relocations = relocations,
+                    .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+                });
+                any_without_include_result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                    .physical = any_without_include,
+                    .form_id = mode66_cases[case_index].form_id,
+                    .output = output,
+                    .output_capacity = sizeof(output),
+                    .relocations = relocations,
+                    .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+                });
+                any_inspection_result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                    .physical = any_inspection,
+                    .form_id = mode66_cases[case_index].form_id,
+                    .output = output,
+                    .output_capacity = sizeof(output),
+                    .relocations = relocations,
+                    .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+                });
+            }
+            mode_guard &= built && ordinary_result.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                          wrong_mode_result.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                          include_only_result.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                          any_without_include_result.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                          any_inspection_result.status == BUSTER_X86_METADATA_ENCODE_SUCCESS;
+        }
+        class_counts &= x87_count == 16 && base_count == 32;
+        BUSTER_TEST(arguments, raw_predicates);
+        BUSTER_TEST(arguments, exact_bytes);
+        BUSTER_TEST(arguments, class_counts);
+        BUSTER_TEST(arguments, mode_guard);
+    }
+
     X86_64MetadataCanonicalGateCase const canonical_gate_cases[] = {
         {8014, 1, {S8("enqcmd")}},
         {8015, 1, {S8("fred")}},
@@ -2127,15 +2303,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        BUSTER_TEST(arguments, audit.emitted_count == 10456 && audit.blocked_count == 557 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10456 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 557);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10564 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 180);
+        BUSTER_TEST(arguments, audit.emitted_count == 10504 && audit.blocked_count == 509 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10504 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 509);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10612 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 132);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 199, 5, 1643, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1649, 192, 5, 1643, 176, 6718, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {163, 7, 0, 0, 0, 10, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1697, 192, 5, 1643, 176, 6718, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {115, 7, 0, 0, 0, 10, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2145,7 +2321,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10456, 268, 108, 99, 0, 82, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10504, 268, 108, 99, 0, 34, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -2449,7 +2625,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, emitted_bnd == 0 && emitted_control == 0 && emitted_debug == 0 && emitted_segment == 4);
         BUSTER_TEST(arguments, privileged_capable == 90);
         BUSTER_TEST(arguments, privileged_blocked == 0);
-        BUSTER_TEST(arguments, not64_capable == 102);
+        BUSTER_TEST(arguments, not64_capable == 150);
         BUSTER_TEST(arguments, privileged_total == 109 && privileged_valid64 == 90 && privileged_valid64_capable == 90 &&
                                    privileged_valid64_blocked == 0 && privileged_not64 == 19);
         BUSTER_TEST(arguments, apx_total == 2465);
@@ -2564,9 +2740,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                              form.mode_flags, form.coverage_class, false, expected_mode);
             }
         }
-        BUSTER_TEST(arguments, rep_prefix_row_count == 84 && rep_prefix_default64_rejected == 84 && rep_prefix_rows_exact &&
-                                   ledger[9106].blocker == BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS &&
-                                   ledger[9107].blocker == BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS);
+        BUSTER_TEST(arguments, rep_prefix_row_count == 84 && rep_prefix_default64_rejected == 84 && rep_prefix_rows_exact);
     }
 
     {

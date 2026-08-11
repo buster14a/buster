@@ -194,11 +194,12 @@ typedef enum BusterX86MetadataExecutionMode
 {
     // The normal resolver mode.  This API describes x86-64 instruction
     // candidates; include_not64 is an explicit opt-in for inspecting rows
-    // that are useful for coverage/debugging but are not legal x86-64 forms.
+    // classified NOT64, while declared MODE16/MODE32 rows use their typed
+    // execution modes below.
     BUSTER_X86_METADATA_EXECUTION_MODE_64,
-    // An explicit inspection mode.  Non-64 rows still require include_not64;
-    // this value only says not to prefer the MODE_64 bit when inspecting a
-    // deliberately widened snapshot query.
+    // An explicit inspection mode.  Explicit NOT64 rows still require
+    // include_not64; this value only says not to prefer the MODE_64 bit when
+    // inspecting a deliberately widened snapshot query.
     BUSTER_X86_METADATA_EXECUTION_MODE_ANY,
     // Legacy execution modes are explicit inspection/encoding modes.  They
     // select forms whose XED row is declared MODE_16 or MODE_32 without

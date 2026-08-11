@@ -657,6 +657,12 @@ struct BusterX86MetadataPatternSemantics
     u8 has_prefix_control;
     u8 has_branch_hint_control;
     u8 has_force64_control;
+    // MODE16/MODE32 are operand-size defaults for this legacy residual
+    // cohort.  Keep the source selector separate from the generated mode
+    // flags: the latter gates candidate visibility, while this value drives
+    // the byte path's implicit 66 decision.
+    u8 mode_control;
+    u8 operand_size_control;
     u8 has_address_control;
     u8 has_decorator_control;
     u8 has_apx_control;
@@ -749,6 +755,14 @@ enum
     BUSTER_X86_METADATA_PATTERN_MOD_MEMORY = 0xfe,
     BUSTER_X86_METADATA_PATTERN_MOD_REGISTER = 3,
     BUSTER_X86_METADATA_PATTERN_FIXED_ANY = 0xff,
+    BUSTER_X86_METADATA_PATTERN_MODE_NONE = 0,
+    BUSTER_X86_METADATA_PATTERN_MODE_16 = 16,
+    BUSTER_X86_METADATA_PATTERN_MODE_32 = 32,
+    BUSTER_X86_METADATA_PATTERN_MODE_64 = 64,
+    BUSTER_X86_METADATA_PATTERN_MODE_NOT64 = 65,
+    BUSTER_X86_METADATA_PATTERN_OPERAND_SIZE_NONE = 0,
+    BUSTER_X86_METADATA_PATTERN_OPERAND_SIZE_66 = 1,
+    BUSTER_X86_METADATA_PATTERN_OPERAND_SIZE_NO66 = 2,
 };
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_is_space(char8 character);
@@ -756,7 +770,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_query_string_valid(String8 string);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_resolution_query_valid(BusterX86MetadataResolveQuery query, u32* error_detail);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_feature_available(BusterX86GeneratedForm form,
                                                                        BusterX86MetadataFeatureInput features);
-BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_form_declared_execution_mode(BusterX86GeneratedForm form, bool legacy_repeat_cohort);
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_form_declared_execution_mode(BusterX86GeneratedForm form, bool legacy_mode_cohort);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_execution_mode_matches(BusterX86GeneratedForm form,
                                                                            BusterX86MetadataResolveQuery query);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_coverage_allowed(BusterX86GeneratedForm form,
@@ -767,6 +781,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_segment_override(Bus
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_string_has(BusterX86MetadataString string, String8 needle);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_df64(BusterX86MetadataForm form,
                                                                   BusterX86MetadataPatternSemantics pattern);
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_mode66_residual(BusterX86MetadataForm form,
+                                                                    BusterX86MetadataPatternSemantics pattern);
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_token_equal(char8 const* token, u32 length, String8 expected)
 {
@@ -841,6 +857,22 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_emit_set_mandatory_prefix(BusterX86
     if (pattern->mandatory_prefix && pattern->mandatory_prefix != prefix)
         buster_x86_metadata_emit_mark_unresolved(pattern, BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS);
     pattern->mandatory_prefix = prefix;
+}
+
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_emit_set_mode_control(BusterX86MetadataPatternSemantics* pattern, u8 mode)
+{
+    if (pattern->mode_control && pattern->mode_control != mode)
+        buster_x86_metadata_emit_mark_unresolved(pattern, BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS);
+    pattern->mode_control = mode;
+    pattern->has_prefix_control = 1;
+}
+
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_emit_set_operand_size_control(BusterX86MetadataPatternSemantics* pattern, u8 control)
+{
+    if (pattern->operand_size_control && pattern->operand_size_control != control)
+        buster_x86_metadata_emit_mark_unresolved(pattern, BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS);
+    pattern->operand_size_control = control;
+    pattern->has_prefix_control = 1;
 }
 
 BUSTER_GLOBAL_LOCAL void buster_x86_metadata_emit_set_lock_control(BusterX86MetadataPatternSemantics* pattern, u8 control)
@@ -1221,7 +1253,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
         else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("V66")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("66_prefix")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("osz_refining_prefix")))
+        {
             buster_x86_metadata_emit_set_mandatory_prefix(&pattern, 0x66);
+            if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("66_prefix")))
+                buster_x86_metadata_emit_set_operand_size_control(&pattern, BUSTER_X86_METADATA_PATTERN_OPERAND_SIZE_66);
+        }
         else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("VF2")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("f2_refining_prefix")))
             buster_x86_metadata_emit_set_mandatory_prefix(&pattern, 0xf2);
@@ -1466,7 +1502,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
         }
         else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("no66_prefix")))
         {
-            pattern.has_prefix_control = 1;
+            buster_x86_metadata_emit_set_operand_size_control(&pattern, BUSTER_X86_METADATA_PATTERN_OPERAND_SIZE_NO66);
             pattern.forbid_operand_size_override = 1;
         }
         else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("CR_WIDTH()")))
@@ -1505,11 +1541,21 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             // the same constraint as the source-level "norep" control.
             pattern.rep_not_f3 = 1;
         }
-        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("mode64")) ||
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("mode16")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("mode32")) ||
-                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("mode16")) ||
-                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("not64")) ||
-                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norex2_prefix")) ||
+                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("mode64")) ||
+                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("not64")))
+        {
+            u8 mode = buster_x86_metadata_emit_token_equal(token_buffer, length, S8("mode16"))
+                          ? BUSTER_X86_METADATA_PATTERN_MODE_16
+                          : buster_x86_metadata_emit_token_equal(token_buffer, length, S8("mode32"))
+                                ? BUSTER_X86_METADATA_PATTERN_MODE_32
+                                : buster_x86_metadata_emit_token_equal(token_buffer, length, S8("mode64"))
+                                      ? BUSTER_X86_METADATA_PATTERN_MODE_64
+                                      : BUSTER_X86_METADATA_PATTERN_MODE_NOT64;
+            buster_x86_metadata_emit_set_mode_control(&pattern, mode);
+        }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norex2_prefix")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("rex2_refining_prefix")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("rexw_prefix")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("no_refining_prefix")) ||
@@ -1784,6 +1830,31 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_has_implicit_immediate(Bu
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_mode66_residual(BusterX86MetadataForm form,
+                                                                    BusterX86MetadataPatternSemantics pattern)
+{
+    // The residual is deliberately a token-shape cohort, not a mnemonic
+    // wildcard.  Only BASE and X87 rows with one explicit 16/32-bit default
+    // and its matching 66/no66 selector qualify; string/segment/REP rows
+    // remain gated by their existing controls.
+    bool base_or_x87 = buster_x86_metadata_string_input_equal(form.extension.offset, S8("BASE")) ||
+                       buster_x86_metadata_string_input_equal(form.extension.offset, S8("X87"));
+    if (!base_or_x87 || form.prefix_kind != BUSTER_X86_METADATA_PREFIX_LEGACY ||
+        (pattern.mode_control != BUSTER_X86_METADATA_PATTERN_MODE_16 &&
+         pattern.mode_control != BUSTER_X86_METADATA_PATTERN_MODE_32) ||
+        (pattern.operand_size_control != BUSTER_X86_METADATA_PATTERN_OPERAND_SIZE_66 &&
+         pattern.operand_size_control != BUSTER_X86_METADATA_PATTERN_OPERAND_SIZE_NO66))
+        return false;
+    if (pattern.has_address_control || pattern.lock_control || pattern.rep_control || pattern.rep_not_f3 ||
+        pattern.has_modep5 || pattern.has_rep_selector || pattern.has_segment_override || pattern.immune66_loop64 ||
+        pattern.df64 || pattern.required_address_size || pattern.forbid_address_override || pattern.forbid_mandatory_prefix ||
+        pattern.no_rex2 || pattern.no_vector_source || pattern.has_prefix_kind || pattern.has_w || pattern.has_apx_control ||
+        pattern.has_amx_control || pattern.has_decorator_control || pattern.has_bcrc || pattern.has_ubit || pattern.has_scc ||
+        pattern.no_scc || pattern.has_evex_r4 || pattern.has_nd || pattern.has_nf || pattern.has_ignore_66)
+        return false;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX86MetadataForm form,
                                                                           BusterX86MetadataPatternSemantics pattern)
 {
@@ -1802,6 +1873,22 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
          (pattern.relative_width != 1 && pattern.relative_width != 4)))
         return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
     if (pattern.has_ignore_66 && pattern.mandatory_prefix == 0x66)
+        return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
+    if (pattern.mode_control == BUSTER_X86_METADATA_PATTERN_MODE_16 &&
+        !(form.mode_flags & BUSTER_X86_METADATA_MODE_16))
+        return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
+    if (pattern.mode_control == BUSTER_X86_METADATA_PATTERN_MODE_32 &&
+        !(form.mode_flags & BUSTER_X86_METADATA_MODE_32))
+        return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
+    if (pattern.mode_control == BUSTER_X86_METADATA_PATTERN_MODE_64 &&
+        !(form.mode_flags & BUSTER_X86_METADATA_MODE_64))
+        return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
+    if (pattern.mode_control == BUSTER_X86_METADATA_PATTERN_MODE_NOT64 &&
+        !(form.mode_flags & BUSTER_X86_METADATA_MODE_NOT64))
+        return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
+    if (pattern.operand_size_control == BUSTER_X86_METADATA_PATTERN_OPERAND_SIZE_66 && form.mandatory_prefix != 0x66)
+        return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
+    if (pattern.operand_size_control == BUSTER_X86_METADATA_PATTERN_OPERAND_SIZE_NO66 && form.mandatory_prefix == 0x66)
         return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
     if (pattern.rep_not_f3 && (pattern.mandatory_prefix == 0xf3 || form.mandatory_prefix == 0xf3))
         return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
@@ -3915,7 +4002,11 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     u8 mandatory_prefix = pattern.mandatory_prefix ? pattern.mandatory_prefix : form.mandatory_prefix;
     u8 pp = buster_x86_metadata_emit_mandatory_pp(mandatory_prefix);
     u16 data_width = buster_x86_metadata_emit_data_operand_width(bindings, binding_count);
+    // In a MODE16 row the default operand size is already 16 bits.  Do not
+    // synthesize a 66 byte for the no66 spelling; MODE32 retains the normal
+    // 32-bit default and therefore keeps the existing width-derived rule.
     bool operand_size_override = data_width == 16 && mandatory_prefix != 0x66 &&
+                                 pattern.mode_control != BUSTER_X86_METADATA_PATTERN_MODE_16 &&
                                  (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY ||
                                   form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX ||
                                   form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2);
@@ -4977,12 +5068,14 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_canonical_query(BusterX86M
                                 form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
                                 form.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY &&
                                 buster_x86_metadata_string_input_equal(form.extension.offset, S8("BASE"));
+    bool mode66_residual = buster_x86_metadata_emit_mode66_residual(form, pattern);
+    bool legacy_mode_cohort = legacy_repeat_cohort || mode66_residual;
+    bool include_not64 = form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64 ||
+                         (form.mode_flags & BUSTER_X86_METADATA_MODE_NOT64) != 0;
     u8 execution_mode = buster_x86_metadata_form_declared_execution_mode((BusterX86GeneratedForm){
         .coverage_class = form.coverage_class,
         .mode_flags = form.mode_flags,
-    }, legacy_repeat_cohort);
-    bool include_not64 = form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64 ||
-                         (form.mode_flags & BUSTER_X86_METADATA_MODE_NOT64) != 0;
+    }, legacy_mode_cohort);
     if (include_not64 && execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64)
         execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_ANY;
     *query = (BusterX86MetadataPhysicalQuery){
@@ -7073,20 +7166,19 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_has_non64_mode(BusterX86Genera
            (mode_bits && !(mode_bits & BUSTER_X86_GENERATED_MODE_64));
 }
 
-BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_form_declared_execution_mode(BusterX86GeneratedForm form, bool legacy_repeat_cohort)
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_form_declared_execution_mode(BusterX86GeneratedForm form, bool legacy_mode_cohort)
 {
     u16 mode_bits = form.mode_flags &
                     (BUSTER_X86_GENERATED_MODE_16 | BUSTER_X86_GENERATED_MODE_32 | BUSTER_X86_GENERATED_MODE_64 |
                      BUSTER_X86_GENERATED_MODE_NOT64);
-    // The legacy string-repeat rows are audited in their declared execution
-    // mode.  Multi-mode rows retain the ordinary 64-bit canonical query;
-    // NOT64 rows are rejected by the structural gate before this helper is
-    // reached.  This keeps the default x86-64 resolver strict while allowing
-    // the coverage ledger to prove the bytes of this exact 16/32-bit cohort.
-    if (legacy_repeat_cohort && (mode_bits & BUSTER_X86_GENERATED_MODE_16) &&
+    // Legacy REP rows and the exact normalized MODE16/MODE32 residual cohort
+    // are audited in their declared execution mode. Multi-mode rows retain
+    // the ordinary 64-bit canonical query; NOT64 rows are admitted only
+    // through the explicit include_not64/ANY policy below.
+    if (legacy_mode_cohort && (mode_bits & BUSTER_X86_GENERATED_MODE_16) &&
         !(mode_bits & (BUSTER_X86_GENERATED_MODE_32 | BUSTER_X86_GENERATED_MODE_64 | BUSTER_X86_GENERATED_MODE_NOT64)))
         return BUSTER_X86_METADATA_EXECUTION_MODE_16;
-    if (legacy_repeat_cohort && (mode_bits & BUSTER_X86_GENERATED_MODE_32) &&
+    if (legacy_mode_cohort && (mode_bits & BUSTER_X86_GENERATED_MODE_32) &&
         !(mode_bits & (BUSTER_X86_GENERATED_MODE_16 | BUSTER_X86_GENERATED_MODE_64 | BUSTER_X86_GENERATED_MODE_NOT64)))
         return BUSTER_X86_METADATA_EXECUTION_MODE_32;
     return BUSTER_X86_METADATA_EXECUTION_MODE_64;
@@ -7102,6 +7194,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_execution_mode_matches(BusterX
                           (mode_bits & BUSTER_X86_GENERATED_MODE_NOT64) != 0;
     bool has_64 = (mode_bits & BUSTER_X86_GENERATED_MODE_64) != 0;
     bool has_explicit_mode = mode_bits != 0;
+    // Preserve the REP-prefix execution-mode contract: non-64 rows are
+    // rejected from a default 64-bit query, and include_not64 only admits
+    // those rows through an ANY query (never by broadening mode64).
     bool non64_only = explicit_not64 || (has_explicit_mode && !has_64);
     if (explicit_not64 && !query.include_not64) return false;
     if (query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64)
@@ -7120,8 +7215,6 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_execution_mode_matches(BusterX
     {
         if (has_explicit_mode && !(mode_bits & BUSTER_X86_GENERATED_MODE_32)) return false;
     }
-    // No execution-mode bits means that the generated row carries no mode
-    // restriction; coverage and the remaining metadata filters still apply.
     return true;
 }
 
