@@ -2651,19 +2651,19 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             u8 expected_count;
         };
         static X86_64MetadataBooleanCohortCase const boolean_cohort_cases[] = {
-            {S8("CLDEMOTE=0"), {7978, UINT32_MAX}, 1},
-            {S8("CLDEMOTE=1"), {7969, UINT32_MAX}, 1},
-            {S8("LZCNT=0"), {8106, 8107}, 2},
-            {S8("LZCNT=1"), {8102, 8103}, 2},
-            {S8("TZCNT=0"), {8689, 8690}, 2},
-            {S8("TZCNT=1"), {8685, 8686}, 2},
-            {S8("IBHF=0"), {8692, UINT32_MAX}, 1},
-            {S8("IBHF=1"), {8691, UINT32_MAX}, 1},
-            {S8("PREFETCHRST=0"), {9572, UINT32_MAX}, 1},
-            {S8("PREFETCHRST=1"), {8780, UINT32_MAX}, 1},
-            {S8("PREFETCHIT=0"), {9573, 9574}, 2},
-            {S8("PREFETCHIT=1"), {8694, 8695}, 2},
-            {S8("CET_NO_TRACK()"), {9483, 9484, 9487, 9488}, 4},
+            {S8_INITIALIZER("CLDEMOTE=0"), {7978, UINT32_MAX}, 1},
+            {S8_INITIALIZER("CLDEMOTE=1"), {7969, UINT32_MAX}, 1},
+            {S8_INITIALIZER("LZCNT=0"), {8106, 8107}, 2},
+            {S8_INITIALIZER("LZCNT=1"), {8102, 8103}, 2},
+            {S8_INITIALIZER("TZCNT=0"), {8689, 8690}, 2},
+            {S8_INITIALIZER("TZCNT=1"), {8685, 8686}, 2},
+            {S8_INITIALIZER("IBHF=0"), {8692, UINT32_MAX}, 1},
+            {S8_INITIALIZER("IBHF=1"), {8691, UINT32_MAX}, 1},
+            {S8_INITIALIZER("PREFETCHRST=0"), {9572, UINT32_MAX}, 1},
+            {S8_INITIALIZER("PREFETCHRST=1"), {8780, UINT32_MAX}, 1},
+            {S8_INITIALIZER("PREFETCHIT=0"), {9573, 9574}, 2},
+            {S8_INITIALIZER("PREFETCHIT=1"), {8694, 8695}, 2},
+            {S8_INITIALIZER("CET_NO_TRACK()"), {9483, 9484, 9487, 9488}, 4},
         };
         bool boolean_cohort_ok = true;
         for (u32 cohort_index = 0; cohort_index < BUSTER_ARRAY_LENGTH(boolean_cohort_cases); cohort_index += 1)
@@ -3231,13 +3231,16 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         // blocked because its REX.W spelling is IBHF=1.
         static u32 const fixed_nop_ids[] = {7954, 7955, 7956, 7957, 7958, 7959, 7960, 7961, 7962, 7963, 7964, 8693};
         static String8 const fixed_nop_reg_tokens[] = {
-            S8("REG[0b010]"), S8("REG[0b011]"), S8("REG[0b100]"), S8("REG[0b101]"), S8("REG[0b111]"),
-            S8("REG[0b111]"), S8("REG[0b111]"), S8("REG[0b111]"), S8("REG[0b110]"), S8("REG[0b111]"),
-            S8("REG[0b111]"), S8("REG[0b111]"),
+            S8_INITIALIZER("REG[0b010]"), S8_INITIALIZER("REG[0b011]"), S8_INITIALIZER("REG[0b100]"),
+            S8_INITIALIZER("REG[0b101]"), S8_INITIALIZER("REG[0b111]"), S8_INITIALIZER("REG[0b111]"),
+            S8_INITIALIZER("REG[0b111]"), S8_INITIALIZER("REG[0b111]"), S8_INITIALIZER("REG[0b110]"),
+            S8_INITIALIZER("REG[0b111]"), S8_INITIALIZER("REG[0b111]"), S8_INITIALIZER("REG[0b111]"),
         };
         static String8 const fixed_nop_rm_tokens[] = {
-            S8("RM[nnn]"), S8("RM[nnn]"), S8("RM[nnn]"), S8("RM[nnn]"), S8("RM[0b001]"), S8("RM[0b101]"),
-            S8("RM[0b110]"), S8("RM[0b111]"), S8("RM[nnn]"), S8("RM[0b000]"), S8("RM[0b100]"), S8("RM[0b000]"),
+            S8_INITIALIZER("RM[nnn]"), S8_INITIALIZER("RM[nnn]"), S8_INITIALIZER("RM[nnn]"),
+            S8_INITIALIZER("RM[nnn]"), S8_INITIALIZER("RM[0b001]"), S8_INITIALIZER("RM[0b101]"),
+            S8_INITIALIZER("RM[0b110]"), S8_INITIALIZER("RM[0b111]"), S8_INITIALIZER("RM[nnn]"),
+            S8_INITIALIZER("RM[0b000]"), S8_INITIALIZER("RM[0b100]"), S8_INITIALIZER("RM[0b000]"),
         };
         bool fixed_nop_inventory = true;
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fixed_nop_ids); index += 1)
