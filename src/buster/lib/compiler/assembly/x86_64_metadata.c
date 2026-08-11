@@ -685,6 +685,22 @@ struct BusterX86MetadataPatternSemantics
     u8 bcrc_value;
     u8 has_ubit;
     u8 ubit_value;
+    // XED uses these typed 0/1 selectors for opcode aliases whose byte
+    // spelling is shared by a real instruction and a legacy NOP.  Keep the
+    // value with the parsed form so a token cannot accidentally be treated as
+    // an interchangeable presence marker.
+    u8 has_lzcnt_control;
+    u8 lzcnt_control_value;
+    u8 has_tzcnt_control;
+    u8 tzcnt_control_value;
+    u8 has_cldemote_control;
+    u8 cldemote_control_value;
+    u8 has_ibhf_control;
+    u8 ibhf_control_value;
+    u8 has_prefetchrst_control;
+    u8 prefetchrst_control_value;
+    u8 has_prefetchit_control;
+    u8 prefetchit_control_value;
     u8 has_explicit_vector_length;
     u8 has_scc;
     u8 scc_value;
@@ -1808,8 +1824,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("OVERRIDE")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("REMOVE")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("FORCE")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("P4")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("IBHF")))
+                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("P4")))
         {
             pattern.has_prefix_control = 1;
             buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
@@ -1849,19 +1864,59 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             pattern.has_prefix_control = 1;
             pattern.immune66 = 1;
         }
-        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("LZCNT=1")) ||
-                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("TZCNT=1")))
+        else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("LZCNT=")))
         {
-            // The 1-valued XED controls select the mnemonic-specific F3
-            // form.  The normalized iclass and mandatory prefix already
-            // carry that source and byte distinction; the control itself
-            // adds no field to the encoding.
+            pattern.has_lzcnt_control = 1;
+            if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("LZCNT=0")) ||
+                buster_x86_metadata_emit_token_equal(token_buffer, length, S8("LZCNT=1")))
+                pattern.lzcnt_control_value = (u8)(token_buffer[length - 1] - '0');
+            else
+                pattern.has_unsupported_token = 1;
         }
-        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("CLDEMOTE=1")))
+        else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("TZCNT=")))
         {
-            // The normalized REG[0b000] field carries CLDEMOTE's fixed
-            // ModRM.reg selector; the token selects the source mnemonic and
-            // adds no independent byte or operand.
+            pattern.has_tzcnt_control = 1;
+            if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("TZCNT=0")) ||
+                buster_x86_metadata_emit_token_equal(token_buffer, length, S8("TZCNT=1")))
+                pattern.tzcnt_control_value = (u8)(token_buffer[length - 1] - '0');
+            else
+                pattern.has_unsupported_token = 1;
+        }
+        else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("CLDEMOTE=")))
+        {
+            pattern.has_cldemote_control = 1;
+            if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("CLDEMOTE=0")) ||
+                buster_x86_metadata_emit_token_equal(token_buffer, length, S8("CLDEMOTE=1")))
+                pattern.cldemote_control_value = (u8)(token_buffer[length - 1] - '0');
+            else
+                pattern.has_unsupported_token = 1;
+        }
+        else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("IBHF=")))
+        {
+            pattern.has_ibhf_control = 1;
+            if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("IBHF=0")) ||
+                buster_x86_metadata_emit_token_equal(token_buffer, length, S8("IBHF=1")))
+                pattern.ibhf_control_value = (u8)(token_buffer[length - 1] - '0');
+            else
+                pattern.has_unsupported_token = 1;
+        }
+        else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("PREFETCHRST=")))
+        {
+            pattern.has_prefetchrst_control = 1;
+            if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("PREFETCHRST=0")) ||
+                buster_x86_metadata_emit_token_equal(token_buffer, length, S8("PREFETCHRST=1")))
+                pattern.prefetchrst_control_value = (u8)(token_buffer[length - 1] - '0');
+            else
+                pattern.has_unsupported_token = 1;
+        }
+        else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("PREFETCHIT=")))
+        {
+            pattern.has_prefetchit_control = 1;
+            if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("PREFETCHIT=0")) ||
+                buster_x86_metadata_emit_token_equal(token_buffer, length, S8("PREFETCHIT=1")))
+                pattern.prefetchit_control_value = (u8)(token_buffer[length - 1] - '0');
+            else
+                pattern.has_unsupported_token = 1;
         }
         else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("CET=")))
         {
@@ -1876,13 +1931,6 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
                 pattern.cet_value = (u8)(token_buffer[4] - '0');
             else
                 pattern.has_unsupported_token = 1;
-        }
-        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("PREFETCHIT=1")) ||
-                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("PREFETCHRST=1")))
-        {
-            // These value-1 selectors choose a source mnemonic/feature form;
-            // their fixed ModRM and mandatory-prefix bytes are already in
-            // the normalized pattern and fields.
         }
         else pattern.has_unsupported_token = 1;
     }
@@ -2030,6 +2078,67 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_mpx_mode_supported(BusterX86Me
                     buster_x86_metadata_string_input_equal(form.iclass.offset, S8("NOP"));
     return pattern.mpx_mode_value == 1 && (mpx_instruction || base_nop);
 }
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_boolean_control_matches(BusterX86MetadataForm form,
+                                                                            BusterX86MetadataPatternSemantics pattern)
+{
+    // The XED boolean controls are typed selectors, not generic annotations:
+    // value 1 names the architectural mnemonic while value 0 names the
+    // legacy NOP/compatibility row sharing its opcode bytes.  Requiring the
+    // normalized iclass here keeps a value-0 row from being silently treated
+    // as its value-1 neighbour (and vice versa) in both the ledger and the
+    // direct emitter.  Decode-only NOP aliases are rejected below because
+    // they become real instructions when the corresponding feature exists.
+    if (pattern.has_lzcnt_control)
+    {
+        bool value_one = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LZCNT"));
+        bool value_zero = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("BSR"));
+        if ((!value_one && !value_zero) || pattern.lzcnt_control_value != (u8)value_one) return false;
+        // The F3 BSR spelling is a decode-only alias: on a target with
+        // LZCNT, the same bytes execute LZCNT.  Canonical BASE BSR rows
+        // remain source-selectable; keep this refining-prefix alias blocked.
+        if (value_zero) return false;
+    }
+    if (pattern.has_tzcnt_control)
+    {
+        bool value_one = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("TZCNT"));
+        bool value_zero = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("BSF"));
+        if ((!value_one && !value_zero) || pattern.tzcnt_control_value != (u8)value_one) return false;
+        if (value_zero) return false;
+    }
+    if (pattern.has_cldemote_control)
+    {
+        bool value_one = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("CLDEMOTE"));
+        bool value_zero = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("NOP"));
+        if ((!value_one && !value_zero) || pattern.cldemote_control_value != (u8)value_one) return false;
+        // CLDEMOTE=0 is a decode-only NOP alias.  Once CLDEMOTE is enabled,
+        // the same bytes execute the architectural instruction; keeping the
+        // alias out of source selection avoids silently changing semantics.
+        if (value_zero) return false;
+    }
+    if (pattern.has_ibhf_control)
+    {
+        bool value_one = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("IBHF"));
+        bool value_zero = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("NOP"));
+        if ((!value_one && !value_zero) || pattern.ibhf_control_value != (u8)value_one) return false;
+        if (value_zero) return false;
+    }
+    if (pattern.has_prefetchrst_control)
+    {
+        bool value_one = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("PREFETCHRST2"));
+        bool value_zero = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("NOP"));
+        if ((!value_one && !value_zero) || pattern.prefetchrst_control_value != (u8)value_one) return false;
+        if (value_zero) return false;
+    }
+    if (pattern.has_prefetchit_control)
+    {
+        bool value_one = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("PREFETCHIT0")) ||
+                         buster_x86_metadata_string_input_equal(form.iclass.offset, S8("PREFETCHIT1"));
+        bool value_zero = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("NOP"));
+        if ((!value_one && !value_zero) || pattern.prefetchit_control_value != (u8)value_one) return false;
+        if (value_zero) return false;
+    }
+    return true;
+}
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX86MetadataForm form,
                                                                           BusterX86MetadataPatternSemantics pattern)
@@ -2037,6 +2146,8 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
     // These booleans are intentionally not a recognition-only side channel.
     // A control token is emittable only when the normalized fields below
     // carry the corresponding constraint into the byte path.
+    if (!buster_x86_metadata_emit_boolean_control_matches(form, pattern))
+        return BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
     if (pattern.has_prefix_kind && form.prefix_kind != pattern.prefix_kind)
         return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
     // BRANCH_HINT is only implemented for the normalized 64-bit conditional
@@ -4761,6 +4872,18 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_eamode_alias_forms(BusterX86Metadat
         first_pattern.nf_value != second_pattern.nf_value || first_pattern.has_bcrc != second_pattern.has_bcrc ||
         first_pattern.bcrc_value != second_pattern.bcrc_value || first_pattern.has_ubit != second_pattern.has_ubit ||
         first_pattern.ubit_value != second_pattern.ubit_value ||
+        first_pattern.has_lzcnt_control != second_pattern.has_lzcnt_control ||
+        first_pattern.lzcnt_control_value != second_pattern.lzcnt_control_value ||
+        first_pattern.has_tzcnt_control != second_pattern.has_tzcnt_control ||
+        first_pattern.tzcnt_control_value != second_pattern.tzcnt_control_value ||
+        first_pattern.has_cldemote_control != second_pattern.has_cldemote_control ||
+        first_pattern.cldemote_control_value != second_pattern.cldemote_control_value ||
+        first_pattern.has_ibhf_control != second_pattern.has_ibhf_control ||
+        first_pattern.ibhf_control_value != second_pattern.ibhf_control_value ||
+        first_pattern.has_prefetchrst_control != second_pattern.has_prefetchrst_control ||
+        first_pattern.prefetchrst_control_value != second_pattern.prefetchrst_control_value ||
+        first_pattern.has_prefetchit_control != second_pattern.has_prefetchit_control ||
+        first_pattern.prefetchit_control_value != second_pattern.prefetchit_control_value ||
         first_pattern.has_explicit_vector_length != second_pattern.has_explicit_vector_length ||
         first_pattern.has_scc != second_pattern.has_scc || first_pattern.scc_value != second_pattern.scc_value ||
         first_pattern.has_evex_r4 != second_pattern.has_evex_r4 || first_pattern.evex_r4_value != second_pattern.evex_r4_value ||

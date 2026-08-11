@@ -2324,23 +2324,82 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             cohort_counts_match &= cohort_emitted[cohort] == cohort_counts[cohort];
         }
         BUSTER_TEST(arguments, cohort_counts_match);
+        typedef struct X86_64MetadataBooleanCohortCase X86_64MetadataBooleanCohortCase;
+        struct X86_64MetadataBooleanCohortCase
+        {
+            String8 token;
+            u32 expected_ids[2];
+            u8 expected_count;
+        };
+        static X86_64MetadataBooleanCohortCase const boolean_cohort_cases[] = {
+            {S8("CLDEMOTE=0"), {7978, UINT32_MAX}, 1},
+            {S8("CLDEMOTE=1"), {7969, UINT32_MAX}, 1},
+            {S8("LZCNT=0"), {8106, 8107}, 2},
+            {S8("LZCNT=1"), {8102, 8103}, 2},
+            {S8("TZCNT=0"), {8689, 8690}, 2},
+            {S8("TZCNT=1"), {8685, 8686}, 2},
+            {S8("IBHF=0"), {8692, UINT32_MAX}, 1},
+            {S8("IBHF=1"), {8691, UINT32_MAX}, 1},
+            {S8("PREFETCHRST=0"), {9572, UINT32_MAX}, 1},
+            {S8("PREFETCHRST=1"), {8780, UINT32_MAX}, 1},
+            {S8("PREFETCHIT=0"), {9573, 9574}, 2},
+            {S8("PREFETCHIT=1"), {8694, 8695}, 2},
+        };
+        bool boolean_cohort_ok = true;
+        for (u32 cohort_index = 0; cohort_index < BUSTER_ARRAY_LENGTH(boolean_cohort_cases); cohort_index += 1)
+        {
+            X86_64MetadataBooleanCohortCase cohort = boolean_cohort_cases[cohort_index];
+            u32 actual_count = 0;
+            for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
+            {
+                BusterX86MetadataForm form = {0};
+                if (!buster_x86_metadata_form(form_id, &form) ||
+                    !x86_64_metadata_test_pattern_has_token(form.pattern, cohort.token))
+                    continue;
+                actual_count += 1;
+                bool expected_id = false;
+                for (u32 expected_index = 0; expected_index < cohort.expected_count; expected_index += 1)
+                    expected_id |= form_id == cohort.expected_ids[expected_index];
+                boolean_cohort_ok &= expected_id;
+                boolean_cohort_ok &= form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED;
+                bool decode_alias = cohort_index == 0 || cohort_index == 2 || cohort_index == 4 ||
+                                    cohort_index == 6 || cohort_index == 8 || cohort_index == 10;
+                if (decode_alias)
+                    boolean_cohort_ok &= !ledger[form_id].encoder_capable &&
+                                         ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
+                                         ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
+                else
+                    boolean_cohort_ok &= ledger[form_id].encoder_capable &&
+                                         ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
+                                         ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_NONE;
+            }
+            boolean_cohort_ok &= actual_count == cohort.expected_count;
+            for (u32 expected_index = 0; expected_index < cohort.expected_count; expected_index += 1)
+            {
+                BusterX86MetadataForm form = {0};
+                u32 expected_id = cohort.expected_ids[expected_index];
+                boolean_cohort_ok &= buster_x86_metadata_form(expected_id, &form) &&
+                                     x86_64_metadata_test_pattern_has_token(form.pattern, cohort.token);
+            }
+        }
+        BUSTER_TEST(arguments, boolean_cohort_ok);
         BUSTER_TEST(arguments, !no_storage.complete && no_storage.required_entry_count == 11013 && no_storage.entry_count == 0);
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        // The residual-control stack contributes sixteen rows and the legacy
-        // DF64/IMMUNE controls contribute seventeen more.  These are disjoint
-        // normalized rows on top of the eight fixed NOT16 rows: combined
-        // ledger delta is +33 from the pre-residual baseline.
-        BUSTER_TEST(arguments, audit.emitted_count == 10569 && audit.blocked_count == 444 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10569 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 444);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10677 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 67);
+        // The residual-control stack contributes sixteen rows, legacy
+        // DF64/IMMUNE controls contribute seventeen, and IBHF=1 contributes
+        // one boolean row.  These are disjoint normalized rows on top of the
+        // eight fixed NOT16 rows: combined ledger delta is +34.
+        BUSTER_TEST(arguments, audit.emitted_count == 10570 && audit.blocked_count == 443 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10570 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 443);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10678 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 66);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 199, 5, 1643, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1759, 195, 5, 1643, 176, 6718, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {53, 4, 0, 0, 0, 10, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1759, 196, 5, 1643, 176, 6718, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {53, 3, 0, 0, 0, 10, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2350,7 +2409,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10569, 268, 108, 45, 0, 23, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10570, 268, 108, 44, 0, 23, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -5190,6 +5249,101 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                    !x86_64_metadata_test_pattern_has_token(form.pattern, S8("ENCDELETE"));
         }
         BUSTER_TEST(arguments, neighbor_exclusions);
+        // The value-0 rows are legacy aliases that share bytes with the
+        // value-1 architectural forms.  Their refining-prefix spellings are
+        // decode-only, so keep every value-0 cohort row blocked and exercise
+        // the real value-1 rows directly.
+        BusterX86MetadataPhysicalOperand lzcnt_zero_memory_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 32),
+            x86_64_metadata_test_physical_mem_base(0, 32, 0),
+        };
+        BusterX86MetadataPhysicalOperand tzcnt_zero_memory_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 32),
+            x86_64_metadata_test_physical_mem_base(0, 32, 0),
+        };
+        BusterX86MetadataPhysicalOperand cldemote_zero_operands[2] = {
+            x86_64_metadata_test_physical_mem_base(0, 64, 0),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
+        };
+        BusterX86MetadataPhysicalOperand ibhf_zero_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 7, 64),
+        };
+        BusterX86MetadataPhysicalOperand prefetchrst_zero_operand = x86_64_metadata_test_physical_mem_base(0, 64, 0);
+        BusterX86MetadataPhysicalOperand prefetchit_zero_operand = x86_64_metadata_test_physical_mem_base(0, 64, 0);
+        u8 ibhf_bytes[] = {0xf3, 0x48, 0x0f, 0x1e, 0xf8};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("IBHF"), 8691, 0, 0,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), ibhf_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(ibhf_bytes)));
+        BusterX86MetadataEmitResult lzcnt_zero_memory_blocked = x86_64_metadata_test_emit_form(
+            S8("BSR"), 8106, lzcnt_zero_memory_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult lzcnt_zero_register_blocked = x86_64_metadata_test_emit_form(
+            S8("BSR"), 8107, lzcnt_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult tzcnt_zero_memory_blocked = x86_64_metadata_test_emit_form(
+            S8("BSF"), 8689, tzcnt_zero_memory_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult tzcnt_zero_register_blocked = x86_64_metadata_test_emit_form(
+            S8("BSF"), 8690, tzcnt_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult cldemote_zero_blocked = x86_64_metadata_test_emit_form(
+            S8("NOP"), 7978, cldemote_zero_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult ibhf_zero_blocked = x86_64_metadata_test_emit_form(
+            S8("NOP"), 8692, ibhf_zero_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult prefetchrst_zero_blocked = x86_64_metadata_test_emit_form(
+            S8("NOP"), 9572, &prefetchrst_zero_operand, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult prefetchit0_zero_blocked = x86_64_metadata_test_emit_form(
+            S8("NOP"), 9573, &prefetchit_zero_operand, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult prefetchit1_zero_blocked = x86_64_metadata_test_emit_form(
+            S8("NOP"), 9574, &prefetchit_zero_operand, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        BUSTER_TEST(arguments, lzcnt_zero_memory_blocked.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA &&
+                                   lzcnt_zero_register_blocked.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA &&
+                                   tzcnt_zero_memory_blocked.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA &&
+                                   tzcnt_zero_register_blocked.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA &&
+                                   cldemote_zero_blocked.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA &&
+                                   ibhf_zero_blocked.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA &&
+                                   prefetchrst_zero_blocked.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA &&
+                                   prefetchit0_zero_blocked.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA &&
+                                   prefetchit1_zero_blocked.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA);
+
+        // A value-0 row must not be reachable through the value-1 mnemonic,
+        // and feature-gated value-1 forms still report their missing ISA.
+        BusterX86MetadataEmitResult ibhf_wrong_mnemonic = x86_64_metadata_test_emit_form(
+            S8("NOP"), 8691, 0, 0, (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard),
+            (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult ibhf_zero_wrong_mnemonic = x86_64_metadata_test_emit_form(
+            S8("IBHF"), 8692, ibhf_zero_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[1]){0}, 0, 0, 0);
+        String8 no_boolean_features[] = {S8("i386")};
+        BusterX86MetadataEmitResult lzcnt_missing_feature = x86_64_metadata_test_emit_form(
+            S8("LZCNT"), 8103, lzcnt_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, no_boolean_features,
+            BUSTER_ARRAY_LENGTH(no_boolean_features), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult ibhf_missing_feature = x86_64_metadata_test_emit_form(
+            S8("IBHF"), 8691, 0, 0, (BusterX86MetadataPhysicalAttributes){0}, no_boolean_features,
+            BUSTER_ARRAY_LENGTH(no_boolean_features), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult cldemote_missing_feature = x86_64_metadata_test_emit_form(
+            S8("CLDEMOTE"), cldemote_form_id, &selector_memory, 1, (BusterX86MetadataPhysicalAttributes){0}, no_boolean_features,
+            BUSTER_ARRAY_LENGTH(no_boolean_features), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult prefetchrst_missing_feature = x86_64_metadata_test_emit_form(
+            S8("PREFETCHRST2"), prefetchrst2_form_id, &selector_memory, 1, (BusterX86MetadataPhysicalAttributes){0}, no_boolean_features,
+            BUSTER_ARRAY_LENGTH(no_boolean_features), (u8[1]){0}, 0, 0, 0);
+        BusterX86MetadataEmitResult prefetchit_missing_feature = x86_64_metadata_test_emit_form(
+            S8("PREFETCHIT0"), prefetchit0_form_id, &prefetchit_memory, 1, (BusterX86MetadataPhysicalAttributes){0}, no_boolean_features,
+            BUSTER_ARRAY_LENGTH(no_boolean_features), (u8[1]){0}, 0, 0, 0);
+        BUSTER_TEST(arguments, ibhf_wrong_mnemonic.status == BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM &&
+                                   ibhf_zero_wrong_mnemonic.status == BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM &&
+                                   lzcnt_missing_feature.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                                   ibhf_missing_feature.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                                   cldemote_missing_feature.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                                   prefetchrst_missing_feature.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                                   prefetchit_missing_feature.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE);
 
         BusterX86MetadataEmitResult ccmp_wrong_operand = x86_64_metadata_test_emit_form(
             S8("CCMPB"), 779,
