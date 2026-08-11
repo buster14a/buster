@@ -1920,6 +1920,78 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         .cpu_arch = CPU_ARCH_AARCH64,
         .os = OPERATING_SYSTEM_LINUX,
     };
+    // Differential coverage for the generated unsigned memory wrapper used
+    // by frame and aggregate-copy emission. Each form is checked at offset
+    // zero and at the architectural imm12 limit, with the old hand-encoded
+    // words retained as an independent byte oracle. The frame helper's large
+    // offset path is also checked: its materialize/add prefix stays intact
+    // and only the final unsigned memory word comes from metadata.
+    static struct
+    {
+        u32 size;
+        bool store;
+        char const* name;
+    } const a64_memory_forms[] = {
+        {1, false, "LDRBBui"},
+        {2, false, "LDRHHui"},
+        {4, false, "LDRWui"},
+        {8, false, "LDRXui"},
+        {1, true, "STRBBui"},
+        {2, true, "STRHHui"},
+        {4, true, "STRWui"},
+        {8, true, "STRXui"},
+    };
+    for (u32 form_index = 0; form_index < BUSTER_ARRAY_LENGTH(a64_memory_forms); form_index += 1)
+    {
+        u32 size = a64_memory_forms[form_index].size;
+        bool store = a64_memory_forms[form_index].store;
+        u32 base = store ? (size == 1   ? UINT32_C(0x39000000)
+                              : size == 2 ? UINT32_C(0x79000000)
+                              : size == 4 ? UINT32_C(0xb9000000)
+                                          : UINT32_C(0xf9000000))
+                         : (size == 1   ? UINT32_C(0x39400000)
+                              : size == 2 ? UINT32_C(0x79400000)
+                              : size == 4 ? UINT32_C(0xb9400000)
+                                          : UINT32_C(0xf9400000));
+        u32 offsets[] = {0, 4095u * size};
+        for (u32 offset_index = 0; offset_index < BUSTER_ARRAY_LENGTH(offsets); offset_index += 1)
+        {
+            u32 bytes[4] = {0};
+            u32 byte_count = 0;
+            bool error = false;
+            bool emitted = machine_a64_test_emit_unsigned_memory((u8*)bytes, sizeof(bytes), 17, 28, offsets[offset_index], size, store, false,
+                                                                   &byte_count, &error);
+            u32 expected = base | (17u) | (28u << 5) | ((offsets[offset_index] / size) << 10);
+            BUSTER_TEST_RAW(arguments, emitted && !error && byte_count == 4 && bytes[0] == expected,
+                            string_format(arguments->arena, S8("a64 generated {S8} offset {u32}"), a64_memory_forms[form_index].name,
+                                          offsets[offset_index]));
+        }
+        if (size > 1)
+        {
+            u32 bytes[4] = {0};
+            u32 byte_count = 0;
+            bool error = false;
+            BUSTER_TEST(arguments, !machine_a64_test_emit_unsigned_memory((u8*)bytes, sizeof(bytes), 17, 28, 1, size, store, false, &byte_count,
+                                                                            &error) &&
+                                      error && byte_count == 0);
+        }
+        u32 bytes[4] = {0};
+        u32 byte_count = 0;
+        bool error = false;
+        BUSTER_TEST(arguments, !machine_a64_test_emit_unsigned_memory((u8*)bytes, sizeof(bytes), 17, 28, 4096u * size, size, store, false, &byte_count,
+                                                                        &error) &&
+                                  error && byte_count == 0);
+    }
+    {
+        u32 bytes[16] = {0};
+        u32 byte_count = 0;
+        bool error = false;
+        BUSTER_TEST(arguments, machine_a64_test_emit_unsigned_memory((u8*)bytes, sizeof(bytes), 17, 0, 32768, 8, true, true, &byte_count, &error) &&
+                                  !error && byte_count == 12);
+        u32 words[3] = {0};
+        memcpy(words, bytes, sizeof(words));
+        BUSTER_TEST(arguments, words[0] == UINT32_C(0xd2900010) && words[1] == UINT32_C(0x8b100390) && words[2] == UINT32_C(0xf9000211));
+    }
     IrProgram* machine_a64_program = machine_test_compile_c(arguments->arena, S8("machine-stage11.c"), machine_c_source_base, machine_a64_target);
     BUSTER_TEST(arguments, machine_a64_program != 0);
     if (machine_a64_program && machine_a64_program->module_count)

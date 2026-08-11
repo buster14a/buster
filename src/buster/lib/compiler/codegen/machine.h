@@ -1083,3 +1083,11 @@ BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build_prepassed(Arena
 BUSTER_F_DECL MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
 BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement);
+
+#if BUSTER_INCLUDE_TESTS
+// Test-only byte seam for the AArch64 unsigned memory helpers. It keeps the
+// generated-form differential tests independent of the private encoder state
+// while preserving the production-only machine API surface.
+BUSTER_F_DECL bool machine_a64_test_emit_unsigned_memory(u8* bytes, u32 capacity, u32 register_number, u32 base_register, u32 offset, u32 size,
+                                                         bool store, bool frame_relative, u32* byte_count, bool* error);
+#endif

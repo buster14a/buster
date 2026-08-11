@@ -45,6 +45,11 @@ aliases and the official Arm XML are independently validated.
   accessors; there are no runtime initialization paths, and the constant
   symbol-address tables lower through the same static-initializer relocation
   path Buster already supports, so the source remains consumable by Buster.
+- `aarch64-form-ids.generated.h` contains the named snapshot IDs for the
+  scalar unsigned load/store forms used by the machine AArch64 backend. It is
+  generated from source names during import so production code never embeds
+  row numbers by hand. The current artifact is 730 bytes (checksum
+  `58f6813468469913`), and its checksum/size are recorded in `manifest.json`.
 - `aarch64-coverage.generated.inc` contains one stable row for every input
   record, including explicit source and name hashes, normalized form ID,
   classification, encoder family, test class, and reason ID.

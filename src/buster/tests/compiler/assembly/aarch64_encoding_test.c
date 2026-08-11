@@ -3,6 +3,7 @@
 #if BUSTER_INCLUDE_TESTS
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
 
 typedef struct A64EncodingCase A64EncodingCase;
 struct A64EncodingCase
@@ -535,6 +536,58 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
         {
             BUSTER_TEST(arguments, decoded_values[field_index] == llvm_mc_cases[index].values[field_index]);
         }
+    }
+
+    // The machine AArch64 backend's first generated memory tranche consists
+    // of the eight scalar unsigned imm12 forms. Check both ends of each
+    // scaled range against the pre-generator bit layout, then exercise the
+    // same alignment/range rejections the machine helpers preserve.
+    static struct
+    {
+        u32 form_id;
+        u32 size;
+        bool store;
+        char const* name;
+    } const memory_forms[] = {
+        {BUSTER_AARCH64_GENERATED_FORM_LDRBBUI, 1, false, "LDRBBui"},
+        {BUSTER_AARCH64_GENERATED_FORM_LDRHHUI, 2, false, "LDRHHui"},
+        {BUSTER_AARCH64_GENERATED_FORM_LDRWUI, 4, false, "LDRWui"},
+        {BUSTER_AARCH64_GENERATED_FORM_LDRXUI, 8, false, "LDRXui"},
+        {BUSTER_AARCH64_GENERATED_FORM_STRBBUI, 1, true, "STRBBui"},
+        {BUSTER_AARCH64_GENERATED_FORM_STRHHUI, 2, true, "STRHHui"},
+        {BUSTER_AARCH64_GENERATED_FORM_STRWUI, 4, true, "STRWui"},
+        {BUSTER_AARCH64_GENERATED_FORM_STRXUI, 8, true, "STRXui"},
+    };
+    for (u32 form_index = 0; form_index < BUSTER_ARRAY_LENGTH(memory_forms); form_index += 1)
+    {
+        u32 form_id = memory_forms[form_index].form_id;
+        u32 size = memory_forms[form_index].size;
+        BusterAarch64MetadataForm form = {0};
+        BUSTER_TEST(arguments, a64_generated_form(form_id, &form) && form.raw_layout_complete && form.field_count == 3 && form.provisionally_apple_m1);
+        BUSTER_TEST(arguments, a64_encoding_metadata_string_equal(form.name, memory_forms[form_index].name));
+        u32 base = memory_forms[form_index].store ? (size == 1   ? UINT32_C(0x39000000)
+                                                       : size == 2 ? UINT32_C(0x79000000)
+                                                       : size == 4 ? UINT32_C(0xb9000000)
+                                                                   : UINT32_C(0xf9000000))
+                                                   : (size == 1   ? UINT32_C(0x39400000)
+                                                       : size == 2 ? UINT32_C(0x79400000)
+                                                       : size == 4 ? UINT32_C(0xb9400000)
+                                                                   : UINT32_C(0xf9400000));
+        u32 offsets[] = {0, 4095u * size};
+        for (u32 offset_index = 0; offset_index < BUSTER_ARRAY_LENGTH(offsets); offset_index += 1)
+        {
+            u32 offset = offsets[offset_index];
+            u32 values[] = {17, 28, offset / size};
+            u32 word = 0;
+            u32 expected = base | (17u) | (28u << 5) | ((offset / size) << 10);
+            BUSTER_TEST(arguments, a64_generated_raw_encode(form_id, values, BUSTER_ARRAY_LENGTH(values), &word) && word == expected);
+            u32 memory_decoded[3] = {0};
+            BUSTER_TEST(arguments, a64_generated_raw_decode(form_id, word, memory_decoded, BUSTER_ARRAY_LENGTH(memory_decoded)) &&
+                                      memory_decoded[0] == values[0] && memory_decoded[1] == values[1] && memory_decoded[2] == values[2]);
+        }
+        u32 out_of_range[] = {17, 28, 4096};
+        u32 ignored = 0;
+        BUSTER_TEST(arguments, !a64_generated_raw_encode(form_id, out_of_range, BUSTER_ARRAY_LENGTH(out_of_range), &ignored));
     }
 
     // Bounded rejection coverage for null, wrong-count, overflow, fixed-bit,

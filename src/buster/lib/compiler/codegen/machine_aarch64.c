@@ -16,6 +16,7 @@
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
@@ -2400,6 +2401,48 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_immediate(MachineA64Encoder* encoder, 
     }
 }
 
+// The scalar unsigned load/store rows all share the same three source fields:
+// Rt, Rn, and the already-scaled imm12.  Keep the form selection named and
+// checked here; the generated raw encoder owns field masks and fixed bits, so
+// this backend cannot drift from the imported LLVM grammar while retaining
+// the existing machine-level size/alignment checks.
+BUSTER_GLOBAL_LOCAL bool machine_a64_emit_generated_unsigned_memory(MachineA64Encoder* encoder, u32 register_number, u32 base_register,
+                                                                    u32 offset, u32 size, bool store)
+{
+    if (!encoder || (size != 1 && size != 2 && size != 4 && size != 8) || offset % size || offset / size > 4095)
+    {
+        if (encoder)
+        {
+            encoder->error = true;
+        }
+        return false;
+    }
+    u32 form_id = UINT32_MAX;
+    if (store)
+    {
+        form_id = size == 1   ? BUSTER_AARCH64_GENERATED_FORM_STRBBUI
+                  : size == 2 ? BUSTER_AARCH64_GENERATED_FORM_STRHHUI
+                  : size == 4 ? BUSTER_AARCH64_GENERATED_FORM_STRWUI
+                              : BUSTER_AARCH64_GENERATED_FORM_STRXUI;
+    }
+    else
+    {
+        form_id = size == 1   ? BUSTER_AARCH64_GENERATED_FORM_LDRBBUI
+                  : size == 2 ? BUSTER_AARCH64_GENERATED_FORM_LDRHHUI
+                  : size == 4 ? BUSTER_AARCH64_GENERATED_FORM_LDRWUI
+                              : BUSTER_AARCH64_GENERATED_FORM_LDRXUI;
+    }
+    u32 field_values[3] = {register_number, base_register, offset / size};
+    u32 word = 0;
+    if (!a64_generated_raw_encode(form_id, field_values, BUSTER_ARRAY_LENGTH(field_values), &word))
+    {
+        encoder->error = true;
+        return false;
+    }
+    machine_a64_emit(encoder, word);
+    return true;
+}
+
 // Frame-relative sized memory operation off the X28 frame base, mirroring
 // the canonical codegen_canonical_a64_memory_operation_base: scaled
 // unsigned offsets directly, larger offsets through the X16 scratch.
@@ -2419,16 +2462,7 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_memory(MachineA64Encoder* encode
         base_register = MACHINE_A64_X16;
         offset = 0;
     }
-    u32 instruction;
-    if (store)
-    {
-        instruction = size == 8 ? 0xf9000000 : size == 4 ? 0xb9000000 : size == 2 ? 0x79000000 : 0x39000000;
-    }
-    else
-    {
-        instruction = size == 8 ? 0xf9400000 : size == 4 ? 0xb9400000 : size == 2 ? 0x79400000 : 0x39400000;
-    }
-    machine_a64_emit(encoder, instruction | ((offset / scale) << 10) | (base_register << 5) | register_number);
+    machine_a64_emit_generated_unsigned_memory(encoder, register_number, base_register, offset, size, store);
 }
 
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_load(MachineA64Encoder* encoder, u32 register_number, u32 offset)
@@ -2447,22 +2481,41 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_pointer_memory(MachineA64Encoder* enco
         encoder->error = true;
         return;
     }
-    u32 instruction;
-    if (store)
-    {
-        instruction = size == 8 ? 0xf9000000 : size == 4 ? 0xb9000000 : size == 2 ? 0x79000000 : 0x39000000;
-    }
-    else
-    {
-        instruction = size == 8 ? 0xf9400000 : size == 4 ? 0xb9400000 : size == 2 ? 0x79400000 : 0x39400000;
-    }
-    machine_a64_emit(encoder, instruction | ((offset / scale) << 10) | (base_register << 5) | register_number);
+    machine_a64_emit_generated_unsigned_memory(encoder, register_number, base_register, offset, size, store);
 }
 
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_store(MachineA64Encoder* encoder, u32 register_number, u32 offset)
 {
     machine_a64_emit_frame_memory(encoder, register_number, offset, 8, true);
 }
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL bool machine_a64_test_emit_unsigned_memory(u8* bytes, u32 capacity, u32 register_number, u32 base_register, u32 offset, u32 size,
+                                                         bool store, bool frame_relative, u32* byte_count, bool* error)
+{
+    MachineA64Encoder encoder = {
+        .bytes = bytes,
+        .capacity = capacity,
+    };
+    if (frame_relative)
+    {
+        machine_a64_emit_frame_memory(&encoder, register_number, offset, size, store);
+    }
+    else
+    {
+        machine_a64_emit_pointer_memory(&encoder, register_number, base_register, offset, size, store);
+    }
+    if (byte_count)
+    {
+        *byte_count = encoder.count;
+    }
+    if (error)
+    {
+        *error = encoder.error;
+    }
+    return !encoder.error && !encoder.overflow;
+}
+#endif
 
 // Register-to-register copy; SP never appears here, so the orr form's zero
 // register reading of 31 can never be misinterpreted.
