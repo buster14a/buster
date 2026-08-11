@@ -3511,6 +3511,11 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         };
         u8 kmovd_vf2_apx_bytes[] = {0x62, 0xf1, 0x7f, 0x08, 0x93, 0xc1};
         u8 kmovd_apx_bytes[] = {0x62, 0xf1, 0xfd, 0x08, 0x90, 0xc1};
+        BusterX86MetadataPhysicalOperand kmovq_mask_gpr_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK, 0, 64),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
+        };
+        u8 kmovq_vf2_apx_bytes[] = {0x62, 0xf1, 0xff, 0x08, 0x92, 0xc0};
         u8 kmovw_apx_bytes[] = {0x62, 0xf1, 0x7c, 0x08, 0x90, 0xc1};
         BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("KMOVB"), 1850, kmov_mask_operands, 2,
                                                                  (BusterX86MetadataPhysicalAttributes){0}, wildcard,
@@ -3524,6 +3529,10 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                                                  (BusterX86MetadataPhysicalAttributes){0}, wildcard,
                                                                  BUSTER_ARRAY_LENGTH(wildcard), kmovd_apx_bytes,
                                                                  BUSTER_ARRAY_LENGTH(kmovd_apx_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("KMOVQ"), 1862, kmovq_mask_gpr_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), kmovq_vf2_apx_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(kmovq_vf2_apx_bytes)));
         BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("KMOVW"), 1865, kmov_mask_operands, 2,
                                                                  (BusterX86MetadataPhysicalAttributes){0}, wildcard,
                                                                  BUSTER_ARRAY_LENGTH(wildcard), kmovw_apx_bytes,
