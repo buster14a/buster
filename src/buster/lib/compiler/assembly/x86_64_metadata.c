@@ -513,6 +513,9 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_physical_operand_view(BusterX86Gene
                                                                       u8* physical_class, u16* physical_width_flags);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_string_input_equal(u32 offset, String8 input);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_input_string_equal(String8 left, String8 right);
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pool_string_has_token(u32 offset, String8 token);
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_is_fixed_not16_nop(BusterX86MetadataForm form);
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_generated_form_is_fixed_not16_nop(BusterX86GeneratedForm form);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prefetchit_address_valid(BusterX86MetadataPhysicalQuery query);
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validation_fail(BusterX86MetadataValidationResult* result,
@@ -705,6 +708,7 @@ struct BusterX86MetadataPatternSemantics
     u8 forbid_address_override;
     u8 forbid_operand_size_override;
     u8 forbid_mandatory_prefix;
+    u8 not16;
     u8 no_rex2;
     u8 no_vector_source;
     u8 apx_fixed_width_no_w_isa;
@@ -1579,6 +1583,16 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
                 pattern.has_force64_control = 1;
             if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("no_refining_prefix")))
                 pattern.forbid_mandatory_prefix = 1;
+        }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("not16")))
+        {
+            // `not16` is an execution-mode exclusion, not a prefix control.
+            // Keep recognition narrow: only the fixed BASE NOP rows carry a
+            // complete byte-level schema for this token.  Every other row
+            // remains an explicit schema blocker rather than being widened
+            // by accepting an unmodeled mode predicate.
+            if (buster_x86_metadata_form_is_fixed_not16_nop(form)) pattern.not16 = 1;
+            else pattern.has_unsupported_token = 1;
         }
         else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("DF64()")))
         {
@@ -3736,6 +3750,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         }
     }
     BusterX86GeneratedForm generated = buster_x86_metadata_form_record(form.id);
+    if (pattern.not16 && query.execution_mode != BUSTER_X86_METADATA_EXECUTION_MODE_64 &&
+        query.execution_mode != BUSTER_X86_METADATA_EXECUTION_MODE_32)
+        return BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
     if (!buster_x86_metadata_form_coverage_allowed(generated, (BusterX86MetadataResolveQuery){
                                                         .include_privileged = query.include_privileged,
                                                         .include_not64 = query.include_not64,
@@ -4584,7 +4601,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_eamode_alias_forms(BusterX86Metadat
         first_pattern.required_address_size != second_pattern.required_address_size ||
         first_pattern.forbid_address_override != second_pattern.forbid_address_override ||
         first_pattern.forbid_operand_size_override != second_pattern.forbid_operand_size_override ||
-        first_pattern.forbid_mandatory_prefix != second_pattern.forbid_mandatory_prefix || first_pattern.no_rex2 != second_pattern.no_rex2 ||
+        first_pattern.forbid_mandatory_prefix != second_pattern.forbid_mandatory_prefix || first_pattern.not16 != second_pattern.not16 ||
+        first_pattern.no_rex2 != second_pattern.no_rex2 ||
         first_pattern.no_vector_source != second_pattern.no_vector_source ||
         first_pattern.apx_fixed_width_no_w_isa != second_pattern.apx_fixed_width_no_w_isa ||
         first_pattern.no_scc != second_pattern.no_scc || first_pattern.short_ud0 != second_pattern.short_ud0 ||
@@ -6289,6 +6307,71 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_input_string_equal(String8 left, St
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_pool_string_has_token(u32 offset, String8 token)
+{
+    if (!token.length) return false;
+    u32 length = 0;
+    if (!buster_x86_metadata_string_offset_terminated(offset, &length)) return false;
+    String8 span = buster_x86_metadata_pool_span(offset, length);
+    if (span.length != length || span.length < token.length) return false;
+    u32 cursor = 0;
+    while (cursor < span.length)
+    {
+        while (cursor < span.length && buster_x86_metadata_is_space(span.pointer[cursor])) cursor += 1;
+        if (cursor == span.length) break;
+        u32 end = cursor;
+        while (end < span.length && !buster_x86_metadata_is_space(span.pointer[end])) end += 1;
+        if (end - cursor == token.length)
+        {
+            bool equal = true;
+            for (u32 index = 0; index < token.length; index += 1)
+            {
+                equal &= buster_x86_metadata_lowercase_character(span.pointer[cursor + index]) ==
+                         buster_x86_metadata_lowercase_character(token.pointer[index]);
+            }
+            if (equal) return true;
+        }
+        cursor = end;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_is_fixed_not16_nop(BusterX86MetadataForm form)
+{
+    return form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+           form.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY &&
+           buster_x86_metadata_string_input_equal(form.extension.offset, S8("BASE")) &&
+           (buster_x86_metadata_string_input_equal(form.isa_set.offset, S8("I86")) ||
+            buster_x86_metadata_string_input_equal(form.isa_set.offset, S8("FAT_NOP"))) &&
+           buster_x86_metadata_string_input_equal(form.category.offset, S8("WIDENOP")) &&
+           buster_x86_metadata_string_input_equal(form.attributes.offset, S8("NOP")) &&
+           form.operand_count == 0 && form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY &&
+           (form.map == BUSTER_X86_METADATA_MAP_LEGACY || form.map == BUSTER_X86_METADATA_MAP_0F) &&
+           form.field_flags == 0 && form.decorator_flags == 0 &&
+           form.apx_flags == 0 && form.amx_flags == 0 && form.mode_flags == 0 && form.displacement_width == 0 &&
+           form.displacement_scale == 0 && form.immediate_width == 0 && form.immediate_signed == 0 &&
+           form.relocation_base == 0 && form.tuple_kind == BUSTER_X86_METADATA_TUPLE_NONE && form.fixed_byte_count != 0 &&
+           (form.mandatory_prefix == 0 || form.mandatory_prefix == 0x66);
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_generated_form_is_fixed_not16_nop(BusterX86GeneratedForm form)
+{
+    return form.coverage_class == BUSTER_X86_GENERATED_COVERAGE_NORMALIZED &&
+           form.encoder_family == BUSTER_X86_GENERATED_ENCODER_LEGACY &&
+           buster_x86_metadata_string_input_equal(form.extension_offset, S8("BASE")) &&
+           (buster_x86_metadata_string_input_equal(form.isa_set_offset, S8("I86")) ||
+            buster_x86_metadata_string_input_equal(form.isa_set_offset, S8("FAT_NOP"))) &&
+           buster_x86_metadata_string_input_equal(form.category_offset, S8("WIDENOP")) &&
+           buster_x86_metadata_string_input_equal(form.attributes_offset, S8("NOP")) && form.operand_count == 0 &&
+           form.prefix_kind == BUSTER_X86_GENERATED_PREFIX_LEGACY &&
+           (form.map == BUSTER_X86_GENERATED_MAP_LEGACY || form.map == BUSTER_X86_GENERATED_MAP_0F) &&
+           form.field_flags == 0 && form.decorator_flags == 0 && form.apx_flags == 0 && form.amx_flags == 0 &&
+           form.mode_flags == 0 && form.displacement_width == 0 && form.displacement_scale == 0 && form.immediate_width == 0 &&
+           form.immediate_signed == 0 && form.relocation_base == 0 && form.tuple_kind == BUSTER_X86_GENERATED_TUPLE_NONE &&
+           form.fixed_byte_count != 0 && (form.mandatory_prefix == 0 || form.mandatory_prefix == 0x66) &&
+           buster_x86_metadata_pool_string_has_token(form.pattern_offset, S8("not16"));
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_query_string_valid(String8 string)
 {
     return string.length <= UINT32_MAX && (!string.length || string.pointer != 0);
@@ -7269,6 +7352,13 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_execution_mode_matches(BusterX
     // rejected from a default 64-bit query, and include_not64 only admits
     // those rows through an ANY query (never by broadening mode64).
     bool non64_only = explicit_not64 || (has_explicit_mode && !has_64);
+    bool fixed_not16 = buster_x86_metadata_generated_form_is_fixed_not16_nop(form);
+    // `not16` is satisfied only by an explicitly selected 32- or 64-bit
+    // execution mode.  ANY is an inspection mode, not evidence that the
+    // instruction is legal outside 16-bit execution.
+    if (fixed_not16 && query.execution_mode != BUSTER_X86_METADATA_EXECUTION_MODE_64 &&
+        query.execution_mode != BUSTER_X86_METADATA_EXECUTION_MODE_32)
+        return false;
     if (explicit_not64 && !query.include_not64) return false;
     if (query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64)
     {

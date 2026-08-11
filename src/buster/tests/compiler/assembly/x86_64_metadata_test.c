@@ -2327,15 +2327,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        BUSTER_TEST(arguments, audit.emitted_count == 10528 && audit.blocked_count == 485 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10528 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 485);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10636 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 108);
+        BUSTER_TEST(arguments, audit.emitted_count == 10536 && audit.blocked_count == 477 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10536 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 477);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10644 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 100);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 199, 5, 1643, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1721, 192, 5, 1643, 176, 6718, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {91, 7, 0, 0, 0, 10, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1729, 192, 5, 1643, 176, 6718, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {83, 7, 0, 0, 0, 10, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2345,7 +2345,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10528, 268, 108, 75, 0, 34, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10536, 268, 108, 67, 0, 34, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -2434,6 +2434,45 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                    mpxmode_memory_count == 10 && mpxmode_refining_count == 16 && mpxmode_aliases_blocked &&
                                    mpxmode_adjacent_excluded &&
                                    no_adjacent_token);
+        // The raw `not16` cohort is intentionally small: only the eight
+        // fixed-opcode BASE NOP rows have a schema shape the encoder can
+        // represent.  Keep the inventory and both adjacent rows explicit so
+        // a future parser change cannot silently widen the execution-mode
+        // exception to unrelated metadata.
+        u32 not16_count = 0;
+        bool not16_inventory = true;
+        for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
+        {
+            BusterX86MetadataForm form = {0};
+            if (!buster_x86_metadata_form(form_id, &form) || !x86_64_metadata_test_pattern_has_token(form.pattern, S8("not16")))
+                continue;
+            not16_count += 1;
+            BusterX86MetadataCoverageLedgerEntry entry = ledger[form_id];
+            bool fixed_nop_shape = x86_64_metadata_test_string_equal(form.extension, S8("BASE")) &&
+                                   (x86_64_metadata_test_string_equal(form.isa_set, S8("I86")) ||
+                                    x86_64_metadata_test_string_equal(form.isa_set, S8("FAT_NOP"))) &&
+                                   x86_64_metadata_test_string_equal(form.category, S8("WIDENOP")) &&
+                                   x86_64_metadata_test_string_equal(form.attributes, S8("NOP")) && form.operand_count == 0 &&
+                                   form.fixed_byte_count != 0 &&
+                                   (form.map == BUSTER_X86_METADATA_MAP_LEGACY || form.map == BUSTER_X86_METADATA_MAP_0F) &&
+                                   (form.mandatory_prefix == 0 || form.mandatory_prefix == 0x66);
+            not16_inventory &= form_id >= 10997 && form_id <= 11004 && fixed_nop_shape &&
+                               form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                               entry.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
+                               entry.blocker == BUSTER_X86_METADATA_BLOCKER_NONE && entry.encoder_capable &&
+                               !entry.policy_excluded;
+        }
+        BusterX86MetadataForm before_not16 = {0};
+        BusterX86MetadataForm after_not16 = {0};
+        bool adjacency = buster_x86_metadata_form(10996, &before_not16) && buster_x86_metadata_form(11005, &after_not16) &&
+                         before_not16.id == 10996 && after_not16.id == 11005 &&
+                         before_not16.coverage_class == BUSTER_X86_METADATA_COVERAGE_PRIVILEGED &&
+                         ledger[10996].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
+                         ledger[10996].blocker == BUSTER_X86_METADATA_BLOCKER_PRIVILEGED && ledger[10996].policy_excluded &&
+                         ledger[10996].encoder_capable &&
+                         ledger[11005].disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
+                         ledger[11005].blocker == BUSTER_X86_METADATA_BLOCKER_NONE && ledger[11005].encoder_capable;
+        BUSTER_TEST(arguments, not16_count == 8 && not16_inventory && adjacency);
 
         // The raw APXEVEX source carries ND=1 on 778 rows.  XED annotates
         // APX_NDD on 730 of them, while the 48 IMULZU/SET*ZU rows omit the
@@ -2916,6 +2955,149 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         });
         BUSTER_TEST(arguments, wrong_mode_result.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
                                    wrong_mode_result.byte_count == 0 && wrong_mode_result.relocation_count == 0);
+    }
+
+    {
+        // Exercise every fixed-opcode `not16` row through both the direct
+        // form API and mnemonic selection.  The expected bytes are the
+        // architectural NOP encodings; production code obtains them from
+        // `form.fixed_bytes` and `form.mandatory_prefix`, never from this
+        // test-only table.
+        static u32 const form_ids[] = {10997, 10998, 10999, 11000, 11001, 11002, 11003, 11004};
+        static u8 const byte_counts[] = {2, 3, 4, 5, 6, 7, 8, 9};
+        static u8 const expected_bytes[][9] = {
+            {0x66, 0x90, 0, 0, 0, 0, 0, 0, 0},
+            {0x0f, 0x1f, 0x00, 0, 0, 0, 0, 0, 0},
+            {0x0f, 0x1f, 0x40, 0x00, 0, 0, 0, 0, 0},
+            {0x0f, 0x1f, 0x44, 0x00, 0x00, 0, 0, 0, 0},
+            {0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00, 0, 0, 0},
+            {0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00, 0, 0},
+            {0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00, 0},
+            {0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00},
+        };
+        bool not16_forms_pass = true;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(form_ids); index += 1)
+        {
+            u32 form_id = form_ids[index];
+            u8 expected_count = byte_counts[index];
+            BusterX86MetadataForm form = {0};
+            BusterX86MetadataPhysicalOperand operands[16] = {0};
+            char8 mnemonic_buffer[128] = {0};
+            BusterX86MetadataPhysicalQuery query = {0};
+            not16_forms_pass &= buster_x86_metadata_form(form_id, &form) &&
+                                x86_64_metadata_test_pattern_has_token(form.pattern, S8("not16")) &&
+                                form.fixed_byte_count != 0;
+            not16_forms_pass &= x86_64_metadata_test_build_gate_query(form_id, &query, operands, mnemonic_buffer);
+
+            u8 output[32] = {0};
+            BusterX86MetadataRelocation relocations[8] = {0};
+            BusterX86MetadataEmitResult direct = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = query,
+                .form_id = form_id,
+                .output = output,
+                .output_capacity = sizeof(output),
+                .relocations = relocations,
+                .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+            });
+            not16_forms_pass &= direct.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && direct.form_id == form_id &&
+                                direct.byte_count == expected_count && direct.relocation_count == 0 &&
+                                x86_64_metadata_test_bytes_equal(output, direct.byte_count, expected_bytes[index], expected_count);
+
+            BusterX86MetadataPhysicalQuery mode32_query = query;
+            mode32_query.execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_32;
+            BusterX86MetadataEmitResult mode32_direct = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = mode32_query,
+                .form_id = form_id,
+                .output = output,
+                .output_capacity = sizeof(output),
+                .relocations = relocations,
+                .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+            });
+            not16_forms_pass &= mode32_direct.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                mode32_direct.byte_count == expected_count &&
+                                x86_64_metadata_test_bytes_equal(output, mode32_direct.byte_count, expected_bytes[index], expected_count);
+
+            BusterX86MetadataPhysicalQuery mode16_query = query;
+            mode16_query.execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_16;
+            BusterX86MetadataSelectResult mode16_selected = buster_x86_metadata_select_form(mode16_query);
+            not16_forms_pass &= mode16_selected.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
+            BusterX86MetadataEmitResult mode16_direct = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = mode16_query,
+                .form_id = form_id,
+                .output = output,
+                .output_capacity = sizeof(output),
+                .relocations = relocations,
+                .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+            });
+            not16_forms_pass &= mode16_direct.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE && mode16_direct.byte_count == 0;
+
+            BusterX86MetadataPhysicalQuery any_mode_query = query;
+            any_mode_query.execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_ANY;
+            BusterX86MetadataSelectResult any_selected = buster_x86_metadata_select_form(any_mode_query);
+            not16_forms_pass &= any_selected.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
+            BusterX86MetadataEmitResult any_direct = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = any_mode_query,
+                .form_id = form_id,
+                .output = output,
+                .output_capacity = sizeof(output),
+                .relocations = relocations,
+                .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+            });
+            not16_forms_pass &= any_direct.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE && any_direct.byte_count == 0;
+
+            BusterX86MetadataPhysicalQuery prefix_query = query;
+            prefix_query.attributes.rep = true;
+            BusterX86MetadataEmitResult prefix_result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = prefix_query,
+                .form_id = form_id,
+                .output = output,
+                .output_capacity = sizeof(output),
+                .relocations = relocations,
+                .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+            });
+            not16_forms_pass &= prefix_result.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION && prefix_result.byte_count == 0;
+
+            BusterX86MetadataEmitResult short_result = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = query,
+                .form_id = form_id,
+                .output = output,
+                .output_capacity = expected_count - 1,
+                .relocations = relocations,
+                .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+            });
+            not16_forms_pass &= short_result.status == BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY && short_result.byte_count == 0 &&
+                                short_result.required_byte_count == expected_count;
+        }
+
+        // The front door has no requested NOP length in its physical query,
+        // so all equivalent NOP candidates must resolve to one deterministic
+        // canonical form (the shortest, then lowest generated ID).  Test that
+        // policy once; per-length coverage above uses the direct form API.
+        BusterX86MetadataPhysicalOperand canonical_operands[16] = {0};
+        char8 canonical_mnemonic_buffer[128] = {0};
+        BusterX86MetadataPhysicalQuery canonical_query = {0};
+        bool canonical_built = x86_64_metadata_test_build_gate_query(
+            form_ids[0], &canonical_query, canonical_operands, canonical_mnemonic_buffer);
+        BusterX86MetadataSelectResult canonical_selected = canonical_built ? buster_x86_metadata_select_form(canonical_query)
+                                                                            : (BusterX86MetadataSelectResult){0};
+        u8 canonical_output[32] = {0};
+        BusterX86MetadataRelocation canonical_relocations[8] = {0};
+        BusterX86MetadataEmitResult canonical_emit = canonical_built && canonical_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS
+                                                         ? buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                                                               .physical = canonical_query,
+                                                               .form_id = canonical_selected.form_id,
+                                                               .output = canonical_output,
+                                                               .output_capacity = sizeof(canonical_output),
+                                                               .relocations = canonical_relocations,
+                                                               .relocation_capacity = BUSTER_ARRAY_LENGTH(canonical_relocations),
+                                                           })
+                                                         : (BusterX86MetadataEmitResult){0};
+        not16_forms_pass &= canonical_built && canonical_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                            canonical_selected.form_id == form_ids[0] && canonical_selected.candidate_count > 0 &&
+                            canonical_selected.selected_byte_count == byte_counts[0] &&
+                            canonical_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                            x86_64_metadata_test_bytes_equal(canonical_output, canonical_emit.byte_count, expected_bytes[0], byte_counts[0]);
+        BUSTER_TEST(arguments, not16_forms_pass);
     }
 
     {
