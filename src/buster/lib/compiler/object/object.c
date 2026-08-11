@@ -114,6 +114,81 @@ BUSTER_GLOBAL_LOCAL u64 object_writer_capacity(ObjectFile* object)
     return result;
 }
 
+// Mach-O's PAGE relocations are emitted against instructions whose immediate
+// field is zero.  Keep the instruction predicates here in lockstep with
+// LLVM's AArch64 PAGEOFF12 fixup rules: ADD (immediate) uses byte granularity,
+// while unsigned LD/ST (immediate) scales the low-page offset by access size.
+BUSTER_GLOBAL_LOCAL bool object_mach_page21_instruction_valid(u32 instruction)
+{
+    return (instruction & UINT32_C(0xffffffe0)) == UINT32_C(0x90000000);
+}
+
+BUSTER_GLOBAL_LOCAL bool object_mach_pageoff12_shift(u32 instruction, u32* shift)
+{
+    if (!shift)
+    {
+        return false;
+    }
+    u32 base = instruction & UINT32_C(0xffc00000);
+    bool valid_ldst = false;
+    switch (base)
+    {
+    case UINT32_C(0x39000000):
+    case UINT32_C(0x39400000):
+    case UINT32_C(0x39800000):
+    case UINT32_C(0x39c00000):
+    case UINT32_C(0x79000000):
+    case UINT32_C(0x79400000):
+    case UINT32_C(0x79800000):
+    case UINT32_C(0x79c00000):
+    case UINT32_C(0xb9000000):
+    case UINT32_C(0xb9400000):
+    case UINT32_C(0xb9800000):
+    case UINT32_C(0xf9000000):
+    case UINT32_C(0xf9400000):
+    case UINT32_C(0xf9800000):
+    case UINT32_C(0x3d000000):
+    case UINT32_C(0x3d400000):
+    case UINT32_C(0x3d800000):
+    case UINT32_C(0x3dc00000):
+    case UINT32_C(0x7d000000):
+    case UINT32_C(0x7d400000):
+    case UINT32_C(0xbd000000):
+    case UINT32_C(0xbd400000):
+    case UINT32_C(0xfd000000):
+    case UINT32_C(0xfd400000):
+        valid_ldst = true;
+        break;
+    default:
+        break;
+    }
+    if (valid_ldst)
+    {
+        u32 implicit_shift = instruction >> 30;
+        if (!implicit_shift && (instruction & UINT32_C(0x04800000)) == UINT32_C(0x04800000))
+        {
+            implicit_shift = 4;
+        }
+        if (instruction & (UINT32_C(0xfff) << 10))
+        {
+            return false;
+        }
+        *shift = implicit_shift;
+        return true;
+    }
+    // The direct PAGEOFF form used by codegen is a 64-bit, non-setting ADD
+    // with no LSL #12.  Registers are intentionally unconstrained: a PAGE
+    // relocation does not imply that this instruction consumes a PAGE21's
+    // destination register.
+    if ((instruction & UINT32_C(0xffc00000)) == UINT32_C(0x91000000) &&
+        !(instruction & (UINT32_C(0xfff) << 10)))
+    {
+        *shift = 0;
+        return true;
+    }
+    return false;
+}
+
 ObjectFormat object_format_for_target(Target target)
 {
     switch (target.os)
@@ -193,6 +268,70 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_aarch64_register_width(ObjectAss
 BUSTER_GLOBAL_LOCAL void object_assembly_append_aarch64_register(ObjectAssemblyBuffer* buffer, u32 register_index)
 {
     object_assembly_append_aarch64_register_width(buffer, register_index, true);
+}
+
+BUSTER_GLOBAL_LOCAL void object_assembly_append_aarch64_memory_destination(ObjectAssemblyBuffer* buffer, u32 register_index, bool wide)
+{
+    if ((register_index & 31) == 31)
+    {
+        object_assembly_append_string(buffer, wide ? S8("xzr") : S8("wzr"));
+    }
+    else
+    {
+        object_assembly_append_aarch64_register_width(buffer, register_index, wide);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void object_assembly_append_aarch64_add_register(ObjectAssemblyBuffer* buffer, u32 register_index, bool wide)
+{
+    if ((register_index & 31) == 31)
+    {
+        object_assembly_append_string(buffer, S8("sp"));
+    }
+    else
+    {
+        object_assembly_append_aarch64_register_width(buffer, register_index, wide);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void object_assembly_append_aarch64_memory_register(ObjectAssemblyBuffer* buffer, u32 register_index)
+{
+    if ((register_index & 31) == 31)
+    {
+        object_assembly_append_string(buffer, S8("sp"));
+    }
+    else
+    {
+        object_assembly_append_aarch64_register(buffer, register_index);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void object_assembly_append_aarch64_fp_register(ObjectAssemblyBuffer* buffer, u32 register_index, u32 size, bool vector128)
+{
+    static String8 const scalar_names[] = {S8("b"), S8("h"), S8("s"), S8("d")};
+    object_assembly_append_string(buffer, vector128 ? S8("q") : scalar_names[size & 3]);
+    object_assembly_append_u64_decimal(buffer, register_index & 31);
+}
+
+BUSTER_GLOBAL_LOCAL void object_assembly_append_aarch64_prefetch_operation(ObjectAssemblyBuffer* buffer, u32 operation)
+{
+    static String8 const names[] = {
+        S8("pldl1keep"), S8("pldl1strm"), S8("pldl2keep"), S8("pldl2strm"),
+        S8("pldl3keep"), S8("pldl3strm"), {0}, {0},
+        S8("plil1keep"), S8("plil1strm"), S8("plil2keep"), S8("plil2strm"),
+        S8("plil3keep"), S8("plil3strm"), {0}, {0},
+        S8("pstl1keep"), S8("pstl1strm"), S8("pstl2keep"), S8("pstl2strm"),
+        S8("pstl3keep"), S8("pstl3strm"),
+    };
+    if (operation < BUSTER_ARRAY_LENGTH(names) && names[operation].length)
+    {
+        object_assembly_append_string(buffer, names[operation]);
+    }
+    else
+    {
+        object_assembly_append_string(buffer, S8("#"));
+        object_assembly_append_u64_decimal(buffer, operation);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void object_assembly_append_u64_hex(ObjectAssemblyBuffer* buffer, u64 value, u32 digit_count)
@@ -598,25 +737,63 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_aarch64_immediate_relocation(Objec
 {
     u32 word = 0;
     memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
+    if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+    {
+        u32 shift = 0;
+        if (!object_mach_pageoff12_shift(word, &shift))
+        {
+            return false;
+        }
+    }
     if ((word & UINT32_C(0x7f000000)) == UINT32_C(0x11000000))
     {
+        bool wide = (word & UINT32_C(0x80000000)) != 0;
         object_assembly_append_string(buffer, S8("\tadd "));
-        object_assembly_append_aarch64_register_width(buffer, word, (word & UINT32_C(0x80000000)) != 0);
+        object_assembly_append_aarch64_add_register(buffer, word, wide);
         object_assembly_append_string(buffer, S8(", "));
-        object_assembly_append_aarch64_register_width(buffer, word >> 5, (word & UINT32_C(0x80000000)) != 0);
+        object_assembly_append_aarch64_add_register(buffer, word >> 5, wide);
         object_assembly_append_string(buffer, S8(", "));
         object_assembly_append_aarch64_relocation_value(buffer, object, target, relocation, modifier, modifier_after);
         object_assembly_append_string(buffer, S8("\n"));
         return true;
     }
-    if ((word & UINT32_C(0x3f000000)) == UINT32_C(0x39000000))
+    if ((word & UINT32_C(0x3b000000)) == UINT32_C(0x39000000))
     {
         u32 size = (word >> 30) & 3;
+        bool vector_register = (word & UINT32_C(0x04000000)) != 0;
+        bool vector128 = vector_register && (word & UINT32_C(0x00800000)) != 0;
         bool load = (word & (UINT32_C(1) << 22)) != 0;
-        object_assembly_append_string(buffer, load ? S8("\tldr ") : S8("\tstr "));
-        object_assembly_append_aarch64_register_width(buffer, word, size == 3);
+        if (vector_register)
+        {
+            object_assembly_append_string(buffer, load ? S8("\tldr ") : S8("\tstr "));
+            object_assembly_append_aarch64_fp_register(buffer, word, size, vector128);
+        }
+        else if (size == 3 && (word & UINT32_C(0x00800000)) != 0 && !load)
+        {
+            object_assembly_append_string(buffer, S8("\tprfm "));
+            object_assembly_append_aarch64_prefetch_operation(buffer, word & 31);
+        }
+        else if ((word & UINT32_C(0x00800000)) != 0)
+        {
+            String8 mnemonic = size == 0 ? S8("\tldrsb ") : size == 1 ? S8("\tldrsh ") : size == 2 ? S8("\tldrsw ") : (String8){0};
+            if (!mnemonic.length)
+            {
+                return false;
+            }
+            object_assembly_append_string(buffer, mnemonic);
+            object_assembly_append_aarch64_memory_destination(buffer, word, !load);
+        }
+        else
+        {
+            String8 mnemonic = !load ? (size == 0 ? S8("\tstrb ") : size == 1 ? S8("\tstrh ") : S8("\tstr "))
+                                     : size == 0 ? S8("\tldrb ")
+                                     : size == 1 ? S8("\tldrh ")
+                                                  : S8("\tldr ");
+            object_assembly_append_string(buffer, mnemonic);
+            object_assembly_append_aarch64_memory_destination(buffer, word, size == 3);
+        }
         object_assembly_append_string(buffer, S8(", ["));
-        object_assembly_append_aarch64_register(buffer, word >> 5);
+        object_assembly_append_aarch64_memory_register(buffer, word >> 5);
         object_assembly_append_string(buffer, S8(", "));
         object_assembly_append_aarch64_relocation_value(buffer, object, target, relocation, modifier, modifier_after);
         object_assembly_append_string(buffer, S8("]\n"));
@@ -696,8 +873,19 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
     {
         u32 word = 0;
         memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
+        if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && !object_mach_page21_instruction_valid(word))
+        {
+            return false;
+        }
         object_assembly_append_string(buffer, S8("\tadrp "));
-        object_assembly_append_aarch64_register(buffer, word);
+        if ((word & 31) == 31)
+        {
+            object_assembly_append_string(buffer, S8("xzr"));
+        }
+        else
+        {
+            object_assembly_append_aarch64_register(buffer, word);
+        }
         object_assembly_append_string(buffer, S8(", "));
         object_assembly_append_aarch64_relocation_value(
             buffer, object, target, relocation,
@@ -4619,8 +4807,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
         symbol_map[source_index] = UINT32_MAX;
         u64 source = symbol_offset + (u64)source_index * MACH_SYMBOL_SIZE;
         u32 name_offset = 0;
+        u16 description = 0;
         u64 value = 0;
-        if (!object_read_u32(bytes, source, &name_offset) || !object_read_u64(bytes, source + 8, &value))
+        if (!object_read_u32(bytes, source, &name_offset) || !object_read_u16(bytes, source + 6, &description) ||
+            !object_read_u64(bytes, source + 8, &value))
         {
             return result;
         }
@@ -4690,11 +4880,25 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             }
             section_value = symbol_base + relative_value;
         }
+        u32 reference_kind = description & 0x7;
+        // Mach-O's reference type is a state/visibility flag, not a symbol
+        // language-kind bit.  Keep the standard values and reject unknown or
+        // state-inconsistent combinations instead of silently treating them
+        // as data.  LLVM commonly leaves defined symbols at NON_LAZY (0),
+        // while our writer emits DEFINED (2), so both are accepted for N_SECT.
+        if (reference_kind > 5 ||
+            (kind == 0 && (reference_kind == 2 || reference_kind == 3)) ||
+            (kind == 0x0e && (reference_kind == 1 || reference_kind == 4 || reference_kind == 5)))
+        {
+            return result;
+        }
+        bool function_symbol = (kind == 0 && (reference_kind == 1 || reference_kind == 5)) ||
+                               (kind == 0x0e && section_kinds[section_number - 1] == OBJECT_SECTION_TEXT);
         result.symbols[destination_index] = (ObjectSymbol){
             .name = string_duplicate_arena(arena, name, false),
             .value = section_value,
             .section = kind == 0x0e ? section_kinds[section_number - 1] : OBJECT_SECTION_UNDEFINED,
-            .kind = OBJECT_SYMBOL_DATA,
+            .kind = function_symbol ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
             .global = (symbol_type & 1) != 0,
         };
         symbol_map[source_index] = destination_index;
@@ -4731,9 +4935,6 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
         bool pending_addend = false;
         s64 pending_addend_value = 0;
         u32 pending_addend_offset = 0;
-        bool pending_direct_page21 = false;
-        u32 pending_direct_page21_offset = 0;
-        u32 pending_direct_page21_symbol = 0;
         for (u32 relocation_index = 0; relocation_index < relocation_count; relocation_index += 1)
         {
             u64 relocation = relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE;
@@ -4755,42 +4956,6 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             if (object_section_kind_is_zero_fill((ObjectSectionKind)section_kinds[section_index]) ||
                 relocation_width > section_size - (u64)source_offset)
             {
-                return result;
-            }
-            if (pending_direct_page21)
-            {
-                u32 stored_high = 0;
-                u32 stored_low = 0;
-                u32 next_source_offset = 0;
-                bool direct_pageoff = target.cpu_arch == CPU_ARCH_AARCH64 && relocation_type == 4 && length == 2 && !pc_relative && external &&
-                                      pending_direct_page21_offset <= UINT32_MAX - sizeof(u32) &&
-                                      source_offset_u32 == pending_direct_page21_offset + sizeof(u32) && source_symbol == pending_direct_page21_symbol &&
-                                      object_read_u32(bytes, (u64)raw_offset + pending_direct_page21_offset, &stored_high) &&
-                                      object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored_low) &&
-                                      (stored_high & UINT32_C(0x9f000000)) == UINT32_C(0x90000000) &&
-                                      (stored_low & UINT32_C(0xffc00000)) == UINT32_C(0x91000000) &&
-                                      (stored_high & 31) == ((stored_low >> 5) & 31) && (stored_low & 31) == (stored_high & 31);
-                bool direct_pageoff_addend = target.cpu_arch == CPU_ARCH_AARCH64 && relocation_type == 10 && !pc_relative && !external && length == 2 &&
-                                             !pending_addend && pending_direct_page21_offset <= UINT32_MAX - sizeof(u32) &&
-                                             source_offset_u32 == pending_direct_page21_offset + sizeof(u32) && relocation_index + 1 < relocation_count &&
-                                             object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE, &next_source_offset) &&
-                                             next_source_offset == source_offset_u32 && object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE + 4, &stored_low) &&
-                                             (stored_low >> 28) == 4 && ((stored_low >> 25) & 0x3) == 2 && !(stored_low & (1u << 24)) &&
-                                             (stored_low & (1u << 27)) && (stored_low & 0x00ffffff) == pending_direct_page21_symbol;
-                bool valid_pair = direct_pageoff || direct_pageoff_addend;
-                if (!valid_pair)
-                {
-                    result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                    return result;
-                }
-                if (direct_pageoff)
-                {
-                    pending_direct_page21 = false;
-                }
-            }
-            else if (target.cpu_arch == CPU_ARCH_AARCH64 && relocation_type == 4)
-            {
-                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                 return result;
             }
             if (target.cpu_arch == CPU_ARCH_AARCH64 && section_kinds[section_index] == OBJECT_SECTION_UNWIND && relocation_type == 1 && length == 2)
@@ -4981,43 +5146,27 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 }
                 if (relocation_type == 3 && length == 2)
                 {
-                    u32 next_source_offset = 0;
-                    u32 next_information = 0;
                     u32 stored = 0;
-                    u32 addend_source_offset = 0;
-                    u32 addend_information = 0;
-                    bool valid_pair = pc_relative && external && source_offset_u32 <= UINT32_MAX - sizeof(u32) &&
-                                      relocation_index + 1 < relocation_count &&
-                                      ((section_bases[section_index] + source_offset_u32) & 3) == 0 &&
-                                      result.sections[section_kinds[section_index]].alignment >= 4 &&
-                                      object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) &&
-                                      (stored & UINT32_C(0x9f000000)) == UINT32_C(0x90000000) &&
-                                      object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE, &next_source_offset) &&
-                                      object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE + 4, &next_information) &&
-                                      next_source_offset == source_offset_u32 + sizeof(u32) &&
-                                      (((next_information >> 28) == 4 && ((next_information >> 25) & 0x3) == 2 &&
-                                        (next_information & (1u << 24)) == 0 && (next_information & (1u << 27)) != 0 &&
-                                        (next_information & 0x00ffffff) == source_symbol) ||
-                                       ((next_information >> 28) == 10 && ((next_information >> 25) & 0x3) == 2 &&
-                                        !(next_information & (1u << 24)) && !(next_information & (1u << 27)) && relocation_index + 2 < relocation_count &&
-                                        object_read_u32(bytes, relocation + 2 * MACH_RELOCATION_SIZE, &addend_source_offset) &&
-                                        object_read_u32(bytes, relocation + 2 * MACH_RELOCATION_SIZE + 4, &addend_information) &&
-                                        addend_source_offset == next_source_offset && (addend_information >> 28) == 4 &&
-                                        ((addend_information >> 25) & 0x3) == 2 && !(addend_information & (1u << 24)) &&
-                                        (addend_information & (1u << 27)) != 0 && (addend_information & 0x00ffffff) == source_symbol));
-                    if (!valid_pair)
+                    if (!pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
+                        !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) || !object_mach_page21_instruction_valid(stored))
                     {
                         result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                         return result;
                     }
-                    pending_direct_page21 = true;
-                    pending_direct_page21_offset = source_offset_u32;
-                    pending_direct_page21_symbol = source_symbol;
                     addend = pending_addend ? pending_addend_value : 0;
                     pending_addend = false;
                 }
                 if (relocation_type == 4 && length == 2)
                 {
+                    u32 stored = 0;
+                    u32 shift = 0;
+                    if (pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
+                        !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) ||
+                        !object_mach_pageoff12_shift(stored, &shift))
+                    {
+                        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                        return result;
+                    }
                     addend = pending_addend ? pending_addend_value : 0;
                     pending_addend = false;
                 }
@@ -5035,7 +5184,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 .kind = output_kind,
             };
         }
-        if (pending_addend || pending_direct_page21)
+        if (pending_addend)
         {
             result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
             return result;
@@ -8980,6 +9129,15 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
         object_write_u32_at(&buffer, offset, symbol_name_offsets[symbol]);
         buffer.bytes[offset + 4] = source->section == OBJECT_SECTION_UNDEFINED ? 0x01 : (u8)(0x0e | (source->global ? 1 : 0));
         buffer.bytes[offset + 5] = source->section == OBJECT_SECTION_UNDEFINED ? 0 : (u8)(source->section + 1);
+        // Preserve the standard Mach-O reference kind: lazy undefined
+        // symbols are function imports, non-lazy undefined symbols remain
+        // data, and all defined symbols use REFERENCE_FLAG_DEFINED (2).
+        // Mach-O has no separate defined-function bit; the reader uses the
+        // canonical __text section to retain the object model's function kind.
+        u16 reference_kind = source->section == OBJECT_SECTION_UNDEFINED
+                                 ? (source->kind == OBJECT_SYMBOL_FUNCTION ? 1 : 0)
+                                 : 2;
+        object_write_u16_at(&buffer, offset + 6, reference_kind);
         object_write_u64_at(&buffer, offset + 8, source->value + (source->section == OBJECT_SECTION_UNDEFINED ? 0 : section_addresses[source->section]));
     }
     for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
@@ -9139,6 +9297,24 @@ ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat forma
                 return result;
             }
             if (format == OBJECT_FORMAT_MACH_O64 && (source->addend < -INT64_C(0x800000) || source->addend > INT64_C(0x7fffff)))
+            {
+                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                return result;
+            }
+        }
+        if (source->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || source->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+        {
+            u32 instruction = 0;
+            u32 shift = 0;
+            memcpy(&instruction, object->sections[source->section].data.pointer + source->offset, sizeof(instruction));
+            if ((source->offset & 3) || object->sections[source->section].alignment < 4 ||
+                (source->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ? !object_mach_page21_instruction_valid(instruction)
+                                                                          : !object_mach_pageoff12_shift(instruction, &shift)))
+            {
+                return result;
+            }
+            if (format == OBJECT_FORMAT_MACH_O64 &&
+                (source->addend < -INT64_C(0x800000) || source->addend > INT64_C(0x7fffff)))
             {
                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                 return result;

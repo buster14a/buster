@@ -160,6 +160,54 @@ BUSTER_GLOBAL_LOCAL bool object_test_mach_text_offsets(ByteSlice bytes, u32* raw
     return *raw_offset <= bytes.length && *relocation_offset <= bytes.length && (u64)*relocation_count * 8 <= bytes.length - *relocation_offset;
 }
 
+BUSTER_GLOBAL_LOCAL u64 object_test_mach_symbol_offset(ByteSlice bytes, u32 symbol_index)
+{
+    if (!bytes.pointer || bytes.length < 32)
+    {
+        return UINT64_MAX;
+    }
+    u32 command_count = 0;
+    u32 commands_size = 0;
+    memcpy(&command_count, bytes.pointer + 16, sizeof(command_count));
+    memcpy(&commands_size, bytes.pointer + 20, sizeof(commands_size));
+    u64 command = 32;
+    u64 command_end = command + commands_size;
+    if (command_end < command || command_end > bytes.length)
+    {
+        return UINT64_MAX;
+    }
+    for (u32 command_index = 0; command_index < command_count && command < command_end; command_index += 1)
+    {
+        u32 kind = 0;
+        u32 size = 0;
+        if (command_end - command < 8)
+        {
+            return UINT64_MAX;
+        }
+        memcpy(&kind, bytes.pointer + command, sizeof(kind));
+        memcpy(&size, bytes.pointer + command + 4, sizeof(size));
+        if (size < 8 || size > command_end - command)
+        {
+            return UINT64_MAX;
+        }
+        if (kind == 2 && size >= 24)
+        {
+            u32 symbol_offset = 0;
+            u32 symbol_count = 0;
+            memcpy(&symbol_offset, bytes.pointer + command + 8, sizeof(symbol_offset));
+            memcpy(&symbol_count, bytes.pointer + command + 12, sizeof(symbol_count));
+            u64 record = symbol_offset + (u64)symbol_index * 16;
+            if (symbol_index < symbol_count && record >= symbol_offset && record <= bytes.length && 16 <= bytes.length - record)
+            {
+                return record;
+            }
+            return UINT64_MAX;
+        }
+        command += size;
+    }
+    return UINT64_MAX;
+}
+
 BUSTER_GLOBAL_LOCAL ByteSlice object_test_archive(Arena* arena, ByteSlice member, bool bsd_name)
 {
     String8 name = S8("member-name.o");
@@ -648,6 +696,20 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         memcpy(&aarch64_mach_cpu, aarch64_mach.bytes.pointer + 4, 4);
     }
     BUSTER_TEST(arguments, aarch64_mach_cpu == 0x0100000c);
+    u16 aarch64_mach_n_desc[5] = {0};
+    bool aarch64_mach_n_desc_valid = true;
+    for (u32 symbol_index = 0; symbol_index < BUSTER_ARRAY_LENGTH(aarch64_mach_n_desc); symbol_index += 1)
+    {
+        u64 symbol_offset = object_test_mach_symbol_offset(aarch64_mach.bytes, symbol_index);
+        aarch64_mach_n_desc_valid &= symbol_offset != UINT64_MAX &&
+                                     (u64)symbol_offset + 8 <= aarch64_mach.bytes.length;
+        if (symbol_offset != UINT64_MAX && (u64)symbol_offset + 8 <= aarch64_mach.bytes.length)
+        {
+            memcpy(&aarch64_mach_n_desc[symbol_index], aarch64_mach.bytes.pointer + symbol_offset + 6, sizeof(u16));
+        }
+    }
+    BUSTER_TEST(arguments, aarch64_mach_n_desc_valid && aarch64_mach_n_desc[0] == 2 && aarch64_mach_n_desc[1] == 2 &&
+                               aarch64_mach_n_desc[2] == 2 && aarch64_mach_n_desc[3] == 1 && aarch64_mach_n_desc[4] == 2);
     u32 aarch64_jump_instruction = UINT32_C(0x14000000);
     memcpy(aarch64_text + 4, &aarch64_jump_instruction, sizeof(aarch64_jump_instruction));
     relocation.kind = OBJECT_RELOCATION_AARCH64_JUMP26;
@@ -867,6 +929,18 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     String8 direct_page_assembly = object_print_assembly(arguments->arena, &direct_page_object);
     BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(direct_page_assembly), S8("\tadrp x9, _direct_page_target@PAGE\n")));
     BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(direct_page_assembly), S8("\tadd x9, x9, _direct_page_target@PAGEOFF\n")));
+    u32 saved_direct_page_instruction = 0;
+    memcpy(&saved_direct_page_instruction, direct_page_words, sizeof(saved_direct_page_instruction));
+    u32 page21_xzr_instruction = UINT32_C(0x9000001f);
+    memcpy(direct_page_words, &page21_xzr_instruction, sizeof(page21_xzr_instruction));
+    String8 page21_xzr_assembly = object_print_assembly(arguments->arena, &direct_page_object);
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(page21_xzr_assembly), S8("\tadrp xzr, _direct_page_target@PAGE\n")));
+    BUSTER_TEST(arguments, object_write(arguments->arena, &direct_page_object, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_NONE);
+    memcpy(direct_page_words, &saved_direct_page_instruction, sizeof(saved_direct_page_instruction));
+    u32 malformed_page21_instruction = UINT32_C(0x14000000);
+    memcpy(direct_page_words, &malformed_page21_instruction, sizeof(malformed_page21_instruction));
+    BUSTER_TEST(arguments, object_print_assembly(arguments->arena, &direct_page_object).length == 0);
+    memcpy(direct_page_words, &saved_direct_page_instruction, sizeof(saved_direct_page_instruction));
     ObjectArtifact direct_page_mach = object_write(arguments->arena, &direct_page_object, OBJECT_FORMAT_MACH_O64);
     u32 direct_page_raw_offset = 0;
     u32 direct_page_relocation_offset = 0;
@@ -896,6 +970,23 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                    direct_page_roundtrip.relocations[1].kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12);
         BUSTER_TEST(arguments, direct_page_roundtrip.relocations[0].offset == 0 && direct_page_roundtrip.relocations[1].offset == sizeof(u32));
     }
+    u64 direct_page_symbol_offset = object_test_mach_symbol_offset(direct_page_mach.bytes, 0);
+    u16 direct_page_n_desc = 0;
+    if (direct_page_symbol_offset != UINT64_MAX && direct_page_symbol_offset + 8 <= direct_page_mach.bytes.length)
+    {
+        memcpy(&direct_page_n_desc, direct_page_mach.bytes.pointer + direct_page_symbol_offset + 6, sizeof(direct_page_n_desc));
+    }
+    BUSTER_TEST(arguments, direct_page_n_desc == 1);
+    ObjectArtifact unknown_reference_kind = object_write(arguments->arena, &direct_page_object, OBJECT_FORMAT_MACH_O64);
+    u64 unknown_reference_symbol = object_test_mach_symbol_offset(unknown_reference_kind.bytes, 0);
+    if (unknown_reference_symbol != UINT64_MAX && unknown_reference_symbol + 8 <= unknown_reference_kind.bytes.length)
+    {
+        object_test_write_u16(unknown_reference_kind.bytes, unknown_reference_symbol + 6, 7);
+    }
+    BUSTER_TEST(arguments, unknown_reference_kind.error == OBJECT_ERROR_NONE &&
+                               object_read(arguments->arena, unknown_reference_kind.bytes,
+                                           (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS})
+                                       .error != OBJECT_ERROR_NONE);
     ObjectRelocation direct_page_addend_relocations[] = {
         direct_page_relocations[0],
         direct_page_relocations[1],
@@ -924,11 +1015,11 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     ObjectArtifact malformed_direct_page = object_write(arguments->arena, &direct_page_object, OBJECT_FORMAT_MACH_O64);
     if (object_test_mach_text_offsets(malformed_direct_page.bytes, &direct_page_raw_offset, &direct_page_relocation_offset, &direct_page_relocation_count))
     {
-        object_test_write_u32(malformed_direct_page.bytes, (u64)direct_page_raw_offset, UINT32_C(0x90000008));
+        object_test_write_u32(malformed_direct_page.bytes, (u64)direct_page_raw_offset, UINT32_C(0x14000000));
     }
     BUSTER_TEST(arguments, object_read(arguments->arena, malformed_direct_page.bytes,
                                        (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS})
-                                 .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+                                 .error != OBJECT_ERROR_NONE);
     malformed_direct_page = object_write(arguments->arena, &direct_page_object, OBJECT_FORMAT_MACH_O64);
     if (object_test_mach_text_offsets(malformed_direct_page.bytes, &direct_page_raw_offset, &direct_page_relocation_offset, &direct_page_relocation_count))
     {
@@ -938,7 +1029,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, object_read(arguments->arena, malformed_direct_page.bytes,
                                        (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS})
-                                 .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+                                 .error != OBJECT_ERROR_NONE);
     malformed_direct_page = object_write(arguments->arena, &direct_page_object, OBJECT_FORMAT_MACH_O64);
     if (object_test_mach_text_offsets(malformed_direct_page.bytes, &direct_page_raw_offset, &direct_page_relocation_offset, &direct_page_relocation_count))
     {
@@ -946,7 +1037,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, object_read(arguments->arena, malformed_direct_page.bytes,
                                        (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS})
-                                 .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+                                 .error != OBJECT_ERROR_NONE);
     ObjectRelocation standalone_pageoff = direct_page_relocations[1];
     ObjectFile standalone_pageoff_object = direct_page_object;
     standalone_pageoff_object.relocations = &standalone_pageoff;
@@ -955,7 +1046,190 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, standalone_pageoff_mach.error == OBJECT_ERROR_NONE &&
                                object_read(arguments->arena, standalone_pageoff_mach.bytes,
                                            (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS})
-                                       .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+                                       .error == OBJECT_ERROR_NONE);
+
+    ObjectRelocation standalone_page21 = direct_page_relocations[0];
+    ObjectFile standalone_page21_object = direct_page_object;
+    standalone_page21_object.relocations = &standalone_page21;
+    standalone_page21_object.relocation_count = 1;
+    ObjectArtifact standalone_page21_mach = object_write(arguments->arena, &standalone_page21_object, OBJECT_FORMAT_MACH_O64);
+    BUSTER_TEST(arguments, standalone_page21_mach.error == OBJECT_ERROR_NONE &&
+                               object_read(arguments->arena, standalone_page21_mach.bytes,
+                                           (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS})
+                                       .error == OBJECT_ERROR_NONE);
+
+    // LLVM writes Mach-O relocations in descending place order.  The reader
+    // must preserve each ADDEND's own PAGE relocation without pairing it to a
+    // neighboring PAGE21/PAGEOFF12 record.
+    ObjectArtifact descending_direct_page = object_write(arguments->arena, &direct_page_addend_object, OBJECT_FORMAT_MACH_O64);
+    if (object_test_mach_text_offsets(descending_direct_page.bytes, &direct_page_addend_raw_offset, &direct_page_addend_relocation_offset,
+                                      &direct_page_addend_relocation_count) &&
+        direct_page_addend_relocation_count == 4)
+    {
+        u8 records[2 * 8];
+        memcpy(records, descending_direct_page.bytes.pointer + direct_page_addend_relocation_offset, sizeof(records));
+        memcpy(descending_direct_page.bytes.pointer + direct_page_addend_relocation_offset,
+               descending_direct_page.bytes.pointer + direct_page_addend_relocation_offset + sizeof(records), sizeof(records));
+        memcpy(descending_direct_page.bytes.pointer + direct_page_addend_relocation_offset + sizeof(records), records, sizeof(records));
+    }
+    ObjectFile descending_direct_page_roundtrip = object_read(arguments->arena, descending_direct_page.bytes,
+                                                              (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS});
+    BUSTER_TEST(arguments, descending_direct_page_roundtrip.error == OBJECT_ERROR_NONE && descending_direct_page_roundtrip.relocation_count == 2);
+    if (descending_direct_page_roundtrip.error == OBJECT_ERROR_NONE && descending_direct_page_roundtrip.relocation_count == 2)
+    {
+        BUSTER_TEST(arguments, descending_direct_page_roundtrip.relocations[0].offset == sizeof(u32) &&
+                                   descending_direct_page_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 &&
+                                   descending_direct_page_roundtrip.relocations[0].addend == 4 &&
+                                   descending_direct_page_roundtrip.relocations[1].offset == 0 &&
+                                   descending_direct_page_roundtrip.relocations[1].kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 &&
+                                   descending_direct_page_roundtrip.relocations[1].addend == 0x1000);
+    }
+
+    u32 pageoff_words[] = {
+        UINT32_C(0x91000041), // add x1, x2, #0
+        UINT32_C(0xf9400083), // ldr x3, [x4]
+        UINT32_C(0x394000c5), // ldrb w5, [x6]
+        UINT32_C(0x79400107), // ldrh w7, [x8]
+        UINT32_C(0x39800149), // ldrsb x9, [x10]
+        UINT32_C(0x79c0018b), // ldrsh w11, [x12]
+        UINT32_C(0xb98001cd), // ldrsw x13, [x14]
+        UINT32_C(0x3d400020), // ldr b0, [x1]
+        UINT32_C(0x7d400062), // ldr h2, [x3]
+        UINT32_C(0xbd4000a4), // ldr s4, [x5]
+        UINT32_C(0xfd4000e6), // ldr d6, [x7]
+        UINT32_C(0x3d00016a), // str b10, [x11]
+        UINT32_C(0x7d0001ac), // str h12, [x13]
+        UINT32_C(0xbd0001ee), // str s14, [x15]
+        UINT32_C(0xfd000230), // str d16, [x17]
+        UINT32_C(0x3dc0020f), // ldr q15, [x16]
+        UINT32_C(0x3d80024f), // str q15, [x18]
+        UINT32_C(0xf9800280), // prfm pldl1keep, [x20]
+        UINT32_C(0xf9800288), // prfm plil1keep, [x20]
+        UINT32_C(0xf9800290), // prfm pstl1keep, [x20]
+        UINT32_C(0x394000ff), // ldrb wzr, [x7]
+        UINT32_C(0x390001ff), // strb wzr, [x15]
+        UINT32_C(0xf94000ff), // ldr xzr, [x7]
+        UINT32_C(0xf90001ff), // str xzr, [x15]
+        UINT32_C(0x9100003f), // add sp, x1, #0
+    };
+    ObjectRelocation pageoff_relocations[BUSTER_ARRAY_LENGTH(pageoff_words)];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(pageoff_relocations); index += 1)
+    {
+        pageoff_relocations[index] = (ObjectRelocation){
+            .offset = index * sizeof(u32),
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12,
+        };
+    }
+    ObjectSection pageoff_sections[] = {
+        {
+            .name = S8(".text"),
+            .data = {.pointer = (u8*)pageoff_words, .length = sizeof(pageoff_words)},
+            .kind = OBJECT_SECTION_TEXT,
+            .alignment = 4,
+        },
+    };
+    ObjectFile pageoff_object = direct_page_object;
+    pageoff_object.sections = pageoff_sections;
+    pageoff_object.section_count = BUSTER_ARRAY_LENGTH(pageoff_sections);
+    pageoff_object.relocations = pageoff_relocations;
+    pageoff_object.relocation_count = BUSTER_ARRAY_LENGTH(pageoff_relocations);
+    String8 pageoff_assembly = object_print_assembly(arguments->arena, &pageoff_object);
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tadd x1, x2, _direct_page_target@PAGEOFF\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tldr x3, [x4, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tldrb w5, [x6, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tldrh w7, [x8, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tldrsb x9, [x10, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tldrsh w11, [x12, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tldrsw x13, [x14, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tldr b0, [x1, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tldr h2, [x3, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tldr s4, [x5, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tldr d6, [x7, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tstr b10, [x11, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tstr h12, [x13, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tstr s14, [x15, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tstr d16, [x17, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tldr q15, [x16, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tstr q15, [x18, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tprfm pldl1keep, [x20, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tprfm plil1keep, [x20, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tprfm pstl1keep, [x20, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tldrb wzr, [x7, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tstrb wzr, [x15, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tldr xzr, [x7, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tstr xzr, [x15, _direct_page_target@PAGEOFF]\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(pageoff_assembly), S8("\tadd sp, x1, _direct_page_target@PAGEOFF\n")));
+    ObjectArtifact pageoff_mach = object_write(arguments->arena, &pageoff_object, OBJECT_FORMAT_MACH_O64);
+    ObjectFile pageoff_roundtrip = object_read(arguments->arena, pageoff_mach.bytes,
+                                               (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS});
+    BUSTER_TEST(arguments, pageoff_mach.error == OBJECT_ERROR_NONE && pageoff_roundtrip.error == OBJECT_ERROR_NONE &&
+                               pageoff_roundtrip.relocation_count == BUSTER_ARRAY_LENGTH(pageoff_words));
+    if (pageoff_roundtrip.error == OBJECT_ERROR_NONE && pageoff_roundtrip.relocation_count == BUSTER_ARRAY_LENGTH(pageoff_words))
+    {
+        BUSTER_TEST(arguments, pageoff_roundtrip.sections[OBJECT_SECTION_TEXT].data.length == sizeof(pageoff_words) &&
+                                   memcmp(pageoff_roundtrip.sections[OBJECT_SECTION_TEXT].data.pointer, pageoff_words, sizeof(pageoff_words)) == 0);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(pageoff_words); index += 1)
+        {
+            BUSTER_TEST(arguments, pageoff_roundtrip.relocations[index].kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 &&
+                                       pageoff_roundtrip.relocations[index].offset == index * sizeof(u32));
+        }
+    }
+    u32 valid_pageoff_bases[] = {
+        UINT32_C(0x91000000),
+        UINT32_C(0x39000000), UINT32_C(0x39400000), UINT32_C(0x39800000), UINT32_C(0x39c00000),
+        UINT32_C(0x79000000), UINT32_C(0x79400000), UINT32_C(0x79800000), UINT32_C(0x79c00000),
+        UINT32_C(0xb9000000), UINT32_C(0xb9400000), UINT32_C(0xb9800000),
+        UINT32_C(0xf9000000), UINT32_C(0xf9400000), UINT32_C(0xf9800000),
+        UINT32_C(0x3d000000), UINT32_C(0x3d400000), UINT32_C(0x3d800000), UINT32_C(0x3dc00000),
+        UINT32_C(0x7d000000), UINT32_C(0x7d400000),
+        UINT32_C(0xbd000000), UINT32_C(0xbd400000),
+        UINT32_C(0xfd000000), UINT32_C(0xfd400000),
+    };
+    u32 invalid_pageoff_bases[] = {
+        UINT32_C(0x91800000),
+        UINT32_C(0xb9c00000), UINT32_C(0xf9c00000),
+        UINT32_C(0x7d800000), UINT32_C(0x7dc00000),
+        UINT32_C(0xbd800000), UINT32_C(0xbdc00000),
+        UINT32_C(0xfd800000), UINT32_C(0xfdc00000),
+    };
+    ObjectFile pageoff_domain_object = pageoff_object;
+    pageoff_domain_object.relocation_count = 1;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(valid_pageoff_bases); index += 1)
+    {
+        pageoff_words[0] = valid_pageoff_bases[index];
+        BUSTER_TEST(arguments, object_write(arguments->arena, &pageoff_domain_object, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_NONE);
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_pageoff_bases); index += 1)
+    {
+        pageoff_words[0] = invalid_pageoff_bases[index];
+        BUSTER_TEST(arguments, object_write(arguments->arena, &pageoff_domain_object, OBJECT_FORMAT_MACH_O64).error != OBJECT_ERROR_NONE);
+    }
+    pageoff_words[0] = UINT32_C(0x91000041);
+    u32 saved_pageoff_word = pageoff_words[0];
+    pageoff_words[0] = UINT32_C(0x91000441); // stale imm12
+    BUSTER_TEST(arguments, object_write(arguments->arena, &pageoff_object, OBJECT_FORMAT_MACH_O64).error != OBJECT_ERROR_NONE);
+    pageoff_words[0] = UINT32_C(0x14000000); // unrelated opcode
+    BUSTER_TEST(arguments, object_write(arguments->arena, &pageoff_object, OBJECT_FORMAT_MACH_O64).error != OBJECT_ERROR_NONE);
+    pageoff_words[0] = saved_pageoff_word;
+    ObjectRelocation misaligned_pageoff_relocation = pageoff_relocations[0];
+    misaligned_pageoff_relocation.offset = 2;
+    ObjectFile misaligned_pageoff_object = pageoff_object;
+    misaligned_pageoff_object.relocations = &misaligned_pageoff_relocation;
+    misaligned_pageoff_object.relocation_count = 1;
+    BUSTER_TEST(arguments, object_write(arguments->arena, &misaligned_pageoff_object, OBJECT_FORMAT_MACH_O64).error != OBJECT_ERROR_NONE);
+    ObjectRelocation out_of_range_page_addend = direct_page_relocations[0];
+    out_of_range_page_addend.addend = INT64_C(0x800000);
+    ObjectFile out_of_range_page_object = direct_page_object;
+    out_of_range_page_object.relocations = &out_of_range_page_addend;
+    out_of_range_page_object.relocation_count = 1;
+    BUSTER_TEST(arguments, object_write(arguments->arena, &out_of_range_page_object, OBJECT_FORMAT_MACH_O64).error != OBJECT_ERROR_NONE);
+    u32 saved_direct_page_high = 0;
+    memcpy(&saved_direct_page_high, direct_page_words, sizeof(saved_direct_page_high));
+    direct_page_words[0] |= 1u << 5; // stale ADRP immediate
+    BUSTER_TEST(arguments, object_write(arguments->arena, &direct_page_object, OBJECT_FORMAT_MACH_O64).error != OBJECT_ERROR_NONE);
+    memcpy(direct_page_words, &saved_direct_page_high, sizeof(saved_direct_page_high));
 
     ObjectArtifact stale_coff_branch = object_write(arguments->arena, &object, OBJECT_FORMAT_COFF);
     u32 coff_raw_offset = 0;

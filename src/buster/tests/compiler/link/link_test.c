@@ -2,6 +2,7 @@
 #if BUSTER_INCLUDE_TESTS
 
 #include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
 
@@ -2474,6 +2475,195 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, (direct_adrp & UINT32_C(0x9f00001f)) == UINT32_C(0x90000009));
         BUSTER_TEST(arguments, (direct_add & UINT32_C(0xffc003ff)) == UINT32_C(0x91000129));
     }
+
+    u32 aarch64_mach_function_roundtrip_instructions[] = {
+        UINT32_C(0x90000009), UINT32_C(0x91000129), UINT32_C(0xd65f03c0),
+    };
+    ObjectSymbol aarch64_mach_function_roundtrip_symbols[] = {
+        {
+            .name = S8("main"),
+            .size = sizeof(aarch64_mach_function_roundtrip_instructions),
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+        {
+            .name = S8("function_address_import"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+    };
+    ObjectRelocation aarch64_mach_function_roundtrip_relocations[] = {
+        {
+            .offset = 0,
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 1,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGE21,
+        },
+        {
+            .offset = sizeof(u32),
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 1,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12,
+        },
+    };
+    ObjectFile aarch64_mach_function_roundtrip_object = link_test_object_make(
+        arguments->arena, aarch64_mach_object.target,
+        (ByteSlice){.pointer = (u8*)aarch64_mach_function_roundtrip_instructions,
+                    .length = sizeof(aarch64_mach_function_roundtrip_instructions)},
+        aarch64_mach_function_roundtrip_symbols, BUSTER_ARRAY_LENGTH(aarch64_mach_function_roundtrip_symbols),
+        aarch64_mach_function_roundtrip_relocations, BUSTER_ARRAY_LENGTH(aarch64_mach_function_roundtrip_relocations));
+    ObjectArtifact aarch64_mach_function_roundtrip_artifact =
+        object_write(arguments->arena, &aarch64_mach_function_roundtrip_object, OBJECT_FORMAT_MACH_O64);
+    ObjectFile aarch64_mach_function_roundtrip_read = object_read(
+        arguments->arena, aarch64_mach_function_roundtrip_artifact.bytes,
+        (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS});
+    BUSTER_TEST(arguments, aarch64_mach_function_roundtrip_artifact.error == OBJECT_ERROR_NONE &&
+                               aarch64_mach_function_roundtrip_read.error == OBJECT_ERROR_NONE &&
+                               aarch64_mach_function_roundtrip_read.symbol_count >= 2 &&
+                               aarch64_mach_function_roundtrip_read.symbols[1].kind == OBJECT_SYMBOL_FUNCTION);
+    NativeExecutableLinkResult aarch64_mach_function_roundtrip_link = link_native_executable(
+        arguments->arena, &aarch64_mach_function_roundtrip_read, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    BUSTER_TEST(arguments, aarch64_mach_function_roundtrip_link.error == LINK_ERROR_NONE);
+    aarch64_mach_function_roundtrip_symbols[1].kind = OBJECT_SYMBOL_DATA;
+    ObjectArtifact aarch64_mach_data_roundtrip_artifact =
+        object_write(arguments->arena, &aarch64_mach_function_roundtrip_object, OBJECT_FORMAT_MACH_O64);
+    ObjectFile aarch64_mach_data_roundtrip_read = object_read(
+        arguments->arena, aarch64_mach_data_roundtrip_artifact.bytes,
+        (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS});
+    NativeExecutableLinkResult aarch64_mach_data_roundtrip_link = link_native_executable(
+        arguments->arena, &aarch64_mach_data_roundtrip_read, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    BUSTER_TEST(arguments, aarch64_mach_data_roundtrip_artifact.error == OBJECT_ERROR_NONE &&
+                               aarch64_mach_data_roundtrip_read.error == OBJECT_ERROR_NONE &&
+                               aarch64_mach_data_roundtrip_read.symbols[1].kind == OBJECT_SYMBOL_DATA &&
+                               aarch64_mach_data_roundtrip_link.error != LINK_ERROR_NONE);
+    aarch64_mach_function_roundtrip_symbols[1].kind = OBJECT_SYMBOL_FUNCTION;
+    aarch64_mach_function_roundtrip_read.relocations[0].addend = INT64_MAX;
+    NativeExecutableLinkResult aarch64_mach_page_overflow = link_native_executable(
+        arguments->arena, &aarch64_mach_function_roundtrip_read, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    BUSTER_TEST(arguments, aarch64_mach_page_overflow.error == LINK_ERROR_RELOCATION);
+    aarch64_mach_function_roundtrip_read.relocations[0].addend = INT64_MIN;
+    NativeExecutableLinkResult aarch64_mach_page_underflow = link_native_executable(
+        arguments->arena, &aarch64_mach_function_roundtrip_read, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    BUSTER_TEST(arguments, aarch64_mach_page_underflow.error == LINK_ERROR_RELOCATION);
+    aarch64_mach_function_roundtrip_read.relocations[0].addend = 0;
+
+    // PAGE21/PAGEOFF12 are independent fixups.  Exercise LLVM's unsigned
+    // LD/ST scaling (including Q registers), non-matching ADD registers,
+    // separated places, and unequal addends without any synthetic pair.
+    u32 aarch64_mach_page_link_instructions[] = {
+        UINT32_C(0x91000041), // add x1, x2, #0
+        UINT32_C(0xf9400083), // ldr x3, [x4]
+        UINT32_C(0x394000c5), // ldrb w5, [x6]
+        UINT32_C(0x79400107), // ldrh w7, [x8]
+        UINT32_C(0x39800149), // ldrsb x9, [x10]
+        UINT32_C(0x79c0018b), // ldrsh w11, [x12]
+        UINT32_C(0xb98001cd), // ldrsw x13, [x14]
+        UINT32_C(0x3dc0020f), // ldr q15, [x16]
+        UINT32_C(0x3d80024f), // str q15, [x18]
+        UINT32_C(0x9100003f), // add sp, x1, #0
+        UINT32_C(0x90000003), // adrp x3, #0 (standalone)
+    };
+    s64 aarch64_mach_page_link_addends[] = {4, 8, 9, 10, 11, 12, 16, 32, 48, 5, 0x1000};
+    u32 aarch64_mach_page_link_shifts[] = {0, 3, 0, 1, 0, 1, 2, 4, 4, 0, 0};
+    ObjectRelocation aarch64_mach_page_link_relocations[BUSTER_ARRAY_LENGTH(aarch64_mach_page_link_instructions)];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(aarch64_mach_page_link_relocations); index += 1)
+    {
+        aarch64_mach_page_link_relocations[index] = (ObjectRelocation){
+            .addend = aarch64_mach_page_link_addends[index],
+            .offset = index * sizeof(u32),
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 1,
+            .kind = index + 1 == BUSTER_ARRAY_LENGTH(aarch64_mach_page_link_relocations)
+                        ? OBJECT_RELOCATION_AARCH64_MACH_PAGE21
+                        : OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12,
+        };
+    }
+    ObjectFile aarch64_mach_page_link_object = link_test_object_make(
+        arguments->arena, aarch64_mach_object.target,
+        (ByteSlice){.pointer = (u8*)aarch64_mach_page_link_instructions, .length = sizeof(aarch64_mach_page_link_instructions)},
+        aarch64_mach_data_symbols, BUSTER_ARRAY_LENGTH(aarch64_mach_data_symbols), aarch64_mach_page_link_relocations,
+        BUSTER_ARRAY_LENGTH(aarch64_mach_page_link_relocations));
+    aarch64_mach_page_link_object.sections[OBJECT_SECTION_DATA].data = (ByteSlice){
+        .pointer = (u8*)&aarch64_mach_data_value,
+        .length = sizeof(aarch64_mach_data_value),
+    };
+    NativeExecutableLinkResult aarch64_mach_page_link_executable =
+        link_native_executable(arguments->arena, &aarch64_mach_page_link_object, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    BUSTER_TEST(arguments, aarch64_mach_page_link_executable.error == LINK_ERROR_NONE);
+    if (aarch64_mach_page_link_executable.error == LINK_ERROR_NONE)
+    {
+        u64 text_header = 0;
+        u64 data_header = 0;
+        bool text_found = link_test_mach_section_find(aarch64_mach_page_link_executable.executable, S8("__TEXT"), S8("__text"), &text_header);
+        bool data_found = link_test_mach_section_find(aarch64_mach_page_link_executable.executable, S8("__DATA"), S8("__data"), &data_header);
+        BUSTER_TEST(arguments, text_found && data_found);
+        if (text_found && data_found)
+        {
+            u64 text_address = link_read_u64(aarch64_mach_page_link_executable.executable.pointer, text_header + 32);
+            u64 data_address = link_read_u64(aarch64_mach_page_link_executable.executable.pointer, data_header + 32);
+            u64 text_file_offset = link_read_u32(aarch64_mach_page_link_executable.executable.pointer, text_header + 48);
+            for (u32 index = 0; index < 10; index += 1)
+            {
+                u32 actual = link_read_u32(aarch64_mach_page_link_executable.executable.pointer, text_file_offset + index * sizeof(u32));
+                u32 expected_immediate = (u32)(((data_address + (u64)aarch64_mach_page_link_addends[index]) & 0xfff) >>
+                                                aarch64_mach_page_link_shifts[index]);
+                BUSTER_TEST(arguments, ((actual >> 10) & 0xfff) == expected_immediate);
+            }
+            u32 expected_adrp = 0;
+            bool expected_adrp_valid = a64_adrp_encode(3, text_address + 10 * sizeof(u32), data_address + 0x1000, &expected_adrp);
+            u32 actual_adrp = link_read_u32(aarch64_mach_page_link_executable.executable.pointer, text_file_offset + 10 * sizeof(u32));
+            BUSTER_TEST(arguments, expected_adrp_valid && actual_adrp == expected_adrp);
+        }
+    }
+    u32 valid_pageoff_bases[] = {
+        UINT32_C(0x91000000),
+        UINT32_C(0x39000000), UINT32_C(0x39400000), UINT32_C(0x39800000), UINT32_C(0x39c00000),
+        UINT32_C(0x79000000), UINT32_C(0x79400000), UINT32_C(0x79800000), UINT32_C(0x79c00000),
+        UINT32_C(0xb9000000), UINT32_C(0xb9400000), UINT32_C(0xb9800000),
+        UINT32_C(0xf9000000), UINT32_C(0xf9400000), UINT32_C(0xf9800000),
+        UINT32_C(0x3d000000), UINT32_C(0x3d400000), UINT32_C(0x3d800000), UINT32_C(0x3dc00000),
+        UINT32_C(0x7d000000), UINT32_C(0x7d400000),
+        UINT32_C(0xbd000000), UINT32_C(0xbd400000),
+        UINT32_C(0xfd000000), UINT32_C(0xfd400000),
+    };
+    u32 invalid_pageoff_bases[] = {
+        UINT32_C(0x91800000),
+        UINT32_C(0xb9c00000), UINT32_C(0xf9c00000),
+        UINT32_C(0x7d800000), UINT32_C(0x7dc00000),
+        UINT32_C(0xbd800000), UINT32_C(0xbdc00000),
+        UINT32_C(0xfd800000), UINT32_C(0xfdc00000),
+    };
+    u32 saved_page_link_instruction = aarch64_mach_page_link_instructions[0];
+    u32 saved_page_link_relocation_count = aarch64_mach_page_link_object.relocation_count;
+    ObjectRelocation saved_page_link_relocation = aarch64_mach_page_link_relocations[0];
+    aarch64_mach_page_link_object.relocation_count = 1;
+    aarch64_mach_page_link_relocations[0].kind = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12;
+    aarch64_mach_page_link_relocations[0].addend = 0;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(valid_pageoff_bases); index += 1)
+    {
+        aarch64_mach_page_link_instructions[0] = valid_pageoff_bases[index];
+        NativeExecutableLinkResult valid_pageoff_link = link_native_executable(
+            arguments->arena, &aarch64_mach_page_link_object, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+        BUSTER_TEST(arguments, valid_pageoff_link.error == LINK_ERROR_NONE);
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_pageoff_bases); index += 1)
+    {
+        aarch64_mach_page_link_instructions[0] = invalid_pageoff_bases[index];
+        NativeExecutableLinkResult invalid_pageoff_link = link_native_executable(
+            arguments->arena, &aarch64_mach_page_link_object, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+        BUSTER_TEST(arguments, invalid_pageoff_link.error == LINK_ERROR_RELOCATION);
+    }
+    aarch64_mach_page_link_object.relocation_count = saved_page_link_relocation_count;
+    aarch64_mach_page_link_relocations[0] = saved_page_link_relocation;
+    aarch64_mach_page_link_instructions[0] = saved_page_link_instruction;
+    u32 saved_page_link_page21 = aarch64_mach_page_link_instructions[10];
+    aarch64_mach_page_link_instructions[10] = UINT32_C(0x9000001f);
+    NativeExecutableLinkResult page21_xzr_link = link_native_executable(
+        arguments->arena, &aarch64_mach_page_link_object, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    BUSTER_TEST(arguments, page21_xzr_link.error == LINK_ERROR_NONE);
+    aarch64_mach_page_link_instructions[10] = saved_page_link_page21;
     ObjectFile aarch64_mach_libc_object = aarch64_libc_object;
     aarch64_mach_libc_object.target.os = OPERATING_SYSTEM_MACOS;
     String8 aarch64_mach_libc_output_path = link_test_temporary_executable_path(arguments->arena, S8("buster-native-aarch64-macho-libc-test"), S8(""));

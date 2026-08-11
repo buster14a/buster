@@ -597,6 +597,100 @@ BUSTER_GLOBAL_LOCAL bool link_address_difference(u64 target, u64 place, s64 adde
     return a64_pc_relative_displacement(target, place, addend, result);
 }
 
+BUSTER_GLOBAL_LOCAL bool link_address_addend(u64 address, s64 addend, u64* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    if (addend < 0)
+    {
+        u64 magnitude = (u64)(-(addend + 1)) + 1;
+        if (magnitude > address)
+        {
+            return false;
+        }
+        *result = address - magnitude;
+    }
+    else
+    {
+        u64 magnitude = (u64)addend;
+        if (magnitude > UINT64_MAX - address)
+        {
+            return false;
+        }
+        *result = address + magnitude;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_aarch64_page21_instruction_valid(u32 instruction)
+{
+    return (instruction & UINT32_C(0xffffffe0)) == UINT32_C(0x90000000);
+}
+
+BUSTER_GLOBAL_LOCAL bool link_aarch64_pageoff12_shift(u32 instruction, u32* shift)
+{
+    if (!shift)
+    {
+        return false;
+    }
+    u32 base = instruction & UINT32_C(0xffc00000);
+    bool valid_ldst = false;
+    switch (base)
+    {
+    case UINT32_C(0x39000000):
+    case UINT32_C(0x39400000):
+    case UINT32_C(0x39800000):
+    case UINT32_C(0x39c00000):
+    case UINT32_C(0x79000000):
+    case UINT32_C(0x79400000):
+    case UINT32_C(0x79800000):
+    case UINT32_C(0x79c00000):
+    case UINT32_C(0xb9000000):
+    case UINT32_C(0xb9400000):
+    case UINT32_C(0xb9800000):
+    case UINT32_C(0xf9000000):
+    case UINT32_C(0xf9400000):
+    case UINT32_C(0xf9800000):
+    case UINT32_C(0x3d000000):
+    case UINT32_C(0x3d400000):
+    case UINT32_C(0x3d800000):
+    case UINT32_C(0x3dc00000):
+    case UINT32_C(0x7d000000):
+    case UINT32_C(0x7d400000):
+    case UINT32_C(0xbd000000):
+    case UINT32_C(0xbd400000):
+    case UINT32_C(0xfd000000):
+    case UINT32_C(0xfd400000):
+        valid_ldst = true;
+        break;
+    default:
+        break;
+    }
+    if (valid_ldst)
+    {
+        u32 implicit_shift = instruction >> 30;
+        if (!implicit_shift && (instruction & UINT32_C(0x04800000)) == UINT32_C(0x04800000))
+        {
+            implicit_shift = 4;
+        }
+        if (instruction & (UINT32_C(0xfff) << 10))
+        {
+            return false;
+        }
+        *shift = implicit_shift;
+        return true;
+    }
+    if ((instruction & UINT32_C(0xffc00000)) == UINT32_C(0x91000000) &&
+        !(instruction & (UINT32_C(0xfff) << 10)))
+    {
+        *shift = 0;
+        return true;
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL void link_write_u64(u8* bytes, u64 offset, u64 value)
 {
     memcpy(bytes + offset, &value, sizeof(value));
@@ -4058,39 +4152,25 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             u32 instruction = 0;
             memcpy(&instruction, bytes + output_offset, sizeof(instruction));
             u32 destination = instruction & 31;
-            if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && (instruction & UINT32_C(0x9f000000)) != UINT32_C(0x90000000))
+            if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 &&
+                ((place_address & 3) || !link_aarch64_page21_instruction_valid(instruction)))
             {
                 result.error = LINK_ERROR_RELOCATION;
                 result.symbol = symbol->name;
                 return result;
             }
-            if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
+            u64 target_address = symbol_address;
+            if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && !link_address_addend(symbol_address, relocation->addend, &target_address))
             {
-                bool paired = false;
-                for (u32 pair_index = 0; pair_index < object->relocation_count; pair_index += 1)
-                {
-                    ObjectRelocation* pair = &object->relocations[pair_index];
-                    if (pair->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 && pair->section == relocation->section &&
-                        pair->offset == relocation->offset + sizeof(u32) && pair->symbol == relocation->symbol)
-                    {
-                        if (pair->offset > section->data.length || sizeof(u32) > section->data.length - pair->offset)
-                        {
-                            break;
-                        }
-                        u32 low_instruction = link_read_u32(section->data.pointer, pair->offset);
-                        paired = (low_instruction & UINT32_C(0xffc00000)) == UINT32_C(0x91000000) &&
-                                 (low_instruction & 31) == destination && ((low_instruction >> 5) & 31) == destination;
-                        break;
-                    }
-                }
-                if (!paired)
-                {
-                    result.error = LINK_ERROR_RELOCATION;
-                    result.symbol = symbol->name;
-                    return result;
-                }
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
             }
-            link_write_u32(bytes, output_offset, link_aarch64_adrp(destination, place_address, symbol_address + (u64)relocation->addend, &valid));
+            if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21)
+            {
+                target_address = symbol_address + (u64)relocation->addend;
+            }
+            link_write_u32(bytes, output_offset, link_aarch64_adrp(destination, place_address, target_address, &valid));
             if (!valid)
             {
                 result.error = LINK_ERROR_RELOCATION;
@@ -4114,40 +4194,31 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         }
         else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
         {
-            u64 address = symbol_address + (u64)relocation->addend;
-            u32 page_offset = (u32)(address & 0xfff);
-            u32 instruction = 0;
-            memcpy(&instruction, bytes + output_offset, sizeof(instruction));
-            if ((instruction & UINT32_C(0xffc00000)) != UINT32_C(0x91000000) || (instruction & 31) != ((instruction >> 5) & 31))
+            if (place_address & 3)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 result.symbol = symbol->name;
                 return result;
             }
-            bool paired = false;
-            if (relocation->offset >= sizeof(u32))
+            u64 address = 0;
+            if (!link_address_addend(symbol_address, relocation->addend, &address))
             {
-                for (u32 pair_index = 0; pair_index < object->relocation_count; pair_index += 1)
-                {
-                    ObjectRelocation* pair = &object->relocations[pair_index];
-                    if (pair->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && pair->section == relocation->section &&
-                        pair->offset + sizeof(u32) == relocation->offset && pair->symbol == relocation->symbol)
-                    {
-                        u32 high_instruction = link_read_u32(section->data.pointer, pair->offset);
-                        paired = (high_instruction & UINT32_C(0x9f000000)) == UINT32_C(0x90000000) &&
-                                 (high_instruction & 31) == (instruction & 31);
-                        break;
-                    }
-                }
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
             }
-            if (!paired)
+            u32 page_offset = (u32)(address & 0xfff);
+            u32 instruction = 0;
+            memcpy(&instruction, bytes + output_offset, sizeof(instruction));
+            u32 shift = 0;
+            if (!link_aarch64_pageoff12_shift(instruction, &shift) || (page_offset & ((1u << shift) - 1)))
             {
                 result.error = LINK_ERROR_RELOCATION;
                 result.symbol = symbol->name;
                 return result;
             }
             instruction &= ~(UINT32_C(0xfff) << 10);
-            instruction |= page_offset << 10;
+            instruction |= (page_offset >> shift) << 10;
             link_write_u32(bytes, output_offset, instruction);
         }
         else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)

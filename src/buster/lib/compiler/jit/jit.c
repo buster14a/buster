@@ -117,6 +117,115 @@ BUSTER_GLOBAL_LOCAL bool jit_address_addend(u64 address, s64 addend, u64* result
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool jit_aarch64_page21_instruction_valid(u32 instruction)
+{
+    return (instruction & UINT32_C(0xffffffe0)) == UINT32_C(0x90000000);
+}
+
+BUSTER_GLOBAL_LOCAL bool jit_aarch64_pageoff12_shift(u32 instruction, u32* shift)
+{
+    if (!shift)
+    {
+        return false;
+    }
+    u32 base = instruction & UINT32_C(0xffc00000);
+    bool valid_ldst = false;
+    switch (base)
+    {
+    case UINT32_C(0x39000000):
+    case UINT32_C(0x39400000):
+    case UINT32_C(0x39800000):
+    case UINT32_C(0x39c00000):
+    case UINT32_C(0x79000000):
+    case UINT32_C(0x79400000):
+    case UINT32_C(0x79800000):
+    case UINT32_C(0x79c00000):
+    case UINT32_C(0xb9000000):
+    case UINT32_C(0xb9400000):
+    case UINT32_C(0xb9800000):
+    case UINT32_C(0xf9000000):
+    case UINT32_C(0xf9400000):
+    case UINT32_C(0xf9800000):
+    case UINT32_C(0x3d000000):
+    case UINT32_C(0x3d400000):
+    case UINT32_C(0x3d800000):
+    case UINT32_C(0x3dc00000):
+    case UINT32_C(0x7d000000):
+    case UINT32_C(0x7d400000):
+    case UINT32_C(0xbd000000):
+    case UINT32_C(0xbd400000):
+    case UINT32_C(0xfd000000):
+    case UINT32_C(0xfd400000):
+        valid_ldst = true;
+        break;
+    default:
+        break;
+    }
+    if (valid_ldst)
+    {
+        u32 implicit_shift = instruction >> 30;
+        if (!implicit_shift && (instruction & UINT32_C(0x04800000)) == UINT32_C(0x04800000))
+        {
+            implicit_shift = 4;
+        }
+        if (instruction & (UINT32_C(0xfff) << 10))
+        {
+            return false;
+        }
+        *shift = implicit_shift;
+        return true;
+    }
+    if ((instruction & UINT32_C(0xffc00000)) == UINT32_C(0x91000000) &&
+        !(instruction & (UINT32_C(0xfff) << 10)))
+    {
+        *shift = 0;
+        return true;
+    }
+    return false;
+}
+
+bool jit_apply_aarch64_mach_page_relocation(ObjectRelocationKind kind, u8* patch, u64 place, u64 target, s64 addend)
+{
+    if (!patch || (place & 3))
+    {
+        return false;
+    }
+    u64 address = 0;
+    if (!jit_address_addend(target, addend, &address))
+    {
+        return false;
+    }
+    u32 instruction = 0;
+    memcpy(&instruction, patch, sizeof(instruction));
+    if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
+    {
+        if (!jit_aarch64_page21_instruction_valid(instruction))
+        {
+            return false;
+        }
+        u32 patched = 0;
+        if (!a64_adrp_encode(instruction & 31, place, address, &patched))
+        {
+            return false;
+        }
+        memcpy(patch, &patched, sizeof(patched));
+        return true;
+    }
+    if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+    {
+        u32 shift = 0;
+        if (!jit_aarch64_pageoff12_shift(instruction, &shift) || ((address & 0xfff) & ((1u << shift) - 1)))
+        {
+            return false;
+        }
+        instruction &= ~(UINT32_C(0xfff) << 10);
+        instruction |= (u32)((address & 0xfff) >> shift) << 10;
+        memcpy(patch, &instruction, sizeof(instruction));
+        return true;
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL bool jit_relocation_is_tls(ObjectRelocationKind kind)
 {
     switch (kind)
@@ -142,7 +251,9 @@ BUSTER_GLOBAL_LOCAL bool jit_relocation_is_supported(ObjectRelocationKind kind, 
 {
     return kind == OBJECT_RELOCATION_ABSOLUTE64 ||
            (kind == OBJECT_RELOCATION_X86_64_PC32 && arch == CPU_ARCH_X86_64) ||
-           ((kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26) && arch == CPU_ARCH_AARCH64);
+           ((kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26 ||
+             kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12) &&
+            arch == CPU_ARCH_AARCH64);
 }
 
 BUSTER_GLOBAL_LOCAL bool jit_external_data_relocation_is_supported(ObjectRelocationKind kind, CpuArch arch)
@@ -386,6 +497,24 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
             }
             memcpy(patch, &patched, sizeof(patched));
         }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
+        {
+            if (!jit_apply_aarch64_mach_page_relocation(relocation->kind, patch, (u64)(uintptr_t)patch, target, relocation->addend))
+            {
+                program->error = JIT_ERROR_CAPACITY;
+                program->failing_symbol = symbol->name;
+                return false;
+            }
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+        {
+            if (!jit_apply_aarch64_mach_page_relocation(relocation->kind, patch, (u64)(uintptr_t)patch, target, relocation->addend))
+            {
+                program->error = JIT_ERROR_CAPACITY;
+                program->failing_symbol = symbol->name;
+                return false;
+            }
+        }
         else
         {
             u64 value = 0;
@@ -550,7 +679,9 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
         bool call_import = symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_FUNCTION &&
                            ((object->target.cpu_arch == CPU_ARCH_X86_64 && relocation->kind == OBJECT_RELOCATION_X86_64_PC32) ||
                             (object->target.cpu_arch == CPU_ARCH_AARCH64 &&
-                             (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26)));
+                             (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26 ||
+                              relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ||
+                              relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)));
         if (call_import)
         {
             thunk_indices[relocation->symbol] = 0;

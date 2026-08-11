@@ -21,6 +21,12 @@ typedef enum JitError
     JIT_ERROR_COUNT,
 } JitError;
 
+// Checked, architecture-independent word patching for Darwin AArch64 PAGE
+// relocations.  The JIT uses this helper after resolving the target address;
+// exposing the byte-level operation also lets host-side tests cover the
+// AArch64 encoding rules without requiring an AArch64 executable host.
+BUSTER_F_DECL bool jit_apply_aarch64_mach_page_relocation(ObjectRelocationKind kind, u8* patch, u64 place, u64 target, s64 addend);
+
 typedef struct JitHostBinding JitHostBinding;
 struct JitHostBinding
 {

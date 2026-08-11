@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/jit/jit_test.h>
+#include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #if BUSTER_INCLUDE_TESTS
 
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_SANITIZE && !BUSTER_IOS && !BUSTER_ANDROID
@@ -146,6 +147,160 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
     JitProgram wrong_kind_program = jit_link_object(&imported_object, (JitOptions){.bindings = &wrong_kind_binding, .binding_count = 1});
     BUSTER_TEST(arguments, wrong_kind_program.error == JIT_ERROR_BINDING_KIND);
     BUSTER_STRING_TEST(arguments, wrong_kind_program.failing_symbol, imported_function.name);
+
+    // Exercise the AArch64 PAGE word patcher on every host architecture.  The
+    // encoding is byte-level and does not require executing AArch64 code, so
+    // malformed words, register-independent ADD, and LLVM's scaled LD/ST
+    // forms remain covered on x86/Linux as well as the native Apple path below.
+    u32 page21_word = UINT32_C(0x90000009);
+    u32 expected_page21 = 0;
+    bool expected_page21_valid = a64_adrp_encode(9, UINT64_C(0x1000), UINT64_C(0x12346000), &expected_page21);
+    bool page21_applied = jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGE21, (u8*)&page21_word,
+                                                                  UINT64_C(0x1000), UINT64_C(0x12345000), 0x1000);
+    BUSTER_TEST(arguments, expected_page21_valid && page21_applied && page21_word == expected_page21);
+    u32 page21_misaligned = UINT32_C(0x90000009);
+    BUSTER_TEST(arguments, !jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGE21, (u8*)&page21_misaligned,
+                                                                    UINT64_C(0x1002), UINT64_C(0x12345000), 0));
+    u32 page21_stale = UINT32_C(0x90000029);
+    BUSTER_TEST(arguments, !jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGE21, (u8*)&page21_stale,
+                                                                    UINT64_C(0x1000), UINT64_C(0x12345000), 0));
+    u32 page21_xzr = UINT32_C(0x9000001f);
+    u32 expected_page21_xzr = 0;
+    bool expected_page21_xzr_valid = a64_adrp_encode(31, UINT64_C(0x1000), UINT64_C(0x12345000), &expected_page21_xzr);
+    bool page21_xzr_applied = jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGE21, (u8*)&page21_xzr,
+                                                                      UINT64_C(0x1000), UINT64_C(0x12345000), 0);
+    BUSTER_TEST(arguments, expected_page21_xzr_valid && page21_xzr_applied && page21_xzr == expected_page21_xzr);
+
+    struct JitPageOffCase
+    {
+        u32 word;
+        u64 target;
+        s64 addend;
+        u32 shift;
+    } pageoff_cases[] = {
+        {UINT32_C(0x91000041), UINT64_C(0x40001234), 4, 0},  // add x1, x2, #imm
+        {UINT32_C(0xf9400083), UINT64_C(0x40001030), 8, 3},  // ldr x3, [x4]
+        {UINT32_C(0x394000c5), UINT64_C(0x400012ab), 0, 0},  // ldrb w5, [x6]
+        {UINT32_C(0x79400107), UINT64_C(0x400012a8), 0, 1},  // ldrh w7, [x8]
+        {UINT32_C(0x3dc0020f), UINT64_C(0x40001030), 0x10, 4}, // ldr q15, [x16]
+        {UINT32_C(0x3d80024f), UINT64_C(0x40001040), 0, 4},  // str q15, [x18]
+    };
+    for (u32 pageoff_index = 0; pageoff_index < BUSTER_ARRAY_LENGTH(pageoff_cases); pageoff_index += 1)
+    {
+        struct JitPageOffCase pageoff_case = pageoff_cases[pageoff_index];
+        u32 word = pageoff_case.word;
+        u64 address = pageoff_case.target + (u64)pageoff_case.addend;
+        u32 expected = (word & ~(UINT32_C(0xfff) << 10)) |
+                       (u32)((address & 0xfff) >> pageoff_case.shift) << 10;
+        bool applied = jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, (u8*)&word,
+                                                               UINT64_C(0x2000), pageoff_case.target, pageoff_case.addend);
+        BUSTER_TEST(arguments, applied && word == expected);
+    }
+    u32 valid_pageoff_bases[] = {
+        UINT32_C(0x91000000),
+        UINT32_C(0x39000000), UINT32_C(0x39400000), UINT32_C(0x39800000), UINT32_C(0x39c00000),
+        UINT32_C(0x79000000), UINT32_C(0x79400000), UINT32_C(0x79800000), UINT32_C(0x79c00000),
+        UINT32_C(0xb9000000), UINT32_C(0xb9400000), UINT32_C(0xb9800000),
+        UINT32_C(0xf9000000), UINT32_C(0xf9400000), UINT32_C(0xf9800000),
+        UINT32_C(0x3d000000), UINT32_C(0x3d400000), UINT32_C(0x3d800000), UINT32_C(0x3dc00000),
+        UINT32_C(0x7d000000), UINT32_C(0x7d400000),
+        UINT32_C(0xbd000000), UINT32_C(0xbd400000),
+        UINT32_C(0xfd000000), UINT32_C(0xfd400000),
+    };
+    u32 invalid_pageoff_bases[] = {
+        UINT32_C(0x91800000),
+        UINT32_C(0xb9c00000), UINT32_C(0xf9c00000),
+        UINT32_C(0x7d800000), UINT32_C(0x7dc00000),
+        UINT32_C(0xbd800000), UINT32_C(0xbdc00000),
+        UINT32_C(0xfd800000), UINT32_C(0xfdc00000),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(valid_pageoff_bases); index += 1)
+    {
+        u32 word = valid_pageoff_bases[index];
+        BUSTER_TEST(arguments, jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, (u8*)&word,
+                                                                        UINT64_C(0x2000), UINT64_C(0x40001000), 0));
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_pageoff_bases); index += 1)
+    {
+        u32 word = invalid_pageoff_bases[index];
+        BUSTER_TEST(arguments, !jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, (u8*)&word,
+                                                                         UINT64_C(0x2000), UINT64_C(0x40001000), 0));
+    }
+    u32 pageoff_stale = UINT32_C(0x91000441);
+    BUSTER_TEST(arguments, !jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, (u8*)&pageoff_stale,
+                                                                    UINT64_C(0x2000), UINT64_C(0x40001000), 0));
+    u32 pageoff_wrong_opcode = UINT32_C(0x14000000);
+    BUSTER_TEST(arguments, !jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, (u8*)&pageoff_wrong_opcode,
+                                                                    UINT64_C(0x2000), UINT64_C(0x40001000), 0));
+    u32 pageoff_misaligned = UINT32_C(0xf9400083);
+    BUSTER_TEST(arguments, !jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, (u8*)&pageoff_misaligned,
+                                                                    UINT64_C(0x2002), UINT64_C(0x40001000), 0));
+    u32 pageoff_unaligned_scale = UINT32_C(0xf9400083);
+    BUSTER_TEST(arguments, !jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, (u8*)&pageoff_unaligned_scale,
+                                                                    UINT64_C(0x2000), UINT64_C(0x40001001), 0));
+    u32 pageoff_overflow = UINT32_C(0x91000041);
+    BUSTER_TEST(arguments, !jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, (u8*)&pageoff_overflow,
+                                                                    UINT64_C(0x2000), 0, -1));
+    BUSTER_TEST(arguments, !jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, (u8*)&pageoff_overflow,
+                                                                    UINT64_C(0x2000), UINT64_MAX, 1));
+
+    // Darwin AArch64 direct PAGE relocations are valid function-address
+    // materializations.  Keep this fixture target-gated so an x86/Linux host
+    // still exercises the structural foreign-target path without attempting
+    // to execute AArch64 code.
+    u32 mach_page_words[] = {UINT32_C(0x90000009), UINT32_C(0x91000041)};
+    ObjectSection mach_page_section = {
+        .name = S8(".text"),
+        .data = {.pointer = (u8*)mach_page_words, .length = sizeof(mach_page_words)},
+        .kind = OBJECT_SECTION_TEXT,
+        .alignment = 4,
+    };
+    ObjectSymbol mach_page_symbol = {
+        .name = S8("jit_mach_page_function"),
+        .section = OBJECT_SECTION_UNDEFINED,
+        .kind = OBJECT_SYMBOL_FUNCTION,
+        .global = true,
+    };
+    ObjectRelocation mach_page_relocations[] = {
+        {
+            .section = 0,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGE21,
+        },
+        {
+            .addend = 4,
+            .offset = sizeof(u32),
+            .section = 0,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12,
+        },
+    };
+    ObjectFile mach_page_object = {
+        .sections = &mach_page_section,
+        .section_count = 1,
+        .symbols = &mach_page_symbol,
+        .symbol_count = 1,
+        .relocations = mach_page_relocations,
+        .relocation_count = BUSTER_ARRAY_LENGTH(mach_page_relocations),
+        .target = target_native,
+    };
+#if BUSTER_CPU_ARCH_AARCH64 && (BUSTER_MACOS || BUSTER_IOS)
+    u64 mach_page_binding_address = 0;
+    JitHostBinding mach_page_binding = {
+        .name = mach_page_symbol.name,
+        .address = &mach_page_binding_address,
+        .kind = OBJECT_SYMBOL_FUNCTION,
+    };
+    JitProgram mach_page_program = jit_link_object(&mach_page_object,
+                                                    (JitOptions){.bindings = &mach_page_binding, .binding_count = 1});
+    BUSTER_TEST(arguments, mach_page_program.error == JIT_ERROR_NONE);
+    jit_program_release(&mach_page_program);
+#else
+    mach_page_object.target.cpu_arch = CPU_ARCH_AARCH64;
+    mach_page_object.target.os = OPERATING_SYSTEM_MACOS;
+    JitProgram mach_page_program = jit_link_object(&mach_page_object, (JitOptions){0});
+    BUSTER_TEST(arguments, mach_page_program.error == JIT_ERROR_FOREIGN_TARGET);
+#endif
 
     ObjectSymbol imported_data = imported_function;
     imported_data.name = S8("jit_test_external_data");
