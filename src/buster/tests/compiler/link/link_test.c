@@ -2436,6 +2436,44 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, (aarch64_mach_data_adrp & UINT32_C(0x9f00001f)) == UINT32_C(0x90000009));
     BUSTER_TEST(arguments, (aarch64_mach_data_add & UINT32_C(0xffc003ff)) == UINT32_C(0x91000129));
     BUSTER_TEST(arguments, aarch64_mach_data_branch == UINT32_C(0x14000002));
+    u32 aarch64_mach_direct_instructions[] = {
+        UINT32_C(0x90000009), UINT32_C(0x91000129), UINT32_C(0x14000002), UINT32_C(0xd65f03c0),
+    };
+    ObjectRelocation aarch64_mach_direct_relocations[] = {
+        {
+            .offset = 0,
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 1,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGE21,
+        },
+        {
+            .offset = sizeof(u32),
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 1,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12,
+        },
+    };
+    ObjectFile aarch64_mach_direct_object = link_test_object_make(
+        arguments->arena, aarch64_mach_object.target,
+        (ByteSlice){.pointer = (u8*)aarch64_mach_direct_instructions, .length = sizeof(aarch64_mach_direct_instructions)},
+        aarch64_mach_data_symbols, BUSTER_ARRAY_LENGTH(aarch64_mach_data_symbols), aarch64_mach_direct_relocations,
+        BUSTER_ARRAY_LENGTH(aarch64_mach_direct_relocations));
+    aarch64_mach_direct_object.sections[OBJECT_SECTION_DATA].data = (ByteSlice){
+        .pointer = (u8*)&aarch64_mach_data_value,
+        .length = sizeof(aarch64_mach_data_value),
+    };
+    NativeExecutableLinkResult aarch64_mach_direct_executable =
+        link_native_executable(arguments->arena, &aarch64_mach_direct_object,
+                               (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    BUSTER_TEST(arguments, aarch64_mach_direct_executable.error == LINK_ERROR_NONE);
+    if (aarch64_mach_direct_executable.error == LINK_ERROR_NONE && aarch64_mach_direct_executable.executable.length > 32)
+    {
+        u64 direct_text_offset = align_forward(32 + link_read_u32(aarch64_mach_direct_executable.executable.pointer, 20), 16);
+        u32 direct_adrp = link_read_u32(aarch64_mach_direct_executable.executable.pointer, direct_text_offset);
+        u32 direct_add = link_read_u32(aarch64_mach_direct_executable.executable.pointer, direct_text_offset + sizeof(u32));
+        BUSTER_TEST(arguments, (direct_adrp & UINT32_C(0x9f00001f)) == UINT32_C(0x90000009));
+        BUSTER_TEST(arguments, (direct_add & UINT32_C(0xffc003ff)) == UINT32_C(0x91000129));
+    }
     ObjectFile aarch64_mach_libc_object = aarch64_libc_object;
     aarch64_mach_libc_object.target.os = OPERATING_SYSTEM_MACOS;
     String8 aarch64_mach_libc_output_path = link_test_temporary_executable_path(arguments->arena, S8("buster-native-aarch64-macho-libc-test"), S8(""));

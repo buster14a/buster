@@ -275,6 +275,8 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         {CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32, false, false, true, false, false},
         {CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21, true, false, true, false, false},
         {CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12, true, false, true, true, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21, true, false, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12, true, false, false, false, false},
     };
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(relocation_kinds) == CODEGEN_MODULE_RELOCATION_COUNT);
     for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(relocation_kinds); kind_index += 1)
@@ -818,6 +820,142 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                            (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS})
                                        .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
     relocation.addend = 0;
+
+    u8 direct_page_words[] = {0x09, 0x00, 0x00, 0x90, 0x29, 0x01, 0x00, 0x91};
+    ObjectSection direct_page_sections[] = {
+        {
+            .name = S8(".text"),
+            .data = BUSTER_ARRAY_TO_SLICE(direct_page_words),
+            .kind = OBJECT_SECTION_TEXT,
+            .alignment = 4,
+        },
+    };
+    ObjectSymbol direct_page_symbols[] = {
+        {
+            .name = S8("direct_page_target"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+    };
+    ObjectRelocation direct_page_relocations[] = {
+        {
+            .offset = 0,
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGE21,
+        },
+        {
+            .offset = sizeof(u32),
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12,
+        },
+    };
+    ObjectFile direct_page_object = {
+        .sections = direct_page_sections,
+        .section_count = BUSTER_ARRAY_LENGTH(direct_page_sections),
+        .symbols = direct_page_symbols,
+        .symbol_count = BUSTER_ARRAY_LENGTH(direct_page_symbols),
+        .relocations = direct_page_relocations,
+        .relocation_count = BUSTER_ARRAY_LENGTH(direct_page_relocations),
+        .target = {
+            .cpu_arch = CPU_ARCH_AARCH64,
+            .os = OPERATING_SYSTEM_MACOS,
+        },
+    };
+    String8 direct_page_assembly = object_print_assembly(arguments->arena, &direct_page_object);
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(direct_page_assembly), S8("\tadrp x9, _direct_page_target@PAGE\n")));
+    BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(direct_page_assembly), S8("\tadd x9, x9, _direct_page_target@PAGEOFF\n")));
+    ObjectArtifact direct_page_mach = object_write(arguments->arena, &direct_page_object, OBJECT_FORMAT_MACH_O64);
+    u32 direct_page_raw_offset = 0;
+    u32 direct_page_relocation_offset = 0;
+    u32 direct_page_relocation_count = 0;
+    bool direct_page_offsets_valid = object_test_mach_text_offsets(direct_page_mach.bytes, &direct_page_raw_offset,
+                                                                    &direct_page_relocation_offset, &direct_page_relocation_count);
+    BUSTER_TEST(arguments, direct_page_mach.error == OBJECT_ERROR_NONE && direct_page_offsets_valid && direct_page_relocation_count == 2);
+    if (direct_page_offsets_valid && direct_page_relocation_count == 2)
+    {
+        u32 high_information = 0;
+        u32 low_information = 0;
+        memcpy(&high_information, direct_page_mach.bytes.pointer + direct_page_relocation_offset + 4, sizeof(high_information));
+        memcpy(&low_information, direct_page_mach.bytes.pointer + direct_page_relocation_offset + 8 + 4, sizeof(low_information));
+        BUSTER_TEST(arguments, high_information >> 28 == 3 && low_information >> 28 == 4);
+        BUSTER_TEST(arguments, (high_information & (1u << 24)) != 0 && (low_information & (1u << 24)) == 0);
+        BUSTER_TEST(arguments, ((high_information >> 25) & 3) == 2 && ((low_information >> 25) & 3) == 2);
+        BUSTER_TEST(arguments, (high_information & (1u << 27)) != 0 && (low_information & (1u << 27)) != 0);
+        BUSTER_TEST(arguments, direct_page_mach.bytes.pointer[direct_page_relocation_offset] == 0);
+        BUSTER_TEST(arguments, direct_page_mach.bytes.pointer[direct_page_relocation_offset + 8] == sizeof(u32));
+    }
+    ObjectFile direct_page_roundtrip = object_read(arguments->arena, direct_page_mach.bytes,
+                                                   (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS});
+    BUSTER_TEST(arguments, direct_page_roundtrip.error == OBJECT_ERROR_NONE && direct_page_roundtrip.relocation_count == 2);
+    if (direct_page_roundtrip.error == OBJECT_ERROR_NONE && direct_page_roundtrip.relocation_count == 2)
+    {
+        BUSTER_TEST(arguments, direct_page_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 &&
+                                   direct_page_roundtrip.relocations[1].kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12);
+        BUSTER_TEST(arguments, direct_page_roundtrip.relocations[0].offset == 0 && direct_page_roundtrip.relocations[1].offset == sizeof(u32));
+    }
+    ObjectRelocation direct_page_addend_relocations[] = {
+        direct_page_relocations[0],
+        direct_page_relocations[1],
+    };
+    direct_page_addend_relocations[0].addend = 0x1000;
+    direct_page_addend_relocations[1].addend = 4;
+    ObjectFile direct_page_addend_object = direct_page_object;
+    direct_page_addend_object.relocations = direct_page_addend_relocations;
+    ObjectArtifact direct_page_addend_mach = object_write(arguments->arena, &direct_page_addend_object, OBJECT_FORMAT_MACH_O64);
+    u32 direct_page_addend_raw_offset = 0;
+    u32 direct_page_addend_relocation_offset = 0;
+    u32 direct_page_addend_relocation_count = 0;
+    bool direct_page_addend_offsets_valid = object_test_mach_text_offsets(direct_page_addend_mach.bytes, &direct_page_addend_raw_offset,
+                                                                           &direct_page_addend_relocation_offset,
+                                                                           &direct_page_addend_relocation_count);
+    BUSTER_TEST(arguments, direct_page_addend_mach.error == OBJECT_ERROR_NONE && direct_page_addend_offsets_valid &&
+                               direct_page_addend_relocation_count == 4);
+    ObjectFile direct_page_addend_roundtrip = object_read(arguments->arena, direct_page_addend_mach.bytes,
+                                                          (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS});
+    BUSTER_TEST(arguments, direct_page_addend_roundtrip.error == OBJECT_ERROR_NONE && direct_page_addend_roundtrip.relocation_count == 2);
+    if (direct_page_addend_roundtrip.error == OBJECT_ERROR_NONE && direct_page_addend_roundtrip.relocation_count == 2)
+    {
+        BUSTER_TEST(arguments, direct_page_addend_roundtrip.relocations[0].addend == 0x1000 &&
+                                   direct_page_addend_roundtrip.relocations[1].addend == 4);
+    }
+    ObjectArtifact malformed_direct_page = object_write(arguments->arena, &direct_page_object, OBJECT_FORMAT_MACH_O64);
+    if (object_test_mach_text_offsets(malformed_direct_page.bytes, &direct_page_raw_offset, &direct_page_relocation_offset, &direct_page_relocation_count))
+    {
+        object_test_write_u32(malformed_direct_page.bytes, (u64)direct_page_raw_offset, UINT32_C(0x90000008));
+    }
+    BUSTER_TEST(arguments, object_read(arguments->arena, malformed_direct_page.bytes,
+                                       (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS})
+                                 .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    malformed_direct_page = object_write(arguments->arena, &direct_page_object, OBJECT_FORMAT_MACH_O64);
+    if (object_test_mach_text_offsets(malformed_direct_page.bytes, &direct_page_raw_offset, &direct_page_relocation_offset, &direct_page_relocation_count))
+    {
+        u32 information = 0;
+        memcpy(&information, malformed_direct_page.bytes.pointer + direct_page_relocation_offset + 8 + 4, sizeof(information));
+        object_test_write_u32(malformed_direct_page.bytes, direct_page_relocation_offset + 8 + 4, information | (1u << 24));
+    }
+    BUSTER_TEST(arguments, object_read(arguments->arena, malformed_direct_page.bytes,
+                                       (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS})
+                                 .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    malformed_direct_page = object_write(arguments->arena, &direct_page_object, OBJECT_FORMAT_MACH_O64);
+    if (object_test_mach_text_offsets(malformed_direct_page.bytes, &direct_page_raw_offset, &direct_page_relocation_offset, &direct_page_relocation_count))
+    {
+        object_test_write_u32(malformed_direct_page.bytes, direct_page_relocation_offset + 8, 2 * sizeof(u32));
+    }
+    BUSTER_TEST(arguments, object_read(arguments->arena, malformed_direct_page.bytes,
+                                       (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS})
+                                 .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    ObjectRelocation standalone_pageoff = direct_page_relocations[1];
+    ObjectFile standalone_pageoff_object = direct_page_object;
+    standalone_pageoff_object.relocations = &standalone_pageoff;
+    standalone_pageoff_object.relocation_count = 1;
+    ObjectArtifact standalone_pageoff_mach = object_write(arguments->arena, &standalone_pageoff_object, OBJECT_FORMAT_MACH_O64);
+    BUSTER_TEST(arguments, standalone_pageoff_mach.error == OBJECT_ERROR_NONE &&
+                               object_read(arguments->arena, standalone_pageoff_mach.bytes,
+                                           (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS})
+                                       .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
 
     ObjectArtifact stale_coff_branch = object_write(arguments->arena, &object, OBJECT_FORMAT_COFF);
     u32 coff_raw_offset = 0;

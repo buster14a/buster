@@ -3993,6 +3993,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         }
         else if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
+            if ((relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12) &&
+                symbol->kind == OBJECT_SYMBOL_DATA)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
             u32 import_index = import_indices[relocation->symbol];
             if (import_index == UINT32_MAX)
             {
@@ -4046,11 +4053,43 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             }
             link_write_u32(bytes, output_offset, patched);
         }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21)
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
         {
             u32 instruction = 0;
             memcpy(&instruction, bytes + output_offset, sizeof(instruction));
             u32 destination = instruction & 31;
+            if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && (instruction & UINT32_C(0x9f000000)) != UINT32_C(0x90000000))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
+            {
+                bool paired = false;
+                for (u32 pair_index = 0; pair_index < object->relocation_count; pair_index += 1)
+                {
+                    ObjectRelocation* pair = &object->relocations[pair_index];
+                    if (pair->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 && pair->section == relocation->section &&
+                        pair->offset == relocation->offset + sizeof(u32) && pair->symbol == relocation->symbol)
+                    {
+                        if (pair->offset > section->data.length || sizeof(u32) > section->data.length - pair->offset)
+                        {
+                            break;
+                        }
+                        u32 low_instruction = link_read_u32(section->data.pointer, pair->offset);
+                        paired = (low_instruction & UINT32_C(0xffc00000)) == UINT32_C(0x91000000) &&
+                                 (low_instruction & 31) == destination && ((low_instruction >> 5) & 31) == destination;
+                        break;
+                    }
+                }
+                if (!paired)
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                    result.symbol = symbol->name;
+                    return result;
+                }
+            }
             link_write_u32(bytes, output_offset, link_aarch64_adrp(destination, place_address, symbol_address + (u64)relocation->addend, &valid));
             if (!valid)
             {
@@ -4071,6 +4110,44 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             memcpy(&instruction, bytes + output_offset, sizeof(instruction));
             instruction &= ~(UINT32_C(0xfff) << 10);
             instruction |= (u32)(page_offset / sizeof(u64)) << 10;
+            link_write_u32(bytes, output_offset, instruction);
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+        {
+            u64 address = symbol_address + (u64)relocation->addend;
+            u32 page_offset = (u32)(address & 0xfff);
+            u32 instruction = 0;
+            memcpy(&instruction, bytes + output_offset, sizeof(instruction));
+            if ((instruction & UINT32_C(0xffc00000)) != UINT32_C(0x91000000) || (instruction & 31) != ((instruction >> 5) & 31))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            bool paired = false;
+            if (relocation->offset >= sizeof(u32))
+            {
+                for (u32 pair_index = 0; pair_index < object->relocation_count; pair_index += 1)
+                {
+                    ObjectRelocation* pair = &object->relocations[pair_index];
+                    if (pair->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && pair->section == relocation->section &&
+                        pair->offset + sizeof(u32) == relocation->offset && pair->symbol == relocation->symbol)
+                    {
+                        u32 high_instruction = link_read_u32(section->data.pointer, pair->offset);
+                        paired = (high_instruction & UINT32_C(0x9f000000)) == UINT32_C(0x90000000) &&
+                                 (high_instruction & 31) == (instruction & 31);
+                        break;
+                    }
+                }
+            }
+            if (!paired)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            instruction &= ~(UINT32_C(0xfff) << 10);
+            instruction |= page_offset << 10;
             link_write_u32(bytes, output_offset, instruction);
         }
         else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)

@@ -76,6 +76,10 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
             thread_local = true;
             thread_local_low = true;
             break;
+        case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21:
+        case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12:
+            aarch64 = true;
+            break;
         case CODEGEN_MODULE_RELOCATION_COUNT:
             return false;
     }
@@ -16220,18 +16224,44 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         else
                         {
-                            codegen_emit_u32(&buffer, 0x58000049);
-                            codegen_emit_u32(&buffer, 0x14000003);
-                            u32 offset = (u32)buffer.count;
-                            codegen_emit_u64(&buffer, 0);
-                            result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
-                                .entity = ANALYSIS_ENTITY_ID_INVALID,
-                                .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
-                                .symbol = instruction->symbol,
-                                .offset = offset,
-                                .kind = CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
-                                .absolute = true,
-                            };
+                            if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
+                            {
+                                u32 high_offset = (u32)buffer.count;
+                                codegen_emit_u32(&buffer, 0x90000009);
+                                u32 low_offset = (u32)buffer.count;
+                                codegen_emit_u32(&buffer, 0x91000129);
+                                result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
+                                    .entity = ANALYSIS_ENTITY_ID_INVALID,
+                                    .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
+                                    .symbol = instruction->symbol,
+                                    .offset = high_offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21,
+                                    .aarch64 = true,
+                                };
+                                result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
+                                    .entity = ANALYSIS_ENTITY_ID_INVALID,
+                                    .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
+                                    .symbol = instruction->symbol,
+                                    .offset = low_offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12,
+                                    .aarch64 = true,
+                                };
+                            }
+                            else
+                            {
+                                codegen_emit_u32(&buffer, 0x58000049);
+                                codegen_emit_u32(&buffer, 0x14000003);
+                                u32 offset = (u32)buffer.count;
+                                codegen_emit_u64(&buffer, 0);
+                                result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
+                                    .entity = ANALYSIS_ENTITY_ID_INVALID,
+                                    .instantiation = ANALYSIS_INSTANTIATION_ID_INVALID,
+                                    .symbol = instruction->symbol,
+                                    .offset = offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
+                                    .absolute = true,
+                                };
+                            }
                         }
                         if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset, 8, true, false))
                         {
