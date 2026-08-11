@@ -40,6 +40,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST,
     BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA,
     BUILD_COMMAND_IMPORT_ARM_A64_METADATA,
+    BUILD_COMMAND_IMPORT_ARM_A64_SYSREG,
     BUILD_COMMAND_TEST_SELF_HOST,
     BUILD_COMMAND_SELF_HOST_FROM_EXISTING,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
@@ -4640,6 +4641,7 @@ BUSTER_GLOBAL_LOCAL void arena_append_json_string(Arena* arena, String8 string)
    existing LLVM/XED metadata importer.  It remains a build-driver workflow;
    production runtime tables do not include this source. */
 #include "src/buster/lib/compiler/assembly/arm_a64_canonical_import.c"
+#include "src/buster/lib/compiler/assembly/arm_a64_sysreg_import.c"
 
 BUSTER_GLOBAL_LOCAL CompileCommandEntry json_parse_compile_command_entry(Arena* arena, JsonParser* parser, bool* valid)
 {
@@ -20909,6 +20911,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST] = S8_INITIALIZER("test_timing_summary_self_test"),
         [BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA] = S8_INITIALIZER("import_assembly_metadata"),
         [BUILD_COMMAND_IMPORT_ARM_A64_METADATA] = S8_INITIALIZER("import_arm_a64_metadata"),
+        [BUILD_COMMAND_IMPORT_ARM_A64_SYSREG] = S8_INITIALIZER("import_arm_a64_sysregs"),
         [BUILD_COMMAND_TEST_SELF_HOST] = S8_INITIALIZER("test_self_host"),
         [BUILD_COMMAND_SELF_HOST_FROM_EXISTING] = S8_INITIALIZER("self_host_from_existing"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
@@ -20970,6 +20973,9 @@ ProcessResult process_arguments(void)
     TestTimingSummaryOptions test_timing_summary_options = {.limit = 25};
     AssemblyImportOptions assembly_import_options = {.output_directory = S8("src/buster/lib/compiler/assembly/generated")};
     ArmA64CanonicalImportOptions arm_a64_canonical_import_options = {
+        .output_directory = S8("src/buster/lib/compiler/assembly/generated"),
+    };
+    ArmA64SysregImportOptions arm_a64_sysreg_import_options = {
         .output_directory = S8("src/buster/lib/compiler/assembly/generated"),
     };
     String8List time_trace_summary_paths = {0};
@@ -21106,6 +21112,24 @@ ProcessResult process_arguments(void)
                 {
                     arm_a64_canonical_import_options.output_directory = argument;
                     arm_a64_canonical_import_options.output_directory_set = true;
+                }
+                else
+                {
+                    result = PROCESS_RESULT_FAILED;
+                    break;
+                }
+                argument_i += 1;
+            }
+            else if (command == BUILD_COMMAND_IMPORT_ARM_A64_SYSREG && !string_starts_with_sequence(argument, S8("--")))
+            {
+                if (!arm_a64_sysreg_import_options.source_directory.length)
+                {
+                    arm_a64_sysreg_import_options.source_directory = argument;
+                }
+                else if (!arm_a64_sysreg_import_options.output_directory_set)
+                {
+                    arm_a64_sysreg_import_options.output_directory = argument;
+                    arm_a64_sysreg_import_options.output_directory_set = true;
                 }
                 else
                 {
@@ -21788,6 +21812,19 @@ ProcessResult process_arguments(void)
             else
             {
                 result = arm_a64_canonical_import_run(arena, arm_a64_canonical_import_options);
+            }
+        }
+        break;
+        case BUILD_COMMAND_IMPORT_ARM_A64_SYSREG:
+        {
+            if (!arm_a64_sysreg_import_options.source_directory.length)
+            {
+                string_print(S8("error: import_arm_a64_sysregs requires <official-arm-sysreg-source-directory> [output-directory]\n"));
+                result = PROCESS_RESULT_FAILED;
+            }
+            else
+            {
+                result = arm_a64_sysreg_import_run(arena, arm_a64_sysreg_import_options);
             }
         }
         break;

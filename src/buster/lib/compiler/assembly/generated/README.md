@@ -71,6 +71,67 @@ separate, deterministic JSONL projection over the pinned AArch64 records.
   lookup totals, alias boundaries, the M1 predicate policy, and acceptance
   status.
 
+### Official Arm A-profile system-register inventory
+
+`aarch64-system-registers.generated.jsonl`,
+`aarch64-system-registers.generated.h`, and
+`aarch64-system-registers-manifest.json` are generated from the official Arm
+A-profile SysReg XML 2026-06 release. The 1,400 relevant mechanisms are the
+`MRS`, `MSRregister`, `MRRS`, and `MSRRregister` SystemAccessor pages. The
+schema-2 JSONL is a compact normalized inventory: every row retains source,
+feature, and access-permission digests, mechanism/mode, packed layout, array
+range, and a numeric decision reason, while raw XML condition/accessor prose
+is intentionally omitted. The pointer-free C header retains only accepted
+runtime identity strings and precomputed parameter transforms. ASL privilege
+and trap text is provenance, never assembler legality. The audited
+hardware-grounded Apple M1 A-profile accepts 402 mechanisms: 392 fixed named
+rows, 8 named parameterized rows, and 2 mechanisms (MRS/MSRregister) in one
+generic S3 family (10 parameterized mechanisms total). Fixed rows cover 202
+target names/201 encodings (200 readable, 138 writable, 136 both). Generic S3
+remains available through the bounded raw parser and is excluded from named
+lookup.
+
+The profile evaluator consumes both Boolean branches, honors
+parentheses/precedence/NOT, combines register and access predicates, and fails
+closed for unknown feature/value atoms. The exact TRUE atoms are
+`FEAT_AA64`, `EL1`, `EL2`, `FEAT_VHE`, `FEAT_AES`, `FEAT_AdvSIMD`, `FEAT_CRC32`,
+`FEAT_DIT`, `FEAT_DotProd`, `FEAT_FCMA`, `FEAT_FHM`, `FEAT_FP`, `FEAT_FP16`,
+`FEAT_FRINTTS`, `FEAT_FlagM`, `FEAT_FlagM2`, `FEAT_JSCVT`, `FEAT_LOR`,
+`FEAT_LRCPC`, `FEAT_LRCPC2`, `FEAT_LSE`, `FEAT_PAuth`, `FEAT_RDM`, `FEAT_SB`,
+`FEAT_SHA1`, `FEAT_SHA256`, `FEAT_SHA3`, `FEAT_SHA512`, `FEAT_SPECRES`,
+`FEAT_SSBS`, `FEAT_RAS`, `FEAT_PAN`, `FEAT_UAO`, `FEAT_TLBIOS`,
+`FEAT_TLBIRANGE`, and `FEAT_DPB`. EL3, AMUv1, MPAM, SEL2, NV/NV2, TRF,
+PMUv3, RASv1p1, D128/SRMASK/SYSREG128, trace access, and unknown atoms are
+explicitly excluded. The access-condition audit records the exact 34-row
+removal from the register-only census: D128=20, SRMASK=8, SYSREG128=2, and
+unknown atoms=4. FEAT_VHE access rows remain eligible (72 accepted); runtime
+`access_permission` ASL is retained only as a digest and never determines
+assembler legality. MRRS/MSRR pair helpers remain available as explicit D128
+layout utilities, but no pair row is in this Apple profile.
+
+### Hardware evidence and scope
+
+The profile is grounded in a [community 2022 M1 `cpuctl` sample](https://gist.github.com/ryo/f533af313ac9dfd971f682b7ae951d63)
+covering both Icestorm and Firestorm cores; it is not Apple-primary evidence and
+is not exhaustive across every M1 revision. The [m1n1 hypervisor source at the
+corroborating commit](https://github.com/AsahiLinux/m1n1/blob/06a4601a351ebfd1abb6abba9a44c34e40d94776/src/hv.c)
+corroborates the EL1/EL2 and VHE baseline. The [Asahi Linux Apple M1 PMU
+driver](https://github.com/AsahiLinux/linux/blob/e2e1930a9595bffafad92cec2b5504525efb9cd4/drivers/perf/apple_m1_cpu_pmu.c)
+is non-architectural platform-software evidence only; it does not prove
+architectural FEAT_PMUv3, so PMUv3 remains excluded.
+
+The source archive is the 30 Jun 2026 release (`2026-06_rel`), URL
+`https://developer.arm.com/-/cdn-downloads/permalink/Exploration-Tools-Arm-Architecture-System-Registers/SysReg/SysReg_xml_A_profile-2026-06.tar.gz`,
+SHA-256 `4795c769085ff9056d9f18abbd9e23d7b0f0a955214cfb2a2121a9698b50d509`
+and 43,124,482 bytes. Arm's notice/provenance digest is
+`13a5c90f2accaf17573f73499a3940df6168d65cd17a893f685e686aa436a246`.
+The proprietary archive/XML is not vendored. The importer requires the exact
+release inventory of 1,943 XML files and 1,400 relevant mechanisms; the
+manifest records both expected and observed counts. To regenerate,
+independently obtain the official archive, extract it, and run the bounded
+sysreg importer; `--check` compares deterministic output and rejects malformed
+or truncated XML rather than accepting partial data.
+
 ## Pinned snapshot and current status
 
 The LLVM source is `llvmorg-22.1.8`, commit
