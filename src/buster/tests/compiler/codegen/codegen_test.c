@@ -30,6 +30,7 @@ typedef f64 CodegenTestAbiMixedSumFunction(CodegenTestAbiMixed mixed);
 typedef s64 CodegenTestAbiLargeSumFunction(CodegenTestAbiLarge large);
 typedef CodegenTestAbiLarge CodegenTestAbiLargeMakeFunction(s64 first, s64 second, s64 third);
 
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
 // The native f80 differential below is a test harness only.  The backend
 // itself never consults host long double; the host ABI is the independent
 // oracle we call through after the generated module has been emitted.
@@ -150,6 +151,7 @@ BUSTER_GLOBAL_LOCAL void codegen_test_patch_local_canonical_calls(CodegenModule*
         }
     }
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL AnalysisEntity* codegen_test_entity_find(AnalysisResult* analysis, String8 name)
 {
