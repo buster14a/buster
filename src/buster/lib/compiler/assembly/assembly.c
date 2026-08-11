@@ -6186,6 +6186,7 @@ BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, Strin
         TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT,
         TARGET_CPU_FEATURE_AARCH64_SSBS,
         TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
+        TARGET_CPU_FEATURE_AARCH64_SME,
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(x86_feature_bits) + BUSTER_ARRAY_LENGTH(aarch64_feature_bits) ==
                     (u32)TARGET_CPU_FEATURE_COUNT - 2);

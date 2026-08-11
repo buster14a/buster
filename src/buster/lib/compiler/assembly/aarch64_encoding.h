@@ -209,14 +209,16 @@ struct BusterAarch64MetadataForm
     // Exact importer decision for the pinned Apple-M1 profile.  This is not
     // semantic encoder readiness; target-feature evaluation remains separate.
     bool apple_m1_profile_member;
+    bool provisionally_apple_m1;
     // Independent predicate-expression validity bit.  A malformed predicate
     // may coexist with an earlier parse reason, so callers must not infer it
-    // from reason_id.
+    // from reason_id. This consumes the byte that was reserved in schema 5 so
+    // the public structure retains its established size and field offsets.
     bool predicate_parse_error;
-    bool provisionally_apple_m1;
-    u8 reserved2[1];
 };
-BUSTER_CT_CHECK(sizeof(BusterAarch64MetadataForm) == 128);
+BUSTER_CT_CHECK(sizeof(BusterAarch64MetadataForm) == 120);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(BusterAarch64MetadataForm, provisionally_apple_m1) == 118);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(BusterAarch64MetadataForm, predicate_parse_error) == 119);
 
 typedef struct BusterAarch64MetadataCounts BusterAarch64MetadataCounts;
 struct BusterAarch64MetadataCounts
@@ -322,3 +324,9 @@ BUSTER_F_DECL u32 a64_generated_field_count(void);
 BUSTER_F_DECL bool a64_generated_form(u32 form_id, BusterAarch64MetadataForm* result);
 BUSTER_F_DECL bool a64_generated_raw_encode(u32 form_id, u32 const* field_values, u32 field_count, u32* word);
 BUSTER_F_DECL bool a64_generated_raw_decode(u32 form_id, u32 word, u32* field_values, u32 field_count);
+
+#if BUSTER_INCLUDE_TESTS
+// Test seam for the fail-closed generated predicate-error bit. The checked
+// production snapshot deliberately contains no malformed predicate rows.
+BUSTER_F_DECL bool buster_aarch64_metadata_test_predicate_parse_error_fails_closed(Target target);
+#endif

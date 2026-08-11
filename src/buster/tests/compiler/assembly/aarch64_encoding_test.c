@@ -375,7 +375,7 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     BusterAarch64MetadataCounts metadata_counts = buster_aarch64_metadata_counts();
     BUSTER_TEST(arguments, buster_aarch64_metadata_schema_version() == 6);
     BUSTER_TEST(arguments, metadata_counts.form_count == 7491 && metadata_counts.field_count == 22631 && metadata_counts.segment_count == 23039 &&
-                              metadata_counts.operand_count == 26262 && metadata_counts.predicate_count == 7854 && metadata_counts.string_pool_size == 337490);
+                              metadata_counts.operand_count == 26262 && metadata_counts.predicate_count == 7855 && metadata_counts.string_pool_size == 337490);
     BUSTER_TEST(arguments, metadata_counts.apple_m1_supported_count == 2898 && metadata_counts.apple_m1_raw_layout_complete_count == 2898 &&
                               metadata_counts.apple_m1_raw_layout_incomplete_count == 0);
 
@@ -430,6 +430,7 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     // them for a generic AArch64 target as well as for the M1 membership path.
     Target generic_aarch64_target = m1_explicit_target;
     generic_aarch64_target.cpu_model = CPU_MODEL_BASELINE;
+    BUSTER_TEST(arguments, buster_aarch64_metadata_test_predicate_parse_error_fails_closed(generic_aarch64_target));
     u32 unknown_predicate_form_count = 0;
     for (u32 form_id = 0; form_id < metadata_counts.form_count; form_id += 1)
     {
@@ -618,8 +619,23 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
         if (a64_encoding_metadata_string_equal(form.name, "MSRpstatesvcrImm1"))
         {
             found_svcr = true;
+            Target generic_no_sme = {
+                .cpu_arch = CPU_ARCH_AARCH64,
+                .cpu_model = CPU_MODEL_A64_GENERIC,
+                .os = OPERATING_SYSTEM_MACOS,
+            };
+            Target generic_with_sme = generic_no_sme;
+            generic_with_sme.cpu_features_explicit = true;
+            generic_with_sme.cpu_features = target_cpu_features_add(target_cpu_features_default(CPU_ARCH_AARCH64, CPU_MODEL_A64_GENERIC),
+                                                                     TARGET_CPU_FEATURE_AARCH64_SME);
+            BusterAarch64MetadataString custom_predicate = {0};
             BUSTER_TEST(arguments, !form.apple_m1_profile_member && !form.provisionally_apple_m1 &&
-                                      !buster_aarch64_metadata_form_supported_for_target(form_id, m1_target) && form.raw_layout_complete);
+                                      !buster_aarch64_metadata_form_supported_for_target(form_id, m1_target) && form.raw_layout_complete &&
+                                      form.predicate_count == 1 && buster_aarch64_metadata_predicate(form_id, 0, &custom_predicate) &&
+                                      a64_encoding_metadata_string_equal(custom_predicate, "HasSME"));
+            BUSTER_TEST(arguments, target_cpu_features_are_valid(generic_with_sme) &&
+                                      !buster_aarch64_metadata_form_supported_for_target(form_id, generic_no_sme) &&
+                                      buster_aarch64_metadata_form_supported_for_target(form_id, generic_with_sme));
             break;
         }
     }

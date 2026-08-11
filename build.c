@@ -13632,8 +13632,7 @@ BUSTER_GLOBAL_LOCAL bool aarch64_apple_m1_record_in_profile(Aarch64ImportRecord*
     // though the reduced row has an empty Predicates list.  Apple M1 has no
     // SME, so this row is an explicit denominator exclusion rather than an
     // inferred baseline form.
-    bool in_profile = !record->predicate_parse_error && record->parse_reason != AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE &&
-                      !aarch64_apple_m1_record_has_sme_custom_gate(record);
+    bool in_profile = !record->predicate_parse_error && record->parse_reason != AARCH64_IMPORT_REASON_UNKNOWN_PREDICATE;
     u64 excluded = 0;
     for (Aarch64ImportPredicate* predicate = record->first_predicate; predicate; predicate = predicate->next)
     {
@@ -14598,6 +14597,36 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_predicates(Arena* arena, Aarch64Im
     return valid && parser.index == parser.text.length;
 }
 
+BUSTER_GLOBAL_LOCAL void aarch64_import_apply_custom_operand_predicates(Arena* arena, Aarch64ImportRecord* record)
+{
+    if (!aarch64_apple_m1_record_has_sme_custom_gate(record))
+    {
+        return;
+    }
+    // LLVM's SVCROperand parser gates this otherwise predicate-free generic
+    // form on SME. Preserve that hidden parser requirement as an ordinary
+    // runtime predicate so every target—not only Apple M1—fails closed.
+    for (Aarch64ImportPredicate* predicate = record->first_predicate; predicate; predicate = predicate->next)
+    {
+        if (string_equal(predicate->name, S8("HasSME")))
+        {
+            return;
+        }
+    }
+    Aarch64ImportPredicate* predicate = arena_allocate(arena, Aarch64ImportPredicate, 1);
+    predicate->name = S8("HasSME");
+    if (record->last_predicate)
+    {
+        record->last_predicate->next = predicate;
+    }
+    else
+    {
+        record->first_predicate = predicate;
+    }
+    record->last_predicate = predicate;
+    record->predicate_count += 1;
+}
+
 BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_asm(Arena* arena, Aarch64ImportRecord* record)
 {
     String8 assembly = record->assembly;
@@ -15382,6 +15411,7 @@ BUSTER_GLOBAL_LOCAL bool aarch64_import_parse_record_object(Arena* arena, String
     {
         return false;
     }
+    aarch64_import_apply_custom_operand_predicates(arena, record);
     aarch64_import_parse_asm(arena, record);
     aarch64_import_set_field_semantics(record);
     record->mnemonic = aarch64_import_mnemonic(record->assembly);
@@ -17877,6 +17907,15 @@ BUSTER_GLOBAL_LOCAL bool aarch64_apple_m1_profile_acceptance_ready(Aarch64AppleM
            arm_evidence_machine_verified;
 }
 
+BUSTER_GLOBAL_LOCAL bool aarch64_apple_m1_profile_command_ready(Aarch64AppleM1ProfileStats stats, bool audit,
+                                                                 bool official_denominator_verified, bool aliases_machine_verified,
+                                                                 bool arm_evidence_machine_verified)
+{
+    return aarch64_apple_m1_profile_schema_ready(stats) &&
+           (audit || aarch64_apple_m1_profile_acceptance_ready(stats, official_denominator_verified, aliases_machine_verified,
+                                                                arm_evidence_machine_verified));
+}
+
 // A small generated ABI surface for production code that emits a handful of
 // well-known scalar memory forms.  The packed metadata IDs are snapshot row
 // IDs, so they must never be copied into a machine backend by hand.  Keep the
@@ -19021,7 +19060,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
     blocked_m1_profile.in_profile_class_counts[AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN] = 0;
     blocked_m1_profile.excluded_class_counts[AARCH64_IMPORT_COVERAGE_UNSUPPORTED_TOKEN] = 1;
     result = result && aarch64_apple_m1_profile_schema_ready(blocked_m1_profile) &&
-             !aarch64_apple_m1_profile_acceptance_ready(blocked_m1_profile, false, false, false);
+             !aarch64_apple_m1_profile_acceptance_ready(blocked_m1_profile, false, false, false) &&
+             aarch64_apple_m1_profile_command_ready(blocked_m1_profile, true, false, false, false) &&
+             !aarch64_apple_m1_profile_command_ready(blocked_m1_profile, false, false, false, false) &&
+             aarch64_apple_m1_profile_command_ready(blocked_m1_profile, false, true, true, true);
     XedGeneratedFormList normalized_forms = {.pointer = &normalized_form, .length = 1};
     XedGeneratedTableStats schema_stats_a = {0};
     XedGeneratedTableStats schema_stats_b = {0};
@@ -19501,7 +19543,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
                     result = PROCESS_RESULT_FAILED;
                 }
             }
-            else if (!options.audit && !aarch64_apple_m1_profile_acceptance_ready(profile_stats, false, false, false))
+            else if (!aarch64_apple_m1_profile_command_ready(profile_stats, options.audit, false, false, false))
             {
                 string_print(S8("error: Apple M1 metadata acceptance is blocked by unverified denominator, alias, or Arm evidence; use --audit only for inventory output\n"));
                 result = PROCESS_RESULT_FAILED;
@@ -20025,7 +20067,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
                             result = PROCESS_RESULT_FAILED;
                         }
                     }
-                    else if (!options.audit && !aarch64_apple_m1_profile_acceptance_ready(aarch64_m1_profile_stats, false, false, false))
+                    else if (!aarch64_apple_m1_profile_command_ready(aarch64_m1_profile_stats, options.audit, false, false, false))
                     {
                         string_print(S8("error: Apple M1 metadata acceptance is blocked by unverified denominator, alias, or Arm evidence; use --audit only for inventory output\n"));
                         result = PROCESS_RESULT_FAILED;

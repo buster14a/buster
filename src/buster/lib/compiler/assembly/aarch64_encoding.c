@@ -274,6 +274,7 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_predicate_feature(u32 predicate_offset, Ta
         {.name = "HasSB", .feature = TARGET_CPU_FEATURE_AARCH64_SB},
         {.name = "HasSHA2", .feature = TARGET_CPU_FEATURE_AARCH64_SHA2},
         {.name = "HasSHA3", .feature = TARGET_CPU_FEATURE_AARCH64_SHA3},
+        {.name = "HasSME", .feature = TARGET_CPU_FEATURE_AARCH64_SME},
         {.name = "HasTRACEV8_4", .feature = TARGET_CPU_FEATURE_AARCH64_TRACEV8_4},
     };
     if (!feature)
@@ -765,6 +766,16 @@ bool a64_generated_raw_decode(u32 form_id, u32 word, u32* field_values, u32 fiel
 {
     return buster_aarch64_metadata_raw_decode(form_id, word, field_values, field_count);
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool buster_aarch64_metadata_test_predicate_parse_error_fails_closed(Target target)
+{
+    BusterAarch64GeneratedForm malformed = {
+        .profile_flags = BUSTER_AARCH64_GENERATED_FORM_FLAG_PREDICATE_PARSE_ERROR,
+    };
+    return !a64_metadata_form_predicates_supported(malformed, target);
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL A64OpcodeDescriptor const a64_opcode_descriptors[A64_OPCODE_COUNT] = {
     [A64_OPCODE_NOP] =

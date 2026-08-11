@@ -80,9 +80,9 @@ reduced-input manifest records the raw reduced checksum separately from the
 checksum of the normalized JSONL emitted by the importer.
 
 The current audit output has 7,491 coverage rows, 7,491 canonical forms,
-22,631 fields, 23,039 segments, 26,262 operands, 7,854 predicate uses, and
-116 distinct predicate features. The flat-chunk header is 3,952,086 bytes
-(checksum `140b1ad11ef9116d`), the flat-chunk coverage include is 299,898
+22,631 fields, 23,039 segments, 26,262 operands, 7,855 predicate uses, and
+116 distinct predicate features. The flat-chunk header is 3,952,094 bytes
+(checksum `f4f8bf298c132f18`), the flat-chunk coverage include is 299,898
 bytes (checksum `ec5065a9b4503e40`), and the sorted string pool is 337,490
 bytes. Lookup
 indexes contain 1,557 mnemonic ranges and candidates for all 7,491 records;
@@ -125,7 +125,7 @@ is the baseline; unknown predicates and any predicate outside this set are
 explicit exclusions, never silent support.
 
 For the 7,491 checked-in LLVM rows this produces 2,898 provisional in-profile
-rows and 4,593 explicit exclusions (4,961 excluded predicate occurrences).
+rows and 4,593 explicit exclusions (4,962 excluded predicate occurrences).
 The in-profile classification counts are
 DIRECT=22, NORMALIZED=1,942, PRIVILEGED/SYSTEM=18,
 RESERVED/UNENCODABLE=0, UNSUPPORTED_TOKEN=916, with ALIAS=0 and
@@ -137,10 +137,12 @@ SVE/SVE2, SME/SME2, MTE, BF16, I8MM, and BTI) remain explicit exclusions and
 do not inflate that denominator. `MSRpstatesvcrImm1` is excluded by the
 explicit `SVCROperand` SME custom-parser gate despite its empty LLVM
 `Predicates` list; its deterministic profile exclusion reason is
-`custom_operand_requires_sme`, and it remains raw-layout complete. Raw layout
+`custom_operand_requires_sme`; the importer materializes that hidden parser
+requirement as a `HasSME` predicate for every target, and the form remains
+raw-layout complete. Raw layout
 closure is complete for all 2,898 in-profile rows (2,898/2,898); this is a
 bit-layout guarantee, not semantic encoder coverage. The emitted profile is
-2,537,273 bytes with checksum `edebd9b8f95920c4`.
+2,537,289 bytes with checksum `a16e675c38fe059f`.
 
 The MRS/MSR system forms with immediate operands remain in the M1 denominator
 when their feature predicates permit them. Their operand-value semantics are
