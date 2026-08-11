@@ -406,6 +406,12 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
         u64 target = 0;
         if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
+            if (symbol->kind == OBJECT_SYMBOL_DATA && !options.binding_count)
+            {
+                program->error = JIT_ERROR_EXTERNAL_DATA;
+                program->failing_symbol = symbol->name;
+                return false;
+            }
             if ((relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26) &&
                 relocation->addend)
             {
@@ -650,13 +656,6 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
             result.failing_symbol = symbol->name;
             return result;
         }
-        if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_DATA && relocation->kind == OBJECT_RELOCATION_ABSOLUTE64 &&
-            !options.binding_count)
-        {
-            result.error = JIT_ERROR_EXTERNAL_DATA;
-            result.failing_symbol = symbol->name;
-            return result;
-        }
         if (!jit_relocation_is_supported(relocation->kind, object->target.cpu_arch))
         {
             result.error = JIT_ERROR_UNSUPPORTED_RELOCATION;
@@ -665,6 +664,12 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
         }
         if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
+            if (symbol->kind == OBJECT_SYMBOL_DATA && !options.binding_count)
+            {
+                result.error = JIT_ERROR_EXTERNAL_DATA;
+                result.failing_symbol = symbol->name;
+                return result;
+            }
             if (symbol->kind == OBJECT_SYMBOL_DATA && !jit_external_data_relocation_is_supported(relocation->kind, object->target.cpu_arch))
             {
                 result.error = JIT_ERROR_EXTERNAL_DATA;

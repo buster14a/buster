@@ -432,6 +432,137 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
 #endif
 #endif
 
+#if BUSTER_CPU_ARCH_AARCH64 && (BUSTER_MACOS || BUSTER_IOS)
+    // An unbound external DATA symbol is rejected consistently for every
+    // supported AArch64 direct relocation.  Keep the pair as one fixture so
+    // the PAGE21/PAGEOFF12 contract cannot silently diverge.
+    u32 unbound_data_words[] = {UINT32_C(0x90000009), UINT32_C(0x91000041)};
+    ObjectSection unbound_data_section = {
+        .name = S8(".text"),
+        .data = {.pointer = (u8*)unbound_data_words, .length = sizeof(unbound_data_words)},
+        .kind = OBJECT_SECTION_TEXT,
+        .alignment = 4,
+    };
+    ObjectSymbol unbound_data_symbol = {
+        .name = S8("jit_test_unbound_page_data"),
+        .section = OBJECT_SECTION_UNDEFINED,
+        .kind = OBJECT_SYMBOL_DATA,
+        .global = true,
+    };
+    ObjectRelocation unbound_data_relocations[] = {
+        {
+            .offset = 0,
+            .section = 0,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGE21,
+        },
+        {
+            .offset = sizeof(u32),
+            .section = 0,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12,
+        },
+    };
+    ObjectFile unbound_data_object = {
+        .sections = &unbound_data_section,
+        .section_count = 1,
+        .symbols = &unbound_data_symbol,
+        .symbol_count = 1,
+        .relocations = unbound_data_relocations,
+        .relocation_count = BUSTER_ARRAY_LENGTH(unbound_data_relocations),
+        .target = target_native,
+    };
+    JitProgram unbound_page_pair_program = jit_link_object(&unbound_data_object, (JitOptions){0});
+    BUSTER_TEST(arguments, unbound_page_pair_program.error == JIT_ERROR_EXTERNAL_DATA);
+    BUSTER_STRING_TEST(arguments, unbound_page_pair_program.failing_symbol, unbound_data_symbol.name);
+    BUSTER_TEST(arguments, !unbound_page_pair_program.allocation_base && !unbound_page_pair_program.allocation_size &&
+                               !unbound_page_pair_program.auxiliary_allocation_base && !unbound_page_pair_program.auxiliary_allocation_size);
+    for (u32 unbound_index = 0; unbound_index < BUSTER_ARRAY_LENGTH(unbound_data_relocations); unbound_index += 1)
+    {
+        ObjectRelocation unbound_relocation = unbound_data_relocations[unbound_index];
+        ObjectFile unbound_object = unbound_data_object;
+        unbound_object.relocations = &unbound_relocation;
+        unbound_object.relocation_count = 1;
+        JitProgram unbound_program = jit_link_object(&unbound_object, (JitOptions){0});
+        BUSTER_TEST(arguments, unbound_program.error == JIT_ERROR_EXTERNAL_DATA);
+        BUSTER_STRING_TEST(arguments, unbound_program.failing_symbol, unbound_data_symbol.name);
+        BUSTER_TEST(arguments, !unbound_program.allocation_base && !unbound_program.allocation_size &&
+                                   !unbound_program.auxiliary_allocation_base && !unbound_program.auxiliary_allocation_size);
+    }
+    ObjectRelocation unbound_prel32_relocation = unbound_data_relocations[0];
+    unbound_prel32_relocation.kind = OBJECT_RELOCATION_AARCH64_PREL32;
+    ObjectFile unbound_prel32_object = unbound_data_object;
+    unbound_prel32_object.relocations = &unbound_prel32_relocation;
+    unbound_prel32_object.relocation_count = 1;
+    JitProgram unbound_prel32_program = jit_link_object(&unbound_prel32_object, (JitOptions){0});
+    BUSTER_TEST(arguments, unbound_prel32_program.error == JIT_ERROR_EXTERNAL_DATA);
+    BUSTER_STRING_TEST(arguments, unbound_prel32_program.failing_symbol, unbound_data_symbol.name);
+    BUSTER_TEST(arguments, !unbound_prel32_program.allocation_base && !unbound_prel32_program.allocation_size &&
+                               !unbound_prel32_program.auxiliary_allocation_base && !unbound_prel32_program.auxiliary_allocation_size);
+
+    // A bound external DATA symbol may be materialized directly by PAGEOFF12.
+    // This form has no page-range dependency, making it a stable native-target
+    // test even when the host allocator chooses a distant JIT mapping.
+    u32 bound_data_word = UINT32_C(0x91000041);
+    ObjectSection bound_data_section = unbound_data_section;
+    bound_data_section.data = (ByteSlice){.pointer = (u8*)&bound_data_word, .length = sizeof(bound_data_word)};
+    ObjectRelocation bound_data_relocation = unbound_data_relocations[1];
+    bound_data_relocation.offset = 0;
+    bound_data_relocation.addend = 4;
+    ObjectFile bound_data_object = unbound_data_object;
+    bound_data_object.sections = &bound_data_section;
+    bound_data_object.relocations = &bound_data_relocation;
+    bound_data_object.relocation_count = 1;
+    u64 bound_data_value = 0;
+    JitHostBinding bound_data_binding = {
+        .name = unbound_data_symbol.name,
+        .address = &bound_data_value,
+        .kind = OBJECT_SYMBOL_DATA,
+    };
+    JitProgram bound_data_program = jit_link_object(&bound_data_object,
+                                                     (JitOptions){.bindings = &bound_data_binding, .binding_count = 1});
+    BUSTER_TEST(arguments, bound_data_program.error == JIT_ERROR_NONE && bound_data_program.allocation_base);
+    if (bound_data_program.error == JIT_ERROR_NONE && bound_data_program.section_addresses[0])
+    {
+        u32 bound_data_expected = UINT32_C(0x91000000) | (u32)(((u64)(uintptr_t)&bound_data_value + 4) & 0xfff) << 10 | (2u << 5) | 1u;
+        u32 bound_data_actual = 0;
+        memcpy(&bound_data_actual, bound_data_program.section_addresses[0], sizeof(bound_data_actual));
+        BUSTER_TEST(arguments, bound_data_actual == bound_data_expected);
+    }
+    jit_program_release(&bound_data_program);
+
+    // The first PAGEOFF12 patch is intentionally valid, while the following
+    // PAGE21 word is malformed.  The failed link must discard the allocation
+    // and leave the caller-owned object bytes unchanged.
+    u32 transactional_words[] = {UINT32_C(0x91000041), UINT32_C(0x14000000)};
+    ObjectSection transactional_section = bound_data_section;
+    transactional_section.data = (ByteSlice){.pointer = (u8*)transactional_words, .length = sizeof(transactional_words)};
+    ObjectRelocation transactional_relocations[] = {
+        bound_data_relocation,
+        {
+            .offset = sizeof(u32),
+            .section = 0,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGE21,
+        },
+    };
+    ObjectFile transactional_object = bound_data_object;
+    transactional_object.sections = &transactional_section;
+    transactional_object.relocations = transactional_relocations;
+    transactional_object.relocation_count = BUSTER_ARRAY_LENGTH(transactional_relocations);
+    u32 transactional_snapshot[BUSTER_ARRAY_LENGTH(transactional_words)];
+    memcpy(transactional_snapshot, transactional_words, sizeof(transactional_snapshot));
+    JitProgram transactional_program = jit_link_object(&transactional_object,
+                                                        (JitOptions){.bindings = &bound_data_binding, .binding_count = 1});
+    BUSTER_TEST(arguments, transactional_program.error == JIT_ERROR_CAPACITY);
+    BUSTER_STRING_TEST(arguments, transactional_program.failing_symbol, unbound_data_symbol.name);
+    BUSTER_TEST(arguments, !transactional_program.allocation_base && !transactional_program.allocation_size &&
+                               !transactional_program.auxiliary_allocation_base && !transactional_program.auxiliary_allocation_size &&
+                               !transactional_program.executable_size && !transactional_program.section_addresses[0] &&
+                               !transactional_program.section_sizes[0] &&
+                               memcmp(transactional_words, transactional_snapshot, sizeof(transactional_snapshot)) == 0);
+#endif
+
     u8 tls_byte = 1;
     ObjectSection tls_section = {
         .name = S8(".tdata"),
