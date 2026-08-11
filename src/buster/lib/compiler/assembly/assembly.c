@@ -5838,8 +5838,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_instruction_parse(AssemblyBuild
     instruction->aarch64_scalar_integer_form_index = form_index;
     instruction->aarch64_scalar_integer_operand_count = (u8)operand_count;
     instruction->aarch64_scalar_integer_modifier_count = (u8)modifier_count;
-    for (u32 index = 0; index < operand_count; index += 1) instruction->aarch64_scalar_integer_operands[index] = parsed_operands[index];
-    for (u32 index = 0; index < modifier_count; index += 1) instruction->aarch64_scalar_integer_modifiers[index] = parsed_modifiers[index];
+    memcpy(instruction->aarch64_scalar_integer_operands, parsed_operands,
+           sizeof(*parsed_operands) * operand_count);
+    memcpy(instruction->aarch64_scalar_integer_modifiers, parsed_modifiers,
+           sizeof(*parsed_modifiers) * modifier_count);
     instruction->operand_count = (u8)operand_count;
     instruction->size = 4;
     return true;
