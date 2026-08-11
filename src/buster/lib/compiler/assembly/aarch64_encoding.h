@@ -317,6 +317,16 @@ BUSTER_F_DECL bool buster_aarch64_metadata_form_has_complete_raw_layout(u32 form
 BUSTER_F_DECL bool buster_aarch64_metadata_raw_encode(u32 form_id, u32 const* field_values, u32 field_count, u32* word);
 BUSTER_F_DECL bool buster_aarch64_metadata_raw_decode(u32 form_id, u32 word, u32* field_values, u32 field_count);
 
+// Fast production path for the importer-named Apple-M1 forms.  Unlike the
+// generic metadata API above, this path reads only direct generated plan
+// tables; it never decodes packed metadata or repeats structural layout
+// validation. Input count, null pointers, and every source-field mask remain
+// checked on each call.
+BUSTER_F_DECL u32 buster_aarch64_production_plan_form_count(void);
+BUSTER_F_DECL u32 buster_aarch64_production_plan_field_count(void);
+BUSTER_F_DECL u32 buster_aarch64_production_plan_segment_count(void);
+BUSTER_F_DECL bool buster_aarch64_production_raw_encode(u32 form_id, u32 const* field_values, u32 field_count, u32* word);
+
 // Short aliases used by assembly semantic layers that already speak in terms
 // of generated forms. They are wrappers, not a second metadata implementation.
 BUSTER_F_DECL u32 a64_generated_form_count(void);
@@ -324,6 +334,7 @@ BUSTER_F_DECL u32 a64_generated_field_count(void);
 BUSTER_F_DECL bool a64_generated_form(u32 form_id, BusterAarch64MetadataForm* result);
 BUSTER_F_DECL bool a64_generated_raw_encode(u32 form_id, u32 const* field_values, u32 field_count, u32* word);
 BUSTER_F_DECL bool a64_generated_raw_decode(u32 form_id, u32 word, u32* field_values, u32 field_count);
+BUSTER_F_DECL bool a64_generated_production_raw_encode(u32 form_id, u32 const* field_values, u32 field_count, u32* word);
 
 #if BUSTER_INCLUDE_TESTS
 // Test seam for the fail-closed generated predicate-error bit. The checked

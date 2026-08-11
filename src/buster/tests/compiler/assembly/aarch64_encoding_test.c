@@ -731,6 +731,107 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !a64_generated_raw_encode(form_id, out_of_range, BUSTER_ARRAY_LENGTH(out_of_range), &ignored));
     }
 
+    // The machine backend's bounded production set is generated from the
+    // same normalized records as the packed metadata.  Exercise every named
+    // form through both encoders, at deterministic and all-ones field values,
+    // and reject malformed fast-path requests without entering the packed
+    // decoder.  Keeping this list in the test makes a missing generated plan
+    // entry fail loudly when the importer set changes.
+    static struct
+    {
+        u32 form_id;
+        char const* name;
+    } const production_forms[] = {
+        {BUSTER_AARCH64_GENERATED_FORM_LDRBBUI, "LDRBBui"},
+        {BUSTER_AARCH64_GENERATED_FORM_LDRHHUI, "LDRHHui"},
+        {BUSTER_AARCH64_GENERATED_FORM_LDRWUI, "LDRWui"},
+        {BUSTER_AARCH64_GENERATED_FORM_LDRXUI, "LDRXui"},
+        {BUSTER_AARCH64_GENERATED_FORM_STRBBUI, "STRBBui"},
+        {BUSTER_AARCH64_GENERATED_FORM_STRHHUI, "STRHHui"},
+        {BUSTER_AARCH64_GENERATED_FORM_STRWUI, "STRWui"},
+        {BUSTER_AARCH64_GENERATED_FORM_STRXUI, "STRXui"},
+        {BUSTER_AARCH64_GENERATED_FORM_ORRWRS, "ORRWrs"},
+        {BUSTER_AARCH64_GENERATED_FORM_ORRXRS, "ORRXrs"},
+        {BUSTER_AARCH64_GENERATED_FORM_ADDWRS, "ADDWrs"},
+        {BUSTER_AARCH64_GENERATED_FORM_ADDXRS, "ADDXrs"},
+        {BUSTER_AARCH64_GENERATED_FORM_SUBWRS, "SUBWrs"},
+        {BUSTER_AARCH64_GENERATED_FORM_SUBXRS, "SUBXrs"},
+        {BUSTER_AARCH64_GENERATED_FORM_ANDWRS, "ANDWrs"},
+        {BUSTER_AARCH64_GENERATED_FORM_ANDXRS, "ANDXrs"},
+        {BUSTER_AARCH64_GENERATED_FORM_EORWRS, "EORWrs"},
+        {BUSTER_AARCH64_GENERATED_FORM_EORXRS, "EORXrs"},
+        {BUSTER_AARCH64_GENERATED_FORM_MADDWRRR, "MADDWrrr"},
+        {BUSTER_AARCH64_GENERATED_FORM_MADDXRRR, "MADDXrrr"},
+        {BUSTER_AARCH64_GENERATED_FORM_MSUBWRRR, "MSUBWrrr"},
+        {BUSTER_AARCH64_GENERATED_FORM_MSUBXRRR, "MSUBXrrr"},
+        {BUSTER_AARCH64_GENERATED_FORM_SDIVWR, "SDIVWr"},
+        {BUSTER_AARCH64_GENERATED_FORM_SDIVXR, "SDIVXr"},
+        {BUSTER_AARCH64_GENERATED_FORM_UDIVWR, "UDIVWr"},
+        {BUSTER_AARCH64_GENERATED_FORM_UDIVXR, "UDIVXr"},
+        {BUSTER_AARCH64_GENERATED_FORM_LSLVWR, "LSLVWr"},
+        {BUSTER_AARCH64_GENERATED_FORM_LSLVXR, "LSLVXr"},
+        {BUSTER_AARCH64_GENERATED_FORM_ASRVWR, "ASRVWr"},
+        {BUSTER_AARCH64_GENERATED_FORM_ASRVXR, "ASRVXr"},
+        {BUSTER_AARCH64_GENERATED_FORM_LSRVWR, "LSRVWr"},
+        {BUSTER_AARCH64_GENERATED_FORM_LSRVXR, "LSRVXr"},
+        {BUSTER_AARCH64_GENERATED_FORM_SBFMXRI, "SBFMXri"},
+        {BUSTER_AARCH64_GENERATED_FORM_UBFMWRI, "UBFMWri"},
+        {BUSTER_AARCH64_GENERATED_FORM_ORNWRS, "ORNWrs"},
+        {BUSTER_AARCH64_GENERATED_FORM_ORNXRS, "ORNXrs"},
+        {BUSTER_AARCH64_GENERATED_FORM_SUBSWRS, "SUBSWrs"},
+        {BUSTER_AARCH64_GENERATED_FORM_SUBSXRS, "SUBSXrs"},
+        {BUSTER_AARCH64_GENERATED_FORM_SUBSXRI, "SUBSXri"},
+        {BUSTER_AARCH64_GENERATED_FORM_CSINCWR, "CSINCWr"},
+        {BUSTER_AARCH64_GENERATED_FORM_FMOVXDR, "FMOVXDr"},
+        {BUSTER_AARCH64_GENERATED_FORM_FMOVDXR, "FMOVDXr"},
+        {BUSTER_AARCH64_GENERATED_FORM_ADDXRI, "ADDXri"},
+        {BUSTER_AARCH64_GENERATED_FORM_RET, "RET"},
+    };
+    u32 production_field_total = 0;
+    u32 production_segment_total = 0;
+    BUSTER_TEST(arguments, buster_aarch64_production_plan_form_count() == BUSTER_ARRAY_LENGTH(production_forms));
+    for (u32 form_index = 0; form_index < BUSTER_ARRAY_LENGTH(production_forms); form_index += 1)
+    {
+        u32 form_id = production_forms[form_index].form_id;
+        BusterAarch64MetadataForm form = {0};
+        BUSTER_TEST(arguments, buster_aarch64_metadata_form(form_id, &form) && form.id == form_id && form.raw_layout_complete &&
+                              form.provisionally_apple_m1 && a64_encoding_metadata_string_equal(form.name, production_forms[form_index].name));
+        BUSTER_TEST(arguments, form.field_count <= 8);
+        production_field_total += form.field_count;
+        u32 values[8] = {0};
+        u32 all_ones[8] = {0};
+        for (u32 field_index = 0; field_index < form.field_count; field_index += 1)
+        {
+            BusterAarch64MetadataField field = {0};
+            BUSTER_TEST(arguments, buster_aarch64_metadata_field(form_id, field_index, &field));
+            production_segment_total += field.segment_count;
+            values[field_index] = field.source_mask & (UINT32_C(0x9e3779b9) ^ form_id * UINT32_C(0x45d9f3b) ^ field_index * UINT32_C(0x27d4eb2d));
+            all_ones[field_index] = field.source_mask;
+            u32 invalid_values[8] = {0};
+            invalid_values[field_index] = field.source_mask | ~field.source_mask;
+            u32 ignored = 0;
+            BUSTER_TEST(arguments, !buster_aarch64_production_raw_encode(form_id, invalid_values, form.field_count, &ignored));
+        }
+        u32 generic_word = 0;
+        u32 production_word = 0;
+        u32 alias_word = 0;
+        BUSTER_TEST(arguments, buster_aarch64_metadata_raw_encode(form_id, values, form.field_count, &generic_word) &&
+                              buster_aarch64_production_raw_encode(form_id, values, form.field_count, &production_word) &&
+                              a64_generated_production_raw_encode(form_id, values, form.field_count, &alias_word) && generic_word == production_word &&
+                              production_word == alias_word && (production_word & form.fixed_mask) == form.fixed_value);
+        BUSTER_TEST(arguments, buster_aarch64_metadata_raw_encode(form_id, all_ones, form.field_count, &generic_word) &&
+                              buster_aarch64_production_raw_encode(form_id, all_ones, form.field_count, &production_word) && generic_word == production_word);
+    }
+    BUSTER_TEST(arguments, buster_aarch64_production_plan_field_count() == production_field_total &&
+                              buster_aarch64_production_plan_segment_count() == production_segment_total);
+    u32 fast_values[8] = {0};
+    u32 fast_word = 0;
+    BUSTER_TEST(arguments, !buster_aarch64_production_raw_encode(UINT32_MAX, fast_values, 0, &fast_word) &&
+                          !buster_aarch64_production_raw_encode(metadata_counts.form_count, fast_values, 0, &fast_word) &&
+                          !buster_aarch64_production_raw_encode(production_forms[0].form_id, fast_values, 2, &fast_word) &&
+                          !buster_aarch64_production_raw_encode(production_forms[0].form_id, 0, 3, &fast_word) &&
+                          !buster_aarch64_production_raw_encode(production_forms[0].form_id, fast_values, 3, 0));
+
     // Bounded rejection coverage for null, wrong-count, overflow, fixed-bit,
     // unsupported-target, and out-of-range metadata requests.
     BusterAarch64MetadataForm metadata_form = {0};

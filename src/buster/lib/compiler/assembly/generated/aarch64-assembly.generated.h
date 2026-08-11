@@ -7,6 +7,7 @@
 #define BUSTER_AARCH64_GENERATED_FORM_FLAG_APPLE_M1_PROFILE_MEMBER 1u
 #define BUSTER_AARCH64_GENERATED_FORM_FLAG_PREDICATE_PARSE_ERROR 2u
 // Packed metadata is consumed by the AArch64 runtime; coverage fields remain audit/provenance data.
+// Named production plans are emitted separately as predecoded direct-C runtime data.
 
 typedef enum BusterAarch64GeneratedCoverageClass {
     BUSTER_AARCH64_GENERATED_COVERAGE_DIRECT,

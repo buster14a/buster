@@ -16136,7 +16136,8 @@ BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_preamble(Arena* output)
                             "#define BUSTER_AARCH64_GENERATED_SCHEMA_VERSION 6\n"
                             "#define BUSTER_AARCH64_GENERATED_FORM_FLAG_APPLE_M1_PROFILE_MEMBER 1u\n"
                             "#define BUSTER_AARCH64_GENERATED_FORM_FLAG_PREDICATE_PARSE_ERROR 2u\n"
-                            "// Packed metadata is consumed by the AArch64 runtime; coverage fields remain audit/provenance data.\n\n"
+                            "// Packed metadata is consumed by the AArch64 runtime; coverage fields remain audit/provenance data.\n"
+                            "// Named production plans are emitted separately as predecoded direct-C runtime data.\n\n"
                             "typedef enum BusterAarch64GeneratedCoverageClass {\n"
                             "    BUSTER_AARCH64_GENERATED_COVERAGE_DIRECT,\n"
                             "    BUSTER_AARCH64_GENERATED_COVERAGE_NORMALIZED,\n"
@@ -17943,7 +17944,515 @@ BUSTER_GLOBAL_LOCAL Aarch64GeneratedNamedForm aarch64_generated_named_forms[] = 
     {S8_INITIALIZER("STRHHui"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_STRHHUI")},
     {S8_INITIALIZER("STRWui"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_STRWUI")},
     {S8_INITIALIZER("STRXui"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_STRXUI")},
+    {S8_INITIALIZER("ORRWrs"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_ORRWRS")},
+    {S8_INITIALIZER("ORRXrs"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_ORRXRS")},
+    {S8_INITIALIZER("ADDWrs"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_ADDWRS")},
+    {S8_INITIALIZER("ADDXrs"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_ADDXRS")},
+    {S8_INITIALIZER("SUBWrs"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_SUBWRS")},
+    {S8_INITIALIZER("SUBXrs"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_SUBXRS")},
+    {S8_INITIALIZER("ANDWrs"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_ANDWRS")},
+    {S8_INITIALIZER("ANDXrs"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_ANDXRS")},
+    {S8_INITIALIZER("EORWrs"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_EORWRS")},
+    {S8_INITIALIZER("EORXrs"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_EORXRS")},
+    {S8_INITIALIZER("MADDWrrr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_MADDWRRR")},
+    {S8_INITIALIZER("MADDXrrr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_MADDXRRR")},
+    {S8_INITIALIZER("MSUBWrrr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_MSUBWRRR")},
+    {S8_INITIALIZER("MSUBXrrr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_MSUBXRRR")},
+    {S8_INITIALIZER("SDIVWr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_SDIVWR")},
+    {S8_INITIALIZER("SDIVXr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_SDIVXR")},
+    {S8_INITIALIZER("UDIVWr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_UDIVWR")},
+    {S8_INITIALIZER("UDIVXr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_UDIVXR")},
+    {S8_INITIALIZER("LSLVWr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_LSLVWR")},
+    {S8_INITIALIZER("LSLVXr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_LSLVXR")},
+    {S8_INITIALIZER("ASRVWr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_ASRVWR")},
+    {S8_INITIALIZER("ASRVXr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_ASRVXR")},
+    {S8_INITIALIZER("LSRVWr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_LSRVWR")},
+    {S8_INITIALIZER("LSRVXr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_LSRVXR")},
+    {S8_INITIALIZER("SBFMXri"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_SBFMXRI")},
+    {S8_INITIALIZER("UBFMWri"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_UBFMWRI")},
+    {S8_INITIALIZER("ORNWrs"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_ORNWRS")},
+    {S8_INITIALIZER("ORNXrs"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_ORNXRS")},
+    {S8_INITIALIZER("SUBSWrs"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_SUBSWRS")},
+    {S8_INITIALIZER("SUBSXrs"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_SUBSXRS")},
+    {S8_INITIALIZER("SUBSXri"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_SUBSXRI")},
+    {S8_INITIALIZER("CSINCWr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_CSINCWR")},
+    {S8_INITIALIZER("FMOVXDr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_FMOVXDR")},
+    {S8_INITIALIZER("FMOVDXr"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_FMOVDXR")},
+    {S8_INITIALIZER("ADDXri"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_ADDXRI")},
+    {S8_INITIALIZER("RET"), S8_INITIALIZER("BUSTER_AARCH64_GENERATED_FORM_RET")},
 };
+
+// The packed metadata snapshot is intentionally retained as the audit and
+// reference representation.  Machine code uses this second, direct-C plan
+// table instead: every descriptor is predecoded by the importer, so a hot
+// encode never enters a base64 accessor or revalidates the whole metadata
+// grammar.  The plan rows are generated from the same normalized records and
+// are therefore not a second source of opcode constants.
+typedef struct Aarch64GeneratedProductionSegment Aarch64GeneratedProductionSegment;
+struct Aarch64GeneratedProductionSegment
+{
+    u8 instruction_lsb;
+    u8 width;
+    u8 value_lsb;
+    u8 reserved;
+};
+
+typedef struct Aarch64GeneratedProductionField Aarch64GeneratedProductionField;
+struct Aarch64GeneratedProductionField
+{
+    u32 source_mask;
+    u32 segment_first;
+    u16 segment_count;
+    u8 width;
+    u8 reserved;
+};
+
+typedef struct Aarch64GeneratedProductionForm Aarch64GeneratedProductionForm;
+struct Aarch64GeneratedProductionForm
+{
+    u32 form_id;
+    u32 fixed_mask;
+    u32 fixed_value;
+    u32 field_first;
+    u16 field_count;
+    u16 reserved;
+    u64 source_hash;
+};
+
+BUSTER_GLOBAL_LOCAL bool aarch64_import_record_raw_layout_complete(Aarch64ImportRecord* record)
+{
+    if (!record || (record->fixed_value & ~record->fixed_mask))
+    {
+        return false;
+    }
+    u32 instruction_used = record->fixed_mask;
+    for (Aarch64ImportVariable* variable = record->first_variable; variable; variable = variable->next)
+    {
+        if (!variable->bit_count || !variable->source_mask || !variable->width || variable->width > 32 || variable->unmapped ||
+            (variable->source_mask & ~((variable->width == 32) ? UINT32_MAX : ((UINT32_C(1) << variable->width) - 1u))))
+        {
+            return false;
+        }
+        u32 source_used = 0;
+        u32 segment_count = 0;
+        Aarch64ImportBit* previous = 0;
+        for (Aarch64ImportBit* bit = variable->first_bit; bit; bit = bit->next)
+        {
+            if (bit->instruction_bit >= 32 || bit->value_bit >= 32 || (source_used & (UINT32_C(1) << bit->value_bit)) ||
+                (instruction_used & (UINT32_C(1) << bit->instruction_bit)))
+            {
+                return false;
+            }
+            if (!previous || bit->instruction_bit != previous->instruction_bit + 1 || bit->value_bit != previous->value_bit + 1)
+            {
+                segment_count += 1;
+            }
+            source_used |= UINT32_C(1) << bit->value_bit;
+            instruction_used |= UINT32_C(1) << bit->instruction_bit;
+            previous = bit;
+        }
+        if (source_used != variable->source_mask || variable->bit_count != variable->width || segment_count > UINT16_MAX)
+        {
+            return false;
+        }
+    }
+    return instruction_used == UINT32_MAX;
+}
+
+BUSTER_GLOBAL_LOCAL Aarch64ImportRecord* aarch64_generated_find_named_record(Aarch64ImportRecordList records, String8 name)
+{
+    Aarch64ImportRecord* found = 0;
+    for (Aarch64ImportRecord* record = records.first; record; record = record->next)
+    {
+        if (string_equal(record->name, name))
+        {
+            if (found)
+            {
+                return 0;
+            }
+            found = record;
+        }
+    }
+    return found;
+}
+
+// Count the direct-C plan rows before allocating their scratch storage.  The
+// importer has no fixed upper bound on the number of fields or discontiguous
+// segments in a normalized form, so a named_count*constant reservation would
+// eventually become either a silent truncation or an unnecessarily large
+// scratch arena.  Keep this pass purely structural; raw-layout validation is
+// still performed by aarch64_import_record_raw_layout_complete() below.
+BUSTER_GLOBAL_LOCAL bool aarch64_generated_plan_record_counts(Aarch64ImportRecord* record, u32* field_count_result,
+                                                               u32* segment_count_result)
+{
+    if (!record || !field_count_result || !segment_count_result)
+    {
+        return false;
+    }
+    u64 field_count = 0;
+    u64 segment_count = 0;
+    for (Aarch64ImportVariable* variable = record->first_variable; variable; variable = variable->next)
+    {
+        field_count += 1;
+        u32 variable_segments = 0;
+        Aarch64ImportBit* previous = 0;
+        for (Aarch64ImportBit* bit = variable->first_bit; bit; bit = bit->next)
+        {
+            if (!previous || bit->instruction_bit != previous->instruction_bit + 1 || bit->value_bit != previous->value_bit + 1)
+            {
+                if (variable_segments == UINT16_MAX)
+                {
+                    return false;
+                }
+                variable_segments += 1;
+            }
+            previous = bit;
+        }
+        segment_count += variable_segments;
+    }
+    if (field_count != record->variable_count || field_count > UINT16_MAX || segment_count > UINT32_MAX)
+    {
+        return false;
+    }
+    *field_count_result = (u32)field_count;
+    *segment_count_result = (u32)segment_count;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_production_u32(Arena* output, u32 value)
+{
+    xed_generated_append_decimal(output, value);
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_production_u64(Arena* output, u64 value)
+{
+    xed_generated_append_decimal(output, value);
+}
+
+BUSTER_GLOBAL_LOCAL bool aarch64_generated_emit_production_plans(Arena* output, Arena* json_output, Arena* scratch,
+                                                                   Aarch64ImportRecordList records, u32* form_count_result,
+                                                                   u32* field_count_result, u32* segment_count_result)
+{
+    if (!output || !json_output || !scratch || !records.count)
+    {
+        return false;
+    }
+    u32 canonical_count = 0;
+    for (Aarch64ImportRecord* record = records.first; record; record = record->next)
+    {
+        if (record->normalized_form_id != UINT32_MAX && record->normalized_form_id >= canonical_count)
+        {
+            canonical_count = record->normalized_form_id + 1;
+        }
+    }
+    if (!canonical_count || canonical_count > UINT32_MAX / sizeof(u16))
+    {
+        return false;
+    }
+    u32 named_count = BUSTER_ARRAY_LENGTH(aarch64_generated_named_forms);
+    Aarch64ImportRecord** named_records = arena_allocate(scratch, Aarch64ImportRecord*, named_count);
+    u16* lookup = arena_allocate(scratch, u16, canonical_count);
+    for (u32 index = 0; index < canonical_count; index += 1)
+    {
+        lookup[index] = UINT16_MAX;
+    }
+
+    // Resolve and validate the bounded production set once, then derive exact
+    // array capacities from the records themselves.  This keeps the emitted
+    // plan complete if a future named form has more than four fields or eight
+    // discontiguous segments without making the hot runtime representation
+    // depend on an arbitrary importer-side ceiling.
+    u64 field_capacity64 = 0;
+    u64 segment_capacity64 = 0;
+    bool valid = true;
+    for (u32 name_index = 0; valid && name_index < named_count; name_index += 1)
+    {
+        Aarch64ImportRecord* record = aarch64_generated_find_named_record(records, aarch64_generated_named_forms[name_index].source_name);
+        u32 record_field_count = 0;
+        u32 record_segment_count = 0;
+        if (!record || record->normalized_form_id == UINT32_MAX || record->normalized_form_id >= canonical_count ||
+            record->coverage_class == AARCH64_IMPORT_COVERAGE_ALIAS || !aarch64_apple_m1_record_in_profile(record, 0) ||
+            !aarch64_import_record_raw_layout_complete(record) || !aarch64_generated_plan_record_counts(record, &record_field_count, &record_segment_count) ||
+            name_index > UINT16_MAX)
+        {
+            valid = false;
+            break;
+        }
+        for (u32 prior_index = 0; prior_index < name_index; prior_index += 1)
+        {
+            if (named_records[prior_index]->normalized_form_id == record->normalized_form_id)
+            {
+                valid = false;
+                break;
+            }
+        }
+        if (!valid)
+        {
+            break;
+        }
+        named_records[name_index] = record;
+        field_capacity64 += record_field_count;
+        segment_capacity64 += record_segment_count;
+        if (field_capacity64 > UINT32_MAX || segment_capacity64 > UINT32_MAX)
+        {
+            valid = false;
+        }
+    }
+    if (!valid)
+    {
+        return false;
+    }
+    u32 field_capacity = (u32)field_capacity64;
+    u32 segment_capacity = (u32)segment_capacity64;
+    Aarch64GeneratedProductionForm* forms = arena_allocate(scratch, Aarch64GeneratedProductionForm, named_count);
+    Aarch64GeneratedProductionField* fields = arena_allocate(scratch, Aarch64GeneratedProductionField, field_capacity ? field_capacity : 1);
+    Aarch64GeneratedProductionSegment* segments =
+        arena_allocate(scratch, Aarch64GeneratedProductionSegment, segment_capacity ? segment_capacity : 1);
+    u32 field_count = 0;
+    u32 segment_count = 0;
+    for (u32 name_index = 0; valid && name_index < named_count; name_index += 1)
+    {
+        Aarch64ImportRecord* record = named_records[name_index];
+        u32 form_id = record->normalized_form_id;
+        if (lookup[form_id] != UINT16_MAX || name_index > UINT16_MAX)
+        {
+            valid = false;
+            break;
+        }
+        u32 form_field_first = field_count;
+        u32 form_field_count = 0;
+        for (Aarch64ImportVariable* variable = record->first_variable; valid && variable; variable = variable->next)
+        {
+            form_field_count += 1;
+            u32 variable_segment_first = segment_count;
+            Aarch64ImportBit* previous = 0;
+            for (Aarch64ImportBit* bit = variable->first_bit; valid && bit; bit = bit->next)
+            {
+                if (!previous || bit->instruction_bit != previous->instruction_bit + 1 || bit->value_bit != previous->value_bit + 1)
+                {
+                    u32 width = 1;
+                    Aarch64ImportBit* last = bit;
+                    for (Aarch64ImportBit* end = bit->next; end && end->instruction_bit == last->instruction_bit + 1 &&
+                                                         end->value_bit == last->value_bit + 1;
+                         end = end->next)
+                    {
+                        width += 1;
+                        last = end;
+                    }
+                    if (segment_count >= segment_capacity || width > UINT8_MAX)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    segments[segment_count++] = (Aarch64GeneratedProductionSegment){
+                        .instruction_lsb = bit->instruction_bit,
+                        .width = (u8)width,
+                        .value_lsb = bit->value_bit,
+                    };
+                }
+                previous = bit;
+            }
+            u32 variable_segment_count = segment_count - variable_segment_first;
+            if (valid && (field_count >= field_capacity || variable_segment_count > UINT16_MAX || variable->width > UINT8_MAX))
+            {
+                valid = false;
+            }
+            if (valid)
+            {
+                fields[field_count++] = (Aarch64GeneratedProductionField){
+                    .source_mask = variable->source_mask,
+                    .segment_first = variable_segment_first,
+                    .segment_count = (u16)variable_segment_count,
+                    .width = variable->width,
+                };
+            }
+        }
+        if (valid && form_field_count != record->variable_count)
+        {
+            valid = false;
+        }
+        forms[name_index] = (Aarch64GeneratedProductionForm){
+            .form_id = form_id,
+            .fixed_mask = record->fixed_mask,
+            .fixed_value = record->fixed_value,
+            .field_first = form_field_first,
+            .field_count = (u16)form_field_count,
+            .source_hash = record->source_hash,
+        };
+        lookup[form_id] = (u16)name_index;
+        named_records[name_index] = record;
+    }
+    if (!valid || field_count > UINT32_MAX || segment_count > UINT32_MAX)
+    {
+        return false;
+    }
+
+    arena_append_string8(output,
+                         S8("/* Generated by build import_assembly_metadata; do not edit. */\n"
+                            "#ifndef BUSTER_AARCH64_PRODUCTION_PLAN_GENERATED_H\n"
+                            "#define BUSTER_AARCH64_PRODUCTION_PLAN_GENERATED_H\n"
+                            "#include <buster/lib/base.h>\n\n"
+                            "#define BUSTER_AARCH64_GENERATED_PRODUCTION_SCHEMA_VERSION 1\n"
+                            "// Direct predecoded plans for named Apple-M1 forms. Packed metadata remains the audit/reference path.\n\n"
+                            "typedef struct BusterAarch64GeneratedProductionSegment BusterAarch64GeneratedProductionSegment;\n"
+                            "struct BusterAarch64GeneratedProductionSegment { u8 instruction_lsb; u8 width; u8 value_lsb; u8 reserved; };\n"
+                            "typedef struct BusterAarch64GeneratedProductionField BusterAarch64GeneratedProductionField;\n"
+                            "struct BusterAarch64GeneratedProductionField { u32 source_mask; u32 segment_first; u16 segment_count; u8 width; u8 reserved; };\n"
+                            "typedef struct BusterAarch64GeneratedProductionForm BusterAarch64GeneratedProductionForm;\n"
+                            "struct BusterAarch64GeneratedProductionForm { u32 form_id; u32 fixed_mask; u32 fixed_value; u32 field_first; u16 field_count; u16 reserved; u64 source_hash; };\n\n"
+                            "#define BUSTER_AARCH64_GENERATED_PRODUCTION_CANONICAL_FORM_COUNT "));
+    aarch64_generated_emit_production_u32(output, canonical_count);
+    arena_append_string8(output, S8("\n#define BUSTER_AARCH64_GENERATED_PRODUCTION_FORM_COUNT "));
+    aarch64_generated_emit_production_u32(output, named_count);
+    arena_append_string8(output, S8("\n#define BUSTER_AARCH64_GENERATED_PRODUCTION_FIELD_COUNT "));
+    aarch64_generated_emit_production_u32(output, field_count);
+    arena_append_string8(output, S8("\n#define BUSTER_AARCH64_GENERATED_PRODUCTION_SEGMENT_COUNT "));
+    aarch64_generated_emit_production_u32(output, segment_count);
+    arena_append_string8(output, S8("\n\nstatic const BusterAarch64GeneratedProductionSegment buster_aarch64_generated_production_segments[] = {\n"));
+    for (u32 index = 0; index < segment_count; index += 1)
+    {
+        Aarch64GeneratedProductionSegment segment = segments[index];
+        arena_append_string8(output, S8("    {"));
+        aarch64_generated_emit_production_u32(output, segment.instruction_lsb);
+        arena_append_string8(output, S8(", "));
+        aarch64_generated_emit_production_u32(output, segment.width);
+        arena_append_string8(output, S8(", "));
+        aarch64_generated_emit_production_u32(output, segment.value_lsb);
+        arena_append_string8(output, S8(", 0},\n"));
+    }
+    arena_append_string8(output, S8("};\n\nstatic const BusterAarch64GeneratedProductionField buster_aarch64_generated_production_fields[] = {\n"));
+    for (u32 index = 0; index < field_count; index += 1)
+    {
+        Aarch64GeneratedProductionField field = fields[index];
+        arena_append_string8(output, S8("    {"));
+        xed_generated_append_hex(output, field.source_mask, false);
+        arena_append_string8(output, S8(", "));
+        aarch64_generated_emit_production_u32(output, field.segment_first);
+        arena_append_string8(output, S8(", "));
+        aarch64_generated_emit_production_u32(output, field.segment_count);
+        arena_append_string8(output, S8(", "));
+        aarch64_generated_emit_production_u32(output, field.width);
+        arena_append_string8(output, S8(", 0},\n"));
+    }
+    arena_append_string8(output, S8("};\n\nstatic const BusterAarch64GeneratedProductionForm buster_aarch64_generated_production_forms[] = {\n"));
+    for (u32 index = 0; index < named_count; index += 1)
+    {
+        Aarch64GeneratedProductionForm form = forms[index];
+        arena_append_string8(output, S8("    {"));
+        aarch64_generated_emit_production_u32(output, form.form_id);
+        arena_append_string8(output, S8(", "));
+        xed_generated_append_hex(output, form.fixed_mask, false);
+        arena_append_string8(output, S8(", "));
+        xed_generated_append_hex(output, form.fixed_value, false);
+        arena_append_string8(output, S8(", "));
+        aarch64_generated_emit_production_u32(output, form.field_first);
+        arena_append_string8(output, S8(", "));
+        aarch64_generated_emit_production_u32(output, form.field_count);
+        arena_append_string8(output, S8(", 0, "));
+        xed_generated_append_hex(output, form.source_hash, true);
+        arena_append_string8(output, S8("},\n"));
+    }
+    arena_append_string8(output, S8("};\n\nstatic const u16 buster_aarch64_generated_production_form_to_plan[] = {\n"));
+    for (u32 index = 0; index < canonical_count; index += 1)
+    {
+        if (!(index % 16))
+        {
+            arena_append_string8(output, S8("    "));
+        }
+        if (lookup[index] == UINT16_MAX)
+        {
+            arena_append_string8(output, S8("UINT16_MAX"));
+        }
+        else
+        {
+            aarch64_generated_emit_production_u32(output, lookup[index]);
+        }
+        if (index + 1 != canonical_count)
+        {
+            arena_append_string8(output, (index % 16) == 15 ? S8(",\n") : S8(", "));
+        }
+    }
+    arena_append_string8(output,
+                         S8("\n};\n\n"
+                            "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE u16 buster_aarch64_generated_production_plan_index(u32 form_id)\n"
+                            "{\n"
+                            "    return form_id < BUSTER_AARCH64_GENERATED_PRODUCTION_CANONICAL_FORM_COUNT ? buster_aarch64_generated_production_form_to_plan[form_id] : UINT16_MAX;\n"
+                            "}\n"
+                            "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE BusterAarch64GeneratedProductionForm const* buster_aarch64_generated_production_form_at(u16 index)\n"
+                            "{\n"
+                            "    return index < BUSTER_AARCH64_GENERATED_PRODUCTION_FORM_COUNT ? buster_aarch64_generated_production_forms + index : 0;\n"
+                            "}\n"
+                            "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE BusterAarch64GeneratedProductionField const* buster_aarch64_generated_production_field_at(u32 index)\n"
+                            "{\n"
+                            "    return index < BUSTER_AARCH64_GENERATED_PRODUCTION_FIELD_COUNT ? buster_aarch64_generated_production_fields + index : 0;\n"
+                            "}\n"
+                            "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE BusterAarch64GeneratedProductionSegment const* buster_aarch64_generated_production_segment_at(u32 index)\n"
+                            "{\n"
+                            "    return index < BUSTER_AARCH64_GENERATED_PRODUCTION_SEGMENT_COUNT ? buster_aarch64_generated_production_segments + index : 0;\n"
+                            "}\n\n"
+                            "#endif\n"));
+
+    for (u32 index = 0; index < named_count; index += 1)
+    {
+        Aarch64GeneratedProductionForm form = forms[index];
+        Aarch64ImportRecord* record = named_records[index];
+        arena_append_string8(json_output, S8("{\"form_id\":"));
+        aarch64_generated_emit_production_u32(json_output, form.form_id);
+        arena_append_string8(json_output, S8(",\"name\":"));
+        arena_append_json_string(json_output, record->name);
+        arena_append_string8(json_output, S8(",\"source_hash\":"));
+        aarch64_generated_emit_production_u64(json_output, form.source_hash);
+        arena_append_string8(json_output, S8(",\"fixed_mask\":"));
+        aarch64_generated_emit_production_u32(json_output, form.fixed_mask);
+        arena_append_string8(json_output, S8(",\"fixed_value\":"));
+        aarch64_generated_emit_production_u32(json_output, form.fixed_value);
+        arena_append_string8(json_output, S8(",\"fields\":["));
+        u32 field_end = form.field_first + form.field_count;
+        for (u32 field_index = form.field_first; field_index < field_end; field_index += 1)
+        {
+            if (field_index != form.field_first)
+            {
+                arena_append_char8(json_output, ',');
+            }
+            Aarch64GeneratedProductionField field = fields[field_index];
+            arena_append_string8(json_output, S8("{\"source_mask\":"));
+            aarch64_generated_emit_production_u32(json_output, field.source_mask);
+            arena_append_string8(json_output, S8(",\"width\":"));
+            aarch64_generated_emit_production_u32(json_output, field.width);
+            arena_append_string8(json_output, S8(",\"segments\":["));
+            for (u32 segment_index = field.segment_first; segment_index < field.segment_first + field.segment_count; segment_index += 1)
+            {
+                if (segment_index != field.segment_first)
+                {
+                    arena_append_char8(json_output, ',');
+                }
+                Aarch64GeneratedProductionSegment segment = segments[segment_index];
+                arena_append_string8(json_output, S8("{\"instruction_lsb\":"));
+                aarch64_generated_emit_production_u32(json_output, segment.instruction_lsb);
+                arena_append_string8(json_output, S8(",\"width\":"));
+                aarch64_generated_emit_production_u32(json_output, segment.width);
+                arena_append_string8(json_output, S8(",\"value_lsb\":"));
+                aarch64_generated_emit_production_u32(json_output, segment.value_lsb);
+                arena_append_char8(json_output, '}');
+            }
+            arena_append_string8(json_output, S8("]}"));
+        }
+        arena_append_string8(json_output, S8("]}\n"));
+    }
+    if (form_count_result)
+    {
+        *form_count_result = named_count;
+    }
+    if (field_count_result)
+    {
+        *field_count_result = field_count;
+    }
+    if (segment_count_result)
+    {
+        *segment_count_result = segment_count;
+    }
+    return true;
+}
 
 BUSTER_GLOBAL_LOCAL bool aarch64_generated_emit_named_form_ids(Arena* output, Aarch64ImportRecordList records)
 {
@@ -17973,7 +18482,8 @@ BUSTER_GLOBAL_LOCAL bool aarch64_generated_emit_named_form_ids(Arena* output, Aa
                 found = record;
             }
         }
-        if (!found || found->normalized_form_id == UINT32_MAX)
+        if (!found || found->normalized_form_id == UINT32_MAX || found->coverage_class == AARCH64_IMPORT_COVERAGE_ALIAS ||
+            !aarch64_apple_m1_record_in_profile(found, 0) || !aarch64_import_record_raw_layout_complete(found))
         {
             valid = false;
             break;
@@ -18142,6 +18652,13 @@ struct AssemblyImportFullManifestData
     String8 aarch64_generated_coverage_checksum;
     String8 aarch64_form_ids_checksum;
     u64 aarch64_form_ids_bytes;
+    String8 aarch64_production_plan_checksum;
+    u64 aarch64_production_plan_bytes;
+    String8 aarch64_production_plan_json_checksum;
+    u64 aarch64_production_plan_json_bytes;
+    u64 aarch64_production_plan_form_count;
+    u64 aarch64_production_plan_field_count;
+    u64 aarch64_production_plan_segment_count;
     String8 aarch64_alias_source_identity;
     String8 aarch64_inventory_checksum;
     u64 aarch64_inventory_bytes;
@@ -18209,6 +18726,15 @@ BUSTER_GLOBAL_LOCAL String8 assembly_import_format_full_manifest(Arena* arena, A
            "    \"form_ids\": \"aarch64-form-ids.generated.h\",\n"
            "    \"form_ids_checksum\": \"{S8}\",\n"
            "    \"form_ids_bytes\": {u64},\n"
+           "    \"production_plan\": \"aarch64-production-plan.generated.h\",\n"
+           "    \"production_plan_checksum\": \"{S8}\",\n"
+           "    \"production_plan_bytes\": {u64},\n"
+           "    \"production_plan_jsonl\": \"aarch64-production-plan.generated.jsonl\",\n"
+           "    \"production_plan_jsonl_checksum\": \"{S8}\",\n"
+           "    \"production_plan_jsonl_bytes\": {u64},\n"
+           "    \"production_plan_form_count\": {u64},\n"
+           "    \"production_plan_field_count\": {u64},\n"
+           "    \"production_plan_segment_count\": {u64},\n"
            "    \"canonical_form_count\": {u64},\n"
            "    \"field_count\": {u64},\n"
            "    \"segment_count\": {u64},\n"
@@ -18270,7 +18796,9 @@ BUSTER_GLOBAL_LOCAL String8 assembly_import_format_full_manifest(Arena* arena, A
         data.xed_stats.reason_counts[0], data.xed_stats.reason_counts[1], data.xed_stats.reason_counts[2], data.xed_stats.reason_counts[3],
         data.xed_stats.reason_counts[4], data.aarch64_generated_output_checksum, data.aarch64_stats.header_bytes,
         data.aarch64_generated_coverage_checksum, data.aarch64_stats.coverage_bytes, data.aarch64_form_ids_checksum, data.aarch64_form_ids_bytes,
-        data.aarch64_stats.canonical_form_count,
+        data.aarch64_production_plan_checksum, data.aarch64_production_plan_bytes, data.aarch64_production_plan_json_checksum,
+        data.aarch64_production_plan_json_bytes, data.aarch64_production_plan_form_count, data.aarch64_production_plan_field_count,
+        data.aarch64_production_plan_segment_count, data.aarch64_stats.canonical_form_count,
         data.aarch64_stats.field_count, data.aarch64_stats.segment_count, data.aarch64_stats.operand_count, data.aarch64_stats.predicate_count,
         data.aarch64_stats.string_pool_bytes, data.aarch64_stats.mnemonic_range_count, data.aarch64_stats.signature_range_count,
         data.aarch64_stats.mnemonic_candidate_count, data.aarch64_stats.signature_candidate_count, data.aarch64_stats.coverage_counts[0],
@@ -18370,6 +18898,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_manifest_format_self_test(Arena* arena)
         .aarch64_generated_coverage_checksum = S8("a64-coverage-checksum"),
         .aarch64_form_ids_checksum = S8("a64-form-ids-checksum"),
         .aarch64_form_ids_bytes = 19,
+        .aarch64_production_plan_checksum = S8("a64-production-plan-checksum"),
+        .aarch64_production_plan_bytes = 20,
+        .aarch64_production_plan_json_checksum = S8("a64-production-plan-json-checksum"),
+        .aarch64_production_plan_json_bytes = 21,
+        .aarch64_production_plan_form_count = 22,
+        .aarch64_production_plan_field_count = 23,
+        .aarch64_production_plan_segment_count = 24,
         .aarch64_alias_source_identity = S8("alias-source-identity"),
         .aarch64_inventory_checksum = S8("inventory-checksum"),
         .aarch64_inventory_bytes = 17,
@@ -18543,7 +19078,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_manifest_format_self_test(Arena* arena)
              json_raw_object_find(aarch64_generated, S8("test_class_counts"), &aarch64_tests) &&
              json_raw_object_find(aarch64_generated, S8("missing_field_inventory"), &inventory);
     String8 aarch64_keys[] = {S8("header"), S8("header_checksum"), S8("header_bytes"), S8("coverage"), S8("coverage_checksum"),
-                              S8("coverage_bytes"), S8("form_ids"), S8("form_ids_checksum"), S8("form_ids_bytes"), S8("canonical_form_count"), S8("field_count"), S8("segment_count"), S8("operand_count"),
+                              S8("coverage_bytes"), S8("form_ids"), S8("form_ids_checksum"), S8("form_ids_bytes"), S8("production_plan"),
+                              S8("production_plan_checksum"), S8("production_plan_bytes"), S8("production_plan_jsonl"),
+                              S8("production_plan_jsonl_checksum"), S8("production_plan_jsonl_bytes"), S8("production_plan_form_count"),
+                              S8("production_plan_field_count"), S8("production_plan_segment_count"), S8("canonical_form_count"), S8("field_count"), S8("segment_count"), S8("operand_count"),
                               S8("predicate_count"), S8("string_pool_bytes"), S8("mnemonic_range_count"), S8("signature_range_count"),
                               S8("mnemonic_candidate_count"), S8("signature_candidate_count"), S8("classification_counts"), S8("reason_counts"),
                               S8("feature_count"), S8("encoder_family_counts"), S8("test_class_counts"), S8("alias_source"), S8("alias_count"),
@@ -18558,24 +19096,33 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_manifest_format_self_test(Arena* arena)
         {.key = aarch64_keys[6], .raw_value = S8("\"aarch64-form-ids.generated.h\"")},
         {.key = aarch64_keys[7], .raw_value = assembly_import_manifest_raw_string(arena, data.aarch64_form_ids_checksum)},
         {.key = aarch64_keys[8], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_form_ids_bytes)},
-        {.key = aarch64_keys[9], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.canonical_form_count)},
-        {.key = aarch64_keys[10], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.field_count)},
-        {.key = aarch64_keys[11], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.segment_count)},
-        {.key = aarch64_keys[12], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.operand_count)},
-        {.key = aarch64_keys[13], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.predicate_count)},
-        {.key = aarch64_keys[14], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.string_pool_bytes)},
-        {.key = aarch64_keys[15], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.mnemonic_range_count)},
-        {.key = aarch64_keys[16], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.signature_range_count)},
-        {.key = aarch64_keys[17], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.mnemonic_candidate_count)},
-        {.key = aarch64_keys[18], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.signature_candidate_count)},
-        {.key = aarch64_keys[19], .raw_value = aarch64_classification},
-        {.key = aarch64_keys[20], .raw_value = aarch64_reasons},
-        {.key = aarch64_keys[21], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.predicate_feature_count)},
-        {.key = aarch64_keys[22], .raw_value = aarch64_encoder},
-        {.key = aarch64_keys[23], .raw_value = aarch64_tests},
-        {.key = aarch64_keys[24], .raw_value = assembly_import_manifest_raw_string(arena, data.aarch64_alias_source_identity)},
-        {.key = aarch64_keys[25], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.coverage_counts[2])},
-        {.key = aarch64_keys[26], .raw_value = inventory},
+        {.key = aarch64_keys[9], .raw_value = S8("\"aarch64-production-plan.generated.h\"")},
+        {.key = aarch64_keys[10], .raw_value = assembly_import_manifest_raw_string(arena, data.aarch64_production_plan_checksum)},
+        {.key = aarch64_keys[11], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_production_plan_bytes)},
+        {.key = aarch64_keys[12], .raw_value = S8("\"aarch64-production-plan.generated.jsonl\"")},
+        {.key = aarch64_keys[13], .raw_value = assembly_import_manifest_raw_string(arena, data.aarch64_production_plan_json_checksum)},
+        {.key = aarch64_keys[14], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_production_plan_json_bytes)},
+        {.key = aarch64_keys[15], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_production_plan_form_count)},
+        {.key = aarch64_keys[16], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_production_plan_field_count)},
+        {.key = aarch64_keys[17], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_production_plan_segment_count)},
+        {.key = aarch64_keys[18], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.canonical_form_count)},
+        {.key = aarch64_keys[19], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.field_count)},
+        {.key = aarch64_keys[20], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.segment_count)},
+        {.key = aarch64_keys[21], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.operand_count)},
+        {.key = aarch64_keys[22], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.predicate_count)},
+        {.key = aarch64_keys[23], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.string_pool_bytes)},
+        {.key = aarch64_keys[24], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.mnemonic_range_count)},
+        {.key = aarch64_keys[25], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.signature_range_count)},
+        {.key = aarch64_keys[26], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.mnemonic_candidate_count)},
+        {.key = aarch64_keys[27], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.signature_candidate_count)},
+        {.key = aarch64_keys[28], .raw_value = aarch64_classification},
+        {.key = aarch64_keys[29], .raw_value = aarch64_reasons},
+        {.key = aarch64_keys[30], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.predicate_feature_count)},
+        {.key = aarch64_keys[31], .raw_value = aarch64_encoder},
+        {.key = aarch64_keys[32], .raw_value = aarch64_tests},
+        {.key = aarch64_keys[33], .raw_value = assembly_import_manifest_raw_string(arena, data.aarch64_alias_source_identity)},
+        {.key = aarch64_keys[34], .raw_value = assembly_import_manifest_raw_u64(arena, data.aarch64_stats.coverage_counts[2])},
+        {.key = aarch64_keys[35], .raw_value = inventory},
     };
     result = result && assembly_import_manifest_expect_fields(aarch64_generated, aarch64_expected, BUSTER_ARRAY_LENGTH(aarch64_expected));
 
@@ -19461,8 +20008,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
     Arena* inventory_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8)});
     Arena* profile_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(16)});
     Arena* form_ids_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1)});
+    Arena* production_plan_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(4)});
+    Arena* production_plan_json_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(2)});
     Arena* scratch = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
-    if (!aarch64_output || !generated_output || !coverage_output || !inventory_output || !profile_output || !form_ids_output || !scratch)
+    if (!aarch64_output || !generated_output || !coverage_output || !inventory_output || !profile_output || !form_ids_output ||
+        !production_plan_output || !production_plan_json_output || !scratch)
     {
         if (scratch)
         {
@@ -19483,6 +20033,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
         if (form_ids_output)
         {
             arena_destroy(form_ids_output, 1);
+        }
+        if (production_plan_json_output)
+        {
+            arena_destroy(production_plan_json_output, 1);
+        }
+        if (production_plan_output)
+        {
+            arena_destroy(production_plan_output, 1);
         }
         if (generated_output)
         {
@@ -19507,6 +20065,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
     Aarch64ImportRecordList records = {0};
     Aarch64GeneratedTableStats stats = {0};
     Aarch64AppleM1ProfileStats profile_stats = {0};
+    u32 production_plan_form_count = 0;
+    u32 production_plan_field_count = 0;
+    u32 production_plan_segment_count = 0;
     bool reduced_provenance_valid = false;
     if (result == PROCESS_RESULT_SUCCESS)
     {
@@ -19565,6 +20126,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
             if (result == PROCESS_RESULT_SUCCESS && !aarch64_generated_emit_named_form_ids(form_ids_output, records))
             {
                 string_print(S8("error: failed to generate named AArch64 form IDs\n"));
+                result = PROCESS_RESULT_FAILED;
+            }
+            if (result == PROCESS_RESULT_SUCCESS &&
+                !aarch64_generated_emit_production_plans(production_plan_output, production_plan_json_output, scratch, records,
+                                                         &production_plan_form_count, &production_plan_field_count, &production_plan_segment_count))
+            {
+                string_print(S8("error: failed to generate named AArch64 production plans\n"));
                 result = PROCESS_RESULT_FAILED;
             }
         }
@@ -19687,12 +20255,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
             String8 inventory_content = assembly_import_arena_contents(inventory_output);
             String8 profile_content = assembly_import_arena_contents(profile_output);
             String8 form_ids_content = assembly_import_arena_contents(form_ids_output);
+            String8 production_plan_content = assembly_import_arena_contents(production_plan_output);
+            String8 production_plan_json_content = assembly_import_arena_contents(production_plan_json_output);
             String8 reduced_input_checksum = assembly_import_checksum(arena, input);
             String8 normalized_input_checksum = assembly_import_checksum(arena, aarch64_content);
             String8 output_checksum = assembly_import_checksum(arena, aarch64_content);
             String8 generated_checksum = assembly_import_checksum(arena, generated_content);
             String8 coverage_checksum = assembly_import_checksum(arena, coverage_content);
             String8 profile_checksum = assembly_import_checksum(arena, profile_content);
+            String8 production_plan_checksum = assembly_import_checksum(arena, production_plan_content);
+            String8 production_plan_json_checksum = assembly_import_checksum(arena, production_plan_json_content);
             String8 xed_input_checksum = assembly_import_checksum(arena, xed_content[0]);
             String8 xed_header_checksum = assembly_import_checksum(arena, xed_content[1]);
             String8 xed_coverage_checksum = assembly_import_checksum(arena, xed_content[2]);
@@ -19739,6 +20311,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
                 .aarch64_generated_coverage_checksum = coverage_checksum,
                 .aarch64_form_ids_checksum = assembly_import_checksum(arena, form_ids_content),
                 .aarch64_form_ids_bytes = form_ids_content.length,
+                .aarch64_production_plan_checksum = production_plan_checksum,
+                .aarch64_production_plan_bytes = production_plan_content.length,
+                .aarch64_production_plan_json_checksum = production_plan_json_checksum,
+                .aarch64_production_plan_json_bytes = production_plan_json_content.length,
+                .aarch64_production_plan_form_count = production_plan_form_count,
+                .aarch64_production_plan_field_count = production_plan_field_count,
+                .aarch64_production_plan_segment_count = production_plan_segment_count,
                 .aarch64_alias_source_identity = S8("not-present-in-reduced-jsonl"),
                 .aarch64_inventory_checksum = inventory_checksum,
                 .aarch64_inventory_bytes = inventory_content.length,
@@ -19765,6 +20344,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
                 !assembly_import_write(arena, options.output_directory, S8("aarch64-missing-fields.generated.jsonl"), inventory_content) ||
                 !assembly_import_write(arena, options.output_directory, S8("aarch64-apple-m1-profile.generated.jsonl"), profile_content) ||
                 !assembly_import_write(arena, options.output_directory, S8("aarch64-form-ids.generated.h"), form_ids_content) ||
+                !assembly_import_write(arena, options.output_directory, S8("aarch64-production-plan.generated.h"), production_plan_content) ||
+                !assembly_import_write(arena, options.output_directory, S8("aarch64-production-plan.generated.jsonl"), production_plan_json_content) ||
                 !assembly_import_write(arena, options.output_directory, S8("manifest.json"), manifest))
             {
                 result = PROCESS_RESULT_FAILED;
@@ -19785,6 +20366,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action_aarch64_only(Arena* are
     arena_destroy(inventory_output, 1);
     arena_destroy(profile_output, 1);
     arena_destroy(form_ids_output, 1);
+    arena_destroy(production_plan_json_output, 1);
+    arena_destroy(production_plan_output, 1);
     arena_destroy(coverage_output, 1);
     arena_destroy(generated_output, 1);
     arena_destroy(aarch64_output, 1);
@@ -19829,11 +20412,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
     Arena* aarch64_inventory_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8)});
     Arena* aarch64_m1_profile_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(16)});
     Arena* aarch64_form_ids_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1)});
+    Arena* aarch64_production_plan_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(4)});
+    Arena* aarch64_production_plan_json_output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(2)});
     Arena* aarch64_generated_scratch = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
     Arena* xed_config_checksum_input = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(32)});
     Arena* xed_checksum_input = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
     if (!xed_output || !generated_output || !coverage_output || !aarch64_output || !aarch64_generated_output ||
-        !aarch64_generated_coverage_output || !aarch64_inventory_output || !aarch64_m1_profile_output || !aarch64_form_ids_output || !aarch64_generated_scratch || !xed_config_checksum_input ||
+        !aarch64_generated_coverage_output || !aarch64_inventory_output || !aarch64_m1_profile_output || !aarch64_form_ids_output ||
+        !aarch64_production_plan_output || !aarch64_production_plan_json_output || !aarch64_generated_scratch || !xed_config_checksum_input ||
         !xed_checksum_input)
     {
         string_print(S8("error: failed to reserve assembly importer arenas\n"));
@@ -19872,6 +20458,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
         if (aarch64_form_ids_output)
         {
             arena_destroy(aarch64_form_ids_output, 1);
+        }
+        if (aarch64_production_plan_json_output)
+        {
+            arena_destroy(aarch64_production_plan_json_output, 1);
+        }
+        if (aarch64_production_plan_output)
+        {
+            arena_destroy(aarch64_production_plan_output, 1);
         }
         if (aarch64_generated_scratch)
         {
@@ -19994,6 +20588,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
     Aarch64ImportRecordList aarch64_records = {0};
     Aarch64GeneratedTableStats aarch64_generated_stats = {0};
     Aarch64AppleM1ProfileStats aarch64_m1_profile_stats = {0};
+    u32 aarch64_production_plan_form_count = 0;
+    u32 aarch64_production_plan_field_count = 0;
+    u32 aarch64_production_plan_segment_count = 0;
     bool aarch64_raw_provenance_valid = false;
     bool aarch64_alias_source = false;
     if (result == PROCESS_RESULT_SUCCESS)
@@ -20091,6 +20688,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
                         string_print(S8("error: failed to generate named AArch64 form IDs\n"));
                         result = PROCESS_RESULT_FAILED;
                     }
+                    if (result == PROCESS_RESULT_SUCCESS &&
+                        !aarch64_generated_emit_production_plans(aarch64_production_plan_output, aarch64_production_plan_json_output,
+                                                                 aarch64_generated_scratch, aarch64_records,
+                                                                 &aarch64_production_plan_form_count, &aarch64_production_plan_field_count,
+                                                                 &aarch64_production_plan_segment_count))
+                    {
+                        string_print(S8("error: failed to generate named AArch64 production plans\n"));
+                        result = PROCESS_RESULT_FAILED;
+                    }
                 }
             }
         }
@@ -20108,6 +20714,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
         String8 aarch64_inventory_content = assembly_import_arena_contents(aarch64_inventory_output);
         String8 aarch64_m1_profile_content = assembly_import_arena_contents(aarch64_m1_profile_output);
         String8 aarch64_form_ids_content = assembly_import_arena_contents(aarch64_form_ids_output);
+        String8 aarch64_production_plan_content = assembly_import_arena_contents(aarch64_production_plan_output);
+        String8 aarch64_production_plan_json_content = assembly_import_arena_contents(aarch64_production_plan_json_output);
         String8 xed_config_checksum = assembly_import_checksum(arena, assembly_import_arena_contents(xed_config_checksum_input));
         String8 xed_input_checksum = assembly_import_checksum(arena, assembly_import_arena_contents(xed_checksum_input));
         String8 aarch64_input_checksum = assembly_import_checksum(arena, aarch64_json);
@@ -20120,6 +20728,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
         String8 aarch64_generated_coverage_checksum = assembly_import_checksum(arena, aarch64_generated_coverage_content);
         String8 aarch64_inventory_checksum = assembly_import_checksum(arena, aarch64_inventory_content);
         String8 aarch64_m1_profile_checksum = assembly_import_checksum(arena, aarch64_m1_profile_content);
+        String8 aarch64_production_plan_checksum = assembly_import_checksum(arena, aarch64_production_plan_content);
+        String8 aarch64_production_plan_json_checksum = assembly_import_checksum(arena, aarch64_production_plan_json_content);
         String8 generation_mode = options.audit ? S8("audit") : S8("acceptance");
         String8 acceptance_status = aarch64_apple_m1_profile_acceptance_ready(aarch64_m1_profile_stats, false, false, false) &&
                                             aarch64_raw_provenance_valid && !aarch64_alias_source
@@ -20161,6 +20771,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
             .aarch64_generated_coverage_checksum = aarch64_generated_coverage_checksum,
             .aarch64_form_ids_checksum = assembly_import_checksum(arena, aarch64_form_ids_content),
             .aarch64_form_ids_bytes = aarch64_form_ids_content.length,
+            .aarch64_production_plan_checksum = aarch64_production_plan_checksum,
+            .aarch64_production_plan_bytes = aarch64_production_plan_content.length,
+            .aarch64_production_plan_json_checksum = aarch64_production_plan_json_checksum,
+            .aarch64_production_plan_json_bytes = aarch64_production_plan_json_content.length,
+            .aarch64_production_plan_form_count = aarch64_production_plan_form_count,
+            .aarch64_production_plan_field_count = aarch64_production_plan_field_count,
+            .aarch64_production_plan_segment_count = aarch64_production_plan_segment_count,
             .aarch64_alias_source_identity = alias_source_identity,
             .aarch64_inventory_checksum = aarch64_inventory_checksum,
             .aarch64_inventory_bytes = aarch64_inventory_content.length,
@@ -20188,6 +20805,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
             !assembly_import_write(arena, options.output_directory, S8("aarch64-missing-fields.generated.jsonl"), aarch64_inventory_content) ||
             !assembly_import_write(arena, options.output_directory, S8("aarch64-apple-m1-profile.generated.jsonl"), aarch64_m1_profile_content) ||
             !assembly_import_write(arena, options.output_directory, S8("aarch64-form-ids.generated.h"), aarch64_form_ids_content) ||
+            !assembly_import_write(arena, options.output_directory, S8("aarch64-production-plan.generated.h"), aarch64_production_plan_content) ||
+            !assembly_import_write(arena, options.output_directory, S8("aarch64-production-plan.generated.jsonl"), aarch64_production_plan_json_content) ||
             !assembly_import_write(arena, options.output_directory, S8("manifest.json"), manifest))
         {
             result = PROCESS_RESULT_FAILED;
@@ -20227,6 +20846,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult assembly_import_action(Arena* arena, void* dat
     arena_destroy(aarch64_inventory_output, 1);
     arena_destroy(aarch64_m1_profile_output, 1);
     arena_destroy(aarch64_form_ids_output, 1);
+    arena_destroy(aarch64_production_plan_json_output, 1);
+    arena_destroy(aarch64_production_plan_output, 1);
     arena_destroy(aarch64_generated_coverage_output, 1);
     arena_destroy(aarch64_generated_output, 1);
     arena_destroy(coverage_output, 1);

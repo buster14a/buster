@@ -15,6 +15,7 @@
 #elif BUSTER_COMPILER_GCC
 #pragma GCC diagnostic pop
 #endif
+#include <buster/lib/compiler/assembly/generated/aarch64-production-plan.generated.h>
 
 BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_COVERAGE_DIRECT == (u32)BUSTER_AARCH64_GENERATED_COVERAGE_DIRECT);
 BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_COVERAGE_NORMALIZED == (u32)BUSTER_AARCH64_GENERATED_COVERAGE_NORMALIZED);
@@ -52,6 +53,11 @@ BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_REASON_UNPROVEN_CORRESPONDENCE ==
 BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_REASON_UNSUPPORTED_ADDRESS_GRAMMAR ==
                 (u32)BUSTER_AARCH64_GENERATED_REASON_UNSUPPORTED_ADDRESS_GRAMMAR);
 BUSTER_CT_CHECK((u32)BUSTER_AARCH64_METADATA_REASON_COUNT == (u32)BUSTER_AARCH64_GENERATED_REASON_COUNT);
+BUSTER_CT_CHECK(BUSTER_AARCH64_GENERATED_PRODUCTION_SCHEMA_VERSION == 1);
+BUSTER_CT_CHECK(BUSTER_AARCH64_GENERATED_PRODUCTION_FORM_COUNT == BUSTER_ARRAY_LENGTH(buster_aarch64_generated_production_forms));
+BUSTER_CT_CHECK(BUSTER_AARCH64_GENERATED_PRODUCTION_FIELD_COUNT == BUSTER_ARRAY_LENGTH(buster_aarch64_generated_production_fields));
+BUSTER_CT_CHECK(BUSTER_AARCH64_GENERATED_PRODUCTION_SEGMENT_COUNT == BUSTER_ARRAY_LENGTH(buster_aarch64_generated_production_segments));
+BUSTER_CT_CHECK(BUSTER_AARCH64_GENERATED_PRODUCTION_FORM_COUNT < UINT16_MAX);
 
 #define A64_NO_PC_RELATIVE_OPERAND UINT8_MAX
 
@@ -742,6 +748,74 @@ bool buster_aarch64_metadata_raw_decode(u32 form_id, u32 word, u32* field_values
     return true;
 }
 
+u32 buster_aarch64_production_plan_form_count(void)
+{
+    return BUSTER_AARCH64_GENERATED_PRODUCTION_FORM_COUNT;
+}
+
+u32 buster_aarch64_production_plan_field_count(void)
+{
+    return BUSTER_AARCH64_GENERATED_PRODUCTION_FIELD_COUNT;
+}
+
+u32 buster_aarch64_production_plan_segment_count(void)
+{
+    return BUSTER_AARCH64_GENERATED_PRODUCTION_SEGMENT_COUNT;
+}
+
+BUSTER_GLOBAL_LOCAL u32 a64_production_width_mask(u8 width)
+{
+    return width == 32 ? UINT32_MAX : (width ? (UINT32_C(1) << width) - 1u : 0);
+}
+
+bool buster_aarch64_production_raw_encode(u32 form_id, u32 const* field_values, u32 field_count, u32* word)
+{
+    if (!word)
+    {
+        return false;
+    }
+    u16 plan_index = buster_aarch64_generated_production_plan_index(form_id);
+    if (plan_index == UINT16_MAX)
+    {
+        return false;
+    }
+    BusterAarch64GeneratedProductionForm const* form = buster_aarch64_generated_production_form_at(plan_index);
+    if (!form || field_count != form->field_count || (field_count && !field_values) ||
+        (form->fixed_value & ~form->fixed_mask))
+    {
+        return false;
+    }
+    u32 result = form->fixed_value;
+    for (u32 field_index = 0; field_index < form->field_count; field_index += 1)
+    {
+        BusterAarch64GeneratedProductionField const* field =
+            buster_aarch64_generated_production_field_at(form->field_first + field_index);
+        if (!field || field->segment_count == 0 || (field_values[field_index] & ~field->source_mask))
+        {
+            return false;
+        }
+        u32 source_value = field_values[field_index];
+        for (u32 segment_index = 0; segment_index < field->segment_count; segment_index += 1)
+        {
+            BusterAarch64GeneratedProductionSegment const* segment =
+                buster_aarch64_generated_production_segment_at(field->segment_first + segment_index);
+            if (!segment || !segment->width || segment->width > 32 || segment->instruction_lsb >= 32 || segment->value_lsb >= 32 ||
+                (u32)segment->instruction_lsb + segment->width > 32 || (u32)segment->value_lsb + segment->width > 32)
+            {
+                return false;
+            }
+            u32 mask = a64_production_width_mask(segment->width);
+            result |= ((source_value >> segment->value_lsb) & mask) << segment->instruction_lsb;
+        }
+    }
+    if ((result & form->fixed_mask) != form->fixed_value)
+    {
+        return false;
+    }
+    *word = result;
+    return true;
+}
+
 u32 a64_generated_form_count(void)
 {
     return buster_aarch64_metadata_form_count();
@@ -776,6 +850,11 @@ bool buster_aarch64_metadata_test_predicate_parse_error_fails_closed(Target targ
     return !a64_metadata_form_predicates_supported(malformed, target);
 }
 #endif
+
+bool a64_generated_production_raw_encode(u32 form_id, u32 const* field_values, u32 field_count, u32* word)
+{
+    return buster_aarch64_production_raw_encode(form_id, field_values, field_count, word);
+}
 
 BUSTER_GLOBAL_LOCAL A64OpcodeDescriptor const a64_opcode_descriptors[A64_OPCODE_COUNT] = {
     [A64_OPCODE_NOP] =
