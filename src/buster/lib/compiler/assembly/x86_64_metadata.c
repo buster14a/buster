@@ -2087,8 +2087,16 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_operand_matches(BusterX86Metad
     // element width (for example the AVX2 gather rows), while other rows use
     // the architectural vector width.  The physical class already carries
     // the architectural width; scalar memory operands retain the element
-    // width check below.
-    if (!vector_register && !variable_encoded_width && width && metadata.physical_width_flags &&
+    // width check below.  A MASK register is another architectural-width
+    // class: its k-register is always 64 bits, while a MASK_B/N/R schema may
+    // append an element qualifier (for example `mskw:u8`).  That suffix is
+    // an element width, not a request for an 8-bit physical register.  Keep
+    // the architectural class and width validation, but do not compare the
+    // element qualifier with the physical k-register width.
+    bool architectural_mask_register = physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                                       physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK;
+    if (architectural_mask_register && width && width != 64) return false;
+    if (!architectural_mask_register && !vector_register && !variable_encoded_width && width && metadata.physical_width_flags &&
         metadata.physical_width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN &&
         !(metadata.physical_width_flags & buster_x86_metadata_emit_width_flags(width)))
         return false;
@@ -2109,6 +2117,13 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_is_writemask_operand(BusterX86
     return !buster_x86_metadata_emit_atom_contains(metadata.atom, S8("_R")) &&
            !buster_x86_metadata_emit_atom_contains(metadata.atom, S8("_N")) &&
            !buster_x86_metadata_emit_atom_contains(metadata.atom, S8("_B"));
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_is_architectural_mask_binding(BusterX86MetadataPhysicalBinding binding)
+{
+    return binding.physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+           binding.physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK &&
+           !buster_x86_metadata_emit_is_writemask_operand(binding.metadata);
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_bind_form(BusterX86MetadataPhysicalQuery query, BusterX86MetadataForm form,
@@ -3904,6 +3919,11 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         bool apx_evex = (form.apx_flags & BUSTER_X86_METADATA_APX) != 0;
         if (apx_evex)
         {
+            bool has_architectural_mask = false;
+            for (u32 binding_index = 0; binding_index < binding_count; binding_index += 1)
+            {
+                has_architectural_mask |= buster_x86_metadata_emit_is_architectural_mask_binding(bindings[binding_index]);
+            }
             u16 apx_width = vvvv_binding && vvvv_binding->physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER
                                 ? vvvv_binding->physical.reg.width
                                 : reg_binding && reg_binding->physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER
@@ -3911,6 +3931,12 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
                                       : rm_binding && rm_binding->physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER
                                       ? rm_binding->physical.reg.width
                                             : has_memory ? buster_x86_metadata_emit_operand_width(memory_binding->physical) : data_width;
+            // APX KMOV rows use the pattern's W/mandatory-prefix fields to
+            // select the encoded element width.  The visible MASK operands
+            // are architectural k registers, so their 64-bit physical width
+            // must not force W=1 or erase the pattern's pp (V66/VF2/VF3).
+            // Keep both fields when a row has W1+V66 (the ordinary width
+            // heuristic can represent only one of them at a time).
             p0 = (u8)(0xf0 | (map & 0x0f));
             if (reg_index & 8) p0 &= (u8)~0x80;
             if (reg_index & 16) p0 &= (u8)~0x10;
@@ -3919,7 +3945,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
             if (has_memory && memory.has_base && (memory.base.index & 8)) p0 &= (u8)~0x20;
             if (has_memory && memory.has_base && (memory.base.index & 16)) p0 |= 0x08;
             if (has_memory && memory.has_index && (memory.index.index & 8)) p0 &= (u8)~0x40;
-            p1 = (u8)(!apx_evex_fixed_width_no_w && apx_width == 64 ? 0x80 : apx_width == 16 ? 0x01 : 0);
+            p1 = has_architectural_mask
+                     ? (u8)((pattern.w ? 0x80 : 0) | pp)
+                     : (u8)(!apx_evex_fixed_width_no_w && apx_width == 64 ? 0x80 : apx_width == 16 ? 0x01 : 0);
             if (pattern.has_scc)
                 p1 |= (u8)(0x04 | ((query.attributes.dfv & 0xf) << 3));
             else if (pattern.has_nd && pattern.nd_value)

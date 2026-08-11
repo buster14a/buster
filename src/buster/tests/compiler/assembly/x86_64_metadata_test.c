@@ -2343,7 +2343,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, privileged_total == 109 && privileged_valid64 == 90 && privileged_valid64_capable == 90 &&
                                    privileged_valid64_blocked == 0 && privileged_not64 == 19);
         BUSTER_TEST(arguments, apx_total == 2465);
-        BUSTER_TEST(arguments, apx_emitted == 2414 && apx_blocked == 51);
+        BUSTER_TEST(arguments, apx_emitted == 2417 && apx_blocked == 48);
         BUSTER_TEST(arguments, apx_scc_total == 640 && apx_scc_emitted == 640);
         BUSTER_TEST(arguments, evex_r4_total == 97 && evex_r4_emitted == 97);
         BUSTER_TEST(arguments, dfv_total == 640 && dfv_scc_total == 640 && dfv_scc_semantics_consistent);
@@ -3495,6 +3495,84 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                                                  (BusterX86MetadataPhysicalAttributes){0}, wildcard,
                                                                  BUSTER_ARRAY_LENGTH(wildcard), kadd_bytes,
                                                                  BUSTER_ARRAY_LENGTH(kadd_bytes)));
+
+        // MASK_B's scalar suffix is an element qualifier; both visible
+        // operands remain architectural 64-bit k registers.  The APX EVEX
+        // W/pp bits come from each row's pattern (V66/W0, VF2/W0, V66/W1,
+        // VNP/W1, VNP/W0), not from that architectural register width.
+        BusterX86MetadataPhysicalOperand kmov_mask_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK, 0, 64),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK, 1, 64),
+        };
+        u8 kmovb_apx_bytes[] = {0x62, 0xf1, 0x7d, 0x08, 0x90, 0xc1};
+        BusterX86MetadataPhysicalOperand kmovd_gpr_mask_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 32),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK, 1, 64),
+        };
+        u8 kmovd_vf2_apx_bytes[] = {0x62, 0xf1, 0x7f, 0x08, 0x93, 0xc1};
+        u8 kmovd_apx_bytes[] = {0x62, 0xf1, 0xfd, 0x08, 0x90, 0xc1};
+        u8 kmovw_apx_bytes[] = {0x62, 0xf1, 0x7c, 0x08, 0x90, 0xc1};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("KMOVB"), 1850, kmov_mask_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), kmovb_apx_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(kmovb_apx_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("KMOVD"), 1855, kmovd_gpr_mask_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), kmovd_vf2_apx_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(kmovd_vf2_apx_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("KMOVD"), 1857, kmov_mask_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), kmovd_apx_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(kmovd_apx_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("KMOVW"), 1865, kmov_mask_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), kmovw_apx_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(kmovw_apx_bytes)));
+
+        // The same schema distinction applies to the AVX512 VEX rows.  Keep
+        // this collateral ledger explicit so a future width change cannot
+        // silently regress or hide the three non-APX analogues.
+        u32 kmov_vex_ids[] = {6881, 6886, 7860};
+        String8 kmov_vex_mnemonics[] = {S8_INITIALIZER("KMOVB"), S8_INITIALIZER("KMOVD"), S8_INITIALIZER("KMOVW")};
+        bool kmov_vex_emitted = true;
+        u8 kmov_vex_output[32] = {0};
+        for (u32 kmov_index = 0; kmov_index < BUSTER_ARRAY_LENGTH(kmov_vex_ids); kmov_index += 1)
+        {
+            BusterX86MetadataEmitResult kmov_vex_result = x86_64_metadata_test_emit_form(
+                kmov_vex_mnemonics[kmov_index], kmov_vex_ids[kmov_index], kmov_mask_operands,
+                BUSTER_ARRAY_LENGTH(kmov_mask_operands), (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                BUSTER_ARRAY_LENGTH(wildcard), kmov_vex_output, BUSTER_ARRAY_LENGTH(kmov_vex_output), 0, 0);
+            BUSTER_TEST(arguments, kmov_vex_result.status == BUSTER_X86_METADATA_ENCODE_SUCCESS);
+            kmov_vex_emitted &= kmov_vex_result.status == BUSTER_X86_METADATA_ENCODE_SUCCESS;
+        }
+        BUSTER_TEST(arguments, kmov_vex_emitted);
+
+        BusterX86MetadataPhysicalOperand kmov_wrong_class_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
+            kmov_mask_operands[1],
+        };
+        BusterX86MetadataEmitResult kmov_wrong_class = x86_64_metadata_test_emit_form(
+            S8("KMOVB"), 1850, kmov_wrong_class_operands, BUSTER_ARRAY_LENGTH(kmov_wrong_class_operands),
+            (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard), kmov_vex_output,
+            BUSTER_ARRAY_LENGTH(kmov_vex_output), 0, 0);
+        BusterX86MetadataPhysicalOperand kmov_wrong_width_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK, 0, 32),
+            kmov_mask_operands[1],
+        };
+        BusterX86MetadataEmitResult kmov_wrong_width = x86_64_metadata_test_emit_form(
+            S8("KMOVB"), 1850, kmov_wrong_width_operands, BUSTER_ARRAY_LENGTH(kmov_wrong_width_operands),
+            (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard), kmov_vex_output,
+            BUSTER_ARRAY_LENGTH(kmov_vex_output), 0, 0);
+        BusterX86MetadataPhysicalOperand kmov_wrong_kind_operands[2] = {
+            kmov_mask_operands[0], x86_64_metadata_test_physical_mem_base(0, 8, 0),
+        };
+        BusterX86MetadataEmitResult kmov_wrong_kind = x86_64_metadata_test_emit_form(
+            S8("KMOVB"), 1850, kmov_wrong_kind_operands, BUSTER_ARRAY_LENGTH(kmov_wrong_kind_operands),
+            (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard), kmov_vex_output,
+            BUSTER_ARRAY_LENGTH(kmov_vex_output), 0, 0);
+        BUSTER_TEST(arguments, kmov_wrong_class.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
+        BUSTER_TEST(arguments, kmov_wrong_width.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
+        BUSTER_TEST(arguments, kmov_wrong_kind.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
 
         BusterX86MetadataPhysicalOperand tile_operands[2] = {
             x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_TMM, 0, 1024),
