@@ -3,21 +3,6 @@
 #if BUSTER_INCLUDE_TESTS
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
-#if BUSTER_COMPILER_CLANG
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Woverlength-strings"
-#pragma clang diagnostic ignored "-Wimplicit-int-conversion"
-#pragma clang diagnostic ignored "-Wsign-conversion"
-#elif BUSTER_COMPILER_GCC
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Woverlength-strings"
-#endif
-#include <buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h>
-#if BUSTER_COMPILER_CLANG
-#pragma clang diagnostic pop
-#elif BUSTER_COMPILER_GCC
-#pragma GCC diagnostic pop
-#endif
 #include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
 
 typedef struct A64EncodingCase A64EncodingCase;
@@ -450,7 +435,7 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     {
         BusterAarch64MetadataForm form = {0};
         BUSTER_TEST(arguments, buster_aarch64_metadata_form(form_id, &form));
-        if (form.reason_id == BUSTER_AARCH64_GENERATED_REASON_UNKNOWN_PREDICATE)
+        if (form.reason_id == BUSTER_AARCH64_METADATA_REASON_UNKNOWN_PREDICATE)
         {
             unknown_predicate_form_count += 1;
             BUSTER_TEST(arguments, !buster_aarch64_metadata_form_supported_for_target(form_id, generic_aarch64_target));
