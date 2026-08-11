@@ -1032,6 +1032,138 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, counts.reason_counts[BUSTER_X86_METADATA_REASON_UNKNOWN_PATTERN_TOKEN] == 0);
     BUSTER_TEST(arguments, counts.reason_counts[BUSTER_X86_METADATA_REASON_UNKNOWN_OPERAND_TOKEN] == 0);
 
+    {
+        // ACE-1's BSRMOV rows are the complete norexr_r4 cohort in this
+        // snapshot.  The token constrains EVEX R' but does not make BSR0 a
+        // user-visible operand.
+        static u32 const ace_r4_form_ids[] = {6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+        bool ace_rows_consistent = true;
+        bool ace_ids_are_complete = true;
+        u32 ace_r4_token_count = 0;
+        u32 ace_visible_operand_count = 0;
+        u32 ace_implicit_operand_count = 0;
+        for (u32 form_id = 0; form_id < buster_x86_metadata_form_count(); form_id += 1)
+        {
+            BusterX86MetadataForm form = {0};
+            if (!buster_x86_metadata_form(form_id, &form))
+            {
+                ace_rows_consistent = false;
+                continue;
+            }
+            if (x86_64_metadata_test_pattern_has_token(form.pattern, S8("norexr_r4")))
+            {
+                ace_r4_token_count += 1;
+                ace_ids_are_complete &= form_id >= ace_r4_form_ids[0] && form_id <= ace_r4_form_ids[BUSTER_ARRAY_LENGTH(ace_r4_form_ids) - 1];
+            }
+        }
+        for (u32 ace_index = 0; ace_index < BUSTER_ARRAY_LENGTH(ace_r4_form_ids); ace_index += 1)
+        {
+            u32 form_id = ace_r4_form_ids[ace_index];
+            BusterX86MetadataForm form = {0};
+            ace_rows_consistent &= buster_x86_metadata_form(form_id, &form) && form.id == form_id &&
+                                   form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                   form.prefix_kind == BUSTER_X86_METADATA_PREFIX_EVEX &&
+                                   form.encoder_family == BUSTER_X86_METADATA_ENCODER_EVEX &&
+                                   x86_64_metadata_test_string_equal(form.isa_set, S8("ACE_1")) &&
+                                   x86_64_metadata_test_pattern_has_token(form.pattern, S8("norexr_r4"));
+            u32 visible_count = 0;
+            u32 implicit_count = 0;
+            for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+            {
+                BusterX86MetadataOperand metadata = {0};
+                ace_rows_consistent &= buster_x86_metadata_operand(form_id, operand_index, &metadata);
+                if (!metadata.visible)
+                {
+                    ace_rows_consistent &= (metadata.access & BUSTER_X86_METADATA_ACCESS_IMPLICIT) != 0;
+                }
+                else
+                {
+                    visible_count += 1;
+                }
+                if ((metadata.access & BUSTER_X86_METADATA_ACCESS_IMPLICIT) != 0)
+                {
+                    implicit_count += 1;
+                    ace_rows_consistent &= !metadata.visible && metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER &&
+                                           metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_FIXED &&
+                                           x86_64_metadata_test_string_equal(metadata.atom, S8("XED_REG_BSR0"));
+                }
+            }
+            ace_visible_operand_count += visible_count;
+            ace_implicit_operand_count += implicit_count;
+            ace_rows_consistent &= implicit_count == 1;
+        }
+        BusterX86MetadataForm bsrinit_form = {0};
+        BUSTER_TEST(arguments, ace_r4_token_count == BUSTER_ARRAY_LENGTH(ace_r4_form_ids) && ace_ids_are_complete &&
+                                   ace_rows_consistent && ace_visible_operand_count == 12 && ace_implicit_operand_count == 10 &&
+                                   buster_x86_metadata_form(30, &bsrinit_form) &&
+                                   x86_64_metadata_test_pattern_has_token(bsrinit_form.pattern, S8("norexr_prefix")) &&
+                                   !x86_64_metadata_test_pattern_has_token(bsrinit_form.pattern, S8("norexr_r4")));
+
+        // ACE_1 is the target feature for these rows.  AMX_TILE is the XED
+        // category, and ACE is the extension spelling; neither substitutes
+        // for the ISA-set feature.  Matching is intentionally case-insensitive.
+        BusterX86MetadataPhysicalOperand gate_operands[16] = {0};
+        char8 gate_mnemonic[128] = {0};
+        BusterX86MetadataPhysicalQuery gate_query = {0};
+        bool gate_query_built = x86_64_metadata_test_build_gate_query(6, &gate_query, gate_operands, gate_mnemonic);
+        String8 ace_feature[] = {S8("ACE_1")};
+        String8 ace_lower_feature[] = {S8("ace_1")};
+        String8 amx_tile_feature[] = {S8("AMX_TILE")};
+        String8 ace_extension_feature[] = {S8("ACE")};
+        String8 no_feature[] = {0};
+        gate_query.features.names = ace_feature;
+        gate_query.features.count = BUSTER_ARRAY_LENGTH(ace_feature);
+        BusterX86MetadataSelectResult ace_selected = buster_x86_metadata_select_form(gate_query);
+        gate_query.features.names = ace_lower_feature;
+        gate_query.features.count = BUSTER_ARRAY_LENGTH(ace_lower_feature);
+        BusterX86MetadataSelectResult ace_lower_selected = buster_x86_metadata_select_form(gate_query);
+        gate_query.features.names = amx_tile_feature;
+        gate_query.features.count = BUSTER_ARRAY_LENGTH(amx_tile_feature);
+        BusterX86MetadataSelectResult amx_tile_rejected = buster_x86_metadata_select_form(gate_query);
+        gate_query.features.names = ace_extension_feature;
+        gate_query.features.count = BUSTER_ARRAY_LENGTH(ace_extension_feature);
+        BusterX86MetadataSelectResult ace_extension_rejected = buster_x86_metadata_select_form(gate_query);
+        gate_query.features.names = no_feature;
+        gate_query.features.count = 0;
+        BusterX86MetadataSelectResult no_feature_rejected = buster_x86_metadata_select_form(gate_query);
+        BUSTER_TEST(arguments, gate_query_built && ace_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && ace_selected.form_id == 6 &&
+                                   ace_lower_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && ace_lower_selected.form_id == 6 &&
+                                   amx_tile_rejected.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                                   ace_extension_rejected.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+                                   no_feature_rejected.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE);
+
+        // These bytes are inferred from XED's EVV/MAP6/W/VF atoms and this
+        // runtime's EVEX builder.  LLVM 22 rejects BSRMOVF/BSRMOVH/BSRMOVL,
+        // so there is deliberately no LLVM byte oracle for this ACE-1 cohort.
+        BusterX86MetadataPhysicalOperand bsr_movf_registers[] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+        };
+        BusterX86MetadataPhysicalOperand bsr_movf_memory[] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+            x86_64_metadata_test_physical_mem_base(0, 64, 0),
+        };
+        BusterX86MetadataPhysicalOperand bsr_movh_store[] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+        };
+        u8 const bsr_movf_register_bytes[] = {0x62, 0xf6, 0xfc, 0x48, 0x95, 0xc0};
+        u8 const bsr_movf_memory_bytes[] = {0x62, 0xf6, 0xfc, 0x48, 0x95, 0x00};
+        u8 const bsr_movh_store_bytes[] = {0x62, 0xf6, 0x7f, 0x48, 0x95, 0xc0};
+        BUSTER_TEST(arguments,
+                    x86_64_metadata_test_emit_exact(S8("BSRMOVF"), 6, bsr_movf_registers,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movf_registers), (BusterX86MetadataPhysicalAttributes){0},
+                                                     ace_feature, BUSTER_ARRAY_LENGTH(ace_feature), bsr_movf_register_bytes,
+                                                     BUSTER_ARRAY_LENGTH(bsr_movf_register_bytes)) &&
+                        x86_64_metadata_test_emit_exact(S8("BSRMOVF"), 7, bsr_movf_memory,
+                                                         BUSTER_ARRAY_LENGTH(bsr_movf_memory), (BusterX86MetadataPhysicalAttributes){0},
+                                                         ace_feature, BUSTER_ARRAY_LENGTH(ace_feature), bsr_movf_memory_bytes,
+                                                         BUSTER_ARRAY_LENGTH(bsr_movf_memory_bytes)) &&
+                        x86_64_metadata_test_emit_exact(S8("BSRMOVH"), 10, bsr_movh_store,
+                                                         BUSTER_ARRAY_LENGTH(bsr_movh_store), (BusterX86MetadataPhysicalAttributes){0},
+                                                         ace_feature, BUSTER_ARRAY_LENGTH(ace_feature), bsr_movh_store_bytes,
+                                                         BUSTER_ARRAY_LENGTH(bsr_movh_store_bytes)));
+    }
+
     BusterX86MetadataForm first_form = {0};
     BusterX86MetadataForm last_form = {0};
     BusterX86MetadataCoverage first_coverage = {0};
@@ -2387,19 +2519,31 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
+        static u32 const ace_r4_form_ids[] = {6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+        bool ace_r4_ledger_unlocked = true;
+        for (u32 ace_index = 0; ace_index < BUSTER_ARRAY_LENGTH(ace_r4_form_ids); ace_index += 1)
+        {
+            BusterX86MetadataCoverageLedgerEntry entry = ledger[ace_r4_form_ids[ace_index]];
+            ace_r4_ledger_unlocked &= entry.form_id == ace_r4_form_ids[ace_index] &&
+                                      entry.encoder_family == BUSTER_X86_METADATA_ENCODER_EVEX &&
+                                      entry.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
+                                      entry.blocker == BUSTER_X86_METADATA_BLOCKER_NONE && entry.encoder_capable;
+        }
+        BUSTER_TEST(arguments, ace_r4_ledger_unlocked && ledger[30].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
+                                   ledger[30].blocker == BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS && !ledger[30].encoder_capable);
         // The residual-control stack contributes sixteen rows, legacy
-        // DF64/IMMUNE controls contribute seventeen, and IBHF=1 contributes
-        // one boolean row.  These are disjoint normalized rows on top of the
-        // eight fixed NOT16 rows: combined ledger delta is +34.
-        BUSTER_TEST(arguments, audit.emitted_count == 10570 && audit.blocked_count == 443 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10570 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 443);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10678 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 66);
+        // DF64/IMMUNE controls contribute seventeen, IBHF=1 contributes one
+        // boolean row, and the ACE R4 cohort contributes ten.  These are
+        // disjoint normalized rows on top of the eight fixed NOT16 rows.
+        BUSTER_TEST(arguments, audit.emitted_count == 10580 && audit.blocked_count == 433 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10580 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 433);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10688 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 56);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 199, 5, 1643, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1759, 196, 5, 1643, 176, 6718, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {53, 3, 0, 0, 0, 10, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1759, 196, 5, 1643, 176, 6728, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {53, 3, 0, 0, 0, 0, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2409,7 +2553,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10570, 268, 108, 44, 0, 23, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10580, 268, 108, 44, 0, 13, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];

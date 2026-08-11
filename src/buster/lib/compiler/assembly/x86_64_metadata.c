@@ -1705,6 +1705,17 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             if (pattern.ubit_value != 1)
                 buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS);
         }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norexr_r4")))
+        {
+            // XED's norexr_r4 atom fixes EVEX's inverted R' bit to one.  It
+            // is a complete, typed constraint (unlike the broader norexr
+            // family below), so keep it in the same representation as the
+            // equivalent EVEXR4_ONE() spelling without special-casing any
+            // mnemonic.
+            pattern.has_prefix_control = 1;
+            pattern.has_evex_r4 = 1;
+            pattern.evex_r4_value = 1;
+        }
         else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norexb")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norexb_prefix")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("rexb")) ||
