@@ -3273,6 +3273,29 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                memcmp(avx10_aux_att.bytes.pointer, expected_avx10_aux_intel,
                                       sizeof(expected_avx10_aux_intel)) == 0);
 
+    AssemblyEncodeResult mem128_intel = assembly_encode(
+        arguments->arena,
+        S8("vpslld ymm0 {k1}, ymm1, xmmword ptr [rax + 16]\n"
+           "vpsrld zmm0 {k1}, zmm1, xmmword ptr [rax + 32]\n"
+           "vpslld ymm0 {k1}, ymm1, xmmword ptr [rax + 17]\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_mem128[] = {
+        0x62, 0xf1, 0x75, 0x29, 0xf2, 0x40, 0x01,
+        0x62, 0xf1, 0x75, 0x49, 0xd2, 0x40, 0x02,
+        0x62, 0xf1, 0x75, 0x29, 0xf2, 0x80, 0x11, 0x00, 0x00, 0x00,
+    };
+    BUSTER_TEST(arguments, mem128_intel.diagnostic_count == 0 && mem128_intel.bytes.length == sizeof(expected_mem128) &&
+                               memcmp(mem128_intel.bytes.pointer, expected_mem128, sizeof(expected_mem128)) == 0);
+
+    AssemblyEncodeResult mem128_att = assembly_encode(
+        arguments->arena,
+        S8("vpslld 16(%rax), %ymm1, %ymm0 {%k1}\n"
+           "vpsrld 32(%rax), %zmm1, %zmm0 {%k1}\n"
+           "vpslld 17(%rax), %ymm1, %ymm0 {%k1}\n"),
+        (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, mem128_att.diagnostic_count == 0 && mem128_att.bytes.length == sizeof(expected_mem128) &&
+                               memcmp(mem128_att.bytes.pointer, expected_mem128, sizeof(expected_mem128)) == 0);
+
     AssemblyEncodeResult invalid_avx10_aux_widths = assembly_encode(
         arguments->arena,
         S8("vcvtbf42hf8 xmm0, xmmword ptr [rax]\n"

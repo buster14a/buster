@@ -754,6 +754,28 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_emit_exact(
            x86_64_metadata_test_bytes_equal(output, result.byte_count, expected, expected_count);
 }
 
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_mem128_forms(void)
+{
+    // Keep every generated NELEM_MEM128 row covered.  The public tuple kind
+    // remains FULL for compatibility, while the pattern token and attribute
+    // carry the fixed 128-bit memory/16-byte displacement semantics.
+    u32 form_ids[] = {
+        6456, 6460, 6470, 6474, 6492, 6496, 6500, 6504, 6508,
+        6510, 6514, 6534, 6538, 6542, 6546, 6550, 6560, 6564,
+        6582, 6586, 6590, 7701, 7705, 7713, 7717, 7725, 7729,
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(form_ids); index += 1)
+    {
+        BusterX86MetadataForm form = {0};
+        if (!buster_x86_metadata_form(form_ids[index], &form) ||
+            form.tuple_kind != BUSTER_X86_METADATA_TUPLE_FULL ||
+            !x86_64_metadata_test_pattern_has_token(form.pattern, S8("NELEM_MEM128()")) ||
+            !x86_64_metadata_test_string_contains(form.attributes, S8("DISP8_MEM128")))
+            return false;
+    }
+    return true;
+}
+
 UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3795,6 +3817,42 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             .mask_register = 1,
         };
 
+        BUSTER_TEST(arguments, x86_64_metadata_test_mem128_forms());
+        String8 mem128_features[2] = {S8("avx512f"), S8("avx512vl")};
+        BusterX86MetadataPhysicalOperand vpslld_ymm_memory = x86_64_metadata_test_physical_mem_base(0, 0, 16);
+        vpslld_ymm_memory.memory.source_width = 128;
+        BusterX86MetadataPhysicalOperand vpslld_ymm_operands[3] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM, 0, 256),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM, 1, 256),
+            vpslld_ymm_memory,
+        };
+        u8 vpslld_ymm_disp8_bytes[] = {0x62, 0xf1, 0x75, 0x28, 0xf2, 0x40, 0x01};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VPSLLD"), 6460, vpslld_ymm_operands, 3,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, mem128_features,
+                                                                 BUSTER_ARRAY_LENGTH(mem128_features), vpslld_ymm_disp8_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(vpslld_ymm_disp8_bytes)));
+        vpslld_ymm_memory.memory.displacement = 17;
+        vpslld_ymm_memory.memory.has_displacement = true;
+        vpslld_ymm_operands[2] = vpslld_ymm_memory;
+        u8 vpslld_ymm_disp32_bytes[] = {0x62, 0xf1, 0x75, 0x28, 0xf2, 0x80, 0x11, 0x00, 0x00, 0x00};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VPSLLD"), 6460, vpslld_ymm_operands, 3,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, mem128_features,
+                                                                 BUSTER_ARRAY_LENGTH(mem128_features), vpslld_ymm_disp32_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(vpslld_ymm_disp32_bytes)));
+
+        BusterX86MetadataPhysicalOperand vpsrld_zmm_memory = x86_64_metadata_test_physical_mem_base(0, 0, 32);
+        vpsrld_zmm_memory.memory.source_width = 128;
+        BusterX86MetadataPhysicalOperand vpsrld_zmm_operands[3] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 1, 512),
+            vpsrld_zmm_memory,
+        };
+        u8 vpsrld_zmm_disp8_bytes[] = {0x62, 0xf1, 0x75, 0x48, 0xd2, 0x40, 0x02};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VPSRLD"), 7725, vpsrld_zmm_operands, 3,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, mem128_features,
+                                                                 BUSTER_ARRAY_LENGTH(mem128_features), vpsrld_zmm_disp8_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(vpsrld_zmm_disp8_bytes)));
+
         // AVX10.2 AUX BF4 memory forms use an exact four-bit element size
         // while their tuple displacement remains a byte-sized half-vector.
         // Keep the in-repo XED metadata form ids and byte oracles explicit
@@ -3907,6 +3965,52 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             .relocation_capacity = BUSTER_ARRAY_LENGTH(bf4_wrong_relocations),
         });
         BUSTER_TEST(arguments, bf4_wrong_zmm.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
+
+        BusterX86MetadataPhysicalOperand bf4_xmm_disp8 = bf4_xmm_operands[1];
+        bf4_xmm_disp8.memory.displacement = 8;
+        bf4_xmm_disp8.memory.has_displacement = true;
+        BusterX86MetadataPhysicalOperand bf4_xmm_disp8_operands[2] = {bf4_xmm_operands[0], bf4_xmm_disp8};
+        u8 bf4_xmm_disp8_bytes[] = {0x62, 0xf5, 0x7c, 0x08, 0x37, 0x40, 0x01};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTBF42HF8"), 3777, bf4_xmm_disp8_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, bf4_features_128,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_features_128), bf4_xmm_disp8_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_xmm_disp8_bytes)));
+        BusterX86MetadataPhysicalOperand bf4_ymm_disp8 = bf4_ymm_operands[1];
+        bf4_ymm_disp8.memory.displacement = 16;
+        bf4_ymm_disp8.memory.has_displacement = true;
+        BusterX86MetadataPhysicalOperand bf4_ymm_disp8_operands[2] = {bf4_ymm_operands[0], bf4_ymm_disp8};
+        u8 bf4_ymm_disp8_bytes[] = {0x62, 0xf5, 0x7c, 0x28, 0x37, 0x40, 0x01};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTBF42HF8"), 3779, bf4_ymm_disp8_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, bf4_features_128,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_features_128), bf4_ymm_disp8_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_ymm_disp8_bytes)));
+        BusterX86MetadataPhysicalOperand bf4_zmm_disp8 = bf4_zmm_operands[1];
+        bf4_zmm_disp8.memory.displacement = 32;
+        bf4_zmm_disp8.memory.has_displacement = true;
+        BusterX86MetadataPhysicalOperand bf4_zmm_disp8_operands[2] = {bf4_zmm_operands[0], bf4_zmm_disp8};
+        u8 bf4_zmm_disp8_bytes[] = {0x62, 0xf5, 0x7c, 0x48, 0x37, 0x40, 0x01};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTBF42HF8"), 3781, bf4_zmm_disp8_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, bf4_features_512,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_features_512), bf4_zmm_disp8_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_zmm_disp8_bytes)));
+        BusterX86MetadataPhysicalOperand bf4_xmm_max_disp8 = bf4_xmm_operands[1];
+        bf4_xmm_max_disp8.memory.displacement = 1016;
+        bf4_xmm_max_disp8.memory.has_displacement = true;
+        BusterX86MetadataPhysicalOperand bf4_xmm_max_disp8_operands[2] = {bf4_xmm_operands[0], bf4_xmm_max_disp8};
+        u8 bf4_xmm_max_disp8_bytes[] = {0x62, 0xf5, 0x7c, 0x08, 0x37, 0x40, 0x7f};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTBF42HF8"), 3777, bf4_xmm_max_disp8_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, bf4_features_128,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_features_128), bf4_xmm_max_disp8_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_xmm_max_disp8_bytes)));
+        BusterX86MetadataPhysicalOperand bf4_xmm_disp32 = bf4_xmm_operands[1];
+        bf4_xmm_disp32.memory.displacement = 1024;
+        bf4_xmm_disp32.memory.has_displacement = true;
+        BusterX86MetadataPhysicalOperand bf4_xmm_disp32_operands[2] = {bf4_xmm_operands[0], bf4_xmm_disp32};
+        u8 bf4_xmm_disp32_bytes[] = {0x62, 0xf5, 0x7c, 0x08, 0x37, 0x80, 0x00, 0x04, 0x00, 0x00};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("VCVTBF42HF8"), 3777, bf4_xmm_disp32_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, bf4_features_128,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_features_128), bf4_xmm_disp32_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(bf4_xmm_disp32_bytes)));
 
         BusterX86MetadataPhysicalOperand bf4_full_disp = bf4_xmm_operands[1];
         bf4_full_disp.memory.displacement = 4;
