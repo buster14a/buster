@@ -2328,18 +2328,19 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        // The residual-control base adds eleven rows and plain not_refining
-        // adds five more (RDRAND, RDSEED, XSTORE, and both MOVBE forms) on
-        // top of the eight fixed NOT16 rows, for a combined +16 delta.
-        BUSTER_TEST(arguments, audit.emitted_count == 10552 && audit.blocked_count == 461 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10552 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 461);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10660 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 84);
+        // The residual-control stack contributes sixteen rows and the legacy
+        // DF64/IMMUNE controls contribute seventeen more.  These are disjoint
+        // normalized rows on top of the eight fixed NOT16 rows: combined
+        // ledger delta is +33 from the pre-residual baseline.
+        BUSTER_TEST(arguments, audit.emitted_count == 10569 && audit.blocked_count == 444 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10569 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 444);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10677 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 67);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 199, 5, 1643, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1742, 195, 5, 1643, 176, 6718, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {70, 4, 0, 0, 0, 10, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1759, 195, 5, 1643, 176, 6718, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {53, 4, 0, 0, 0, 10, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2349,7 +2350,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10552, 268, 108, 51, 0, 34, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10569, 268, 108, 45, 0, 23, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -2594,6 +2595,81 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
               })
             : (BusterX86MetadataEmitResult){0};
         BUSTER_TEST(arguments, wrong_built && wrong_result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS && wrong_result.byte_count == 0);
+
+        // Prefix-control coverage is intentionally tracked separately from
+        // the broad audit totals.  These raw populations and exact blocked
+        // rows make it impossible for a newly recognized token to unlock an
+        // unrelated CET or MODEP5/REP-selector form by accident.
+        String8 const residual_tokens[] = {
+            S8_INITIALIZER("DF64()"), S8_INITIALIZER("IMMUNE66()"),
+            S8_INITIALIZER("IMMUNE66_LOOP64()"), S8_INITIALIZER("IMMUNE_REXW()"),
+        };
+        static u32 const residual_total_expected[] = {42, 34, 15, 4};
+        static u32 const residual_normalized_expected[] = {40, 26, 15, 4};
+        static u32 const residual_blocked_expected[] = {10, 0, 10, 0};
+        static u32 const residual_emitted_expected[] = {30, 26, 5, 4};
+        static u32 const residual_blocked_ids[][10] = {
+            {9483, 9484, 9487, 9488, 10042, 10043, 10045, 10046, 10047, 10049},
+            {0},
+            {9483, 9484, 9487, 9488, 10042, 10043, 10045, 10046, 10047, 10049},
+            {0},
+        };
+        static u32 const residual_blocked_id_count[] = {10, 0, 10, 0};
+        u32 residual_total[4] = {0};
+        u32 residual_normalized[4] = {0};
+        u32 residual_blocked[4] = {0};
+        u32 residual_emitted[4] = {0};
+        bool residual_rows_consistent = true;
+        for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
+        {
+            BusterX86MetadataForm form = {0};
+            if (!buster_x86_metadata_form(form_id, &form)) continue;
+            for (u32 token_index = 0; token_index < BUSTER_ARRAY_LENGTH(residual_tokens); token_index += 1)
+            {
+                if (!x86_64_metadata_test_pattern_has_token(form.pattern, residual_tokens[token_index])) continue;
+                residual_total[token_index] += 1;
+                if (form.coverage_class != BUSTER_X86_METADATA_COVERAGE_NORMALIZED) continue;
+                residual_normalized[token_index] += 1;
+                bool expected_blocked = false;
+                for (u32 blocked_index = 0; blocked_index < residual_blocked_id_count[token_index]; blocked_index += 1)
+                    expected_blocked |= form_id == residual_blocked_ids[token_index][blocked_index];
+                bool is_blocked = ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED;
+                residual_blocked[token_index] += is_blocked;
+                residual_emitted[token_index] += !is_blocked;
+                if (expected_blocked)
+                {
+                    residual_rows_consistent &= is_blocked && !ledger[form_id].encoder_capable &&
+                                               ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
+                }
+                else
+                {
+                    residual_rows_consistent &= !is_blocked && ledger[form_id].encoder_capable &&
+                                               ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_NONE;
+                }
+            }
+        }
+        bool residual_counts_match = residual_rows_consistent;
+        for (u32 token_index = 0; token_index < BUSTER_ARRAY_LENGTH(residual_tokens); token_index += 1)
+        {
+            residual_counts_match &= residual_total[token_index] == residual_total_expected[token_index];
+            residual_counts_match &= residual_normalized[token_index] == residual_normalized_expected[token_index];
+            residual_counts_match &= residual_blocked[token_index] == residual_blocked_expected[token_index];
+            residual_counts_match &= residual_emitted[token_index] == residual_emitted_expected[token_index];
+        }
+        BUSTER_TEST(arguments, residual_counts_match);
+        static u32 const immune66_ids[] = {
+            7909, 7910, 7911, 7912, 7913, 7914, 7915, 7916, 9526, 9528, 9529, 9530,
+            10952, 10953, 10954, 10955, 10958, 10959, 10960, 10961, 10964, 10965, 10966, 10967, 10968, 10969,
+        };
+        bool immune66_rows_stable = true;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(immune66_ids); index += 1)
+        {
+            u32 form_id = immune66_ids[index];
+            immune66_rows_stable &= form_id < audit.entry_count &&
+                                   ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
+                                   ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_NONE && ledger[form_id].encoder_capable;
+        }
+        BUSTER_TEST(arguments, immune66_rows_stable);
 
         // The raw APXEVEX source carries ND=1 on 778 rows.  XED annotates
         // APX_NDD on 730 of them, while the 48 IMULZU/SET*ZU rows omit the
@@ -3219,6 +3295,135 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                             canonical_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
                             x86_64_metadata_test_bytes_equal(canonical_output, canonical_emit.byte_count, expected_bytes[0], byte_counts[0]);
         BUSTER_TEST(arguments, not16_forms_pass);
+    }
+
+    {
+        // Exact bytes for every normalized row that this change unblocks.
+        // The stack forms also exercise DF64's 64-bit default, its explicit
+        // 16-bit override, and its contradictory 32-bit guard.
+        BusterX86MetadataPhysicalOperand pop_mem64 = x86_64_metadata_test_physical_mem_base(0, 64, 0);
+        BusterX86MetadataPhysicalOperand pop_reg64 = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64);
+        BusterX86MetadataPhysicalOperand pop_mem16 = x86_64_metadata_test_physical_mem_base(0, 16, 0);
+        BusterX86MetadataPhysicalOperand pop_reg16 = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 16);
+        BusterX86MetadataPhysicalOperand pop_mem32 = x86_64_metadata_test_physical_mem_base(0, 32, 0);
+        BusterX86MetadataPhysicalOperand pop_reg32 = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 32);
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("POP"), 9337, &pop_mem64, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0x8f, 0x00}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("POP"), 9338, &pop_reg64, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0x8f, 0xc0}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("PUSH"), 9490, &pop_mem64, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xff, 0x30}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("PUSH"), 9491, &pop_reg64, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xff, 0xf0}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("POP"), 9337, &pop_mem16, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0x66, 0x8f, 0x00}, 3));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("POP"), 9338, &pop_reg16, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0x66, 0x8f, 0xc0}, 3));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("PUSH"), 9490, &pop_mem16, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0x66, 0xff, 0x30}, 3));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("PUSH"), 9491, &pop_reg16, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0x66, 0xff, 0xf0}, 3));
+        u8 guard_output[8] = {0};
+        BusterX86MetadataEmitResult pop_mem32_result = x86_64_metadata_test_emit_form(
+            S8("POP"), 9337, &pop_mem32, 1, (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+            guard_output, sizeof(guard_output), 0, 0);
+        BusterX86MetadataEmitResult pop_reg32_result = x86_64_metadata_test_emit_form(
+            S8("POP"), 9338, &pop_reg32, 1, (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+            guard_output, sizeof(guard_output), 0, 0);
+        BusterX86MetadataEmitResult push_mem32_result = x86_64_metadata_test_emit_form(
+            S8("PUSH"), 9490, &pop_mem32, 1, (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+            guard_output, sizeof(guard_output), 0, 0);
+        BusterX86MetadataEmitResult push_reg32_result = x86_64_metadata_test_emit_form(
+            S8("PUSH"), 9491, &pop_reg32, 1, (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+            guard_output, sizeof(guard_output), 0, 0);
+        BUSTER_TEST(arguments, pop_mem32_result.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH &&
+                                   pop_reg32_result.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH &&
+                                   push_mem32_result.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH &&
+                                   push_reg32_result.status == BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH);
+
+        BusterX86MetadataPhysicalOperand push_imm32 = x86_64_metadata_test_physical_imm(0x12345678, 32);
+        BusterX86MetadataPhysicalOperand push_imm8 = x86_64_metadata_test_physical_imm(0x7f, 8);
+        BusterX86MetadataPhysicalOperand ret_imm16 = x86_64_metadata_test_physical_imm_u64(0x1234, 16);
+        BusterX86MetadataPhysicalOperand io_imm8 = x86_64_metadata_test_physical_imm_u64(0x7f, 8);
+        BusterX86MetadataPhysicalOperand loop_disp8 = x86_64_metadata_test_physical_relative(0, 8);
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("PUSH"), 9743, &push_imm32, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0x68, 0x78, 0x56, 0x34, 0x12}, 5));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("PUSH"), 9746, &push_imm8, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0x6a, 0x7f}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("RET_NEAR"), 10019, &ret_imm16, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xc2, 0x34, 0x12}, 3));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("RET_NEAR"), 10020, 0, 0,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xc3}, 1));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("LEAVE"), 10024, 0, 0,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xc9}, 1));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("PUSH"), 10272, 0, 0,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0x0f, 0xa0}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("POP"), 10273, 0, 0,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0x0f, 0xa1}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("PUSH"), 10658, 0, 0,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0x0f, 0xa8}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("POP"), 10659, 0, 0,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0x0f, 0xa9}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("IN"), 10056, &io_imm8, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xe5, 0x7f}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("OUT"), 10058, &io_imm8, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xe7, 0x7f}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("IN"), 10065, 0, 0,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xed}, 1));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("OUT"), 10067, 0, 0,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xef}, 1));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("LOOPNE"), 10044, &loop_disp8, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xe0, 0x00}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("LOOPE"), 10048, &loop_disp8, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xe1, 0x00}, 2));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("LOOP"), 10050, &loop_disp8, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
+                                                                 (u8 const[]){0xe2, 0x00}, 2));
+        BusterX86MetadataEmitResult loop_rep_result = x86_64_metadata_test_emit_form(
+            S8("LOOP"), 10050, &loop_disp8, 1, (BusterX86MetadataPhysicalAttributes){.rep = true}, 0, 0,
+            guard_output, sizeof(guard_output), 0, 0);
+        BUSTER_TEST(arguments, loop_rep_result.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION);
+
+        // Representative ADCX and CMPXCHG8B byte checks pin the old
+        // IMMUNE66 path; the audit ledger above covers all 26 rows' status.
+        BusterX86MetadataPhysicalOperand adcx32_operands[] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 32),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 2, 32),
+        };
+        BusterX86MetadataPhysicalOperand adcx64_operands[] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 64),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 2, 64),
+        };
+        String8 wildcard_features[1] = {S8("*")};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("ADCX"), 7909, adcx32_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard_features, 1,
+                                                                 (u8 const[]){0x66, 0x0f, 0x38, 0xf6, 0xca}, 5));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("ADCX"), 7911, adcx64_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard_features, 1,
+                                                                 (u8 const[]){0x66, 0x48, 0x0f, 0x38, 0xf6, 0xca}, 6));
     }
 
     {

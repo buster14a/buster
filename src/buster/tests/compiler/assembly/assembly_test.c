@@ -46,6 +46,17 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86.relocation_count == 1 && x86.relocations[0].offset == 2 && x86.relocations[0].symbol == 1 &&
                                x86.relocations[0].addend == -4 && x86.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
 
+    // Front-door routing for the legacy prefix-control rows: RET/LEAVE use
+    // the newly normalized DF64/IMMUNE66_LOOP64 forms, while LOOP-family
+    // branches retain their 8-bit displacement and ignore redundant 66.
+    AssemblyEncodeResult residual_controls = assembly_encode(
+        arguments->arena, S8("ret\nleave\nloop loop_target\nloopne loop_target\nloope loop_target\nloop_target:\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 expected_residual_controls[] = {0xc3, 0xc9, 0xe2, 0x04, 0xe0, 0x02, 0xe1, 0x00};
+    BUSTER_TEST(arguments, residual_controls.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(residual_controls.bytes, expected_residual_controls,
+                                                         sizeof(expected_residual_controls)));
+
     AssemblyEncodeResult x86_syntax_switches = assembly_encode(
         arguments->arena,
         S8("mov rax, rbx ; Intel comment\n"

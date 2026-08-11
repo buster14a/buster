@@ -715,7 +715,9 @@ struct BusterX86MetadataPatternSemantics
     u8 rex_b4_control;
     u8 has_p4_control;
     u8 p4_value;
+    u8 immune66;
     u8 immune66_loop64;
+    u8 immune_rexw;
     u8 df64;
     u8 required_address_size;
     u8 forbid_address_override;
@@ -1753,6 +1755,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             pattern.has_prefix_control = 1;
             pattern.immune66_loop64 = 1;
         }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("IMMUNE_REXW()")))
+        {
+            pattern.has_prefix_control = 1;
+            pattern.immune_rexw = 1;
+        }
         else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("OVERRIDE_SEG0()")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("OVERRIDE_SEG1()")))
         {
@@ -1839,6 +1846,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             // irrelevant to this form.  The normalized mandatory-prefix and
             // operand-width fields already carry the bytes and source shape;
             // this control adds neither a source operand nor an encoded byte.
+            pattern.has_prefix_control = 1;
+            pattern.immune66 = 1;
         }
         else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("LZCNT=1")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("TZCNT=1")))
@@ -1901,7 +1910,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
     bool loop_form = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOP")) ||
                      buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOPE")) ||
                      buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LOOPNE"));
-    if ((pattern.immune66_loop64 || pattern.has_modep5 || pattern.has_rep_selector) && !loop_form)
+    if ((pattern.has_modep5 || pattern.has_rep_selector) && !loop_form)
         buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
     if (pattern.has_modep5 && pattern.modep5_value != 0)
         buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
@@ -2079,7 +2088,8 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
                                  pattern.has_branch_hint_control ||
                                  pattern.has_remove_segment || pattern.rex_b_control || pattern.rex_b4_control ||
                                  pattern.has_p4_control ||
-                                 pattern.immune66_loop64 || buster_x86_metadata_emit_canonical_df64(form, pattern) ||
+                                 pattern.immune66 || pattern.immune66_loop64 || pattern.immune_rexw || pattern.df64 ||
+                                 buster_x86_metadata_emit_canonical_df64(form, pattern) ||
                                  pattern.has_mpx_mode ||
                                  (form.mode_flags & (BUSTER_X86_METADATA_MODE_16 | BUSTER_X86_METADATA_MODE_32 |
                                                      BUSTER_X86_METADATA_MODE_64 | BUSTER_X86_METADATA_MODE_NOT64));
@@ -3416,6 +3426,28 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_semantics(BusterX
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_df64_operands_match(BusterX86MetadataPatternSemantics pattern,
+                                                                        BusterX86MetadataPhysicalBinding* bindings,
+                                                                        u32 binding_count)
+{
+    if (!pattern.df64) return true;
+    // DF64 gives variable GPR/memory operands a 64-bit default in long mode.
+    // The legacy stack forms have no 32-bit encoding: 16-bit remains an
+    // explicit operand-size override, while a 32-bit physical operand is a
+    // contradictory query and must not fall through to the generic width
+    // heuristic.
+    for (u32 index = 0; index < binding_count; index += 1)
+    {
+        BusterX86MetadataPhysicalOperand physical = bindings[index].physical;
+        u8 physical_class = buster_x86_metadata_emit_operand_class(physical);
+        if (physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR &&
+            physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_MEMORY)
+            continue;
+        if (!pattern.has_w && buster_x86_metadata_emit_operand_width(physical) == 32) return false;
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_write_byte(BusterX86MetadataEncodeScratch* scratch, u8 value)
 {
     if (scratch->byte_count >= BUSTER_ARRAY_LENGTH(scratch->bytes)) return false;
@@ -3946,6 +3978,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     u32 binding_count = 0;
     if (!buster_x86_metadata_emit_bind_form(query, form, bindings, &binding_count, diagnostic_operand))
         return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+    if (!buster_x86_metadata_emit_df64_operands_match(pattern, bindings, binding_count))
+        return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
     if (query.source_semantics && !buster_x86_metadata_emit_form_operand_semantics(form, bindings, binding_count))
         return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
     for (u32 index = 0; index < binding_count; index += 1)
@@ -4156,6 +4190,14 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
             physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR && physical.reg.width == 64)
             if (!pattern.has_w && !apx_evex_fixed_width_no_w) rex_w = true;
     }
+    // DF64 rows encode their 64-bit default without a synthetic REX.W.  An
+    // explicit W token remains authoritative for the small subset whose XED
+    // row actually requires it (for example the PUSHF/POPF aliases).
+    if (pattern.df64 && !pattern.has_w) rex_w = false;
+    // IMMUNE_REXW rows intentionally ignore a derived REX.W.  The typed
+    // query has no separate "prefix was explicitly requested" bit, so a
+    // width heuristic must not turn a valid fixed-width form into a failure.
+    if (pattern.immune_rexw) rex_w = false;
     bool vector_family = form.prefix_kind == BUSTER_X86_METADATA_PREFIX_VEX || form.prefix_kind == BUSTER_X86_METADATA_PREFIX_XOP ||
                          form.prefix_kind == BUSTER_X86_METADATA_PREFIX_EVEX;
     if (vector_family && buster_x86_metadata_emit_any_high_byte(bindings, binding_count))
@@ -4205,6 +4247,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
                                   form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2);
     if (operand_size_override && pattern.forbid_operand_size_override)
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+    bool immune_to_66 = pattern.immune66 ||
+                        (pattern.immune66_loop64 && query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64);
+    if (operand_size_override && immune_to_66) return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if ((query.attributes.rep && mandatory_prefix == 0xf2) || (query.attributes.repne && mandatory_prefix == 0xf3))
         return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     if ((pattern.lock_control == 1 && !query.attributes.lock) || (pattern.lock_control == 2 && query.attributes.lock) ||
@@ -4729,7 +4774,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_eamode_alias_forms(BusterX86Metadat
         first_pattern.has_remove_segment != second_pattern.has_remove_segment || first_pattern.rex_b_control != second_pattern.rex_b_control ||
         first_pattern.rex_b4_control != second_pattern.rex_b4_control || first_pattern.has_p4_control != second_pattern.has_p4_control ||
         first_pattern.p4_value != second_pattern.p4_value ||
+        first_pattern.immune66 != second_pattern.immune66 ||
         first_pattern.immune66_loop64 != second_pattern.immune66_loop64 ||
+        first_pattern.immune_rexw != second_pattern.immune_rexw ||
         first_pattern.df64 != second_pattern.df64 ||
         first_pattern.required_address_size != second_pattern.required_address_size ||
         first_pattern.forbid_address_override != second_pattern.forbid_address_override ||
