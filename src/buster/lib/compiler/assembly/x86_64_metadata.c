@@ -667,6 +667,9 @@ struct BusterX86MetadataPatternSemantics
     // the byte path's implicit 66 decision.
     u8 mode_control;
     u8 operand_size_control;
+    u8 has_cet_control;
+    u8 cet_value;
+    u8 has_encdelete_control;
     u8 has_address_control;
     u8 has_decorator_control;
     u8 has_apx_control;
@@ -1799,10 +1802,19 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("REMOVE")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("FORCE")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("P4")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("IBHF")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("ENCDELETE")))
+                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("IBHF")))
         {
             pattern.has_prefix_control = 1;
+            buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
+        }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("ENCDELETE")))
+        {
+            // XED's ENCDELETE marker identifies a deleted/noncanonical alias,
+            // not a source-selectable encoding.  Keep it typed in the parsed
+            // pattern while retaining an explicit blocker so it cannot leak
+            // into the encoder through generic prefix-token handling.
+            pattern.has_prefix_control = 1;
+            pattern.has_encdelete_control = 1;
             buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
         }
         else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("ONE()")))
@@ -1842,8 +1854,21 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             // ModRM.reg selector; the token selects the source mnemonic and
             // adds no independent byte or operand.
         }
-        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("CET=1")) ||
-                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("PREFETCHIT=1")) ||
+        else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("CET=")))
+        {
+            // CET=1 selects an actual CET instruction (ENDBR/RDSSP), while
+            // CET=0 selects the legacy NOP aliases occupying those bytes when
+            // CET is disabled.  The normalized opcode/prefix/ModRM fields
+            // carry the bytes; retain the selector so aliases cannot collapse
+            // across the CET policy boundary.
+            pattern.has_prefix_control = 1;
+            pattern.has_cet_control = 1;
+            if (length == 5 && (token_buffer[4] == '0' || token_buffer[4] == '1'))
+                pattern.cet_value = (u8)(token_buffer[4] - '0');
+            else
+                pattern.has_unsupported_token = 1;
+        }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("PREFETCHIT=1")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("PREFETCHRST=1")))
         {
             // These value-1 selectors choose a source mnemonic/feature form;
@@ -1894,6 +1919,17 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
         (!pattern.p4_value || !buster_x86_metadata_string_input_equal(form.iclass.offset, S8("PAUSE")) ||
          pattern.opcode_count != 1 || pattern.opcode[0] != 0x90 || pattern.mandatory_prefix != 0xf3))
         buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
+    if (pattern.has_cet_control && pattern.cet_value == 0)
+    {
+        // These rows are the legacy NOP aliases occupying the CET opcode
+        // space when CET is disabled.  They stay blocked even when their
+        // exact legacy signature is present: the public source query has no
+        // unambiguous mandatory-F3 selector and the same bytes become ENDBR
+        // or RDSSP when CET is enabled.  Retain the typed selector for audit
+        // and regeneration while refusing to advertise an encoder capability
+        // that could weaken CET feature policy.
+        buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
+    }
     if (pattern.short_ud0)
     {
         // MODE_SHORT_UD0 is a selector for the fixed 0f ff spelling, never a
@@ -4669,6 +4705,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_eamode_alias_forms(BusterX86Metadat
         first_pattern.has_prefix_control != second_pattern.has_prefix_control ||
         first_pattern.has_branch_hint_control != second_pattern.has_branch_hint_control ||
         first_pattern.has_force64_control != second_pattern.has_force64_control ||
+        first_pattern.has_cet_control != second_pattern.has_cet_control || first_pattern.cet_value != second_pattern.cet_value ||
+        first_pattern.has_encdelete_control != second_pattern.has_encdelete_control ||
         first_pattern.has_address_control != second_pattern.has_address_control ||
         first_pattern.has_decorator_control != second_pattern.has_decorator_control ||
         first_pattern.has_apx_control != second_pattern.has_apx_control || first_pattern.has_amx_control != second_pattern.has_amx_control ||

@@ -2477,6 +2477,32 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                          ledger[11005].disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
                          ledger[11005].blocker == BUSTER_X86_METADATA_BLOCKER_NONE && ledger[11005].encoder_capable;
         BUSTER_TEST(arguments, not16_count == 8 && not16_inventory && adjacency);
+        // CET=0 and ENCDELETE aliases remain in the complete ledger for
+        // audit/regeneration, but their decode-policy markers make them
+        // unavailable to the public encoder.  Reuse this audit's ledger;
+        // running another full 11k-form audit in the selector tests below
+        // would duplicate a comparatively expensive scan.
+        static u32 const cet0_form_ids[] = {7965, 7966, 7967, 7968};
+        bool cet0_ledger_exact = true;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cet0_form_ids); index += 1)
+        {
+            u32 form_id = cet0_form_ids[index];
+            cet0_ledger_exact &= form_id < audit.entry_count && ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
+                                 !ledger[form_id].encoder_capable &&
+                                 ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
+        }
+        static u32 const encdelete_form_ids[] = {7970, 7971, 7972, 7973, 7974, 7975};
+        bool encdelete_ledger_exact = true;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(encdelete_form_ids); index += 1)
+        {
+            u32 form_id = encdelete_form_ids[index];
+            encdelete_ledger_exact &= form_id < audit.entry_count && ledger[form_id].disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED &&
+                                      !ledger[form_id].encoder_capable &&
+                                      ledger[form_id].blocker == BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS;
+        }
+        BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
+                                   audit.entry_count == 11013 && audit.normalized_entry_count == 10636 && cet0_ledger_exact &&
+                                   encdelete_ledger_exact);
         // These are the five additional normalized LEGACY rows whose plain
         // not_refining controls are architecturally selectable here.  The
         // six not_refining_f3 BSR/BSF rows are already covered by the
@@ -4873,6 +4899,92 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                                                                     (BusterX86MetadataPhysicalAttributes){0}, wildcard,
                                                                                     BUSTER_ARRAY_LENGTH(wildcard), prefetchrst2_bytes,
                                                                                     BUSTER_ARRAY_LENGTH(prefetchrst2_bytes)));
+
+        // CET=0 rows are typed legacy-NOP aliases.  Their raw signature is
+        // preserved for audit, but they remain unavailable to the public
+        // encoder: no source query can select mandatory F3 without ambiguity
+        // against the generic 0f1e NOP form, and the bytes become ENDBR/RDSSP
+        // under CET.  ENCDELETE rows are similarly retained as explicit
+        // deleted/noncanonical aliases and must stay blocked.
+        u32 const cet0_form_ids[] = {7965, 7966, 7967, 7968};
+        bool cet0_contract = true;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cet0_form_ids); index += 1)
+        {
+            u32 form_id = cet0_form_ids[index];
+            BusterX86MetadataForm form = {0};
+            BusterX86MetadataOperand operands[2] = {0};
+            BusterX86MetadataPhysicalOperand physical[16] = {0};
+            char8 mnemonic_buffer[128] = {0};
+            BusterX86MetadataPhysicalQuery query = {0};
+            bool retrieved = buster_x86_metadata_form(form_id, &form) && buster_x86_metadata_operand(form_id, 0, operands + 0) &&
+                             buster_x86_metadata_operand(form_id, 1, operands + 1) &&
+                             x86_64_metadata_test_build_gate_query(form_id, &query, physical, mnemonic_buffer);
+            BusterX86MetadataEmitResult emitted = retrieved
+                                                       ? buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                                                             .physical = query,
+                                                             .form_id = form_id,
+                                                             .output = (u8[32]){0},
+                                                             .output_capacity = 32,
+                                                         })
+                                                       : (BusterX86MetadataEmitResult){.status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT};
+            BusterX86MetadataSelectResult selected = retrieved ? buster_x86_metadata_select_form(query)
+                                                               : (BusterX86MetadataSelectResult){.status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT};
+            bool raw_signature = form.fixed_byte_count == 2 && form.fixed_bytes[0] == 0x0f && form.fixed_bytes[1] == 0x1e &&
+                                 form.mandatory_prefix == 0xf3 && form.map == BUSTER_X86_METADATA_MAP_0F &&
+                                 (form.field_flags & (BUSTER_X86_METADATA_FIELD_MODRM | BUSTER_X86_METADATA_FIELD_REGISTER)) ==
+                                     (BUSTER_X86_METADATA_FIELD_MODRM | BUSTER_X86_METADATA_FIELD_REGISTER);
+            bool selected_generic = selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS;
+            selected_generic &= selected.form_id != 7965 && selected.form_id != 7966 && selected.form_id != 7967 && selected.form_id != 7968;
+            cet0_contract &= retrieved && x86_64_metadata_test_string_equal(form.iclass, S8("NOP")) &&
+                             x86_64_metadata_test_string_equal(form.isa_set, S8("PPRO")) &&
+                             x86_64_metadata_test_string_equal(form.extension, S8("BASE")) &&
+                             form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                             x86_64_metadata_test_pattern_has_token(form.pattern, S8("CET=0")) && raw_signature &&
+                             operands[0].visible && operands[1].visible && operands[0].physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR &&
+                             operands[1].physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR &&
+                             (operands[0].physical_width_flags & (1u << (index < 3 ? 2 : 3))) != 0 &&
+                             (operands[1].physical_width_flags & (1u << (index < 3 ? 2 : 3))) != 0 &&
+                             emitted.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA && selected_generic;
+        }
+        BUSTER_TEST(arguments, cet0_contract);
+
+        u32 const encdelete_form_ids[] = {7970, 7971, 7972, 7973, 7974, 7975};
+        bool encdelete_contract = true;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(encdelete_form_ids); index += 1)
+        {
+            u32 form_id = encdelete_form_ids[index];
+            BusterX86MetadataForm form = {0};
+            BusterX86MetadataPhysicalOperand physical[16] = {0};
+            char8 mnemonic_buffer[128] = {0};
+            BusterX86MetadataPhysicalQuery query = {0};
+            bool retrieved = buster_x86_metadata_form(form_id, &form) &&
+                             x86_64_metadata_test_build_gate_query(form_id, &query, physical, mnemonic_buffer);
+            BusterX86MetadataEmitResult emitted = retrieved
+                                                       ? buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                                                             .physical = query,
+                                                             .form_id = form_id,
+                                                             .output = (u8[32]){0},
+                                                             .output_capacity = 32,
+                                                         })
+                                                       : (BusterX86MetadataEmitResult){.status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT};
+            encdelete_contract &= retrieved && x86_64_metadata_test_string_equal(form.iclass, S8("NOP")) &&
+                                  x86_64_metadata_test_string_equal(form.isa_set, S8("PPRO")) &&
+                                  x86_64_metadata_test_string_equal(form.extension, S8("BASE")) &&
+                                  x86_64_metadata_test_pattern_has_token(form.pattern, S8("ENCDELETE")) &&
+                                  emitted.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
+        }
+        BUSTER_TEST(arguments, encdelete_contract);
+
+        u32 const residual_neighbors[] = {7969, 7976, 7977, 7978};
+        bool neighbor_exclusions = true;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(residual_neighbors); index += 1)
+        {
+            BusterX86MetadataForm form = {0};
+            bool retrieved = buster_x86_metadata_form(residual_neighbors[index], &form);
+            neighbor_exclusions &= retrieved && !x86_64_metadata_test_pattern_has_token(form.pattern, S8("CET=0")) &&
+                                   !x86_64_metadata_test_pattern_has_token(form.pattern, S8("ENCDELETE"));
+        }
+        BUSTER_TEST(arguments, neighbor_exclusions);
 
         BusterX86MetadataEmitResult ccmp_wrong_operand = x86_64_metadata_test_emit_form(
             S8("CCMPB"), 779,
