@@ -586,7 +586,8 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_build_gate_query(
                                                                                            : 64;
         if (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER)
             operands[operand_count] = x86_64_metadata_test_physical_reg(metadata.physical_class, 0, width);
-        else if (metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY)
+        else if (metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY ||
+                 metadata.kind == BUSTER_X86_METADATA_OPERAND_ADDRESS_GENERATOR)
             operands[operand_count] = x86_64_metadata_test_physical_mem_base(0, width, 0);
         else if (metadata.kind == BUSTER_X86_METADATA_OPERAND_IMMEDIATE)
             operands[operand_count] = x86_64_metadata_test_physical_imm(0, width);
@@ -2327,15 +2328,20 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !short_storage.complete && short_storage.entry_count == 11012);
         BUSTER_TEST(arguments, audit.complete && !audit.duplicate_form_id && !audit.duplicate_stable_hash &&
                                    audit.entry_count == 11013 && audit.normalized_entry_count == 10636);
-        BUSTER_TEST(arguments, audit.emitted_count == 10536 && audit.blocked_count == 477 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10536 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 477);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10644 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 100);
+        // This combined residual-control cluster adds eleven normalized rows
+        // from dcfeae35 on top of the existing eight fixed NOT16 rows: LEA,
+        // NOP, PAUSE, two XCHG forms, and the six AMD/HSW no-F3 BSR/BSF
+        // duplicates (which share ordinary opcodes with the canonical rows
+        // but must remain selectable without F3).
+        BUSTER_TEST(arguments, audit.emitted_count == 10547 && audit.blocked_count == 466 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10547 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 466);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10655 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 89);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 199, 5, 1643, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1729, 192, 5, 1643, 176, 6718, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {83, 7, 0, 0, 0, 10, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1737, 195, 5, 1643, 176, 6718, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {75, 4, 0, 0, 0, 10, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -2345,7 +2351,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10536, 268, 108, 67, 0, 34, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10547, 268, 108, 56, 0, 34, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -3905,6 +3911,106 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                                                  (BusterX86MetadataPhysicalAttributes){0}, wildcard,
                                                                  BUSTER_ARRAY_LENGTH(wildcard), xchg_r8_bytes,
                                                                  BUSTER_ARRAY_LENGTH(xchg_r8_bytes)));
+
+        // LEA's source schema calls the address operand AGEN rather than
+        // MEM.  The public physical query deliberately models that address
+        // with a memory operand, while REMOVE_SEGMENT rejects any segment
+        // override before the ordinary ModRM/SIB encoder runs.
+        BusterX86MetadataPhysicalOperand lea_rax =
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64);
+        BusterX86MetadataPhysicalOperand lea_rbx = x86_64_metadata_test_physical_mem_base(3, 64, 0);
+        BusterX86MetadataPhysicalOperand lea_operands[2] = {lea_rax, lea_rbx};
+        u8 lea_base_bytes[] = {0x48, 0x8d, 0x03};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("LEA"), 9849, lea_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), lea_base_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(lea_base_bytes)));
+        BusterX86MetadataPhysicalOperand lea_complex_memory = x86_64_metadata_test_physical_mem_base(9, 64, 0x20);
+        lea_complex_memory.memory.has_index = true;
+        lea_complex_memory.memory.index =
+            (BusterX86MetadataPhysicalRegister){.index = 1, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR};
+        lea_complex_memory.memory.scale = 4;
+        lea_complex_memory.memory.has_displacement = true;
+        BusterX86MetadataPhysicalOperand lea_complex_operands[2] = {xchg_r8, lea_complex_memory};
+        u8 lea_complex_bytes[] = {0x4d, 0x8d, 0x44, 0x89, 0x20};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("LEA"), 9849, lea_complex_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), lea_complex_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(lea_complex_bytes)));
+        BusterX86MetadataPhysicalOperand lea_segment_memory = lea_rbx;
+        lea_segment_memory.memory.has_segment = true;
+        lea_segment_memory.memory.segment = BUSTER_X86_METADATA_SEGMENT_FS;
+        BusterX86MetadataPhysicalOperand lea_segment_operands[2] = {lea_rax, lea_segment_memory};
+        BusterX86MetadataEmitResult lea_segment_result = x86_64_metadata_test_emit_form(
+            S8("LEA"), 9849, lea_segment_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[8]){0}, 8, 0, 0);
+        BUSTER_TEST(arguments, lea_segment_result.status == BUSTER_X86_METADATA_ENCODE_ADDRESSING);
+        BusterX86MetadataPhysicalQuery lea_query = x86_64_metadata_test_physical_query(
+            S8("LEA"), lea_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard));
+        BusterX86MetadataSelectResult lea_selection = buster_x86_metadata_select_form(lea_query);
+        u8 lea_selected_bytes[8] = {0};
+        BusterX86MetadataEmitResult lea_selected = buster_x86_metadata_emit_form(
+            (BusterX86MetadataEmitQuery){.physical = lea_query, .form_id = lea_selection.form_id, .output = lea_selected_bytes,
+                                         .output_capacity = BUSTER_ARRAY_LENGTH(lea_selected_bytes)});
+        BUSTER_TEST(arguments, lea_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && lea_selection.form_id == 9849 &&
+                                   lea_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   x86_64_metadata_test_bytes_equal(lea_selected_bytes, lea_selected.byte_count, lea_base_bytes,
+                                                                     BUSTER_ARRAY_LENGTH(lea_base_bytes)));
+
+        u8 nop_bytes[] = {0x90};
+        u8 pause_bytes[] = {0xf3, 0x90};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("NOP"), 9852, 0, 0,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), nop_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(nop_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("PAUSE"), 9853, 0, 0,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), pause_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(pause_bytes)));
+        BusterX86MetadataEmitResult nop_p4_zero = x86_64_metadata_test_emit_form(
+            S8("NOP"), 9854, 0, 0, (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard),
+            (u8[8]){0}, 8, 0, 0);
+        BusterX86MetadataPhysicalQuery nop_query = x86_64_metadata_test_physical_query(
+            S8("NOP"), 0, 0, (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard));
+        BusterX86MetadataSelectResult nop_selection = buster_x86_metadata_select_form(nop_query);
+        BUSTER_TEST(arguments, nop_p4_zero.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA &&
+                                   nop_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && nop_selection.form_id == 9852);
+
+        BusterX86MetadataPhysicalOperand xchg_r8_low =
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 8, 32);
+        BusterX86MetadataPhysicalOperand xchg_r16_low =
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 16, 32);
+        BusterX86MetadataPhysicalOperand xchg_rax_low =
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 32);
+        u8 xchg_rexb_bytes[] = {0x41, 0x90};
+        u8 xchg_rexb4_bytes[] = {0xd5, 0x10, 0x90};
+        String8 xchg_apx_wildcard[1] = {S8("*")};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("XCHG"), 9856, &xchg_r8_low, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), xchg_rexb_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(xchg_rexb_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("XCHG"), 9857, &xchg_r16_low, 1,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, xchg_apx_wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(xchg_apx_wildcard), xchg_rexb4_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(xchg_rexb4_bytes)));
+        BusterX86MetadataEmitResult xchg_rexb_low_rejected = x86_64_metadata_test_emit_form(
+            S8("XCHG"), 9856, &xchg_rax_low, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[8]){0}, 8, 0, 0);
+        BusterX86MetadataEmitResult xchg_rexb4_low_rejected = x86_64_metadata_test_emit_form(
+            S8("XCHG"), 9857, &xchg_r8_low, 1, (BusterX86MetadataPhysicalAttributes){0}, xchg_apx_wildcard,
+            BUSTER_ARRAY_LENGTH(xchg_apx_wildcard), (u8[8]){0}, 8, 0, 0);
+        BusterX86MetadataEmitResult xchg_rexb4_high_rejected = x86_64_metadata_test_emit_form(
+            S8("XCHG"), 9857,
+            &(BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+                .width = 32,
+                .reg = {.index = 24, .width = 32, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+            },
+            1, (BusterX86MetadataPhysicalAttributes){0}, xchg_apx_wildcard, BUSTER_ARRAY_LENGTH(xchg_apx_wildcard),
+            (u8[8]){0}, 8, 0, 0);
+        BUSTER_TEST(arguments, xchg_rexb_low_rejected.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION &&
+                                   xchg_rexb4_low_rejected.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION &&
+                                   xchg_rexb4_high_rejected.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION);
         BusterX86MetadataPhysicalOperand xchg_rax =
             x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64);
         BusterX86MetadataEmitResult xchg_rax_result = x86_64_metadata_test_emit_form(
@@ -4558,6 +4664,79 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                                                                        (BusterX86MetadataPhysicalAttributes){0}, wildcard,
                                                                                        BUSTER_ARRAY_LENGTH(wildcard), tzcnt_metadata_bytes,
                                                                                        BUSTER_ARRAY_LENGTH(tzcnt_metadata_bytes)));
+
+        // AMD/HSW duplicate BSR/BSF rows carry the same opcode but explicitly
+        // reject F3.  Each normalized no-F3 row must emit the ordinary bytes,
+        // and front-door selection must resolve the duplicates deterministically
+        // instead of reporting an ambiguity.
+        BusterX86MetadataPhysicalOperand bsr_register_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 32),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 32),
+        };
+        BusterX86MetadataPhysicalOperand bsr_memory_operands[2] = {
+            bsr_register_operands[0], x86_64_metadata_test_physical_mem_base(1, 32, 0),
+        };
+        BusterX86MetadataPhysicalOperand bsf_register_operands[2] = {
+            bsr_register_operands[0], bsr_register_operands[1],
+        };
+        BusterX86MetadataPhysicalOperand bsf_memory_operands[2] = {
+            bsf_register_operands[0], bsr_memory_operands[1],
+        };
+        u8 bsr_register_bytes[] = {0x0f, 0xbd, 0xc1};
+        u8 bsr_memory_bytes[] = {0x0f, 0xbd, 0x01};
+        u8 bsf_register_bytes[] = {0x0f, 0xbc, 0xc1};
+        u8 bsf_memory_bytes[] = {0x0f, 0xbc, 0x01};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BSR"), 445, bsr_memory_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), bsr_memory_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(bsr_memory_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BSR"), 446, bsr_register_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), bsr_register_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(bsr_register_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BSR"), 8104, bsr_memory_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), bsr_memory_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(bsr_memory_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BSR"), 8105, bsr_register_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), bsr_register_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(bsr_register_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BSF"), 8687, bsf_memory_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), bsf_memory_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(bsf_memory_bytes)));
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("BSF"), 8688, bsf_register_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), bsf_register_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(bsf_register_bytes)));
+        BusterX86MetadataEmitResult bsr_f3_rejected = x86_64_metadata_test_emit_form(
+            S8("BSR"), 445, bsr_memory_operands, 2, (BusterX86MetadataPhysicalAttributes){.rep = true}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[8]){0}, 8, 0, 0);
+        BUSTER_TEST(arguments, bsr_f3_rejected.status == BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION);
+        BusterX86MetadataPhysicalQuery bsr_query = x86_64_metadata_test_physical_query(
+            S8("BSR"), bsr_register_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard));
+        BusterX86MetadataPhysicalQuery bsf_query = bsr_query;
+        bsf_query.mnemonic = S8("BSF");
+        BusterX86MetadataSelectResult bsr_selection = buster_x86_metadata_select_form(bsr_query);
+        BusterX86MetadataSelectResult bsf_selection = buster_x86_metadata_select_form(bsf_query);
+        u8 bsr_selected_bytes[8] = {0};
+        u8 bsf_selected_bytes[8] = {0};
+        BusterX86MetadataEmitResult bsr_selected = buster_x86_metadata_emit_form(
+            (BusterX86MetadataEmitQuery){.physical = bsr_query, .form_id = bsr_selection.form_id, .output = bsr_selected_bytes,
+                                         .output_capacity = BUSTER_ARRAY_LENGTH(bsr_selected_bytes)});
+        BusterX86MetadataEmitResult bsf_selected = buster_x86_metadata_emit_form(
+            (BusterX86MetadataEmitQuery){.physical = bsf_query, .form_id = bsf_selection.form_id, .output = bsf_selected_bytes,
+                                         .output_capacity = BUSTER_ARRAY_LENGTH(bsf_selected_bytes)});
+        BUSTER_TEST(arguments, bsr_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   bsr_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   x86_64_metadata_test_bytes_equal(bsr_selected_bytes, bsr_selected.byte_count, bsr_register_bytes,
+                                                                     BUSTER_ARRAY_LENGTH(bsr_register_bytes)) &&
+                                   bsf_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   bsf_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   x86_64_metadata_test_bytes_equal(bsf_selected_bytes, bsf_selected.byte_count, bsf_register_bytes,
+                                                                     BUSTER_ARRAY_LENGTH(bsf_register_bytes)));
         BUSTER_TEST(arguments, movss_ignore66_token_form && x86_64_metadata_test_emit_exact(
                                    S8("MOVSS"), movss_ignore66_form_id, movss_ignore66_operands, 2,
                                    (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard),

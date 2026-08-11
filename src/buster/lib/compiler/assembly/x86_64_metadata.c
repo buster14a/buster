@@ -656,6 +656,7 @@ struct BusterX86MetadataPatternSemantics
     u8 has_memory;
     u8 has_register;
     u8 has_dynamic_opcode;
+    u8 has_srm_register;
     u8 has_unsupported_token;
     u8 has_prefix_control;
     u8 has_branch_hint_control;
@@ -702,6 +703,15 @@ struct BusterX86MetadataPatternSemantics
     u8 mpx_mode_value;
     u8 has_segment_override;
     u8 segment_override_index;
+    // A small set of XED pattern controls describes the prefix/address
+    // topology rather than introducing another source operand.  Keep these
+    // constraints typed so the encoder can enforce them for every physical
+    // query (including direct metadata callers).
+    u8 has_remove_segment;
+    u8 rex_b_control;
+    u8 rex_b4_control;
+    u8 has_p4_control;
+    u8 p4_value;
     u8 immune66_loop64;
     u8 df64;
     u8 required_address_size;
@@ -726,6 +736,13 @@ struct BusterX86MetadataPatternSemantics
     u8 zeroing_control;
     u16 rounding_length;
     u8 unresolved_blocker;
+};
+
+enum
+{
+    BUSTER_X86_METADATA_REX_CONTROL_NONE,
+    BUSTER_X86_METADATA_REX_CONTROL_FORBID,
+    BUSTER_X86_METADATA_REX_CONTROL_REQUIRE,
 };
 
 enum
@@ -1071,7 +1088,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
         }
         if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("SRM[")))
         {
-            if (buster_x86_metadata_emit_token_has(token_buffer, length, 'r')) pattern.srm_fixed = BUSTER_X86_METADATA_PATTERN_FIXED_ANY;
+            if (buster_x86_metadata_emit_token_has(token_buffer, length, 'r'))
+            {
+                pattern.srm_fixed = BUSTER_X86_METADATA_PATTERN_FIXED_ANY;
+                pattern.has_srm_register = 1;
+            }
             else if (buster_x86_metadata_emit_parse_bracket_number(token_buffer, length, &value)) pattern.srm_fixed = (u8)value;
             else pattern.has_unsupported_token = 1;
             continue;
@@ -1574,6 +1595,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("f2_refining_prefix")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("f3_refining_prefix")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("refining_f3")) ||
+                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("not_refining_f3")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("REFINING66")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("REFINING66()")) ||
                  buster_x86_metadata_emit_token_equal(token_buffer, length, S8("FORCE64()")))
@@ -1583,6 +1605,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
                 pattern.has_force64_control = 1;
             if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("no_refining_prefix")))
                 pattern.forbid_mandatory_prefix = 1;
+            else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("not_refining_f3")))
+                pattern.rep_not_f3 = 1;
         }
         else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("not16")))
         {
@@ -1658,10 +1682,31 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
             if (pattern.ubit_value != 1)
                 buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS);
         }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norexb")) ||
+                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norexb_prefix")) ||
+                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("rexb")) ||
+                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("rexb_prefix")) ||
+                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norexb4")) ||
+                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norexb4_prefix")) ||
+                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("rexb4")) ||
+                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("rexb4_prefix")))
+        {
+            pattern.has_prefix_control = 1;
+            bool forbid = buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norexb")) ||
+                          buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norexb_prefix")) ||
+                          buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norexb4")) ||
+                          buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norexb4_prefix"));
+            bool b4 = buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norexb4")) ||
+                      buster_x86_metadata_emit_token_equal(token_buffer, length, S8("norexb4_prefix")) ||
+                      buster_x86_metadata_emit_token_equal(token_buffer, length, S8("rexb4")) ||
+                      buster_x86_metadata_emit_token_equal(token_buffer, length, S8("rexb4_prefix"));
+            if (b4)
+                pattern.rex_b4_control = forbid ? BUSTER_X86_METADATA_REX_CONTROL_FORBID : BUSTER_X86_METADATA_REX_CONTROL_REQUIRE;
+            else
+                pattern.rex_b_control = forbid ? BUSTER_X86_METADATA_REX_CONTROL_FORBID : BUSTER_X86_METADATA_REX_CONTROL_REQUIRE;
+        }
         else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("EVEXR4")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("norexr")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("norexb")) ||
-                 buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("rexb")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("SCC")) ||
                  buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("NO_SCC")))
         {
@@ -1693,9 +1738,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
                 }
                 else buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS);
             }
-            else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("norexr")) ||
-                     buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("norexb")) ||
-                     buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("rexb")))
+            else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("norexr")))
                 buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS);
             else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("NO_SCC")))
                 pattern.no_scc = 1;
@@ -1729,6 +1772,24 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
                 pattern.mpx_mode_value = 1;
             else
                 buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
+        }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("REMOVE_SEGMENT()")))
+        {
+            pattern.has_prefix_control = 1;
+            pattern.has_remove_segment = 1;
+        }
+        else if (buster_x86_metadata_emit_token_equal(token_buffer, length, S8("P4=0")) ||
+                 buster_x86_metadata_emit_token_equal(token_buffer, length, S8("P4=1")))
+        {
+            pattern.has_prefix_control = 1;
+            pattern.has_p4_control = 1;
+            pattern.p4_value = (u8)(token_buffer[length - 1] - '0');
+        }
+        else if (buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("P4=")))
+        {
+            pattern.has_prefix_control = 1;
+            pattern.has_p4_control = 1;
+            pattern.has_unsupported_token = 1;
         }
         else if ((buster_x86_metadata_emit_token_starts_with(token_buffer, length, S8("IMMUNE")) &&
                  !buster_x86_metadata_emit_token_equal(token_buffer, length, S8("IMMUNE66()"))) ||
@@ -1822,6 +1883,14 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_parse_pattern(BusterX86Metadat
     if (pattern.immune66_loop64 && buster_x86_metadata_emit_string_has(form.attributes, S8("UNDOCUMENTED")))
         buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
     if (pattern.has_segment_override && !buster_x86_metadata_emit_canonical_segment_override(form, pattern))
+        buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
+    if (pattern.has_remove_segment &&
+        (!buster_x86_metadata_string_input_equal(form.iclass.offset, S8("LEA")) || pattern.opcode_count != 1 ||
+         pattern.opcode[0] != 0x8d || !pattern.has_memory || pattern.mod_kind != BUSTER_X86_METADATA_PATTERN_MOD_MEMORY))
+        buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
+    if (pattern.has_p4_control &&
+        (!pattern.p4_value || !buster_x86_metadata_string_input_equal(form.iclass.offset, S8("PAUSE")) ||
+         pattern.opcode_count != 1 || pattern.opcode[0] != 0x90 || pattern.mandatory_prefix != 0xf3))
         buster_x86_metadata_emit_mark_unresolved(&pattern, BUSTER_X86_METADATA_BLOCKER_PATTERN_SEMANTICS);
     if (pattern.short_ud0)
     {
@@ -1970,6 +2039,8 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_pattern_control_blocker(BusterX8
                                  pattern.lock_control || pattern.rep_control || pattern.rep_not_f3 || pattern.no_rex2 ||
                                  pattern.has_modep5 || pattern.has_rep_selector || pattern.has_segment_override ||
                                  pattern.has_branch_hint_control ||
+                                 pattern.has_remove_segment || pattern.rex_b_control || pattern.rex_b4_control ||
+                                 pattern.has_p4_control ||
                                  pattern.immune66_loop64 || buster_x86_metadata_emit_canonical_df64(form, pattern) ||
                                  pattern.has_mpx_mode ||
                                  (form.mode_flags & (BUSTER_X86_METADATA_MODE_16 | BUSTER_X86_METADATA_MODE_32 |
@@ -2240,13 +2311,17 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_operand_matches(BusterX86Metad
                                                                     BusterX86MetadataPatternSemantics pattern)
 {
     u8 actual_class = buster_x86_metadata_emit_operand_class(physical);
-    bool address_generator = metadata.kind == BUSTER_X86_METADATA_OPERAND_ADDRESS_GENERATOR && pattern.has_mpx_mode;
+    bool address_generator = metadata.kind == BUSTER_X86_METADATA_OPERAND_ADDRESS_GENERATOR;
     if (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER &&
         physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
         return false;
     if ((metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY || address_generator) &&
         physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
         return false;
+    // XED exposes an AGEN source operand for address-only forms such as LEA.
+    // The public physical API represents the same ModRM/SIB address as a
+    // memory operand; no data width or load/store semantics are implied.
+    if (address_generator && physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY) return false;
     if (metadata.kind == BUSTER_X86_METADATA_OPERAND_IMMEDIATE && physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE)
         return false;
     if (metadata.kind == BUSTER_X86_METADATA_OPERAND_RELATIVE && physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE)
@@ -3988,7 +4063,11 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     if (has_memory && pattern.mod_kind == BUSTER_X86_METADATA_PATTERN_MOD_REGISTER) return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
     if (!has_memory && pattern.mod_kind == BUSTER_X86_METADATA_PATTERN_MOD_MEMORY) return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
 
-    bool dynamic_opcode_register = pattern.has_dynamic_opcode && !pattern.has_modrm;
+    // Binary opcode tokens also use the dynamic-opcode slot for fixed
+    // encodings such as NOP's `0b1001_0 SRM[0b000]`.  Only SRM[rrr] carries a
+    // visible register that replaces the low opcode bits; a fixed SRM value
+    // must not manufacture a binding or require an operand.
+    bool dynamic_opcode_register = pattern.has_dynamic_opcode && !pattern.has_modrm && pattern.has_srm_register;
     BusterX86MetadataPhysicalBinding* dynamic_opcode_binding = dynamic_opcode_register
                                                                     ? (rm_binding ? rm_binding : reg_binding)
                                                                     : 0;
@@ -4004,6 +4083,14 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     bool has_x4 = has_memory && memory.has_index && ((memory.index.index & 16) != 0);
     bool has_b4 = has_memory ? (memory.has_base && ((memory.base.index & 16) != 0))
                              : (dynamic_opcode_register ? ((dynamic_opcode_index & 16) != 0) : ((rm_index & 16) != 0));
+    if (pattern.rex_b_control == BUSTER_X86_METADATA_REX_CONTROL_FORBID && has_b)
+        return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+    if (pattern.rex_b_control == BUSTER_X86_METADATA_REX_CONTROL_REQUIRE && !has_b)
+        return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+    if (pattern.rex_b4_control == BUSTER_X86_METADATA_REX_CONTROL_FORBID && has_b4)
+        return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+    if (pattern.rex_b4_control == BUSTER_X86_METADATA_REX_CONTROL_REQUIRE && !has_b4)
+        return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     // APX privileged/system forms use EVEX only to carry EGPR extension
     // bits.  Their source schema fixes W=0 even though the visible GPR is
     // 64-bit.  Keep this predicate tied to the exact fixed-width ISA sets
@@ -4097,6 +4184,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     {
         if (query.attributes.lock || query.attributes.rep || query.attributes.repne) return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
     }
+    if (pattern.has_remove_segment && has_memory && memory.has_segment)
+        return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
     if (has_memory && memory.has_segment)
     {
         u8 segment_prefix = memory.segment == BUSTER_X86_METADATA_SEGMENT_ES ? 0x26
@@ -4271,7 +4360,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     if (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 && encoding_map == BUSTER_X86_METADATA_MAP_0F && pattern.opcode_count &&
         pattern.opcode[0] == 0x0f)
         opcode_start = 1;
-    if (pattern.has_dynamic_opcode)
+    if (pattern.has_dynamic_opcode && dynamic_opcode_register)
     {
         BusterX86MetadataPhysicalBinding* srm_binding = rm_binding ? rm_binding : reg_binding;
         if (!srm_binding || srm_binding->physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
@@ -4573,6 +4662,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_eamode_alias_forms(BusterX86Metadat
         first_pattern.explicit_modrm != second_pattern.explicit_modrm || first_pattern.has_sib != second_pattern.has_sib ||
         first_pattern.has_memory != second_pattern.has_memory || first_pattern.has_register != second_pattern.has_register ||
         first_pattern.has_dynamic_opcode != second_pattern.has_dynamic_opcode ||
+        first_pattern.has_srm_register != second_pattern.has_srm_register ||
         first_pattern.has_unsupported_token != second_pattern.has_unsupported_token ||
         first_pattern.has_prefix_control != second_pattern.has_prefix_control ||
         first_pattern.has_branch_hint_control != second_pattern.has_branch_hint_control ||
@@ -4596,6 +4686,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_eamode_alias_forms(BusterX86Metadat
         first_pattern.rep_selector_value != second_pattern.rep_selector_value ||
         first_pattern.has_segment_override != second_pattern.has_segment_override ||
         first_pattern.segment_override_index != second_pattern.segment_override_index ||
+        first_pattern.has_remove_segment != second_pattern.has_remove_segment || first_pattern.rex_b_control != second_pattern.rex_b_control ||
+        first_pattern.rex_b4_control != second_pattern.rex_b4_control || first_pattern.has_p4_control != second_pattern.has_p4_control ||
+        first_pattern.p4_value != second_pattern.p4_value ||
         first_pattern.immune66_loop64 != second_pattern.immune66_loop64 ||
         first_pattern.df64 != second_pattern.df64 ||
         first_pattern.required_address_size != second_pattern.required_address_size ||
@@ -4893,7 +4986,7 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_coverage_structural_blocker(BusterX86
             return BUSTER_X86_METADATA_BLOCKER_PREFIX_FIELDS;
         if (!operand.visible) continue;
         if (operand.kind == BUSTER_X86_METADATA_OPERAND_BASE || operand.kind == BUSTER_X86_METADATA_OPERAND_SEGMENT ||
-            (operand.kind == BUSTER_X86_METADATA_OPERAND_ADDRESS_GENERATOR && !pattern.has_mpx_mode) ||
+            (operand.kind == BUSTER_X86_METADATA_OPERAND_ADDRESS_GENERATOR && !pattern.has_mpx_mode && !pattern.has_remove_segment) ||
             operand.kind == BUSTER_X86_METADATA_OPERAND_PSEUDO)
             return BUSTER_X86_METADATA_BLOCKER_OPERAND_SEMANTICS;
         if (operand.kind == BUSTER_X86_METADATA_OPERAND_REGISTER && operand.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_UNKNOWN)
@@ -4945,6 +5038,19 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_register(BusterX86Metadata
         .width = width,
         .physical_class = physical_class,
     };
+    if (physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR)
+    {
+        // Canonical coverage queries must satisfy typed B/B4 controls instead
+        // of accidentally choosing rax and classifying a valid row as a
+        // prefix blocker.  The controls describe the RM/dynamic-opcode field
+        // for the residual XCHG rows, whose visible operand is this GPR.
+        if (pattern.rex_b4_control == BUSTER_X86_METADATA_REX_CONTROL_REQUIRE)
+            reg.index |= 16;
+        else if (pattern.rex_b_control == BUSTER_X86_METADATA_REX_CONTROL_REQUIRE)
+            reg.index |= 8;
+        if (pattern.rex_b4_control == BUSTER_X86_METADATA_REX_CONTROL_FORBID) reg.index &= (u16)~16u;
+        if (pattern.rex_b_control == BUSTER_X86_METADATA_REX_CONTROL_FORBID) reg.index &= (u16)~8u;
+    }
     bool fixed = metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_FIXED ||
                  buster_x86_metadata_emit_atom_contains(metadata.atom, S8("XED_REG_"));
     if (fixed)
@@ -5017,7 +5123,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_canonical_query(BusterX86M
                 operands[operand_count].reg.index = 1;
         }
         else if (metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY ||
-                 (metadata.kind == BUSTER_X86_METADATA_OPERAND_ADDRESS_GENERATOR && pattern.has_mpx_mode))
+                 (metadata.kind == BUSTER_X86_METADATA_OPERAND_ADDRESS_GENERATOR && (pattern.has_mpx_mode || pattern.has_remove_segment)))
         {
             canonical_has_memory = true;
             u16 width = buster_x86_metadata_coverage_width(metadata.physical_width_flags,
