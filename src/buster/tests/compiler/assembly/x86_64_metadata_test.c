@@ -2810,6 +2810,18 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("MASKMOVDQU"), implicit_di_ids[1], maskmovdqu_operands, 2,
                                                                 (BusterX86MetadataPhysicalAttributes){0}, maskmov_features, 1,
                                                                 maskmovdqu_bytes, BUSTER_ARRAY_LENGTH(maskmovdqu_bytes)));
+        BusterX86MetadataPhysicalQuery maskmovq_segment_query = maskmovq_query;
+        maskmovq_segment_query.attributes.implicit_segment = BUSTER_X86_METADATA_SEGMENT_FS;
+        u8 maskmovq_segment_bytes[8] = {0};
+        BusterX86MetadataEmitResult maskmovq_segment = buster_x86_metadata_emit_form(
+            (BusterX86MetadataEmitQuery){.physical = maskmovq_segment_query, .form_id = implicit_di_ids[0],
+                                         .output = maskmovq_segment_bytes,
+                                         .output_capacity = BUSTER_ARRAY_LENGTH(maskmovq_segment_bytes)});
+        u8 expected_maskmovq_segment[] = {0x64, 0x0f, 0xf7, 0xc1};
+        BUSTER_TEST(arguments, maskmovq_segment.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   x86_64_metadata_test_bytes_equal(maskmovq_segment_bytes, maskmovq_segment.byte_count,
+                                                                     expected_maskmovq_segment,
+                                                                     BUSTER_ARRAY_LENGTH(expected_maskmovq_segment)));
         maskmovq_query.address_size = 32;
         u8 maskmovq_addr32_bytes[8] = {0};
         BusterX86MetadataEmitResult maskmovq_addr32 = buster_x86_metadata_emit_form(
@@ -2820,11 +2832,12 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                    x86_64_metadata_test_bytes_equal(maskmovq_addr32_bytes, maskmovq_addr32.byte_count,
                                                                      expected_maskmovq_addr32, BUSTER_ARRAY_LENGTH(expected_maskmovq_addr32)));
         maskmovdqu_query.address_size = 32;
+        maskmovdqu_query.attributes.implicit_segment = BUSTER_X86_METADATA_SEGMENT_GS;
         u8 maskmovdqu_addr32_bytes[8] = {0};
         BusterX86MetadataEmitResult maskmovdqu_addr32 = buster_x86_metadata_emit_form(
             (BusterX86MetadataEmitQuery){.physical = maskmovdqu_query, .form_id = implicit_di_ids[1],
                                          .output = maskmovdqu_addr32_bytes, .output_capacity = BUSTER_ARRAY_LENGTH(maskmovdqu_addr32_bytes)});
-        u8 expected_maskmovdqu_addr32[] = {0x67, 0x66, 0x0f, 0xf7, 0xc1};
+        u8 expected_maskmovdqu_addr32[] = {0x65, 0x67, 0x66, 0x0f, 0xf7, 0xc1};
         BUSTER_TEST(arguments, maskmovdqu_addr32.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
                                    x86_64_metadata_test_bytes_equal(maskmovdqu_addr32_bytes, maskmovdqu_addr32.byte_count,
                                                                      expected_maskmovdqu_addr32, BUSTER_ARRAY_LENGTH(expected_maskmovdqu_addr32)));

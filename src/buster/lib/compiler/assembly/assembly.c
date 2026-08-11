@@ -7541,7 +7541,9 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
                     // silently turning the prefix-looking token into a
                     // label and encoding the instruction without it.
                     u8 segment_label_index = 0;
-                    if (assembly_x86_segment_parse(segment, ASSEMBLY_SYNTAX_INTEL, &segment_label_index) &&
+                    bool segment_label = assembly_x86_segment_parse(segment, syntax, &segment_label_index) ||
+                                         assembly_x86_segment_parse(segment, ASSEMBLY_SYNTAX_INTEL, &segment_label_index);
+                    if (segment_label &&
                         following_index < statement.length)
                     {
                         assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT, line, column,

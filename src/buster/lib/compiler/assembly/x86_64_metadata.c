@@ -3060,11 +3060,9 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_canonical_segment_override(Bus
 {
     if (buster_x86_metadata_emit_is_maskmov(form, pattern))
     {
-        // MASKMOV's destination segment is architecturally fixed to the
-        // default data segment.  MEM0/BASE0/SEG0 are hidden supplemental
-        // records, so only the canonical no-explicit-memory spelling is
-        // expressible here; FS/GS overrides remain rejected by the typed
-        // physical query until an implicit-segment operand exists.
+        // MASKMOV's destination address is hidden DI with the default data
+        // segment. MEM0/BASE0/SEG0 are supplemental records, so a typed
+        // implicit-segment attribute carries an optional source override.
         return true;
     }
     bool string_category = buster_x86_metadata_string_input_equal(form.category.offset, S8("STRINGOP")) ||
