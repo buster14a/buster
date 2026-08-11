@@ -1,0 +1,44 @@
+{
+  "artifacts": {
+    "header": "aarch64-syntax.generated.h",
+    "jsonl": "aarch64-syntax.generated.jsonl",
+    "manifest": "aarch64-syntax-manifest.json"
+  },
+  "counts": {
+    "alias_rows": 172,
+    "alt_nodes": 33,
+    "anchor_alternative_nodes": 680,
+    "anchor_occurrences": 6213,
+    "canonical_rows": 1523,
+    "exact_row_digest": "d119218081214274587a380f5a5f5336eaf06de979cd66c77b14dcc133461250",
+    "exact_shape_count": 1635,
+    "exact_shape_digest": "726948d2c5db9d57b84e47432253aed229904296dcab5dc3e4ea3a66ceafe8f8",
+    "fixed_numeric_literal_occurrences": 273,
+    "fixed_numeric_literal_rows": 237,
+    "fixed_numeric_literal_spellings": 19,
+    "generic_row_digest": "aca86f91a674243d3782f50c725c6e52a9e768680200d9c74f0c8d4130f1e874",
+    "generic_shape_count": 181,
+    "generic_shape_digest": "c81a31eaf080057e934b03f9bbe265fb267b48e6684bcd1767809fd4be05c3b2",
+    "input_digest": "7dccd8605bfe3f3f738e8e070468625ae364c97c7901b119631b2f54396243ac",
+    "lane_nodes": 157,
+    "list_nodes": 158,
+    "max_non_lit_non_seq_nodes": 14,
+    "max_total_ast_nodes": 29,
+    "mem_nodes": 625,
+    "mem_writeback_nodes": 36,
+    "mnemonic_condition_rows": 1,
+    "mnemonic_optional_suffix_rows": 55,
+    "node_count": 18390,
+    "optional_nodes": 366,
+    "range_anchor_nodes": 28,
+    "rows": 1695
+  },
+  "mnemonic_candidate_count": 1695,
+  "mnemonic_range_count": 733,
+  "schema_version": 1,
+  "source": {
+    "file": "arm-a64-canonical.generated.jsonl",
+    "input_digest": "7dccd8605bfe3f3f738e8e070468625ae364c97c7901b119631b2f54396243ac"
+  },
+  "string_pool_bytes": 120570
+}
