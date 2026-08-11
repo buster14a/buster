@@ -14,6 +14,11 @@
 #pragma GCC diagnostic pop
 #endif
 
+_Static_assert(BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE == BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_COUNT * BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_RECORD_BYTES,
+               "A64 value atom blob layout mismatch");
+_Static_assert(BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE == BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_COUNT * BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_RECORD_BYTES,
+               "A64 value entry blob layout mismatch");
+
 static bool
 buster_a64_semantic_range(u32 first, u32 count, u32 total)
 {
@@ -125,6 +130,30 @@ static bool buster_a64_semantic_generated_field(u32 id, BusterA64SemanticGenerat
     result->segment_count = buster_a64_semantic_blob_u16(buster_a64_semantic_field_blob, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, offset + 12);
     result->width = buster_a64_semantic_blob_byte(buster_a64_semantic_field_blob, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, offset + 14);
     result->reserved = buster_a64_semantic_blob_byte(buster_a64_semantic_field_blob, BUSTER_AARCH64_SEMANTIC_FIELD_BLOB_SIZE, offset + 15);
+    return true;
+}
+
+static bool buster_a64_semantic_generated_value_atom(u32 id, BusterA64SemanticGeneratedValueAtom* result)
+{
+    if (!result || id >= BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_COUNT) return false;
+    u32 offset = id * BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_RECORD_BYTES;
+    result->text_offset = buster_a64_semantic_blob_u32(buster_a64_semantic_value_atom_blob, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 0);
+    result->integer = (s64)buster_a64_semantic_blob_u64(buster_a64_semantic_value_atom_blob, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 4);
+    result->program_first = buster_a64_semantic_blob_u32(buster_a64_semantic_value_atom_blob, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 12);
+    result->program_count = buster_a64_semantic_blob_u16(buster_a64_semantic_value_atom_blob, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 16);
+    result->type = buster_a64_semantic_blob_byte(buster_a64_semantic_value_atom_blob, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 18);
+    result->reserved[0] = buster_a64_semantic_blob_byte(buster_a64_semantic_value_atom_blob, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_BLOB_SIZE, offset + 19);
+    return true;
+}
+
+static bool buster_a64_semantic_generated_value_entry(u32 id, BusterA64SemanticGeneratedValueEntry* result)
+{
+    if (!result || id >= BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_COUNT) return false;
+    u32 offset = id * BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_RECORD_BYTES;
+    result->key_first = buster_a64_semantic_blob_u32(buster_a64_semantic_value_entry_blob, BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE, offset + 0);
+    result->result_first = buster_a64_semantic_blob_u32(buster_a64_semantic_value_entry_blob, BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE, offset + 4);
+    result->key_count = buster_a64_semantic_blob_u16(buster_a64_semantic_value_entry_blob, BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE, offset + 8);
+    result->result_count = buster_a64_semantic_blob_u16(buster_a64_semantic_value_entry_blob, BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_BLOB_SIZE, offset + 10);
     return true;
 }
 
@@ -434,36 +463,38 @@ bool buster_a64_semantic_transform_value(u32 id, u32 ordinal, BusterA64SemanticV
     if (!result || id >= BUSTER_AARCH64_SEMANTIC_TRANSFORM_COUNT) return false;
     BusterA64SemanticGeneratedTransform const* transform = buster_a64_semantic_transforms + id;
     if (ordinal >= transform->value_count || !buster_a64_semantic_range(transform->value_first, transform->value_count, BUSTER_AARCH64_SEMANTIC_VALUE_ENTRY_COUNT)) return false;
-    BusterA64SemanticGeneratedValueEntry const* value = buster_a64_semantic_value_entries + transform->value_first + ordinal;
-    if (!buster_a64_semantic_range(value->key_first, value->key_count, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_COUNT) ||
-        !buster_a64_semantic_range(value->result_first, value->result_count, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_COUNT) || value->result_count != 1) return false;
-    *result = (BusterA64SemanticValue){.id = transform->value_first + ordinal, .key_first = value->key_first, .result_first = value->result_first, .key_count = value->key_count, .result_count = value->result_count};
+    BusterA64SemanticGeneratedValueEntry value = {0};
+    if (!buster_a64_semantic_generated_value_entry(transform->value_first + ordinal, &value) ||
+        !buster_a64_semantic_range(value.key_first, value.key_count, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_COUNT) ||
+        !buster_a64_semantic_range(value.result_first, value.result_count, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_COUNT) || value.result_count != 1) return false;
+    *result = (BusterA64SemanticValue){.id = transform->value_first + ordinal, .key_first = value.key_first, .result_first = value.result_first, .key_count = value.key_count, .result_count = value.result_count};
     return true;
 }
 
 bool buster_a64_semantic_value_atom(u32 id, BusterA64SemanticValueAtom* result)
 {
     if (!result || id >= BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_COUNT) return false;
-    BusterA64SemanticGeneratedValueAtom const* atom = buster_a64_semantic_value_atoms + id;
+    BusterA64SemanticGeneratedValueAtom atom = {0};
+    if (!buster_a64_semantic_generated_value_atom(id, &atom)) return false;
     BusterA64SemanticString text;
-    bool string_ok = buster_a64_semantic_string_offset(atom->text_offset, &text);
-    bool type_ok = atom->type <= BUSTER_A64_SEMANTIC_VALUE_PROGRAM;
-    bool span_ok = buster_a64_semantic_program_span(atom->program_first, atom->program_count);
-    bool kind_span_ok = atom->type == BUSTER_A64_SEMANTIC_VALUE_PROGRAM ? atom->program_count != 0 : atom->program_count == 0;
+    bool string_ok = buster_a64_semantic_string_offset(atom.text_offset, &text);
+    bool type_ok = atom.type <= BUSTER_A64_SEMANTIC_VALUE_PROGRAM;
+    bool span_ok = buster_a64_semantic_program_span(atom.program_first, atom.program_count);
+    bool kind_span_ok = atom.type == BUSTER_A64_SEMANTIC_VALUE_PROGRAM ? atom.program_count != 0 : atom.program_count == 0;
     if (!string_ok || !type_ok || !span_ok || !kind_span_ok)
         return false;
-    *result = (BusterA64SemanticValueAtom){.id = id, .kind = atom->type, .integer = atom->integer, .text = text,
-                                           .program_first = atom->program_first, .program_count = atom->program_count};
+    *result = (BusterA64SemanticValueAtom){.id = id, .kind = atom.type, .integer = atom.integer, .text = text,
+                                           .program_first = atom.program_first, .program_count = atom.program_count};
     return true;
 }
 
 bool buster_a64_semantic_value_atom_program_instruction(u32 atom_id, u32 ordinal, BusterA64SemanticProgramInstruction* result)
 {
     if (!result || atom_id >= BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_COUNT) return false;
-    BusterA64SemanticGeneratedValueAtom const* atom = buster_a64_semantic_value_atoms + atom_id;
-    if (atom->type != BUSTER_A64_SEMANTIC_VALUE_PROGRAM || ordinal >= atom->program_count ||
-        !buster_a64_semantic_program_span(atom->program_first, atom->program_count)) return false;
-    return buster_a64_semantic_program_instruction(atom->program_first + ordinal, result);
+    BusterA64SemanticGeneratedValueAtom atom = {0};
+    if (!buster_a64_semantic_generated_value_atom(atom_id, &atom) || atom.type != BUSTER_A64_SEMANTIC_VALUE_PROGRAM || ordinal >= atom.program_count ||
+        !buster_a64_semantic_program_span(atom.program_first, atom.program_count)) return false;
+    return buster_a64_semantic_program_instruction(atom.program_first + ordinal, result);
 }
 
 bool buster_a64_semantic_table_header(u32 id, BusterA64SemanticTableHeader* result)
@@ -680,23 +711,25 @@ static bool buster_a64_semantic_validate_transform(u32 index)
     }
     for (u32 value_index = 0; value_index < transform->value_count; value_index += 1)
     {
-        BusterA64SemanticGeneratedValueEntry const* value = buster_a64_semantic_value_entries + transform->value_first + value_index;
-        if (value->key_count == 0 || value->result_count != 1 ||
-            !buster_a64_semantic_range(value->key_first, value->key_count, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_COUNT) ||
-            !buster_a64_semantic_range(value->result_first, value->result_count, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_COUNT)) return false;
-        for (u32 atom_index = 0; atom_index < value->key_count; atom_index += 1)
+        BusterA64SemanticGeneratedValueEntry value = {0};
+        if (!buster_a64_semantic_generated_value_entry(transform->value_first + value_index, &value) || value.key_count == 0 || value.result_count != 1 ||
+            !buster_a64_semantic_range(value.key_first, value.key_count, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_COUNT) ||
+            !buster_a64_semantic_range(value.result_first, value.result_count, BUSTER_AARCH64_SEMANTIC_VALUE_ATOM_COUNT)) return false;
+        for (u32 atom_index = 0; atom_index < value.key_count; atom_index += 1)
         {
-            BusterA64SemanticGeneratedValueAtom const* atom = buster_a64_semantic_value_atoms + value->key_first + atom_index;
+            BusterA64SemanticGeneratedValueAtom atom = {0};
+            if (!buster_a64_semantic_generated_value_atom(value.key_first + atom_index, &atom)) return false;
             BusterA64SemanticString ignored;
-            if (atom->type > BUSTER_A64_SEMANTIC_VALUE_PROGRAM || !buster_a64_semantic_string_offset(atom->text_offset, &ignored) ||
-                !buster_a64_semantic_program_span(atom->program_first, atom->program_count) ||
-                (atom->type == BUSTER_A64_SEMANTIC_VALUE_PROGRAM ? atom->program_count == 0 : atom->program_count != 0)) return false;
+            if (atom.type > BUSTER_A64_SEMANTIC_VALUE_PROGRAM || !buster_a64_semantic_string_offset(atom.text_offset, &ignored) ||
+                !buster_a64_semantic_program_span(atom.program_first, atom.program_count) ||
+                (atom.type == BUSTER_A64_SEMANTIC_VALUE_PROGRAM ? atom.program_count == 0 : atom.program_count != 0)) return false;
         }
-        BusterA64SemanticGeneratedValueAtom const* result_atom = buster_a64_semantic_value_atoms + value->result_first;
+        BusterA64SemanticGeneratedValueAtom result_atom = {0};
+        if (!buster_a64_semantic_generated_value_atom(value.result_first, &result_atom)) return false;
         BusterA64SemanticString ignored;
-        if (result_atom->type > BUSTER_A64_SEMANTIC_VALUE_PROGRAM || !buster_a64_semantic_string_offset(result_atom->text_offset, &ignored) ||
-            !buster_a64_semantic_program_span(result_atom->program_first, result_atom->program_count) ||
-            (result_atom->type == BUSTER_A64_SEMANTIC_VALUE_PROGRAM ? result_atom->program_count == 0 : result_atom->program_count != 0)) return false;
+        if (result_atom.type > BUSTER_A64_SEMANTIC_VALUE_PROGRAM || !buster_a64_semantic_string_offset(result_atom.text_offset, &ignored) ||
+            !buster_a64_semantic_program_span(result_atom.program_first, result_atom.program_count) ||
+            (result_atom.type == BUSTER_A64_SEMANTIC_VALUE_PROGRAM ? result_atom.program_count == 0 : result_atom.program_count != 0)) return false;
     }
     return true;
 }
@@ -712,11 +745,18 @@ bool buster_a64_semantic_validate(void)
         valid = valid && buster_a64_semantic_generated_segment(index, &segment) && buster_a64_semantic_validate_segment(&segment);
     }
     for (u32 index = 0; index < BUSTER_AARCH64_SEMANTIC_PROGRAM_OPERAND_COUNT; index += 1)
+    {
         valid = valid && buster_a64_semantic_validate_program_operand(buster_a64_semantic_program_operands + index);
+    }
     for (u32 index = 0; index < BUSTER_AARCH64_SEMANTIC_PROGRAM_INSTRUCTION_COUNT; index += 1)
+    {
         valid = valid && buster_a64_semantic_validate_program_instruction(index);
+    }
     u32 transform_index = 0;
-    for (; transform_index < BUSTER_AARCH64_SEMANTIC_TRANSFORM_COUNT; transform_index += 1) valid = valid && buster_a64_semantic_validate_transform(transform_index);
+    for (; transform_index < BUSTER_AARCH64_SEMANTIC_TRANSFORM_COUNT; transform_index += 1)
+    {
+        valid = valid && buster_a64_semantic_validate_transform(transform_index);
+    }
     for (u32 table_id = 0; table_id < BUSTER_AARCH64_SEMANTIC_TABLE_COUNT; table_id += 1)
     {
         BusterA64SemanticGeneratedTableHeader const* table = buster_a64_semantic_table_headers + table_id;
@@ -724,7 +764,9 @@ bool buster_a64_semantic_validate(void)
         BusterA64SemanticString ignored;
         valid = valid && buster_a64_semantic_string_offset(table->result_header_offset, &ignored);
         for (u32 header = 0; header < table->key_header_count; header += 1)
+        {
             valid = valid && buster_a64_semantic_string_offset(buster_a64_semantic_table_key_headers[table->key_header_first + header], &ignored);
+        }
     }
     for (u32 token_id = 0; token_id < BUSTER_AARCH64_SEMANTIC_ALIAS_CONDITION_TOKEN_COUNT; token_id += 1)
     {
@@ -747,8 +789,14 @@ bool buster_a64_semantic_validate(void)
         BusterA64SemanticGeneratedConstraint const* constraint = buster_a64_semantic_constraints + form_id;
         valid = valid && buster_a64_semantic_range(constraint->feature_first, constraint->feature_count, BUSTER_AARCH64_SEMANTIC_CONSTRAINT_FEATURE_TAG_COUNT) &&
                 buster_a64_semantic_range(constraint->program_first, constraint->program_count, BUSTER_AARCH64_SEMANTIC_CONSTRAINT_PROGRAM_TOKEN_COUNT);
-        for (u32 token = 0; token < constraint->feature_count; token += 1) valid = valid && buster_a64_semantic_string_offset(buster_a64_semantic_constraint_feature_tags[constraint->feature_first + token], &ignored);
-        for (u32 token = 0; token < constraint->program_count; token += 1) valid = valid && buster_a64_semantic_string_offset(buster_a64_semantic_constraint_program_tokens[constraint->program_first + token], &ignored);
+        for (u32 token = 0; token < constraint->feature_count; token += 1)
+        {
+            valid = valid && buster_a64_semantic_string_offset(buster_a64_semantic_constraint_feature_tags[constraint->feature_first + token], &ignored);
+        }
+        for (u32 token = 0; token < constraint->program_count; token += 1)
+        {
+            valid = valid && buster_a64_semantic_string_offset(buster_a64_semantic_constraint_program_tokens[constraint->program_first + token], &ignored);
+        }
     }
     for (u32 preference_id = 0; preference_id < BUSTER_AARCH64_SEMANTIC_ALIAS_PREFERENCE_COUNT; preference_id += 1)
     {
@@ -762,7 +810,10 @@ bool buster_a64_semantic_validate(void)
     {
         u32 form_id = buster_a64_semantic_alias_form_ids[ordinal];
         valid = valid && form_id < BUSTER_AARCH64_SEMANTIC_FORM_COUNT && buster_a64_semantic_forms[form_id].kind == BUSTER_A64_SEMANTIC_FORM_ALIAS;
-        for (u32 previous = 0; previous < ordinal; previous += 1) valid = valid && buster_a64_semantic_alias_form_ids[previous] != form_id;
+        for (u32 previous = 0; previous < ordinal; previous += 1)
+        {
+            valid = valid && buster_a64_semantic_alias_form_ids[previous] != form_id;
+        }
         alias_ids_seen += form_id < BUSTER_AARCH64_SEMANTIC_FORM_COUNT && buster_a64_semantic_forms[form_id].kind == BUSTER_A64_SEMANTIC_FORM_ALIAS;
     }
     valid = valid && alias_ids_seen == BUSTER_AARCH64_SEMANTIC_ALIAS_COUNT;

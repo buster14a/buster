@@ -463,6 +463,12 @@ UnitTestResult aarch64_semantics_tests(UnitTestArguments* arguments)
                                                                .high = 6, .low = 7, .width = 8, .kind = 9};
     BusterA64SemanticProgramOperand invalid_program_operand_before = invalid_program_operand;
     BUSTER_TEST(arguments, !buster_a64_semantic_program_operand(UINT32_MAX, 0, &invalid_program_operand) && memcmp(&invalid_program_operand, &invalid_program_operand_before, sizeof(invalid_program_operand)) == 0);
+    BusterA64SemanticValue invalid_value = {.id = 0x12345678u, .key_first = 1, .result_first = 2, .key_count = 3, .result_count = 4};
+    BusterA64SemanticValue invalid_value_before = invalid_value;
+    BUSTER_TEST(arguments, !buster_a64_semantic_transform_value(UINT32_MAX, 0, &invalid_value) && memcmp(&invalid_value, &invalid_value_before, sizeof(invalid_value)) == 0);
+    BusterA64SemanticProgramInstruction invalid_value_program = invalid_program;
+    BusterA64SemanticProgramInstruction invalid_value_program_before = invalid_value_program;
+    BUSTER_TEST(arguments, !buster_a64_semantic_value_atom_program_instruction(UINT32_MAX, 0, &invalid_value_program) && memcmp(&invalid_value_program, &invalid_value_program_before, sizeof(invalid_value_program)) == 0);
     u32 invalid_field_id = 0xabcdef01u;
     BUSTER_TEST(arguments, !buster_a64_semantic_operand_field_index(UINT32_MAX, 0, &invalid_field_id) && invalid_field_id == 0xabcdef01u);
     BusterA64SemanticValueAtom invalid_atom = {.id = 1, .kind = 2, .integer = 3, .text = {4, 5}};

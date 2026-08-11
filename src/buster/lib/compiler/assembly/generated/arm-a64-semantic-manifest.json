@@ -2,9 +2,9 @@
   "ambiguous_role_operands": 0,
   "artifacts": {
     "header": {
-      "bytes": 2939348,
+      "bytes": 2482188,
       "file": "arm-a64-semantic.generated.h",
-      "sha256": "9838352a9f002c862088f7d4d5c047f98c50eb6dfcc56e6f81ef4da45b4d92c8",
+      "sha256": "f2439db25af2f538965fbc067d6d7d708afbdfe5945495eed553a9b9865e2f3d",
       "string_pool_bytes": 235630
     },
     "jsonl": {
