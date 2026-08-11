@@ -5035,14 +5035,17 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             {
                 return result;
             }
-            if (target.cpu_arch == CPU_ARCH_AARCH64 && section_kinds[section_index] == OBJECT_SECTION_UNWIND && relocation_type == 1 && length == 2)
+            ObjectSectionKind current_section_kind = (ObjectSectionKind)section_kinds[section_index];
+            if (target.cpu_arch == CPU_ARCH_AARCH64 && relocation_type == 1 && length == 2 &&
+                !object_section_kind_is_zero_fill(current_section_kind))
             {
                 u32 next_source_offset = 0;
                 u32 next_information = 0;
-                if (relocation_index + 1 >= relocation_count || !external ||
+                if (relocation_index + 1 >= relocation_count || !external || pc_relative ||
                     !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE, &next_source_offset) ||
                     !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE + 4, &next_information) || next_source_offset != source_offset_u32 ||
-                    (next_information >> 28) != 0 || ((next_information >> 25) & 0x3) != 2 || !(next_information & (1u << 27)))
+                    (next_information >> 28) != 0 || ((next_information >> 25) & 0x3) != 2 || !(next_information & (1u << 27)) ||
+                    (next_information & (1u << 24)))
                 {
                     result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                     return result;
@@ -5055,7 +5058,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     return result;
                 }
                 ObjectSymbol* subtractor = &result.symbols[symbol_map[subtractor_source_symbol]];
-                if (subtractor->section != OBJECT_SECTION_UNWIND || subtractor->value != section_bases[section_index] + (u32)source_offset)
+                u64 place = section_bases[section_index] + (u64)source_offset_u32;
+                if (place < section_bases[section_index] || subtractor->section != current_section_kind || subtractor->value != place)
                 {
                     result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                     return result;
@@ -5067,8 +5071,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 }
                 result.relocations[result.relocation_count++] = (ObjectRelocation){
                     .addend = (s32)stored,
-                    .offset = section_bases[section_index] + (u32)source_offset,
-                    .section = OBJECT_SECTION_UNWIND,
+                    .offset = place,
+                    .section = current_section_kind,
                     .symbol = symbol_map[target_source_symbol],
                     .kind = OBJECT_RELOCATION_AARCH64_PREL32,
                 };

@@ -160,6 +160,30 @@ BUSTER_GLOBAL_LOCAL bool object_test_mach_text_offsets(ByteSlice bytes, u32* raw
     return *raw_offset <= bytes.length && *relocation_offset <= bytes.length && (u64)*relocation_count * 8 <= bytes.length - *relocation_offset;
 }
 
+BUSTER_GLOBAL_LOCAL bool object_test_mach_section_offsets(ByteSlice bytes, u32 section_index, u32* raw_offset, u32* relocation_offset,
+                                                          u32* relocation_count)
+{
+    u64 section = 32 + 72 + (u64)section_index * 80;
+    if (!bytes.pointer || !raw_offset || !relocation_offset || !relocation_count || bytes.length < section + 80)
+    {
+        return false;
+    }
+    u32 magic = 0;
+    u32 command = 0;
+    u32 section_count = 0;
+    memcpy(&magic, bytes.pointer, sizeof(magic));
+    memcpy(&command, bytes.pointer + 32, sizeof(command));
+    memcpy(&section_count, bytes.pointer + 32 + 64, sizeof(section_count));
+    if (magic != UINT32_C(0xfeedfacf) || command != 0x19 || section_index >= section_count)
+    {
+        return false;
+    }
+    memcpy(raw_offset, bytes.pointer + section + 48, sizeof(*raw_offset));
+    memcpy(relocation_offset, bytes.pointer + section + 56, sizeof(*relocation_offset));
+    memcpy(relocation_count, bytes.pointer + section + 60, sizeof(*relocation_count));
+    return *raw_offset <= bytes.length && *relocation_offset <= bytes.length && (u64)*relocation_count * 8 <= bytes.length - *relocation_offset;
+}
+
 BUSTER_GLOBAL_LOCAL u64 object_test_mach_symbol_offset(ByteSlice bytes, u32 symbol_index)
 {
     if (!bytes.pointer || bytes.length < 32)
@@ -1960,6 +1984,237 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     {
         BUSTER_TEST(arguments, a64_mach_cfi_roundtrip.relocations[0].section == OBJECT_SECTION_UNWIND);
         BUSTER_TEST(arguments, a64_mach_cfi_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_PREL32);
+    }
+
+    u32 a64_mach_prel_text_data[2] = {0};
+    u32 a64_mach_prel_read_only_data[2] = {0};
+    u32 a64_mach_prel_data_data[2] = {0};
+    ObjectSection a64_mach_prel_sections[] = {
+        {
+            .name = S8(".text"),
+            .data = BUSTER_ARRAY_TO_BYTE_SLICE(a64_mach_prel_text_data),
+            .kind = OBJECT_SECTION_TEXT,
+            .alignment = 4,
+        },
+        {
+            .name = S8(".rodata"),
+            .data = BUSTER_ARRAY_TO_BYTE_SLICE(a64_mach_prel_read_only_data),
+            .kind = OBJECT_SECTION_READ_ONLY_DATA,
+            .alignment = 4,
+        },
+        {
+            .name = S8(".data"),
+            .data = BUSTER_ARRAY_TO_BYTE_SLICE(a64_mach_prel_data_data),
+            .kind = OBJECT_SECTION_DATA,
+            .alignment = 4,
+        },
+    };
+    ObjectSymbol a64_mach_prel_symbols[] = {
+        {
+            .name = S8("prel_text_target"),
+            .section = OBJECT_SECTION_TEXT,
+            .size = sizeof(u32),
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+        {
+            .name = S8("prel_read_only_target"),
+            .section = OBJECT_SECTION_READ_ONLY_DATA,
+            .size = sizeof(u32),
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+        {
+            .name = S8("prel_data_target"),
+            .section = OBJECT_SECTION_DATA,
+            .size = sizeof(u32),
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+    };
+    s64 a64_mach_prel_addends[] = {17, -23, 4096};
+    ObjectRelocation a64_mach_prel_relocations[] = {
+        {
+            .addend = a64_mach_prel_addends[0],
+            .offset = sizeof(u32),
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 1,
+            .kind = OBJECT_RELOCATION_AARCH64_PREL32,
+        },
+        {
+            .addend = a64_mach_prel_addends[1],
+            .offset = sizeof(u32),
+            .section = OBJECT_SECTION_READ_ONLY_DATA,
+            .symbol = 2,
+            .kind = OBJECT_RELOCATION_AARCH64_PREL32,
+        },
+        {
+            .addend = a64_mach_prel_addends[2],
+            .offset = sizeof(u32),
+            .section = OBJECT_SECTION_DATA,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_AARCH64_PREL32,
+        },
+    };
+    ObjectFile a64_mach_prel_object = {
+        .sections = a64_mach_prel_sections,
+        .section_count = BUSTER_ARRAY_LENGTH(a64_mach_prel_sections),
+        .symbols = a64_mach_prel_symbols,
+        .symbol_count = BUSTER_ARRAY_LENGTH(a64_mach_prel_symbols),
+        .relocations = a64_mach_prel_relocations,
+        .relocation_count = BUSTER_ARRAY_LENGTH(a64_mach_prel_relocations),
+        .target = {
+            .cpu_arch = CPU_ARCH_AARCH64,
+            .os = OPERATING_SYSTEM_MACOS,
+        },
+    };
+    ObjectArtifact a64_mach_prel_artifact = object_write(arguments->arena, &a64_mach_prel_object, OBJECT_FORMAT_MACH_O64);
+    BUSTER_TEST(arguments, a64_mach_prel_artifact.error == OBJECT_ERROR_NONE);
+    // LLVM's AArch64 Mach-O PREL32 lowering is the SUBTRACTOR/UNSIGNED pair
+    // checked below: both records are external, non-PC-relative, and 32-bit.
+    bool a64_mach_prel_shape_valid = true;
+    for (u32 section_index = 0; section_index < BUSTER_ARRAY_LENGTH(a64_mach_prel_sections); section_index += 1)
+    {
+        u32 raw_offset = 0;
+        u32 relocation_offset = 0;
+        u32 relocation_count = 0;
+        bool offsets_valid = object_test_mach_section_offsets(a64_mach_prel_artifact.bytes, section_index, &raw_offset, &relocation_offset,
+                                                               &relocation_count);
+        a64_mach_prel_shape_valid &= offsets_valid && relocation_count == 2;
+        if (offsets_valid && relocation_count == 2)
+        {
+            u32 first_source_offset = 0;
+            u32 first_information = 0;
+            u32 second_source_offset = 0;
+            u32 second_information = 0;
+            memcpy(&first_source_offset, a64_mach_prel_artifact.bytes.pointer + relocation_offset, sizeof(first_source_offset));
+            memcpy(&first_information, a64_mach_prel_artifact.bytes.pointer + relocation_offset + 4, sizeof(first_information));
+            memcpy(&second_source_offset, a64_mach_prel_artifact.bytes.pointer + relocation_offset + 8, sizeof(second_source_offset));
+            memcpy(&second_information, a64_mach_prel_artifact.bytes.pointer + relocation_offset + 12, sizeof(second_information));
+            a64_mach_prel_shape_valid &= first_source_offset == sizeof(u32) && second_source_offset == sizeof(u32) &&
+                                         (first_information >> 28) == 1 && ((first_information >> 25) & 3) == 2 &&
+                                         (first_information & (1u << 27)) && !(first_information & (1u << 24)) &&
+                                         (second_information >> 28) == 0 && ((second_information >> 25) & 3) == 2 &&
+                                         (second_information & (1u << 27)) && !(second_information & (1u << 24));
+        }
+    }
+    BUSTER_TEST(arguments, a64_mach_prel_shape_valid);
+    ObjectFile a64_mach_prel_roundtrip = object_read(arguments->arena, a64_mach_prel_artifact.bytes, a64_mach_prel_object.target);
+    BUSTER_TEST(arguments, a64_mach_prel_roundtrip.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, a64_mach_prel_roundtrip.relocation_count == BUSTER_ARRAY_LENGTH(a64_mach_prel_relocations));
+    ObjectSectionKind a64_mach_prel_expected_sections[] = {
+        OBJECT_SECTION_TEXT,
+        OBJECT_SECTION_READ_ONLY_DATA,
+        OBJECT_SECTION_DATA,
+    };
+    String8 a64_mach_prel_expected_symbols[] = {
+        S8("prel_read_only_target"),
+        S8("prel_data_target"),
+        S8("prel_text_target"),
+    };
+    if (a64_mach_prel_roundtrip.error == OBJECT_ERROR_NONE &&
+        a64_mach_prel_roundtrip.relocation_count == BUSTER_ARRAY_LENGTH(a64_mach_prel_relocations))
+    {
+        for (u32 relocation_index = 0; relocation_index < BUSTER_ARRAY_LENGTH(a64_mach_prel_relocations); relocation_index += 1)
+        {
+            ObjectRelocation* roundtrip_relocation = &a64_mach_prel_roundtrip.relocations[relocation_index];
+            BUSTER_TEST(arguments, roundtrip_relocation->section == a64_mach_prel_expected_sections[relocation_index]);
+            BUSTER_TEST(arguments, roundtrip_relocation->offset == sizeof(u32));
+            BUSTER_TEST(arguments, roundtrip_relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32);
+            BUSTER_TEST(arguments, roundtrip_relocation->addend == a64_mach_prel_addends[relocation_index]);
+            BUSTER_TEST(arguments, roundtrip_relocation->symbol < a64_mach_prel_roundtrip.symbol_count);
+            if (roundtrip_relocation->symbol < a64_mach_prel_roundtrip.symbol_count)
+            {
+                BUSTER_STRING_TEST(arguments, a64_mach_prel_roundtrip.symbols[roundtrip_relocation->symbol].name,
+                                   a64_mach_prel_expected_symbols[relocation_index]);
+            }
+        }
+    }
+    for (u32 malformed_kind = 0; malformed_kind < 11; malformed_kind += 1)
+    {
+        TemporalArena malformed_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice malformed = {
+            .pointer = arena_allocate(arguments->arena, u8, a64_mach_prel_artifact.bytes.length),
+            .length = a64_mach_prel_artifact.bytes.length,
+        };
+        memcpy(malformed.pointer, a64_mach_prel_artifact.bytes.pointer, malformed.length);
+        u32 raw_offset = 0;
+        u32 relocation_offset = 0;
+        u32 relocation_count = 0;
+        bool offsets_valid = object_test_mach_section_offsets(malformed, 0, &raw_offset, &relocation_offset, &relocation_count);
+        if (offsets_valid && relocation_count == 2)
+        {
+            u32 first_information = 0;
+            u32 second_information = 0;
+            memcpy(&first_information, malformed.pointer + relocation_offset + 4, sizeof(first_information));
+            memcpy(&second_information, malformed.pointer + relocation_offset + 12, sizeof(second_information));
+            switch (malformed_kind)
+            {
+                case 0:
+                    object_test_write_u32(malformed, relocation_offset + 4, first_information & ~(1u << 27));
+                    break;
+                case 1:
+                    object_test_write_u32(malformed, relocation_offset + 4, first_information | (1u << 24));
+                    break;
+                case 2:
+                    object_test_write_u32(malformed, relocation_offset + 12, second_information & ~(1u << 27));
+                    break;
+                case 3:
+                    object_test_write_u32(malformed, relocation_offset + 12, second_information | (1u << 24));
+                    break;
+                case 4:
+                    object_test_write_u32(malformed, relocation_offset + 12,
+                                          (second_information & ~(0xfu << 28)) | (2u << 28));
+                    break;
+                case 5:
+                    object_test_write_u32(malformed, relocation_offset + 12,
+                                          (second_information & ~(3u << 25)) | (3u << 25));
+                    break;
+                case 6:
+                    object_test_write_u32(malformed, relocation_offset + 8, sizeof(u32) * 2);
+                    break;
+                case 7:
+                {
+                    u32 first_source_offset = 0;
+                    u32 first_word = 0;
+                    u32 second_source_offset = 0;
+                    u32 second_word = 0;
+                    memcpy(&first_source_offset, malformed.pointer + relocation_offset, sizeof(first_source_offset));
+                    memcpy(&first_word, malformed.pointer + relocation_offset + 4, sizeof(first_word));
+                    memcpy(&second_source_offset, malformed.pointer + relocation_offset + 8, sizeof(second_source_offset));
+                    memcpy(&second_word, malformed.pointer + relocation_offset + 12, sizeof(second_word));
+                    object_test_write_u32(malformed, relocation_offset, second_source_offset);
+                    object_test_write_u32(malformed, relocation_offset + 4, second_word);
+                    object_test_write_u32(malformed, relocation_offset + 8, first_source_offset);
+                    object_test_write_u32(malformed, relocation_offset + 12, first_word);
+                    break;
+                }
+                case 8:
+                {
+                    u64 symbol_offset = object_test_mach_symbol_offset(malformed, BUSTER_ARRAY_LENGTH(a64_mach_prel_symbols));
+                    if (symbol_offset != UINT64_MAX)
+                    {
+                        object_test_write_u64(malformed, symbol_offset + 8, 8);
+                    }
+                    break;
+                }
+                case 9:
+                {
+                    u64 symbol_offset = object_test_mach_symbol_offset(malformed, BUSTER_ARRAY_LENGTH(a64_mach_prel_symbols));
+                    if (symbol_offset != UINT64_MAX && symbol_offset + 6 <= malformed.length)
+                    {
+                        malformed.pointer[symbol_offset + 5] = OBJECT_SECTION_READ_ONLY_DATA + 1;
+                    }
+                    break;
+                }
+                case 10:
+                    object_test_write_u32(malformed, 32 + 72 + 60, 1);
+                    break;
+            }
+        }
+        ObjectFile malformed_result = object_read(arguments->arena, malformed, a64_mach_prel_object.target);
+        BUSTER_TEST(arguments, offsets_valid && malformed_result.error != OBJECT_ERROR_NONE);
+        arena_set_position(arguments->arena, malformed_scope.position);
     }
     u8 compact_x64_code[] = {
         0x55, 0x48, 0x89, 0xe5, 0xc3,
