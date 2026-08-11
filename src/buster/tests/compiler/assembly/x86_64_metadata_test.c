@@ -3543,19 +3543,22 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         // silently regress or hide the three non-APX analogues.
         u32 kmov_vex_ids[] = {6881, 6886, 7860};
         String8 kmov_vex_mnemonics[] = {S8_INITIALIZER("KMOVB"), S8_INITIALIZER("KMOVD"), S8_INITIALIZER("KMOVW")};
-        bool kmov_vex_emitted = true;
-        u8 kmov_vex_output[32] = {0};
+        u8 kmov_vex_bytes[][5] = {
+            {0xc5, 0xf9, 0x90, 0xc1, 0},
+            {0xc4, 0xe1, 0xf9, 0x90, 0xc1},
+            {0xc5, 0xf8, 0x90, 0xc1, 0},
+        };
+        u8 kmov_vex_lengths[] = {4, 5, 4};
         for (u32 kmov_index = 0; kmov_index < BUSTER_ARRAY_LENGTH(kmov_vex_ids); kmov_index += 1)
         {
-            BusterX86MetadataEmitResult kmov_vex_result = x86_64_metadata_test_emit_form(
-                kmov_vex_mnemonics[kmov_index], kmov_vex_ids[kmov_index], kmov_mask_operands,
-                BUSTER_ARRAY_LENGTH(kmov_mask_operands), (BusterX86MetadataPhysicalAttributes){0}, wildcard,
-                BUSTER_ARRAY_LENGTH(wildcard), kmov_vex_output, BUSTER_ARRAY_LENGTH(kmov_vex_output), 0, 0);
-            BUSTER_TEST(arguments, kmov_vex_result.status == BUSTER_X86_METADATA_ENCODE_SUCCESS);
-            kmov_vex_emitted &= kmov_vex_result.status == BUSTER_X86_METADATA_ENCODE_SUCCESS;
+            BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(
+                                       kmov_vex_mnemonics[kmov_index], kmov_vex_ids[kmov_index], kmov_mask_operands,
+                                       BUSTER_ARRAY_LENGTH(kmov_mask_operands), (BusterX86MetadataPhysicalAttributes){0},
+                                       wildcard, BUSTER_ARRAY_LENGTH(wildcard), kmov_vex_bytes[kmov_index],
+                                       kmov_vex_lengths[kmov_index]));
         }
-        BUSTER_TEST(arguments, kmov_vex_emitted);
 
+        u8 kmov_vex_output[32] = {0};
         BusterX86MetadataPhysicalOperand kmov_wrong_class_operands[2] = {
             x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
             kmov_mask_operands[1],
