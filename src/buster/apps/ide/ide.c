@@ -13,6 +13,7 @@
 #include <buster/lib/compiler/frontend/buster/analysis.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#include <buster/lib/compiler/assembly/aarch64_control_semantics.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/ir/ir.h>
@@ -79,6 +80,7 @@
 #include <buster/lib/compiler/frontend/buster/analysis.c>
 #include <buster/lib/compiler/frontend/c/c.c>
 #include <buster/lib/compiler/assembly/aarch64_encoding.c>
+#include <buster/lib/compiler/assembly/aarch64_control_semantics.c>
 #include <buster/lib/compiler/assembly/assembly.c>
 #include <buster/lib/compiler/assembly/x86_64_metadata.c>
 #include <buster/lib/compiler/ir/ir.c>

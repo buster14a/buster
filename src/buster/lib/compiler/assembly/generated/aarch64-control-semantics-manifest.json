@@ -1,0 +1,43 @@
+{
+  "schema_version": 2,
+  "source": "arm-a64-canonical.generated.jsonl",
+  "profile": "apple-m1",
+  "row_count": 27,
+  "digest_recipe": "sorted id<TAB>row.digest<NL>",
+  "digest": "981200c3a2350be0f18eb8785929b30de5f468b5a8faa6419d96b7fa3b5e42a4",
+  "groups": {
+    "general_label_fixup": {
+      "count": 15,
+      "digest": "fff799a7ccd6dbe7adb9bc238b4b5838b6dd02928450e2048a579c645e891a15"
+    },
+    "general_condition_select": {
+      "count": 8,
+      "digest": "a6aa6bcea3eaada795da6acbaac131afe8d8eeae58839cf5cb509934dafcb0ad"
+    },
+    "general_ret": {
+      "count": 1,
+      "digest": "babf7e807a273b459d0fb4caa94e41b9779c9949ec2f7bf4eda1803aa7a734d6"
+    },
+    "complex_literal_load": {
+      "count": 3,
+      "digest": "2a29a4d0e6b7d537dde6523e1859678169a4c93c973e4bd1d4f6e87fa6d6e25e"
+    }
+  },
+  "artifacts": {
+    "source": {
+      "file": "arm-a64-canonical.generated.jsonl",
+      "bytes": 9675675,
+      "sha256": "8485c5c61835d5394d325757ab2964890e8bdfea304c6faa8fd4c23e4c7aabec"
+    },
+    "jsonl": {
+      "file": "aarch64-control-semantics.generated.jsonl",
+      "bytes": 11506,
+      "sha256": "d36ca8dddefd8a103e59ae61cd5240d3d29a72e9433ad3a77aae5b8e623af52a"
+    },
+    "header": {
+      "file": "aarch64-control-semantics.generated.h",
+      "bytes": 28917,
+      "sha256": "b1747fc020a990c0e6483ac7f49b71ef4887c0e2f55533d62352f3f5b20bef9e"
+    }
+  }
+}
