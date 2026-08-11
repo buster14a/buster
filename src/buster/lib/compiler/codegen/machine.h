@@ -1097,4 +1097,23 @@ BUSTER_F_DECL bool machine_a64_test_emit_unsigned_memory(u8* bytes, u32 capacity
 // while keeping that mapping out of the production API when tests are absent.
 BUSTER_F_DECL bool machine_a64_test_emit_generated_opcode(u8* bytes, u32 capacity, u16 opcode, u32 operand0, u32 operand1, u32 operand2,
                                                           u32 payload, u32* byte_count, bool* error);
+// Test-only branch-relaxation seams.  These wrappers exercise the private
+// fixed-size position-independent transfer and its B/BCC tier classifier
+// without changing the production machine API.
+BUSTER_F_DECL bool machine_a64_test_emit_long_branch(u8* bytes, u32 capacity, s64 displacement, u32* byte_count);
+BUSTER_F_DECL u8 machine_a64_test_branch_relaxation_tier(u16 opcode, u32 condition, s64 displacement);
+typedef struct MachineA64TestSparseFixup MachineA64TestSparseFixup;
+struct MachineA64TestSparseFixup
+{
+    u32 source_offset;
+    u32 target_offset;
+    u32 row_offset;
+    u32 call_offset;
+    u32 epilog_offset;
+    u16 opcode;
+    u8 condition;
+    u8 tier;
+};
+BUSTER_F_DECL bool machine_a64_test_relax_sparse(Arena* arena, u32 code_size, MachineA64TestSparseFixup* fixups, u32 fixup_count,
+                                                 u32* final_code_size);
 #endif

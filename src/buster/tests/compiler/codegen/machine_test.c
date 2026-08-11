@@ -2079,6 +2079,133 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                         string_format(arguments->arena, S8("a64 generated machine opcode {S8}"), generated_machine_cases[case_index].name));
     }
     BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == 0);
+    // Branch-relaxation seam coverage.  These probes keep the sparse-layout
+    // acceptance checks independent of a giant byte buffer: the fixed long
+    // transfer handles every aligned signed delta, while the classifier pins
+    // the direct/short/long decisions at both architectural boundaries.
+    {
+        s64 long_deltas[] = {
+            -4,
+            0,
+            4,
+            INT64_C(0x12345678),
+            -INT64_C(0x12345678),
+            INT64_MIN,
+            INT64_MAX - 3,
+        };
+        for (u32 delta_index = 0; delta_index < BUSTER_ARRAY_LENGTH(long_deltas); delta_index += 1)
+        {
+            u8 bytes[28] = {0};
+            u32 byte_count = 0;
+            bool emitted = machine_a64_test_emit_long_branch(bytes, sizeof(bytes), long_deltas[delta_index], &byte_count);
+            BUSTER_TEST(arguments, emitted && byte_count == 28);
+            u32 words[7] = {0};
+            memcpy(words, bytes, sizeof(words));
+            BUSTER_TEST(arguments, words[0] == UINT32_C(0x10000010) && words[5] == UINT32_C(0x8b110210) && words[6] == UINT32_C(0xd61f0200));
+            u64 reconstructed = ((u64)(words[1] >> 5) & UINT64_C(0xffff)) | (((u64)(words[2] >> 5) & UINT64_C(0xffff)) << 16) |
+                                (((u64)(words[3] >> 5) & UINT64_C(0xffff)) << 32) | (((u64)(words[4] >> 5) & UINT64_C(0xffff)) << 48);
+            BUSTER_TEST(arguments, reconstructed == (u64)long_deltas[delta_index]);
+            u8 repeat[28] = {0};
+            u32 repeat_count = 0;
+            BUSTER_TEST(arguments, machine_a64_test_emit_long_branch(repeat, sizeof(repeat), long_deltas[delta_index], &repeat_count) && repeat_count == byte_count &&
+                                      memcmp(repeat, bytes, sizeof(bytes)) == 0);
+        }
+        u8 bytes[28] = {0};
+        u32 byte_count = 0;
+        BUSTER_TEST(arguments, !machine_a64_test_emit_long_branch(bytes, 27, 0, &byte_count));
+        BUSTER_TEST(arguments, !machine_a64_test_emit_long_branch(bytes, sizeof(bytes), 2, &byte_count));
+    }
+    {
+        s64 b_min = -INT64_C(134217728);
+        s64 b_max = INT64_C(134217724);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B, 0, b_min) == 0);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B, 0, b_max) == 0);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B, 0, b_min - 4) == 2);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B, 0, b_max + 4) == 2);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B, 0, 2) == UINT8_MAX);
+
+        s64 bcc_min = -INT64_C(1048576);
+        s64 bcc_max = INT64_C(1048572);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B_COND, 0, bcc_min) == 0);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B_COND, 0, bcc_max) == 0);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B_COND, 0, bcc_min - 4) == 1);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B_COND, 0, bcc_max + 4) == 1);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B_COND, 0, b_min + 4) == 1);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B_COND, 0, b_max + 4) == 1);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B_COND, 0, b_min) == 2);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B_COND, 0, b_max + 8) == 2);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B_COND, 14, bcc_max) == 0);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B_COND, 14, bcc_max + 4) == UINT8_MAX);
+        BUSTER_TEST(arguments, machine_a64_test_branch_relaxation_tier(A64_OPCODE_B_COND, 0, 2) == UINT8_MAX);
+    }
+    {
+        // Two interacting edges force a genuine convergence sequence without
+        // allocating their 200 MiB virtual layout.  The first BCC starts in
+        // the medium tier, its fallthrough B is at the adjacent word, and a
+        // later long B insertion shifts the BCC target across B's upper
+        // boundary, upgrading it atomically to inverse-cond + long transfer.
+        u32 sparse_code_size = 200100000u;
+        MachineA64TestSparseFixup sparse_fixups[] = {
+            {.source_offset = 1000000u,
+             .target_offset = 135217728u,
+             .row_offset = 1000000u,
+             .call_offset = 1000016u,
+             .epilog_offset = 1000020u,
+             .opcode = A64_OPCODE_B_COND,
+             .condition = 0},
+            {.source_offset = 1000004u,
+             .target_offset = 1200000u,
+             .row_offset = 1000004u,
+             .call_offset = 1000024u,
+             .epilog_offset = 1000028u,
+             .opcode = A64_OPCODE_B,
+             .condition = 0xff},
+            {.source_offset = 50000000u,
+             .target_offset = 200000000u,
+             .row_offset = 50000000u,
+             .call_offset = 50000016u,
+             .epilog_offset = 50000020u,
+             .opcode = A64_OPCODE_B,
+             .condition = 0xff},
+        };
+        MachineA64TestSparseFixup sparse_repeat[BUSTER_ARRAY_LENGTH(sparse_fixups)];
+        memcpy(sparse_repeat, sparse_fixups, sizeof(sparse_fixups));
+        u32 sparse_final_size = 0;
+        u32 sparse_repeat_size = 0;
+        bool sparse_valid = machine_a64_test_relax_sparse(arguments->arena, sparse_code_size, sparse_fixups,
+                                                           BUSTER_ARRAY_LENGTH(sparse_fixups), &sparse_final_size);
+        bool sparse_repeat_valid = machine_a64_test_relax_sparse(arguments->arena, sparse_code_size, sparse_repeat,
+                                                                  BUSTER_ARRAY_LENGTH(sparse_repeat), &sparse_repeat_size);
+        BUSTER_TEST(arguments, sparse_valid && sparse_repeat_valid && sparse_final_size == sparse_code_size + 52u && sparse_repeat_size == sparse_final_size);
+        BUSTER_TEST(arguments, memcmp(sparse_fixups, sparse_repeat, sizeof(sparse_fixups)) == 0);
+        BUSTER_TEST(arguments, sparse_fixups[0].tier == 2 && sparse_fixups[1].tier == 0 && sparse_fixups[2].tier == 2);
+        // BCC source remains at P, while its fallthrough B moves from P+4
+        // past the 32-byte long conditional expansion. The later B source
+        // and all targets/call/epilog/row metadata move by the same checked
+        // insertions used by production.
+        BUSTER_TEST(arguments, sparse_fixups[0].source_offset == 1000000u && sparse_fixups[0].target_offset == 135217780u);
+        BUSTER_TEST(arguments, sparse_fixups[1].source_offset == 1000032u && sparse_fixups[1].target_offset == 1200028u);
+        BUSTER_TEST(arguments, sparse_fixups[2].source_offset == 50000028u && sparse_fixups[2].target_offset == 200000052u);
+        BUSTER_TEST(arguments, sparse_fixups[1].row_offset == 1000032u && sparse_fixups[1].call_offset == 1000052u &&
+                                  sparse_fixups[1].epilog_offset == 1000056u);
+        BUSTER_TEST(arguments, sparse_fixups[2].row_offset == 50000028u && sparse_fixups[2].call_offset == 50000068u &&
+                                  sparse_fixups[2].epilog_offset == 50000072u);
+
+        MachineA64TestSparseFixup overflow_fixup = {
+            .source_offset = UINT32_MAX - 7u,
+            .target_offset = 0,
+            .row_offset = UINT32_MAX - 7u,
+            .call_offset = UINT32_MAX - 7u,
+            .epilog_offset = UINT32_MAX - 7u,
+            .opcode = A64_OPCODE_B,
+            .condition = 0xff,
+        };
+        u32 overflow_size = 0;
+        BUSTER_TEST(arguments, !machine_a64_test_relax_sparse(arguments->arena, UINT32_MAX - 3u, &overflow_fixup, 1, &overflow_size));
+        MachineA64TestSparseFixup malformed_fixup = overflow_fixup;
+        malformed_fixup.source_offset = 2;
+        BUSTER_TEST(arguments, !machine_a64_test_relax_sparse(arguments->arena, 64, &malformed_fixup, 1, &overflow_size));
+    }
     IrProgram* machine_a64_program = machine_test_compile_c(arguments->arena, S8("machine-stage11.c"), machine_c_source_base, machine_a64_target);
     BUSTER_TEST(arguments, machine_a64_program != 0);
     if (machine_a64_program && machine_a64_program->module_count)
