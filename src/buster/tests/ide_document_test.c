@@ -55,7 +55,12 @@ BUSTER_GLOBAL_LOCAL String8 ide_document_test_temporary_root(Arena* arena, Strin
         return temporary;
     }
     String8 parent_path = string_slice(temporary, 0, leaf_start - 1);
-    String8 parent = os_path_absolute(arena, parent_path, true);
+    // os_path_absolute() passes POSIX input directly to realpath(), which
+    // requires a NUL-terminated path even though the rest of the code uses
+    // length-delimited String8 values. Copy the nested parent before asking
+    // realpath() to canonicalize it.
+    String8 parent_input = string_duplicate_arena(arena, parent_path, true);
+    String8 parent = os_path_absolute(arena, parent_input, true);
     if (!parent.length)
     {
         return temporary;
