@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.h>
+#include <buster/lib/compiler/assembly/assembly.h>
 #if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_string_equal(BusterX86MetadataString first, String8 second)
@@ -778,9 +779,159 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_mem128_forms(void)
     return true;
 }
 
+typedef enum X86_64MetadataSourceReachabilityClass
+{
+    X86_64_METADATA_SOURCE_REACHABILITY_SUCCESS,
+    X86_64_METADATA_SOURCE_REACHABILITY_SYNTAX_CONSTRUCTION,
+    X86_64_METADATA_SOURCE_REACHABILITY_POLICY_FEATURE,
+    X86_64_METADATA_SOURCE_REACHABILITY_AMBIGUITY,
+    X86_64_METADATA_SOURCE_REACHABILITY_IMPLICIT_HIDDEN,
+    X86_64_METADATA_SOURCE_REACHABILITY_PUBLIC_GAP,
+} X86_64MetadataSourceReachabilityClass;
+
+typedef struct X86_64MetadataSourceReachabilityResult X86_64MetadataSourceReachabilityResult;
+struct X86_64MetadataSourceReachabilityResult
+{
+    u32 form_id;
+    X86_64MetadataSourceReachabilityClass classification;
+    bool canonical_query;
+    bool direct_emission;
+    bool source_encoded;
+    bool bytes_match;
+    u32 physical_operand_count;
+    u32 diagnostic_kind;
+    u32 direct_byte_count;
+    u32 direct_first_byte;
+    u32 source_byte_count;
+    u32 source_first_byte;
+    u32 mismatch_index;
+    u32 mismatch_direct_byte;
+    u32 mismatch_source_byte;
+};
+
+typedef struct X86_64MetadataSourceReachabilityCase X86_64MetadataSourceReachabilityCase;
+struct X86_64MetadataSourceReachabilityCase
+{
+    u32 form_id;
+    String8 source;
+};
+
+BUSTER_GLOBAL_LOCAL X86_64MetadataSourceReachabilityResult x86_64_metadata_test_source_reachability_case(
+    Arena* arena, Target target, X86_64MetadataSourceReachabilityCase test_case)
+{
+    X86_64MetadataSourceReachabilityResult result = {.form_id = test_case.form_id,
+                                                      .classification = X86_64_METADATA_SOURCE_REACHABILITY_PUBLIC_GAP};
+    BusterX86MetadataPhysicalOperand operands[16] = {0};
+    String8 features[1] = {0};
+    char8 mnemonic_buffer[128] = {0};
+    BusterX86MetadataPhysicalQuery physical = {0};
+    result.canonical_query = buster_x86_metadata_test_canonical_query(test_case.form_id, &physical, operands, features,
+                                                                       mnemonic_buffer);
+    result.physical_operand_count = physical.operand_count;
+    if (!result.canonical_query)
+    {
+        result.classification = X86_64_METADATA_SOURCE_REACHABILITY_SYNTAX_CONSTRUCTION;
+        return result;
+    }
+
+    u8 direct_bytes[32] = {0};
+    BusterX86MetadataRelocation direct_relocations[8] = {0};
+    BusterX86MetadataEmitResult direct = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+        .physical = physical,
+        .form_id = test_case.form_id,
+        .output = direct_bytes,
+        .output_capacity = BUSTER_ARRAY_LENGTH(direct_bytes),
+        .relocations = direct_relocations,
+        .relocation_capacity = BUSTER_ARRAY_LENGTH(direct_relocations),
+    });
+    result.direct_emission = direct.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && direct.relocation_count == 0;
+    result.direct_byte_count = direct.byte_count;
+    result.direct_first_byte = direct.byte_count ? direct_bytes[0] : 0;
+    if (!result.direct_emission)
+    {
+        result.classification = X86_64_METADATA_SOURCE_REACHABILITY_PUBLIC_GAP;
+        return result;
+    }
+
+    AssemblyEncodeResult encoded = assembly_encode(arena, test_case.source,
+                                                    (AssemblyEncodeOptions){.target = target,
+                                                                             .syntax = ASSEMBLY_SYNTAX_INTEL});
+    result.source_encoded = encoded.diagnostic_count == 0;
+    result.diagnostic_kind = encoded.diagnostic_count ? encoded.diagnostics[0].kind : ASSEMBLY_DIAGNOSTIC_COUNT;
+    result.source_byte_count = (u32)encoded.bytes.length;
+    result.source_first_byte = encoded.bytes.length ? encoded.bytes.pointer[0] : 0;
+    result.mismatch_index = UINT32_MAX;
+    u32 shared_byte_count = BUSTER_MIN((u32)encoded.bytes.length, direct.byte_count);
+    for (u32 byte_index = 0; byte_index < shared_byte_count; byte_index += 1)
+    {
+        if (encoded.bytes.pointer[byte_index] != direct_bytes[byte_index])
+        {
+            result.mismatch_index = byte_index;
+            result.mismatch_direct_byte = direct_bytes[byte_index];
+            result.mismatch_source_byte = encoded.bytes.pointer[byte_index];
+            break;
+        }
+    }
+    result.bytes_match = result.source_encoded && encoded.bytes.length == direct.byte_count &&
+                         memcmp(encoded.bytes.pointer, direct_bytes, direct.byte_count) == 0;
+    if (result.bytes_match)
+    {
+        result.classification = X86_64_METADATA_SOURCE_REACHABILITY_SUCCESS;
+    }
+    else if (encoded.diagnostic_count && encoded.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE)
+    {
+        result.classification = X86_64_METADATA_SOURCE_REACHABILITY_POLICY_FEATURE;
+    }
+    else if (encoded.diagnostic_count && encoded.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS)
+    {
+        result.classification = physical.operand_count == 0 ? X86_64_METADATA_SOURCE_REACHABILITY_IMPLICIT_HIDDEN
+                                                              : X86_64_METADATA_SOURCE_REACHABILITY_AMBIGUITY;
+    }
+    else if (!encoded.diagnostic_count)
+    {
+        result.classification = X86_64_METADATA_SOURCE_REACHABILITY_PUBLIC_GAP;
+    }
+    else
+    {
+        result.classification = X86_64_METADATA_SOURCE_REACHABILITY_SYNTAX_CONSTRUCTION;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_reachability_skeleton(UnitTestArguments* arguments)
+{
+    Target target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_INTEL_DIAMOND_RAPIDS,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    static X86_64MetadataSourceReachabilityCase const cases[] = {
+        // Snapshot form IDs are stable for the checked-in generated table.
+        {9842, S8_INITIALIZER("mov rax, rax\n")},
+        {6939, S8_INITIALIZER("vaddps zmm0, zmm0, zmm0, {rn-sae}\n")},
+        {567, S8_INITIALIZER("add rax, rax, rax\n")},
+    };
+    bool all_success = true;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        X86_64MetadataSourceReachabilityResult reachability =
+            x86_64_metadata_test_source_reachability_case(arguments->arena, target, cases[index]);
+        all_success &= reachability.classification == X86_64_METADATA_SOURCE_REACHABILITY_SUCCESS;
+        arguments->show(arguments, S8("X86_SOURCE_REACHABILITY form={u32} canonical={u32} direct={u32} operands={u32} source={u32} match={u32} diag={u32} direct_bytes={u32}:{u32} source_bytes={u32}:{u32} mismatch={u32}:{u32}:{u32} class={u32}\n"),
+                        reachability.form_id, reachability.canonical_query, reachability.direct_emission,
+                        reachability.physical_operand_count, reachability.source_encoded, reachability.bytes_match,
+                        reachability.diagnostic_kind, reachability.direct_byte_count, reachability.direct_first_byte,
+                        reachability.source_byte_count, reachability.source_first_byte, reachability.mismatch_index,
+                        reachability.mismatch_direct_byte, reachability.mismatch_source_byte, reachability.classification);
+    }
+    return all_success;
+}
+
 UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+
+    BUSTER_TEST(arguments, x86_64_metadata_test_source_reachability_skeleton(arguments));
 
     {
         // This is the complete normalized residual cohort: the sixteen X87

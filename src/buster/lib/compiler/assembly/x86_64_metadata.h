@@ -943,6 +943,13 @@ BUSTER_F_DECL BusterX86MetadataCoverageAuditResult buster_x86_metadata_coverage_
     BusterX86MetadataCoverageLedgerEntry* entries, u32 entry_capacity);
 
 #if BUSTER_INCLUDE_TESTS
+// Test-only access to the same constraint-aware physical query used by the
+// coverage ledger.  Keeping this seam beside the ledger prevents source
+// reachability tests from falling back to unconstrained zero operands.
+bool buster_x86_metadata_test_canonical_query(u32 form_id, BusterX86MetadataPhysicalQuery* query,
+                                              BusterX86MetadataPhysicalOperand operands[16], String8 features[1],
+                                              char8 mnemonic_buffer[128]);
+
 typedef enum BusterX86MetadataValidationPatchKind
 {
     BUSTER_X86_METADATA_PATCH_FORM_SOURCE_OFFSET,
