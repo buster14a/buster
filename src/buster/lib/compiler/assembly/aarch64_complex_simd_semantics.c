@@ -572,6 +572,37 @@ static bool buster_a64_complex_simd_arrangement_is_vector(BusterA64ComplexSIMDAr
     return arrangement == BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_Q || buster_a64_complex_simd_register_width(arrangement) != 0;
 }
 
+static u8 buster_a64_complex_simd_scalar_aux_vector_width(BusterA64SemanticForm form, u32 operand_index,
+                                                          BusterA64SemanticVMValue const* values)
+{
+    BUSTER_UNUSED(operand_index);
+    if (values)
+    {
+        for (u32 index = 0; index < form.operand_count; index += 1)
+        {
+            BusterA64SemanticVMValue value = values[index];
+            if (value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_ARRANGEMENT)
+            {
+                u8 width = buster_a64_complex_simd_register_width((BusterA64ComplexSIMDArrangement)value.aux);
+                if (width == 64 || width == 128)
+                {
+                    return width;
+                }
+            }
+            else if (value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR && (value.width == 64 || value.width == 128))
+            {
+                return value.width;
+            }
+        }
+    }
+    /* DUP's scalar-only encoding still reads a full 128-bit source vector. */
+    if (buster_a64_complex_simd_semantic_equal_cstr(form.name, "DUP_asisdone_only"))
+    {
+        return 128;
+    }
+    return 0;
+}
+
 BusterA64SemanticVMValue buster_a64_complex_simd_value_arrangement(BusterA64ComplexSIMDArrangement arrangement)
 {
     if (arrangement == BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_INVALID || arrangement >= BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_COUNT)
@@ -915,9 +946,11 @@ static bool buster_a64_complex_simd_register_value_ok(BusterA64SemanticOperand o
     {
         return false;
     }
+    bool scalar_aux_vector = value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR &&
+                             buster_a64_complex_simd_arrangement_is_scalar(arrangement) && (value.width == 64 || value.width == 128);
     if ((value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR || value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST ||
          value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LANE) &&
-        !buster_a64_complex_simd_arrangement_is_vector(arrangement))
+        !buster_a64_complex_simd_arrangement_is_vector(arrangement) && !scalar_aux_vector)
     {
         return false;
     }
@@ -1314,6 +1347,15 @@ static bool buster_a64_complex_simd_decode_register(u32 row_index, BusterA64Sema
     {
         *result = buster_a64_complex_simd_value_lane(number, arrangement, 0);
     }
+    else if (vector && buster_a64_complex_simd_arrangement_is_scalar(arrangement))
+    {
+        u8 width = buster_a64_complex_simd_scalar_aux_vector_width(form, operand_index, values);
+        if (width == 0)
+        {
+            return false;
+        }
+        *result = (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR, .width = width, .aux = arrangement, .payload = number};
+    }
     else
     {
         *result = buster_a64_complex_simd_value_register(number, arrangement, scalar);
@@ -1396,6 +1438,67 @@ static BusterA64ComplexSIMDStatus buster_a64_complex_simd_canonical_status(Buste
     }
 }
 
+static BusterA64ComplexSIMDStatus buster_a64_complex_simd_decode_internal(Target target, u32 requested_row, bool row_requested, u32 word,
+                                                                        BusterA64ComplexSIMDResult* result);
+
+static bool buster_a64_complex_simd_typed_value_equal(BusterA64SemanticVMValue left, BusterA64SemanticVMValue right)
+{
+    if (left.kind != right.kind || left.width != right.width || left.flags != right.flags || left.aux != right.aux || left.aux2 != right.aux2 ||
+        left.payload != right.payload || left.mask != right.mask || left.text.length != right.text.length)
+    {
+        return false;
+    }
+    for (u32 index = 0; index < left.text.length; index += 1)
+    {
+        if (buster_a64_semantic_string_byte(left.text, index) != buster_a64_semantic_string_byte(right.text, index))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static BusterA64ComplexSIMDStatus buster_a64_complex_simd_encode_raw(Target target, BusterA64ComplexSIMDInstruction const* instruction,
+                                                                      BusterA64SemanticForm form, BusterA64ComplexSIMDGeneratedRow const* row,
+                                                                      u32* word)
+{
+    if (!instruction || !row || !word || !instruction->raw_fields_valid || instruction->raw_fields.count != form.field_count || form.field_count > 64)
+    {
+        return BUSTER_A64_COMPLEX_SIMD_STATUS_RANGE;
+    }
+    u32 candidate = 0;
+    BusterA64SemanticVMStatus vm_status = buster_a64_semantic_vm_encode_fields(form.id, &instruction->raw_fields, &candidate);
+    if (vm_status != BUSTER_A64_SEMANTIC_VM_STATUS_OK)
+    {
+        return buster_a64_complex_simd_vm_status(vm_status);
+    }
+    BusterAarch64CanonicalDecodeResult canonical = {0};
+    BusterAarch64CanonicalDecodeStatus canonical_status = buster_aarch64_canonical_decode(target, candidate, &canonical);
+    if (canonical_status != BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS)
+    {
+        return buster_a64_complex_simd_canonical_status(canonical_status);
+    }
+    if (canonical.arm_row_digest != row->source_digest)
+    {
+        return BUSTER_A64_COMPLEX_SIMD_STATUS_TARGET_MISMATCH;
+    }
+    BusterA64ComplexSIMDResult decoded = {0};
+    BusterA64ComplexSIMDStatus decode_status = buster_a64_complex_simd_decode_internal(target, instruction->row_index, true, candidate, &decoded);
+    if (decode_status != BUSTER_A64_COMPLEX_SIMD_STATUS_OK || decoded.operand_count != instruction->operand_count)
+    {
+        return decode_status == BUSTER_A64_COMPLEX_SIMD_STATUS_OK ? BUSTER_A64_COMPLEX_SIMD_STATUS_TARGET_MISMATCH : decode_status;
+    }
+    for (u32 index = 0; index < instruction->operand_count; index += 1)
+    {
+        if (!buster_a64_complex_simd_typed_value_equal(decoded.operands[index], instruction->operands[index]))
+        {
+            return BUSTER_A64_COMPLEX_SIMD_STATUS_RANGE;
+        }
+    }
+    *word = candidate;
+    return BUSTER_A64_COMPLEX_SIMD_STATUS_OK;
+}
+
 BusterA64ComplexSIMDStatus buster_a64_complex_simd_encode(Target target, BusterA64ComplexSIMDInstruction const* instruction, u32* word)
 {
     if (!instruction || !word || instruction->operand_count > BUSTER_A64_COMPLEX_SIMD_MAX_OPERANDS)
@@ -1416,6 +1519,10 @@ BusterA64ComplexSIMDStatus buster_a64_complex_simd_encode(Target target, BusterA
         form.operand_count > BUSTER_A64_COMPLEX_SIMD_MAX_OPERANDS)
     {
         return BUSTER_A64_COMPLEX_SIMD_STATUS_INVALID_ARGUMENT;
+    }
+    if (instruction->raw_fields_valid)
+    {
+        return buster_a64_complex_simd_encode_raw(target, instruction, form, row, word);
     }
     u32 fields[64] = {0};
     u64 assigned = 0;
@@ -1622,6 +1729,8 @@ static BusterA64ComplexSIMDStatus buster_a64_complex_simd_decode_internal(Target
     }
     BusterA64ComplexSIMDResult candidate = {
         .status = BUSTER_A64_COMPLEX_SIMD_STATUS_OK, .row_index = row_index, .word = word, .operand_count = form.operand_count};
+    candidate.raw_fields_valid = 1;
+    candidate.raw_fields = decoded.fields;
     for (u32 index = 0; index < form.operand_count; index += 1)
     {
         candidate.operands[index] = values[index];

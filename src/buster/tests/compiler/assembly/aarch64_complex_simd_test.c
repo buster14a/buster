@@ -66,6 +66,8 @@ static bool a64_complex_simd_audit_word(Target target, u32 row_index, u64 digest
         return false;
     }
     BusterA64ComplexSIMDInstruction instruction = {.row_index = row_index, .operand_count = (u8)typed.operand_count};
+    instruction.raw_fields_valid = typed.raw_fields_valid;
+    instruction.raw_fields = typed.raw_fields;
     for (u32 index = 0; index < typed.operand_count; index += 1)
     {
         instruction.operands[index] = typed.operands[index];
@@ -320,6 +322,40 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, audit_all_exercised && audit_rows_exercised == buster_a64_complex_simd_row_count());
     BUSTER_TEST(arguments, audit_legal_total >= audit_rows_exercised);
     BUSTER_TEST(arguments, audit_legal_total != 0u);
+
+    /* Provenance preserves non-invertible field projections while still
+     * rejecting typed mutations and tampered raw fields transactionally. */
+    BusterA64ComplexSIMDResult provenance_decoded = {0};
+    bool provenance_decode_ok = buster_a64_complex_simd_decode_row(target, 13, UINT32_C(0x0e010400), &provenance_decoded) == BUSTER_A64_COMPLEX_SIMD_STATUS_OK;
+    bool provenance_roundtrip_ok = false;
+    bool provenance_mutation_rejected = false;
+    bool provenance_tamper_rejected = false;
+    if (provenance_decode_ok)
+    {
+        BusterA64ComplexSIMDInstruction provenance_instruction = {.row_index = 13, .operand_count = (u8)provenance_decoded.operand_count,
+                                                                 .raw_fields_valid = provenance_decoded.raw_fields_valid,
+                                                                 .raw_fields = provenance_decoded.raw_fields};
+        for (u32 index = 0; index < provenance_decoded.operand_count; index += 1)
+        {
+            provenance_instruction.operands[index] = provenance_decoded.operands[index];
+        }
+        u32 provenance_word = UINT32_C(0xa5a5a5a5);
+        provenance_roundtrip_ok = buster_a64_complex_simd_encode(target, &provenance_instruction, &provenance_word) == BUSTER_A64_COMPLEX_SIMD_STATUS_OK &&
+                                  provenance_word == UINT32_C(0x0e010400);
+        provenance_instruction.operands[0].payload ^= 1;
+        provenance_word = UINT32_C(0xa5a5a5a5);
+        BusterA64ComplexSIMDStatus mutation_status = buster_a64_complex_simd_encode(target, &provenance_instruction, &provenance_word);
+        provenance_mutation_rejected = mutation_status != BUSTER_A64_COMPLEX_SIMD_STATUS_OK && provenance_word == UINT32_C(0xa5a5a5a5);
+        provenance_instruction.operands[0] = provenance_decoded.operands[0];
+        provenance_instruction.raw_fields.values[0] ^= 1;
+        provenance_word = UINT32_C(0xa5a5a5a5);
+        BusterA64ComplexSIMDStatus tamper_status = buster_a64_complex_simd_encode(target, &provenance_instruction, &provenance_word);
+        provenance_tamper_rejected = tamper_status != BUSTER_A64_COMPLEX_SIMD_STATUS_OK && provenance_word == UINT32_C(0xa5a5a5a5);
+    }
+    BUSTER_TEST(arguments, provenance_decode_ok);
+    BUSTER_TEST(arguments, provenance_roundtrip_ok);
+    BUSTER_TEST(arguments, provenance_mutation_rejected);
+    BUSTER_TEST(arguments, provenance_tamper_rejected);
 
     /* Feature filtering and failed-output transactionality are checked on a
      * known legal baseline encoding. */
