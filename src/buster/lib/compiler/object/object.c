@@ -4970,9 +4970,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             {
                 return result;
             }
-            ObjectSectionKind current_section_kind = (ObjectSectionKind)section_kinds[section_index];
-            if (target.cpu_arch == CPU_ARCH_AARCH64 && relocation_type == 1 && length == 2 &&
-                !object_section_kind_is_zero_fill(current_section_kind))
+            if (target.cpu_arch == CPU_ARCH_AARCH64 && section_kinds[section_index] == OBJECT_SECTION_UNWIND && relocation_type == 1 && length == 2)
             {
                 u32 next_source_offset = 0;
                 u32 next_information = 0;
