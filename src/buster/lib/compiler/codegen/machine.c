@@ -70,6 +70,8 @@ BUSTER_F_DECL bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
 // them keeps vector values clear of rows that scribble the low XMM file.
 #define MACHINE_X64_FLOAT_SCRATCH_CLOBBER ((1u << MACHINE_X64_ZMM0) | (1u << MACHINE_X64_ZMM1))
 #define MACHINE_X64_FLOAT_BRIDGE_CLOBBER (0xffu << MACHINE_X64_ZMM0)
+#define MACHINE_RESOURCE_FLAGS_MASK MACHINE_RESOURCE_BIT(MACHINE_RESOURCE_FLAGS)
+#define MACHINE_RESOURCE_NZCV_MASK MACHINE_RESOURCE_BIT(MACHINE_RESOURCE_NZCV)
 
 // Shorthand rows for the x86-64 scalar subset: destination-and-source
 // moves, read-modify-write arithmetic, flag producers/consumers, frame and
@@ -77,21 +79,39 @@ BUSTER_F_DECL bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
 #define MACHINE_INFO_MOVE(name_literal)                                                                                                                        \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
+        .form_set = MACHINE_OPCODE_FORM_SET(MACHINE_OPCODE_FORM_REGISTER), .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
     }
 #define MACHINE_INFO_READ_MODIFY(name_literal)                                                                                                                 \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},           \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,                                                                                                   \
     }
+#define MACHINE_INFO_TWO_ADDRESS_SSA(name_literal, schedule)                                                                                                   \
+    {                                                                                                                                                          \
+        .name = S8_INITIALIZER(name_literal), .operand_count = 3,                                                                                              \
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                                            \
+        .tied_pair = (u8)(1u | (2u << 4)),                                                                                                                     \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,                                                                                                   \
+        .schedule_class = (schedule), .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                                                                    \
+        .form_set = MACHINE_OPCODE_FORM_SET(MACHINE_OPCODE_FORM_REGISTER),                                                                                    \
+    }
+#define MACHINE_INFO_FINALIZE(flags, effect, memslot, schedule)                                                                                                \
+    .attributes = (flags), .memory_effect = (effect), .memory_operand = (memslot), .schedule_class = (schedule),                                              \
+    .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE
 #define MACHINE_INFO_SHIFT(name_literal)                                                                                                                       \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},           \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,                                                            \
+        .schedule_class = MACHINE_SCHEDULE_CLASS_SHIFT, .fixed_register_set = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX),                              \
+        .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_X64_RAX, MACHINE_X64_RCX},                                                                    \
     }
 #define MACHINE_INFO_DIVIDE(name_literal)                                                                                                                      \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},           \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED, .clobber_mask = 1u << MACHINE_X64_RDX,                     \
+        .schedule_class = MACHINE_SCHEDULE_CLASS_DIV, .fixed_register_set = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX),                               \
+        .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_X64_RAX, MACHINE_X64_RCX},                                                                    \
+        .implicit_physical_defs = 1ull << MACHINE_X64_RDX,                                                                                                     \
     }
 #define MACHINE_INFO_MOVE_CONSTRAINED(name_literal)                                                                                                            \
     {                                                                                                                                                          \
@@ -101,18 +121,33 @@ BUSTER_F_DECL bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
 #define MACHINE_INFO_MOVE_CONSTRAINED_CLOBBER(name_literal, clobbers)                                                                                          \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED, .clobber_mask = (clobbers),                                                                        \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED, .clobber_mask = (clobbers), .implicit_physical_defs = (clobbers),                                  \
     }
 #define MACHINE_INFO_THREE_ADDRESS(name_literal)                                                                                                               \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 3,                                                                                              \
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                                            \
+        .form_set = MACHINE_OPCODE_FORM_SET(MACHINE_OPCODE_FORM_REGISTER), .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
+    }
+#define MACHINE_INFO_A64_THREE_ADDRESS(name_literal, schedule)                                                                                                 \
+    {                                                                                                                                                          \
+        .name = S8_INITIALIZER(name_literal), .operand_count = 3,                                                                                              \
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                                            \
+        .form_set = MACHINE_OPCODE_FORM_SET(MACHINE_OPCODE_FORM_REGISTER), .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
+        .schedule_class = (schedule),                                                                                                                          \
     }
 #define MACHINE_INFO_THREE_ADDRESS_CONSTRAINED(name_literal)                                                                                                   \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 3,                                                                                              \
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                                            \
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,                                                                                                    \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED | MACHINE_OPCODE_ATTRIBUTE_EXPANDS, .form_set = MACHINE_OPCODE_FORM_SET(MACHINE_OPCODE_FORM_PSEUDO),\
+        .expansion_recipe = MACHINE_OPCODE_EXPANSION_PSEUDO, .schedule_class = MACHINE_SCHEDULE_CLASS_DIV,                                                    \
+    }
+#define MACHINE_INFO_A64_COMPARE(name_literal)                                                                                                                 \
+    {                                                                                                                                                          \
+        .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                  \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE, .implicit_resource_defs = MACHINE_RESOURCE_NZCV_MASK,                                             \
+        .form_set = MACHINE_OPCODE_FORM_SET(MACHINE_OPCODE_FORM_REGISTER), .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
     }
 #define MACHINE_INFO_UNARY_READ_MODIFY(name_literal)                                                                                                           \
     {                                                                                                                                                          \
@@ -122,21 +157,31 @@ BUSTER_F_DECL bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
 #define MACHINE_INFO_COMPARE(name_literal)                                                                                                                     \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                  \
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,                                                                                                   \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE, .implicit_resource_defs = MACHINE_RESOURCE_FLAGS_MASK,                                             \
     }
 #define MACHINE_INFO_STORE_FRAME(name_literal)                                                                                                                 \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {0, MACHINE_OPERAND_USE_GENERAL},                                            \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_WRITE, .memory_operand = 1,                                      \
+        .schedule_class = MACHINE_SCHEDULE_CLASS_STORE,                                                                                                         \
     }
 #define MACHINE_INFO_MOVE_CLOBBER(name_literal, clobbers)                                                                                                      \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
         .clobber_mask = (clobbers),                                                                                                                            \
     }
-#define MACHINE_INFO_LOAD_POINTER(name_literal) MACHINE_INFO_MOVE(name_literal)
+#define MACHINE_INFO_LOAD_POINTER(name_literal)                                                                                                                 \
+    {                                                                                                                                                          \
+        .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ, .memory_operand = 2,                                       \
+        .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD, .form_set = MACHINE_OPCODE_FORM_SET(MACHINE_OPCODE_FORM_REGISTER),                                     \
+        .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                                                                                                   \
+    }
 #define MACHINE_INFO_STORE_POINTER(name_literal)                                                                                                               \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                  \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_WRITE, .memory_operand = 1,                                      \
+        .schedule_class = MACHINE_SCHEDULE_CLASS_STORE,                                                                                                         \
     }
 
 BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_COUNT] = {
@@ -196,18 +241,18 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_BSR64] = MACHINE_INFO_MOVE("x64_bsr64"),
     [MACHINE_X64_POPCNT32] = MACHINE_INFO_MOVE("x64_popcnt32"),
     [MACHINE_X64_POPCNT64] = MACHINE_INFO_MOVE("x64_popcnt64"),
-    [MACHINE_X64_ADD32] = MACHINE_INFO_READ_MODIFY("x64_add32"),
-    [MACHINE_X64_ADD64] = MACHINE_INFO_READ_MODIFY("x64_add64"),
-    [MACHINE_X64_SUB32] = MACHINE_INFO_READ_MODIFY("x64_sub32"),
-    [MACHINE_X64_SUB64] = MACHINE_INFO_READ_MODIFY("x64_sub64"),
-    [MACHINE_X64_AND32] = MACHINE_INFO_READ_MODIFY("x64_and32"),
-    [MACHINE_X64_AND64] = MACHINE_INFO_READ_MODIFY("x64_and64"),
-    [MACHINE_X64_OR32] = MACHINE_INFO_READ_MODIFY("x64_or32"),
-    [MACHINE_X64_OR64] = MACHINE_INFO_READ_MODIFY("x64_or64"),
-    [MACHINE_X64_XOR32] = MACHINE_INFO_READ_MODIFY("x64_xor32"),
-    [MACHINE_X64_XOR64] = MACHINE_INFO_READ_MODIFY("x64_xor64"),
-    [MACHINE_X64_IMUL32] = MACHINE_INFO_READ_MODIFY("x64_imul32"),
-    [MACHINE_X64_IMUL64] = MACHINE_INFO_READ_MODIFY("x64_imul64"),
+    [MACHINE_X64_ADD32] = MACHINE_INFO_TWO_ADDRESS_SSA("x64_add32", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_X64_ADD64] = MACHINE_INFO_TWO_ADDRESS_SSA("x64_add64", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_X64_SUB32] = MACHINE_INFO_TWO_ADDRESS_SSA("x64_sub32", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_X64_SUB64] = MACHINE_INFO_TWO_ADDRESS_SSA("x64_sub64", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_X64_AND32] = MACHINE_INFO_TWO_ADDRESS_SSA("x64_and32", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_X64_AND64] = MACHINE_INFO_TWO_ADDRESS_SSA("x64_and64", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_X64_OR32] = MACHINE_INFO_TWO_ADDRESS_SSA("x64_or32", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_X64_OR64] = MACHINE_INFO_TWO_ADDRESS_SSA("x64_or64", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_X64_XOR32] = MACHINE_INFO_TWO_ADDRESS_SSA("x64_xor32", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_X64_XOR64] = MACHINE_INFO_TWO_ADDRESS_SSA("x64_xor64", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_X64_IMUL32] = MACHINE_INFO_TWO_ADDRESS_SSA("x64_imul32", MACHINE_SCHEDULE_CLASS_MUL),
+    [MACHINE_X64_IMUL64] = MACHINE_INFO_TWO_ADDRESS_SSA("x64_imul64", MACHINE_SCHEDULE_CLASS_MUL),
     [MACHINE_X64_NEG32] = MACHINE_INFO_UNARY_READ_MODIFY("x64_neg32"),
     [MACHINE_X64_NEG64] = MACHINE_INFO_UNARY_READ_MODIFY("x64_neg64"),
     [MACHINE_X64_NOT32] = MACHINE_INFO_UNARY_READ_MODIFY("x64_not32"),
@@ -220,11 +265,14 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .implicit_resource_uses = MACHINE_RESOURCE_FLAGS_MASK,
     },
     [MACHINE_X64_LOAD_FRAME] = {
         .name = S8_INITIALIZER("x64_load_frame"),
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, 0},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ, .memory_operand = 2,
+        .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD,
     },
     [MACHINE_X64_STORE_FRAME8] = MACHINE_INFO_STORE_FRAME("x64_store_frame8"),
     [MACHINE_X64_STORE_FRAME16] = MACHINE_INFO_STORE_FRAME("x64_store_frame16"),
@@ -247,6 +295,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("x64_jcc"),
         .operand_count = 2,
         .attributes = MACHINE_OPCODE_ATTRIBUTE_TERMINATOR | MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE,
+        .implicit_resource_uses = MACHINE_RESOURCE_FLAGS_MASK,
     },
     [MACHINE_X64_RET] = {
         .name = S8_INITIALIZER("x64_ret"),
@@ -321,6 +370,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_count = 3,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .implicit_resource_defs = MACHINE_RESOURCE_FLAGS_MASK,
         .clobber_mask = (1u << MACHINE_X64_RDX) | MACHINE_X64_FLOAT_SCRATCH_CLOBBER,
     },
     [MACHINE_X64_CVT_F32_TO_F64] = MACHINE_INFO_MOVE_CLOBBER("x64_cvt_f32_to_f64", MACHINE_X64_FLOAT_SCRATCH_CLOBBER),
@@ -543,22 +593,22 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_A64_SXTW] = MACHINE_INFO_MOVE("a64_sxtw"),
     [MACHINE_A64_UXTB] = MACHINE_INFO_MOVE("a64_uxtb"),
     [MACHINE_A64_UXTH] = MACHINE_INFO_MOVE("a64_uxth"),
-    [MACHINE_A64_ADD32] = MACHINE_INFO_THREE_ADDRESS("a64_add32"),
-    [MACHINE_A64_ADD64] = MACHINE_INFO_THREE_ADDRESS("a64_add64"),
-    [MACHINE_A64_SUB32] = MACHINE_INFO_THREE_ADDRESS("a64_sub32"),
-    [MACHINE_A64_SUB64] = MACHINE_INFO_THREE_ADDRESS("a64_sub64"),
-    [MACHINE_A64_AND32] = MACHINE_INFO_THREE_ADDRESS("a64_and32"),
-    [MACHINE_A64_AND64] = MACHINE_INFO_THREE_ADDRESS("a64_and64"),
-    [MACHINE_A64_ORR32] = MACHINE_INFO_THREE_ADDRESS("a64_orr32"),
-    [MACHINE_A64_ORR64] = MACHINE_INFO_THREE_ADDRESS("a64_orr64"),
-    [MACHINE_A64_EOR32] = MACHINE_INFO_THREE_ADDRESS("a64_eor32"),
-    [MACHINE_A64_EOR64] = MACHINE_INFO_THREE_ADDRESS("a64_eor64"),
-    [MACHINE_A64_MUL32] = MACHINE_INFO_THREE_ADDRESS("a64_mul32"),
-    [MACHINE_A64_MUL64] = MACHINE_INFO_THREE_ADDRESS("a64_mul64"),
-    [MACHINE_A64_SDIV32] = MACHINE_INFO_THREE_ADDRESS("a64_sdiv32"),
-    [MACHINE_A64_SDIV64] = MACHINE_INFO_THREE_ADDRESS("a64_sdiv64"),
-    [MACHINE_A64_UDIV32] = MACHINE_INFO_THREE_ADDRESS("a64_udiv32"),
-    [MACHINE_A64_UDIV64] = MACHINE_INFO_THREE_ADDRESS("a64_udiv64"),
+    [MACHINE_A64_ADD32] = MACHINE_INFO_A64_THREE_ADDRESS("a64_add32", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_A64_ADD64] = MACHINE_INFO_A64_THREE_ADDRESS("a64_add64", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_A64_SUB32] = MACHINE_INFO_A64_THREE_ADDRESS("a64_sub32", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_A64_SUB64] = MACHINE_INFO_A64_THREE_ADDRESS("a64_sub64", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_A64_AND32] = MACHINE_INFO_A64_THREE_ADDRESS("a64_and32", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_A64_AND64] = MACHINE_INFO_A64_THREE_ADDRESS("a64_and64", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_A64_ORR32] = MACHINE_INFO_A64_THREE_ADDRESS("a64_orr32", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_A64_ORR64] = MACHINE_INFO_A64_THREE_ADDRESS("a64_orr64", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_A64_EOR32] = MACHINE_INFO_A64_THREE_ADDRESS("a64_eor32", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_A64_EOR64] = MACHINE_INFO_A64_THREE_ADDRESS("a64_eor64", MACHINE_SCHEDULE_CLASS_ALU),
+    [MACHINE_A64_MUL32] = MACHINE_INFO_A64_THREE_ADDRESS("a64_mul32", MACHINE_SCHEDULE_CLASS_MUL),
+    [MACHINE_A64_MUL64] = MACHINE_INFO_A64_THREE_ADDRESS("a64_mul64", MACHINE_SCHEDULE_CLASS_MUL),
+    [MACHINE_A64_SDIV32] = MACHINE_INFO_A64_THREE_ADDRESS("a64_sdiv32", MACHINE_SCHEDULE_CLASS_DIV),
+    [MACHINE_A64_SDIV64] = MACHINE_INFO_A64_THREE_ADDRESS("a64_sdiv64", MACHINE_SCHEDULE_CLASS_DIV),
+    [MACHINE_A64_UDIV32] = MACHINE_INFO_A64_THREE_ADDRESS("a64_udiv32", MACHINE_SCHEDULE_CLASS_DIV),
+    [MACHINE_A64_UDIV64] = MACHINE_INFO_A64_THREE_ADDRESS("a64_udiv64", MACHINE_SCHEDULE_CLASS_DIV),
     [MACHINE_A64_SREM32] = MACHINE_INFO_THREE_ADDRESS_CONSTRAINED("a64_srem32"),
     [MACHINE_A64_SREM64] = MACHINE_INFO_THREE_ADDRESS_CONSTRAINED("a64_srem64"),
     [MACHINE_A64_UREM32] = MACHINE_INFO_THREE_ADDRESS_CONSTRAINED("a64_urem32"),
@@ -573,29 +623,35 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_A64_NEG64] = MACHINE_INFO_MOVE("a64_neg64"),
     [MACHINE_A64_NOT32] = MACHINE_INFO_MOVE("a64_not32"),
     [MACHINE_A64_NOT64] = MACHINE_INFO_MOVE("a64_not64"),
-    [MACHINE_A64_CMP32] = MACHINE_INFO_COMPARE("a64_cmp32"),
-    [MACHINE_A64_CMP64] = MACHINE_INFO_COMPARE("a64_cmp64"),
+    [MACHINE_A64_CMP32] = MACHINE_INFO_A64_COMPARE("a64_cmp32"),
+    [MACHINE_A64_CMP64] = MACHINE_INFO_A64_COMPARE("a64_cmp64"),
     [MACHINE_A64_CMP_ZERO] = {
         .name = S8_INITIALIZER("a64_cmp_zero"),
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .implicit_resource_defs = MACHINE_RESOURCE_NZCV_MASK,
     },
     [MACHINE_A64_CSET] = {
         .name = S8_INITIALIZER("a64_cset"),
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE,
+        .implicit_resource_uses = MACHINE_RESOURCE_NZCV_MASK,
     },
     [MACHINE_A64_LOAD_FRAME] = {
         .name = S8_INITIALIZER("a64_load_frame"),
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, 0},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ, .memory_operand = 2,
+        .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD,
     },
     [MACHINE_A64_LOAD_FRAME32] = {
         .name = S8_INITIALIZER("a64_load_frame32"),
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, 0},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ, .memory_operand = 2,
+        .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD,
     },
     [MACHINE_A64_STORE_FRAME8] = MACHINE_INFO_STORE_FRAME("a64_store_frame8"),
     [MACHINE_A64_STORE_FRAME16] = MACHINE_INFO_STORE_FRAME("a64_store_frame16"),
@@ -641,6 +697,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("a64_bcc"),
         .operand_count = 2,
         .attributes = MACHINE_OPCODE_ATTRIBUTE_TERMINATOR | MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE,
+        .implicit_resource_uses = MACHINE_RESOURCE_NZCV_MASK,
     },
     [MACHINE_A64_RET] = {
         .name = S8_INITIALIZER("a64_ret"),
@@ -929,6 +986,82 @@ BUSTER_F_DECL MachineEmitRecipeId machine_opcode_emit_recipe(u16 opcode)
     return opcode < MACHINE_OPCODE_COUNT ? machine_opcode_emit_recipes[opcode] : MACHINE_EMIT_RECIPE_INVALID;
 }
 
+BUSTER_F_DECL u16 machine_opcode_form_set(MachineOpcodeInfo const* info)
+{
+    if (!info)
+    {
+        return 0;
+    }
+    u16 forms = info->form_set;
+    return forms;
+}
+
+BUSTER_F_DECL MachineScheduleClass machine_opcode_schedule_class(MachineOpcodeInfo const* info)
+{
+    return info && info->schedule_class < MACHINE_SCHEDULE_CLASS_COUNT ? (MachineScheduleClass)info->schedule_class : MACHINE_SCHEDULE_CLASS_NONE;
+}
+
+BUSTER_F_DECL MachineOpcodeExpansion machine_opcode_expansion(MachineOpcodeInfo const* info)
+{
+    return info && info->expansion_recipe < MACHINE_OPCODE_EXPANSION_COUNT ? (MachineOpcodeExpansion)info->expansion_recipe : MACHINE_OPCODE_EXPANSION_NONE;
+}
+
+BUSTER_F_DECL MachineMemoryEffect machine_opcode_memory_effect(MachineOpcodeInfo const* info)
+{
+    return info && info->memory_effect < MACHINE_MEMORY_EFFECT_COUNT ? (MachineMemoryEffect)info->memory_effect : MACHINE_MEMORY_EFFECT_NONE;
+}
+
+BUSTER_F_DECL MachineBundleKind machine_opcode_bundle(MachineOpcodeInfo const* info)
+{
+    return info && info->bundle < MACHINE_BUNDLE_COUNT ? (MachineBundleKind)info->bundle : MACHINE_BUNDLE_NONE;
+}
+
+BUSTER_F_DECL bool machine_opcode_is_memory(MachineOpcodeInfo const* info)
+{
+    return machine_opcode_memory_effect(info) != MACHINE_MEMORY_EFFECT_NONE || (info && (info->attributes & MACHINE_OPCODE_ATTRIBUTE_MEMORY));
+}
+
+BUSTER_F_DECL u32 machine_opcode_fixed_register(MachineOpcodeInfo const* info, u32 slot)
+{
+    if (!info || slot >= BUSTER_ARRAY_LENGTH(info->fixed_registers) || !(info->fixed_register_mask & (1u << slot)))
+    {
+        return UINT32_MAX;
+    }
+    return info->fixed_registers[slot];
+}
+
+BUSTER_F_DECL u32 machine_opcode_memory_operand(MachineOpcodeInfo const* info)
+{
+    if (!info || !info->memory_operand)
+    {
+        return UINT32_MAX;
+    }
+    u32 slot = (u32)info->memory_operand - 1u;
+    return slot < info->operand_count ? slot : UINT32_MAX;
+}
+
+BUSTER_F_DECL bool machine_opcode_operand_is_tied(MachineOpcodeInfo const* info, u32 destination_slot, u32 source_slot)
+{
+    if (!info || destination_slot >= 4 || source_slot >= 4)
+    {
+        return false;
+    }
+    u32 encoded_destination = info->tied_pair & 0x0fu;
+    u32 encoded_source = (info->tied_pair >> 4) & 0x0fu;
+    return encoded_destination != 0 && encoded_source != 0 && encoded_destination - 1u == destination_slot && encoded_source - 1u == source_slot;
+}
+
+BUSTER_F_DECL bool machine_opcode_operand_is_early_clobber(MachineOpcodeInfo const* info, u32 slot)
+{
+    return info && slot < 8 && (info->early_clobber_mask & (1u << slot)) != 0;
+}
+
+BUSTER_F_DECL bool machine_opcode_has_constraints(MachineOpcodeInfo const* info)
+{
+    return info && (info->tied_pair || info->early_clobber_mask || info->fixed_register_set || info->fixed_register_mask ||
+                    (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED));
+}
+
 BUSTER_F_DECL void machine_stream_initialize(MachineBuilderStream* stream, u64 element_size)
 {
     stream->first = 0;
@@ -985,6 +1118,9 @@ BUSTER_F_DECL MachineFunctionBuilder machine_function_builder_begin(Arena* arena
     machine_stream_initialize(&builder.instructions, sizeof(MachineInstruction));
     machine_stream_initialize(&builder.virtual_registers, sizeof(MachineVirtualRegister));
     machine_stream_initialize(&builder.blocks, sizeof(MachineBlock));
+    machine_stream_initialize(&builder.edges, sizeof(MachineEdge));
+    machine_stream_initialize(&builder.block_parameters, sizeof(MachineBlockParameter));
+    machine_stream_initialize(&builder.edge_copy_sources, sizeof(MachineRef));
     return builder;
 }
 
@@ -1029,20 +1165,56 @@ BUSTER_F_DECL void machine_builder_block_end(MachineFunctionBuilder* builder, Ma
     builder->open_block = UINT32_MAX;
 }
 
+BUSTER_F_DECL u32 machine_builder_block_parameter(MachineFunctionBuilder* builder, MachineBlockParameter parameter)
+{
+    u32 index = builder->block_parameters.total_count;
+    MachineBlockParameter* row = (MachineBlockParameter*)machine_stream_append(builder->arena, &builder->block_parameters);
+    *row = parameter;
+    return index;
+}
+
+BUSTER_F_DECL u32 machine_builder_edge_copy_source(MachineFunctionBuilder* builder, MachineRef source)
+{
+    u32 index = builder->edge_copy_sources.total_count;
+    MachineRef* row = (MachineRef*)machine_stream_append(builder->arena, &builder->edge_copy_sources);
+    *row = source;
+    return index;
+}
+
+BUSTER_F_DECL u32 machine_builder_edge(MachineFunctionBuilder* builder, MachineEdge edge)
+{
+    u32 index = builder->edges.total_count;
+    MachineEdge* row = (MachineEdge*)machine_stream_append(builder->arena, &builder->edges);
+    *row = edge;
+    return index;
+}
+
 BUSTER_F_DECL MachineFunction machine_function_builder_finish(Arena* arena, MachineFunctionBuilder* builder)
 {
     BUSTER_CHECK(!builder->block_is_open);
+    BUSTER_CHECK(builder->edges.total_count == 0 || builder->edges.total_count <= MACHINE_REF_PAYLOAD_LIMIT);
+    BUSTER_CHECK(builder->block_parameters.total_count == 0 || builder->block_parameters.total_count <= MACHINE_REF_PAYLOAD_LIMIT);
+    BUSTER_CHECK(builder->edge_copy_sources.total_count == 0 || builder->edge_copy_sources.total_count <= MACHINE_REF_PAYLOAD_LIMIT);
     MachineFunction function = {
         .instructions = arena_allocate(arena, MachineInstruction, builder->instructions.total_count),
         .virtual_registers = arena_allocate(arena, MachineVirtualRegister, builder->virtual_registers.total_count),
         .blocks = arena_allocate(arena, MachineBlock, builder->blocks.total_count),
+        .edges = arena_allocate(arena, MachineEdge, builder->edges.total_count),
+        .block_parameters = arena_allocate(arena, MachineBlockParameter, builder->block_parameters.total_count),
+        .edge_copy_sources = arena_allocate(arena, MachineRef, builder->edge_copy_sources.total_count),
         .instruction_count = builder->instructions.total_count,
         .virtual_register_count = builder->virtual_registers.total_count,
         .block_count = builder->blocks.total_count,
+        .edge_count = builder->edges.total_count,
+        .block_parameter_count = builder->block_parameters.total_count,
+        .edge_copy_source_count = builder->edge_copy_sources.total_count,
     };
     machine_stream_flatten(&builder->instructions, function.instructions);
     machine_stream_flatten(&builder->virtual_registers, function.virtual_registers);
     machine_stream_flatten(&builder->blocks, function.blocks);
+    machine_stream_flatten(&builder->edges, function.edges);
+    machine_stream_flatten(&builder->block_parameters, function.block_parameters);
+    machine_stream_flatten(&builder->edge_copy_sources, function.edge_copy_sources);
     return function;
 }
 
@@ -1162,10 +1334,72 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_reference(MachineFunction* function, Mac
 BUSTER_F_DECL MachineVerifyResult machine_verify_function(MachineFunction* function)
 {
     MachineVerifyResult result = {0};
+    if (!function)
+    {
+        result.error = MACHINE_VERIFY_EDGE_RANGE;
+        return result;
+    }
+    if ((function->instruction_count && !function->instructions) || (function->virtual_register_count && !function->virtual_registers) ||
+        (function->block_count && !function->blocks) || (function->edge_count && !function->edges) ||
+        (function->block_parameter_count && !function->block_parameters) ||
+        (function->edge_copy_source_count && !function->edge_copy_sources))
+    {
+        result.error = MACHINE_VERIFY_EDGE_RANGE;
+        return result;
+    }
     if (function->instruction_count >= MACHINE_POINT_INSTRUCTION_LIMIT)
     {
         result.error = MACHINE_VERIFY_POINT_CAPACITY;
         return result;
+    }
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        MachineBlock* block = function->blocks + block_index;
+        result.block = block_index;
+        if (block->predecessor_offset > function->edge_count || block->predecessor_count > function->edge_count - block->predecessor_offset ||
+            block->successor_offset > function->edge_count || block->successor_count > function->edge_count - block->successor_offset ||
+            block->parameter_offset > function->block_parameter_count || block->parameter_count > function->block_parameter_count - block->parameter_offset)
+        {
+            result.error = MACHINE_VERIFY_EDGE_RANGE;
+            return result;
+        }
+        for (u32 parameter_index = 0; parameter_index < block->parameter_count; parameter_index += 1)
+        {
+            MachineBlockParameter* parameter = function->block_parameters + block->parameter_offset + parameter_index;
+            if (parameter->virtual_register >= function->virtual_register_count)
+            {
+                result.operand = parameter_index;
+                result.error = MACHINE_VERIFY_BLOCK_PARAMETER;
+                return result;
+            }
+        }
+    }
+    for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
+    {
+        MachineEdge* edge = function->edges + edge_index;
+        result.block = edge->source_block;
+        if (edge->source_block >= function->block_count || edge->destination_block >= function->block_count || edge->copy_offset > function->edge_copy_source_count ||
+            edge->copy_count > function->edge_copy_source_count - edge->copy_offset)
+        {
+            result.error = MACHINE_VERIFY_EDGE_RANGE;
+            return result;
+        }
+        MachineBlock* destination = function->blocks + edge->destination_block;
+        if (edge->copy_count != destination->parameter_count)
+        {
+            result.error = MACHINE_VERIFY_EDGE_COPY;
+            return result;
+        }
+        for (u32 copy_index = 0; copy_index < edge->copy_count; copy_index += 1)
+        {
+            MachineRef source = function->edge_copy_sources[edge->copy_offset + copy_index];
+            if (!machine_verify_reference(function, source))
+            {
+                result.operand = copy_index;
+                result.error = MACHINE_VERIFY_EDGE_COPY;
+                return result;
+            }
+        }
     }
     u32 covered_instruction_count = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
@@ -1216,6 +1450,25 @@ BUSTER_F_DECL MachineVerifyResult machine_verify_function(MachineFunction* funct
                 if (!machine_verify_reference(function, ref))
                 {
                     result.error = MACHINE_VERIFY_OPERAND_REFERENCE;
+                    return result;
+                }
+                u32 fixed_register = machine_opcode_fixed_register(info, operand_index);
+                if (fixed_register != UINT32_MAX && machine_ref_kind(ref) == MACHINE_REF_PHYSICAL_REGISTER && machine_ref_payload(ref) != fixed_register)
+                {
+                    result.error = MACHINE_VERIFY_CONSTRAINT;
+                    return result;
+                }
+            }
+            u32 tied_destination = info->tied_pair & 0x0fu;
+            u32 tied_source = (info->tied_pair >> 4) & 0x0fu;
+            if (tied_destination && tied_source && tied_destination <= info->operand_count && tied_source <= info->operand_count)
+            {
+                MachineRef destination_ref = instruction->operands[tied_destination - 1u];
+                MachineRef source_ref = instruction->operands[tied_source - 1u];
+                if (machine_ref_kind(destination_ref) == MACHINE_REF_PHYSICAL_REGISTER && machine_ref_kind(source_ref) == MACHINE_REF_PHYSICAL_REGISTER &&
+                    machine_ref_payload(destination_ref) != machine_ref_payload(source_ref))
+                {
+                    result.error = MACHINE_VERIFY_CONSTRAINT;
                     return result;
                 }
             }
@@ -1315,9 +1568,10 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
         {
             return placement;
         }
+        u8* row_operand_registers = placement.operand_registers + (u64)instruction_index * 4;
         for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(instruction->operands); slot += 1)
         {
-            u8* operand_register = placement.operand_registers + (u64)instruction_index * 4 + slot;
+            u8* operand_register = row_operand_registers + slot;
             *operand_register = UINT8_MAX;
             if (slot >= info->operand_count)
             {
@@ -1346,6 +1600,24 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
             {
                 u32 operand_class = (info->operand_info[slot] >> MACHINE_OPERAND_CLASS_SHIFT) & 0x7u;
                 *operand_register = operand_class == MACHINE_REGISTER_CLASS_VECTOR ? target->vector_slot_scratch[slot] : target->slot_scratch[slot];
+                u32 fixed_register = machine_opcode_fixed_register(info, slot);
+                if (fixed_register != UINT32_MAX)
+                {
+                    *operand_register = (u8)fixed_register;
+                }
+                u32 tied_destination = UINT32_MAX;
+                for (u32 destination_slot = 0; destination_slot < info->operand_count; destination_slot += 1)
+                {
+                    if (machine_opcode_operand_is_tied(info, destination_slot, slot))
+                    {
+                        tied_destination = destination_slot;
+                        break;
+                    }
+                }
+                if (tied_destination != UINT32_MAX && row_operand_registers[tied_destination] != UINT8_MAX)
+                {
+                    *operand_register = row_operand_registers[tied_destination];
+                }
             }
             // A copy into a fixed physical register reloads its source
             // directly into that register: argument sequences would
@@ -1386,13 +1658,17 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
             }
             if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
             {
-                u32 defined_class = (info->operand_info[slot] >> MACHINE_OPERAND_CLASS_SHIFT) & 0x7u;
+                u8 destination_register = row_operand_registers[slot];
+                if (destination_register == UINT8_MAX)
+                {
+                    return placement;
+                }
                 MachineEdit* edit = (MachineEdit*)machine_stream_append(arena, &edits);
                 *edit = (MachineEdit){
                     .point = machine_point_make(instruction_index, MACHINE_POINT_AFTER),
                     .kind = MACHINE_EDIT_SPILL,
                     .subject = machine_ref_payload(ref),
-                    .location = defined_class == MACHINE_REGISTER_CLASS_VECTOR ? target->vector_slot_scratch[slot] : target->slot_scratch[slot],
+                    .location = destination_register,
                 };
                 placement.spill_count += 1;
             }
@@ -1419,16 +1695,28 @@ struct MachineReplayHeader
     u32 instruction_count;
     u32 virtual_register_count;
     u32 block_count;
-    u32 reserved;
+    u32 edge_count;
+    u32 block_parameter_count;
+    u32 edge_copy_source_count;
 };
-BUSTER_CT_CHECK(sizeof(MachineReplayHeader) == 24);
+BUSTER_CT_CHECK(sizeof(MachineReplayHeader) == 32);
 
 BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* function)
 {
+    if ((function->instruction_count && !function->instructions) || (function->virtual_register_count && !function->virtual_registers) ||
+        (function->block_count && !function->blocks) || (function->edge_count && !function->edges) ||
+        (function->block_parameter_count && !function->block_parameters) ||
+        (function->edge_copy_source_count && !function->edge_copy_sources))
+    {
+        return (ByteSlice){0};
+    }
     u64 instruction_bytes = (u64)function->instruction_count * sizeof(MachineInstruction);
     u64 register_bytes = (u64)function->virtual_register_count * sizeof(MachineVirtualRegister);
     u64 block_bytes = (u64)function->block_count * sizeof(MachineBlock);
-    u64 total = sizeof(MachineReplayHeader) + instruction_bytes + register_bytes + block_bytes;
+    u64 edge_bytes = (u64)function->edge_count * sizeof(MachineEdge);
+    u64 parameter_bytes = (u64)function->block_parameter_count * sizeof(MachineBlockParameter);
+    u64 edge_source_bytes = (u64)function->edge_copy_source_count * sizeof(MachineRef);
+    u64 total = sizeof(MachineReplayHeader) + instruction_bytes + register_bytes + block_bytes + edge_bytes + parameter_bytes + edge_source_bytes;
     u8* bytes = arena_allocate(arena, u8, total);
     MachineReplayHeader header = {
         .magic = MACHINE_REPLAY_MAGIC,
@@ -1436,6 +1724,9 @@ BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* 
         .instruction_count = function->instruction_count,
         .virtual_register_count = function->virtual_register_count,
         .block_count = function->block_count,
+        .edge_count = function->edge_count,
+        .block_parameter_count = function->block_parameter_count,
+        .edge_copy_source_count = function->edge_copy_source_count,
     };
     u64 offset = 0;
     memcpy(bytes + offset, &header, sizeof(header));
@@ -1455,6 +1746,21 @@ BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* 
         memcpy(bytes + offset, function->blocks, block_bytes);
         offset += block_bytes;
     }
+    if (edge_bytes)
+    {
+        memcpy(bytes + offset, function->edges, edge_bytes);
+        offset += edge_bytes;
+    }
+    if (parameter_bytes)
+    {
+        memcpy(bytes + offset, function->block_parameters, parameter_bytes);
+        offset += parameter_bytes;
+    }
+    if (edge_source_bytes)
+    {
+        memcpy(bytes + offset, function->edge_copy_sources, edge_source_bytes);
+        offset += edge_source_bytes;
+    }
     // The length is what was actually written, which the running offset
     // already holds; `total` only had to size the allocation. Keeping the
     // final increment live also means a section appended after this one
@@ -1467,7 +1773,7 @@ BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* 
 
 BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* function)
 {
-    if (bytes.length < sizeof(MachineReplayHeader))
+    if (!function || (!bytes.pointer && bytes.length) || bytes.length < sizeof(MachineReplayHeader))
     {
         return false;
     }
@@ -1480,7 +1786,10 @@ BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, Mac
     u64 instruction_bytes = (u64)header.instruction_count * sizeof(MachineInstruction);
     u64 register_bytes = (u64)header.virtual_register_count * sizeof(MachineVirtualRegister);
     u64 block_bytes = (u64)header.block_count * sizeof(MachineBlock);
-    u64 total = sizeof(MachineReplayHeader) + instruction_bytes + register_bytes + block_bytes;
+    u64 edge_bytes = (u64)header.edge_count * sizeof(MachineEdge);
+    u64 parameter_bytes = (u64)header.block_parameter_count * sizeof(MachineBlockParameter);
+    u64 edge_source_bytes = (u64)header.edge_copy_source_count * sizeof(MachineRef);
+    u64 total = sizeof(MachineReplayHeader) + instruction_bytes + register_bytes + block_bytes + edge_bytes + parameter_bytes + edge_source_bytes;
     if (bytes.length != total)
     {
         return false;
@@ -1489,9 +1798,15 @@ BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, Mac
         .instructions = arena_allocate(arena, MachineInstruction, header.instruction_count),
         .virtual_registers = arena_allocate(arena, MachineVirtualRegister, header.virtual_register_count),
         .blocks = arena_allocate(arena, MachineBlock, header.block_count),
+        .edges = arena_allocate(arena, MachineEdge, header.edge_count),
+        .block_parameters = arena_allocate(arena, MachineBlockParameter, header.block_parameter_count),
+        .edge_copy_sources = arena_allocate(arena, MachineRef, header.edge_copy_source_count),
         .instruction_count = header.instruction_count,
         .virtual_register_count = header.virtual_register_count,
         .block_count = header.block_count,
+        .edge_count = header.edge_count,
+        .block_parameter_count = header.block_parameter_count,
+        .edge_copy_source_count = header.edge_copy_source_count,
     };
     u64 offset = sizeof(MachineReplayHeader);
     if (instruction_bytes)
@@ -1507,11 +1822,27 @@ BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, Mac
     if (block_bytes)
     {
         memcpy(read.blocks, bytes.pointer + offset, block_bytes);
+        offset += block_bytes;
+    }
+    if (edge_bytes)
+    {
+        memcpy(read.edges, bytes.pointer + offset, edge_bytes);
+        offset += edge_bytes;
+    }
+    if (parameter_bytes)
+    {
+        memcpy(read.block_parameters, bytes.pointer + offset, parameter_bytes);
+        offset += parameter_bytes;
+    }
+    if (edge_source_bytes)
+    {
+        memcpy(read.edge_copy_sources, bytes.pointer + offset, edge_source_bytes);
     }
     *function = read;
     return true;
 }
 
+#include <buster/lib/compiler/codegen/machine_select.c>
 #include <buster/lib/compiler/codegen/machine_x86_64.c>
 #include <buster/lib/compiler/codegen/machine_aarch64.c>
 #include <buster/lib/compiler/codegen/machine_schedule.c>

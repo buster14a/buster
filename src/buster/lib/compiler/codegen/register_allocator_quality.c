@@ -439,7 +439,8 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         {
             foreclosed |= caller_saved_allocatable;
         }
-        bool constrained = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) != 0;
+        bool legacy_constrained = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) != 0;
+        bool constrained = legacy_constrained || info->fixed_register_mask || info->early_clobber_mask || info->fixed_register_set;
         u32 register_operand_slots = 0;
         for (u32 slot = 0; slot < info->operand_count; slot += 1)
         {
@@ -451,9 +452,16 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             else if (kind == MACHINE_REF_VIRTUAL_REGISTER)
             {
                 register_operand_slots += 1;
-                if (constrained)
+                u32 fixed = machine_opcode_fixed_register(info, slot);
+                if (fixed != UINT32_MAX && fixed < MACHINE_TARGET_REGISTER_LIMIT)
                 {
-                    foreclosed |= 1ull << description->slot_scratch[slot];
+                    foreclosed |= 1ull << fixed;
+                }
+                else if (legacy_constrained)
+                {
+                    u32 operand_class = (info->operand_info[slot] >> MACHINE_OPERAND_CLASS_SHIFT) & 0x7u;
+                    u32 scratch_register = operand_class == MACHINE_REGISTER_CLASS_VECTOR ? description->vector_slot_scratch[slot] : description->slot_scratch[slot];
+                    foreclosed |= 1ull << scratch_register;
                 }
             }
         }

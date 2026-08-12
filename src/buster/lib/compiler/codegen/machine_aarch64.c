@@ -114,6 +114,8 @@ struct MachineA64Selector
     IrProgram* program;
     IrFunction* function;
     MachineFunctionBuilder builder;
+    MachineSelectionPrepass selection_prepass;
+    MachineSelectionCounters selection_counters;
     Target target;
     MachineBuilderStream immediates;
     MachineBuilderStream stack_slots;
@@ -452,6 +454,12 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
 {
     IrProgram* program = selector->program;
     IrFunction* function = selector->function;
+    u32 instruction_index = (u32)(instruction - function->instructions);
+    MachineSelectionRuleContext selection_context =
+        machine_selection_rule_context(&selector->selection_prepass, (IrInstructionId){.value = instruction_index}, selector->target);
+    MachineSelectionDecision selection_decision =
+        machine_selection_rule_select(selection_context, MACHINE_SELECTION_MODE_FAST, &selector->selection_counters);
+    BUSTER_CHECK(selection_decision.selected.rule != MACHINE_SELECTION_RULE_INVALID);
     u32 result_register = UINT32_MAX;
     if (instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value < function->value_count)
     {
@@ -715,6 +723,47 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
         }
         if (arithmetic)
         {
+            bool remainder = arithmetic == MACHINE_A64_SREM32 || arithmetic == MACHINE_A64_SREM64 || arithmetic == MACHINE_A64_UREM32 ||
+                             arithmetic == MACHINE_A64_UREM64;
+            if (remainder)
+            {
+                // AArch64 has no scalar remainder instruction.  Expand the
+                // old encoder macro-op before allocation so quotient and
+                // product pressure, scheduling dependencies, and register
+                // lifetimes are visible to the machine passes.  Keep the
+                // quotient and product as separate SSA values, and represent
+                // MSUB's equivalent `left - quotient * right` with SUB here.
+                u16 divide = arithmetic == MACHINE_A64_SREM32 ? MACHINE_A64_SDIV32
+                              : arithmetic == MACHINE_A64_SREM64 ? MACHINE_A64_SDIV64
+                              : arithmetic == MACHINE_A64_UREM32 ? MACHINE_A64_UDIV32
+                                                                  : MACHINE_A64_UDIV64;
+                u16 multiply = wide ? MACHINE_A64_MUL64 : MACHINE_A64_MUL32;
+                u16 subtract = wide ? MACHINE_A64_SUB64 : MACHINE_A64_SUB32;
+                u32 quotient_register = machine_a64_synthesize_register(selector);
+                u32 divide_row = machine_a64_select_row(selector, (MachineInstruction){
+                                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, quotient_register),
+                                                                                     machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                                                     machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                                                        .opcode = divide,
+                });
+                machine_a64_define(selector, quotient_register, divide_row);
+                u32 product_register = machine_a64_synthesize_register(selector);
+                u32 multiply_row = machine_a64_select_row(selector, (MachineInstruction){
+                                                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, product_register),
+                                                                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, quotient_register),
+                                                                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                                                          .opcode = multiply,
+                                                                      });
+                machine_a64_define(selector, product_register, multiply_row);
+                u32 subtract_row = machine_a64_select_row(selector, (MachineInstruction){
+                                                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, product_register)},
+                                                                          .opcode = subtract,
+                                                                      });
+                machine_a64_define(selector, result_register, subtract_row);
+                return true;
+            }
             u32 row = machine_a64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
@@ -1599,13 +1648,6 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             return result;
         }
     }
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        if (function->blocks[block_index].parameter_count)
-        {
-            return result;
-        }
-    }
     MachineA64Selector selector = {
         .arena = arena,
         .program = program,
@@ -1616,6 +1658,11 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         .supported = true,
         .failed_opcode = IR_OPCODE_COUNT,
     };
+    selector.selection_prepass = machine_selection_prepass_build(arena, program, function);
+    if (!selector.selection_prepass.valid)
+    {
+        return result;
+    }
     selector.target = target;
     selector.direct_call_uses = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
     memset(selector.direct_call_uses, 0, function->value_count);
@@ -1660,6 +1707,24 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
     {
         selector.value_virtual_registers[value_index] = UINT32_MAX;
         selector.value_stack_slots[value_index] = UINT32_MAX;
+    }
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
+        {
+            IrType* parameter_type = ir_type_from_id(&program->types, parameter->canonical_type);
+            if (parameter->value.value >= function->value_count ||
+                (!machine_a64_type_is_scalar_register(parameter_type) && !machine_a64_type_is_float_scalar(parameter_type)))
+            {
+                return result;
+            }
+            selector.value_virtual_registers[parameter->value.value] =
+                machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
+                                                                         .definition_point = MACHINE_POINT_INVALID,
+                                                                         .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                                         .typed_origin = parameter->value.value,
+                                                                     });
+        }
     }
     for (u32 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(selector.argument_values); argument_index += 1)
     {
@@ -2156,6 +2221,12 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
     {
         IrBlock* block = function->blocks + block_index;
         machine_builder_block_begin(&selector.builder);
+        u32 parameter_offset = selector.builder.block_parameters.total_count;
+        for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
+        {
+            machine_builder_block_parameter(&selector.builder,
+                                            (MachineBlockParameter){.virtual_register = selector.value_virtual_registers[parameter->value.value]});
+        }
         if (block_index == 0)
         {
             // Capture every incoming argument register at entry, before any
@@ -2287,7 +2358,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 break;
             }
         }
-        machine_builder_block_end(&selector.builder, (MachineBlock){0});
+        machine_builder_block_end(&selector.builder, (MachineBlock){.parameter_offset = parameter_offset, .parameter_count = (u16)block->parameter_count});
     }
     if (!selector.supported)
     {
@@ -2295,6 +2366,44 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         return result;
     }
     result.function = machine_function_builder_finish(arena, &selector.builder);
+    for (u32 destination_block = 0; destination_block < function->block_count; destination_block += 1)
+    {
+        IrBlock* destination = function->blocks + destination_block;
+        for (IrPredecessor* predecessor = destination->first_predecessor; predecessor; predecessor = predecessor->next)
+        {
+            u32 copy_offset = result.function.edge_copy_source_count;
+            for (IrBlockParameter* parameter = destination->first_parameter; parameter; parameter = parameter->next)
+            {
+                IrIncoming* incoming = parameter->first_incoming;
+                while (incoming && incoming->predecessor.value != predecessor->block.value)
+                {
+                    incoming = incoming->next;
+                }
+                if (!incoming || incoming->value.value >= function->value_count || selector.value_virtual_registers[incoming->value.value] == UINT32_MAX)
+                {
+                    return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
+                }
+                MachineRef* grown = arena_allocate(arena, MachineRef, result.function.edge_copy_source_count + 1u);
+                if (result.function.edge_copy_source_count)
+                {
+                    memcpy(grown, result.function.edge_copy_sources, (u64)result.function.edge_copy_source_count * sizeof(MachineRef));
+                }
+                grown[result.function.edge_copy_source_count++] =
+                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, selector.value_virtual_registers[incoming->value.value]);
+                result.function.edge_copy_sources = grown;
+            }
+            MachineEdge* grown_edges = arena_allocate(arena, MachineEdge, result.function.edge_count + 1u);
+            if (result.function.edge_count)
+            {
+                memcpy(grown_edges, result.function.edges, (u64)result.function.edge_count * sizeof(MachineEdge));
+            }
+            grown_edges[result.function.edge_count++] = (MachineEdge){.source_block = predecessor->block.value,
+                                                                      .destination_block = destination_block,
+                                                                      .copy_offset = copy_offset,
+                                                                      .copy_count = (u16)destination->parameter_count};
+            result.function.edges = grown_edges;
+        }
+    }
     result.function.target = &machine_aarch64_description;
     result.function.immediates = arena_allocate(arena, u64, selector.immediates.total_count);
     result.function.immediate_count = selector.immediates.total_count;
@@ -2320,6 +2429,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
     result.returns_value = returns_value;
     result.selected_typed_instructions = typed_instruction_count;
     result.machine_instructions = result.function.instruction_count;
+    result.selection_counters = selector.selection_counters;
     return result;
 }
 

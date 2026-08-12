@@ -482,6 +482,30 @@ history.
 
 ## Core rules
 
+## Machine instruction selection and scheduling
+
+- `MachineInstruction` is the 24-byte hot row. Keep static form, scheduling,
+  memory, bundle, fixed-register, tie, early-clobber, implicit-physical, and
+  implicit-resource facts in `MachineOpcodeInfo`, accessed through the
+  `machine_opcode_*` helpers.
+- `MachineFunction` owns CFG edges, block parameters, and incoming edge
+  parallel-copy sources. Edge source `i` maps to destination block parameter
+  `i`; keep these copies parallel through allocation so cycles are resolved as
+  copies rather than serialized selector moves. Replay files include all three
+  arrays and use the current replay version.
+- Shared canonical-IR facts and the generated FAST/QUALITY rule decision tree
+  live in `machine_select.{c,h}`, `machine_select_rules.h`, and
+  `machine_select_generated.c`. Target selectors may retain custom ABI and
+  complex lowering, but must consume shared facts instead of introducing a
+  third permanent graph IR.
+- x86 ADD/SUB/AND/OR/XOR/IMUL rows are three-operand machine SSA with operand
+  0 tied to operand 1. Allocators satisfy the physical two-address constraint;
+  selectors must not reintroduce a MOV plus mutable USE_DEFINE result.
+- QUALITY scheduling remains pressure-first and deterministic. Pressure is
+  counted per register class; metadata supplies barriers, memory membership,
+  and vector scheduling membership while compatibility opcode classifiers
+  cover legacy rows during migration.
+
 - **C only.** No C++, no exceptions. `-fwrapv`, `-fno-strict-aliasing`,
   `-funsigned-char`.
 - **No third-party code.** External code was deliberately removed from the

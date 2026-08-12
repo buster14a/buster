@@ -12,6 +12,25 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-13a` (Linux x86_64; instruction-selection and scheduling foundation,
+based on `33e4b016`). Baseline Release self-host before the change produced
+45,381,688 deterministic bytes; stage 1 retired 9,082,017,170 instructions in
+0.928327 seconds and stage 2 retired 127,455,862,452 instructions. The change
+preserves the 24-byte machine row, moves x86 scalar ALU two-address operations
+to tied three-operand SSA, expands AArch64 remainder before allocation, adds
+function-owned edge/block-parameter parallel copies, declarative shared
+selection facts/rules, metadata-driven operand constraints, and per-register-
+class scheduling pressure. Debug and Release integration validation each
+passed 276,763 assertions across 44 modules. Release self-host remained
+deterministic at 45,704,896 bytes; stage 1 retired 9,142,625,938 instructions
+and stage 2 retired 128,295,924,084 instructions. Relative to the pre-change
+tree, stage-1 instructions rose 0.67% and stage-2 instructions rose 0.66%.
+Wall-clock readings were noisy across otherwise byte-identical runs, so the
+retired-instruction counts are the comparison metric for this entry.
+The MIR_STACK machine soak selected one more function (fallbacks 53 vs. 54)
+and reduced encoder fallbacks to 39 from 40. Future audits should retain the
+pressure-first scheduler acceptance discipline.
+
 `2026-08-11l` (Linux x86_64, Zen 4 7940HS; register-allocator live-range
 splitting — the plan-stage-7 capability the span-pin design deferred and
 the lever `2026-08-10l` named after measuring every static refinement of

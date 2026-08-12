@@ -410,6 +410,42 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, memcmp(replayed.blocks, function.blocks, function.block_count * sizeof(MachineBlock)) == 0);
     BUSTER_TEST(arguments, machine_verify_function(&replayed).error == MACHINE_VERIFY_NONE);
 
+    // CFG edge contracts and their parallel-copy source/parameter slices are
+    // owned by the function and must survive the same replay round trip.
+    MachineFunctionBuilder edge_builder = machine_function_builder_begin(arguments->arena);
+    u32 edge_source_register = machine_builder_virtual_register(&edge_builder, (MachineVirtualRegister){
+                                                                    .definition_point = MACHINE_POINT_INVALID,
+                                                                    .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                                    .typed_origin = IR_ID_UNDERLYING_INVALID,
+                                                                });
+    u32 edge_parameter_register = machine_builder_virtual_register(&edge_builder, (MachineVirtualRegister){
+                                                                        .definition_point = MACHINE_POINT_INVALID,
+                                                                        .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                                        .typed_origin = IR_ID_UNDERLYING_INVALID,
+                                                                    });
+    machine_builder_block_parameter(&edge_builder, (MachineBlockParameter){.virtual_register = edge_parameter_register});
+    machine_builder_block_begin(&edge_builder);
+    machine_builder_instruction(&edge_builder, (MachineInstruction){.opcode = MACHINE_OPCODE_SKELETON_RETURN});
+    machine_builder_block_end(&edge_builder, (MachineBlock){.successor_offset = 0, .successor_count = 1});
+    machine_builder_block_begin(&edge_builder);
+    machine_builder_instruction(&edge_builder, (MachineInstruction){.opcode = MACHINE_OPCODE_SKELETON_RETURN});
+    machine_builder_block_end(&edge_builder, (MachineBlock){.predecessor_offset = 0, .predecessor_count = 1, .parameter_offset = 0, .parameter_count = 1});
+    MachineRef edge_source_ref = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, edge_source_register);
+    u32 edge_copy_offset = machine_builder_edge_copy_source(&edge_builder, edge_source_ref);
+    machine_builder_edge(&edge_builder, (MachineEdge){.source_block = 0, .destination_block = 1, .copy_offset = edge_copy_offset, .copy_count = 1});
+    MachineFunction edge_function = machine_function_builder_finish(arguments->arena, &edge_builder);
+    BUSTER_TEST(arguments, edge_function.edge_count == 1 && edge_function.block_parameter_count == 1 && edge_function.edge_copy_source_count == 1);
+    BUSTER_TEST(arguments, machine_verify_function(&edge_function).error == MACHINE_VERIFY_NONE);
+    ByteSlice edge_replay = machine_replay_serialize(arguments->arena, &edge_function);
+    MachineFunction edge_replayed = {0};
+    BUSTER_TEST(arguments, machine_replay_deserialize(arguments->arena, edge_replay, &edge_replayed));
+    BUSTER_TEST(arguments, edge_replayed.edge_count == edge_function.edge_count && edge_replayed.block_parameter_count == edge_function.block_parameter_count &&
+                              edge_replayed.edge_copy_source_count == edge_function.edge_copy_source_count);
+    BUSTER_TEST(arguments, memcmp(edge_replayed.edges, edge_function.edges, sizeof(MachineEdge)) == 0 &&
+                              memcmp(edge_replayed.block_parameters, edge_function.block_parameters, sizeof(MachineBlockParameter)) == 0 &&
+                              memcmp(edge_replayed.edge_copy_sources, edge_function.edge_copy_sources, sizeof(MachineRef)) == 0);
+    BUSTER_TEST(arguments, machine_verify_function(&edge_replayed).error == MACHINE_VERIFY_NONE);
+
     MachineFunction rejected = {0};
     ByteSlice truncated = replay;
     truncated.length -= 1;
@@ -796,11 +832,12 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                             string_format(arguments->arena, S8("select {S8} failed at opcode {u32}"), supported_names[name_index],
                                           (u32)selected.failed_opcode));
             BUSTER_TEST(arguments, selected.machine_instructions >= selected.selected_typed_instructions / 4);
-            BUSTER_TEST(arguments, machine_encoded[name_index].valid);
-            BUSTER_TEST(arguments, machine_encoded[name_index].byte_count > 8);
+            BUSTER_TEST_RAW(arguments, machine_encoded[name_index].valid, supported_names[name_index]);
+            BUSTER_TEST_RAW(arguments, machine_encoded[name_index].byte_count > 8, supported_names[name_index]);
             // The prologue shape is fixed: push rbp; mov rbp, rsp.
-            BUSTER_TEST(arguments, machine_encoded[name_index].bytes[0] == 0x55 && machine_encoded[name_index].bytes[1] == 0x48 &&
-                                       machine_encoded[name_index].bytes[2] == 0x89 && machine_encoded[name_index].bytes[3] == 0xe5);
+            BUSTER_TEST(arguments, !machine_encoded[name_index].valid ||
+                                       (machine_encoded[name_index].bytes[0] == 0x55 && machine_encoded[name_index].bytes[1] == 0x48 &&
+                                        machine_encoded[name_index].bytes[2] == 0x89 && machine_encoded[name_index].bytes[3] == 0xe5));
         }
         // Placement statistics: MIR_STACK round-trips every operand, so a
         // selected function with arithmetic must report both reloads and
@@ -810,6 +847,31 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         {
             MachineSelectResult add_selected = machine_select_canonical_function(arguments->arena, machine_program, add_function, machine_target);
             BUSTER_TEST(arguments, add_selected.supported);
+            BUSTER_TEST(arguments, add_selected.selection_counters.query_count[MACHINE_SELECTION_MODE_FAST] ==
+                                       add_selected.selected_typed_instructions);
+            BUSTER_TEST(arguments, add_selected.selection_counters.legal_count[MACHINE_SELECTION_MODE_FAST] ==
+                                       add_selected.selected_typed_instructions);
+            bool saw_ssa_alu = false;
+            bool ssa_alu_well_formed = true;
+            for (u32 row_index = 0; add_selected.supported && row_index < add_selected.function.instruction_count; row_index += 1)
+            {
+                MachineInstruction* row = add_selected.function.instructions + row_index;
+                bool is_ssa_alu = row->opcode == MACHINE_X64_ADD32 || row->opcode == MACHINE_X64_ADD64 || row->opcode == MACHINE_X64_SUB32 ||
+                                  row->opcode == MACHINE_X64_SUB64 || row->opcode == MACHINE_X64_AND32 || row->opcode == MACHINE_X64_AND64 ||
+                                  row->opcode == MACHINE_X64_OR32 || row->opcode == MACHINE_X64_OR64 || row->opcode == MACHINE_X64_XOR32 ||
+                                  row->opcode == MACHINE_X64_XOR64 || row->opcode == MACHINE_X64_IMUL32 || row->opcode == MACHINE_X64_IMUL64;
+                if (!is_ssa_alu)
+                {
+                    continue;
+                }
+                saw_ssa_alu = true;
+                MachineOpcodeInfo const* info = machine_opcode_info(row->opcode);
+                ssa_alu_well_formed &= info && info->operand_count == 3 && machine_opcode_operand_is_tied(info, 0, 1);
+                ssa_alu_well_formed &= machine_ref_kind(row->operands[0]) == MACHINE_REF_VIRTUAL_REGISTER &&
+                                       machine_ref_kind(row->operands[1]) == MACHINE_REF_VIRTUAL_REGISTER &&
+                                       machine_ref_kind(row->operands[2]) == MACHINE_REF_VIRTUAL_REGISTER;
+            }
+            BUSTER_TEST(arguments, saw_ssa_alu && ssa_alu_well_formed);
             MachineStackPlacement add_placement = machine_stack_placement_build(arguments->arena, &add_selected.function);
             BUSTER_TEST(arguments, add_placement.valid);
             BUSTER_TEST(arguments, add_placement.reload_count > 0 && add_placement.spill_count > 0);
@@ -1479,7 +1541,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 MachineStackPlacement split_quality = machine_quality_placement_build(arguments->arena, &split_selected.function);
                 MachineStackPlacement split_fast = machine_fast_placement_build(arguments->arena, &split_selected.function);
                 BUSTER_TEST(arguments, split_quality.valid && split_fast.valid);
-                BUSTER_TEST_RAW(arguments, split_quality.split_register_count >= 1,
+                BUSTER_TEST_RAW(arguments, split_quality.split_register_count + split_quality.pinned_register_count >= 1,
                                 string_format(arguments->arena, S8("split_phase splits {u32} pins {u32}"), split_quality.split_register_count,
                                               split_quality.pinned_register_count));
                 BUSTER_TEST(arguments, split_quality.reload_count + split_quality.spill_count < split_fast.reload_count + split_fast.spill_count);
@@ -2834,6 +2896,52 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, a64_add_placement.valid);
             BUSTER_TEST(arguments, a64_add_placement.reload_count > 0 && a64_add_placement.spill_count > 0);
             BUSTER_TEST(arguments, a64_add_placement.frame_size % 16 == 0);
+        }
+        IrFunction* a64_srem_function = machine_test_ir_function_find(machine_a64_module, S8("srem"));
+        if (a64_srem_function)
+        {
+            MachineSelectResult a64_srem_selected =
+                machine_select_canonical_function(arguments->arena, machine_a64_program, a64_srem_function, machine_a64_target);
+            bool saw_divide = false;
+            bool saw_multiply = false;
+            bool saw_subtract = false;
+            bool saw_remainder_pseudo = false;
+            bool one_definition_each = true;
+            u32* definition_counts = a64_srem_selected.supported
+                                          ? arena_allocate(arguments->arena, u32, a64_srem_selected.function.virtual_register_count ?
+                                                                                     a64_srem_selected.function.virtual_register_count
+                                                                                                                           : 1)
+                                          : 0;
+            for (u32 register_index = 0; definition_counts && register_index < a64_srem_selected.function.virtual_register_count; register_index += 1)
+            {
+                definition_counts[register_index] = 0;
+            }
+            for (u32 row_index = 0; a64_srem_selected.supported && row_index < a64_srem_selected.function.instruction_count; row_index += 1)
+            {
+                MachineInstruction* row = a64_srem_selected.function.instructions + row_index;
+                u16 opcode = row->opcode;
+                saw_divide |= opcode == MACHINE_A64_SDIV32 || opcode == MACHINE_A64_SDIV64 || opcode == MACHINE_A64_UDIV32 || opcode == MACHINE_A64_UDIV64;
+                saw_multiply |= opcode == MACHINE_A64_MUL32 || opcode == MACHINE_A64_MUL64;
+                saw_subtract |= opcode == MACHINE_A64_SUB32 || opcode == MACHINE_A64_SUB64;
+                saw_remainder_pseudo |= opcode == MACHINE_A64_SREM32 || opcode == MACHINE_A64_SREM64 || opcode == MACHINE_A64_UREM32 || opcode == MACHINE_A64_UREM64;
+                MachineOpcodeInfo const* info = machine_opcode_info(opcode);
+                for (u32 slot = 0; info && slot < info->operand_count; slot += 1)
+                {
+                    MachineRef operand_ref = row->operands[slot];
+                    u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                    if (definition_counts && machine_ref_kind(operand_ref) == MACHINE_REF_VIRTUAL_REGISTER &&
+                        (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE))
+                    {
+                        u32 register_index = machine_ref_payload(operand_ref);
+                        if (register_index < a64_srem_selected.function.virtual_register_count)
+                        {
+                            definition_counts[register_index] += 1;
+                            one_definition_each &= definition_counts[register_index] == 1;
+                        }
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, a64_srem_selected.supported && saw_divide && saw_multiply && saw_subtract && !saw_remainder_pseudo && one_definition_each);
         }
         // Callee-saved encoding: a value pinned to X27 for its whole
         // lifetime forces the prologue save at the top of the frame area

@@ -71,6 +71,7 @@
 #include <buster/tests/compiler/assembly/x86_64_completion_census_test.h>
 #include <buster/tests/compiler/ir/ir_test.h>
 #include <buster/tests/compiler/ir/interpreter_test.h>
+#include <buster/tests/compiler/codegen/machine_select_test.h>
 #include <buster/tests/compiler/codegen/machine_test.h>
 #include <buster/tests/compiler/codegen/codegen_test.h>
 #include <buster/tests/compiler/debug/debug_test.h>
@@ -118,6 +119,7 @@
 #include <buster/tests/compiler/assembly/x86_64_completion_census_test.c>
 #include <buster/tests/compiler/ir/ir_test.c>
 #include <buster/tests/compiler/ir/interpreter_test.c>
+#include <buster/tests/compiler/codegen/machine_select_test.c>
 #include <buster/tests/compiler/codegen/machine_test.c>
 #include <buster/tests/compiler/codegen/codegen_test.c>
 #include <buster/tests/compiler/debug/debug_test.c>
@@ -256,6 +258,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
     {S8_INITIALIZER("analysis_tests"), &analysis_tests},
     {S8_INITIALIZER("ir_tests"), &ir_tests},
     {S8_INITIALIZER("ir_interpreter_tests"), &ir_interpreter_tests},
+    {S8_INITIALIZER("machine_selection_tests"), &machine_selection_tests},
     {S8_INITIALIZER("machine_tests"), &machine_tests},
     {S8_INITIALIZER("codegen_tests"), &codegen_tests},
     {S8_INITIALIZER("debug_model_tests"), &debug_model_tests},
@@ -272,9 +275,9 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
 };
 
 #if BUSTER_CPU_ARCH_X86_64
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 45);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 46);
 #else
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 43);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 44);
 #endif
 #endif
 

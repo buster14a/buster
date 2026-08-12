@@ -2,6 +2,7 @@
 
 #include <buster/lib/arena.h>
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/compiler/codegen/machine_select.h>
 #include <buster/lib/target.h>
 
 // Compact target-specific machine SSA representation shared by the FAST and
@@ -124,6 +125,20 @@ struct MachineEdge
     u16 flags;
 };
 BUSTER_CT_CHECK(sizeof(MachineEdge) == 16);
+
+// A block parameter is a virtual register defined at block entry.  Incoming
+// edge values are kept separately in the edge's parallel-copy source slice;
+// the destination for source i is the parameter at destination_block's
+// parameter_offset + i.  Keeping both arrays function-owned makes CFG edges
+// stable when a scheduled instruction stream is copied.
+typedef struct MachineBlockParameter MachineBlockParameter;
+struct MachineBlockParameter
+{
+    u32 virtual_register;
+    u16 flags;
+    u16 reserved;
+};
+BUSTER_CT_CHECK(sizeof(MachineBlockParameter) == 8);
 
 typedef struct MachineAddress MachineAddress;
 struct MachineAddress
@@ -525,6 +540,98 @@ typedef enum MachineOpcode
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
+// Encoding forms are deliberately target-neutral.  An opcode may expose more
+// than one legal form (for example a register and a folded-memory form), so
+// MachineOpcodeInfo stores a bit set rather than a single enum value.
+typedef enum MachineOpcodeForm
+{
+    MACHINE_OPCODE_FORM_NONE,
+    MACHINE_OPCODE_FORM_REGISTER,
+    MACHINE_OPCODE_FORM_REGISTER_IMMEDIATE,
+    MACHINE_OPCODE_FORM_MEMORY,
+    MACHINE_OPCODE_FORM_BRANCH,
+    MACHINE_OPCODE_FORM_CALL,
+    MACHINE_OPCODE_FORM_PSEUDO,
+    MACHINE_OPCODE_FORM_COUNT,
+} MachineOpcodeForm;
+
+typedef enum MachineScheduleClass
+{
+    MACHINE_SCHEDULE_CLASS_NONE,
+    MACHINE_SCHEDULE_CLASS_ALU,
+    MACHINE_SCHEDULE_CLASS_SHIFT,
+    MACHINE_SCHEDULE_CLASS_MUL,
+    MACHINE_SCHEDULE_CLASS_DIV,
+    MACHINE_SCHEDULE_CLASS_LOAD,
+    MACHINE_SCHEDULE_CLASS_STORE,
+    MACHINE_SCHEDULE_CLASS_BRANCH,
+    MACHINE_SCHEDULE_CLASS_CALL,
+    MACHINE_SCHEDULE_CLASS_VECTOR,
+    MACHINE_SCHEDULE_CLASS_ATOMIC,
+    MACHINE_SCHEDULE_CLASS_BARRIER,
+    MACHINE_SCHEDULE_CLASS_COUNT,
+} MachineScheduleClass;
+
+typedef enum MachineOpcodeExpansion
+{
+    MACHINE_OPCODE_EXPANSION_NONE,
+    MACHINE_OPCODE_EXPANSION_SINGLE,
+    MACHINE_OPCODE_EXPANSION_SEQUENCE,
+    MACHINE_OPCODE_EXPANSION_PSEUDO,
+    MACHINE_OPCODE_EXPANSION_COUNT,
+} MachineOpcodeExpansion;
+
+typedef enum MachineMemoryEffect
+{
+    MACHINE_MEMORY_EFFECT_NONE,
+    MACHINE_MEMORY_EFFECT_READ,
+    MACHINE_MEMORY_EFFECT_WRITE,
+    MACHINE_MEMORY_EFFECT_READ_WRITE,
+    MACHINE_MEMORY_EFFECT_VOLATILE,
+    MACHINE_MEMORY_EFFECT_ATOMIC,
+    MACHINE_MEMORY_EFFECT_BARRIER,
+    MACHINE_MEMORY_EFFECT_COUNT,
+} MachineMemoryEffect;
+
+typedef enum MachineBundleKind
+{
+    MACHINE_BUNDLE_NONE,
+    MACHINE_BUNDLE_HEAD,
+    MACHINE_BUNDLE_MEMBER,
+    MACHINE_BUNDLE_TAIL,
+    MACHINE_BUNDLE_COUNT,
+} MachineBundleKind;
+
+typedef enum MachineResource
+{
+    MACHINE_RESOURCE_NONE,
+    MACHINE_RESOURCE_FLAGS,
+    MACHINE_RESOURCE_NZCV,
+    MACHINE_RESOURCE_STACK_POINTER,
+    MACHINE_RESOURCE_FP_ENVIRONMENT,
+    MACHINE_RESOURCE_VECTOR_STATE,
+    MACHINE_RESOURCE_CONTROL,
+    MACHINE_RESOURCE_COUNT,
+} MachineResource;
+
+// Public spelling used by verifier/scheduler clients.  Keep the shorter
+// MachineResource name as a source-compatible alias for existing target code;
+// both names denote the same compact bit positions in implicit-resource
+// masks.
+typedef MachineResource MachineImplicitResource;
+#define MACHINE_IMPLICIT_RESOURCE_NONE MACHINE_RESOURCE_NONE
+#define MACHINE_IMPLICIT_RESOURCE_FLAGS MACHINE_RESOURCE_FLAGS
+#define MACHINE_IMPLICIT_RESOURCE_NZCV MACHINE_RESOURCE_NZCV
+#define MACHINE_IMPLICIT_RESOURCE_STACK_POINTER MACHINE_RESOURCE_STACK_POINTER
+#define MACHINE_IMPLICIT_RESOURCE_FP_ENVIRONMENT MACHINE_RESOURCE_FP_ENVIRONMENT
+#define MACHINE_IMPLICIT_RESOURCE_VECTOR_STATE MACHINE_RESOURCE_VECTOR_STATE
+#define MACHINE_IMPLICIT_RESOURCE_CONTROL MACHINE_RESOURCE_CONTROL
+#define MACHINE_IMPLICIT_RESOURCE_COUNT MACHINE_RESOURCE_COUNT
+
+#define MACHINE_OPCODE_FORM_BIT(form) ((u16)(1u << (form)))
+#define MACHINE_OPCODE_FORM_SET(form) MACHINE_OPCODE_FORM_BIT(form)
+#define MACHINE_RESOURCE_BIT(resource) (1ull << (resource))
+
 // One source mark per lowered IR instruction: the machine row where its
 // rows begin and the canonical source position, consumed by the encoder's
 // per-row offsets into per-function line entries.
@@ -614,6 +721,9 @@ BUSTER_CT_CHECK(MACHINE_REGISTER_CLASS_COUNT <= (1u << 3));
 // take the target's fixed per-slot scratch assignment and every allocator
 // must stand clear of them.
 #define MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED (1u << 6)
+#define MACHINE_OPCODE_ATTRIBUTE_MEMORY (1u << 7)
+#define MACHINE_OPCODE_ATTRIBUTE_BUNDLE (1u << 8)
+#define MACHINE_OPCODE_ATTRIBUTE_EXPANDS (1u << 9)
 
 typedef struct MachineOpcodeInfo MachineOpcodeInfo;
 struct MachineOpcodeInfo
@@ -636,7 +746,32 @@ struct MachineOpcodeInfo
     // Extra registers the opcode's encoder sequence scribbles on beyond its
     // declared operands; owners must vacate before the instruction runs.
     u64 clobber_mask;
+    // Expanded target metadata.  All fields are zero for legacy rows, which
+    // preserves aggregate-initializer compatibility; accessors below derive
+    // conservative defaults from the old attributes when needed.
+    u16 form_set;
+    u8 schedule_class;
+    u8 reserved_metadata;
+    u16 expansion_recipe;
+    u8 memory_effect;
+    // Memory operand is slot + 1; zero means this opcode has no memory
+    // operand, allowing slot zero to remain unambiguous in zero defaults.
+    u8 memory_operand;
+    u8 memory_flags;
+    u8 latency;
+    u8 throughput;
+    u8 bundle;
+    u8 fixed_register_mask;
+    // Explicit fixed physical register per operand slot.  A set bit in
+    // fixed_register_mask makes the corresponding byte meaningful.
+    u8 fixed_registers[4];
+    u64 implicit_physical_uses;
+    u64 implicit_physical_defs;
+    u64 implicit_resource_uses;
+    u64 implicit_resource_defs;
 };
+
+#define MACHINE_OPCODE_INFO_HAS_FIXED_REGISTERS 1
 
 // Upper bound on any target's unified register file — the general file plus
 // the vector file behind it; every allocator mask is one u64 over this
@@ -743,6 +878,9 @@ struct MachineFunction
     MachineInstruction* instructions;
     MachineVirtualRegister* virtual_registers;
     MachineBlock* blocks;
+    MachineEdge* edges;
+    MachineBlockParameter* block_parameters;
+    MachineRef* edge_copy_sources;
     u64* immediates;
     u32* stack_slot_sizes;
     // Power-of-two start alignment per stack slot, at most sixteen.
@@ -758,6 +896,9 @@ struct MachineFunction
     u32 instruction_count;
     u32 virtual_register_count;
     u32 block_count;
+    u32 edge_count;
+    u32 block_parameter_count;
+    u32 edge_copy_source_count;
     u32 immediate_count;
     u32 stack_slot_count;
     u32 call_target_count;
@@ -894,6 +1035,10 @@ struct MachineSelectResult
     // rows produced.
     u32 selected_typed_instructions;
     u32 machine_instructions;
+    // Shared declarative matcher telemetry for this function. The current
+    // target emitter consumes the decision classification and retains custom
+    // ABI/complex lowering as the explicit legacy constructor path.
+    MachineSelectionCounters selection_counters;
 };
 
 // Stage-9 scheduling output: a reordered copy of the input function, or the
@@ -1018,6 +1163,9 @@ struct MachineFunctionBuilder
     MachineBuilderStream instructions;
     MachineBuilderStream virtual_registers;
     MachineBuilderStream blocks;
+    MachineBuilderStream edges;
+    MachineBuilderStream block_parameters;
+    MachineBuilderStream edge_copy_sources;
     u32 open_block;
     u32 open_block_first_instruction;
     bool block_is_open;
@@ -1036,6 +1184,10 @@ typedef enum MachineVerifyError
     MACHINE_VERIFY_TERMINATOR,
     MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION,
     MACHINE_VERIFY_POINT_CAPACITY,
+    MACHINE_VERIFY_EDGE_RANGE,
+    MACHINE_VERIFY_EDGE_COPY,
+    MACHINE_VERIFY_BLOCK_PARAMETER,
+    MACHINE_VERIFY_CONSTRAINT,
     MACHINE_VERIFY_COUNT,
 } MachineVerifyError;
 
@@ -1051,7 +1203,7 @@ struct MachineVerifyResult
 // Test-only replay serialization. Versioned; readers reject unknown versions
 // rather than guessing. Never used in production compilation.
 #define MACHINE_REPLAY_MAGIC 0x52494d42u // "BMIR"
-#define MACHINE_REPLAY_VERSION 1u
+#define MACHINE_REPLAY_VERSION 2u
 
 BUSTER_F_DECL MachineRef machine_ref_make(MachineRefKind kind, u32 payload);
 BUSTER_F_DECL MachineRefKind machine_ref_kind(MachineRef ref);
@@ -1064,6 +1216,17 @@ BUSTER_F_DECL u16 machine_emit_recipe_index(MachineEmitRecipeId recipe);
 BUSTER_F_DECL bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe);
 BUSTER_F_DECL MachineEmitRecipeId machine_opcode_emit_recipe(u16 opcode);
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode);
+BUSTER_F_DECL u16 machine_opcode_form_set(MachineOpcodeInfo const* info);
+BUSTER_F_DECL MachineScheduleClass machine_opcode_schedule_class(MachineOpcodeInfo const* info);
+BUSTER_F_DECL MachineOpcodeExpansion machine_opcode_expansion(MachineOpcodeInfo const* info);
+BUSTER_F_DECL MachineMemoryEffect machine_opcode_memory_effect(MachineOpcodeInfo const* info);
+BUSTER_F_DECL MachineBundleKind machine_opcode_bundle(MachineOpcodeInfo const* info);
+BUSTER_F_DECL bool machine_opcode_is_memory(MachineOpcodeInfo const* info);
+BUSTER_F_DECL u32 machine_opcode_fixed_register(MachineOpcodeInfo const* info, u32 slot);
+BUSTER_F_DECL u32 machine_opcode_memory_operand(MachineOpcodeInfo const* info);
+BUSTER_F_DECL bool machine_opcode_operand_is_tied(MachineOpcodeInfo const* info, u32 destination_slot, u32 source_slot);
+BUSTER_F_DECL bool machine_opcode_operand_is_early_clobber(MachineOpcodeInfo const* info, u32 slot);
+BUSTER_F_DECL bool machine_opcode_has_constraints(MachineOpcodeInfo const* info);
 BUSTER_F_DECL MachineTargetDescription const* machine_target_x86_64(void);
 BUSTER_F_DECL MachineTargetDescription const* machine_target_aarch64(void);
 BUSTER_F_DECL void machine_stream_initialize(MachineBuilderStream* stream, u64 element_size);
@@ -1074,6 +1237,9 @@ BUSTER_F_DECL u32 machine_builder_virtual_register(MachineFunctionBuilder* build
 BUSTER_F_DECL u32 machine_builder_block_begin(MachineFunctionBuilder* builder);
 BUSTER_F_DECL u32 machine_builder_instruction(MachineFunctionBuilder* builder, MachineInstruction instruction);
 BUSTER_F_DECL void machine_builder_block_end(MachineFunctionBuilder* builder, MachineBlock block);
+BUSTER_F_DECL u32 machine_builder_block_parameter(MachineFunctionBuilder* builder, MachineBlockParameter parameter);
+BUSTER_F_DECL u32 machine_builder_edge_copy_source(MachineFunctionBuilder* builder, MachineRef source);
+BUSTER_F_DECL u32 machine_builder_edge(MachineFunctionBuilder* builder, MachineEdge edge);
 BUSTER_F_DECL MachineFunction machine_function_builder_finish(Arena* arena, MachineFunctionBuilder* builder);
 // Stamps every block's `frequency_class` with its loop-nesting depth,
 // derived from backward block references (block-ref operands and

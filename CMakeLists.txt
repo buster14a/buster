@@ -914,6 +914,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.c
     src/buster/tests/compiler/ir/ir_test.c
     src/buster/tests/compiler/ir/interpreter_test.c
+    src/buster/tests/compiler/codegen/machine_select_test.c
     src/buster/tests/compiler/codegen/machine_test.c
     src/buster/tests/compiler/codegen/codegen_test.c
     src/buster/tests/compiler/debug/debug_test.c
@@ -959,6 +960,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.h
     src/buster/tests/compiler/ir/ir_test.h
     src/buster/tests/compiler/ir/interpreter_test.h
+    src/buster/tests/compiler/codegen/machine_select_test.h
     src/buster/tests/compiler/codegen/machine_test.h
     src/buster/tests/compiler/codegen/codegen_test.h
     src/buster/tests/compiler/debug/debug_test.h

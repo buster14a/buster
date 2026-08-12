@@ -72,6 +72,8 @@ struct MachineX64Selector
     IrProgram* program;
     IrFunction* function;
     MachineFunctionBuilder builder;
+    MachineSelectionPrepass selection_prepass;
+    MachineSelectionCounters selection_counters;
     MachineBuilderStream immediates;
     MachineBuilderStream stack_slots;
     MachineBuilderStream call_targets;
@@ -392,6 +394,34 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_scalar_bit_width(IrType* type)
         break;
     default:
         return 0;
+    }
+}
+
+// The integer ALU encodings are physically two-address, but their selected
+// rows carry an explicit SSA destination, first source, and second source.
+// Fixed-register shifts and divide/remainder remain on their legacy
+// constrained shape until their slot constraints are fully target-metadata
+// driven.
+BUSTER_GLOBAL_LOCAL bool machine_x64_opcode_is_ssa_two_address(u16 opcode)
+{
+    switch (opcode)
+    {
+        break;
+    case MACHINE_X64_ADD32:
+    case MACHINE_X64_ADD64:
+    case MACHINE_X64_SUB32:
+    case MACHINE_X64_SUB64:
+    case MACHINE_X64_AND32:
+    case MACHINE_X64_AND64:
+    case MACHINE_X64_OR32:
+    case MACHINE_X64_OR64:
+    case MACHINE_X64_XOR32:
+    case MACHINE_X64_XOR64:
+    case MACHINE_X64_IMUL32:
+    case MACHINE_X64_IMUL64:
+        return true;
+    default:
+        return false;
     }
 }
 
@@ -844,6 +874,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_i128_unsigned_shift_right(MachineX64
                                              });
         machine_x64_select_row(selector, (MachineInstruction){
                                                  .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low),
                                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross)},
                                                  .opcode = MACHINE_X64_OR64,
                                              });
@@ -914,6 +945,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_member_write(MachineX64Selector* sel
                                          });
         machine_x64_select_row(selector, (MachineInstruction){
                                              .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
                                                           machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, offset_register)},
                                              .opcode = MACHINE_X64_ADD64,
                                          });
@@ -931,6 +963,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
 {
     IrProgram* program = selector->program;
     IrFunction* function = selector->function;
+    u32 instruction_index = (u32)(instruction - function->instructions);
+    MachineSelectionRuleContext selection_context =
+        machine_selection_rule_context(&selector->selection_prepass, (IrInstructionId){.value = instruction_index}, selector->target);
+    MachineSelectionDecision selection_decision =
+        machine_selection_rule_select(selection_context, MACHINE_SELECTION_MODE_FAST, &selector->selection_counters);
+    BUSTER_CHECK(selection_decision.selected.rule != MACHINE_SELECTION_RULE_INVALID);
     u32 result_register = UINT32_MAX;
     if (instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value < function->value_count)
     {
@@ -1130,6 +1168,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                              });
             machine_x64_select_row(selector, (MachineInstruction){
                                                  .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_register),
                                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register)},
                                                  .opcode = MACHINE_X64_AND64,
                                              });
@@ -1578,13 +1617,14 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             // leading — both undefined on zero input, exactly like the
             // builtins they lower.
             bool leading = instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS;
+            u32 bit_scan_register = leading ? machine_x64_synthesize_register(selector) : result_register;
             u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bit_scan_register),
                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
                                                            .opcode = (u16)(leading ? (wide ? MACHINE_X64_BSR64 : MACHINE_X64_BSR32)
                                                                                    : (wide ? MACHINE_X64_BSF64 : MACHINE_X64_BSF32)),
                                                        });
-            machine_x64_define(selector, result_register, row);
+            machine_x64_define(selector, bit_scan_register, row);
             if (leading)
             {
                 u32 flip_immediate = selector->immediates.total_count;
@@ -1596,11 +1636,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                                                   machine_ref_make(MACHINE_REF_IMMEDIATE, flip_immediate)},
                                                      .opcode = MACHINE_X64_MOV_RI,
                                                  });
-                machine_x64_select_row(selector, (MachineInstruction){
+                u32 flip_row_index = machine_x64_select_row(selector, (MachineInstruction){
                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, bit_scan_register),
                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, flip_register)},
-                                                     .opcode = (u16)(wide ? MACHINE_X64_XOR64 : MACHINE_X64_XOR32),
-                                                 });
+                                                                     .opcode = (u16)(wide ? MACHINE_X64_XOR64 : MACHINE_X64_XOR32),
+                                                                 });
+                machine_x64_define(selector, result_register, flip_row_index);
             }
             return true;
         }
@@ -1613,12 +1655,6 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             }
             // Sign-bit flip in the general-register domain is the exact
             // IEEE negation for every input including NaN.
-            u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                                                           .opcode = MACHINE_X64_MOV_RR,
-                                                       });
-            machine_x64_define(selector, result_register, row);
             u32 mask_register = machine_x64_synthesize_register(selector);
             u32 immediate_index = selector->immediates.total_count;
             u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
@@ -1628,11 +1664,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                                               machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
                                                  .opcode = MACHINE_X64_MOV_RI,
                                              });
-            machine_x64_select_row(selector, (MachineInstruction){
+            u32 negate_row = machine_x64_select_row(selector, (MachineInstruction){
                                                  .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register),
                                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register)},
                                                  .opcode = (u16)(float_type->bit_width == 64 ? MACHINE_X64_XOR64 : MACHINE_X64_XOR32),
                                              });
+            machine_x64_define(selector, result_register, negate_row);
             return true;
         }
         if (instruction->unary_operation == IR_UNARY_BOOLEAN_NOT)
@@ -1878,17 +1916,38 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         }
         if (arithmetic)
         {
-            u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                                        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register)},
-                                                           .opcode = MACHINE_X64_MOV_RR,
-                                                       });
-            machine_x64_define(selector, result_register, row);
-            machine_x64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
-                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
-                                                 .opcode = arithmetic,
-                                             });
+            if (machine_x64_opcode_is_ssa_two_address(arithmetic))
+            {
+                // Keep the physical two-address operation in explicit SSA
+                // form: operand 0 defines the result, operand 1 is the first
+                // source (tied by opcode metadata), and operand 2 is the
+                // second source. The old MOV-plus-RMW pair obscured this
+                // relationship from the allocator and scheduler.
+                u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                                               .opcode = arithmetic,
+                                                           });
+                machine_x64_define(selector, result_register, row);
+            }
+            else
+            {
+                // Fixed-register shifts and divide/remainder retain their
+                // legacy constrained two-row shape until their target
+                // fixed-register contract is represented in metadata.
+                u32 copy_row = machine_x64_select_row(selector, (MachineInstruction){
+                                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register)},
+                                                                     .opcode = MACHINE_X64_MOV_RR,
+                                                                 });
+                machine_x64_define(selector, result_register, copy_row);
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                                     .opcode = arithmetic,
+                                                 });
+            }
             return true;
         }
         u32 condition = machine_x64_condition_from_comparison(instruction->binary_operation);
@@ -2123,6 +2182,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                                  });
                 machine_x64_select_row(selector, (MachineInstruction){
                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, masked_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, masked_register),
                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register)},
                                                      .opcode = MACHINE_X64_AND64,
                                                  });
@@ -2139,12 +2199,14 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                                      });
                     machine_x64_select_row(selector, (MachineInstruction){
                                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, masked_register),
+                                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, masked_register),
                                                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scale_register)},
                                                          .opcode = MACHINE_X64_IMUL64,
                                                      });
                 }
                 machine_x64_select_row(selector, (MachineInstruction){
                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, unit_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, unit_register),
                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, masked_register)},
                                                      .opcode = MACHINE_X64_OR64,
                                                  });
@@ -2238,6 +2300,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         }
         machine_x64_select_row(selector, (MachineInstruction){
                                              .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                           machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register)},
                                              .opcode = MACHINE_X64_ADD64,
                                          });
@@ -3560,13 +3623,6 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         machine_x64_place_argument(signature_parameter_shapes + parameter_index, &signature_integer_count, &signature_float_count,
                                    &signature_stack_count, signature_parameter_placements + parameter_index);
     }
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        if (function->blocks[block_index].parameter_count)
-        {
-            return result;
-        }
-    }
     MachineX64Selector selector = {
         .arena = arena,
         .program = program,
@@ -3579,6 +3635,11 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .supported = true,
         .failed_opcode = IR_OPCODE_COUNT,
     };
+    selector.selection_prepass = machine_selection_prepass_build(arena, program, function);
+    if (!selector.selection_prepass.valid)
+    {
+        return result;
+    }
     machine_stream_initialize(&selector.immediates, sizeof(u64));
     machine_stream_initialize(&selector.stack_slots, sizeof(u32));
     machine_stream_initialize(&selector.call_targets, sizeof(IrSymbolId));
@@ -3611,6 +3672,25 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         selector.value_virtual_registers[value_index] = UINT32_MAX;
         selector.value_stack_slots[value_index] = UINT32_MAX;
         selector.value_indirect_slots[value_index] = UINT32_MAX;
+    }
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
+        {
+            IrType* parameter_type = ir_type_from_id(&program->types, parameter->canonical_type);
+            bool float_scalar = parameter_type && parameter_type->kind == IR_TYPE_FLOAT &&
+                                (parameter_type->bit_width == 32 || parameter_type->bit_width == 64);
+            if (parameter->value.value >= function->value_count || (!machine_x64_type_is_scalar_register(parameter_type) && !float_scalar))
+            {
+                return result;
+            }
+            selector.value_virtual_registers[parameter->value.value] =
+                machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
+                                                                         .definition_point = MACHINE_POINT_INVALID,
+                                                                         .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                                         .typed_origin = parameter->value.value,
+                                                                     });
+        }
     }
     for (u32 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(selector.argument_values); argument_index += 1)
     {
@@ -4187,6 +4267,12 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     {
         IrBlock* block = function->blocks + block_index;
         machine_builder_block_begin(&selector.builder);
+        u32 parameter_offset = selector.builder.block_parameters.total_count;
+        for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
+        {
+            machine_builder_block_parameter(&selector.builder,
+                                            (MachineBlockParameter){.virtual_register = selector.value_virtual_registers[parameter->value.value]});
+        }
         if (block_index == 0)
         {
             if (selector.va_register_save_slot != UINT32_MAX)
@@ -4429,7 +4515,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 break;
             }
         }
-        machine_builder_block_end(&selector.builder, (MachineBlock){0});
+        machine_builder_block_end(&selector.builder, (MachineBlock){.parameter_offset = parameter_offset, .parameter_count = (u16)block->parameter_count});
     }
     if (!selector.supported)
     {
@@ -4437,6 +4523,44 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         return result;
     }
     result.function = machine_function_builder_finish(arena, &selector.builder);
+    for (u32 destination_block = 0; destination_block < function->block_count; destination_block += 1)
+    {
+        IrBlock* destination = function->blocks + destination_block;
+        for (IrPredecessor* predecessor = destination->first_predecessor; predecessor; predecessor = predecessor->next)
+        {
+            u32 copy_offset = result.function.edge_copy_source_count;
+            for (IrBlockParameter* parameter = destination->first_parameter; parameter; parameter = parameter->next)
+            {
+                IrIncoming* incoming = parameter->first_incoming;
+                while (incoming && incoming->predecessor.value != predecessor->block.value)
+                {
+                    incoming = incoming->next;
+                }
+                if (!incoming || incoming->value.value >= function->value_count || selector.value_virtual_registers[incoming->value.value] == UINT32_MAX)
+                {
+                    return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
+                }
+                MachineRef* grown = arena_allocate(arena, MachineRef, result.function.edge_copy_source_count + 1u);
+                if (result.function.edge_copy_source_count)
+                {
+                    memcpy(grown, result.function.edge_copy_sources, (u64)result.function.edge_copy_source_count * sizeof(MachineRef));
+                }
+                grown[result.function.edge_copy_source_count++] =
+                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, selector.value_virtual_registers[incoming->value.value]);
+                result.function.edge_copy_sources = grown;
+            }
+            MachineEdge* grown_edges = arena_allocate(arena, MachineEdge, result.function.edge_count + 1u);
+            if (result.function.edge_count)
+            {
+                memcpy(grown_edges, result.function.edges, (u64)result.function.edge_count * sizeof(MachineEdge));
+            }
+            grown_edges[result.function.edge_count++] = (MachineEdge){.source_block = predecessor->block.value,
+                                                                      .destination_block = destination_block,
+                                                                      .copy_offset = copy_offset,
+                                                                      .copy_count = (u16)destination->parameter_count};
+            result.function.edges = grown_edges;
+        }
+    }
     result.function.target = &machine_x86_64_description;
     result.function.immediates = arena_allocate(arena, u64, selector.immediates.total_count);
     result.function.immediate_count = selector.immediates.total_count;
@@ -4468,6 +4592,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     result.returns_value = returns_value;
     result.selected_typed_instructions = typed_instruction_count;
     result.machine_instructions = result.function.instruction_count;
+    result.selection_counters = selector.selection_counters;
     return result;
 }
 
@@ -5133,40 +5258,40 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 machine_x64_emit_rr(&encoder, true, true, 0xb7, operand_registers[0], operand_registers[1]);
                 break;
             case MACHINE_X64_ADD32:
-                machine_x64_emit_rr(&encoder, false, false, 0x01, operand_registers[1], operand_registers[0]);
+                machine_x64_emit_rr(&encoder, false, false, 0x01, operand_registers[2], operand_registers[0]);
                 break;
             case MACHINE_X64_ADD64:
-                machine_x64_emit_rr(&encoder, true, false, 0x01, operand_registers[1], operand_registers[0]);
+                machine_x64_emit_rr(&encoder, true, false, 0x01, operand_registers[2], operand_registers[0]);
                 break;
             case MACHINE_X64_SUB32:
-                machine_x64_emit_rr(&encoder, false, false, 0x29, operand_registers[1], operand_registers[0]);
+                machine_x64_emit_rr(&encoder, false, false, 0x29, operand_registers[2], operand_registers[0]);
                 break;
             case MACHINE_X64_SUB64:
-                machine_x64_emit_rr(&encoder, true, false, 0x29, operand_registers[1], operand_registers[0]);
+                machine_x64_emit_rr(&encoder, true, false, 0x29, operand_registers[2], operand_registers[0]);
                 break;
             case MACHINE_X64_AND32:
-                machine_x64_emit_rr(&encoder, false, false, 0x21, operand_registers[1], operand_registers[0]);
+                machine_x64_emit_rr(&encoder, false, false, 0x21, operand_registers[2], operand_registers[0]);
                 break;
             case MACHINE_X64_AND64:
-                machine_x64_emit_rr(&encoder, true, false, 0x21, operand_registers[1], operand_registers[0]);
+                machine_x64_emit_rr(&encoder, true, false, 0x21, operand_registers[2], operand_registers[0]);
                 break;
             case MACHINE_X64_OR32:
-                machine_x64_emit_rr(&encoder, false, false, 0x09, operand_registers[1], operand_registers[0]);
+                machine_x64_emit_rr(&encoder, false, false, 0x09, operand_registers[2], operand_registers[0]);
                 break;
             case MACHINE_X64_OR64:
-                machine_x64_emit_rr(&encoder, true, false, 0x09, operand_registers[1], operand_registers[0]);
+                machine_x64_emit_rr(&encoder, true, false, 0x09, operand_registers[2], operand_registers[0]);
                 break;
             case MACHINE_X64_XOR32:
-                machine_x64_emit_rr(&encoder, false, false, 0x31, operand_registers[1], operand_registers[0]);
+                machine_x64_emit_rr(&encoder, false, false, 0x31, operand_registers[2], operand_registers[0]);
                 break;
             case MACHINE_X64_XOR64:
-                machine_x64_emit_rr(&encoder, true, false, 0x31, operand_registers[1], operand_registers[0]);
+                machine_x64_emit_rr(&encoder, true, false, 0x31, operand_registers[2], operand_registers[0]);
                 break;
             case MACHINE_X64_IMUL32:
-                machine_x64_emit_rr(&encoder, false, true, 0xaf, operand_registers[0], operand_registers[1]);
+                machine_x64_emit_rr(&encoder, false, true, 0xaf, operand_registers[0], operand_registers[2]);
                 break;
             case MACHINE_X64_IMUL64:
-                machine_x64_emit_rr(&encoder, true, true, 0xaf, operand_registers[0], operand_registers[1]);
+                machine_x64_emit_rr(&encoder, true, true, 0xaf, operand_registers[0], operand_registers[2]);
                 break;
             case MACHINE_X64_NEG32:
                 machine_x64_emit_rr(&encoder, false, false, 0xf7, 3, operand_registers[0]);

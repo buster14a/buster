@@ -1,4 +1,5 @@
 #include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/simd.h>
 
 // Stage 9: pressure-aware scheduling over the machine IR. The selector emits
 // rows in typed-IR walk order, so independent computations stretch their
@@ -71,6 +72,21 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_barrier(u16 opcode)
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_schedule_info_is_barrier(u16 opcode, MachineOpcodeInfo const* info)
+{
+    if (!info)
+    {
+        return true;
+    }
+    MachineScheduleClass schedule_class = machine_opcode_schedule_class(info);
+    MachineMemoryEffect memory_effect = machine_opcode_memory_effect(info);
+    return schedule_class == MACHINE_SCHEDULE_CLASS_BARRIER || schedule_class == MACHINE_SCHEDULE_CLASS_CALL ||
+           schedule_class == MACHINE_SCHEDULE_CLASS_ATOMIC || memory_effect == MACHINE_MEMORY_EFFECT_VOLATILE ||
+           memory_effect == MACHINE_MEMORY_EFFECT_ATOMIC || memory_effect == MACHINE_MEMORY_EFFECT_BARRIER ||
+           (info->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) != 0 ||
+           machine_schedule_opcode_is_barrier(opcode);
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_memory(u16 opcode)
 {
     switch (opcode)
@@ -115,6 +131,11 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_memory(u16 opcode)
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_schedule_info_is_memory(u16 opcode, MachineOpcodeInfo const* info)
+{
+    return machine_opcode_is_memory(info) || machine_schedule_opcode_is_memory(opcode);
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_vector(u16 opcode)
 {
     switch (opcode)
@@ -140,6 +161,15 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_vector(u16 opcode)
             return false;
     }
 }
+BUSTER_GLOBAL_LOCAL MachineRegisterClass machine_schedule_register_class(MachineFunction* function, u32 virtual_register)
+{
+    if (virtual_register >= function->virtual_register_count)
+    {
+        return MACHINE_REGISTER_CLASS_GENERAL;
+    }
+    MachineRegisterClass register_class = (MachineRegisterClass)function->virtual_registers[virtual_register].register_class;
+    return register_class < MACHINE_REGISTER_CLASS_COUNT && register_class != MACHINE_REGISTER_CLASS_NONE ? register_class : MACHINE_REGISTER_CLASS_GENERAL;
+}
 
 #define MACHINE_SCHEDULE_UNIT_BARRIER (1u << 0)
 #define MACHINE_SCHEDULE_UNIT_MEMORY (1u << 1)
@@ -149,10 +179,11 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_vector(u16 opcode)
 // `block_rows_order` (global row indices, block-local length), clamped to
 // the excess above the allocatable file. The epoch keys the per-register
 // scratch so nothing is cleared between calls.
-BUSTER_GLOBAL_LOCAL u32 machine_schedule_block_excess(MachineFunction* function, u32 block_row_count, u32 const* block_rows_order, u32 allocatable_count,
-                                                      u32 epoch, u32* touch_epochs, u32* last_touches, s32* window_deltas)
+BUSTER_GLOBAL_LOCAL u32 machine_schedule_block_excess(MachineFunction* function, u32 block_row_count, u32 const* block_rows_order,
+                                                      u32 const* class_capacities, u8 const* register_classes, u32 epoch, u32* touch_epochs,
+                                                      u32* last_touches, s32* window_deltas)
 {
-    for (u32 offset = 0; offset <= block_row_count; offset += 1)
+    for (u32 offset = 0; offset < (block_row_count + 1u) * MACHINE_REGISTER_CLASS_COUNT; offset += 1)
     {
         window_deltas[offset] = 0;
     }
@@ -167,30 +198,41 @@ BUSTER_GLOBAL_LOCAL u32 machine_schedule_block_excess(MachineFunction* function,
                 continue;
             }
             u32 virtual_register = machine_ref_payload(instruction->operands[slot]);
+            u32 register_class = register_classes[virtual_register];
+            s32* class_deltas = window_deltas + register_class * (block_row_count + 1u);
             if (touch_epochs[virtual_register] != epoch)
             {
                 touch_epochs[virtual_register] = epoch;
-                window_deltas[offset] += 1;
-                window_deltas[offset + 1] -= 1;
+                class_deltas[offset] += 1;
+                class_deltas[offset + 1] -= 1;
             }
             else
             {
                 // Extend the window: retract the previous close and close
                 // after this row instead.
-                window_deltas[last_touches[virtual_register] + 1] += 1;
-                window_deltas[offset + 1] -= 1;
+                class_deltas[last_touches[virtual_register] + 1] += 1;
+                class_deltas[offset + 1] -= 1;
             }
             last_touches[virtual_register] = offset;
         }
     }
-    s32 live = 0;
-    s32 peak = 0;
-    for (u32 offset = 0; offset < block_row_count; offset += 1)
+    u32 excess = 0;
+    for (u32 register_class = 0; register_class < MACHINE_REGISTER_CLASS_COUNT; register_class += 1)
     {
-        live += window_deltas[offset];
-        peak = BUSTER_MAX(peak, live);
+        s32 live = 0;
+        s32 peak = 0;
+        s32* class_deltas = window_deltas + register_class * (block_row_count + 1u);
+        for (u32 offset = 0; offset < block_row_count; offset += 1)
+        {
+            live += class_deltas[offset];
+            peak = BUSTER_MAX(peak, live);
+        }
+        if ((u32)peak > class_capacities[register_class])
+        {
+            excess += (u32)peak - class_capacities[register_class];
+        }
     }
-    return (u32)peak > allocatable_count ? (u32)peak - allocatable_count : 0;
+    return excess;
 }
 
 MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function)
@@ -204,11 +246,13 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
         return result;
     }
     u32 register_count = function->virtual_register_count;
-    u32 allocatable_count = 0;
-    for (u32 physical_register = 0; physical_register < MACHINE_TARGET_REGISTER_LIMIT; physical_register += 1)
-    {
-        allocatable_count += (function->target->allocatable_mask >> physical_register) & 1u;
-    }
+    u32 class_capacities[MACHINE_REGISTER_CLASS_COUNT] = {0};
+    // Keep the scheduler portable to MSVC, which has no
+    // __builtin_popcountll; simd.h owns the fallback used elsewhere by the
+    // allocator and parser.
+    class_capacities[MACHINE_REGISTER_CLASS_GENERAL] = mask64_count((Mask64)function->target->allocatable_mask);
+    class_capacities[MACHINE_REGISTER_CLASS_VECTOR] = mask64_count((Mask64)function->target->vector_allocatable_mask);
+    u32 allocatable_count = BUSTER_MAX(class_capacities[MACHINE_REGISTER_CLASS_GENERAL], class_capacities[MACHINE_REGISTER_CLASS_VECTOR]);
     u32 maximum_block_rows = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
@@ -230,8 +274,13 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
     {
         touch_epochs[register_index] = 0;
     }
-    s32* window_deltas = arena_allocate(scratch.arena, s32, maximum_block_rows + 1);
+    s32* window_deltas = arena_allocate(scratch.arena, s32, (u64)(maximum_block_rows + 1u) * MACHINE_REGISTER_CLASS_COUNT);
     u32* order_scratch = arena_allocate(scratch.arena, u32, maximum_block_rows ? maximum_block_rows : 1);
+    u8* register_classes = arena_allocate(scratch.arena, u8, register_count ? register_count : 1);
+    for (u32 register_index = 0; register_index < register_count; register_index += 1)
+    {
+        register_classes[register_index] = (u8)machine_schedule_register_class(function, register_index);
+    }
     // First gate, before any scheduling structure exists: the per-block
     // excess in source order. Blocks the file already covers are excluded
     // from scheduling outright, and a function with no excess anywhere is
@@ -250,8 +299,8 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
         {
             order_scratch[offset] = block->first_instruction + offset;
         }
-        block_excesses[block_index] = machine_schedule_block_excess(function, block->instruction_count, order_scratch, allocatable_count, block_index + 1,
-                                                                    touch_epochs, last_touches, window_deltas);
+        block_excesses[block_index] = machine_schedule_block_excess(function, block->instruction_count, order_scratch, class_capacities, register_classes,
+                                                                    block_index + 1, touch_epochs, last_touches, window_deltas);
         base_excess += block_excesses[block_index];
     }
     if (!base_excess)
@@ -366,12 +415,11 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
             MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
             MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
             u8 flags = 0;
-            flags |= (info->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) ||
-                             machine_schedule_opcode_is_barrier(instruction->opcode)
-                         ? MACHINE_SCHEDULE_UNIT_BARRIER
+            flags |= machine_schedule_info_is_barrier(instruction->opcode, info) ? MACHINE_SCHEDULE_UNIT_BARRIER : 0;
+            flags |= machine_schedule_info_is_memory(instruction->opcode, info) ? MACHINE_SCHEDULE_UNIT_MEMORY : 0;
+            flags |= machine_opcode_schedule_class(info) == MACHINE_SCHEDULE_CLASS_VECTOR || machine_schedule_opcode_is_vector(instruction->opcode)
+                         ? MACHINE_SCHEDULE_UNIT_VECTOR
                          : 0;
-            flags |= machine_schedule_opcode_is_memory(instruction->opcode) ? MACHINE_SCHEDULE_UNIT_MEMORY : 0;
-            flags |= machine_schedule_opcode_is_vector(instruction->opcode) ? MACHINE_SCHEDULE_UNIT_VECTOR : 0;
             for (u32 slot = 0; slot < info->operand_count; slot += 1)
             {
                 flags |= machine_ref_kind(instruction->operands[slot]) == MACHINE_REF_PHYSICAL_REGISTER ? MACHINE_SCHEDULE_UNIT_BARRIER : 0;
@@ -792,7 +840,7 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
         {
             order_scratch[new_rows[block->first_instruction + offset] - block->first_instruction] = block->first_instruction + offset;
         }
-        scheduled_excess += machine_schedule_block_excess(function, block->instruction_count, order_scratch, allocatable_count,
+        scheduled_excess += machine_schedule_block_excess(function, block->instruction_count, order_scratch, class_capacities, register_classes,
                                                           function->block_count + block_index + 1, touch_epochs, last_touches, window_deltas);
     }
     if (scheduled_excess >= compared_excess)
