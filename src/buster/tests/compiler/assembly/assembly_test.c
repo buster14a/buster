@@ -2583,10 +2583,10 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
            "svc #2\n"),
         (AssemblyEncodeOptions){.target = aarch64_m1_target});
     static u8 const expected_aarch64_system[] = {
-        0x20, 0x00, 0x20, 0xd4, 0x5f, 0x30, 0x03, 0xd5, 0xbf, 0x3b, 0x03, 0xd5,
+        0x20, 0x00, 0x20, 0xd4, 0x5f, 0x3f, 0x03, 0xd5, 0xbf, 0x3b, 0x03, 0xd5,
         0x9f, 0x3f, 0x03, 0xd5, 0xdf, 0x3f, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5,
         0x00, 0x42, 0x3b, 0xd5, 0x00, 0x42, 0x1b, 0xd5, 0xdf, 0x4f, 0x03, 0xd5,
-        0x01, 0x78, 0x08, 0xd5, 0x20, 0x78, 0x08, 0xd5, 0x20, 0x78, 0x28, 0xd5,
+        0x3f, 0x78, 0x08, 0xd5, 0x20, 0x78, 0x08, 0xd5, 0x20, 0x78, 0x28, 0xd5,
         0x41, 0x00, 0x00, 0xd4,
     };
     BUSTER_TEST(arguments, aarch64_system.diagnostic_count == 0 &&
@@ -2600,6 +2600,35 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         arguments->arena, S8("mrs w0, nzcv\nmsr nzcv, w0\ndmb #0\n"),
         (AssemblyEncodeOptions){.target = aarch64_m1_target});
     BUSTER_TEST(arguments, aarch64_system_bad.diagnostic_count == 3 && aarch64_system_bad.bytes.length == 0);
+    AssemblyEncodeResult aarch64_system_exceptions = assembly_encode(
+        arguments->arena,
+        S8("dcps1 #1\n"
+           "dcps2 #2\n"
+           "dcps3 #3\n"
+           "hlt #4\n"
+           "hvc #5\n"
+           "smc #6\n"
+           "msr spsel, #0\n"
+           "msr daifclr, #7\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    static u8 const expected_aarch64_system_exceptions[] = {
+        0x21, 0x00, 0xa0, 0xd4, 0x42, 0x00, 0xa0, 0xd4, 0x63, 0x00, 0xa0, 0xd4,
+        0x80, 0x00, 0x40, 0xd4, 0xa2, 0x00, 0x00, 0xd4, 0xc3, 0x00, 0x00, 0xd4,
+        0xbf, 0x40, 0x00, 0xd5, 0xdf, 0x47, 0x03, 0xd5,
+    };
+    BUSTER_TEST(arguments, aarch64_system_exceptions.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_system_exceptions.bytes, expected_aarch64_system_exceptions,
+                                                         sizeof(expected_aarch64_system_exceptions)));
+    AssemblyEncodeResult aarch64_system_invalid = assembly_encode(
+        arguments->arena, S8("isb ish\nbrk #65536\nhlt #-1\nsys #8, c0, c0, #0\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    BUSTER_TEST(arguments, aarch64_system_invalid.diagnostic_count == 4 && aarch64_system_invalid.bytes.length == 0);
+    AssemblyEncodeResult aarch64_system_transaction = assembly_encode(
+        arguments->arena, S8("brk #1\nhlt #65536\n"), (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    static u8 const expected_aarch64_system_transaction[] = {0x20, 0x00, 0x20, 0xd4};
+    BUSTER_TEST(arguments, aarch64_system_transaction.diagnostic_count == 1 &&
+                               assembly_test_bytes_equal(aarch64_system_transaction.bytes, expected_aarch64_system_transaction,
+                                                         sizeof(expected_aarch64_system_transaction)));
     AssemblyEncodeResult aarch64_system_generic = assembly_encode(
         arguments->arena, S8("brk #1\nmrs x0, nzcv\n"), (AssemblyEncodeOptions){.target = aarch64_target});
     BUSTER_TEST(arguments, aarch64_system_generic.diagnostic_count == 2 && aarch64_system_generic.bytes.length == 0);

@@ -1513,7 +1513,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_condition_parse(String8 text, 
 
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_mnemonic_row(Target target, String8 mnemonic, u32* row)
 {
-    if (!row || !buster_aarch64_system_semantic_target_supported(target)) return false;
+    if (!row || !buster_aarch64_system_semantic_target_supported(target))
+    {
+        return false;
+    }
     for (u32 index = 0; index < buster_aarch64_system_semantic_count(); index += 1)
     {
         BusterAarch64SystemSemanticRecord metadata = {0};
@@ -1530,7 +1533,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_mnemonic_row(Target target, Str
 
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_lookup(Target target, String8 mnemonic, AssemblyInstructionInfo* result)
 {
-    if (!result || !buster_aarch64_system_semantic_target_supported(target)) return false;
+    if (!result || !buster_aarch64_system_semantic_target_supported(target))
+    {
+        return false;
+    }
     u32 row = UINT32_MAX;
     if (assembly_word_equal(mnemonic, S8("msr")))
     {
@@ -1542,9 +1548,15 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_lookup(Target target, String8 m
         };
         return true;
     }
-    if (!assembly_aarch64_system_mnemonic_row(target, mnemonic, &row)) return false;
+    if (!assembly_aarch64_system_mnemonic_row(target, mnemonic, &row))
+    {
+        return false;
+    }
     BusterAarch64SystemSemanticRecord metadata = {0};
-    if (!buster_aarch64_system_semantic_row(row, &metadata)) return false;
+    if (!buster_aarch64_system_semantic_row(row, &metadata))
+    {
+        return false;
+    }
     *result = (AssemblyInstructionInfo){
         .opcode = ASSEMBLY_OPCODE_COUNT,
         .operand_count = metadata.field_count,
@@ -1556,10 +1568,16 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_lookup(Target target, String8 m
 
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_fixed_row(Target target, String8 mnemonic, AssemblyInstructionInfo* result)
 {
-    if (!result || !buster_aarch64_arm_m1_fixed_target(target)) return false;
+    if (!result || !buster_aarch64_arm_m1_fixed_target(target))
+    {
+        return false;
+    }
     BusterAarch64ArmM1FixedSpelling fixed = {0};
     if (!buster_aarch64_arm_m1_fixed_lookup(mnemonic, &fixed) || !fixed.system ||
-        !buster_aarch64_arm_m1_fixed_supported_for_target(fixed, target)) return false;
+        !buster_aarch64_arm_m1_fixed_supported_for_target(fixed, target))
+    {
+        return false;
+    }
     *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_COUNT, .encoding_kind = ASSEMBLY_ENCODING_AARCH64_FIXED_WORD,
                                        .fixed_word = fixed.word};
     return true;
@@ -6075,15 +6093,24 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_immediate(AssemblyBuilder* buil
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_c_register(String8 text, u32* value)
 {
     text = assembly_trim(text);
-    if (!value || text.length < 2 || (text.pointer[0] != 'c' && text.pointer[0] != 'C')) return false;
+    if (!value || text.length < 2 || (text.pointer[0] != 'c' && text.pointer[0] != 'C'))
+    {
+        return false;
+    }
     u32 parsed = 0;
     for (u64 index = 1; index < text.length; index += 1)
     {
         char8 digit = text.pointer[index];
-        if (digit < '0' || digit > '9' || parsed > (UINT32_MAX - (u32)(digit - '0')) / 10u) return false;
+        if (digit < '0' || digit > '9' || parsed > (UINT32_MAX - (u32)(digit - '0')) / 10u)
+        {
+            return false;
+        }
         parsed = parsed * 10u + (u32)(digit - '0');
     }
-    if (parsed > 15) return false;
+    if (parsed > 15)
+    {
+        return false;
+    }
     *value = parsed;
     return true;
 }
@@ -6096,7 +6123,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_option(String8 text, u32* value
         S8_INITIALIZER("ish"), S8_INITIALIZER("st"), S8_INITIALIZER("ld"), S8_INITIALIZER("sy"),
     };
     static u8 const values[] = {2, 1, 3, 6, 5, 7, 10, 9, 11, 14, 13, 15};
-    if (!value) return false;
+    if (!value)
+    {
+        return false;
+    }
     text = assembly_trim(text);
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
     {
@@ -6112,21 +6142,24 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_option(String8 text, u32* value
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_pstate(String8 text, u32* op2, u32* crm, u32* op1)
 {
     typedef struct A64PStateName A64PStateName;
-    struct A64PStateName { String8 name; u8 op2; u8 crm; u8 op1; };
+    struct A64PStateName { String8 name; u8 op2; u8 selector_crm; u8 op1; };
     static A64PStateName const names[] = {
-        {S8_INITIALIZER("spsel"), 5, 0, 0}, {S8_INITIALIZER("daifset"), 6, 0, 0},
-        {S8_INITIALIZER("daifclr"), 6, 1, 0}, {S8_INITIALIZER("pan"), 4, 4, 0},
-        {S8_INITIALIZER("uao"), 4, 3, 0}, {S8_INITIALIZER("ssbs"), 6, 2, 0},
-        {S8_INITIALIZER("dit"), 6, 3, 0}, {S8_INITIALIZER("tco"), 6, 4, 0},
+        {S8_INITIALIZER("spsel"), 5, 0, 0}, {S8_INITIALIZER("daifset"), 6, 0, 3},
+        {S8_INITIALIZER("daifclr"), 6, 1, 3}, {S8_INITIALIZER("pan"), 4, 4, 0},
+        {S8_INITIALIZER("uao"), 4, 3, 0}, {S8_INITIALIZER("ssbs"), 6, 2, 3},
+        {S8_INITIALIZER("dit"), 6, 3, 3}, {S8_INITIALIZER("tco"), 6, 4, 3},
     };
-    if (!op2 || !crm || !op1) return false;
+    if (!op2 || !crm || !op1)
+    {
+        return false;
+    }
     text = assembly_trim(text);
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
     {
         if (assembly_word_equal(text, names[index].name))
         {
             *op2 = names[index].op2;
-            *crm = names[index].crm;
+            *crm = names[index].selector_crm;
             *op1 = names[index].op1;
             return true;
         }
@@ -6136,9 +6169,15 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_pstate(String8 text, u32* op2, 
 
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_reg_encoding(String8 text, bool read, u16* packed)
 {
-    if (!packed) return false;
+    if (!packed)
+    {
+        return false;
+    }
     text = assembly_trim(text);
-    if (aarch64_system_register_parse_raw_s3(text, packed)) return true;
+    if (aarch64_system_register_parse_raw_s3(text, packed))
+    {
+        return true;
+    }
     Aarch64SystemRegisterLookup lookup = {0};
     if (!aarch64_system_register_lookup_name(text, &lookup) ||
         (read ? !(lookup.mode & AARCH64_SYSTEM_REGISTER_MODE_READ) : !(lookup.mode & AARCH64_SYSTEM_REGISTER_MODE_WRITE)))
@@ -6164,33 +6203,53 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_set_field(BusterAarch64SystemIn
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_instruction_parse(AssemblyBuilder* builder, String8 mnemonic, String8 operands_text,
                                                                     AssemblyInstruction* instruction, u32 row)
 {
-    if (!builder || !instruction) return false;
-    BUSTER_UNUSED(mnemonic);
+    if (!builder || !instruction)
+    {
+        return false;
+    }
     String8 tokens[ASSEMBLY_MAX_OPERANDS] = {0};
     u32 token_count = 0;
     u64 cursor = 0;
     while (cursor < operands_text.length)
     {
-        if (token_count >= BUSTER_ARRAY_LENGTH(tokens)) return false;
+        if (token_count >= BUSTER_ARRAY_LENGTH(tokens))
+        {
+            return false;
+        }
         String8 token = {0};
-        if (assembly_operand_split_next(operands_text, &cursor, &token) != ASSEMBLY_OPERAND_SPLIT_SUCCESS) return false;
+        if (assembly_operand_split_next(operands_text, &cursor, &token) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
+        {
+            return false;
+        }
         tokens[token_count++] = assembly_trim(token);
     }
     if (row == UINT32_MAX && assembly_word_equal(mnemonic, S8("msr")))
     {
-        if (!token_count) return false;
-        u32 op2 = 0, crm = 0, op1 = 0;
-        row = assembly_aarch64_system_pstate(tokens[0], &op2, &crm, &op1) ? BUSTER_AARCH64_SYSTEM_FORM_MSR_PSTATE
-                                                                            : BUSTER_AARCH64_SYSTEM_FORM_MSR;
+        if (!token_count)
+        {
+            return false;
+        }
+        u32 op2 = 0, selector_crm = 0, op1 = 0;
+        row = assembly_aarch64_system_pstate(tokens[0], &op2, &selector_crm, &op1) ? BUSTER_AARCH64_SYSTEM_FORM_MSR_PSTATE
+                                                                                     : BUSTER_AARCH64_SYSTEM_FORM_MSR;
     }
-    if (row >= buster_aarch64_system_semantic_count()) return false;
+    if (row >= buster_aarch64_system_semantic_count())
+    {
+        return false;
+    }
     BusterAarch64SystemSemanticRecord metadata = {0};
-    if (!buster_aarch64_system_semantic_row(row, &metadata)) return false;
+    if (!buster_aarch64_system_semantic_row(row, &metadata))
+    {
+        return false;
+    }
     BusterAarch64SystemInstruction candidate = {.row = (u16)row, .field_count = metadata.field_count};
     for (u32 field = 0; field < metadata.field_count; field += 1)
     {
         BusterAarch64SystemFieldSchema schema = {0};
-        if (!buster_aarch64_system_semantic_field(row, field, &schema)) return false;
+        if (!buster_aarch64_system_semantic_field(row, field, &schema))
+        {
+            return false;
+        }
         candidate.fields[field] = (BusterAarch64SystemOperandValue){.kind = schema.kind, .width = schema.width};
     }
     u32 value = 0;
@@ -6201,7 +6260,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_instruction_parse(AssemblyBuild
         u32 register_token = read ? 0u : 1u;
         u32 system_token = read ? 1u : 0u;
         if (token_count != 2 || !assembly_aarch64_gpr_register_parse(tokens[register_token], &reg) || reg.width != 64 ||
-            !assembly_aarch64_system_reg_encoding(tokens[system_token], read, &instruction->aarch64_system_register_encoding)) return false;
+            !assembly_aarch64_system_reg_encoding(tokens[system_token], read, &instruction->aarch64_system_register_encoding))
+        {
+            return false;
+        }
         u16 packed = instruction->aarch64_system_register_encoding;
         u32 op0 = (packed >> 14) & 3u, op1 = (packed >> 11) & 7u, crn = (packed >> 7) & 15u, crm = (packed >> 3) & 15u, op2 = packed & 7u;
         if (op0 < 2 || !assembly_aarch64_system_set_field(&candidate, row, 0, reg.index, BUSTER_AARCH64_SYSTEM_FIELD_REGISTER, 5) ||
@@ -6209,31 +6271,48 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_instruction_parse(AssemblyBuild
             !assembly_aarch64_system_set_field(&candidate, row, 2, crm, BUSTER_AARCH64_SYSTEM_FIELD_CRM, 4) ||
             !assembly_aarch64_system_set_field(&candidate, row, 3, crn, BUSTER_AARCH64_SYSTEM_FIELD_CRN, 4) ||
             !assembly_aarch64_system_set_field(&candidate, row, 4, op1, BUSTER_AARCH64_SYSTEM_FIELD_OP1, 3) ||
-            !assembly_aarch64_system_set_field(&candidate, row, 5, op0 - 2u, BUSTER_AARCH64_SYSTEM_FIELD_O0, 1)) return false;
+            !assembly_aarch64_system_set_field(&candidate, row, 5, op0 - 2u, BUSTER_AARCH64_SYSTEM_FIELD_O0, 1))
+        {
+            return false;
+        }
     }
     else if (row == BUSTER_AARCH64_SYSTEM_FORM_MSR_PSTATE)
     {
-        u32 op2 = 0, crm = 0, op1 = 0;
-        if (token_count != 2 || !assembly_aarch64_system_pstate(tokens[0], &op2, &crm, &op1) ||
+        u32 op2 = 0, selector_crm = 0, op1 = 0;
+        if (token_count != 2 || !assembly_aarch64_system_pstate(tokens[0], &op2, &selector_crm, &op1) ||
             !assembly_aarch64_system_immediate(builder, tokens[1], 15, &value) ||
             !assembly_aarch64_system_set_field(&candidate, row, 0, op2, BUSTER_AARCH64_SYSTEM_FIELD_OP2, 3) ||
             !assembly_aarch64_system_set_field(&candidate, row, 1, value, BUSTER_AARCH64_SYSTEM_FIELD_CRM, 4) ||
-            !assembly_aarch64_system_set_field(&candidate, row, 2, op1, BUSTER_AARCH64_SYSTEM_FIELD_OP1, 3)) return false;
+            !assembly_aarch64_system_set_field(&candidate, row, 2, op1, BUSTER_AARCH64_SYSTEM_FIELD_OP1, 3))
+        {
+            return false;
+        }
         candidate.fields[0].value = op2;
         candidate.fields[1].value = value;
         candidate.fields[2].value = op1;
-        BUSTER_UNUSED(crm);
+        // The XML selector CRM is a representative field for the named pstate;
+        // the source #imm is the architectural CRm value that must be encoded.
+        BUSTER_UNUSED(selector_crm);
     }
     else if (row == BUSTER_AARCH64_SYSTEM_FORM_SYS)
     {
         u32 op1 = 0, op2 = 0, crn = 0, crm = 0;
         if ((token_count != 4 && token_count != 5) || !assembly_aarch64_system_immediate(builder, tokens[0], 7, &op1) ||
             !assembly_aarch64_system_c_register(tokens[1], &crn) || !assembly_aarch64_system_c_register(tokens[2], &crm) ||
-            !assembly_aarch64_system_immediate(builder, tokens[3], 7, &op2)) return false;
-        candidate.fields[1].value = op2; candidate.fields[2].value = crm; candidate.fields[3].value = crn; candidate.fields[4].value = op1;
+            !assembly_aarch64_system_immediate(builder, tokens[3], 7, &op2))
+        {
+            return false;
+        }
+        candidate.fields[1].value = op2;
+        candidate.fields[2].value = crm;
+        candidate.fields[3].value = crn;
+        candidate.fields[4].value = op1;
         if (token_count == 5)
         {
-            if (!assembly_aarch64_gpr_register_parse(tokens[4], &reg) || reg.width != 64) return false;
+            if (!assembly_aarch64_gpr_register_parse(tokens[4], &reg) || reg.width != 64)
+            {
+                return false;
+            }
             candidate.fields[0].value = reg.index;
         }
         else
@@ -6247,28 +6326,51 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_instruction_parse(AssemblyBuild
         u32 op1 = 0, op2 = 0, crn = 0, crm = 0;
         if (token_count != 5 || !assembly_aarch64_gpr_register_parse(tokens[0], &reg) || reg.width != 64 ||
             !assembly_aarch64_system_immediate(builder, tokens[1], 7, &op1) || !assembly_aarch64_system_c_register(tokens[2], &crn) ||
-            !assembly_aarch64_system_c_register(tokens[3], &crm) || !assembly_aarch64_system_immediate(builder, tokens[4], 7, &op2)) return false;
-        candidate.fields[0].value = reg.index; candidate.fields[1].value = op2; candidate.fields[2].value = crm;
-        candidate.fields[3].value = crn; candidate.fields[4].value = op1;
+            !assembly_aarch64_system_c_register(tokens[3], &crm) || !assembly_aarch64_system_immediate(builder, tokens[4], 7, &op2))
+        {
+            return false;
+        }
+        candidate.fields[0].value = reg.index;
+        candidate.fields[1].value = op2;
+        candidate.fields[2].value = crm;
+        candidate.fields[3].value = crn;
+        candidate.fields[4].value = op1;
     }
     else if (row == BUSTER_AARCH64_SYSTEM_FORM_DMB || row == BUSTER_AARCH64_SYSTEM_FORM_DSB || row == BUSTER_AARCH64_SYSTEM_FORM_ISB)
     {
-        if (token_count != 1 || (!assembly_aarch64_system_option(tokens[0], &value) && !assembly_aarch64_system_immediate(builder, tokens[0], 15, &value))) return false;
+        bool named_option = assembly_aarch64_system_option(tokens[0], &value);
+        bool immediate_option = !named_option && assembly_aarch64_system_immediate(builder, tokens[0], 15, &value);
+        if (token_count != 1 || (!named_option && !immediate_option) ||
+            (row == BUSTER_AARCH64_SYSTEM_FORM_ISB && named_option && value != 15))
+        {
+            return false;
+        }
         candidate.fields[0].value = value;
     }
     else if (row == BUSTER_AARCH64_SYSTEM_FORM_CLREX)
     {
-        if (token_count > 1 || (token_count && (!assembly_aarch64_system_immediate(builder, tokens[0], 15, &value)))) return false;
-        candidate.fields[0].value = token_count ? value : 15; candidate.defaulted_mask = token_count ? 0 : 1;
+        if (token_count > 1 || (token_count && (!assembly_aarch64_system_immediate(builder, tokens[0], 15, &value))))
+        {
+            return false;
+        }
+        candidate.fields[0].value = token_count ? value : 15;
+        candidate.defaulted_mask = token_count ? 0 : 1;
     }
     else if (row == BUSTER_AARCH64_SYSTEM_FORM_HINT)
     {
-        if (token_count != 1 || !assembly_aarch64_system_immediate(builder, tokens[0], 31, &value)) return false;
-        candidate.fields[0].value = value & 7u; candidate.fields[1].value = value >> 3;
+        if (token_count != 1 || !assembly_aarch64_system_immediate(builder, tokens[0], 31, &value))
+        {
+            return false;
+        }
+        candidate.fields[0].value = value & 7u;
+        candidate.fields[1].value = value >> 3;
     }
     else
     {
-        if (token_count != 1 || !assembly_aarch64_system_immediate(builder, tokens[0], 65535, &value)) return false;
+        if (token_count != 1 || !assembly_aarch64_system_immediate(builder, tokens[0], 65535, &value))
+        {
+            return false;
+        }
         candidate.fields[0].value = value;
     }
     instruction->aarch64_system_instruction = candidate;
@@ -6279,7 +6381,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_instruction_parse(AssemblyBuild
     instruction->operand_count = metadata.field_count;
     instruction->size = 4;
     u32 ignored = 0;
-    if (!buster_aarch64_system_semantic_encode(builder->target, &candidate, &ignored)) return false;
+    if (!buster_aarch64_system_semantic_encode(builder->target, &candidate, &ignored))
+    {
+        return false;
+    }
     return true;
 }
 
