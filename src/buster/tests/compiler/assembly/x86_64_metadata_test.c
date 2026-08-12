@@ -816,6 +816,7 @@ struct X86_64MetadataSourceReachabilityCase
 {
     u32 form_id;
     String8 source;
+    bool memory_source;
 };
 
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_mask_is_decorator(u32 form_id, u32 operand_index);
@@ -975,6 +976,221 @@ struct X86_64MetadataSourceQuery
     BusterX86MetadataOperand metadata[16];
 };
 
+BUSTER_GLOBAL_LOCAL X86_64MetadataSourceReachabilityResult x86_64_metadata_test_source_reachability_case(
+    Arena* arena, Target target, X86_64MetadataSourceReachabilityCase test_case);
+
+BUSTER_GLOBAL_LOCAL String8 x86_64_metadata_test_source_memory(Arena* arena,
+                                                                BusterX86MetadataPhysicalOperand operand,
+                                                                BusterX86MetadataPhysicalAttributes attributes)
+{
+    BusterX86MetadataPhysicalMemory memory = operand.memory;
+    String8 qualifier = {0};
+    u16 width = memory.source_width ? memory.source_width : operand.width;
+    if (width == 8) qualifier = S8("byte ptr ");
+    else if (width == 16) qualifier = S8("word ptr ");
+    else if (width == 32) qualifier = S8("dword ptr ");
+    else if (width == 64) qualifier = S8("qword ptr ");
+    else if (width == 80) qualifier = S8("tbyte ptr ");
+    else if (width == 128) qualifier = S8("xmmword ptr ");
+    else if (width == 256) qualifier = S8("ymmword ptr ");
+    else if (width == 512) qualifier = S8("zmmword ptr ");
+    else return (String8){0};
+
+    String8 source = qualifier;
+    if (memory.has_segment)
+    {
+        String8 segment = memory.segment == BUSTER_X86_METADATA_SEGMENT_FS ? S8("fs:")
+                         : memory.segment == BUSTER_X86_METADATA_SEGMENT_GS ? S8("gs:")
+                                                                           : (String8){0};
+        if (!segment.length) return (String8){0};
+        source = string_format(arena, S8("{S8}{S8}"), source, segment);
+    }
+    source = string_format(arena, S8("{S8}["), source);
+    bool wrote_term = false;
+    if (memory.has_base)
+    {
+        String8 base = x86_64_metadata_test_source_register(arena, memory.base);
+        if (!base.length) return (String8){0};
+        source = string_format(arena, S8("{S8}{S8}"), source, base);
+        wrote_term = true;
+    }
+    if (memory.rip_relative)
+    {
+        if (wrote_term || memory.has_index) return (String8){0};
+        source = string_format(arena, S8("{S8}rip"), source);
+        wrote_term = true;
+    }
+    if (memory.has_index)
+    {
+        String8 index = x86_64_metadata_test_source_register(arena, memory.index);
+        if (!index.length || !memory.scale) return (String8){0};
+        if (wrote_term) source = string_format(arena, S8("{S8} + {S8}*{u8}"), source, index, memory.scale);
+        else source = string_format(arena, S8("{S8}{S8}*{u8}"), source, index, memory.scale);
+        wrote_term = true;
+    }
+    if (memory.has_displacement || (!wrote_term && !memory.has_symbol))
+    {
+        s64 displacement = memory.displacement;
+        if (displacement < 0)
+        {
+            if (displacement == INT64_MIN) return (String8){0};
+            s64 magnitude = -displacement;
+            source = wrote_term ? string_format(arena, S8("{S8} - {s64}"), source, magnitude)
+                                : string_format(arena, S8("{S8}-{s64}"), source, magnitude);
+        }
+        else
+        {
+            source = wrote_term ? string_format(arena, S8("{S8} + {s64}"), source, displacement)
+                                : string_format(arena, S8("{S8}{s64}"), source, displacement);
+        }
+        wrote_term = true;
+    }
+    if (memory.has_symbol)
+    {
+        if (!memory.symbol.length || wrote_term) return (String8){0};
+        source = string_format(arena, S8("{S8}{S8}"), source, memory.symbol);
+        wrote_term = true;
+    }
+    if (!wrote_term) return (String8){0};
+    source = string_format(arena, S8("{S8}]"), source);
+    if (attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST)
+    {
+        if (!attributes.broadcast_elements) return (String8){0};
+        source = string_format(arena, S8("{S8}{{1to{u8}}}"), source, attributes.broadcast_elements);
+    }
+    return source;
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_memory_query(Arena* arena, u32 form_id,
+                                                                   BusterX86MetadataPhysicalQuery canonical,
+                                                                   X86_64MetadataSourceQuery* result)
+{
+    (void)arena;
+    BusterX86MetadataForm form = {0};
+    if (!result || !buster_x86_metadata_form(form_id, &form) || canonical.operand_count > 16) return false;
+    u32 output_count = 0;
+    for (u32 metadata_index = 0; metadata_index < form.operand_count; metadata_index += 1)
+    {
+        BusterX86MetadataOperand metadata = {0};
+        if (!buster_x86_metadata_operand(form_id, metadata_index, &metadata)) return false;
+        if (!metadata.visible) continue;
+        if (output_count >= canonical.operand_count || output_count >= BUSTER_ARRAY_LENGTH(result->operands)) return false;
+        if (metadata.kind != BUSTER_X86_METADATA_OPERAND_REGISTER && metadata.kind != BUSTER_X86_METADATA_OPERAND_MEMORY)
+            return false;
+        result->metadata[output_count] = metadata;
+        result->operands[output_count] = canonical.operands[output_count];
+        output_count += 1;
+    }
+    if (output_count != canonical.operand_count) return false;
+
+    // The canonical query intentionally uses zero displacement.  Source
+    // parsing cannot retain an explicit zero addend, so try a small family of
+    // non-zero spellings and let the direct emitter remain the constraint
+    // oracle for MODRM/SIB, tuple, and address-size controls.
+    static s64 const displacements[] = {0, 1, -1, 0x100, -0x100};
+    for (u32 displacement_index = 0; displacement_index < BUSTER_ARRAY_LENGTH(displacements); displacement_index += 1)
+    {
+        BusterX86MetadataPhysicalOperand trial[16] = {0};
+        memcpy(trial, result->operands, output_count * sizeof(*trial));
+        bool changed_memory = false;
+        for (u32 operand_index = 0; operand_index < output_count; operand_index += 1)
+        {
+            BusterX86MetadataPhysicalOperand* operand = trial + operand_index;
+            if (operand->kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY) continue;
+            if (operand->memory.rip_relative || operand->memory.has_symbol) continue;
+            operand->memory.displacement = displacements[displacement_index];
+            operand->memory.has_displacement = displacements[displacement_index] != 0;
+            changed_memory = true;
+        }
+        if (!changed_memory) continue;
+        u8 bytes[32] = {0};
+        BusterX86MetadataRelocation relocations[8] = {0};
+        BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = (BusterX86MetadataPhysicalQuery){
+                .mnemonic = canonical.mnemonic,
+                .operands = trial,
+                .operand_count = output_count,
+                .features = canonical.features,
+                .attributes = canonical.attributes,
+                .address_size = canonical.address_size,
+                .execution_mode = canonical.execution_mode,
+                .include_privileged = canonical.include_privileged,
+                .include_not64 = canonical.include_not64,
+                .include_implicit = canonical.include_implicit,
+                .source_semantics = canonical.source_semantics,
+            },
+            .form_id = form_id,
+            .output = bytes,
+            .output_capacity = BUSTER_ARRAY_LENGTH(bytes),
+            .relocations = relocations,
+            .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+        });
+        if (emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.relocation_count == 0)
+        {
+            memcpy(result->operands, trial, output_count * sizeof(*trial));
+            result->physical = canonical;
+            result->physical.operands = result->operands;
+            result->physical.operand_count = output_count;
+            return true;
+        }
+    }
+    result->physical = canonical;
+    result->physical.operands = result->operands;
+    result->physical.operand_count = output_count;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL String8 x86_64_metadata_test_source_memory_operands(Arena* arena, u32 form_id,
+                                                                          BusterX86MetadataPhysicalQuery query)
+{
+    BusterX86MetadataForm form = {0};
+    if (!buster_x86_metadata_form(form_id, &form)) return (String8){0};
+    String8 source = query.mnemonic;
+    if (query.attributes.lock) source = string_format(arena, S8("lock {S8}"), source);
+    else if (query.attributes.rep) source = string_format(arena, S8("rep {S8}"), source);
+    else if (query.attributes.repne) source = string_format(arena, S8("repne {S8}"), source);
+    else if (query.attributes.notrack) source = string_format(arena, S8("notrack {S8}"), source);
+    if (query.attributes.no_flags) source = string_format(arena, S8("{{nf}} {S8}"), source);
+    bool wrote_operand = false;
+    u32 operand_index = 0;
+    for (u32 metadata_index = 0; metadata_index < form.operand_count; metadata_index += 1)
+    {
+        BusterX86MetadataOperand metadata = {0};
+        if (!buster_x86_metadata_operand(form_id, metadata_index, &metadata)) return (String8){0};
+        if (!metadata.visible) continue;
+        if (operand_index >= query.operand_count) return (String8){0};
+        if (x86_64_metadata_test_mask_is_decorator(form_id, operand_index))
+        {
+            operand_index += 1;
+            continue;
+        }
+        if (query.attributes.has_mask_register && query.operands[operand_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+            query.operands[operand_index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK &&
+            query.operands[operand_index].reg.index == query.attributes.mask_register)
+        {
+            operand_index += 1;
+            continue;
+        }
+        BusterX86MetadataPhysicalOperand operand = query.operands[operand_index++];
+        String8 spelling = operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY
+                               ? x86_64_metadata_test_source_memory(arena, operand, query.attributes)
+                               : x86_64_metadata_test_source_register_atom(arena, operand.reg, metadata.atom);
+        if (!spelling.length) return (String8){0};
+        if (!wrote_operand) source = string_format(arena, S8("{S8} {S8}"), source, spelling);
+        else source = string_format(arena, S8("{S8}, {S8}"), source, spelling);
+        if (!wrote_operand && query.attributes.has_mask_register)
+        {
+            source = string_format(arena, S8("{S8} {{k{u8}}}"), source, query.attributes.mask_register);
+            if (query.attributes.zeroing) source = string_format(arena, S8("{S8} {{z}}"), source);
+        }
+        wrote_operand = true;
+    }
+    if (query.attributes.sae)
+        source = string_format(arena, S8("{S8}, {{{S8}}}"), source,
+                               query.attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_NEAREST ? S8("rn-sae") : S8("sae"));
+    return string_format(arena, S8("{S8}\n"), source);
+}
+
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_query_is_apx(BusterX86MetadataForm form)
 {
     return form.encoder_family == BUSTER_X86_METADATA_ENCODER_REX2 ||
@@ -1119,6 +1335,28 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_query(Arena* arena, u32 for
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_memory_skeleton(UnitTestArguments* arguments)
+{
+    Target target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_INTEL_DIAMOND_RAPIDS,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    static u32 const forms[] = {3239, 6460, 7725, 3777};
+    bool success = true;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(forms); index += 1)
+    {
+        u32 form_id = forms[index];
+        X86_64MetadataSourceReachabilityResult result = x86_64_metadata_test_source_reachability_case(
+            arguments->arena, target, (X86_64MetadataSourceReachabilityCase){.form_id = form_id, .memory_source = true});
+        bool form_success = result.classification == X86_64_METADATA_SOURCE_REACHABILITY_SUCCESS;
+        success &= form_success;
+        arguments->show(arguments, S8("X86_SOURCE_MEMORY_SKELETON form={u32} success={u32} diag={u32} source={S8}\n"), form_id,
+                        form_success, result.diagnostic_kind, result.source);
+    }
+    return success;
+}
+
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_mask_is_decorator(u32 form_id, u32 operand_index)
 {
     BusterX86MetadataForm form = {0};
@@ -1243,7 +1481,12 @@ BUSTER_GLOBAL_LOCAL X86_64MetadataSourceReachabilityResult x86_64_metadata_test_
     }
 
     X86_64MetadataSourceQuery source_query = {0};
-    if (!test_case.source.length && !x86_64_metadata_test_source_query(arena, test_case.form_id, physical, &source_query))
+    bool query_built = true;
+    if (!test_case.source.length)
+        query_built = test_case.memory_source
+                          ? x86_64_metadata_test_source_memory_query(arena, test_case.form_id, physical, &source_query)
+                          : x86_64_metadata_test_source_query(arena, test_case.form_id, physical, &source_query);
+    if (!test_case.source.length && !query_built)
     {
         result.classification = X86_64_METADATA_SOURCE_REACHABILITY_SYNTAX_CONSTRUCTION;
         return result;
@@ -1268,8 +1511,10 @@ BUSTER_GLOBAL_LOCAL X86_64MetadataSourceReachabilityResult x86_64_metadata_test_
         return result;
     }
 
-    String8 source = test_case.source.length ? test_case.source :
-                     x86_64_metadata_test_source_register_only(arena, test_case.form_id, physical.mnemonic, physical);
+    if (!test_case.source.length && test_case.memory_source) physical = source_query.physical;
+    String8 source = test_case.source.length ? test_case.source
+                     : test_case.memory_source ? x86_64_metadata_test_source_memory_operands(arena, test_case.form_id, physical)
+                                               : x86_64_metadata_test_source_register_only(arena, test_case.form_id, physical.mnemonic, physical);
     result.source = source;
     if (!source.length)
     {
@@ -1410,6 +1655,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
 
     BUSTER_TEST(arguments, x86_64_metadata_test_source_reachability_skeleton(arguments));
+    BUSTER_TEST(arguments, x86_64_metadata_test_source_memory_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_register_only_census(arguments));
 
     {
