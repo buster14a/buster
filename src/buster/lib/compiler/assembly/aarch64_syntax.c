@@ -1002,8 +1002,14 @@ BUSTER_F_DECL bool buster_aarch64_syntax_match_row(u32 row_index, String8 input,
     if (result)
     {
         if (machine.capture_count > result->capture_capacity || machine.choice_count > result->choice_capacity) return false;
-        for (u32 index = 0; index < machine.capture_count; index += 1) result->captures[index] = machine.captures[index];
-        for (u32 index = 0; index < machine.choice_count; index += 1) result->choices[index] = machine.choices[index];
+        for (u32 index = 0; index < machine.capture_count; index += 1)
+        {
+            result->captures[index] = machine.captures[index];
+        }
+        for (u32 index = 0; index < machine.choice_count; index += 1)
+        {
+            result->choices[index] = machine.choices[index];
+        }
         result->capture_count = machine.capture_count;
         result->choice_count = machine.choice_count;
         result->consumed = machine.cursor;
