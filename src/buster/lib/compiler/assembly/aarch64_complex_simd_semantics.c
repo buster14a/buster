@@ -145,6 +145,18 @@ static bool buster_a64_complex_simd_operand_is_arrangement_selector(BusterA64Sem
            buster_a64_complex_simd_operand_has_arrangement_kind(operand);
 }
 
+static bool buster_a64_complex_simd_operand_has_register_kind(BusterA64SemanticOperand operand)
+{
+    return buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER) ||
+           buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST) ||
+           buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE);
+}
+
+static bool buster_a64_complex_simd_operand_is_pure_arrangement_selector(BusterA64SemanticOperand operand)
+{
+    return buster_a64_complex_simd_operand_is_arrangement_selector(operand) && !buster_a64_complex_simd_operand_has_register_kind(operand);
+}
+
 static bool buster_a64_complex_simd_value_uint(BusterA64SemanticVMValue value, u64* result)
 {
     if (!result)
@@ -978,15 +990,11 @@ static bool buster_a64_complex_simd_encode_operand(u32 row_index, BusterA64Seman
     {
         return false;
     }
-    if (buster_a64_complex_simd_operand_is_arrangement_selector(operand))
+    if (buster_a64_complex_simd_operand_is_pure_arrangement_selector(operand))
     {
         return buster_a64_complex_simd_inverse_tables(form, operand, value, fields, assigned);
     }
-    bool register_operand = buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER) ||
-                            buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST) ||
-                            (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE &&
-                             !buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_INTEGER_IMMEDIATE));
-    if (register_operand)
+    if (buster_a64_complex_simd_operand_has_register_kind(operand))
     {
         bool value_ok = buster_a64_complex_simd_register_value_ok(operand, value);
         bool arrangement_ok = value_ok && buster_a64_complex_simd_register_arrangement_ok(row_index, form, operand_index, values, value);
@@ -1487,7 +1495,7 @@ static BusterA64ComplexSIMDStatus buster_a64_complex_simd_decode_internal(Target
         {
             return BUSTER_A64_COMPLEX_SIMD_STATUS_BOUNDS;
         }
-        if (buster_a64_complex_simd_operand_is_arrangement_selector(operand))
+        if (buster_a64_complex_simd_operand_is_pure_arrangement_selector(operand))
         {
             if (!buster_a64_complex_simd_decode_arrangement(form, operand, &decoded.fields, &values[index]))
             {
@@ -1507,12 +1515,7 @@ static BusterA64ComplexSIMDStatus buster_a64_complex_simd_decode_internal(Target
             /* Arrangement selectors were evaluated in the first pass. */
             continue;
         }
-        bool register_operand = !buster_a64_complex_simd_operand_is_arrangement_selector(operand) &&
-                                (buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER) ||
-                                 buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST) ||
-                                 (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE &&
-                                  !buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_INTEGER_IMMEDIATE)));
-        if (register_operand)
+        if (buster_a64_complex_simd_operand_has_register_kind(operand))
         {
             if (!buster_a64_complex_simd_decode_register(row_index, form, index, operand, &decoded.fields, values, &values[index]))
             {

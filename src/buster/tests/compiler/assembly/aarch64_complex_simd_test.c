@@ -221,6 +221,14 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
             arrangement_bindings_ok = false;
             continue;
         }
+        for (u32 operand_index = 0; operand_index < binding_row.operand_count; operand_index += 1)
+        {
+            BusterA64ComplexSIMDArrangementBinding binding = {0};
+            if (buster_a64_complex_simd_arrangement_binding(row_index, operand_index, &binding))
+            {
+                arrangement_binding_count += 1;
+            }
+        }
         u32 binding_word = binding_form.representative_word;
         BusterA64ComplexSIMDResult binding_decoded = {0};
         if (buster_a64_complex_simd_decode_row(target, row_index, binding_word, &binding_decoded) != BUSTER_A64_COMPLEX_SIMD_STATUS_OK)
@@ -242,12 +250,12 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
             {
                 continue;
             }
-            arrangement_binding_count += 1;
-            arrangement_bindings_ok = arrangement_bindings_ok && binding.selector_index < binding_decoded.operand_count &&
+            bool binding_ok = binding.selector_index < binding_decoded.operand_count &&
                                       ((binding.direction == 1 && binding.selector_index == operand_index + 1) ||
                                        (binding.direction == -1 && operand_index != 0 && binding.selector_index + 1 == operand_index)) &&
                                       binding_decoded.operands[binding.selector_index].kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_ARRANGEMENT &&
                                       binding_decoded.operands[operand_index].aux == binding_decoded.operands[binding.selector_index].aux;
+            arrangement_bindings_ok = arrangement_bindings_ok && binding_ok;
             if (binding.selector_index >= binding_decoded.operand_count)
             {
                 cross_arrangement_rejected = false;
