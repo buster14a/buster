@@ -2,6 +2,8 @@
 #if BUSTER_INCLUDE_TESTS
 
 #include <buster/tests/compiler/assembly/generated/aarch64_scalar_integer_corpus.generated.h>
+#include <buster/lib/compiler/assembly/aarch64_control_semantics.h>
+#include <buster/lib/compiler/assembly/aarch64_syntax.h>
 
 BUSTER_GLOBAL_LOCAL bool assembly_test_bytes_equal(ByteSlice actual, u8 const* expected, u32 expected_count)
 {
@@ -2529,6 +2531,25 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
            "pacia x1, xzr\n"),
         (AssemblyEncodeOptions){.target = aarch64_m1_target});
     BUSTER_TEST(arguments, aarch64_direct_gpr_bad.diagnostic_count == 3 && aarch64_direct_gpr_bad.bytes.length == 0);
+
+    BusterAarch64SyntaxMnemonicRange csel_range = {0};
+    BUSTER_TEST(arguments, buster_aarch64_syntax_mnemonic_lookup(S8("csel"), &csel_range) && csel_range.candidate_count > 0);
+    u32 csel_row = UINT32_MAX;
+    BUSTER_TEST(arguments, buster_aarch64_syntax_mnemonic_candidate(csel_range, 0, &csel_row) && csel_row < 1695);
+    AssemblyEncodeResult aarch64_control = assembly_encode(
+        arguments->arena,
+        S8("csel w0, w1, w2, eq\n"
+           "target:\n"
+           "cbz w0, target\n"
+           "tbz x0, #3, target\n"
+           "b.ne target\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    BUSTER_TEST(arguments, aarch64_control.diagnostic_count == 0 && aarch64_control.bytes.length == 16);
+    BUSTER_TEST(arguments, aarch64_control.relocation_count == 0);
+    AssemblyEncodeResult unsupported_control = assembly_encode(
+        arguments->arena, S8("ld1 {v0.4s}, [x0]\n"), (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    BUSTER_TEST(arguments, unsupported_control.diagnostic_count == 1 && unsupported_control.bytes.length == 0);
+
     Target aarch64_m1_no_crc = aarch64_m1_explicit_target;
     aarch64_m1_no_crc.cpu_features = target_cpu_features_remove(aarch64_m1_no_crc.cpu_features, TARGET_CPU_FEATURE_AARCH64_CRC);
     AssemblyEncodeResult aarch64_direct_gpr_no_crc = assembly_encode(

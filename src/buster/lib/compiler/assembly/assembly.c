@@ -1,5 +1,7 @@
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#include <buster/lib/compiler/assembly/aarch64_control_semantics.h>
+#include <buster/lib/compiler/assembly/aarch64_syntax.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 
 #include <buster/lib/string.h>
@@ -370,9 +372,9 @@ struct AssemblyOperand
 
 enum
 {
-    // The imported AArch64 metadata contains source forms with six visible
-    // operands.  Keep every parser-side operand buffer at the same capacity.
-    ASSEMBLY_MAX_OPERANDS = 6,
+    // Generated AArch64 source forms include up to ten visible operands.
+    // Keep parser and metadata projections at the same bounded capacity.
+    ASSEMBLY_MAX_OPERANDS = 10,
 };
 
 typedef struct AssemblyInstruction AssemblyInstruction;
@@ -383,6 +385,7 @@ typedef enum AssemblyEncodingKind
     ASSEMBLY_ENCODING_AARCH64_FIXED_WORD,
     ASSEMBLY_ENCODING_AARCH64_M1_GPR,
     ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER,
+    ASSEMBLY_ENCODING_AARCH64_CONTROL,
 } AssemblyEncodingKind;
 
 struct AssemblyInstruction
@@ -410,11 +413,16 @@ struct AssemblyInstruction
     u32 fixed_word;
     u32 aarch64_gpr_form_index;
     u32 aarch64_scalar_integer_form_index;
+    u32 aarch64_control_row_index;
     u8 aarch64_scalar_integer_operand_count;
     u8 aarch64_scalar_integer_modifier_count;
     u8 aarch64_scalar_integer_reserved[2];
     A64ScalarIntOperand aarch64_scalar_integer_operands[4];
     A64ScalarIntModifier aarch64_scalar_integer_modifiers[1];
+    BusterAarch64ControlInstruction aarch64_control_instruction;
+    AssemblyExpression aarch64_control_expressions[4];
+    u8 aarch64_control_expression_mask;
+    u8 aarch64_control_reserved[3];
     String8 metadata_mnemonic;
     u8 metadata_address_size;
     u8 metadata_reserved_address[3];
@@ -440,7 +448,7 @@ struct AssemblyBuilder
 
 enum
 {
-    // A source line can define one label and contain six metadata operands;
+    // A source line can define one label and contain ten metadata operands;
     // each of those can introduce one distinct symbol.
     ASSEMBLY_SOURCE_SYMBOLS_PER_LINE = ASSEMBLY_MAX_OPERANDS + 1,
 };
@@ -1459,8 +1467,76 @@ struct AssemblyInstructionInfo
     bool no_flags;
     AssemblyEncodingKind encoding_kind;
     u32 fixed_word;
+    u32 aarch64_control_row_index;
     AssemblyAmdForm const* amd_form;
 };
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_condition_parse(String8 text, u64* value)
+{
+    text = assembly_trim(text);
+    if (!value || !text.length)
+    {
+        return false;
+    }
+    for (u32 index = 0; index < buster_aarch64_control_condition_count(); index += 1)
+    {
+        BusterAarch64ControlCondition condition = {0};
+        String8 name = {0};
+        if (buster_aarch64_control_condition((u8)index, &condition) &&
+            buster_aarch64_control_semantic_string(condition.name, &name) && assembly_word_equal(text, name))
+        {
+            *value = index;
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_lookup(Target target, String8 mnemonic, AssemblyInstructionInfo* result)
+{
+    if (!result || !buster_aarch64_arm_m1_fixed_target(target))
+    {
+        return false;
+    }
+    bool conditional = false;
+    u64 condition = 0;
+    if (mnemonic.length > 2 && assembly_word_equal(string_slice(mnemonic, 0, 2), S8("b.")))
+    {
+        conditional = assembly_aarch64_control_condition_parse(string_slice(mnemonic, 2, mnemonic.length), &condition);
+        if (!conditional)
+        {
+            return false;
+        }
+    }
+    for (u32 row_index = 0; row_index < buster_aarch64_control_semantic_count(); row_index += 1)
+    {
+        BusterAarch64ControlSemanticRecord row = {0};
+        String8 row_mnemonic = {0};
+        if (!buster_aarch64_control_semantic_row(row_index, &row) ||
+            !buster_aarch64_control_semantic_string(row.mnemonic, &row_mnemonic))
+        {
+            continue;
+        }
+        if (row.form == BUSTER_AARCH64_CONTROL_FORM_B || row.form == BUSTER_AARCH64_CONTROL_FORM_BL ||
+            row.form == BUSTER_AARCH64_CONTROL_FORM_RET)
+        {
+            continue;
+        }
+        bool mnemonic_match = conditional ? row.form == BUSTER_AARCH64_CONTROL_FORM_B_COND
+                                          : assembly_word_equal(mnemonic, row_mnemonic);
+        if (mnemonic_match)
+        {
+            *result = (AssemblyInstructionInfo){
+                .opcode = ASSEMBLY_OPCODE_COUNT,
+                .encoding_kind = ASSEMBLY_ENCODING_AARCH64_CONTROL,
+                .condition = (u8)condition,
+                .aarch64_control_row_index = UINT32_MAX,
+            };
+            return true;
+        }
+    }
+    return false;
+}
 
 typedef enum AssemblyAmdEncoding
 {
@@ -2166,6 +2242,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
                     .operand_count = scalar_operand_count,
                     .encoding_kind = ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER,
                 };
+                return true;
+            }
+            if (assembly_aarch64_control_lookup(target, mnemonic, result))
+            {
                 return true;
             }
             // The canonical direct-GPR projection is target-gated. Keep the
@@ -5847,6 +5927,229 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_instruction_parse(AssemblyBuild
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_pc_operand(AssemblyBuilder* builder, String8 text,
+                                                              BusterAarch64ControlOperandValue* value,
+                                                              AssemblyExpression* expression)
+{
+    if (!builder || !value || !expression || !assembly_expression_parse(builder, assembly_trim(text), expression))
+    {
+        return false;
+    }
+    *value = (BusterAarch64ControlOperandValue){
+        .kind = BUSTER_AARCH64_CONTROL_OPERAND_PC_RELATIVE,
+        .width = 64,
+    };
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_register_operand(String8 text, BusterAarch64ControlOperandValue* value)
+{
+    AssemblyRegister reg = {0};
+    if (!value || !assembly_aarch64_gpr_register_parse(assembly_trim(text), &reg))
+    {
+        return false;
+    }
+    *value = (BusterAarch64ControlOperandValue){
+        .value = reg.index,
+        .kind = BUSTER_AARCH64_CONTROL_OPERAND_REGISTER,
+        .width = (u8)reg.width,
+        .register31_role = reg.index == 31 ? (reg.stack_pointer ? BUSTER_AARCH64_CONTROL_REGISTER31_SP
+                                                                  : BUSTER_AARCH64_CONTROL_REGISTER31_ZR)
+                                          : BUSTER_AARCH64_CONTROL_REGISTER31_NONE,
+        .register_class = BUSTER_AARCH64_CONTROL_REGISTER_CLASS_GPR,
+    };
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_immediate(AssemblyBuilder* builder, String8 text, u8 width,
+                                                             BusterAarch64ControlOperandValue* value)
+{
+    u64 immediate = 0;
+    text = assembly_trim(text);
+    if (!text.length || text.pointer[0] != '#' || !assembly_aarch64_scalar_constant(builder, text, &immediate) ||
+        immediate > (u64)INT64_MAX || !value)
+    {
+        return false;
+    }
+    *value = (BusterAarch64ControlOperandValue){
+        .value = (s64)immediate,
+        .kind = BUSTER_AARCH64_CONTROL_OPERAND_IMMEDIATE,
+        .width = width,
+    };
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_row_select(String8 mnemonic, BusterAarch64ControlInstruction candidate,
+                                                              u32* row_index)
+{
+    if (!row_index)
+    {
+        return false;
+    }
+    bool conditional = mnemonic.length > 2 && assembly_word_equal(string_slice(mnemonic, 0, 2), S8("b."));
+    for (u32 index = 0; index < buster_aarch64_control_semantic_count(); index += 1)
+    {
+        BusterAarch64ControlSemanticRecord row = {0};
+        String8 row_mnemonic = {0};
+        if (!buster_aarch64_control_semantic_row(index, &row) ||
+            !buster_aarch64_control_semantic_string(row.mnemonic, &row_mnemonic))
+        {
+            continue;
+        }
+        if (row.form == BUSTER_AARCH64_CONTROL_FORM_B || row.form == BUSTER_AARCH64_CONTROL_FORM_BL ||
+            row.form == BUSTER_AARCH64_CONTROL_FORM_RET)
+        {
+            continue;
+        }
+        if ((conditional && row.form != BUSTER_AARCH64_CONTROL_FORM_B_COND) ||
+            (!conditional && !assembly_word_equal(mnemonic, row_mnemonic)))
+        {
+            continue;
+        }
+        candidate.row = (u16)index;
+        u32 ignored_word = 0;
+        if (buster_aarch64_control_semantic_encode(&candidate, &ignored_word))
+        {
+            *row_index = index;
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_instruction_parse(AssemblyBuilder* builder, String8 mnemonic,
+                                                                     String8 operands_text, AssemblyInstruction* instruction)
+{
+    if (!builder || !instruction)
+    {
+        return false;
+    }
+    String8 tokens[ASSEMBLY_MAX_OPERANDS] = {0};
+    u32 token_count = 0;
+    u64 cursor = 0;
+    while (cursor < operands_text.length)
+    {
+        if (token_count >= BUSTER_ARRAY_LENGTH(tokens))
+        {
+            return false;
+        }
+        String8 token = {0};
+        if (assembly_operand_split_next(operands_text, &cursor, &token) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
+        {
+            return false;
+        }
+        tokens[token_count++] = assembly_trim(token);
+    }
+    bool conditional = mnemonic.length > 2 && assembly_word_equal(string_slice(mnemonic, 0, 2), S8("b."));
+    u64 condition = 0;
+    BusterAarch64ControlInstruction candidate = {0};
+    u8 expression_mask = 0;
+    AssemblyExpression expressions[4] = {0};
+    if (conditional)
+    {
+        if (token_count != 1 || !assembly_aarch64_control_condition_parse(string_slice(mnemonic, 2, mnemonic.length), &condition))
+        {
+            return false;
+        }
+        candidate.operand_count = 2;
+        candidate.operands[0] = (BusterAarch64ControlOperandValue){
+            .kind = BUSTER_AARCH64_CONTROL_OPERAND_PC_RELATIVE,
+            .width = 64,
+        };
+        candidate.operands[1].kind = BUSTER_AARCH64_CONTROL_OPERAND_CONDITION;
+        candidate.operands[1].width = 4;
+        candidate.operands[1].value = (s64)condition;
+        if (!assembly_aarch64_control_pc_operand(builder, tokens[0], &candidate.operands[0], &expressions[0]))
+        {
+            return false;
+        }
+        expression_mask = 1;
+    }
+    else if (assembly_word_equal(mnemonic, S8("adr")) || assembly_word_equal(mnemonic, S8("adrp")))
+    {
+        if (token_count != 2 || !assembly_aarch64_control_register_operand(tokens[0], &candidate.operands[0]) ||
+            !assembly_aarch64_control_pc_operand(builder, tokens[1], &candidate.operands[1], &expressions[1]))
+        {
+            return false;
+        }
+        candidate.operand_count = 2;
+        expression_mask = 2;
+    }
+    else if (assembly_word_equal(mnemonic, S8("cbz")) || assembly_word_equal(mnemonic, S8("cbnz")))
+    {
+        if (token_count != 2 || !assembly_aarch64_control_register_operand(tokens[0], &candidate.operands[0]) ||
+            !assembly_aarch64_control_pc_operand(builder, tokens[1], &candidate.operands[1], &expressions[1]))
+        {
+            return false;
+        }
+        candidate.operand_count = 2;
+        expression_mask = 2;
+    }
+    else if (assembly_word_equal(mnemonic, S8("tbz")) || assembly_word_equal(mnemonic, S8("tbnz")))
+    {
+        if (token_count != 3 || !assembly_aarch64_control_register_operand(tokens[0], &candidate.operands[0]) ||
+            !assembly_aarch64_control_immediate(builder, tokens[1], 6, &candidate.operands[1]) ||
+            !assembly_aarch64_control_pc_operand(builder, tokens[2], &candidate.operands[2], &expressions[2]))
+        {
+            return false;
+        }
+        candidate.operand_count = 3;
+        expression_mask = 4;
+    }
+    else if (assembly_word_equal(mnemonic, S8("csel")) || assembly_word_equal(mnemonic, S8("csinc")) ||
+             assembly_word_equal(mnemonic, S8("csinv")) || assembly_word_equal(mnemonic, S8("csneg")))
+    {
+        if (token_count != 4 || !assembly_aarch64_control_register_operand(tokens[0], &candidate.operands[0]) ||
+            !assembly_aarch64_control_register_operand(tokens[1], &candidate.operands[1]) ||
+            !assembly_aarch64_control_register_operand(tokens[2], &candidate.operands[2]) ||
+            !assembly_aarch64_control_condition_parse(tokens[3], &condition))
+        {
+            return false;
+        }
+        candidate.operand_count = 4;
+        candidate.operands[3].value = (s64)condition;
+        candidate.operands[3].kind = BUSTER_AARCH64_CONTROL_OPERAND_CONDITION;
+        candidate.operands[3].width = 4;
+    }
+    else if (assembly_word_equal(mnemonic, S8("ldr")) || assembly_word_equal(mnemonic, S8("ldrsw")))
+    {
+        if (token_count != 2 || !assembly_aarch64_control_register_operand(tokens[0], &candidate.operands[0]) ||
+            !assembly_aarch64_control_pc_operand(builder, tokens[1], &candidate.operands[1], &expressions[1]))
+        {
+            return false;
+        }
+        candidate.operand_count = 2;
+        expression_mask = 2;
+    }
+    else if (assembly_word_equal(mnemonic, S8("prfm")))
+    {
+        if (token_count != 2 || !assembly_aarch64_control_immediate(builder, tokens[0], 5, &candidate.operands[0]) ||
+            !assembly_aarch64_control_pc_operand(builder, tokens[1], &candidate.operands[1], &expressions[1]))
+        {
+            return false;
+        }
+        candidate.operand_count = 2;
+        expression_mask = 2;
+    }
+    else
+    {
+        return false;
+    }
+    u32 row_index = UINT32_MAX;
+    if (!assembly_aarch64_control_row_select(mnemonic, candidate, &row_index))
+    {
+        return false;
+    }
+    candidate.row = (u16)row_index;
+    instruction->aarch64_control_instruction = candidate;
+    instruction->aarch64_control_row_index = row_index;
+    instruction->aarch64_control_expression_mask = expression_mask;
+    memcpy(instruction->aarch64_control_expressions, expressions, sizeof(expressions));
+    instruction->operand_count = candidate.operand_count;
+    instruction->size = 4;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder* builder, String8 statement, u32 line, u32 column,
                                                                  u64 offset, Target target, AssemblySyntax syntax)
 {
@@ -6040,6 +6343,17 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
                                     (u32)operands.length, S8("invalid instruction operands"));
             }
+            return;
+        }
+        builder->instructions[builder->instruction_count++] = instruction;
+        return;
+    }
+    if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_CONTROL)
+    {
+        if (!assembly_aarch64_control_instruction_parse(builder, mnemonic, operands, &instruction))
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                (u32)operands.length, S8("invalid AArch64 control instruction operands"));
             return;
         }
         builder->instructions[builder->instruction_count++] = instruction;
@@ -6492,7 +6806,8 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
     else
     {
         instruction.size = 4;
-        if (instruction.encoding_kind != ASSEMBLY_ENCODING_AARCH64_M1_GPR && instruction.operand_count &&
+        if (instruction.encoding_kind != ASSEMBLY_ENCODING_AARCH64_M1_GPR &&
+            instruction.encoding_kind != ASSEMBLY_ENCODING_AARCH64_CONTROL && instruction.operand_count &&
             instruction.operands[0].kind != ASSEMBLY_OPERAND_EXPRESSION)
         {
             assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
@@ -10031,6 +10346,56 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
                                     S8("AArch64 instruction could not be encoded"));
                 return;
+            }
+            assembly_emit_u32(builder, word);
+            continue;
+        }
+        if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_CONTROL)
+        {
+            u32 word = 0;
+            if (!buster_aarch64_control_semantic_encode(&instruction->aarch64_control_instruction, &word))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
+                                    S8("AArch64 control instruction could not be encoded"));
+                return;
+            }
+            for (u32 operand_index = 0; operand_index < 4; operand_index += 1)
+            {
+                if (!(instruction->aarch64_control_expression_mask & (u8)(1u << operand_index)))
+                {
+                    continue;
+                }
+                AssemblyExpression expression = instruction->aarch64_control_expressions[operand_index];
+                s64 target = 0;
+                if (!assembly_expression_target(builder, expression, &target))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
+                                        S8("AArch64 control relocation requires a local label"));
+                    return;
+                }
+                if (target < 0 || (u64)target > UINT64_MAX)
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
+                                        S8("AArch64 control target is out of range"));
+                    return;
+                }
+                u32 patched = 0;
+                BusterAarch64ControlFixupResult fixup = {0};
+                if (!buster_aarch64_control_semantic_fixup(
+                        instruction->aarch64_control_row_index, word,
+                        (BusterAarch64ControlFixupRequest){
+                            .target = builder->target,
+                            .place_address = instruction->offset,
+                            .target_address = (u64)target,
+                            .symbol_defined = true,
+                        },
+                        &patched, &fixup))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
+                                        S8("AArch64 control target is out of range or unaligned"));
+                    return;
+                }
+                word = patched;
             }
             assembly_emit_u32(builder, word);
             continue;
