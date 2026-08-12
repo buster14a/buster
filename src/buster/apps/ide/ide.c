@@ -22,6 +22,7 @@
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_complex_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_memory_semantics.h>
+#include <buster/lib/compiler/assembly/aarch64_alias_projection.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/ir/ir.h>
@@ -97,6 +98,7 @@
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_memory_semantics.c>
+#include <buster/lib/compiler/assembly/aarch64_alias_projection.c>
 #include <buster/lib/compiler/assembly/assembly.c>
 #include <buster/lib/compiler/assembly/x86_64_metadata.c>
 #include <buster/lib/compiler/ir/ir.c>

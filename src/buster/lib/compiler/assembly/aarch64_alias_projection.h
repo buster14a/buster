@@ -83,6 +83,7 @@ struct BusterA64AliasResult
 BUSTER_F_DECL u32 buster_a64_alias_projection_schema_version(void);
 BUSTER_F_DECL u32 buster_a64_alias_count(void);
 BUSTER_F_DECL u32 buster_a64_alias_canonical_count(void);
+BUSTER_F_DECL u32 buster_a64_alias_generic_executable_count(void);
 BUSTER_F_DECL String8 buster_a64_alias_denominator_sha256(void);
 BUSTER_F_DECL bool buster_a64_alias_row(u32 alias_ordinal, BusterA64AliasRowInfo* result);
 BUSTER_F_DECL bool buster_a64_alias_row_by_form(u32 alias_form_id, BusterA64AliasRowInfo* result);
@@ -94,12 +95,7 @@ BUSTER_F_DECL bool buster_a64_alias_preference_supported(u32 alias_form_id);
  * generic path accepts register/immediate values whose operand has one field;
  * transform-bearing or multi-field operands fail closed as UNSUPPORTED until
  * their owner module supplies an inverse transform. */
-BUSTER_F_DECL BusterA64AliasStatus buster_a64_alias_encode(Target target,
-                                                           BusterA64AliasInstruction const* instruction,
-                                                           u32* word);
-BUSTER_F_DECL BusterA64AliasStatus buster_a64_alias_decode_row(Target target,
-                                                               u32 alias_form_id, u32 word,
-                                                               BusterA64AliasResult* result);
-BUSTER_F_DECL BusterA64AliasStatus buster_a64_alias_decode(Target target, u32 word,
-                                                           BusterA64AliasResult* result);
+BUSTER_F_DECL BusterA64AliasStatus buster_a64_alias_encode(Target target, BusterA64AliasInstruction const* instruction, u32* word);
+BUSTER_F_DECL BusterA64AliasStatus buster_a64_alias_decode_row(Target target, u32 alias_form_id, u32 word, BusterA64AliasResult* result);
+BUSTER_F_DECL BusterA64AliasStatus buster_a64_alias_decode(Target target, u32 word, BusterA64AliasResult* result);
 BUSTER_F_DECL bool buster_a64_alias_validate(void);

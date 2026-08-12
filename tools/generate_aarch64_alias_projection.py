@@ -37,6 +37,22 @@ OWNER_CENSUS = {
 }
 
 
+def generic_condition_supported(program: list[str]) -> bool:
+    return (len(program) == 1 and program[0] in {"Unconditionally", "Never"}) or (
+        len(program) == 3 and program[1] in {"==", "!="}
+    )
+
+
+def generic_operand_projection_supported(row: dict[str, Any]) -> bool:
+    return all(int(operand.get("transform_count", 0)) == 0 and len(operand.get("fields", [])) == 1
+               for operand in row.get("operands", []))
+
+
+def generic_projection_executable(row: dict[str, Any]) -> bool:
+    program = list((row.get("alias") or {}).get("condition_program", []))
+    return generic_condition_supported(program) and program != ["Never"] and generic_operand_projection_supported(row)
+
+
 def digest(value: str) -> int:
     return int(value, 0)
 
@@ -155,6 +171,7 @@ def c_string(value: str) -> str:
 
 def emit_header(rows: list[dict[str, Any]], output: Path) -> None:
     projections = [projection_row(index, row) for index, row in enumerate(rows)]
+    executable_count = sum(generic_projection_executable(row) for row in rows)
     strings = bytearray()
     spans: dict[str, tuple[int, int]] = {}
 
@@ -172,16 +189,17 @@ def emit_header(rows: list[dict[str, Any]], output: Path) -> None:
         aid_off, aid_len = span(row["alias_id"])
         tid_off, tid_len = span(row["target_id"])
         records.append(
-            "    { %du, %du, %du, %du, %du, UINT64_C(0x%016x), UINT64_C(0x%016x), UINT32_C(0x%08x), UINT32_C(0x%08x), %du, %du, %du, %du, %du, %du, %du, %d },"
+            "    { %du, %du, %du, %du, %du, UINT64_C(0x%016x), UINT64_C(0x%016x), UINT32_C(0x%08x), UINT32_C(0x%08x), %du, %du, %d, %du, %du, %du, %du, %du },"
             % (
                 row["alias_ordinal"], row["alias_form_index"], row["target_form_index"],
                 aid_off, tid_off,
                 digest(row["alias_source_digest"]), digest(row["target_source_digest"]),
                 int(row["fixed_mask"], 0), int(row["fixed_value"], 0),
-                aid_len, tid_len, {"memory": 0, "scalar_integer": 1, "direct_gpr": 2, "general_nonmemory": 3,
+                aid_len, tid_len, row["preference_rank"],
+                {"memory": 0, "scalar_integer": 1, "direct_gpr": 2, "general_nonmemory": 3,
                  "system": 4, "complex_simd_fp": 5, "direct_simd": 6}.get(row["target_owner"], 255),
                 row["operand_count"], row["field_count"], len(row["condition_program"]),
-                len(row["preference_condition_program"]), row["preference_rank"],
+                len(row["preference_condition_program"]),
             )
         )
     pool = ",\n".join(", ".join(f"0x{byte:02x}" for byte in strings[index:index + 32]) for index in range(0, len(strings), 32))
@@ -198,6 +216,7 @@ def emit_header(rows: list[dict[str, Any]], output: Path) -> None:
 #define BUSTER_A64_ALIAS_PROJECTION_MAX_OPERANDS {MAX_OPERANDS}u
 #define BUSTER_A64_ALIAS_PROJECTION_MAX_FIELDS {MAX_FIELDS}u
 #define BUSTER_A64_ALIAS_PROJECTION_MAX_CONDITION_TOKENS {MAX_CONDITION_TOKENS}u
+#define BUSTER_A64_ALIAS_PROJECTION_GENERIC_EXECUTABLE_COUNT {executable_count}u
 #define BUSTER_A64_ALIAS_PROJECTION_CANONICAL_SHA256 "{CANONICAL_SHA256}"
 #define BUSTER_A64_ALIAS_PROJECTION_DENOMINATOR_SHA256 "{ALIAS_DENOMINATOR_SHA256}"
 #define BUSTER_A64_ALIAS_PROJECTION_STRING_POOL_SIZE {len(strings)}u
@@ -248,6 +267,7 @@ def emit_outputs(canonical: list[dict[str, Any]], aliases: list[dict[str, Any]],
         census[row["target_owner"]] = census.get(row["target_owner"], 0) + 1
     if census != OWNER_CENSUS:
         raise SystemExit(f"target-owner census changed: {census!r}")
+    generic_executable_count = sum(generic_projection_executable(row) for row in aliases)
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "form_count": FORM_COUNT,
@@ -261,6 +281,8 @@ def emit_outputs(canonical: list[dict[str, Any]], aliases: list[dict[str, Any]],
         "max_condition_tokens": max(len(row["alias"].get("condition_program", [])) for row in aliases),
         "max_preference_condition_tokens": max(len(row["alias"].get("preference_condition_program", [])) for row in aliases),
         "nested_preferences": sum(bool(row["alias"].get("preferences")) for row in aliases),
+        "generic_executable_count": generic_executable_count,
+        "generic_unsupported_count": ALIAS_COUNT - generic_executable_count,
         "outputs": {
             "header": output_header.name,
             "jsonl": output_jsonl.name,
