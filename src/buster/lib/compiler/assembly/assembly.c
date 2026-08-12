@@ -6167,6 +6167,80 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_pstate(String8 text, u32* op2, 
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_raw_decimal(String8 text, u64* cursor, u32 maximum, u32* value)
+{
+    if (!cursor || !value || *cursor >= text.length)
+    {
+        return false;
+    }
+    u64 start = *cursor;
+    u32 parsed = 0;
+    while (*cursor < text.length)
+    {
+        char8 digit = text.pointer[*cursor];
+        if (digit < '0' || digit > '9')
+        {
+            break;
+        }
+        if (parsed > (UINT32_MAX - (u32)(digit - '0')) / 10u)
+        {
+            return false;
+        }
+        parsed = parsed * 10u + (u32)(digit - '0');
+        *cursor += 1;
+    }
+    if (*cursor == start || parsed > maximum)
+    {
+        return false;
+    }
+    *value = parsed;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_raw_reg_encoding(String8 text, u16* packed)
+{
+    if (!packed || !text.pointer || !text.length)
+    {
+        return false;
+    }
+    text = assembly_trim(text);
+    if (text.length < 4 || (text.pointer[0] != 's' && text.pointer[0] != 'S') ||
+        (text.pointer[1] != '2' && text.pointer[1] != '3') || text.pointer[2] != '_')
+    {
+        return false;
+    }
+    u32 op0 = (u32)(text.pointer[1] - '0');
+    u32 op1 = 0, crn = 0, crm = 0, op2 = 0;
+    u64 cursor = 3;
+    if (!assembly_aarch64_system_raw_decimal(text, &cursor, 7, &op1) || cursor >= text.length || text.pointer[cursor++] != '_' ||
+        cursor >= text.length || (text.pointer[cursor] != 'c' && text.pointer[cursor] != 'C'))
+    {
+        return false;
+    }
+    cursor += 1;
+    if (!assembly_aarch64_system_raw_decimal(text, &cursor, 15, &crn) || cursor >= text.length || text.pointer[cursor++] != '_' ||
+        cursor >= text.length || (text.pointer[cursor] != 'c' && text.pointer[cursor] != 'C'))
+    {
+        return false;
+    }
+    cursor += 1;
+    if (!assembly_aarch64_system_raw_decimal(text, &cursor, 15, &crm) || cursor >= text.length || text.pointer[cursor++] != '_')
+    {
+        return false;
+    }
+    if (!assembly_aarch64_system_raw_decimal(text, &cursor, 7, &op2) || cursor != text.length)
+    {
+        return false;
+    }
+    u16 value = (u16)((op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2);
+    if (op0 < 2 || op0 > 3)
+    {
+        return false;
+    }
+    *packed = value;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_reg_encoding(String8 text, bool read, u16* packed)
 {
     if (!packed)
@@ -6174,7 +6248,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_reg_encoding(String8 text, bool
         return false;
     }
     text = assembly_trim(text);
-    if (aarch64_system_register_parse_raw_s3(text, packed))
+    if (assembly_aarch64_system_raw_reg_encoding(text, packed))
     {
         return true;
     }

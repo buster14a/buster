@@ -2593,9 +2593,49 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                aarch64_system.bytes.length == sizeof(expected_aarch64_system) &&
                                memcmp(aarch64_system.bytes.pointer, expected_aarch64_system, sizeof(expected_aarch64_system)) == 0);
     AssemblyEncodeResult aarch64_system_raw = assembly_encode(
-        arguments->arena, S8("mrs x1, S3_3_C7_C8_1\nmsr S3_3_C7_C8_1, x1\n"),
+        arguments->arena,
+        S8("mrs x0, S2_0_C0_C0_0\n"
+           "msr S2_0_C0_C0_0, x0\n"
+           "mrs x1, S3_3_C7_C8_1\n"
+           "msr S3_3_C7_C8_1, x1\n"),
         (AssemblyEncodeOptions){.target = aarch64_m1_target});
-    BUSTER_TEST(arguments, aarch64_system_raw.diagnostic_count == 0 && aarch64_system_raw.bytes.length == 8);
+    static u8 const expected_aarch64_system_raw[] = {
+        0x00, 0x00, 0x30, 0xd5,
+        0x00, 0x00, 0x10, 0xd5,
+        0x21, 0x78, 0x3b, 0xd5,
+        0x21, 0x78, 0x1b, 0xd5,
+    };
+    BUSTER_TEST(arguments, aarch64_system_raw.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_system_raw.bytes, expected_aarch64_system_raw,
+                                                         sizeof(expected_aarch64_system_raw)));
+    static String8 const invalid_aarch64_system_raw[] = {
+        S8("mrs x0, S0_0_C0_C0_0\n"),
+        S8("mrs x0, S1_0_C0_C0_0\n"),
+        S8("mrs x0, S4_0_C0_C0_0\n"),
+        S8("mrs x0, S2_0_C0_C0\n"),
+        S8("mrs x0, S2_0_C0_C0_0x\n"),
+        S8("mrs x0, {S2_0_C0_C0_0}\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_system_raw); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_raw = assembly_encode(
+            arguments->arena, invalid_aarch64_system_raw[invalid_index], (AssemblyEncodeOptions){.target = aarch64_m1_target});
+        BUSTER_TEST(arguments, invalid_raw.diagnostic_count == 1 && invalid_raw.bytes.length == 0);
+    }
+    AssemblyEncodeResult aarch64_system_raw_transaction = assembly_encode(
+        arguments->arena,
+        S8("mrs x0, S2_0_C0_C0_0\n"
+           "mrs x0, {S2_0_C0_C0_0}\n"
+           "msr S3_3_C7_C8_1, x1\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    static u8 const expected_aarch64_system_raw_transaction[] = {
+        0x00, 0x00, 0x30, 0xd5,
+        0x21, 0x78, 0x1b, 0xd5,
+    };
+    BUSTER_TEST(arguments, aarch64_system_raw_transaction.diagnostic_count == 1 &&
+                               assembly_test_bytes_equal(aarch64_system_raw_transaction.bytes,
+                                                         expected_aarch64_system_raw_transaction,
+                                                         sizeof(expected_aarch64_system_raw_transaction)));
     AssemblyEncodeResult aarch64_system_bad = assembly_encode(
         arguments->arena, S8("mrs w0, nzcv\nmsr nzcv, w0\ndmb #0\n"),
         (AssemblyEncodeOptions){.target = aarch64_m1_target});
