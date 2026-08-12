@@ -961,6 +961,31 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_MOVRS));
     BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_VMX));
     BUSTER_TEST(arguments, target_cpu_feature_has(feature_invocation.target, TARGET_CPU_FEATURE_X86_SVM));
+    String8 scalar_feature_command_line[] = {
+        S8("-c"), S8("--target=x86_64-linux"), S8("-march=baseline"),
+        S8("-mattr=+avx,+f16c,+fma,+ssse3,+sse4.1,+sse4.2,+bmi2,+adx,+movbe,+rdrand,+rdseed,+waitpkg,+pku,+ptwrite,+serialize,+clflushopt,+clwb,+fsgsbase,+rtm,+tsxldtrk,+uintr,+prefetchwt1"),
+        S8("-mattr=-fma,+fma,-ssse3,+ssse3"), S8("source.c"),
+    };
+    CompilerDriverInvocation scalar_feature_invocation =
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(scalar_feature_command_line));
+    BUSTER_TEST(arguments, scalar_feature_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+    TargetCpuFeatures scalar_features = scalar_feature_invocation.target.cpu_features;
+    TargetCpuFeature scalar_feature_bits[] = {
+        TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_F16C, TARGET_CPU_FEATURE_X86_FMA,
+        TARGET_CPU_FEATURE_X86_SSSE3, TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2,
+        TARGET_CPU_FEATURE_X86_BMI2, TARGET_CPU_FEATURE_X86_ADX, TARGET_CPU_FEATURE_X86_MOVBE,
+        TARGET_CPU_FEATURE_X86_RDRAND, TARGET_CPU_FEATURE_X86_RDSEED, TARGET_CPU_FEATURE_X86_WAITPKG,
+        TARGET_CPU_FEATURE_X86_PKU, TARGET_CPU_FEATURE_X86_PTWRITE, TARGET_CPU_FEATURE_X86_SERIALIZE,
+        TARGET_CPU_FEATURE_X86_CLFLUSHOPT, TARGET_CPU_FEATURE_X86_CLWB, TARGET_CPU_FEATURE_X86_FSGSBASE,
+        TARGET_CPU_FEATURE_X86_RTM, TARGET_CPU_FEATURE_X86_TSXLDTRK, TARGET_CPU_FEATURE_X86_UINTR,
+        TARGET_CPU_FEATURE_X86_PREFETCHWT1,
+    };
+    for (u32 scalar_index = 0; scalar_index < BUSTER_ARRAY_LENGTH(scalar_feature_bits); scalar_index += 1)
+    {
+        BUSTER_TEST(arguments, target_cpu_features_contains(scalar_features, scalar_feature_bits[scalar_index]));
+    }
+    BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, scalar_feature_invocation.target),
+                       S8("adx,avx,bmi2,clflushopt,clwb,f16c,fma,fsgsbase,movbe,pku,prefetchwt1,ptwrite,rdrand,rdseed,rtm,serialize,sse2,sse4.1,sse4.2,ssse3,tsxldtrk,uintr,waitpkg"));
     String8 ace_feature_command_line[] = {
         S8("--target=x86_64-linux"),
         S8("-march=haswell"),

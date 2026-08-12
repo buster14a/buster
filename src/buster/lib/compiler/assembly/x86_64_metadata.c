@@ -7319,6 +7319,49 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_canonical_feature_matches(u32 offse
         return buster_x86_metadata_feature_input_contains_all(input, S8("xsave"), S8(""), S8(""), S8(""));
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("XSAVES")))
         return buster_x86_metadata_feature_input_contains_all(input, S8("xsaves"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("F16C")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("f16c"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("FMA")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("fma"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SSSE3")) ||
+        buster_x86_metadata_pool_string_equal_literal(offset, S8("SSSE3MMX")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("ssse3"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SSE4")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("sse4.1"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SSE42")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("sse4.2"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("BMI2")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("bmi2"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("ADX")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("adx"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("MOVBE")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("movbe"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("RDRAND")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("rdrand"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("RDSEED")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("rdseed"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("WAITPKG")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("waitpkg"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("PKU")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("pku"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("PTWRITE")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("ptwrite"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("SERIALIZE")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("serialize"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("CLFLUSHOPT")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("clflushopt"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("CLWB")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("clwb"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("RDWRFSGS")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("fsgsbase"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("RTM")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("rtm"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("TSX_LDTRK")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("tsxldtrk"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("UINTR")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("uintr"), S8(""), S8(""), S8(""));
+    if (buster_x86_metadata_pool_string_equal_literal(offset, S8("PREFETCHWT1")))
+        return buster_x86_metadata_feature_input_contains_all(input, S8("prefetchwt1"), S8(""), S8(""), S8(""));
     if (buster_x86_metadata_pool_string_equal_literal(offset, S8("ACE_1")))
     {
         // The driver exposes the canonical CLI spelling, while direct
@@ -7385,6 +7428,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_canonical_feature_matches(u32 offse
         else if (buster_x86_metadata_pool_string_contains(offset, S8("BMI2"))) secondary = S8("bmi2");
         else if (buster_x86_metadata_pool_string_contains(offset, S8("LZCNT"))) secondary = S8("lzcnt");
         else if (buster_x86_metadata_pool_string_contains(offset, S8("POPCNT"))) secondary = S8("popcnt");
+        else if (buster_x86_metadata_pool_string_contains(offset, S8("ADX"))) secondary = S8("adx");
+        else if (buster_x86_metadata_pool_string_contains(offset, S8("MOVBE"))) secondary = S8("movbe");
         else if (buster_x86_metadata_pool_string_contains(offset, S8("AMX_MOVRS")))
             secondary = S8("amx-movrs");
         else if (buster_x86_metadata_pool_string_contains(offset, S8("AMX"))) secondary = S8("amx-tile");

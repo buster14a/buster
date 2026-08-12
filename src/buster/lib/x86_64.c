@@ -79,7 +79,8 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
 {
     TargetCpuFeatures result = target_cpu_features_singleton(TARGET_CPU_FEATURE_X86_SSE2);
     CpuId basic = input.basic;
-    if (basic.ecx & (UINT32_C(0x1)))
+    bool has_basic_leaf_1 = input.maximum_basic_leaf >= UINT32_C(1);
+    if (has_basic_leaf_1 && (basic.ecx & (UINT32_C(0x1))))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSE3);
     }
@@ -92,15 +93,15 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_VMX);
     }
-    if (basic.ecx & (UINT32_C(0x2000)))
+    if (has_basic_leaf_1 && (basic.ecx & (UINT32_C(0x2000))))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_CX16);
     }
-    if (basic.ecx & (UINT32_C(0x800000)))
+    if (has_basic_leaf_1 && (basic.ecx & (UINT32_C(0x800000))))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_POPCNT);
     }
-    if (basic.ecx & (UINT32_C(0x2000000)))
+    if (has_basic_leaf_1 && (basic.ecx & (UINT32_C(0x2000000))))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_AES);
     }
@@ -109,17 +110,39 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_XSAVE);
     }
-    if (basic.ecx & (UINT32_C(0x2)))
+    if (has_basic_leaf_1 && (basic.ecx & (UINT32_C(0x2))))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_PCLMUL);
+    }
+    // CPUID.01H:ECX advertises the scalar/SSE extensions independently of
+    // OS-managed vector state.
+    if (input.maximum_basic_leaf >= UINT32_C(1) && (basic.ecx & (UINT32_C(0x200))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSSE3);
+    }
+    if (input.maximum_basic_leaf >= UINT32_C(1) && (basic.ecx & (UINT32_C(0x80000))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSE4_1);
+    }
+    if (input.maximum_basic_leaf >= UINT32_C(1) && (basic.ecx & (UINT32_C(0x100000))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSE4_2);
+    }
+    if (input.maximum_basic_leaf >= UINT32_C(1) && (basic.ecx & (UINT32_C(0x400000))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_MOVBE);
+    }
+    if (input.maximum_basic_leaf >= UINT32_C(1) && (basic.ecx & (UINT32_C(0x40000000))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_RDRAND);
     }
     if (input.maximum_extended_leaf >= UINT32_C(0x80000001) && (input.extended_basic.ecx & (UINT32_C(0x20))))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_LZCNT);
     }
 
-    bool has_osxsave = (basic.ecx & (UINT32_C(0x8000000))) != 0;
-    bool has_avx_hardware = (basic.ecx & (UINT32_C(0x10000000))) != 0;
+    bool has_osxsave = has_basic_leaf_1 && (basic.ecx & (UINT32_C(0x8000000))) != 0;
+    bool has_avx_hardware = has_basic_leaf_1 && (basic.ecx & (UINT32_C(0x10000000))) != 0;
     bool avx_state = has_osxsave && (input.xcr0 & UINT64_C(0x6)) == UINT64_C(0x6);
     bool avx_usable = has_avx_hardware && avx_state;
     bool avx512_state = avx_usable && (input.xcr0 & UINT64_C(0xe0)) == UINT64_C(0xe0);
@@ -166,12 +189,80 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
     if (avx_usable)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_AVX);
+        if (basic.ecx & (UINT32_C(0x1000)))
+        {
+            result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_FMA);
+        }
+        if (basic.ecx & (UINT32_C(0x20000000)))
+        {
+            result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_F16C);
+        }
     }
 
     CpuId leaf_7_0 = input.leaf_7_0;
     CpuId leaf_7_1 = input.leaf_7_1;
     bool has_leaf_7 = input.maximum_basic_leaf >= 7;
     bool has_leaf_7_1 = has_leaf_7 && leaf_7_0.eax >= 1;
+    // CPUID.07H:0.EBX advertises scalar bit-manipulation, transaction,
+    // random-seed, and cache-flush extensions.
+    if (has_leaf_7 && (leaf_7_0.ebx & (UINT32_C(0x1))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_FSGSBASE);
+    }
+    if (has_leaf_7 && (leaf_7_0.ebx & (UINT32_C(0x100))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_BMI2);
+    }
+    if (has_leaf_7 && (leaf_7_0.ebx & (UINT32_C(0x800))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_RTM);
+    }
+    if (has_leaf_7 && (leaf_7_0.ebx & (UINT32_C(0x40000))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_RDSEED);
+    }
+    if (has_leaf_7 && (leaf_7_0.ebx & (UINT32_C(0x80000))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_ADX);
+    }
+    if (has_leaf_7 && (leaf_7_0.ebx & (UINT32_C(0x800000))) )
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_CLFLUSHOPT);
+    }
+    if (has_leaf_7 && (leaf_7_0.ebx & (UINT32_C(0x1000000))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_CLWB);
+    }
+    // CPUID.07H:0.ECX/EDX advertises the remaining scalar extensions.
+    if (has_leaf_7 && (leaf_7_0.ecx & (UINT32_C(0x1))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_PREFETCHWT1);
+    }
+    if (has_leaf_7 && (leaf_7_0.ecx & (UINT32_C(0x8))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_PKU);
+    }
+    if (has_leaf_7 && (leaf_7_0.ecx & (UINT32_C(0x20))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_WAITPKG);
+    }
+    if (has_leaf_7 && (leaf_7_0.edx & (UINT32_C(0x20))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_UINTR);
+    }
+    if (has_leaf_7 && (leaf_7_0.edx & (UINT32_C(0x4000))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SERIALIZE);
+    }
+    if (has_leaf_7 && (leaf_7_0.edx & (UINT32_C(0x10000))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_TSXLDTRK);
+    }
+    if (input.maximum_basic_leaf >= UINT32_C(0x14) && (input.leaf_14_0.ebx & (UINT32_C(0x10))))
+    {
+        // CPUID.14H:0.EBX[4] is Intel PTWRITE.
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_PTWRITE);
+    }
     if (has_leaf_7 && (leaf_7_0.ebx & (UINT32_C(0x4))))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SGX);
@@ -511,6 +602,10 @@ TargetCpuFeatures cpu_detect_features_x86_64(void)
         {
             input.leaf_7_1 = cpuid(7, 1);
         }
+    }
+    if (input.maximum_basic_leaf >= UINT32_C(0x14))
+    {
+        input.leaf_14_0 = cpuid(UINT32_C(0x14), 0);
     }
     if (input.maximum_basic_leaf >= UINT32_C(0xd))
     {

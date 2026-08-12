@@ -135,6 +135,49 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
     BUSTER_TEST(arguments, ace_bsr0_without_feature.diagnostic_count == 1 &&
                                ace_bsr0_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    Target scalar_feature_target = x86_target;
+    scalar_feature_target.cpu_model = CPU_MODEL_BASELINE;
+    scalar_feature_target.cpu_features_explicit = true;
+    scalar_feature_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_F16C,
+        TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_SSE4_2, TARGET_CPU_FEATURE_X86_BMI2,
+        TARGET_CPU_FEATURE_X86_RDRAND}, 7);
+    AssemblyEncodeResult f16c_without_feature = assembly_encode(
+        arguments->arena, S8("vcvtph2ps xmm0, xmm1\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult f16c_with_feature = assembly_encode(
+        arguments->arena, S8("vcvtph2ps xmm0, xmm1\n"),
+        (AssemblyEncodeOptions){.target = scalar_feature_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult fma_without_feature = assembly_encode(
+        arguments->arena, S8("vfmadd132ps xmm0, xmm1, xmm2\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult fma_with_feature = assembly_encode(
+        arguments->arena, S8("vfmadd132ps xmm0, xmm1, xmm2\n"),
+        (AssemblyEncodeOptions){.target = scalar_feature_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult bmi2_without_feature = assembly_encode(
+        arguments->arena, S8("bzhi rax, rbx, rcx\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult bmi2_with_feature = assembly_encode(
+        arguments->arena, S8("bzhi rax, rbx, rcx\n"),
+        (AssemblyEncodeOptions){.target = scalar_feature_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult sse42_without_feature = assembly_encode(
+        arguments->arena, S8("crc32 eax, ecx\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult sse42_with_feature = assembly_encode(
+        arguments->arena, S8("crc32 eax, ecx\n"),
+        (AssemblyEncodeOptions){.target = scalar_feature_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, f16c_without_feature.diagnostic_count == 1 &&
+                               f16c_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                               f16c_with_feature.diagnostic_count == 0);
+    BUSTER_TEST(arguments, fma_without_feature.diagnostic_count == 1 &&
+                               fma_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                               fma_with_feature.diagnostic_count == 0);
+    BUSTER_TEST(arguments, bmi2_without_feature.diagnostic_count == 1 &&
+                               bmi2_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                               bmi2_with_feature.diagnostic_count == 0);
+    BUSTER_TEST(arguments, sse42_without_feature.diagnostic_count == 1 &&
+                               sse42_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                               sse42_with_feature.diagnostic_count == 0);
     Target sse4a_target = x86_target;
     sse4a_target.cpu_model = CPU_MODEL_AMD_AMD_FAMILY_10;
     sse4a_target.cpu_features_explicit = true;

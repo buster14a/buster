@@ -24,6 +24,7 @@ struct X86_64CpuFeatureInput
     CpuId extended_basic;
     CpuId leaf_7_0;
     CpuId leaf_7_1;
+    CpuId leaf_14_0;
     CpuId leaf_d_1;
     CpuId leaf_1e_0;
     CpuId leaf_1e_1;
