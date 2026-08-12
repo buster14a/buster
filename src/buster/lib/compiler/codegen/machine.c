@@ -339,6 +339,16 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_ADD_RSP] = {
         .name = S8_INITIALIZER("x64_add_rsp"),
     },
+    [MACHINE_X64_STACK_ALLOCATE] = {
+        .name = S8_INITIALIZER("x64_stack_allocate"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        // The count is consumed in RCX by the probe loop. The result itself
+        // is the constrained RAX definition, so only RCX is an implicit
+        // clobber beyond the declared operands.
+        .clobber_mask = 1u << MACHINE_X64_RCX,
+    },
     [MACHINE_X64_ATOMIC_STORE_XCHG] = {
         .name = S8_INITIALIZER("x64_atomic_store_xchg"),
         .operand_count = 2,

@@ -314,6 +314,11 @@ typedef enum MachineOpcode
     MACHINE_X64_PUSH_REGISTER, // use
     MACHINE_X64_SUB_RSP,       // payload bytes
     MACHINE_X64_ADD_RSP,       // payload bytes
+    // Runtime stack allocation: def = the resulting aligned RSP, use = the
+    // byte count. The encoder keeps the count in RCX while probing one page
+    // at a time and returns the final RSP in RAX. Payload is the required
+    // alignment (at least sixteen for the System V call boundary).
+    MACHINE_X64_STACK_ALLOCATE,
     // Indirect call through a pointer value; the callee rides in R10 so
     // neither the argument registers nor the variadic AL setup can clobber
     // it. Same flags as CALL_DIRECT.

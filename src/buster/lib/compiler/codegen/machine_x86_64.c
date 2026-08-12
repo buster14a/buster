@@ -715,8 +715,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     break;
     case IR_OPCODE_STACK_SAVE:
     {
-        // With STACK_ALLOCATE outside the subset, RSP is constant after the
-        // prologue, so save/restore pairs reduce to exact RSP copies.
+        // RSP is a physical operand, so the scheduler and allocators keep
+        // this checkpoint ordered with every stack-affecting row. The value
+        // remains an ordinary virtual register and is spilled around calls
+        // when its lifetime crosses one.
         if (result_register == UINT32_MAX)
         {
             return false;
@@ -725,6 +727,37 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                     machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RSP)},
                                                        .opcode = MACHINE_X64_MOV_RR,
+                                                   });
+        machine_x64_define(selector, result_register, row);
+        return true;
+    }
+    break;
+    case IR_OPCODE_STACK_ALLOCATE:
+    {
+        if (result_register == UINT32_MAX || !instruction->immediate_count || !instruction->immediates)
+        {
+            return false;
+        }
+        u64 requested_alignment = instruction->immediates[0];
+        if (requested_alignment > UINT32_MAX)
+        {
+            return false;
+        }
+        u32 stack_alignment = BUSTER_MAX((u32)requested_alignment, 16u);
+        if (!stack_alignment || (stack_alignment & (stack_alignment - 1u)) != 0)
+        {
+            return false;
+        }
+        u32 size_register;
+        if (!machine_x64_operand_register(selector, instruction->operands[0], &size_register))
+        {
+            return false;
+        }
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, size_register)},
+                                                       .payload = stack_alignment,
+                                                       .opcode = MACHINE_X64_STACK_ALLOCATE,
                                                    });
         machine_x64_define(selector, result_register, row);
         return true;
@@ -4153,6 +4186,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
         case MACHINE_X64_COPY_PTR_FROM_FRAME:
             capacity64 += ((u64)capacity_row->payload / 8 + 4) * 24;
             break;
+        case MACHINE_X64_STACK_ALLOCATE:
+            // Alignment, the page-probe loop, the final subtract/touch, and
+            // the RSP result are substantially larger than a normal row.
+            capacity64 += 64;
+            break;
         case MACHINE_X64_FCMP_SET:
             capacity64 += 40;
             break;
@@ -5111,6 +5149,61 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 machine_x64_emit8(&encoder, 0x81);
                 machine_x64_emit8(&encoder, 0xc4);
                 machine_x64_emit32(&encoder, instruction->payload);
+            }
+            break;
+            case MACHINE_X64_STACK_ALLOCATE:
+            {
+                // The constrained row places the runtime byte count in RCX
+                // and receives the resulting RSP in RAX. Keep the count
+                // unsigned, round it exactly as the canonical emitter does,
+                // and touch every page before the final residual subtract so
+                // guard-page stacks cannot be skipped.
+                u32 stack_alignment = instruction->payload;
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x81);
+                machine_x64_emit8(&encoder, 0xc1); // add rcx, alignment - 1
+                machine_x64_emit32(&encoder, stack_alignment - 1);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x81);
+                machine_x64_emit8(&encoder, 0xe1); // and rcx, -alignment
+                machine_x64_emit32(&encoder, 0 - stack_alignment);
+
+                u32 compare_offset = encoder.count;
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x81);
+                machine_x64_emit8(&encoder, 0xf9); // cmp rcx, 4096
+                machine_x64_emit32(&encoder, 4096);
+                u32 short_exit = encoder.count;
+                machine_x64_emit8(&encoder, 0x72); // jb final residual subtract
+                machine_x64_emit8(&encoder, 0);
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x81);
+                machine_x64_emit8(&encoder, 0xec); // sub rsp, 4096
+                machine_x64_emit32(&encoder, 4096);
+                machine_x64_emit8(&encoder, 0xf6);
+                machine_x64_emit8(&encoder, 0x04);
+                machine_x64_emit8(&encoder, 0x24);
+                machine_x64_emit8(&encoder, 0); // test byte [rsp], 0
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x81);
+                machine_x64_emit8(&encoder, 0xe9); // sub rcx, 4096
+                machine_x64_emit32(&encoder, 4096);
+                u32 loop_back = encoder.count;
+                machine_x64_emit8(&encoder, 0xeb);
+                machine_x64_emit8(&encoder, 0);
+                u32 residual = encoder.count;
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x29);
+                machine_x64_emit8(&encoder, 0xcc); // sub rsp, rcx
+                machine_x64_emit8(&encoder, 0xf6);
+                machine_x64_emit8(&encoder, 0x04);
+                machine_x64_emit8(&encoder, 0x24);
+                machine_x64_emit8(&encoder, 0); // test byte [rsp], 0
+                machine_x64_emit8(&encoder, 0x48);
+                machine_x64_emit8(&encoder, 0x89);
+                machine_x64_emit8(&encoder, 0xe0); // mov rax, rsp
+                encoder.bytes[short_exit + 1] = (u8)(residual - (short_exit + 2));
+                encoder.bytes[loop_back + 1] = (u8)(compare_offset - (loop_back + 2));
             }
             break;
             case MACHINE_X64_ATOMIC_STORE_XCHG:

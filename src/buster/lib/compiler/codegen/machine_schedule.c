@@ -63,6 +63,7 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_barrier(u16 opcode)
         case MACHINE_X64_PUSH_REGISTER:
         case MACHINE_X64_SUB_RSP:
         case MACHINE_X64_ADD_RSP:
+        case MACHINE_X64_STACK_ALLOCATE:
         case MACHINE_A64_READ_SP:
             return true;
         default:

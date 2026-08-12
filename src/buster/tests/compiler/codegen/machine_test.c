@@ -173,6 +173,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, copy_info && (copy_info->operand_info[1] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u)) == MACHINE_OPERAND_ROLE_USE);
     MachineOpcodeInfo const* return_info = machine_opcode_info(MACHINE_OPCODE_SKELETON_RETURN);
     BUSTER_TEST(arguments, return_info && (return_info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR));
+    MachineOpcodeInfo const* stack_allocate_info = machine_opcode_info(MACHINE_X64_STACK_ALLOCATE);
+    BUSTER_TEST(arguments, stack_allocate_info && (stack_allocate_info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE));
     BUSTER_TEST(arguments, machine_opcode_info(MACHINE_OPCODE_COUNT) == 0);
 
     MachineFunction function = machine_test_build_function(arguments->arena);
@@ -556,6 +558,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "    return acc ^ k1 ^ k2 ^ k3 ^ k4 ^ k5 ^ k6 ^ k7 ^ k8 ^ k9 ^ k10 ^ k11 ^ k12 ^ k13 ^ k14 ^ k15 ^ k16 ^ k17 ^ k18 ^ k19 ^\n"
                                   "           k20 ^ k21 ^ k22;\n"
                                   "}\n"
+                                  "static int vla_consume(const int* values, int count, int a, int b, int c, int d, int e) { return values[0] + values[count - 1] + a + e; }\n"
+                                  "int vla_sum(int seed, int count) { int n = (count & 2047) + 1; int total = 0; for (int i = 0; i < 2; i += 1) { int values[n]; values[0] = seed + i; values[n - 1] = seed + count + i; total += vla_consume(values, n, seed, i, 1, 2, 3); } return total; }\n"
                                   "typedef __int128 MachineWideSigned;\n"
                                   "typedef unsigned __int128 MachineWideUnsigned;\n"
                                   "unsigned long u128_to_u64(MachineWideUnsigned v) { return (unsigned long)v; }\n"
@@ -648,6 +652,40 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         {
             MachineSelectResult seven_selected = machine_select_canonical_function(arguments->arena, machine_program, seven_function, machine_target);
             BUSTER_TEST(arguments, seven_selected.supported);
+        }
+        // A variable-length local must stay on the machine path: the
+        // dynamic allocation row pins its runtime size in RCX, probes the
+        // pages, and returns the aligned pointer in RAX. The call while the
+        // VLA is live proves the stack checkpoint and outgoing argument rows
+        // remain ordered by the scheduler barriers.
+        IrFunction* vla_function = machine_test_ir_function_find(machine_module, S8("vla_sum"));
+        BUSTER_TEST(arguments, vla_function != 0);
+        if (vla_function)
+        {
+            MachineSelectResult vla_selected = machine_select_canonical_function(arguments->arena, machine_program, vla_function, machine_target);
+            BUSTER_TEST_RAW(arguments, vla_selected.supported,
+                            string_format(arguments->arena, S8("vla select failed at opcode {u32}"), (u32)vla_selected.failed_opcode));
+            if (vla_selected.supported)
+            {
+                bool saw_allocate = false;
+                bool saw_save = false;
+                bool saw_restore = false;
+                for (u32 row_index = 0; row_index < vla_selected.function.instruction_count; row_index += 1)
+                {
+                    MachineInstruction* row = vla_selected.function.instructions + row_index;
+                    saw_allocate |= row->opcode == MACHINE_X64_STACK_ALLOCATE;
+                    saw_save |= row->opcode == MACHINE_X64_MOV_RR && machine_ref_kind(row->operands[1]) == MACHINE_REF_PHYSICAL_REGISTER &&
+                                machine_ref_payload(row->operands[1]) == MACHINE_X64_RSP;
+                    saw_restore |= row->opcode == MACHINE_X64_MOV_RR && machine_ref_kind(row->operands[0]) == MACHINE_REF_PHYSICAL_REGISTER &&
+                                   machine_ref_payload(row->operands[0]) == MACHINE_X64_RSP;
+                }
+                BUSTER_TEST(arguments, saw_allocate && saw_save && saw_restore);
+                BUSTER_TEST(arguments, machine_verify_function(&vla_selected.function).error == MACHINE_VERIFY_NONE);
+                MachineStackPlacement vla_placement = machine_stack_placement_build(arguments->arena, &vla_selected.function);
+                BUSTER_TEST(arguments, vla_placement.valid);
+                MachineEncodeResult vla_encoded = machine_encode_x86_64(arguments->arena, &vla_selected.function, &vla_placement);
+                BUSTER_TEST(arguments, vla_encoded.valid && vla_encoded.byte_count > 32);
+            }
         }
         IrFunction* indirect_function = machine_test_ir_function_find(machine_module, S8("indirect"));
         BUSTER_TEST(arguments, indirect_function != 0);
@@ -851,7 +889,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             // Call-containing functions execute only through the module
             // differential, where their call relocations resolve.
             bool contains_calls = string_equal(supported_names[name_index], S8("span_round_trip")) ||
-                                  string_equal(supported_names[name_index], S8("kagg"));
+                                  string_equal(supported_names[name_index], S8("kagg")) ||
+                                  string_equal(supported_names[name_index], S8("vla_sum"));
             if (touches_globals || contains_calls)
             {
                 continue;
@@ -1025,7 +1064,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("locals_array"), S8_INITIALIZER("local_pair"), S8_INITIALIZER("pick"),
             S8_INITIALIZER("aligned_local"), S8_INITIALIZER("span_round_trip"), S8_INITIALIZER("single_round_trip"), S8_INITIALIZER("fmath"),
             S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnan"), S8_INITIALIZER("call_stack"), S8_INITIALIZER("big_round"),
-            S8_INITIALIZER("call_indirect"), S8_INITIALIZER("atomic_ops"), S8_INITIALIZER("kagg"),
+            S8_INITIALIZER("call_indirect"), S8_INITIALIZER("atomic_ops"), S8_INITIALIZER("kagg"), S8_INITIALIZER("vla_sum"),
         };
         typedef s64 MachineTestModuleCall2(s64, s64);
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(module_names) && none_module_executable.address && mir_module_executable.address;
