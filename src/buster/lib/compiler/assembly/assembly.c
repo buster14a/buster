@@ -345,6 +345,11 @@ struct AssemblyMemory
     bool rip_relative;
     bool has_segment;
     bool vsib;
+    // AT&T permits an absolute address without the parenthesized
+    // displacement(base,index,scale) form.  Keep this source-level bit so
+    // direct branch targets (which use the same bare spelling) can remain
+    // expressions while indirect branches still see a memory operand.
+    bool absolute;
 };
 
 typedef struct AssemblyOperand AssemblyOperand;
@@ -1171,7 +1176,20 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_att(AssemblyBuilder* builder,
     text = assembly_trim(text);
     text = assembly_x86_memory_strip_segment(text, ASSEMBLY_SYNTAX_ATT, result);
     u64 open = string_first_code_unit(text, '(');
-    if (open == text.length || text.length < open + 2 || text.pointer[text.length - 1] != ')')
+    if (open == BUSTER_STRING_NO_MATCH)
+    {
+        // In AT&T syntax '$' is the immediate marker.  Do not let the
+        // expression grammar's '$'-prefixed identifiers turn it into an
+        // absolute memory operand before the immediate path sees it.
+        if (!text.length || text.pointer[0] == '$' || !assembly_expression_parse(builder, text, &result->displacement))
+        {
+            return false;
+        }
+        result->absolute = true;
+        result->scale = 1;
+        return true;
+    }
+    if (text.length < open + 2 || text.pointer[text.length - 1] != ')')
     {
         return false;
     }
@@ -5665,7 +5683,13 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         {
             break;
         }
-        if (target.cpu_arch == CPU_ARCH_X86_64 && assembly_register_parse(text, syntax, &operand->reg))
+        bool att_immediate = syntax == ASSEMBLY_SYNTAX_ATT && text.length && text.pointer[0] == '$';
+        if (att_immediate)
+        {
+            text.pointer += 1;
+            text.length -= 1;
+        }
+        if (target.cpu_arch == CPU_ARCH_X86_64 && !att_immediate && assembly_register_parse(text, syntax, &operand->reg))
         {
             if (syntax == ASSEMBLY_SYNTAX_ATT && branch && !indirect)
             {
@@ -5673,7 +5697,8 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
             }
             operand->kind = ASSEMBLY_OPERAND_REGISTER;
         }
-        else if (target.cpu_arch == CPU_ARCH_X86_64 && assembly_x86_memory_parse(builder, text, syntax, &operand->memory))
+        else if (target.cpu_arch == CPU_ARCH_X86_64 && !att_immediate && assembly_x86_memory_parse(builder, text, syntax, &operand->memory) &&
+                 !(branch && syntax == ASSEMBLY_SYNTAX_ATT && !indirect && operand->memory.absolute))
         {
             if (branch && syntax == ASSEMBLY_SYNTAX_ATT && !indirect)
             {
@@ -5681,15 +5706,17 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
             }
             operand->kind = ASSEMBLY_OPERAND_MEMORY;
         }
+        else if (att_immediate)
+        {
+            if (!text.length || !assembly_expression_parse(builder, text, &operand->expression))
+            {
+                break;
+            }
+            operand->kind = ASSEMBLY_OPERAND_EXPRESSION;
+        }
         else
         {
-            u8 immediate = syntax == ASSEMBLY_SYNTAX_ATT && text.pointer[0] == '$';
-            if (immediate)
-            {
-                text.pointer += 1;
-                text.length -= 1;
-            }
-            else if (syntax != ASSEMBLY_SYNTAX_ATT && text.pointer[0] == '$')
+            if (syntax != ASSEMBLY_SYNTAX_ATT && text.length && text.pointer[0] == '$')
             {
                 break;
             }
@@ -6930,26 +6957,28 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         {
             return BUSTER_X86_METADATA_ENCODE_DECORATOR;
         }
-        if (assembly_register_parse(text, syntax, &operand->reg))
+        bool att_immediate = syntax == ASSEMBLY_SYNTAX_ATT && text.length && text.pointer[0] == '$';
+        if (att_immediate)
+        {
+            text = assembly_trim(string_slice(text, 1, text.length));
+        }
+        if (!att_immediate && assembly_register_parse(text, syntax, &operand->reg))
         {
             operand->kind = ASSEMBLY_OPERAND_REGISTER;
         }
-        else if (assembly_x86_memory_parse(builder, text, syntax, &operand->memory))
+        else if (!att_immediate && assembly_x86_memory_parse(builder, text, syntax, &operand->memory) &&
+                 !(syntax == ASSEMBLY_SYNTAX_ATT && relative && !indirect && operand->memory.absolute))
         {
             operand->kind = ASSEMBLY_OPERAND_MEMORY;
         }
         else
         {
-            bool immediate = syntax == ASSEMBLY_SYNTAX_ATT && text.pointer[0] == '$';
-            if (immediate)
-            {
-                text = string_slice(text, 1, text.length);
-            }
-            else if (syntax == ASSEMBLY_SYNTAX_INTEL && text.pointer[0] == '$')
+            bool immediate = att_immediate;
+            if (!immediate && syntax == ASSEMBLY_SYNTAX_INTEL && text.length && text.pointer[0] == '$')
             {
                 return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
             }
-            else if (syntax == ASSEMBLY_SYNTAX_ATT && !relative)
+            else if (!immediate && syntax == ASSEMBLY_SYNTAX_ATT && !relative)
             {
                 return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
             }
@@ -7266,6 +7295,15 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_instruction_is_novel(AssemblyInst
         }
     }
     BusterX86MetadataForm form = {0};
+    if (buster_x86_metadata_form_is_moffs(instruction.metadata_form_id))
+    {
+        // A bare AT&T absolute address may need metadata solely to select the
+        // accumulator-only MOV moffs encoding when its displacement exceeds
+        // the ModRM disp32 range.  Treat that form as a genuine metadata
+        // extension, rather than restoring the handwritten invalid-operand
+        // diagnostic below.
+        return true;
+    }
     if (buster_x86_metadata_form(instruction.metadata_form_id, &form) &&
         (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 || form.encoder_family == BUSTER_X86_METADATA_ENCODER_XOP))
     {

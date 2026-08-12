@@ -2838,6 +2838,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_count(BusterX86Me
     {
         BusterX86MetadataOperand metadata = {0};
         if (!buster_x86_metadata_operand(form.id, operand_index, &metadata)) return false;
+        if (pattern_valid)
+            metadata.field_source = buster_x86_metadata_emit_effective_field_source_pattern(metadata, pattern);
         bool moffs_fixed_accumulator = moffs_source_accumulator &&
                                        ((metadata.kind == BUSTER_X86_METADATA_OPERAND_BASE && !metadata.visible) ||
                                         (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER && !metadata.visible &&
@@ -2893,6 +2895,12 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_effective_field_source(BusterX86
     // Preserve an explicit fixed source before applying those generic atom
     // suffix heuristics.
     if (metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_FIXED)
+        return BUSTER_X86_METADATA_FIELD_SOURCE_FIXED;
+    // MOV moffs uses OrAX() for its hidden accumulator operand.  The atom is
+    // a fixed architectural choice even though the generated field source is
+    // REG; keep this exception closed to that one hidden register spelling.
+    if (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER && !metadata.visible &&
+        buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OrAX()")))
         return BUSTER_X86_METADATA_FIELD_SOURCE_FIXED;
     if (buster_x86_metadata_emit_atom_contains(metadata.atom, S8("_B"))) return BUSTER_X86_METADATA_FIELD_SOURCE_RM;
     if (buster_x86_metadata_emit_atom_contains(metadata.atom, S8("_N"))) return BUSTER_X86_METADATA_FIELD_SOURCE_VVVV;
@@ -3171,6 +3179,11 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_fixed_register_matches(BusterX
         !buster_x86_metadata_emit_atom_contains(metadata.atom, S8("XED_REG_")))
         return true;
     if (physical.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER) return false;
+    if (buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OrAX()")))
+    {
+        return physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR && physical.reg.index == 0 &&
+               (physical.reg.width == 16 || physical.reg.width == 32 || physical.reg.width == 64) && !physical.reg.high_byte;
+    }
     u8 expected_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_UNKNOWN;
     u16 expected_index = UINT16_MAX;
     u16 expected_width = BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN;
@@ -4672,7 +4685,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     for (u32 index = 0; index < binding_count; index += 1)
     {
         BusterX86MetadataPhysicalOperand physical = bindings[index].physical;
-        if ((pattern.has_modrm || pattern.has_dynamic_opcode) &&
+        if ((pattern.has_modrm || pattern.has_dynamic_opcode || moffs_form) &&
             physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
             physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR && physical.reg.width == 64)
             if (!pattern.has_w && !apx_evex_fixed_width_no_w) rex_w = true;
@@ -6783,6 +6796,14 @@ bool buster_x86_metadata_form(u32 form_id, BusterX86MetadataForm* result)
     if (!buster_x86_metadata_form_record_valid(form_id)) return false;
     buster_x86_metadata_normalized_form(form_id, result);
     return true;
+}
+
+bool buster_x86_metadata_form_is_moffs(u32 form_id)
+{
+    BusterX86MetadataForm form = {0};
+    BusterX86MetadataPatternSemantics pattern = {0};
+    return buster_x86_metadata_form(form_id, &form) && buster_x86_metadata_emit_parse_pattern(form, &pattern) &&
+           buster_x86_metadata_emit_is_moffs(form, pattern);
 }
 
 bool buster_x86_metadata_form_requires_dfv(u32 form_id)

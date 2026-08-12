@@ -893,6 +893,11 @@ BUSTER_F_DECL u8 buster_x86_metadata_string_byte(BusterX86MetadataString string,
 // test for every byte examined.
 BUSTER_F_DECL String8 buster_x86_metadata_string_span(BusterX86MetadataString string);
 BUSTER_F_DECL bool buster_x86_metadata_form(u32 form_id, BusterX86MetadataForm* result);
+// Returns whether the generated form is one of the four legacy MOV moffs
+// encodings (A0-A3).  The pattern details remain private to the metadata
+// decoder; callers only need this classification when deciding whether a
+// metadata-selected form is a source-level extension.
+BUSTER_F_DECL bool buster_x86_metadata_form_is_moffs(u32 form_id);
 // The normalized XED iform carries DFV as a source role while generated
 // visible operands intentionally omit it.  The source assembler uses this
 // cross-translation-unit query to expose that schema fact without mnemonic

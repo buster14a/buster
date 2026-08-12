@@ -399,6 +399,47 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_att_memory.relocation_count == 1 && x86_att_memory.relocations[0].offset == 26 &&
                                x86_att_memory.relocations[0].addend == -4 &&
                                x86_att_memory.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+
+    // GNU/AT&T treats a bare non-immediate expression as an absolute memory
+    // operand.  Keep the explicit '$' spelling as an immediate and preserve
+    // direct versus indirect branch targets despite their shared bare form.
+    AssemblyEncodeResult x86_att_absolute = assembly_encode(
+        arguments->arena,
+        S8("movq 0x12345678, %rax\n"
+           "movq %rax, 0x12345678\n"
+           "movb external, %al\n"
+           "movb %al, external\n"
+           "movq 0x123456789, %rax\n"
+           "call target\n"
+           "call *target\n"
+           "target:\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    u8 expected_x86_att_absolute[] = {
+        0x48, 0x8b, 0x04, 0x25, 0x78, 0x56, 0x34, 0x12,
+        0x48, 0x89, 0x04, 0x25, 0x78, 0x56, 0x34, 0x12,
+        0x8a, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
+        0x88, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
+        0x48, 0xa1, 0x89, 0x67, 0x45, 0x23, 0x01, 0x00, 0x00, 0x00,
+        0xe8, 0x07, 0x00, 0x00, 0x00,
+        0xff, 0x14, 0x25, 0x34, 0x00, 0x00, 0x00,
+    };
+    BUSTER_TEST(arguments, x86_att_absolute.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(x86_att_absolute.bytes, expected_x86_att_absolute,
+                                                         BUSTER_ARRAY_LENGTH(expected_x86_att_absolute)));
+    BUSTER_TEST(arguments, x86_att_absolute.relocation_count == 2 &&
+                               x86_att_absolute.relocations[0].offset == 19 &&
+                               x86_att_absolute.relocations[0].kind == ASSEMBLY_RELOCATION_X86_32 &&
+                               x86_att_absolute.relocations[1].offset == 26 &&
+                               x86_att_absolute.relocations[1].kind == ASSEMBLY_RELOCATION_X86_32 &&
+                               string_equal(x86_att_absolute.symbols[x86_att_absolute.relocations[0].symbol].name, S8("external")) &&
+                               string_equal(x86_att_absolute.symbols[x86_att_absolute.relocations[1].symbol].name, S8("external")));
+    AssemblyEncodeResult x86_att_immediate = assembly_encode(
+        arguments->arena, S8("movq $0x10, %rax\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    u8 expected_x86_att_immediate[] = {0x48, 0xb8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    BUSTER_TEST(arguments, x86_att_immediate.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(x86_att_immediate.bytes, expected_x86_att_immediate,
+                                                         BUSTER_ARRAY_LENGTH(expected_x86_att_immediate)));
     // CET indirect-branch tracking has a typed `notrack` source prefix.  It
     // is accepted in both dialects for register and memory CALL/JMP forms,
     // while ordinary handwritten call/jmp syntax remains unprefixed.
@@ -773,7 +814,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyEncodeResult invalid_att_integer_increment = assembly_encode(
         arguments->arena,
         S8("adcq %rax, %eax\n"
-           "sbbq external, %rax\n"
+           "sbbq %external, %rax\n"
            "mulq $1, %rax\n"
            "imulb %bl, %al\n"
            "imulb $1, %bl, %al\n"
@@ -1925,9 +1966,16 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
     BUSTER_TEST(arguments, invalid_x86_forms.diagnostic_count == 3);
     AssemblyEncodeResult invalid_att_forms =
-        assembly_encode(arguments->arena, S8("movq %rbx, rax\naddq 3, %rax\ncallq %r11\n"),
+        assembly_encode(arguments->arena, S8("movq %rbx, 3(,%rax,2,4)\naddq 3(,%rax,2,4), %rax\ncallq %r11\n"),
                         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
     BUSTER_TEST(arguments, invalid_att_forms.diagnostic_count == 3);
+    AssemblyEncodeResult invalid_att_absolute = assembly_encode(
+        arguments->arena,
+        S8("movq , %rax\n"
+           "movq broken(,%rax\n"
+           "movq broken(,%rax,2,4), %rax\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, invalid_att_absolute.diagnostic_count == 3 && invalid_att_absolute.bytes.length == 0);
     AssemblyEncodeResult invalid_x86_memory =
         assembly_encode(arguments->arena, S8("mov rax, [rsp*2]\nmov rax, [rip + rbx]\ninc [rax]\nmov rax, [rbx + 0x80000000]\n"),
                         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
