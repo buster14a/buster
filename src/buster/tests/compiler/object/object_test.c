@@ -2130,7 +2130,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             }
         }
     }
-    for (u32 malformed_kind = 0; malformed_kind < 11; malformed_kind += 1)
+    for (u32 malformed_kind = 0; malformed_kind < 13; malformed_kind += 1)
     {
         TemporalArena malformed_scope = arena_begin_temporal(arguments->arena);
         ByteSlice malformed = {
@@ -2210,12 +2210,79 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                 case 10:
                     object_test_write_u32(malformed, 32 + 72 + 60, 1);
                     break;
+                case 11:
+                    // A bare arm64 32-bit UNSIGNED record is not a PREL32
+                    // pair and must not be accepted as ABS32.
+                    object_test_write_u32(malformed, relocation_offset + 4, (first_information & ~(0xfu << 28)) | (0u << 28));
+                    break;
+                case 12:
+                    // PREL32 fields are 4-byte objects; a pair at an
+                    // unaligned offset is malformed even when its records
+                    // otherwise have the canonical shape.
+                    object_test_write_u32(malformed, relocation_offset, 2);
+                    object_test_write_u32(malformed, relocation_offset + 8, 2);
+                    break;
             }
         }
         ObjectFile malformed_result = object_read(arguments->arena, malformed, a64_mach_prel_object.target);
         BUSTER_TEST(arguments, offsets_valid && malformed_result.error != OBJECT_ERROR_NONE);
         arena_set_position(arguments->arena, malformed_scope.position);
     }
+    // The Mach-O writer owns the serialized PREL32 word.  Verify that it
+    // overwrites stale input for both zero and nonzero addends.
+    u32 saved_a64_mach_prel_text = a64_mach_prel_text_data[1];
+    u32 saved_a64_mach_prel_read_only = a64_mach_prel_read_only_data[1];
+    u32 saved_a64_mach_prel_data = a64_mach_prel_data_data[1];
+    s64 saved_a64_mach_prel_addend = a64_mach_prel_relocations[0].addend;
+    a64_mach_prel_text_data[1] = UINT32_C(0xdeadbeef);
+    a64_mach_prel_read_only_data[1] = UINT32_C(0xcafebabe);
+    a64_mach_prel_data_data[1] = UINT32_C(0xfeedface);
+    a64_mach_prel_relocations[0].addend = 0;
+    ObjectArtifact a64_mach_prel_zero_artifact = object_write(arguments->arena, &a64_mach_prel_object, OBJECT_FORMAT_MACH_O64);
+    u32 zero_raw_offset = 0;
+    u32 ignored_relocation_offset = 0;
+    u32 ignored_relocation_count = 0;
+    bool zero_offsets_valid = object_test_mach_section_offsets(a64_mach_prel_zero_artifact.bytes, OBJECT_SECTION_TEXT, &zero_raw_offset,
+                                                                &ignored_relocation_offset, &ignored_relocation_count);
+    u32 zero_slot = UINT32_MAX;
+    if (zero_offsets_valid && (u64)zero_raw_offset + sizeof(u32) * 2 <= a64_mach_prel_zero_artifact.bytes.length)
+    {
+        memcpy(&zero_slot, a64_mach_prel_zero_artifact.bytes.pointer + zero_raw_offset + sizeof(u32), sizeof(zero_slot));
+    }
+    BUSTER_TEST(arguments, a64_mach_prel_zero_artifact.error == OBJECT_ERROR_NONE && zero_offsets_valid && zero_slot == 0);
+    ObjectFile a64_mach_prel_zero_roundtrip = object_read(arguments->arena, a64_mach_prel_zero_artifact.bytes, a64_mach_prel_object.target);
+    BUSTER_TEST(arguments, a64_mach_prel_zero_roundtrip.error == OBJECT_ERROR_NONE && a64_mach_prel_zero_roundtrip.relocation_count == 3 &&
+                               a64_mach_prel_zero_roundtrip.relocations[0].addend == 0);
+    a64_mach_prel_relocations[0].addend = INT32_MAX;
+    a64_mach_prel_relocations[1].addend = INT32_MIN;
+    a64_mach_prel_relocations[2].addend = 0;
+    ObjectArtifact a64_mach_prel_boundary_artifact = object_write(arguments->arena, &a64_mach_prel_object, OBJECT_FORMAT_MACH_O64);
+    BUSTER_TEST(arguments, a64_mach_prel_boundary_artifact.error == OBJECT_ERROR_NONE);
+    ObjectFile a64_mach_prel_boundary_roundtrip = object_read(arguments->arena, a64_mach_prel_boundary_artifact.bytes, a64_mach_prel_object.target);
+    BUSTER_TEST(arguments, a64_mach_prel_boundary_roundtrip.error == OBJECT_ERROR_NONE && a64_mach_prel_boundary_roundtrip.relocation_count == 3 &&
+                               a64_mach_prel_boundary_roundtrip.relocations[0].addend == INT32_MAX &&
+                               a64_mach_prel_boundary_roundtrip.relocations[1].addend == INT32_MIN &&
+                               a64_mach_prel_boundary_roundtrip.relocations[2].addend == 0);
+    s64 invalid_a64_mach_prel_addends[] = {(s64)INT32_MIN - 1, (s64)INT32_MAX + 1};
+    for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(invalid_a64_mach_prel_addends); addend_index += 1)
+    {
+        a64_mach_prel_relocations[0].addend = invalid_a64_mach_prel_addends[addend_index];
+        ObjectArtifact invalid_prel_artifact = object_write(arguments->arena, &a64_mach_prel_object, OBJECT_FORMAT_MACH_O64);
+        BUSTER_TEST(arguments, invalid_prel_artifact.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    }
+    ObjectRelocation misaligned_a64_mach_prel_relocation = a64_mach_prel_relocations[0];
+    misaligned_a64_mach_prel_relocation.offset = 2;
+    ObjectFile misaligned_a64_mach_prel_object = a64_mach_prel_object;
+    misaligned_a64_mach_prel_object.relocations = &misaligned_a64_mach_prel_relocation;
+    misaligned_a64_mach_prel_object.relocation_count = 1;
+    misaligned_a64_mach_prel_relocation.addend = 0;
+    BUSTER_TEST(arguments, object_write(arguments->arena, &misaligned_a64_mach_prel_object, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_INVALID_INPUT);
+    a64_mach_prel_text_data[1] = saved_a64_mach_prel_text;
+    a64_mach_prel_read_only_data[1] = saved_a64_mach_prel_read_only;
+    a64_mach_prel_data_data[1] = saved_a64_mach_prel_data;
+    a64_mach_prel_relocations[0].addend = saved_a64_mach_prel_addend;
+    a64_mach_prel_relocations[1].addend = -23;
+    a64_mach_prel_relocations[2].addend = 4096;
     u8 compact_x64_code[] = {
         0x55, 0x48, 0x89, 0xe5, 0xc3,
     };
