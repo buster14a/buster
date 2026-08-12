@@ -1,5 +1,6 @@
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.h>
 #include <buster/lib/compiler/assembly/assembly.h>
+#include <buster/lib/string.h>
 #if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_string_equal(BusterX86MetadataString first, String8 second)
@@ -807,6 +808,7 @@ struct X86_64MetadataSourceReachabilityResult
     u32 mismatch_index;
     u32 mismatch_direct_byte;
     u32 mismatch_source_byte;
+    String8 source;
 };
 
 typedef struct X86_64MetadataSourceReachabilityCase X86_64MetadataSourceReachabilityCase;
@@ -815,6 +817,345 @@ struct X86_64MetadataSourceReachabilityCase
     u32 form_id;
     String8 source;
 };
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_mask_is_decorator(u32 form_id, u32 operand_index);
+BUSTER_GLOBAL_LOCAL String8 x86_64_metadata_test_source_register(Arena* arena,
+                                                                 BusterX86MetadataPhysicalRegister register_value);
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_is_fixed(BusterX86MetadataOperand metadata)
+{
+    return metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_FIXED ||
+           x86_64_metadata_test_string_contains(metadata.atom, S8("XED_REG_"));
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_is_bsr0(BusterX86MetadataOperand metadata)
+{
+    return metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER &&
+           x86_64_metadata_test_string_equal(metadata.atom, S8("XED_REG_BSR0"));
+}
+
+BUSTER_GLOBAL_LOCAL String8 x86_64_metadata_test_source_register_atom(Arena* arena,
+                                                                       BusterX86MetadataPhysicalRegister register_value,
+                                                                       BusterX86MetadataString atom)
+{
+    if (x86_64_metadata_test_register_is_bsr0((BusterX86MetadataOperand){
+            .kind = BUSTER_X86_METADATA_OPERAND_REGISTER,
+            .atom = atom,
+        }))
+        return S8("bsr0");
+    if (x86_64_metadata_test_string_contains(atom, S8("XED_REG_ST")))
+        return string_format(arena, S8("st({u8})"), register_value.index);
+    if (x86_64_metadata_test_string_equal(atom, S8("X87()")))
+        return register_value.index ? string_format(arena, S8("st({u8})"), register_value.index) : S8("st");
+    return x86_64_metadata_test_source_register(arena, register_value);
+}
+
+BUSTER_GLOBAL_LOCAL String8 x86_64_metadata_test_source_register(Arena* arena,
+                                                                 BusterX86MetadataPhysicalRegister register_value)
+{
+    static String8 const gpr16[] = {
+        S8_INITIALIZER("ax"), S8_INITIALIZER("cx"), S8_INITIALIZER("dx"), S8_INITIALIZER("bx"),
+        S8_INITIALIZER("sp"), S8_INITIALIZER("bp"), S8_INITIALIZER("si"), S8_INITIALIZER("di"),
+    };
+    static String8 const gpr32[] = {
+        S8_INITIALIZER("eax"), S8_INITIALIZER("ecx"), S8_INITIALIZER("edx"), S8_INITIALIZER("ebx"),
+        S8_INITIALIZER("esp"), S8_INITIALIZER("ebp"), S8_INITIALIZER("esi"), S8_INITIALIZER("edi"),
+    };
+    static String8 const gpr64[] = {
+        S8_INITIALIZER("rax"), S8_INITIALIZER("rcx"), S8_INITIALIZER("rdx"), S8_INITIALIZER("rbx"),
+        S8_INITIALIZER("rsp"), S8_INITIALIZER("rbp"), S8_INITIALIZER("rsi"), S8_INITIALIZER("rdi"),
+    };
+    static String8 const gpr8[] = {
+        S8_INITIALIZER("al"), S8_INITIALIZER("cl"), S8_INITIALIZER("dl"), S8_INITIALIZER("bl"),
+    };
+    static String8 const segment[] = {
+        S8_INITIALIZER("es"), S8_INITIALIZER("cs"), S8_INITIALIZER("ss"), S8_INITIALIZER("ds"),
+        S8_INITIALIZER("fs"), S8_INITIALIZER("gs"),
+    };
+    switch (register_value.physical_class)
+    {
+    case BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR:
+        if (register_value.width == 8 && register_value.index < 4)
+            return gpr8[register_value.index];
+        if (register_value.width == 8) return string_format(arena, S8("r{u16}b"), register_value.index);
+        if (register_value.width == 16) return register_value.index < 8
+                                                    ? gpr16[register_value.index]
+                                                    : string_format(arena, S8("r{u16}w"), register_value.index);
+        if (register_value.width == 32) return register_value.index < 8
+                                                    ? gpr32[register_value.index]
+                                                    : string_format(arena, S8("r{u16}d"), register_value.index);
+        return register_value.index < 8 ? gpr64[register_value.index] : string_format(arena, S8("r{u16}"), register_value.index);
+    case BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM: return string_format(arena, S8("xmm{u16}"), register_value.index);
+    case BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM: return string_format(arena, S8("ymm{u16}"), register_value.index);
+    case BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM: return string_format(arena, S8("zmm{u16}"), register_value.index);
+    case BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK: return string_format(arena, S8("k{u16}"), register_value.index);
+    case BUSTER_X86_METADATA_PHYSICAL_CLASS_TMM: return string_format(arena, S8("tmm{u16}"), register_value.index);
+    case BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX: return string_format(arena, S8("mm{u16}"), register_value.index);
+    case BUSTER_X86_METADATA_PHYSICAL_CLASS_BND: return string_format(arena, S8("bnd{u16}"), register_value.index);
+    case BUSTER_X86_METADATA_PHYSICAL_CLASS_CONTROL: return string_format(arena, S8("cr{u16}"), register_value.index);
+    case BUSTER_X86_METADATA_PHYSICAL_CLASS_DEBUG: return string_format(arena, S8("dr{u16}"), register_value.index);
+    case BUSTER_X86_METADATA_PHYSICAL_CLASS_SEGMENT: return register_value.index < BUSTER_ARRAY_LENGTH(segment) ? segment[register_value.index] : (String8){0};
+    case BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL: return S8("bsr0");
+    default: return (String8){0};
+    }
+}
+
+typedef struct X86_64MetadataSourceQuery X86_64MetadataSourceQuery;
+struct X86_64MetadataSourceQuery
+{
+    BusterX86MetadataPhysicalQuery physical;
+    BusterX86MetadataPhysicalOperand operands[16];
+    BusterX86MetadataOperand metadata[16];
+};
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_query_is_apx(BusterX86MetadataForm form)
+{
+    return form.encoder_family == BUSTER_X86_METADATA_ENCODER_REX2 ||
+           form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 ||
+           (form.apx_flags & BUSTER_X86_METADATA_APX) != 0;
+}
+
+BUSTER_GLOBAL_LOCAL u16 x86_64_metadata_test_source_register_candidate(u8 physical_class, u16 width, u32 ordinal,
+                                                                         u32 attempt, bool apx, bool evex)
+{
+    static u8 const low_gpr[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    static u8 const high_gpr[] = {16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31};
+    static u8 const vector_low[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    static u8 const vector_high[] = {16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31};
+    static u8 const short_registers[] = {1, 2, 3, 4, 5, 6, 7};
+    u8 const* candidates = low_gpr;
+    u32 candidate_count = BUSTER_ARRAY_LENGTH(low_gpr);
+    if (physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR)
+    {
+        if (apx)
+        {
+            candidates = high_gpr;
+            candidate_count = BUSTER_ARRAY_LENGTH(high_gpr);
+        }
+    }
+    else if (physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM ||
+             physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM ||
+             physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM)
+    {
+        if (width >= 128 && (apx || evex))
+        {
+            candidates = vector_high;
+            candidate_count = BUSTER_ARRAY_LENGTH(vector_high);
+        }
+        else
+        {
+            candidates = vector_low;
+            candidate_count = BUSTER_ARRAY_LENGTH(vector_low);
+        }
+    }
+    else if (physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK)
+    {
+        candidates = short_registers;
+        candidate_count = BUSTER_ARRAY_LENGTH(short_registers);
+    }
+    else if (physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_TMM ||
+             physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX ||
+             physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_BND ||
+             physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_SPECIAL)
+    {
+        candidates = short_registers;
+        candidate_count = BUSTER_ARRAY_LENGTH(short_registers);
+    }
+    if (!candidate_count) return 0;
+    return candidates[(ordinal + attempt) % candidate_count];
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_query(Arena* arena, u32 form_id,
+                                                             BusterX86MetadataPhysicalQuery canonical,
+                                                             X86_64MetadataSourceQuery* result)
+{
+    (void)arena;
+    BusterX86MetadataForm form = {0};
+    if (!result || !buster_x86_metadata_form(form_id, &form) || canonical.operand_count > 16) return false;
+    u32 canonical_index = 0;
+    u32 output_count = 0;
+    bool apx = x86_64_metadata_test_source_query_is_apx(form);
+    for (u32 metadata_index = 0; metadata_index < form.operand_count; metadata_index += 1)
+    {
+        BusterX86MetadataOperand metadata = {0};
+        if (!buster_x86_metadata_operand(form_id, metadata_index, &metadata)) return false;
+        if (!metadata.visible) continue;
+        BusterX86MetadataPhysicalOperand operand = {0};
+        if (canonical_index >= canonical.operand_count || output_count >= BUSTER_ARRAY_LENGTH(result->operands)) return false;
+        operand = canonical.operands[canonical_index++];
+        if (output_count >= BUSTER_ARRAY_LENGTH(result->metadata)) return false;
+        result->metadata[output_count] = metadata;
+        result->operands[output_count++] = operand;
+    }
+    if (canonical_index != canonical.operand_count) return false;
+
+    // Try a bounded family of role-distinct choices.  The direct emitter is
+    // the constraint oracle: fixed REG/RM/SRM fields, no-rex controls, and
+    // architecture-specific register limits all remain authoritative.
+    for (u32 attempt = 0; attempt < 16; attempt += 1)
+    {
+        BusterX86MetadataPhysicalOperand trial[16] = {0};
+        memcpy(trial, result->operands, output_count * sizeof(*trial));
+        u32 ordinal = 0;
+        for (u32 index = 0; index < output_count; index += 1)
+        {
+            BusterX86MetadataPhysicalOperand* operand = trial + index;
+            if (operand->kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
+                operand->reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK ||
+                x86_64_metadata_test_register_is_fixed(result->metadata[index]) ||
+                x86_64_metadata_test_register_is_bsr0(result->metadata[index]))
+                continue;
+            operand->reg.index = x86_64_metadata_test_source_register_candidate(operand->reg.physical_class, operand->reg.width,
+                                                                                 ordinal, attempt, apx,
+                                                                                 form.prefix_kind == BUSTER_X86_METADATA_PREFIX_EVEX);
+            operand->width = operand->reg.width;
+            ordinal += 1;
+        }
+        u8 bytes[32] = {0};
+        BusterX86MetadataRelocation relocations[8] = {0};
+        BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = (BusterX86MetadataPhysicalQuery){
+                .mnemonic = canonical.mnemonic,
+                .operands = trial,
+                .operand_count = output_count,
+                .features = canonical.features,
+                .attributes = canonical.attributes,
+                .address_size = canonical.address_size,
+                .execution_mode = canonical.execution_mode,
+                .include_privileged = canonical.include_privileged,
+                .include_not64 = canonical.include_not64,
+                .include_implicit = canonical.include_implicit,
+                .source_semantics = canonical.source_semantics,
+            },
+            .form_id = form_id,
+            .output = bytes,
+            .output_capacity = BUSTER_ARRAY_LENGTH(bytes),
+            .relocations = relocations,
+            .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+        });
+        if (emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.relocation_count == 0)
+        {
+            memcpy(result->operands, trial, output_count * sizeof(*trial));
+            result->physical = canonical;
+            result->physical.operands = result->operands;
+            result->physical.operand_count = output_count;
+            return true;
+        }
+    }
+    // Some classes (notably tile operands and fixed-role combinations) have
+    // no bounded role-distinct spelling that the public assembler accepts.
+    // Keep the canonical query in that case so the reachability result is a
+    // real public-source diagnostic rather than a mutator-construction gap.
+    result->physical = canonical;
+    result->physical.operands = result->operands;
+    result->physical.operand_count = output_count;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_mask_is_decorator(u32 form_id, u32 operand_index)
+{
+    BusterX86MetadataForm form = {0};
+    if (!buster_x86_metadata_form(form_id, &form)) return false;
+    u32 visible_index = 0;
+    for (u32 metadata_index = 0; metadata_index < form.operand_count; metadata_index += 1)
+    {
+        BusterX86MetadataOperand metadata = {0};
+        if (!buster_x86_metadata_operand(form_id, metadata_index, &metadata)) return false;
+        if (!metadata.visible) continue;
+        if (visible_index == operand_index)
+        {
+            if (metadata.kind != BUSTER_X86_METADATA_OPERAND_REGISTER ||
+                metadata.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK)
+                return false;
+            return !x86_64_metadata_test_string_contains(metadata.atom, S8("_R")) &&
+                   !x86_64_metadata_test_string_contains(metadata.atom, S8("_N")) &&
+                   !x86_64_metadata_test_string_contains(metadata.atom, S8("_B"));
+        }
+        visible_index += 1;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL String8 x86_64_metadata_test_source_register_only(Arena* arena, u32 form_id, String8 mnemonic,
+                                                                        BusterX86MetadataPhysicalQuery query)
+{
+    BusterX86MetadataForm form = {0};
+    if (!buster_x86_metadata_form(form_id, &form)) return (String8){0};
+    String8 source = mnemonic;
+    if (query.attributes.lock) source = string_format(arena, S8("lock {S8}"), source);
+    else if (query.attributes.rep) source = string_format(arena, S8("rep {S8}"), source);
+    else if (query.attributes.repne) source = string_format(arena, S8("repne {S8}"), source);
+    else if (query.attributes.notrack) source = string_format(arena, S8("notrack {S8}"), source);
+    if (query.attributes.no_flags) source = string_format(arena, S8("{{nf}} {S8}"), source);
+    bool wrote_operand = false;
+    bool has_bsr0 = false;
+    for (u32 metadata_index = 0; metadata_index < form.operand_count; metadata_index += 1)
+    {
+        BusterX86MetadataOperand metadata = {0};
+        if (!buster_x86_metadata_operand(form_id, metadata_index, &metadata)) return (String8){0};
+        has_bsr0 |= !metadata.visible && x86_64_metadata_test_register_is_bsr0(metadata);
+    }
+    if (has_bsr0 && query.operand_count == 1)
+    {
+        // BSRMOVH/L have both operand orders in the metadata.  Looking for
+        // BSR0 anywhere in the iform is not enough: the trailing forms carry
+        // the same atom in their name.  The leading spelling is the one
+        // whose hidden operand precedes the visible register.
+        bool bsr0_first = x86_64_metadata_test_string_contains(form.iform, S8("BSRMOVH_BSR0")) ||
+                          x86_64_metadata_test_string_contains(form.iform, S8("BSRMOVL_BSR0"));
+        if (bsr0_first)
+        {
+            source = string_format(arena, S8("{S8} bsr0"), source);
+            wrote_operand = true;
+        }
+    }
+    if (query.attributes.has_dfv)
+    {
+        source = string_format(arena, S8("{S8} 0"), source);
+        wrote_operand = true;
+    }
+    for (u32 index = 0; index < query.operand_count; index += 1)
+    {
+        if (x86_64_metadata_test_mask_is_decorator(form_id, index)) continue;
+        if (query.attributes.has_mask_register && query.operands[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+            query.operands[index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK &&
+            query.operands[index].reg.index == query.attributes.mask_register)
+            continue;
+        BusterX86MetadataOperand metadata = {0};
+        u32 visible_index = 0;
+        for (u32 metadata_index = 0; metadata_index < form.operand_count; metadata_index += 1)
+        {
+            BusterX86MetadataOperand candidate = {0};
+            if (!buster_x86_metadata_operand(form_id, metadata_index, &candidate)) return (String8){0};
+            if (!candidate.visible) continue;
+            if (visible_index == index)
+            {
+                metadata = candidate;
+                break;
+            }
+            visible_index += 1;
+        }
+        String8 register_name = x86_64_metadata_test_source_register_atom(arena, query.operands[index].reg, metadata.atom);
+        if (!register_name.length) return (String8){0};
+        if (!wrote_operand) source = string_format(arena, S8("{S8} {S8}"), source, register_name);
+        else source = string_format(arena, S8("{S8}, {S8}"), source, register_name);
+        if (!wrote_operand && query.attributes.has_mask_register)
+        {
+            String8 mask = string_format(arena, S8("k{u8}"), query.attributes.mask_register);
+            source = string_format(arena, S8("{S8} {{{S8}}}"), source, mask);
+            if (query.attributes.zeroing) source = string_format(arena, S8("{S8} {{z}}"), source);
+        }
+        wrote_operand = true;
+    }
+    if (query.attributes.sae)
+        source = string_format(arena, S8("{S8}, {{{S8}}}"), source,
+                               query.attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_NEAREST ? S8("rn-sae") : S8("sae"));
+    if (has_bsr0 && query.operand_count == 1 &&
+        !(x86_64_metadata_test_string_contains(form.iform, S8("BSRMOVH_BSR0")) ||
+          x86_64_metadata_test_string_contains(form.iform, S8("BSRMOVL_BSR0"))))
+        source = string_format(arena, S8("{S8}, bsr0"), source);
+    return string_format(arena, S8("{S8}\n"), source);
+}
 
 BUSTER_GLOBAL_LOCAL X86_64MetadataSourceReachabilityResult x86_64_metadata_test_source_reachability_case(
     Arena* arena, Target target, X86_64MetadataSourceReachabilityCase test_case)
@@ -834,6 +1175,13 @@ BUSTER_GLOBAL_LOCAL X86_64MetadataSourceReachabilityResult x86_64_metadata_test_
         return result;
     }
 
+    X86_64MetadataSourceQuery source_query = {0};
+    if (!test_case.source.length && !x86_64_metadata_test_source_query(arena, test_case.form_id, physical, &source_query))
+    {
+        result.classification = X86_64_METADATA_SOURCE_REACHABILITY_SYNTAX_CONSTRUCTION;
+        return result;
+    }
+    if (!test_case.source.length) physical = source_query.physical;
     u8 direct_bytes[32] = {0};
     BusterX86MetadataRelocation direct_relocations[8] = {0};
     BusterX86MetadataEmitResult direct = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
@@ -853,7 +1201,15 @@ BUSTER_GLOBAL_LOCAL X86_64MetadataSourceReachabilityResult x86_64_metadata_test_
         return result;
     }
 
-    AssemblyEncodeResult encoded = assembly_encode(arena, test_case.source,
+    String8 source = test_case.source.length ? test_case.source :
+                     x86_64_metadata_test_source_register_only(arena, test_case.form_id, physical.mnemonic, physical);
+    result.source = source;
+    if (!source.length)
+    {
+        result.classification = X86_64_METADATA_SOURCE_REACHABILITY_SYNTAX_CONSTRUCTION;
+        return result;
+    }
+    AssemblyEncodeResult encoded = assembly_encode(arena, source,
                                                     (AssemblyEncodeOptions){.target = target,
                                                                              .syntax = ASSEMBLY_SYNTAX_INTEL});
     result.source_encoded = encoded.diagnostic_count == 0;
@@ -927,11 +1283,59 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_reachability_skeleton(UnitT
     return all_success;
 }
 
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArguments* arguments)
+{
+    u32 emitted = 0;
+    u32 register_only = 0;
+    u32 class_counts[X86_64_METADATA_SOURCE_REACHABILITY_PUBLIC_GAP + 1] = {0};
+    u32 ledger_capacity = buster_x86_metadata_form_count();
+    BusterX86MetadataCoverageLedgerEntry* ledger =
+        arena_allocate(arguments->arena, BusterX86MetadataCoverageLedgerEntry, ledger_capacity);
+    BusterX86MetadataCoverageAuditResult audit = buster_x86_metadata_coverage_audit(ledger, ledger_capacity);
+    for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
+    {
+        if (ledger[form_id].disposition != BUSTER_X86_METADATA_COVERAGE_EMITTED) continue;
+        emitted += 1;
+        BusterX86MetadataPhysicalOperand operands[16] = {0};
+        String8 features[1] = {0};
+        char8 mnemonic_buffer[128] = {0};
+        BusterX86MetadataPhysicalQuery query = {0};
+        if (!buster_x86_metadata_test_canonical_query(form_id, &query, operands, features, mnemonic_buffer)) continue;
+        bool register_only_form = true;
+        for (u32 operand_index = 0; operand_index < query.operand_count; operand_index += 1)
+            register_only_form &= query.operands[operand_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER;
+        if (!register_only_form) continue;
+        register_only += 1;
+        X86_64MetadataSourceReachabilityResult reachability = x86_64_metadata_test_source_reachability_case(
+            arguments->arena, (Target){.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_INTEL_DIAMOND_RAPIDS,
+                                       .os = OPERATING_SYSTEM_LINUX},
+            (X86_64MetadataSourceReachabilityCase){.form_id = form_id});
+        class_counts[reachability.classification] += 1;
+        if (reachability.classification != X86_64_METADATA_SOURCE_REACHABILITY_SUCCESS &&
+            class_counts[reachability.classification] <= 3)
+        {
+            BusterX86MetadataForm failed_form = {0};
+            buster_x86_metadata_form(form_id, &failed_form);
+            arguments->show(arguments, S8("X86_SOURCE_REGISTER_FAILURE form={u32} class={u32} diag={u32} iclass={S8} iform={S8} source={S8} mismatch={u32}:{u32}:{u32}\n"),
+                            form_id, reachability.classification, reachability.diagnostic_kind,
+                            buster_x86_metadata_string_span(failed_form.iclass), buster_x86_metadata_string_span(failed_form.iform),
+                            reachability.source, reachability.mismatch_index, reachability.mismatch_direct_byte,
+                            reachability.mismatch_source_byte);
+        }
+    }
+    arguments->show(arguments, S8("X86_SOURCE_REGISTER_CENSUS emitted={u32} register_only={u32} success={u32} syntax={u32} policy={u32} ambiguity={u32} implicit={u32} gap={u32}\n"),
+                    emitted, register_only, class_counts[0], class_counts[1], class_counts[2], class_counts[3],
+                    class_counts[4], class_counts[5]);
+    return audit.complete && emitted == audit.emitted_count && class_counts[0] + class_counts[1] + class_counts[2] +
+               class_counts[3] + class_counts[4] + class_counts[5] == register_only;
+}
+
 UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
 
     BUSTER_TEST(arguments, x86_64_metadata_test_source_reachability_skeleton(arguments));
+    BUSTER_TEST(arguments, x86_64_metadata_test_register_only_census(arguments));
 
     {
         // This is the complete normalized residual cohort: the sixteen X87
