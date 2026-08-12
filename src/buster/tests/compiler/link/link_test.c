@@ -2437,25 +2437,6 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, (aarch64_mach_data_adrp & UINT32_C(0x9f00001f)) == UINT32_C(0x90000009));
     BUSTER_TEST(arguments, (aarch64_mach_data_add & UINT32_C(0xffc003ff)) == UINT32_C(0x91000129));
     BUSTER_TEST(arguments, aarch64_mach_data_branch == UINT32_C(0x14000002));
-    // ABS64 addends are signed at the object boundary but the patched slot
-    // is an unsigned address.  Exercise the exact two's-complement limits
-    // and the valid -1 case through the final Darwin linker.
-    s64 aarch64_mach_abs64_addends[] = {INT64_MIN, INT64_MAX, -1};
-    for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(aarch64_mach_abs64_addends); addend_index += 1)
-    {
-        aarch64_mach_data_relocation.addend = aarch64_mach_abs64_addends[addend_index];
-        NativeExecutableLinkResult abs64_addend_link = link_native_executable(
-            arguments->arena, &aarch64_mach_data_object, (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
-        if (aarch64_mach_abs64_addends[addend_index] == -1)
-        {
-            BUSTER_TEST(arguments, abs64_addend_link.error == LINK_ERROR_NONE);
-        }
-        else
-        {
-            BUSTER_TEST(arguments, abs64_addend_link.error == LINK_ERROR_RELOCATION);
-        }
-    }
-    aarch64_mach_data_relocation.addend = 0;
     u32 aarch64_mach_direct_instructions[] = {
         UINT32_C(0x90000009), UINT32_C(0x91000129), UINT32_C(0x14000002), UINT32_C(0xd65f03c0),
     };

@@ -624,16 +624,6 @@ BUSTER_GLOBAL_LOCAL bool link_address_addend(u64 address, s64 addend, u64* resul
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool link_u64_add(u64 left, u64 right, u64* result)
-{
-    if (!result || right > UINT64_MAX - left)
-    {
-        return false;
-    }
-    *result = left + right;
-    return true;
-}
-
 BUSTER_GLOBAL_LOCAL bool link_aarch64_page21_instruction_valid(u32 instruction)
 {
     return (instruction & UINT32_C(0xffffffe0)) == UINT32_C(0x90000000);
@@ -1052,11 +1042,23 @@ BUSTER_GLOBAL_LOCAL bool link_elf_eh_frame_header_write(u8* bytes, u64 byte_coun
         {
             return false;
         }
-        u64 address = 0;
-        if (!link_u64_add(image_base, section_offsets[symbol->section], &address) ||
-            !link_u64_add(address, symbol->value, &address) || !link_address_addend(address, relocation->addend, &address))
+        u64 address = image_base + section_offsets[symbol->section] + symbol->value;
+        if (relocation->addend >= 0)
         {
-            return false;
+            if ((u64)relocation->addend > UINT64_MAX - address)
+            {
+                return false;
+            }
+            address += (u64)relocation->addend;
+        }
+        else
+        {
+            u64 magnitude = (u64)(-(relocation->addend + 1)) + 1;
+            if (magnitude > address)
+            {
+                return false;
+            }
+            address -= magnitude;
         }
         entry->function_address = address;
     }
@@ -1366,32 +1368,16 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
             // addresses, DW_OP_addr, and DW_AT_low_pc) are true addresses.
             bool relative_text_range = (relocation->section == OBJECT_SECTION_DEBUG_LOC || relocation->section == OBJECT_SECTION_DEBUG_RANGES) &&
                                        symbol->section == OBJECT_SECTION_TEXT;
-            u64 value = 0;
-            if (relative_text_range)
+            s64 value = (s64)symbol->value + relocation->addend;
+            if (!relative_text_range)
             {
-                if (!link_address_addend(symbol->value, relocation->addend, &value))
-                {
-                    result->error = LINK_ERROR_RELOCATION;
-                    return;
-                }
+                value += (s64)image_base + (s64)section_offsets[symbol->section];
             }
-            else if (!link_u64_add(image_base, section_offsets[symbol->section], &value) ||
-                     !link_u64_add(value, symbol->value, &value) || !link_address_addend(value, relocation->addend, &value))
-            {
-                result->error = LINK_ERROR_RELOCATION;
-                return;
-            }
-            link_write_u64(bytes, slot, value);
+            link_write_u64(bytes, slot, (u64)value);
         }
         else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE32 && object_section_kind_is_debug((ObjectSectionKind)symbol->section))
         {
-            u64 value = 0;
-            if (!link_address_addend(symbol->value, relocation->addend, &value) || value > UINT32_MAX)
-            {
-                result->error = LINK_ERROR_RELOCATION;
-                return;
-            }
-            link_write_u32(bytes, slot, (u32)value);
+            link_write_u32(bytes, slot, (u32)((s64)symbol->value + relocation->addend));
         }
         else
         {
@@ -1563,20 +1549,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             result.symbol = symbol->name;
             return result;
         }
-        u64 symbol_address = 0;
-        if (!link_u64_add(image_base, section_offsets[symbol->section], &symbol_address) ||
-            !link_u64_add(symbol_address, symbol->value, &symbol_address))
-        {
-            result.error = LINK_ERROR_RELOCATION;
-            result.symbol = symbol->name;
-            return result;
-        }
+        u64 symbol_address = image_base + section_offsets[symbol->section] + symbol->value;
         u64 place_address = image_base + section_offsets[relocation->section] + relocation->offset;
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
         if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
         {
-            s64 value = 0;
-            if (!link_address_difference(symbol_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
+            s64 value = (s64)symbol_address + relocation->addend - (s64)place_address;
+            if (value < INT32_MIN || value > INT32_MAX)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 return result;
@@ -1585,13 +1564,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         }
         else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
         {
-            u64 value = 0;
-            if (!link_address_addend(symbol_address, relocation->addend, &value))
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                return result;
-            }
-            link_write_u64(bytes, output_offset, value);
+            link_write_u64(bytes, output_offset, symbol_address + (u64)relocation->addend);
         }
         else
         {
@@ -1922,24 +1895,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                 result.symbol = symbol->name;
                 return result;
             }
-            u64 plt_slot = (u64)import_index + 1;
-            if (import_index == UINT32_MAX || plt_slot > UINT64_MAX / ELF_PLT_ENTRY_SIZE ||
-                !link_u64_add(plt_address, plt_slot * ELF_PLT_ENTRY_SIZE, &symbol_address))
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                result.symbol = symbol->name;
-                return result;
-            }
+            symbol_address = plt_address + (u64)(import_index + 1) * ELF_PLT_ENTRY_SIZE;
         }
         else if (symbol->section < OBJECT_SECTION_COUNT)
         {
-            if (!link_u64_add(image_base, section_offsets[symbol->section], &symbol_address) ||
-                !link_u64_add(symbol_address, symbol->value, &symbol_address))
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                result.symbol = symbol->name;
-                return result;
-            }
+            symbol_address = image_base + section_offsets[symbol->section] + symbol->value;
         }
         else
         {
@@ -1951,8 +1911,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
         if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
         {
-            s64 value = 0;
-            if (!link_address_difference(symbol_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
+            s64 value = (s64)symbol_address + relocation->addend - (s64)place_address;
+            if (value < INT32_MIN || value > INT32_MAX)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 return result;
@@ -1961,13 +1921,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         }
         else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
         {
-            u64 value = 0;
-            if (!link_address_addend(symbol_address, relocation->addend, &value))
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                return result;
-            }
-            link_write_u64(bytes, output_offset, value);
+            link_write_u64(bytes, output_offset, symbol_address + (u64)relocation->addend);
         }
         else if (relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32)
         {
@@ -1982,8 +1936,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             u64 thread_local_size = align_forward(initialized_size + object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size,
                                                   object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment);
             u64 symbol_offset = symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO ? initialized_size + symbol->value : symbol->value;
-            s64 value = 0;
-            if (!link_address_difference(symbol_offset, thread_local_size, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
+            s64 value = (s64)symbol_offset + relocation->addend - (s64)thread_local_size;
+            if (value < INT32_MIN || value > INT32_MAX)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 return result;
@@ -2243,14 +2197,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             result.symbol = symbol->name;
             return result;
         }
-        u64 symbol_address = 0;
-        if (!link_u64_add(image_base, section_offsets[symbol->section], &symbol_address) ||
-            !link_u64_add(symbol_address, symbol->value, &symbol_address))
-        {
-            result.error = LINK_ERROR_RELOCATION;
-            result.symbol = symbol->name;
-            return result;
-        }
+        u64 symbol_address = image_base + section_offsets[symbol->section] + symbol->value;
         u64 place_address = image_base + section_offsets[relocation->section] + relocation->offset;
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
         if (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26)
@@ -2269,8 +2216,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
         {
             s64 value = 0;
-            if (section->alignment < 4 || (place_address & 3) ||
-                !link_address_difference(symbol_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
+            if (!link_address_difference(symbol_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 return result;
@@ -2279,13 +2225,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         }
         else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
         {
-            u64 value = 0;
-            if (!link_address_addend(symbol_address, relocation->addend, &value))
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                return result;
-            }
-            link_write_u64(bytes, output_offset, value);
+            link_write_u64(bytes, output_offset, symbol_address + (u64)relocation->addend);
         }
         else
         {
@@ -2556,25 +2496,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
                 result.symbol = symbol->name;
                 return result;
             }
-            u64 plt_slot = (u64)import_index + 1;
-            if (import_index == UINT32_MAX || plt_slot > UINT64_MAX / ELF_PLT_ENTRY_SIZE ||
-                !link_u64_add(image_base, plt_offset, &symbol_address) ||
-                !link_u64_add(symbol_address, plt_slot * ELF_PLT_ENTRY_SIZE, &symbol_address))
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                result.symbol = symbol->name;
-                return result;
-            }
+            symbol_address = image_base + plt_offset + (u64)(import_index + 1) * ELF_PLT_ENTRY_SIZE;
         }
         else
         {
-            if (!link_u64_add(image_base, section_offsets[symbol->section], &symbol_address) ||
-                !link_u64_add(symbol_address, symbol->value, &symbol_address))
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                result.symbol = symbol->name;
-                return result;
-            }
+            symbol_address = image_base + section_offsets[symbol->section] + symbol->value;
         }
         u64 place_address = image_base + output_offset;
         s64 displacement = 0;
@@ -3246,13 +3172,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                     result.symbol = symbol->name;
                     return result;
                 }
-                u64 import_slot = (u64)import_slots[relocation->symbol] * sizeof(u64);
-                if (!link_u64_add(import_section_rva, runtime_address_offset, &symbol_rva) || !link_u64_add(symbol_rva, import_slot, &symbol_rva))
-                {
-                    result.error = LINK_ERROR_RELOCATION;
-                    result.symbol = symbol->name;
-                    return result;
-                }
+                symbol_rva = import_section_rva + runtime_address_offset + (u64)import_slots[relocation->symbol] * sizeof(u64);
                 data_import = true;
             }
             else
@@ -3263,13 +3183,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                     result.symbol = symbol->name;
                     return result;
                 }
-                u64 thunk_delta = (u64)import_index * thunk_entry_size;
-                if (!link_u64_add(section_rvas[PE_SECTION_TEXT], thunk_offset, &symbol_rva) || !link_u64_add(symbol_rva, thunk_delta, &symbol_rva))
-                {
-                    result.error = LINK_ERROR_RELOCATION;
-                    result.symbol = symbol->name;
-                    return result;
-                }
+                symbol_rva = section_rvas[PE_SECTION_TEXT] + thunk_offset + (u64)import_index * thunk_entry_size;
             }
         }
         else if (symbol->section < OBJECT_SECTION_COUNT)
@@ -3280,13 +3194,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 result.symbol = symbol->name;
                 return result;
             }
-            if (!link_u64_add(section_rvas[object_output_sections[symbol->section]], object_section_offsets[symbol->section], &symbol_rva) ||
-                !link_u64_add(symbol_rva, symbol->value, &symbol_rva))
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                result.symbol = symbol->name;
-                return result;
-            }
+            symbol_rva = section_rvas[object_output_sections[symbol->section]] + object_section_offsets[symbol->section] + symbol->value;
         }
         else
         {
@@ -3299,20 +3207,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             result.error = LINK_ERROR_RELOCATION;
             return result;
         }
-        u64 place_rva = 0;
-        u64 output_offset = 0;
-        if (!link_u64_add(section_rvas[object_output_sections[relocation->section]], object_section_offsets[relocation->section], &place_rva) ||
-            !link_u64_add(place_rva, relocation->offset, &place_rva) ||
-            !link_u64_add(section_raw_offsets[object_output_sections[relocation->section]], object_section_offsets[relocation->section], &output_offset) ||
-            !link_u64_add(output_offset, relocation->offset, &output_offset))
-        {
-            result.error = LINK_ERROR_RELOCATION;
-            return result;
-        }
+        u64 place_rva = section_rvas[object_output_sections[relocation->section]] + object_section_offsets[relocation->section] + relocation->offset;
+        u64 output_offset = section_raw_offsets[object_output_sections[relocation->section]] + object_section_offsets[relocation->section] + relocation->offset;
         if (relocation->kind == OBJECT_RELOCATION_COFF_ADDR32NB)
         {
-            u64 value = 0;
-            if (symbol->section == OBJECT_SECTION_UNDEFINED || !link_address_addend(symbol_rva, relocation->addend, &value) || value > UINT32_MAX)
+            s64 value = (s64)symbol_rva + relocation->addend;
+            if (symbol->section == OBJECT_SECTION_UNDEFINED || value < 0 || value > UINT32_MAX)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 result.symbol = symbol->name;
@@ -3322,10 +3222,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         }
         else if (relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32)
         {
-            u64 target_rva = 0;
-            s64 value = 0;
-            if (!link_u64_add(import_section_rva, tls_index_offset, &target_rva) ||
-                !link_address_difference(target_rva, place_rva, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
+            s64 value = (s64)(import_section_rva + tls_index_offset) + relocation->addend - (s64)place_rva;
+            if (value < INT32_MIN || value > INT32_MAX)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 return result;
@@ -3340,9 +3238,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 result.symbol = symbol->name;
                 return result;
             }
-            u64 tls_offset = 0;
-            if (!link_u64_add(object_section_offsets[symbol->section], symbol->value, &tls_offset) ||
-                !link_address_addend(tls_offset, relocation->addend, &tls_offset) || tls_offset > UINT32_MAX)
+            u64 tls_offset = object_section_offsets[symbol->section] + symbol->value + (u64)relocation->addend;
+            if (tls_offset > UINT32_MAX)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 return result;
@@ -3380,9 +3277,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 result.symbol = symbol->name;
                 return result;
             }
-            u64 tls_offset = 0;
-            if (!link_u64_add(object_section_offsets[symbol->section], symbol->value, &tls_offset) ||
-                !link_address_addend(tls_offset, relocation->addend, &tls_offset) || tls_offset > 4095)
+            u64 tls_offset = object_section_offsets[symbol->section] + symbol->value + (u64)relocation->addend;
+            if (tls_offset > 4095)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 return result;
@@ -3402,8 +3298,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 }
                 bytes[output_offset - 2] = 0x8b;
             }
-            s64 value = 0;
-            if (!link_address_difference(symbol_rva, place_rva, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
+            s64 value = (s64)symbol_rva + relocation->addend - (s64)place_rva;
+            if (value < INT32_MIN || value > INT32_MAX)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 return result;
@@ -3454,14 +3350,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             }
             else
             {
-                u64 address = 0;
-                if (!link_u64_add(image_base, symbol_rva, &address) || !link_address_addend(address, relocation->addend, &address))
-                {
-                    result.error = LINK_ERROR_RELOCATION;
-                    result.symbol = symbol->name;
-                    return result;
-                }
-                link_write_u64(bytes, output_offset, address);
+                link_write_u64(bytes, output_offset, image_base + symbol_rva + (u64)relocation->addend);
             }
         }
         else
@@ -4144,32 +4033,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         {
             bool relative_text_range = (relocation->section == OBJECT_SECTION_DEBUG_LOC || relocation->section == OBJECT_SECTION_DEBUG_RANGES) &&
                                        symbol->section == OBJECT_SECTION_TEXT;
-            u64 value = 0;
-            if (relative_text_range)
+            s64 value = (s64)symbol->value + relocation->addend;
+            if (!relative_text_range)
             {
-                if (!link_address_addend(symbol->value, relocation->addend, &value))
-                {
-                    result.error = LINK_ERROR_RELOCATION;
-                    return result;
-                }
+                value += (s64)image_base + (s64)section_offsets[symbol->section];
             }
-            else if (!link_u64_add(image_base, section_offsets[symbol->section], &value) ||
-                     !link_u64_add(value, symbol->value, &value) || !link_address_addend(value, relocation->addend, &value))
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                return result;
-            }
-            link_write_u64(bytes, slot, value);
+            link_write_u64(bytes, slot, (u64)value);
         }
         else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE32 && object_section_kind_is_debug((ObjectSectionKind)symbol->section))
         {
-            u64 value = 0;
-            if (!link_address_addend(symbol->value, relocation->addend, &value) || value > UINT32_MAX)
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                return result;
-            }
-            link_write_u32(bytes, slot, (u32)value);
+            link_write_u32(bytes, slot, (u32)((s64)symbol->value + relocation->addend));
         }
         else
         {
@@ -4210,14 +4083,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 result.symbol = symbol->name;
                 return result;
             }
-            u64 slot_index = 0;
-            if (!link_u64_add(import_count, thread_local_index, &slot_index) || slot_index > UINT64_MAX / sizeof(u64) ||
-                !link_u64_add(image_base, got_offset, &symbol_address) || !link_u64_add(symbol_address, slot_index * sizeof(u64), &symbol_address))
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                result.symbol = symbol->name;
-                return result;
-            }
+            symbol_address = image_base + got_offset + ((u64)import_count + thread_local_index) * sizeof(u64);
         }
         else if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
@@ -4235,23 +4101,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 result.symbol = symbol->name;
                 return result;
             }
-            if (!link_u64_add(text_vm_address, stub_offset, &symbol_address) || import_index > UINT64_MAX / stub_size ||
-                !link_u64_add(symbol_address, (u64)import_index * stub_size, &symbol_address))
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                result.symbol = symbol->name;
-                return result;
-            }
+            symbol_address = text_vm_address + stub_offset + (u64)import_index * stub_size;
         }
         else if (symbol->section < OBJECT_SECTION_COUNT)
         {
-            if (!link_u64_add(image_base, section_offsets[symbol->section], &symbol_address) ||
-                !link_u64_add(symbol_address, symbol->value, &symbol_address))
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                result.symbol = symbol->name;
-                return result;
-            }
+            symbol_address = image_base + section_offsets[symbol->section] + symbol->value;
         }
         else
         {
@@ -4266,11 +4120,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         {
             s64 value = 0;
             bool value_valid = relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32
-                                   ? section->alignment >= 4 && !(place_address & 3) && link_address_difference(symbol_address, place_address, relocation->addend, &value)
+                                   ? link_address_difference(symbol_address, place_address, relocation->addend, &value)
                                    : true;
             if (relocation->kind != OBJECT_RELOCATION_AARCH64_PREL32)
             {
-                value_valid = link_address_difference(symbol_address, place_address, relocation->addend, &value);
+                value = (s64)symbol_address + relocation->addend - (s64)place_address;
             }
             if (!value_valid || value < INT32_MIN || value > INT32_MAX)
             {
@@ -4369,13 +4223,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         }
         else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
         {
-            u64 address = 0;
-            if (!link_address_addend(symbol_address, relocation->addend, &address))
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                result.symbol = symbol->name;
-                return result;
-            }
+            u64 address = symbol_address + (u64)relocation->addend;
             if (object->target.cpu_arch == CPU_ARCH_AARCH64 && relocation->section == OBJECT_SECTION_TEXT)
             {
                 if (relocation->offset < 8)
