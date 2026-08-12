@@ -23966,7 +23966,8 @@ struct CIrLowerInlineAssemblyState
     bool output;
     bool asm_goto;
     bool goto_qualifier;
-    u8 reserved[5];
+    bool volatile_qualifier;
+    u8 reserved[4];
 };
 
 typedef struct CIrLowerAutomaticDeclarationListState CIrLowerAutomaticDeclarationListState;
@@ -38493,6 +38494,7 @@ BUSTER_GLOBAL_LOCAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder,
     }
     IrSourceRange instruction_source = c_ir_token_source_range(builder, builder->preprocess.tokens[state->start]);
     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_INLINE_ASSEMBLY, builder->void_type);
+    instruction.volatile_access = state->volatile_qualifier;
     String8 assembly_literal = {
         .pointer = (char8*)assembly.pointer,
         .length = assembly.length,
@@ -38638,7 +38640,9 @@ BUSTER_GLOBAL_LOCAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* buil
                 string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("__inline__")) ||
                 string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("goto"))))
         {
-            state->goto_qualifier |= string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]), S8("goto"));
+            String8 qualifier = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[state->open]);
+            state->goto_qualifier |= string_equal(qualifier, S8("goto"));
+            state->volatile_qualifier |= string_equal(qualifier, S8("volatile")) || string_equal(qualifier, S8("__volatile__"));
             state->open += 1;
         }
         if (state->open + 2 >= state->end || !c_token_is_punctuator(&builder->preprocess.tokens[state->open], C_PUNCTUATOR_LEFT_PARENTHESIS) ||

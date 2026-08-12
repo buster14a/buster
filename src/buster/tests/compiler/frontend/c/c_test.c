@@ -6794,6 +6794,63 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_volatile_ir(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult preprocess = {0};
+    CParseResult parse = {0};
+    CIRLowerResult lowered = c_test_lower_source(
+        temporary.arena,
+        S8("int plain_asm(void) { __asm__(\"nop\"); return 0; }\n"
+           "int volatile_asm(void) { __asm__ volatile(\"nop\"); return 0; }\n"
+           "int underscored_volatile_asm(void) { __asm__ __volatile__(\"nop\"); return 0; }\n"
+           "int plain_asm_goto(int value) { __asm__ goto (\"\" ::: : target); return value; target: return value + 1; }\n"
+           "int volatile_asm_goto(int value) { __asm__ volatile goto (\"\" ::: : target); return value; target: return value + 1; }\n"),
+        S8("inline-assembly-volatile.c"), target_native, &preprocess, &parse);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+    if (lowered.program)
+    {
+        IrModule* module = &lowered.program->modules[0];
+        String8 names[] = {
+            S8("plain_asm"),
+            S8("volatile_asm"),
+            S8("underscored_volatile_asm"),
+            S8("plain_asm_goto"),
+            S8("volatile_asm_goto"),
+        };
+        bool expected_volatile[] = {false, true, true, false, true};
+        for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(names); function_index += 1)
+        {
+            IrFunction* function = c_test_find_ir_function(module, names[function_index]);
+            IrInstruction* assembly = 0;
+            u32 assembly_count = 0;
+            for (u32 instruction_index = 0; function && instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = function->instructions + instruction_index;
+                if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                {
+                    assembly = instruction;
+                    assembly_count += 1;
+                }
+            }
+            BUSTER_TEST(arguments, function != 0);
+            BUSTER_TEST(arguments, assembly_count == 1);
+            BUSTER_TEST(arguments, assembly && assembly->volatile_access == expected_volatile[function_index]);
+            if (function_index >= 3)
+            {
+                BUSTER_TEST(arguments, assembly && assembly->target_count != 0);
+            }
+        }
+        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8257,6 +8314,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_then_nested_conditionals(arguments));
     c_test_result_add(&result, c_test_frontend_vectors(arguments));
     c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));
+    c_test_result_add(&result, c_test_inline_assembly_volatile_ir(arguments));
     c_test_result_add(&result, c_test_frontend_vla_and_ir(arguments));
     c_test_result_add(&result, c_test_local_static_aggregates(arguments));
 
