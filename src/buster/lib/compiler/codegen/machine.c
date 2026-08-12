@@ -1017,7 +1017,6 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
         running = (running + function->stack_slot_sizes[slot_index] + slot_alignment - 1) & ~(slot_alignment - 1);
         placement.stack_slot_offsets[slot_index] = running;
     }
-    placement.frame_size = (running + 15u) & ~15u;
     MachineBuilderStream edits;
     machine_stream_initialize(&edits, sizeof(MachineEdit));
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
@@ -1028,6 +1027,11 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
         {
             return placement;
         }
+        // MIR_STACK has no register allocator to notice an implicit
+        // callee-saved clobber. Account for one directly from opcode
+        // metadata so CMPXCHG16B receives the same ABI save/restore as
+        // FAST/QUALITY placement.
+        placement.callee_saved_mask |= info->clobber_mask & target->callee_saved_mask;
         for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(instruction->operands); slot += 1)
         {
             u8* operand_register = placement.operand_registers + (u64)instruction_index * 4 + slot;
@@ -1101,6 +1105,21 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
                 placement.spill_count += 1;
             }
         }
+    }
+    // The x86 prologue pushes every register named by the final clobber
+    // mask after establishing RBP. MIR_STACK has no allocator pass to fold
+    // those pushes into its running size, so account for their parity now:
+    // an odd number of pushes needs an eight-byte subtract to restore the
+    // System V call boundary before any nested call.
+    u32 push_count = 0;
+    for (u32 physical_register = 0; physical_register < target->register_count; physical_register += 1)
+    {
+        push_count += (placement.callee_saved_mask >> physical_register) & 1u;
+    }
+    placement.frame_size = (running + 15u) & ~15u;
+    if (push_count & 1u)
+    {
+        placement.frame_size += 8u;
     }
     placement.edits = arena_allocate(arena, MachineEdit, edits.total_count);
     placement.edit_count = edits.total_count;

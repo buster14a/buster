@@ -104,6 +104,9 @@ struct MachineX64Selector
     // Per IrValue: the fusion a BRANCH_IF on that condition value selects,
     // and whether the value is a chain member that selects into nothing.
     MachineX64BranchFusion* branch_fusions;
+    // i128 CMPXCHG16B materializes its ZF result immediately, so later
+    // aggregate expected-value copies never rely on flags surviving IR rows.
+    u32* atomic_success_registers;
     u8* fused_dead;
     u32 virtual_register_count;
     // The compile target, for the AVX-512 feature gates on the vector rows.
@@ -1183,6 +1186,34 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     break;
     case IR_OPCODE_BINARY:
     {
+        // CMPXCHG16B materializes its success boolean immediately after the
+        // atomic row; later aggregate copies consume that value, never live
+        // flags across unrelated IR rows.
+        if (result_register != UINT32_MAX && instruction->operand_count >= 2 &&
+            (instruction->binary_operation == IR_BINARY_INTEGER_EQUAL || instruction->binary_operation == IR_BINARY_INTEGER_NOT_EQUAL) &&
+            instruction->operands[0].value < function->value_count && instruction->operands[1].value < function->value_count)
+        {
+            u32 success_register = selector->atomic_success_registers[instruction->operands[0].value];
+            IrValue* observed_value = function->values + instruction->operands[0].value;
+            IrInstruction* atomic_instruction = 0;
+            if (observed_value->definition.value < function->instruction_count)
+            {
+                atomic_instruction = function->instructions + observed_value->definition.value;
+            }
+            bool is_atomic_expected_compare = atomic_instruction && atomic_instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE &&
+                                               atomic_instruction->operand_count >= 2 &&
+                                               atomic_instruction->operands[1].value == instruction->operands[1].value;
+            if (success_register != UINT32_MAX && is_atomic_expected_compare && instruction->binary_operation == IR_BINARY_INTEGER_EQUAL)
+            {
+                u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, success_register)},
+                                                               .opcode = MACHINE_X64_MOV_RR,
+                                                           });
+                machine_x64_define(selector, result_register, row);
+                return true;
+            }
+        }
         u32 left_register;
         u32 right_register;
         if (result_register == UINT32_MAX || !machine_x64_operand_register(selector, instruction->operands[0], &left_register) ||
@@ -2679,6 +2710,49 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     break;
     case IR_OPCODE_ATOMIC_COMPARE_EXCHANGE:
     {
+        IrType* atomic_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        u64 size = atomic_type && atomic_type->layout.resolved ? atomic_type->layout.size : 0;
+        if (size == 16)
+        {
+            // CMPXCHG16B consumes and produces two eightbyte values. Keep
+            // all three value images in frame slots; only the address is a
+            // virtual register and is constrained to slot 3 (RSI), leaving
+            // RAX/RDX/RBX/RCX wholly available to the instruction's implicit
+            // protocol.
+            u32 result_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
+            u32 expected_slot = instruction->operand_count >= 2 && instruction->operands[1].value < function->value_count
+                                    ? selector->value_stack_slots[instruction->operands[1].value]
+                                    : UINT32_MAX;
+            u32 desired_slot = instruction->operand_count >= 3 && instruction->operands[2].value < function->value_count
+                                   ? selector->value_stack_slots[instruction->operands[2].value]
+                                   : UINT32_MAX;
+            if (!target_cpu_feature_has(selector->target, TARGET_CPU_FEATURE_X86_CX16) || instruction->operand_count < 3 ||
+                result_slot == UINT32_MAX || expected_slot == UINT32_MAX || desired_slot == UINT32_MAX)
+            {
+                return false;
+            }
+            u32 address_register = machine_x64_synthesize_register(selector);
+            if (!machine_x64_select_place_address(selector, instruction->operands[0], address_register))
+            {
+                return false;
+            }
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                                    machine_ref_make(MACHINE_REF_STACK_SLOT, expected_slot),
+                                                                    machine_ref_make(MACHINE_REF_STACK_SLOT, desired_slot),
+                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register)},
+                                                       .opcode = MACHINE_X64_ATOMIC_CMPXCHG16,
+                                                   });
+            u32 success_register = machine_x64_synthesize_register(selector);
+            u32 success_row = machine_x64_select_row(selector, (MachineInstruction){
+                                                                  .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, success_register)},
+                                                                  .payload = MACHINE_X64_CONDITION_EQUAL,
+                                                                  .opcode = MACHINE_X64_SETCC,
+                                                              });
+            machine_x64_define(selector, success_register, success_row);
+            selector->atomic_success_registers[instruction->result.value] = success_register;
+            return true;
+        }
         u32 expected_register;
         u32 desired_register;
         if (result_register == UINT32_MAX || instruction->operand_count < 3 ||
@@ -2687,8 +2761,6 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         {
             return false;
         }
-        IrType* atomic_type = ir_type_from_id(&program->types, instruction->canonical_type);
-        u64 size = atomic_type && atomic_type->layout.resolved ? atomic_type->layout.size : 0;
         if (size != 1 && size != 2 && size != 4 && size != 8)
         {
             return false;
@@ -3355,7 +3427,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                                                                         });
             }
             else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD || instruction->opcode == IR_OPCODE_CALL ||
-                      instruction->opcode == IR_OPCODE_CAST || instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY) &&
+                      instruction->opcode == IR_OPCODE_CAST || instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY ||
+                      instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE) &&
                      value_type && value_type->layout.resolved && value_type->layout.size <= UINT32_MAX - 7 &&
                      (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE ||
                       (value_type->kind == IR_TYPE_INTEGER && value_type->bit_width == 128) ||
@@ -3401,11 +3474,13 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     // FCMP_SET materialization and only feed the chain as its bool.
     selector.branch_fusions = arena_allocate(arena, MachineX64BranchFusion, function->value_count ? function->value_count : 1);
     selector.fused_dead = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
+    selector.atomic_success_registers = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
     u32* local_store_ordinals = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
     for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
     {
         selector.branch_fusions[value_index] = (MachineX64BranchFusion){0};
         selector.fused_dead[value_index] = 0;
+        selector.atomic_success_registers[value_index] = UINT32_MAX;
         local_store_ordinals[value_index] = 0;
     }
     u32 fusion_ordinal = 0;
@@ -4211,6 +4286,9 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             break;
         case MACHINE_X64_ATOMIC_RMW:
             capacity64 += 48;
+            break;
+        case MACHINE_X64_ATOMIC_CMPXCHG16:
+            capacity64 += 96;
             break;
         default:
             capacity64 += 24;
@@ -5308,6 +5386,34 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 machine_x64_emit8(&encoder, 0x0f);
                 machine_x64_emit8(&encoder, size == 1 ? 0xb0 : 0xb1);
                 machine_x64_emit8(&encoder, 0x31);
+            }
+            break;
+            case MACHINE_X64_ATOMIC_CMPXCHG16:
+            {
+                u32 result_slot = machine_ref_payload(instruction->operands[0]);
+                u32 expected_slot = machine_ref_payload(instruction->operands[1]);
+                u32 desired_slot = machine_ref_payload(instruction->operands[2]);
+                u32 address = operand_registers[3];
+                u32 result_offset = placement->stack_slot_offsets[result_slot];
+                u32 expected_offset = placement->stack_slot_offsets[expected_slot];
+                u32 desired_offset = placement->stack_slot_offsets[desired_slot];
+                // CMPXCHG16B's implicit pairs are RAX:RDX (expected/result)
+                // and RBX:RCX (desired). The result stores happen after the
+                // instruction, preserving the old memory image on both the
+                // success and failure paths.
+                machine_x64_emit_frame_load(&encoder, MACHINE_X64_RAX, expected_offset);
+                // Frame slots grow toward lower addresses: aggregate byte
+                // offset 8 is represented by the slot offset minus eight.
+                machine_x64_emit_frame_load(&encoder, MACHINE_X64_RDX, expected_offset - 8);
+                machine_x64_emit_frame_load(&encoder, MACHINE_X64_RBX, desired_offset);
+                machine_x64_emit_frame_load(&encoder, MACHINE_X64_RCX, desired_offset - 8);
+                machine_x64_emit8(&encoder, 0xf0);
+                machine_x64_emit8(&encoder, (u8)(0x48 | (address >= 8 ? 0x01 : 0)));
+                machine_x64_emit8(&encoder, 0x0f);
+                machine_x64_emit8(&encoder, 0xc7);
+                machine_x64_emit_memory_modrm(&encoder, 1, address, 0);
+                machine_x64_emit_frame_store(&encoder, MACHINE_X64_RAX, result_offset);
+                machine_x64_emit_frame_store(&encoder, MACHINE_X64_RDX, result_offset - 8);
             }
             break;
             case MACHINE_X64_INT3:

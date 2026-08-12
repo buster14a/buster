@@ -149,6 +149,44 @@ BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_function(Arena* arena)
     return machine_function_builder_finish(arena, &builder);
 }
 
+BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_cmpxchg16_function(Arena* arena)
+{
+    MachineFunctionBuilder builder = machine_function_builder_begin(arena);
+    u32 address = machine_builder_virtual_register(&builder, (MachineVirtualRegister){
+                                                               .definition_point = machine_point_make(0, MACHINE_POINT_AFTER),
+                                                               .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                           });
+    machine_builder_block_begin(&builder);
+    machine_builder_instruction(&builder, (MachineInstruction){
+                                              .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address),
+                                                           machine_ref_make(MACHINE_REF_IMMEDIATE, 0)},
+                                              .opcode = MACHINE_X64_MOV_RI,
+                                          });
+    machine_builder_instruction(&builder, (MachineInstruction){
+                                              .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, 0),
+                                                           machine_ref_make(MACHINE_REF_STACK_SLOT, 1),
+                                                           machine_ref_make(MACHINE_REF_STACK_SLOT, 2),
+                                                           machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address)},
+                                              .opcode = MACHINE_X64_ATOMIC_CMPXCHG16,
+                                          });
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&builder, (MachineBlock){0});
+    MachineFunction function = machine_function_builder_finish(arena, &builder);
+    function.target = machine_target_x86_64();
+    function.immediates = arena_allocate(arena, u64, 1);
+    function.immediates[0] = 0;
+    function.immediate_count = 1;
+    function.stack_slot_sizes = arena_allocate(arena, u32, 3);
+    function.stack_slot_alignments = arena_allocate(arena, u32, 3);
+    for (u32 slot = 0; slot < 3; slot += 1)
+    {
+        function.stack_slot_sizes[slot] = 16;
+        function.stack_slot_alignments[slot] = 16;
+    }
+    function.stack_slot_count = 3;
+    return function;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -186,6 +224,44 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                    (cmpxchg16_info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE) &&
                                    cmpxchg16_info->clobber_mask == cmpxchg16_fixed);
     BUSTER_TEST(arguments, machine_opcode_info(MACHINE_OPCODE_COUNT) == 0);
+
+    // A metadata-only CMPXCHG16B clobber must preserve RBX in every
+    // placement mode, even though this fixture has no virtual value bound to
+    // RBX. Its address is constrained to RSI and the encoder must retain the
+    // old value from RAX:RDX in the result slot after the instruction.
+    MachineFunction cmpxchg16_function = machine_test_build_cmpxchg16_function(arguments->arena);
+    BUSTER_TEST(arguments, machine_verify_function(&cmpxchg16_function).error == MACHINE_VERIFY_NONE);
+    MachineStackPlacement cmpxchg16_mir = machine_stack_placement_build(arguments->arena, &cmpxchg16_function);
+    MachineStackPlacement cmpxchg16_fast = machine_fast_placement_build(arguments->arena, &cmpxchg16_function);
+    MachineStackPlacement cmpxchg16_quality = machine_quality_placement_build(arguments->arena, &cmpxchg16_function);
+    u64 rbx_mask = 1ull << MACHINE_X64_RBX;
+    BUSTER_TEST(arguments, cmpxchg16_mir.valid && cmpxchg16_fast.valid && cmpxchg16_quality.valid);
+    BUSTER_TEST(arguments, (cmpxchg16_mir.callee_saved_mask & rbx_mask) && (cmpxchg16_fast.callee_saved_mask & rbx_mask) &&
+                                   (cmpxchg16_quality.callee_saved_mask & rbx_mask));
+    BUSTER_TEST(arguments, (cmpxchg16_mir.frame_size + 8 * ((cmpxchg16_mir.callee_saved_mask >> MACHINE_X64_RBX) & 1u)) % 16 == 0);
+    BUSTER_TEST(arguments, (cmpxchg16_fast.frame_size + 8 * ((cmpxchg16_fast.callee_saved_mask >> MACHINE_X64_RBX) & 1u)) % 16 == 0);
+    BUSTER_TEST(arguments, (cmpxchg16_quality.frame_size + 8 * ((cmpxchg16_quality.callee_saved_mask >> MACHINE_X64_RBX) & 1u)) % 16 == 0);
+    u32 cmpxchg16_row = 1;
+    BUSTER_TEST(arguments, cmpxchg16_mir.operand_registers[cmpxchg16_row * 4 + 3] == MACHINE_X64_RSI &&
+                                   cmpxchg16_fast.operand_registers[cmpxchg16_row * 4 + 3] == MACHINE_X64_RSI &&
+                                   cmpxchg16_quality.operand_registers[cmpxchg16_row * 4 + 3] == MACHINE_X64_RSI);
+    MachineEncodeResult cmpxchg16_encoded = machine_encode_x86_64(arguments->arena, &cmpxchg16_function, &cmpxchg16_fast);
+    bool saw_cmpxchg16 = false;
+    bool saw_result_store = false;
+    for (u32 byte = 0; cmpxchg16_encoded.valid && byte + 5 <= cmpxchg16_encoded.byte_count; byte += 1)
+    {
+        if (cmpxchg16_encoded.bytes[byte] == 0xf0 && cmpxchg16_encoded.bytes[byte + 1] == 0x48 &&
+            cmpxchg16_encoded.bytes[byte + 2] == 0x0f && cmpxchg16_encoded.bytes[byte + 3] == 0xc7 && cmpxchg16_encoded.bytes[byte + 4] == 0x0e)
+        {
+            saw_cmpxchg16 = true;
+        }
+        if (saw_cmpxchg16 && byte + 3 <= cmpxchg16_encoded.byte_count && cmpxchg16_encoded.bytes[byte] == 0x48 &&
+            cmpxchg16_encoded.bytes[byte + 1] == 0x89 && cmpxchg16_encoded.bytes[byte + 2] == 0x85)
+        {
+            saw_result_store = true;
+        }
+    }
+    BUSTER_TEST(arguments, cmpxchg16_encoded.valid && saw_cmpxchg16 && saw_result_store);
 
     MachineFunction function = machine_test_build_function(arguments->arena);
     BUSTER_TEST(arguments, function.instruction_count == 4);
@@ -433,6 +509,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         .cpu_arch = CPU_ARCH_X86_64,
         .os = OPERATING_SYSTEM_LINUX,
     };
+    machine_target.cpu_features_explicit = true;
+    machine_target.cpu_features = target_cpu_features_add(target_cpu_features_effective(machine_target), TARGET_CPU_FEATURE_X86_CX16);
     String8 machine_c_source_head = S8("int add(int a, int b) { return a + b; }\n"
                                   "int mul(int a, int b) { return a * b; }\n"
                                   "long widen(int a, unsigned b) { return (long)a + (long)b; }\n"
@@ -593,6 +671,14 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "    total += (long)__builtin_va_arg(arguments, double); __builtin_va_end(arguments); return total; }\n"
                                   "long variadic_observe_caller(int first) { return variadic_observe(first, 1, 2, 3, 4, 5, 6, 7,\n"
                                   "    1.25, 2.25, 3.25, 4.25, 5.25, 6.25, 7.25, 8.25, 9.25); }\n"
+                                  "int atomic_cmpxchg16(_Atomic unsigned __int128* cell, unsigned __int128 expected, unsigned __int128 desired) {\n"
+                                  "    int result = __c11_atomic_compare_exchange_strong(cell, &expected, desired, 5, 5);\n"
+                                  "    return result;\n"
+                                  "}\n"
+                                  "int atomic_cmpxchg16_after_call(_Atomic unsigned __int128* cell, unsigned __int128 expected, unsigned __int128 desired) {\n"
+                                  "    int result = __c11_atomic_compare_exchange_strong(cell, &expected, desired, 5, 5);\n"
+                                  "    return result + variadic_named(0);\n"
+                                  "}\n"
                                   "int variadic_unsupported_first(int first, ...) { __asm__ volatile(\"\");\n"
                                   "    va_list arguments; __builtin_va_start(arguments, first); return __builtin_va_arg(arguments, int); }\n"
                                   "#endif\n");
@@ -736,6 +822,135 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             MachineSelectResult atomic_selected = machine_select_canonical_function(arguments->arena, machine_program, atomic_function, machine_target);
             BUSTER_TEST(arguments, atomic_selected.supported);
         }
+        IrFunction* atomic_cmpxchg16_function = machine_test_ir_function_find(machine_module, S8("atomic_cmpxchg16"));
+        BUSTER_TEST(arguments, atomic_cmpxchg16_function != 0);
+        if (atomic_cmpxchg16_function)
+        {
+            MachineSelectResult atomic_cmpxchg16_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, atomic_cmpxchg16_function, machine_target);
+            BUSTER_TEST_RAW(arguments, atomic_cmpxchg16_selected.supported,
+                            string_format(arguments->arena, S8("select atomic_cmpxchg16 failed at opcode {u32}"),
+                                          (u32)atomic_cmpxchg16_selected.failed_opcode));
+            if (atomic_cmpxchg16_selected.supported)
+            {
+                bool saw_cmpxchg16_row = false;
+                for (u32 row_index = 0; row_index < atomic_cmpxchg16_selected.function.instruction_count; row_index += 1)
+                {
+                    saw_cmpxchg16_row |= atomic_cmpxchg16_selected.function.instructions[row_index].opcode == MACHINE_X64_ATOMIC_CMPXCHG16;
+                }
+                BUSTER_TEST(arguments, saw_cmpxchg16_row);
+            }
+            // The boolean shortcut is valid only for the frontend's
+            // observed == expected comparison.  Mutate that RHS to the
+            // unrelated desired i128 value and require the generic selector
+            // to reject the unsupported i128 equality instead of reusing the
+            // atomic success flag.
+            IrInstruction* atomic_ir = 0;
+            IrInstruction* atomic_observed_compare = 0;
+            for (u32 instruction_index = 0; instruction_index < atomic_cmpxchg16_function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = atomic_cmpxchg16_function->instructions + instruction_index;
+                if (!atomic_ir && instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE && instruction->operand_count >= 3)
+                {
+                    atomic_ir = instruction;
+                }
+            }
+            if (atomic_ir)
+            {
+                for (u32 instruction_index = 0; instruction_index < atomic_cmpxchg16_function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = atomic_cmpxchg16_function->instructions + instruction_index;
+                    if (instruction->opcode == IR_OPCODE_BINARY && instruction->operand_count >= 2 &&
+                        instruction->binary_operation == IR_BINARY_INTEGER_EQUAL &&
+                        instruction->operands[0].value == atomic_ir->result.value)
+                    {
+                        atomic_observed_compare = instruction;
+                        break;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, atomic_ir && atomic_observed_compare && atomic_ir->operands[1].value != atomic_ir->operands[2].value);
+            if (atomic_ir && atomic_observed_compare && atomic_ir->operands[1].value != atomic_ir->operands[2].value)
+            {
+                IrValueId expected_operand = atomic_observed_compare->operands[1];
+                atomic_observed_compare->operands[1] = atomic_ir->operands[2];
+                MachineSelectResult unrelated_i128_selected =
+                    machine_select_canonical_function(arguments->arena, machine_program, atomic_cmpxchg16_function, machine_target);
+                BUSTER_TEST(arguments, !unrelated_i128_selected.supported);
+                atomic_observed_compare->operands[1] = expected_operand;
+            }
+            Target no_cx16_target = machine_target;
+            no_cx16_target.cpu_features_explicit = true;
+            no_cx16_target.cpu_features = target_cpu_features_remove(target_cpu_features_effective(machine_target), TARGET_CPU_FEATURE_X86_CX16);
+            MachineSelectResult no_cx16_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, atomic_cmpxchg16_function, no_cx16_target);
+            BUSTER_TEST(arguments, !no_cx16_selected.supported);
+        }
+        IrFunction* atomic_cmpxchg16_call_function = machine_test_ir_function_find(machine_module, S8("atomic_cmpxchg16_after_call"));
+        BUSTER_TEST(arguments, atomic_cmpxchg16_call_function != 0);
+        if (atomic_cmpxchg16_call_function)
+        {
+            MachineSelectResult atomic_cmpxchg16_call_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, atomic_cmpxchg16_call_function, machine_target);
+            BUSTER_TEST_RAW(arguments, atomic_cmpxchg16_call_selected.supported,
+                            string_format(arguments->arena, S8("select atomic_cmpxchg16_after_call failed at opcode {u32}"),
+                                          (u32)atomic_cmpxchg16_call_selected.failed_opcode));
+            if (atomic_cmpxchg16_call_selected.supported)
+            {
+                MachineStackPlacement call_placement = machine_stack_placement_build(arguments->arena, &atomic_cmpxchg16_call_selected.function);
+                u32 call_push_count = 0;
+                for (u32 physical_register = 0; physical_register < machine_target_x86_64()->register_count; physical_register += 1)
+                {
+                    call_push_count += (call_placement.callee_saved_mask >> physical_register) & 1u;
+                }
+                BUSTER_TEST(arguments, call_placement.valid && (call_placement.callee_saved_mask & rbx_mask) &&
+                                               (call_placement.frame_size + 8 * call_push_count) % 16 == 0);
+            }
+        }
+        // Execute the canonical and machine forms against a deliberately
+        // sixteen-byte-aligned object.  The first call succeeds and returns
+        // true; the second observes the changed old value and returns false,
+        // exercising both CMPXCHG16B result paths and its RBX save/restore.
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+        if (atomic_cmpxchg16_function)
+        {
+            typedef int MachineTestAtomicCmpxchg16(_Atomic unsigned __int128*, unsigned __int128, unsigned __int128);
+            u32 atomic_none_offset = machine_test_module_offset(&none_module, machine_module, S8("atomic_cmpxchg16"));
+            MachineSelectResult atomic_machine_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, atomic_cmpxchg16_function, machine_target);
+            MachineStackPlacement atomic_machine_placement = machine_stack_placement_build(arguments->arena, &atomic_machine_selected.function);
+            MachineEncodeResult atomic_machine_encoded = atomic_machine_selected.supported
+                                                             ? machine_encode_x86_64(arguments->arena, &atomic_machine_selected.function,
+                                                                                     &atomic_machine_placement)
+                                                             : (MachineEncodeResult){0};
+            CodegenExecutable atomic_none_executable = codegen_make_executable((CodegenFunction){.code = none_module.code});
+            CodegenExecutable atomic_machine_executable = codegen_make_executable((CodegenFunction){
+                .code = {.pointer = atomic_machine_encoded.bytes, .length = atomic_machine_encoded.byte_count}});
+            BUSTER_TEST(arguments, atomic_none_offset != UINT32_MAX && atomic_machine_encoded.valid &&
+                                       atomic_none_executable.error == CODEGEN_ERROR_NONE && atomic_machine_executable.error == CODEGEN_ERROR_NONE);
+            if (atomic_none_offset != UINT32_MAX && atomic_machine_executable.address && atomic_none_executable.address)
+            {
+                MachineTestAtomicCmpxchg16* atomic_none_call = 0;
+                MachineTestAtomicCmpxchg16* atomic_machine_call = 0;
+                void* atomic_none_address = (u8*)atomic_none_executable.address + atomic_none_offset;
+                void* atomic_machine_address = atomic_machine_executable.address;
+                memcpy(&atomic_none_call, &atomic_none_address, sizeof(atomic_none_call));
+                memcpy(&atomic_machine_call, &atomic_machine_address, sizeof(atomic_machine_call));
+                _Alignas(16) unsigned __int128 atomic_cell_none = ((unsigned __int128)UINT64_C(0x1111222233334444) << 64) | UINT64_C(0x5555666677778888);
+                _Alignas(16) unsigned __int128 atomic_cell_machine = atomic_cell_none;
+                unsigned __int128 atomic_expected = atomic_cell_none;
+                unsigned __int128 atomic_desired = ((unsigned __int128)UINT64_C(0xaaaabbbbccccdddd) << 64) | UINT64_C(0xeeeeffff00001111);
+                int atomic_none_first = atomic_none_call((_Atomic unsigned __int128*)&atomic_cell_none, atomic_expected, atomic_desired);
+                int atomic_machine_first = atomic_machine_call((_Atomic unsigned __int128*)&atomic_cell_machine, atomic_expected, atomic_desired);
+                int atomic_none_second = atomic_none_call((_Atomic unsigned __int128*)&atomic_cell_none, atomic_expected, atomic_expected);
+                int atomic_machine_second = atomic_machine_call((_Atomic unsigned __int128*)&atomic_cell_machine, atomic_expected, atomic_expected);
+                BUSTER_TEST(arguments, atomic_none_first == atomic_machine_first && atomic_none_second == atomic_machine_second && atomic_none_first && !atomic_none_second &&
+                                           atomic_cell_none == atomic_cell_machine);
+            }
+            codegen_release_executable(atomic_machine_executable);
+            codegen_release_executable(atomic_none_executable);
+        }
+#endif
         IrFunction* goto_function = machine_test_ir_function_find(machine_module, S8("goto_probe"));
         BUSTER_TEST(arguments, goto_function != 0);
         if (goto_function)

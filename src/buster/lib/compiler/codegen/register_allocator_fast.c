@@ -840,6 +840,17 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
     // Only the callee-saved pins cost a prologue save; a caller-saved pin
     // is exactly why QUALITY hands them out where a span crosses no call.
     placement.callee_saved_mask |= pinned_mask & description->callee_saved_mask;
+    // Metadata-only clobbers (for example CMPXCHG16B's implicit RBX write)
+    // still require an ABI save even when no virtual value owns that
+    // physical register during the scan.
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        MachineOpcodeInfo const* info = machine_opcode_info(function->instructions[instruction_index].opcode);
+        if (info)
+        {
+            placement.callee_saved_mask |= info->clobber_mask & description->callee_saved_mask;
+        }
+    }
     MachineFastState state = {
         .arena = arena,
         .function = function,
