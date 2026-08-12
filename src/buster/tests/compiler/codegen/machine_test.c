@@ -555,7 +555,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "    for (unsigned long round = 0; round < rounds; round += 1) { acc += sp_mix(acc ^ k0 ^ k23); }\n"
                                   "    return acc ^ k1 ^ k2 ^ k3 ^ k4 ^ k5 ^ k6 ^ k7 ^ k8 ^ k9 ^ k10 ^ k11 ^ k12 ^ k13 ^ k14 ^ k15 ^ k16 ^ k17 ^ k18 ^ k19 ^\n"
                                   "           k20 ^ k21 ^ k22;\n"
-                                  "}\n");
+                                  "}\n"
+                                  "typedef __int128 MachineWideSigned;\n"
+                                  "typedef unsigned __int128 MachineWideUnsigned;\n"
+                                  "unsigned long u128_to_u64(MachineWideUnsigned v) { return (unsigned long)v; }\n"
+                                  "long i128_to_i64(MachineWideSigned v) { return (long)v; }\n"
+                                  "MachineWideUnsigned u64_to_u128(unsigned long v) { return (MachineWideUnsigned)v; }\n"
+                                  "MachineWideSigned i64_to_i128(long v) { return (MachineWideSigned)v; }\n");
     String8 machine_c_source =
         string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra);
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
@@ -700,6 +706,105 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                               (u32)lifted_selected.failed_opcode));
             }
         }
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+        // i128/u128 casts use the same two-eightbyte frame representation as
+        // the ABI's integer aggregate pair.  Exercise every signedness
+        // direction through the machine bytes and compare against the
+        // canonical NONE entry, including a negative signed widening and an
+        // unsigned value whose low half has its top bit set.
+        {
+            typedef unsigned __int128 MachineTestCallU128(u64);
+            typedef __int128 MachineTestCallI128(s64);
+            typedef u64 MachineTestCallU64(unsigned __int128);
+            typedef s64 MachineTestCallI64(__int128);
+            String8 cast_names[] = {
+                S8_INITIALIZER("u128_to_u64"), S8_INITIALIZER("i128_to_i64"), S8_INITIALIZER("u64_to_u128"), S8_INITIALIZER("i64_to_i128"),
+            };
+            CodegenExecutable cast_none_module_executable = codegen_make_executable((CodegenFunction){
+                .code = none_module.code,
+            });
+            BUSTER_TEST(arguments, cast_none_module_executable.error == CODEGEN_ERROR_NONE);
+            for (u32 cast_index = 0; cast_index < BUSTER_ARRAY_LENGTH(cast_names); cast_index += 1)
+            {
+                IrFunction* cast_function = machine_test_ir_function_find(machine_module, cast_names[cast_index]);
+                BUSTER_TEST(arguments, cast_function != 0);
+                if (!cast_function)
+                {
+                    continue;
+                }
+                MachineSelectResult cast_selected = {0};
+                MachineEncodeResult cast_machine = machine_test_encode(arguments->arena, machine_program, cast_function, machine_target, &cast_selected);
+                BUSTER_TEST_RAW(arguments, cast_selected.supported,
+                                string_format(arguments->arena, S8("select {S8} failed at opcode {u32}"), cast_names[cast_index],
+                                              (u32)cast_selected.failed_opcode));
+                BUSTER_TEST(arguments, cast_machine.valid);
+                u32 cast_none_offset = machine_test_module_offset(&none_module, machine_module, cast_names[cast_index]);
+                BUSTER_TEST(arguments, cast_none_offset != UINT32_MAX);
+                CodegenExecutable cast_machine_executable = codegen_make_executable((CodegenFunction){
+                    .code = {.pointer = cast_machine.bytes, .length = cast_machine.byte_count},
+                });
+                BUSTER_TEST(arguments, cast_machine_executable.error == CODEGEN_ERROR_NONE);
+                if (cast_none_offset == UINT32_MAX || !cast_machine_executable.address || !cast_none_module_executable.address)
+                {
+                    codegen_release_executable(cast_machine_executable);
+                    continue;
+                }
+                void* cast_none_address = (u8*)cast_none_module_executable.address + cast_none_offset;
+                void* cast_machine_address = cast_machine_executable.address;
+                bool cast_equal = true;
+                if (cast_index == 0)
+                {
+                    MachineTestCallU64* none_call = 0;
+                    MachineTestCallU64* machine_call = 0;
+                    memcpy(&none_call, &cast_none_address, sizeof(none_call));
+                    memcpy(&machine_call, &cast_machine_address, sizeof(machine_call));
+                    unsigned __int128 value = ((unsigned __int128)UINT64_C(0x8000000000000001) << 64) | UINT64_C(0xdeadbeefcafebabe);
+                    cast_equal = none_call(value) == machine_call(value);
+                }
+                else if (cast_index == 1)
+                {
+                    MachineTestCallI64* none_call = 0;
+                    MachineTestCallI64* machine_call = 0;
+                    memcpy(&none_call, &cast_none_address, sizeof(none_call));
+                    memcpy(&machine_call, &cast_machine_address, sizeof(machine_call));
+                    __int128 value = -((__int128)1 << 100) - 5;
+                    cast_equal = none_call(value) == machine_call(value);
+                }
+                else if (cast_index == 2)
+                {
+                    MachineTestCallU128* none_call = 0;
+                    MachineTestCallU128* machine_call = 0;
+                    memcpy(&none_call, &cast_none_address, sizeof(none_call));
+                    memcpy(&machine_call, &cast_machine_address, sizeof(machine_call));
+                    u64 value = UINT64_C(0x8000000000000001);
+                    unsigned __int128 none_value = none_call(value);
+                    unsigned __int128 machine_value = machine_call(value);
+                    cast_equal = none_value == machine_value;
+                    BUSTER_TEST(arguments, (u64)(machine_value >> 64) == 0);
+                }
+                else
+                {
+                    MachineTestCallI128* none_call = 0;
+                    MachineTestCallI128* machine_call = 0;
+                    memcpy(&none_call, &cast_none_address, sizeof(none_call));
+                    memcpy(&machine_call, &cast_machine_address, sizeof(machine_call));
+                    s64 value = -1;
+                    __int128 none_value = none_call(value);
+                    __int128 machine_value = machine_call(value);
+                    cast_equal = none_value == machine_value;
+                    BUSTER_TEST(arguments, (u64)((unsigned __int128)machine_value >> 64) == UINT64_MAX);
+                    value = INT64_MIN;
+                    none_value = none_call(value);
+                    machine_value = machine_call(value);
+                    cast_equal &= none_value == machine_value;
+                    BUSTER_TEST(arguments, (u64)((unsigned __int128)machine_value >> 64) == UINT64_MAX);
+                }
+                BUSTER_TEST_RAW(arguments, cast_equal, cast_names[cast_index]);
+                codegen_release_executable(cast_machine_executable);
+            }
+            codegen_release_executable(cast_none_module_executable);
+        }
+#endif
         // Live-range splitting: split_phase must take at least one split — a value
         // register-resident for the first loop only, installed on the
         // entering edges and stored back at the landing pad — and the

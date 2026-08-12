@@ -788,14 +788,113 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
     break;
     case IR_OPCODE_CAST:
     {
-        u32 source_register;
-        if (result_register == UINT32_MAX || !machine_x64_operand_register(selector, instruction->operands[0], &source_register))
+        if (instruction->operands[0].value >= function->value_count)
         {
             return false;
         }
         IrType* source_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
         IrType* cast_target_type = ir_type_from_id(&program->types, instruction->canonical_type);
         u32 source_bits = machine_x64_scalar_bit_width(source_type);
+        bool source_integer128 = source_type && source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128;
+        bool target_integer128 = cast_target_type && cast_target_type->kind == IR_TYPE_INTEGER && cast_target_type->bit_width == 128;
+        // i128 values use the same two-eightbyte frame representation as
+        // aggregate values.  Keep this path deliberately narrow: only the
+        // canonical integer truncation and extension forms between a 128-bit
+        // integer and a 64-bit integer are selected here.  Other aggregate
+        // casts continue through the explicit unsupported fallback below.
+        if (source_integer128 || target_integer128)
+        {
+            if (!source_type || !cast_target_type || source_type->kind != IR_TYPE_INTEGER || cast_target_type->kind != IR_TYPE_INTEGER)
+            {
+                return false;
+            }
+            u32 source_slot = selector->value_stack_slots[instruction->operands[0].value];
+            u32 target_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
+            bool truncate_i128 = source_integer128 && cast_target_type->bit_width == 64 && instruction->conversion_operation == IR_CONVERSION_INTEGER_TRUNCATE;
+            bool extend_i128 = target_integer128 && source_type->bit_width == 64 &&
+                               (instruction->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND ||
+                                instruction->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND);
+            if (truncate_i128)
+            {
+                if (result_register == UINT32_MAX || source_slot == UINT32_MAX)
+                {
+                    return false;
+                }
+                u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                            machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
+                                                               .opcode = MACHINE_X64_LOAD_FRAME,
+                                                           });
+                machine_x64_define(selector, result_register, row);
+                return true;
+            }
+            if (extend_i128)
+            {
+                u32 source_register;
+                if (result_register != UINT32_MAX || target_slot == UINT32_MAX || source_bits != 64 ||
+                    !machine_x64_operand_register(selector, instruction->operands[0], &source_register))
+                {
+                    return false;
+                }
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, target_slot),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                     .opcode = MACHINE_X64_STORE_FRAME64,
+                                                 });
+                u32 high_register = machine_x64_synthesize_register(selector);
+                if (instruction->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND)
+                {
+                    // The high half of a signed 64-to-128 extension is the
+                    // sign bit replicated across all 64 bits.  Copy the low
+                    // half, then arithmetic-shift it by 63 so the runtime
+                    // sign (rather than the static type) chooses all ones or
+                    // all zeroes.
+                    machine_x64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_register),
+                                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                         .opcode = MACHINE_X64_MOV_RR,
+                                                     });
+                    u32 shift_register = machine_x64_synthesize_register(selector);
+                    u32 immediate_index = selector->immediates.total_count;
+                    u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+                    *immediate_row = 63;
+                    machine_x64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, shift_register),
+                                                                      machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
+                                                         .opcode = MACHINE_X64_MOV_RI,
+                                                     });
+                    machine_x64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_register),
+                                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, shift_register)},
+                                                         .opcode = MACHINE_X64_SAR64,
+                                                     });
+                }
+                else
+                {
+                    u32 immediate_index = selector->immediates.total_count;
+                    u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+                    *immediate_row = 0;
+                    machine_x64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_register),
+                                                                      machine_ref_make(MACHINE_REF_IMMEDIATE, immediate_index)},
+                                                         .opcode = MACHINE_X64_MOV_RI,
+                                                     });
+                }
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, target_slot),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_register)},
+                                                     .payload = 8,
+                                                     .opcode = MACHINE_X64_STORE_FRAME64,
+                                                 });
+                return true;
+            }
+            return false;
+        }
+        u32 source_register;
+        if (result_register == UINT32_MAX || !machine_x64_operand_register(selector, instruction->operands[0], &source_register))
+        {
+            return false;
+        }
         // Float conversions mirror the canonical forms: the 64-bit convert
         // instructions carry every narrower case after an integer extension,
         // and the branchy unsigned-64 sequences stay outside the subset.
@@ -3208,7 +3307,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                                                                         });
             }
             else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD || instruction->opcode == IR_OPCODE_CALL ||
-                      instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY) &&
+                      instruction->opcode == IR_OPCODE_CAST || instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY) &&
                      value_type && value_type->layout.resolved && value_type->layout.size <= UINT32_MAX - 7 &&
                      (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE ||
                       (value_type->kind == IR_TYPE_INTEGER && value_type->bit_width == 128) ||
