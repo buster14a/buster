@@ -160,6 +160,30 @@ BUSTER_GLOBAL_LOCAL bool object_test_mach_text_offsets(ByteSlice bytes, u32* raw
     return *raw_offset <= bytes.length && *relocation_offset <= bytes.length && (u64)*relocation_count * 8 <= bytes.length - *relocation_offset;
 }
 
+BUSTER_GLOBAL_LOCAL bool object_test_mach_section_offsets(ByteSlice bytes, u32 section_index, u32* raw_offset, u32* relocation_offset,
+                                                          u32* relocation_count)
+{
+    u64 section = 32 + 72 + (u64)section_index * 80;
+    if (!bytes.pointer || !raw_offset || !relocation_offset || !relocation_count || bytes.length < section + 80)
+    {
+        return false;
+    }
+    u32 magic = 0;
+    u32 command = 0;
+    u32 section_count = 0;
+    memcpy(&magic, bytes.pointer, sizeof(magic));
+    memcpy(&command, bytes.pointer + 32, sizeof(command));
+    memcpy(&section_count, bytes.pointer + 32 + 64, sizeof(section_count));
+    if (magic != UINT32_C(0xfeedfacf) || command != 0x19 || section_index >= section_count)
+    {
+        return false;
+    }
+    memcpy(raw_offset, bytes.pointer + section + 48, sizeof(*raw_offset));
+    memcpy(relocation_offset, bytes.pointer + section + 56, sizeof(*relocation_offset));
+    memcpy(relocation_count, bytes.pointer + section + 60, sizeof(*relocation_count));
+    return *raw_offset <= bytes.length && *relocation_offset <= bytes.length && (u64)*relocation_count * 8 <= bytes.length - *relocation_offset;
+}
+
 BUSTER_GLOBAL_LOCAL u64 object_test_mach_symbol_offset(ByteSlice bytes, u32 symbol_index)
 {
     if (!bytes.pointer || bytes.length < 32)
