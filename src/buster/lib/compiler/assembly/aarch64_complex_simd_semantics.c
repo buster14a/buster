@@ -125,6 +125,26 @@ static bool buster_a64_complex_simd_semantic_equal(BusterA64SemanticString left,
     return true;
 }
 
+static bool buster_a64_complex_simd_operand_has_kind(BusterA64SemanticOperand operand, BusterA64SemanticOperandKind kind)
+{
+    u32 bit = (u32)kind;
+    return bit < 32 && (operand.kind_mask & (UINT32_C(1) << bit)) != 0;
+}
+
+static bool buster_a64_complex_simd_operand_has_arrangement_kind(BusterA64SemanticOperand operand)
+{
+    return buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT) ||
+           buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR) ||
+           buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR);
+}
+
+static bool buster_a64_complex_simd_operand_is_arrangement_selector(BusterA64SemanticOperand operand)
+{
+    return (operand.flags & BUSTER_A64_SEMANTIC_FLAG_ARRANGEMENT_SELECTOR) != 0 &&
+           !buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_FIXED_CONSTANT) &&
+           buster_a64_complex_simd_operand_has_arrangement_kind(operand);
+}
+
 static bool buster_a64_complex_simd_value_uint(BusterA64SemanticVMValue value, u64* result)
 {
     if (!result)
@@ -836,9 +856,11 @@ static bool buster_a64_complex_simd_register_value_ok(BusterA64SemanticOperand o
     {
         return false;
     }
-    bool index_vector = operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE && (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_INDEX_REGISTER) != 0 &&
+    bool index_vector = buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE) &&
+                        (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_INDEX_REGISTER) != 0 &&
                         (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LANE_INDEX) != 0 && (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0;
-    if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST || (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LIST_MEMBER) != 0)
+    if (buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST) ||
+        (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LIST_MEMBER) != 0)
     {
         if (value.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST)
         {
@@ -854,7 +876,7 @@ static bool buster_a64_complex_simd_register_value_ok(BusterA64SemanticOperand o
             return false;
         }
     }
-    else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE)
+    else if (buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE))
     {
         if (value.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LANE)
         {
@@ -955,6 +977,21 @@ static bool buster_a64_complex_simd_encode_operand(u32 row_index, BusterA64Seman
     if (value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID)
     {
         return false;
+    }
+    if (buster_a64_complex_simd_operand_is_arrangement_selector(operand))
+    {
+        return buster_a64_complex_simd_inverse_tables(form, operand, value, fields, assigned);
+    }
+    bool register_operand = buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER) ||
+                            buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST) ||
+                            (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE &&
+                             !buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_INTEGER_IMMEDIATE));
+    if (register_operand)
+    {
+        bool value_ok = buster_a64_complex_simd_register_value_ok(operand, value);
+        bool arrangement_ok = value_ok && buster_a64_complex_simd_register_arrangement_ok(row_index, form, operand_index, values, value);
+        bool fields_ok = arrangement_ok && buster_a64_complex_simd_assign_operand_fields(form, operand, value, fields, assigned);
+        return value_ok && arrangement_ok && fields_ok;
     }
     switch (operand.kind)
     {
@@ -1199,7 +1236,8 @@ static bool buster_a64_complex_simd_decode_register(u32 row_index, BusterA64Sema
     {
         return false;
     }
-    bool is_list = operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST || (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LIST_MEMBER) != 0;
+    bool is_list = buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST) ||
+                   (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LIST_MEMBER) != 0;
     u32 number = is_list ? fields->values[local] : (fields->values[local] + offset) & 31u;
     BusterA64ComplexSIMDArrangement arrangement = BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_INVALID;
     bool arrangement_selected = false;
@@ -1247,21 +1285,22 @@ static bool buster_a64_complex_simd_decode_register(u32 row_index, BusterA64Sema
             {
                 return false;
             }
-            if (candidate.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST && candidate_offset + 1 > count)
+            if (buster_a64_complex_simd_operand_has_kind(candidate, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST) && candidate_offset + 1 > count)
             {
                 count = candidate_offset + 1;
             }
         }
         *result = buster_a64_complex_simd_value_list(number, count, arrangement);
     }
-    else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE && (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_INDEX_REGISTER) != 0 &&
+    else if (buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE) &&
+             (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_INDEX_REGISTER) != 0 &&
              (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LANE_INDEX) != 0 && (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0)
     {
         /* TBL/TBX Vm is an index vector; the presentation metadata calls it
          * simd_lane but there is no encoded element lane to recover. */
         *result = buster_a64_complex_simd_value_vector(number, arrangement);
     }
-    else if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE)
+    else if (buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE))
     {
         *result = buster_a64_complex_simd_value_lane(number, arrangement, 0);
     }
@@ -1448,8 +1487,7 @@ static BusterA64ComplexSIMDStatus buster_a64_complex_simd_decode_internal(Target
         {
             return BUSTER_A64_COMPLEX_SIMD_STATUS_BOUNDS;
         }
-        if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT || operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR ||
-            operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR)
+        if (buster_a64_complex_simd_operand_is_arrangement_selector(operand))
         {
             if (!buster_a64_complex_simd_decode_arrangement(form, operand, &decoded.fields, &values[index]))
             {
@@ -1464,12 +1502,36 @@ static BusterA64ComplexSIMDStatus buster_a64_complex_simd_decode_internal(Target
         {
             return BUSTER_A64_COMPLEX_SIMD_STATUS_BOUNDS;
         }
+        if (buster_a64_complex_simd_operand_is_arrangement_selector(operand))
+        {
+            /* Arrangement selectors were evaluated in the first pass. */
+            continue;
+        }
+        bool register_operand = !buster_a64_complex_simd_operand_is_arrangement_selector(operand) &&
+                                (buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER) ||
+                                 buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST) ||
+                                 (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE &&
+                                  !buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_INTEGER_IMMEDIATE)));
+        if (register_operand)
+        {
+            if (!buster_a64_complex_simd_decode_register(row_index, form, index, operand, &decoded.fields, values, &values[index]))
+            {
+                return BUSTER_A64_COMPLEX_SIMD_STATUS_RANGE;
+            }
+            continue;
+        }
         switch (operand.kind)
         {
         case BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT:
         case BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR:
         case BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR:
-            /* Arrangement selectors were evaluated in the first pass. */
+            /* A selector without the arrangement-selector flag is not
+             * currently emitted by the canonical corpus, but retain the
+             * primary-kind fallback for forward-compatible rows. */
+            if (!buster_a64_complex_simd_decode_arrangement(form, operand, &decoded.fields, &values[index]))
+            {
+                return BUSTER_A64_COMPLEX_SIMD_STATUS_RESERVED;
+            }
             break;
         case BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER:
         case BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST:
@@ -1608,8 +1670,7 @@ bool buster_a64_complex_simd_validate(void)
             }
             BusterA64SemanticOperand selector = {0};
             if (!buster_a64_semantic_operand(form.operand_first + binding->selector_index, &selector) ||
-                (selector.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT && selector.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR &&
-                 selector.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR))
+                !buster_a64_complex_simd_operand_has_arrangement_kind(selector))
             {
                 return false;
             }
