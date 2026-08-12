@@ -407,7 +407,9 @@ struct CodegenModuleOptions
     // A CodegenRegisterAllocatorMode value; u8 storage keeps the options
     // record at its existing size.
     u8 register_allocator;
-    u8 reserved[1];
+    // An AssemblySyntax value.  Keep this byte-sized so the public options
+    // record remains ABI-compatible with callers that embed it.
+    u8 assembly_syntax;
 };
 
 // Fills the per-abi target cache on the calling thread. Call before lane_run;

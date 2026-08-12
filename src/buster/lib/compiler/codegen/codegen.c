@@ -94,6 +94,8 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
            (!relocation->label_address || kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64);
 }
 
+#include <buster/lib/compiler/assembly/assembly.h>
+#include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/ir/interpreter.h>
 #include <buster/lib/compiler/object/object.h>
@@ -104,6 +106,48 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
 #define X64_VALUE_SLOT_COMPONENT_COUNT 4
 #define A64_VALUE_SLOT_SIZE 32
 
+BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_names64[] = {
+    S8("rax"), S8("rcx"), S8("rdx"), S8("rbx"), S8("rsp"), S8("rbp"), S8("rsi"), S8("rdi"),
+    S8("r8"), S8("r9"), S8("r10"), S8("r11"), S8("r12"), S8("r13"), S8("r14"), S8("r15"),
+};
+BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_names32[] = {
+    S8("eax"), S8("ecx"), S8("edx"), S8("ebx"), S8("esp"), S8("ebp"), S8("esi"), S8("edi"),
+    S8("r8d"), S8("r9d"), S8("r10d"), S8("r11d"), S8("r12d"), S8("r13d"), S8("r14d"), S8("r15d"),
+};
+BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_names16[] = {
+    S8("ax"), S8("cx"), S8("dx"), S8("bx"), S8("sp"), S8("bp"), S8("si"), S8("di"),
+    S8("r8w"), S8("r9w"), S8("r10w"), S8("r11w"), S8("r12w"), S8("r13w"), S8("r14w"), S8("r15w"),
+};
+BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_names8[] = {
+    S8("al"), S8("cl"), S8("dl"), S8("bl"), S8("spl"), S8("bpl"), S8("sil"), S8("dil"),
+    S8("r8b"), S8("r9b"), S8("r10b"), S8("r11b"), S8("r12b"), S8("r13b"), S8("r14b"), S8("r15b"),
+};
+BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
+    S8("mov"), S8("movb"), S8("movw"), S8("movl"), S8("movq"), S8("movzx"), S8("movsx"), S8("movzb"), S8("movzw"), S8("movzl"),
+    S8("movsxb"), S8("movsxw"), S8("movsxl"), S8("add"), S8("addb"), S8("addw"), S8("addl"), S8("addq"), S8("sub"), S8("subb"),
+    S8("subw"), S8("subl"), S8("subq"), S8("xor"), S8("xorb"), S8("xorw"), S8("xorl"), S8("xorq"), S8("or"), S8("orb"), S8("orw"),
+    S8("orl"), S8("orq"), S8("and"), S8("andb"), S8("andw"), S8("andl"), S8("andq"), S8("cmp"), S8("cmpb"), S8("cmpw"), S8("cmpl"),
+    S8("cmpq"), S8("test"), S8("testb"), S8("testw"), S8("testl"), S8("testq"), S8("xchg"), S8("xchgb"), S8("xchgw"), S8("xchgl"),
+    S8("xchgq"), S8("inc"), S8("incb"), S8("incw"), S8("incl"), S8("incq"), S8("dec"), S8("decb"), S8("decw"), S8("decl"), S8("decq"),
+    S8("neg"), S8("negb"), S8("negw"), S8("negl"), S8("negq"), S8("not"), S8("notb"), S8("notw"), S8("notl"), S8("notq"), S8("bswap"),
+    S8("bswapl"), S8("bswapq"),
+};
+BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_registers[] = {
+    S8("rax"), S8("eax"), S8("ax"), S8("al"), S8("rcx"), S8("ecx"), S8("cx"), S8("cl"), S8("rdx"), S8("edx"), S8("dx"), S8("dl"),
+    S8("rbx"), S8("ebx"), S8("bx"), S8("bl"), S8("rsp"), S8("esp"), S8("sp"), S8("spl"), S8("rbp"), S8("ebp"), S8("bp"), S8("bpl"),
+    S8("rsi"), S8("esi"), S8("si"), S8("sil"), S8("rdi"), S8("edi"), S8("di"), S8("dil"), S8("r8"), S8("r8d"), S8("r8w"), S8("r8b"),
+    S8("r9"), S8("r9d"), S8("r9w"), S8("r9b"), S8("r10"), S8("r10d"), S8("r10w"), S8("r10b"), S8("r11"), S8("r11d"), S8("r11w"),
+    S8("r11b"), S8("r12"), S8("r12d"), S8("r12w"), S8("r12b"), S8("r13"), S8("r13d"), S8("r13w"), S8("r13b"), S8("r14"), S8("r14d"),
+    S8("r14w"), S8("r14b"), S8("r15"), S8("r15d"), S8("r15w"), S8("r15b"),
+};
+BUSTER_GLOBAL_LOCAL X64Register const codegen_x64_asm_system_v_registers[] = {
+    X64_REGISTER_RAX, X64_REGISTER_RCX, X64_REGISTER_RDX, X64_REGISTER_RSI, X64_REGISTER_RDI,
+    X64_REGISTER_R8, X64_REGISTER_R9, X64_REGISTER_R10, X64_REGISTER_R11,
+};
+BUSTER_GLOBAL_LOCAL X64Register const codegen_x64_asm_windows_registers[] = {
+    X64_REGISTER_RAX, X64_REGISTER_RCX, X64_REGISTER_RDX, X64_REGISTER_R8, X64_REGISTER_R9, X64_REGISTER_R10, X64_REGISTER_R11,
+};
+
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_jump_target(IrFunction* function, IrInstruction* instruction, String8 literal, String8 prefix,
                                                              u32* target_index_out)
 {
@@ -112,6 +156,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_jump_target(IrFunction* functio
 
 BUSTER_GLOBAL_LOCAL void codegen_emit_u8(CodegenBuffer* buffer, u8 value);
 BUSTER_GLOBAL_LOCAL void codegen_emit_u32(CodegenBuffer* buffer, u32 value);
+BUSTER_GLOBAL_LOCAL u32 codegen_inline_assembly_type_class(IrType* type);
 
 BUSTER_GLOBAL_LOCAL bool codegen_decimal_number(String8 string, u64* value_out)
 {
@@ -131,6 +176,401 @@ BUSTER_GLOBAL_LOCAL bool codegen_decimal_number(String8 string, u64* value_out)
     }
     *value_out = value;
     return true;
+}
+
+// The canonical emitter only gives ordinary inline assembly scalar GPR
+// operands.  Keep the spelling table here, rather than teaching the
+// instruction encoder about compiler values: the former is the ABI contract,
+// while the latter is just a source-level substitution.
+BUSTER_GLOBAL_LOCAL String8 codegen_x64_asm_register_name(X64Register register_index, u32 width)
+{
+    if ((u32)register_index >= BUSTER_ARRAY_LENGTH(codegen_x64_asm_names64))
+    {
+        return (String8){0};
+    }
+    switch (width)
+    {
+    case 1: return codegen_x64_asm_names8[register_index];
+    case 2: return codegen_x64_asm_names16[register_index];
+    case 4: return codegen_x64_asm_names32[register_index];
+    case 8: return codegen_x64_asm_names64[register_index];
+    }
+    return (String8){0};
+}
+
+BUSTER_GLOBAL_LOCAL AssemblySyntax codegen_inline_assembly_syntax(CodegenModuleOptions options)
+{
+    // GNU's default dialect is AT&T.  Do not pass DEFAULT to assembly_encode:
+    // its standalone API intentionally defaults to Intel for historical
+    // callers, whereas a GNU asm template must retain the driver's meaning.
+    return options.assembly_syntax == ASSEMBLY_SYNTAX_INTEL ? ASSEMBLY_SYNTAX_INTEL : ASSEMBLY_SYNTAX_ATT;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_operand_name_index(IrInstructionExtra extra, String8 name, u32* index_out)
+{
+    if (!extra.operand_names)
+    {
+        return false;
+    }
+    for (u32 index = 0; index < extra.operand_name_count; index += 1)
+    {
+        if (string_equal(extra.operand_names[index], name))
+        {
+            if (index_out)
+            {
+                *index_out = index;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_reference(String8 source, u64 percent_index, IrInstructionExtra extra,
+                                                                    u32 operand_count, u32* operand_index_out, u64* end_out)
+{
+    if (percent_index + 1 >= source.length)
+    {
+        return false;
+    }
+    u64 index = percent_index + 1;
+    if (source.pointer[index] == '[')
+    {
+        u64 name_start = index + 1;
+        u64 name_end = name_start;
+        while (name_end < source.length && source.pointer[name_end] != ']')
+        {
+            name_end += 1;
+        }
+        if (name_end == name_start || name_end >= source.length)
+        {
+            return false;
+        }
+        u32 operand_index = 0;
+        if (!codegen_inline_assembly_operand_name_index(extra,
+                                                        (String8){.pointer = source.pointer + name_start, .length = name_end - name_start},
+                                                        &operand_index) || operand_index >= operand_count)
+        {
+            return false;
+        }
+        *operand_index_out = operand_index;
+        *end_out = name_end + 1;
+        return true;
+    }
+    if (source.pointer[index] < '0' || source.pointer[index] > '9')
+    {
+        return false;
+    }
+    u64 value = 0;
+    u64 end = index;
+    while (end < source.length && source.pointer[end] >= '0' && source.pointer[end] <= '9')
+    {
+        u8 digit = (u8)(source.pointer[end] - '0');
+        if (value > (UINT64_MAX - digit) / 10)
+        {
+            return false;
+        }
+        value = value * 10 + digit;
+        end += 1;
+    }
+    if (value >= operand_count || value > UINT32_MAX)
+    {
+        return false;
+    }
+    *operand_index_out = (u32)value;
+    *end_out = end;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_mnemonic_allowed(String8 mnemonic)
+{
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(codegen_x64_asm_mnemonics); index += 1)
+    {
+        if (string_equal(mnemonic, codegen_x64_asm_mnemonics[index]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_name(String8 token)
+{
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(codegen_x64_asm_registers); index += 1)
+    {
+        if (string_equal(token, codegen_x64_asm_registers[index]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_literal_registers_absent(String8 source)
+{
+    // A literal register is not tied to a compiler operand.  Reject it even
+    // when the general assembler could encode it: otherwise a generic input
+    // allocated in (say) RAX could be silently overwritten by `%%rax`.
+    for (u64 index = 0; index < source.length; index += 1)
+    {
+        if (source.pointer[index] != '%')
+        {
+            continue;
+        }
+        u64 token_start = index + 1;
+            if (token_start < source.length && source.pointer[token_start] == '%')
+            {
+                token_start += 1;
+            }
+        if (token_start < source.length && source.pointer[token_start] == '[')
+        {
+            while (token_start < source.length && source.pointer[token_start] != ']')
+            {
+                token_start += 1;
+            }
+            index = token_start;
+            continue;
+        }
+        if (token_start < source.length && (source.pointer[token_start] >= '0' && source.pointer[token_start] <= '9'))
+        {
+            while (token_start < source.length && source.pointer[token_start] >= '0' && source.pointer[token_start] <= '9')
+            {
+                token_start += 1;
+            }
+            index = token_start;
+            continue;
+        }
+        u64 token_end = token_start;
+        while (token_end < source.length && ((source.pointer[token_end] >= 'a' && source.pointer[token_end] <= 'z') ||
+                                              (source.pointer[token_end] >= 'A' && source.pointer[token_end] <= 'Z') ||
+                                              (source.pointer[token_end] >= '0' && source.pointer[token_end] <= '9')))
+        {
+            token_end += 1;
+        }
+        if (token_end > token_start && codegen_inline_assembly_register_name((String8){.pointer = source.pointer + token_start,
+                                                                                .length = token_end - token_start}))
+        {
+            return false;
+        }
+        index = token_end;
+    }
+    // Intel templates spell physical registers without a percent.  Scan words
+    // in that dialect; ATT mnemonics and punctuation do not match the table.
+    for (u64 index = 0; index < source.length;)
+    {
+        if (source.pointer[index] == '%')
+        {
+            if (index + 1 < source.length && source.pointer[index + 1] == '%')
+            {
+                index += 2;
+                continue;
+            }
+            if (index + 1 < source.length && source.pointer[index + 1] == '[')
+            {
+                while (index < source.length && source.pointer[index] != ']')
+                {
+                    index += 1;
+                }
+                if (index < source.length)
+                {
+                    index += 1;
+                }
+                continue;
+            }
+            if (index + 1 < source.length && source.pointer[index + 1] >= '0' && source.pointer[index + 1] <= '9')
+            {
+                index += 2;
+                while (index < source.length && source.pointer[index] >= '0' && source.pointer[index] <= '9')
+                {
+                    index += 1;
+                }
+                continue;
+            }
+        }
+        while (index < source.length && !((source.pointer[index] >= 'a' && source.pointer[index] <= 'z') ||
+                                          (source.pointer[index] >= 'A' && source.pointer[index] <= 'Z')))
+        {
+            index += 1;
+        }
+        u64 start = index;
+        while (index < source.length && ((source.pointer[index] >= 'a' && source.pointer[index] <= 'z') ||
+                                         (source.pointer[index] >= 'A' && source.pointer[index] <= 'Z') ||
+                                         (source.pointer[index] >= '0' && source.pointer[index] <= '9')))
+        {
+            index += 1;
+        }
+        if (index > start && codegen_inline_assembly_register_name((String8){.pointer = source.pointer + start, .length = index - start}))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(String8 source)
+{
+    // The canonical path deliberately has no memory or immediate constraints.
+    // Reject their source spellings before handing the text to the general
+    // assembler, including Intel memory forms that have no '$' marker.
+    for (u64 index = 0; index < source.length; index += 1)
+    {
+        u8 character = (u8)source.pointer[index];
+        if (character == '$' || character == '[' || character == ']' || character == '(' || character == ')' || character == '*' || character == ':')
+        {
+            return false;
+        }
+    }
+    u64 index = 0;
+    while (index < source.length)
+    {
+        while (index < source.length && (source.pointer[index] == ' ' || source.pointer[index] == '\t' || source.pointer[index] == '\r' ||
+                                         source.pointer[index] == '\n' || source.pointer[index] == ';'))
+        {
+            index += 1;
+        }
+        if (index >= source.length)
+        {
+            break;
+        }
+        u64 mnemonic_start = index;
+        while (index < source.length && source.pointer[index] != ' ' && source.pointer[index] != '\t' && source.pointer[index] != '\r' &&
+               source.pointer[index] != '\n' && source.pointer[index] != ';' && source.pointer[index] != ',')
+        {
+            index += 1;
+        }
+        if (!codegen_inline_assembly_mnemonic_allowed((String8){.pointer = source.pointer + mnemonic_start, .length = index - mnemonic_start}))
+        {
+            return false;
+        }
+        u64 line_end = index;
+        while (line_end < source.length && source.pointer[line_end] != '\n' && source.pointer[line_end] != ';' && source.pointer[line_end] != '\r')
+        {
+            line_end += 1;
+        }
+        while (index < line_end)
+        {
+            while (index < line_end && (source.pointer[index] == ' ' || source.pointer[index] == '\t' || source.pointer[index] == ','))
+            {
+                index += 1;
+            }
+            if (index >= line_end)
+            {
+                break;
+            }
+            // Every ordinary operand is a substituted GPR.  A leading digit
+            // or sign therefore denotes an immediate, while '$' is the GNU
+            // spelling already rejected by the punctuation pass above.
+            if ((source.pointer[index] >= '0' && source.pointer[index] <= '9') || source.pointer[index] == '+' || source.pointer[index] == '-')
+            {
+                return false;
+            }
+            while (index < line_end && source.pointer[index] != ',')
+            {
+                index += 1;
+            }
+        }
+        index = line_end;
+        while (index < source.length && (source.pointer[index] == '\n' || source.pointer[index] == ';' || source.pointer[index] == '\r'))
+        {
+            index += 1;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
+                                                                   IrInstructionExtra extra, X64Register* registers, AssemblySyntax syntax,
+                                                                   String8* source_out)
+{
+    String8 template_source = extra.literal;
+    if (!codegen_inline_assembly_literal_registers_absent(template_source))
+    {
+        return false;
+    }
+    u64 output_length = 0;
+    for (u64 index = 0; index < template_source.length;)
+    {
+        if (template_source.pointer[index] != '%')
+        {
+            if (output_length == UINT64_MAX)
+            {
+                return false;
+            }
+            output_length += 1;
+            index += 1;
+            continue;
+        }
+        if (index + 1 < template_source.length && template_source.pointer[index + 1] == '%')
+        {
+            output_length += 1;
+            index += 2;
+            continue;
+        }
+        u32 operand_index = 0;
+        u64 end = 0;
+        if (!codegen_inline_assembly_template_reference(template_source, index, extra, instruction->operand_count, &operand_index, &end))
+        {
+            return false;
+        }
+        IrValueId value = instruction->operands[operand_index];
+        if (value.value >= function->value_count)
+        {
+            return false;
+        }
+        IrType* type = ir_type_from_id(&program->types, function->values[value.value].canonical_type);
+        u32 type_class = codegen_inline_assembly_type_class(type);
+        String8 register_name = codegen_x64_asm_register_name(registers[operand_index], type_class == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID
+                                                                                           ? 0
+                                                                                           : (u32)type->layout.size);
+        if (!register_name.length || (syntax != ASSEMBLY_SYNTAX_ATT && syntax != ASSEMBLY_SYNTAX_INTEL))
+        {
+            return false;
+        }
+        if (register_name.length > UINT64_MAX - output_length - (syntax == ASSEMBLY_SYNTAX_ATT ? 1 : 0))
+        {
+            return false;
+        }
+        output_length += register_name.length + (syntax == ASSEMBLY_SYNTAX_ATT ? 1 : 0);
+        index = end;
+    }
+    char8* output = arena_allocate(arena, char8, output_length ? output_length : 1);
+    if (!output)
+    {
+        return false;
+    }
+    u64 output_index = 0;
+    for (u64 index = 0; index < template_source.length;)
+    {
+        if (template_source.pointer[index] != '%')
+        {
+            output[output_index++] = template_source.pointer[index++];
+            continue;
+        }
+        if (index + 1 < template_source.length && template_source.pointer[index + 1] == '%')
+        {
+            output[output_index++] = '%';
+            index += 2;
+            continue;
+        }
+        u32 operand_index = 0;
+        u64 end = 0;
+        if (!codegen_inline_assembly_template_reference(template_source, index, extra, instruction->operand_count, &operand_index, &end))
+        {
+            return false;
+        }
+        IrValueId value = instruction->operands[operand_index];
+        IrType* type = ir_type_from_id(&program->types, function->values[value.value].canonical_type);
+        String8 register_name = codegen_x64_asm_register_name(registers[operand_index], (u32)type->layout.size);
+        if (syntax == ASSEMBLY_SYNTAX_ATT)
+        {
+            output[output_index++] = '%';
+        }
+        memcpy(output + output_index, register_name.pointer, register_name.length);
+        output_index += register_name.length;
+        index = end;
+    }
+    *source_out = (String8){.pointer = output, .length = output_index};
+    return codegen_inline_assembly_register_only_source(*source_out);
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_clobber_is_rbx(String8 clobber)
@@ -309,6 +749,34 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_function_saves_rbx(IrFunction* fu
         for (u32 clobber_index = 0; clobber_index < extra.clobber_count; clobber_index += 1)
         {
             if (codegen_inline_assembly_clobber_is_rbx(extra.clobbers[clobber_index]))
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_module_uses_ordinary_x86_assembly(IrModule* module)
+{
+    if (!module)
+    {
+        return false;
+    }
+    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+    {
+        IrFunction* function = module->functions + function_index;
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            IrInstruction* instruction = function->instructions + instruction_index;
+            if (instruction->opcode != IR_OPCODE_INLINE_ASSEMBLY)
+            {
+                continue;
+            }
+            IrInstructionExtra extra = ir_instruction_extra(function, instruction->id);
+            if (extra.literal.length && !string_equal(extra.literal, S8("cpuid")) && !string_equal(extra.literal, S8("xgetbv")) &&
+                !string_equal(extra.literal, S8("ud2")) && !string_equal(extra.literal, S8("nop")) && !string_equal(extra.literal, S8("pause")) &&
+                !string_equal(extra.literal, S8("int3")) && !codegen_inline_assembly_jump_target(function, instruction, extra.literal, S8("jmp %l"), 0))
             {
                 return true;
             }
@@ -15343,11 +15811,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 jump_target_index = 0;
                         bool jump_label = codegen_inline_assembly_jump_target(function, instruction, asm_extra.literal, S8("jmp %l"), &jump_target_index);
                         bool operandless = undefined || nop || pause || interrupt;
-                        if (!cpuid && !xgetbv && !operandless && !no_instruction && !jump_label)
-                        {
-                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-                            return result;
-                        }
+                        bool ordinary = !cpuid && !xgetbv && !operandless && !no_instruction && !jump_label;
                         if ((operandless && instruction->operand_count) || (jump_label && instruction->target_count < 2) ||
                             instruction->operand_count != instruction->immediate_count || asm_extra.operand_name_count != instruction->operand_count ||
                             (instruction->operand_count && (!instruction->operands || !instruction->immediates || !asm_extra.operand_names)) ||
@@ -15479,6 +15943,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                        definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE;
                             indirect_operands |= indirect[operand_index];
                             IrType* operand_type = ir_type_from_id(&program->types, function->values[operand.value].canonical_type);
+                            if (ordinary && (codegen_inline_assembly_type_class(operand_type) == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID ||
+                                             !codegen_canonical_x64_asm_memory_width((u32)operand_type->layout.size)))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
                             if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0)
                             {
                                 if (codegen_inline_assembly_type_class(operand_type) == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID)
@@ -15543,17 +16013,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             else
                             {
-                                static X64Register const system_v_registers[] = {
-                                    X64_REGISTER_RAX, X64_REGISTER_RCX, X64_REGISTER_RDX, X64_REGISTER_RSI, X64_REGISTER_RDI,
-                                    X64_REGISTER_R8, X64_REGISTER_R9, X64_REGISTER_R10, X64_REGISTER_R11,
-                                };
-                                static X64Register const windows_registers[] = {
-                                    X64_REGISTER_RAX, X64_REGISTER_RCX, X64_REGISTER_RDX, X64_REGISTER_R8, X64_REGISTER_R9,
-                                    X64_REGISTER_R10, X64_REGISTER_R11,
-                                };
-                                X64Register const* candidates = result.abi == CODEGEN_ABI_X86_64_WINDOWS ? windows_registers : system_v_registers;
-                                u32 candidate_count = result.abi == CODEGEN_ABI_X86_64_WINDOWS ? BUSTER_ARRAY_LENGTH(windows_registers)
-                                                                                                 : BUSTER_ARRAY_LENGTH(system_v_registers);
+                                X64Register const* candidates = result.abi == CODEGEN_ABI_X86_64_WINDOWS ? codegen_x64_asm_windows_registers
+                                                                                                           : codegen_x64_asm_system_v_registers;
+                                u32 candidate_count = result.abi == CODEGEN_ABI_X86_64_WINDOWS ? BUSTER_ARRAY_LENGTH(codegen_x64_asm_windows_registers)
+                                                                                                 : BUSTER_ARRAY_LENGTH(codegen_x64_asm_system_v_registers);
                                 bool found = false;
                                 for (u32 candidate_index = 0; candidate_index < candidate_count; candidate_index += 1)
                                 {
@@ -15624,6 +16087,44 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         else if (interrupt)
                         {
                             codegen_emit_u8(&buffer, 0xcc);
+                        }
+                        else if (ordinary)
+                        {
+                            String8 source = {0};
+                            if (!codegen_inline_assembly_resolve_template(arena, program, function, instruction, asm_extra, asm_registers,
+                                                                           codegen_inline_assembly_syntax(options), &source))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            AssemblyEncodeResult encoded = assembly_encode(arena, source,
+                                                                            (AssemblyEncodeOptions){
+                                                                                .target = target,
+                                                                                .syntax = codegen_inline_assembly_syntax(options),
+                                                                            });
+                            if (encoded.diagnostic_count || encoded.relocation_count)
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            for (u32 symbol_index = 0; symbol_index < encoded.symbol_count; symbol_index += 1)
+                            {
+                                if (!encoded.symbols[symbol_index].defined)
+                                {
+                                    result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                    return result;
+                                }
+                            }
+                            u8* encoded_bytes = 0;
+                            if (!codegen_buffer_reserve(&buffer, encoded.bytes.length, &encoded_bytes))
+                            {
+                                result.error = CODEGEN_ERROR_CAPACITY;
+                                return result;
+                            }
+                            if (encoded.bytes.length)
+                            {
+                                memcpy(encoded_bytes, encoded.bytes.pointer, encoded.bytes.length);
+                            }
                         }
                         for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
                         {
@@ -18775,6 +19276,13 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     }
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
+        if (codegen_canonical_module_uses_ordinary_x86_assembly(module))
+        {
+            // The encoder's metadata caches are demand-filled and read by
+            // function lanes without locks.  Warm them before the parallel
+            // attempt, just as compiler_prewarm does for the other tables.
+            buster_x86_metadata_prewarm();
+        }
         f80_cache = codegen_canonical_x64_f80_cache_initialize(arena, program);
         if (f80_cache.allocation_failed)
         {

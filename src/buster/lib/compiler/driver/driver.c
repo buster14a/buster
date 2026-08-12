@@ -1464,6 +1464,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                .debug_info = invocation.debug_info,
                                                                .assume_validated = true,
                                                                .register_allocator = invocation.register_allocator,
+                                                               .assembly_syntax = (u8)invocation.assembly_syntax,
                                                            });
     result.codegen_statistics = code.statistics;
     result.codegen_error = code.error;
@@ -1743,6 +1744,7 @@ static CompilerDriverResult compiler_driver_execute_buster(Arena* arena, Compile
                                                      (CodegenModuleOptions){
                                                          .debug_info = invocation.debug_info,
                                                          .register_allocator = invocation.register_allocator,
+                                                         .assembly_syntax = ASSEMBLY_SYNTAX_DEFAULT,
                                                      });
         result.codegen_statistics = code.statistics;
         result.codegen_error = code.error;
@@ -2460,6 +2462,7 @@ CompilerDriverResult compiler_driver_compile(Arena* arena, CompilerDriverOptions
                                                      (CodegenModuleOptions){
                                                          .debug_info = options.debug_info,
                                                          .register_allocator = options.register_allocator,
+                                                         .assembly_syntax = ASSEMBLY_SYNTAX_DEFAULT,
                                                      });
         result.codegen_error = code.error;
         if (code.error != CODEGEN_ERROR_NONE)

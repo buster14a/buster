@@ -2898,6 +2898,43 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                                                            S8("C code generation failed with error 2, function 0 ('conditional_asm_goto'")));
     }
     {
+        // Ordinary templates are deliberately a closed, scalar register-only
+        // subset.  Keep each rejection explicit so a future assembler-table
+        // expansion cannot accidentally widen compiler-side effects.
+        String8 rejected_templates[] = {
+            S8("ret"),
+            S8("call %0"),
+            S8("jmp %0"),
+            S8(".byte 0x90"),
+            S8("mul %0"),
+            S8("mov %%rax, %%rax"),
+            S8("add %0, 1"),
+            S8("mov foo, %0"),
+        };
+        String8 rejected_dialects[] = {S8("att"), S8("intel")};
+        for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(rejected_dialects); dialect_index += 1)
+        {
+            for (u32 template_index = 0; template_index < BUSTER_ARRAY_LENGTH(rejected_templates); template_index += 1)
+            {
+                u32 case_index = dialect_index * BUSTER_ARRAY_LENGTH(rejected_templates) + template_index;
+                String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-invalid-asm-template"),
+                                                                  string_format(arguments->arena, S8("-{u32}.c"), case_index));
+                String8 source = string_format(arguments->arena, S8("int invalid_template(int value) {{ __asm__ volatile(\"{S8}\" : \"+r\"(value)); return value; }}\n"),
+                                                rejected_templates[template_index]);
+                BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+                String8 rejected_command_line[] = {
+                    S8("-c"), S8("-masm"), rejected_dialects[dialect_index], S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-o"),
+                    buster_test_temporary_path(arguments->arena, S8("buster-invalid-asm-template"), string_format(arguments->arena, S8("-{u32}.o"), case_index)),
+                    source_path,
+                };
+                CompilerDriverResult rejected = compiler_driver_execute_invocation(
+                    arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(rejected_command_line)));
+                BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_CODEGEN);
+                BUSTER_TEST(arguments, rejected.codegen_error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION);
+            }
+        }
+    }
+    {
         String8 label_object_targets[] = {
             S8("x86_64-pc-windows-msvc"), S8("x86_64-apple-macos"), S8("aarch64-pc-windows-msvc"), S8("aarch64-apple-macos"),
         };
@@ -3617,6 +3654,51 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             ProcessWaitResult c_asm_wait = os_process_wait_sync(c_asm_arena, c_asm_spawn);
             BUSTER_TEST(arguments, c_asm_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    // The ordinary-template path is deliberately checked in both GNU
+    // dialects.  The fixture has fixed, generic, tied/read-write, named, and
+    // 8/16/32/64-bit operands; running each executable catches stale input
+    // loads as well as incorrect physical-register width spelling.
+    {
+        String8 default_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-default"), S8(""));
+        String8 default_command_line[] = {S8("-o"), default_path, S8("tests/basic_c_inline_asm.c")};
+        CompilerDriverResult default_dialect = compiler_driver_execute_invocation(
+            c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(default_command_line)));
+        BUSTER_TEST(arguments, default_dialect.error == COMPILER_DRIVER_ERROR_NONE);
+        if (default_dialect.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 run_arguments[] = {default_path};
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                        (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(c_asm_arena, spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        String8 dialects[] = {S8("att"), S8("intel")};
+        for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+        {
+            String8 dialect_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-dialect"),
+                                                               string_format(c_asm_arena, S8("-{u32}"), dialect_index));
+            String8 dialect_command_line[] = {
+                S8("-masm"), dialects[dialect_index], S8("-o"), dialect_path, S8("tests/basic_c_inline_asm.c"),
+            };
+            CompilerDriverResult dialect = compiler_driver_execute_invocation(
+                c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(dialect_command_line)));
+            BUSTER_TEST(arguments, dialect.error == COMPILER_DRIVER_ERROR_NONE);
+            if (dialect.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run_arguments[] = {dialect_path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(c_asm_arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
         }
     }
     String8 c_asm_aarch64_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-aarch64"), S8(""));
