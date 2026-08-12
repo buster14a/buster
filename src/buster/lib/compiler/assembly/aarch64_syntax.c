@@ -985,14 +985,12 @@ BUSTER_F_DECL bool buster_aarch64_syntax_match_row(u32 row_index, String8 input,
         (result && result->capture_capacity && !result->captures) || (result && result->choice_capacity && !result->choices)) return false;
     BusterAarch64SyntaxMatchMachine machine = {.input = input};
     if (!buster_aarch64_syntax_match_push_node(&machine, row.node_first)) return false;
-    bool matched = false;
-    while (!matched)
+    for (;;)
     {
         if (!machine.task_count)
         {
             if (machine.cursor == input.length && machine.capture_count >= row.anchor_min && machine.capture_count <= row.anchor_max)
             {
-                matched = true;
                 break;
             }
             if (!buster_aarch64_syntax_match_backtrack(&machine)) return false;
