@@ -1271,12 +1271,13 @@ static bool buster_a64_complex_simd_decode_register(u32 row_index, BusterA64Sema
     {
         arrangement = BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_Q;
     }
-    bool scalar = (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) != 0;
-    if (!scalar && arrangement_selected && buster_a64_complex_simd_arrangement_is_scalar(arrangement))
+    bool vector = (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0;
+    bool scalar = !vector && (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) != 0;
+    if (!scalar && !vector && arrangement_selected && buster_a64_complex_simd_arrangement_is_scalar(arrangement))
     {
         scalar = true;
     }
-    if (!scalar && !arrangement_selected && operand.symbol.length > 1)
+    if (!scalar && !vector && !arrangement_selected && operand.symbol.length > 1)
     {
         char8 first = buster_a64_semantic_string_byte(operand.symbol, 1);
         scalar = first == 'd' || first == 'n' || first == 'm' || first == 'a' || first == 'b' || first == 'H' || first == 'S' || first == 'D';
