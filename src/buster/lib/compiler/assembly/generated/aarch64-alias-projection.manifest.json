@@ -1,0 +1,26 @@
+{
+  "alias_count": 172,
+  "canonical_count": 1523,
+  "canonical_sha256": "8485c5c61835d5394d325757ab2964890e8bdfea304c6faa8fd4c23e4c7aabec",
+  "denominator_sha256": "fa030a65c5be661813f50a92f3027e152ab9c1b55701f851c6142390df5c25a8",
+  "form_count": 1695,
+  "max_condition_tokens": 17,
+  "max_fields": 5,
+  "max_operands": 6,
+  "max_preference_condition_tokens": 22,
+  "nested_preferences": 0,
+  "outputs": {
+    "header": "aarch64-alias-projection.generated.h",
+    "jsonl": "aarch64-alias-projection.generated.jsonl"
+  },
+  "schema_version": 1,
+  "target_owner_census": {
+    "complex_simd_fp": 7,
+    "direct_gpr": 21,
+    "direct_simd": 2,
+    "general_nonmemory": 10,
+    "memory": 64,
+    "scalar_integer": 59,
+    "system": 9
+  }
+}
