@@ -176,6 +176,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, return_info && (return_info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR));
     MachineOpcodeInfo const* stack_allocate_info = machine_opcode_info(MACHINE_X64_STACK_ALLOCATE);
     BUSTER_TEST(arguments, stack_allocate_info && (stack_allocate_info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE));
+    MachineOpcodeInfo const* cmpxchg16_info = machine_opcode_info(MACHINE_X64_ATOMIC_CMPXCHG16);
+    u64 cmpxchg16_fixed = (1ull << MACHINE_X64_RAX) | (1ull << MACHINE_X64_RDX) | (1ull << MACHINE_X64_RBX) | (1ull << MACHINE_X64_RCX);
+    BUSTER_TEST(arguments, cmpxchg16_info && cmpxchg16_info->operand_count == 4);
+    BUSTER_TEST(arguments, cmpxchg16_info && cmpxchg16_info->operand_info[0] == 0 && cmpxchg16_info->operand_info[1] == 0 &&
+                                   cmpxchg16_info->operand_info[2] == 0 &&
+                                   (cmpxchg16_info->operand_info[3] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u)) == MACHINE_OPERAND_ROLE_USE);
+    BUSTER_TEST(arguments, cmpxchg16_info && (cmpxchg16_info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) &&
+                                   (cmpxchg16_info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE) &&
+                                   cmpxchg16_info->clobber_mask == cmpxchg16_fixed);
     BUSTER_TEST(arguments, machine_opcode_info(MACHINE_OPCODE_COUNT) == 0);
 
     MachineFunction function = machine_test_build_function(arguments->arena);

@@ -329,6 +329,13 @@ typedef enum MachineOpcode
     MACHINE_X64_ATOMIC_STORE_XCHG, // use address, use value; implicit-lock xchg
     MACHINE_X64_ATOMIC_RMW,        // def old, use address, use value
     MACHINE_X64_ATOMIC_CMPXCHG,    // def old, use address, use expected, use desired
+    // CMPXCHG16B has a two-eightbyte value on each side.  The result,
+    // expected, and desired operands stay in frame slots; the address is the
+    // constrained fourth operand and is staged in the target's RSI scratch.
+    // RAX:RDX and RBX:RCX are implicit inputs/outputs, so the opcode's
+    // metadata carries their complete clobber set rather than pretending
+    // that one virtual register represents either pair.
+    MACHINE_X64_ATOMIC_CMPXCHG16,
     MACHINE_X64_MFENCE,
     MACHINE_X64_INT3, // debug trap
     MACHINE_X64_UD2,  // unreachable; terminator

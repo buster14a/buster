@@ -373,6 +373,16 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
     },
+    [MACHINE_X64_ATOMIC_CMPXCHG16] = {
+        .name = S8_INITIALIZER("x64_atomic_cmpxchg16"),
+        .operand_count = 4,
+        // result, expected, and desired are stack-slot references.  Only the
+        // address is a virtual register and it occupies slot 3, whose x86
+        // scratch is RSI (outside CMPXCHG16B's implicit register quartet).
+        .operand_info = {0, 0, 0, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1ull << MACHINE_X64_RAX) | (1ull << MACHINE_X64_RDX) | (1ull << MACHINE_X64_RBX) | (1ull << MACHINE_X64_RCX),
+    },
     [MACHINE_X64_MFENCE] = {
         .name = S8_INITIALIZER("x64_mfence"),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
