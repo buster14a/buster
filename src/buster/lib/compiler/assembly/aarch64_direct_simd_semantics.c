@@ -1002,7 +1002,7 @@ static bool buster_a64_direct_simd_decode_arrangement(BusterA64SemanticForm form
             {
                 return false;
             }
-            for (u32 char_index = 0; char_index < value.text.length; char_index += 1)
+            for (u32 char_index = 0; char_index < value.text.length && char_index < BUSTER_ARRAY_LENGTH(buffer); char_index += 1)
             {
                 buffer[char_index] = buster_a64_semantic_string_byte(value.text, char_index);
             }
