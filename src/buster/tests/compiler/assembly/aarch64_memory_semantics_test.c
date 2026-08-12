@@ -227,7 +227,7 @@ aarch64_memory_semantics_tests(UnitTestArguments* arguments)
             BusterA64MemoryInstruction mismatched = {.row_index = row_index, .operand_count = (u8)decoded.operand_count};
             for (u32 index = 0; index < decoded.operand_count; index += 1) { mismatched.operands[index] = decoded.operands[index];
 }
-            mismatched.operands[operand_index].aux = alternate;
+            mismatched.operands[operand_index].aux = (u32)alternate;
             u32 preserved_word = UINT32_C(0xa5a5a5a5);
             BusterA64MemoryStatus mismatch_status = buster_a64_memory_encode(target, &mismatched, &preserved_word);
             cross_arrangement_rejected = cross_arrangement_rejected && mismatch_status != BUSTER_A64_MEMORY_STATUS_OK &&

@@ -305,7 +305,8 @@ UnitTestResult aarch64_direct_simd_tests(UnitTestArguments* arguments)
             {
                 mismatched.operands[index] = binding_decoded.operands[index];
             }
-            mismatched.operands[operand_index].aux = a64_direct_simd_alternate_arrangement(mismatched.operands[operand_index]);
+            mismatched.operands[operand_index].aux =
+                (u32)a64_direct_simd_alternate_arrangement(mismatched.operands[operand_index]);
             u32 preserved_word = UINT32_C(0xa5a5a5a5);
             BusterA64DirectSIMDStatus mismatch_status = buster_a64_direct_simd_encode(target, &mismatched, &preserved_word);
             cross_arrangement_rejected =

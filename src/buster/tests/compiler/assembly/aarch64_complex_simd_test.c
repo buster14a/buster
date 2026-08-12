@@ -254,7 +254,8 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
             }
             bool binding_ok = binding.selector_index < binding_decoded.operand_count &&
                                       ((binding.direction == 1 && binding.selector_index == operand_index + 1) ||
-                                       (binding.direction == -1 && operand_index != 0 && binding.selector_index + 1 == operand_index)) &&
+                                       (binding.direction == -1 && operand_index != 0 &&
+                                        (u32)binding.selector_index + 1u == operand_index)) &&
                                       binding_decoded.operands[binding.selector_index].kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_ARRANGEMENT &&
                                       binding_decoded.operands[operand_index].aux == binding_decoded.operands[binding.selector_index].aux;
             arrangement_bindings_ok = arrangement_bindings_ok && binding_ok;
@@ -268,7 +269,8 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
             {
                 mismatched.operands[index] = binding_decoded.operands[index];
             }
-            mismatched.operands[operand_index].aux = a64_complex_simd_alternate_arrangement(mismatched.operands[operand_index]);
+            mismatched.operands[operand_index].aux =
+                (u32)a64_complex_simd_alternate_arrangement(mismatched.operands[operand_index]);
             u32 preserved_word = UINT32_C(0xa5a5a5a5);
             BusterA64ComplexSIMDStatus mismatch_status = buster_a64_complex_simd_encode(target, &mismatched, &preserved_word);
             cross_arrangement_rejected =

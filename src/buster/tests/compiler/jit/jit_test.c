@@ -432,7 +432,7 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
 #endif
 #endif
 
-#if BUSTER_CPU_ARCH_AARCH64 && (BUSTER_MACOS || BUSTER_IOS)
+#if BUSTER_CPU_ARCH_AARCH64
     // An unbound external DATA symbol is rejected consistently for every
     // supported AArch64 direct relocation.  Keep the pair as one fixture so
     // the PAGE21/PAGEOFF12 contract cannot silently diverge.
@@ -500,6 +500,11 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !unbound_prel32_program.allocation_base && !unbound_prel32_program.allocation_size &&
                                !unbound_prel32_program.auxiliary_allocation_base && !unbound_prel32_program.auxiliary_allocation_size);
 
+// Apple's public MAP_JIT contract permits one region per process, and this
+// module links its native executable fixture below. Keep additional successful
+// direct-link coverage on non-Apple AArch64 hosts while every host still tests
+// the byte-level PAGE relocation helper above.
+#if !BUSTER_MACOS && !BUSTER_IOS
     // A bound external DATA symbol may be materialized directly by PAGEOFF12.
     // This form has no page-range dependency, making it a stable native-target
     // test even when the host allocator chooses a distant JIT mapping.
@@ -561,6 +566,7 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
                                !transactional_program.executable_size && !transactional_program.section_addresses[0] &&
                                !transactional_program.section_sizes[0] &&
                                memcmp(transactional_words, transactional_snapshot, sizeof(transactional_snapshot)) == 0);
+#endif
 #endif
 
     u8 tls_byte = 1;

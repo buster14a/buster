@@ -264,7 +264,10 @@ BUSTER_GLOBAL_LOCAL bool jit_relocation_is_supported(ObjectRelocationKind kind, 
 
 BUSTER_GLOBAL_LOCAL bool jit_external_data_relocation_is_supported(ObjectRelocationKind kind, CpuArch arch)
 {
-    return arch == CPU_ARCH_X86_64 && kind == OBJECT_RELOCATION_ABSOLUTE64;
+    return (arch == CPU_ARCH_X86_64 && kind == OBJECT_RELOCATION_ABSOLUTE64) ||
+           (arch == CPU_ARCH_AARCH64 &&
+            (kind == OBJECT_RELOCATION_AARCH64_PREL32 || kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ||
+             kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12));
 }
 
 BUSTER_GLOBAL_LOCAL u64 jit_relocation_size(ObjectRelocationKind kind)
@@ -411,7 +414,8 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
         u64 target = 0;
         if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
-            if (symbol->kind == OBJECT_SYMBOL_DATA && !options.binding_count)
+            if (symbol->kind == OBJECT_SYMBOL_DATA && !options.binding_count && object->target.cpu_arch == CPU_ARCH_AARCH64 &&
+                jit_external_data_relocation_is_supported(relocation->kind, object->target.cpu_arch))
             {
                 program->error = JIT_ERROR_EXTERNAL_DATA;
                 program->failing_symbol = symbol->name;
@@ -677,7 +681,8 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
         }
         if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
-            if (symbol->kind == OBJECT_SYMBOL_DATA && !options.binding_count)
+            if (symbol->kind == OBJECT_SYMBOL_DATA && !options.binding_count && object->target.cpu_arch == CPU_ARCH_AARCH64 &&
+                jit_external_data_relocation_is_supported(relocation->kind, object->target.cpu_arch))
             {
                 result.error = JIT_ERROR_EXTERNAL_DATA;
                 result.failing_symbol = symbol->name;

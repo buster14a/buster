@@ -545,7 +545,10 @@ BusterA64SemanticVMValue buster_a64_direct_simd_value_arrangement(BusterA64Direc
     {
         return buster_a64_semantic_vm_value_invalid();
     }
-    return (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_ARRANGEMENT, .width = 8, .aux = arrangement, .payload = arrangement};
+    return (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_ARRANGEMENT,
+                                      .width = 8,
+                                      .aux = (u32)arrangement,
+                                      .payload = (u64)arrangement};
 }
 
 BusterA64SemanticVMValue buster_a64_direct_simd_value_register(u32 number, BusterA64DirectSIMDArrangement arrangement, bool scalar)
@@ -557,7 +560,7 @@ BusterA64SemanticVMValue buster_a64_direct_simd_value_register(u32 number, Buste
     }
     return (BusterA64SemanticVMValue){.kind = scalar ? BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_SCALAR : BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR,
                                       .width = width,
-                                      .aux = arrangement,
+                                      .aux = (u32)arrangement,
                                       .payload = number};
 }
 BusterA64SemanticVMValue buster_a64_direct_simd_value_vector(u32 number, BusterA64DirectSIMDArrangement arrangement)
@@ -577,7 +580,11 @@ BusterA64SemanticVMValue buster_a64_direct_simd_value_list(u32 first, u32 count,
     {
         return buster_a64_semantic_vm_value_invalid();
     }
-    return (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST, .width = width, .aux = arrangement, .aux2 = count, .payload = first};
+    return (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST,
+                                      .width = width,
+                                      .aux = (u32)arrangement,
+                                      .aux2 = count,
+                                      .payload = first};
 }
 
 BusterA64SemanticVMValue buster_a64_direct_simd_value_lane(u32 number, BusterA64DirectSIMDArrangement arrangement, u32 lane)
@@ -588,7 +595,11 @@ BusterA64SemanticVMValue buster_a64_direct_simd_value_lane(u32 number, BusterA64
     {
         return buster_a64_semantic_vm_value_invalid();
     }
-    return (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LANE, .width = width, .aux = arrangement, .aux2 = lane, .payload = number};
+    return (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LANE,
+                                      .width = width,
+                                      .aux = (u32)arrangement,
+                                      .aux2 = lane,
+                                      .payload = number};
 }
 BusterA64SemanticVMValue buster_a64_direct_simd_value_gpr(u32 number, u8 width, bool zr)
 {

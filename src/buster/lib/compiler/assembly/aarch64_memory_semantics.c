@@ -471,7 +471,7 @@ buster_a64_memory_value_arrangement(BusterA64MemoryArrangement arrangement)
         return buster_a64_semantic_vm_value_invalid();
 }
     return (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_ARRANGEMENT,
-                                      .width = 8, .aux = arrangement, .payload = arrangement};
+                                      .width = 8, .aux = (u32)arrangement, .payload = (u64)arrangement};
 }
 
 BusterA64SemanticVMValue
@@ -482,7 +482,7 @@ buster_a64_memory_value_register(u32 number, BusterA64MemoryArrangement arrangem
         return buster_a64_semantic_vm_value_invalid();
 }
     return (BusterA64SemanticVMValue){.kind = scalar ? BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_SCALAR : BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR,
-                                      .width = width, .aux = arrangement, .payload = number};
+                                      .width = width, .aux = (u32)arrangement, .payload = number};
 }
 
 BusterA64SemanticVMValue buster_a64_memory_value_vector(u32 number, BusterA64MemoryArrangement arrangement)
@@ -504,7 +504,7 @@ buster_a64_memory_value_list(u32 first, u32 count, BusterA64MemoryArrangement ar
         return buster_a64_semantic_vm_value_invalid();
 }
     return (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST,
-                                      .width = width, .aux = arrangement, .aux2 = count, .payload = first};
+                                      .width = width, .aux = (u32)arrangement, .aux2 = count, .payload = first};
 }
 
 BusterA64SemanticVMValue
@@ -515,7 +515,7 @@ buster_a64_memory_value_lane(u32 number, BusterA64MemoryArrangement arrangement,
     if (number > 31 || !width || !count || lane >= count) { return buster_a64_semantic_vm_value_invalid();
 }
     return (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LANE,
-                                      .width = width, .aux = arrangement, .aux2 = lane, .payload = number};
+                                      .width = width, .aux = (u32)arrangement, .aux2 = lane, .payload = number};
 }
 
 BusterA64SemanticVMValue
@@ -541,7 +541,7 @@ buster_a64_memory_value_extend(BusterA64MemoryExtend extend)
         return buster_a64_semantic_vm_value_invalid();
 }
     return (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_EXTEND,
-                                      .width = 4, .aux = extend, .payload = extend};
+                                      .width = 4, .aux = (u32)extend, .payload = (u64)extend};
 }
 
 BusterA64SemanticVMValue

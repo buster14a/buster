@@ -16,7 +16,7 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
     CodegenModuleRelocationKind kind = (CodegenModuleRelocationKind)relocation->kind;
     bool aarch64 = false;
     bool absolute = false;
-    bool thread_local = false;
+    bool is_thread_local = false;
     bool thread_local_low = false;
     bool thread_local_index = false;
     switch (kind)
@@ -31,49 +31,49 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
             absolute = true;
             break;
         case CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32:
-            thread_local = true;
+            is_thread_local = true;
             break;
         case CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32:
-            thread_local = true;
+            is_thread_local = true;
             thread_local_index = true;
             break;
         case CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32:
-            thread_local = true;
+            is_thread_local = true;
             break;
         case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
             aarch64 = true;
-            thread_local = true;
+            is_thread_local = true;
             thread_local_index = true;
             break;
         case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12:
             aarch64 = true;
-            thread_local = true;
+            is_thread_local = true;
             thread_local_low = true;
             thread_local_index = true;
             break;
         case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12:
             aarch64 = true;
-            thread_local = true;
+            is_thread_local = true;
             break;
         case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12:
             aarch64 = true;
-            thread_local = true;
+            is_thread_local = true;
             break;
         case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12:
             aarch64 = true;
-            thread_local = true;
+            is_thread_local = true;
             thread_local_low = true;
             break;
         case CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32:
-            thread_local = true;
+            is_thread_local = true;
             break;
         case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
             aarch64 = true;
-            thread_local = true;
+            is_thread_local = true;
             break;
         case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
             aarch64 = true;
-            thread_local = true;
+            is_thread_local = true;
             thread_local_low = true;
             break;
         case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21:
@@ -89,7 +89,7 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
     // the conversion boundary instead of silently producing the wrong object
     // relocation.  label_address is an independent static-label operation,
     // but it can only carry an absolute address payload.
-    return relocation->aarch64 == aarch64 && relocation->absolute == absolute && relocation->is_thread_local == thread_local &&
+    return relocation->aarch64 == aarch64 && relocation->absolute == absolute && relocation->is_thread_local == is_thread_local &&
            relocation->thread_local_low == thread_local_low && relocation->thread_local_index == thread_local_index &&
            (!relocation->label_address || kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64);
 }

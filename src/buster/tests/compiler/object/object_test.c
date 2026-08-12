@@ -2118,7 +2118,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         for (u32 relocation_index = 0; relocation_index < BUSTER_ARRAY_LENGTH(a64_mach_prel_relocations); relocation_index += 1)
         {
             ObjectRelocation* roundtrip_relocation = &a64_mach_prel_roundtrip.relocations[relocation_index];
-            BUSTER_TEST(arguments, roundtrip_relocation->section == a64_mach_prel_expected_sections[relocation_index]);
+            BUSTER_TEST(arguments, roundtrip_relocation->section == (u32)a64_mach_prel_expected_sections[relocation_index]);
             BUSTER_TEST(arguments, roundtrip_relocation->offset == sizeof(u32));
             BUSTER_TEST(arguments, roundtrip_relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32);
             BUSTER_TEST(arguments, roundtrip_relocation->addend == a64_mach_prel_addends[relocation_index]);

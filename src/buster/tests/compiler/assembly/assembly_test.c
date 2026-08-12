@@ -2609,13 +2609,13 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                assembly_test_bytes_equal(aarch64_system_raw.bytes, expected_aarch64_system_raw,
                                                          sizeof(expected_aarch64_system_raw)));
     static String8 const invalid_aarch64_system_raw[] = {
-        S8("mrs x0, S0_0_C0_C0_0\n"),
-        S8("mrs x0, S1_0_C0_C0_0\n"),
-        S8("mrs x0, S4_0_C0_C0_0\n"),
-        S8("mrs x0, S2_0_C0_C0\n"),
-        S8("mrs x0, S2_0_C0_C0_0x\n"),
-        S8("mrs x0, {S2_0_C0_C0_0}\n"),
-        S8("mrs x0, S3_7_C15_C15_7\n"),
+        S8_INITIALIZER("mrs x0, S0_0_C0_C0_0\n"),
+        S8_INITIALIZER("mrs x0, S1_0_C0_C0_0\n"),
+        S8_INITIALIZER("mrs x0, S4_0_C0_C0_0\n"),
+        S8_INITIALIZER("mrs x0, S2_0_C0_C0\n"),
+        S8_INITIALIZER("mrs x0, S2_0_C0_C0_0x\n"),
+        S8_INITIALIZER("mrs x0, {S2_0_C0_C0_0}\n"),
+        S8_INITIALIZER("mrs x0, S3_7_C15_C15_7\n"),
     };
     for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_system_raw); invalid_index += 1)
     {
@@ -2701,10 +2701,10 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                memcmp(aarch64_scalar_integer.bytes.pointer, expected_aarch64_scalar_integer,
                                       sizeof(expected_aarch64_scalar_integer)) == 0);
     static String8 const invalid_aarch64_scalar_integer[] = {
-        S8("add lsl #1, x0, x1, x2\n"),
-        S8("add x0, lsl #1, x1, x2\n"),
-        S8("add x0, x1, x2, lsl\n"),
-        S8("ccmn x1, #31, #15, #0\n"),
+        S8_INITIALIZER("add lsl #1, x0, x1, x2\n"),
+        S8_INITIALIZER("add x0, lsl #1, x1, x2\n"),
+        S8_INITIALIZER("add x0, x1, x2, lsl\n"),
+        S8_INITIALIZER("ccmn x1, #31, #15, #0\n"),
     };
     for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_scalar_integer); invalid_index += 1)
     {
