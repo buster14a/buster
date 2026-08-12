@@ -8,7 +8,7 @@
 // object/debug data through the driver call. The reservation is virtual and
 // uses demand-paged commits, so this headroom does not eagerly consume 8 GiB
 // of physical memory.
-#define COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE BUSTER_GB(8)
+#define COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE BUSTER_GB(32)
 
 typedef enum CompilerDriverError
 {

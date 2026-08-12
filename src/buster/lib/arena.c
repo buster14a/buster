@@ -4,7 +4,7 @@
 
 BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 
-BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(64);
+BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(256);
 BUSTER_GLOBAL_LOCAL u64 initial_size_granularity_factor = 4;
 
 BUSTER_GLOBAL_LOCAL u64 arena_os_position_after_commit(u64 requested_end, u64 reserved_size)
