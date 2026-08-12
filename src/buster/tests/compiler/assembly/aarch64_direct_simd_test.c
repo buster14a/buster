@@ -292,7 +292,7 @@ UnitTestResult aarch64_direct_simd_tests(UnitTestArguments* arguments)
             arrangement_binding_count += 1;
             arrangement_bindings_ok = arrangement_bindings_ok && binding.selector_index < binding_decoded.operand_count &&
                                       ((binding.direction == 1 && binding.selector_index == operand_index + 1) ||
-                                       (binding.direction == -1 && operand_index != 0 && binding.selector_index + 1 == operand_index)) &&
+                                       (binding.direction == -1 && operand_index != 0 && (u32)binding.selector_index + 1u == operand_index)) &&
                                       binding_decoded.operands[binding.selector_index].kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_ARRANGEMENT &&
                                       binding_decoded.operands[operand_index].aux == binding_decoded.operands[binding.selector_index].aux;
             if (binding.selector_index >= binding_decoded.operand_count)

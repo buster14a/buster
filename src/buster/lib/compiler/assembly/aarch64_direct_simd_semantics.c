@@ -1533,7 +1533,7 @@ bool buster_a64_direct_simd_validate(void)
                 return false;
             }
             if ((binding->direction == 1 && binding->selector_index != operand_index + 1) ||
-                (binding->direction == -1 && (operand_index == 0 || binding->selector_index + 1 != operand_index)))
+                (binding->direction == -1 && (operand_index == 0 || (u32)binding->selector_index + 1u != operand_index)))
             {
                 return false;
             }

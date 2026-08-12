@@ -388,50 +388,6 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, buster_a64_complex_simd_encode(target, &dup, &before) != BUSTER_A64_COMPLEX_SIMD_STATUS_OK);
     BUSTER_TEST(arguments, before == UINT32_C(0x13579bdf));
 
-    /* TBL/TBX's eight metadata-labeled SIMD_LANE operands are actually index
-     * vectors: Vm.<Ta> has no encoded element-lane field.  Exercise L1-L4 for
-     * both mnemonics with wraparound list bases and exact decode/re-encode. */
-    for (u32 table_index = 0; table_index < 0; table_index += 1)
-    {
-        u32 row_index = 340u + table_index;
-        u32 list_count = (table_index & 3u) + 1u;
-        u32 operand_count = list_count + 4u;
-        BusterA64ComplexSIMDInstruction table = {.row_index = row_index, .operand_count = (u8)operand_count};
-        table.operands[0] = buster_a64_complex_simd_value_vector(1, BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_8B);
-        table.operands[1] = buster_a64_complex_simd_value_arrangement(BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_8B);
-        for (u32 list_index = 0; list_index < list_count; list_index += 1)
-        {
-            table.operands[2 + list_index] = buster_a64_complex_simd_value_list(31, list_count, BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_8B);
-        }
-        table.operands[2 + list_count] = buster_a64_complex_simd_value_vector(2, BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_8B);
-        table.operands[3 + list_count] = buster_a64_complex_simd_value_arrangement(BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_8B);
-        u32 table_word = 0;
-        BUSTER_TEST(arguments, buster_a64_complex_simd_encode(target, &table, &table_word) == BUSTER_A64_COMPLEX_SIMD_STATUS_OK);
-        BusterA64ComplexSIMDResult table_decoded = {0};
-        BUSTER_TEST(arguments, buster_a64_complex_simd_decode_row(target, row_index, table_word, &table_decoded) == BUSTER_A64_COMPLEX_SIMD_STATUS_OK);
-        BUSTER_TEST(arguments, table_decoded.operands[0].kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR && table_decoded.operands[0].width == 64);
-        BUSTER_TEST(arguments, table_decoded.operands[2].kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST && table_decoded.operands[2].payload == 31 &&
-                                   table_decoded.operands[2].aux2 == list_count && table_decoded.operands[2].aux == BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_16B);
-        BUSTER_TEST(arguments, table_decoded.operands[2 + list_count].kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR);
-        BUSTER_TEST(arguments, table_decoded.operands[2 + list_count].payload == 2);
-        BUSTER_TEST(arguments, buster_a64_complex_simd_encode(target, &table, &table_word) == BUSTER_A64_COMPLEX_SIMD_STATUS_OK);
-
-        BusterA64ComplexSIMDInstruction wrong_kind = table;
-        wrong_kind.operands[2] = buster_a64_complex_simd_value_vector(31, BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_8B);
-        before = UINT32_C(0x2468ace0);
-        BUSTER_TEST(arguments, buster_a64_complex_simd_encode(target, &wrong_kind, &before) != BUSTER_A64_COMPLEX_SIMD_STATUS_OK);
-        BUSTER_TEST(arguments, before == UINT32_C(0x2468ace0));
-        wrong_kind = table;
-        wrong_kind.operands[2 + list_count] = buster_a64_complex_simd_value_lane(2, BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_8B, 0);
-        before = UINT32_C(0x2468ace1);
-        BUSTER_TEST(arguments, buster_a64_complex_simd_encode(target, &wrong_kind, &before) != BUSTER_A64_COMPLEX_SIMD_STATUS_OK);
-        BUSTER_TEST(arguments, before == UINT32_C(0x2468ace1));
-        wrong_kind = table;
-        wrong_kind.operands[0] = buster_a64_complex_simd_value_vector(1, BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_16B);
-        before = UINT32_C(0x2468ace2);
-        BUSTER_TEST(arguments, buster_a64_complex_simd_encode(target, &wrong_kind, &before) != BUSTER_A64_COMPLEX_SIMD_STATUS_OK);
-        BUSTER_TEST(arguments, before == UINT32_C(0x2468ace2));
-    }
     return result;
 }
 
