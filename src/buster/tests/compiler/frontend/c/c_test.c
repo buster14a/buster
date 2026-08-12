@@ -11180,6 +11180,161 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         scratch_end(fixed_tied_assembly_temporary);
     }
     {
+        TemporalArena special_literal_assembly_temporary = scratch_begin(0, 0);
+        Target x86_special_target = target_native;
+        x86_special_target.cpu_arch = CPU_ARCH_X86_64;
+        x86_special_target.cpu_model = CPU_MODEL_BASELINE;
+        CPreprocessResult special_tokens = {0};
+        CParseResult special_parse = {0};
+        CIRLowerResult special_lowered = c_test_lower_source(
+            special_literal_assembly_temporary.arena,
+            S8("unsigned cpuid_rw(unsigned value) { unsigned eax = value, ebx, ecx = value;"
+               " __asm__(\"cpuid\" : \"+a\"(eax), \"=b\"(ebx), \"+c\"(ecx)); return eax ^ ebx ^ ecx; }"
+               "unsigned cpuid_tied(unsigned value) { unsigned eax, ebx, ecx, edx;"
+               " __asm__(\"cpuid\" : \"=a\"(eax), \"=b\"(ebx), \"=c\"(ecx), \"=d\"(edx) : \"0\"(value), \"2\"(value));"
+               " return eax ^ ebx ^ ecx ^ edx; }"
+               "unsigned cpuid_reordered(unsigned value) { unsigned eax, ebx, ecx, edx;"
+               " __asm__(\"cpuid\" : \"=c\"(ecx), \"=d\"(edx), \"=a\"(eax), \"=b\"(ebx) : \"c\"(value), \"a\"(value));"
+               " return eax ^ ebx ^ ecx ^ edx; }"
+               "unsigned cpuid_named_tied(unsigned value) { unsigned eax, ecx;"
+               " __asm__(\"cpuid\" : [eax_out] \"=a\"(eax), [ecx_out] \"=c\"(ecx) : \"[eax_out]\"(value), \"[ecx_out]\"(value) : \"rbx\");"
+               " return eax ^ ecx; }"
+               "unsigned cpuid_pointer(unsigned value) { unsigned *input = 0, *output;"
+               " __asm__(\"cpuid\" : \"=a\"(output) : \"a\"(input), \"c\"(value) : \"rbx\");"
+               " return output != 0; }"
+               "unsigned xgetbv_outputs(unsigned value) { unsigned eax, edx;"
+               " __asm__(\"xgetbv\" : \"=a\"(eax), \"=d\"(edx) : \"c\"(value)); return eax ^ edx; }\n"),
+            S8("special-literal-assembly.c"), x86_special_target, &special_tokens, &special_parse);
+        BUSTER_TEST(arguments, special_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, special_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, special_lowered.diagnostic_count == 0);
+        if (special_lowered.program)
+        {
+            IrModule* module = special_lowered.program->modules;
+            IrFunction* cpuid_rw = c_test_find_ir_function(module, S8("cpuid_rw"));
+            IrFunction* cpuid_tied = c_test_find_ir_function(module, S8("cpuid_tied"));
+            IrFunction* cpuid_reordered = c_test_find_ir_function(module, S8("cpuid_reordered"));
+            IrFunction* cpuid_named_tied = c_test_find_ir_function(module, S8("cpuid_named_tied"));
+            IrFunction* cpuid_pointer = c_test_find_ir_function(module, S8("cpuid_pointer"));
+            IrFunction* xgetbv_outputs = c_test_find_ir_function(module, S8("xgetbv_outputs"));
+            IrInstruction* cpuid_rw_assembly = 0;
+            IrInstruction* cpuid_tied_assembly = 0;
+            IrInstruction* cpuid_reordered_assembly = 0;
+            IrInstruction* cpuid_named_tied_assembly = 0;
+            IrInstruction* cpuid_pointer_assembly = 0;
+            IrInstruction* xgetbv_outputs_assembly = 0;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + instruction_index;
+                    if (instruction->opcode != IR_OPCODE_INLINE_ASSEMBLY)
+                    {
+                        continue;
+                    }
+                    if (function == cpuid_rw)
+                    {
+                        cpuid_rw_assembly = instruction;
+                    }
+                    else if (function == cpuid_tied)
+                    {
+                        cpuid_tied_assembly = instruction;
+                    }
+                    else if (function == cpuid_reordered)
+                    {
+                        cpuid_reordered_assembly = instruction;
+                    }
+                    else if (function == cpuid_named_tied)
+                    {
+                        cpuid_named_tied_assembly = instruction;
+                    }
+                    else if (function == cpuid_pointer)
+                    {
+                        cpuid_pointer_assembly = instruction;
+                    }
+                    else if (function == xgetbv_outputs)
+                    {
+                        xgetbv_outputs_assembly = instruction;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, cpuid_rw_assembly && cpuid_rw_assembly->operand_count == 3);
+            BUSTER_TEST(arguments, cpuid_tied_assembly && cpuid_tied_assembly->operand_count == 6);
+            BUSTER_TEST(arguments, cpuid_reordered_assembly && cpuid_reordered_assembly->operand_count == 6);
+            BUSTER_TEST(arguments, cpuid_named_tied_assembly && cpuid_named_tied_assembly->operand_count == 4);
+            BUSTER_TEST(arguments, cpuid_pointer_assembly && cpuid_pointer_assembly->operand_count == 3);
+            BUSTER_TEST(arguments, xgetbv_outputs_assembly && xgetbv_outputs_assembly->operand_count == 3);
+            if (cpuid_rw_assembly)
+            {
+                BUSTER_TEST(arguments, cpuid_rw_assembly->immediates[0] == (IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT | IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE |
+                                                                              IR_INLINE_ASSEMBLY_CONSTRAINT_A));
+                BUSTER_TEST(arguments, cpuid_rw_assembly->immediates[1] ==
+                                           (IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT | IR_INLINE_ASSEMBLY_CONSTRAINT_B));
+                BUSTER_TEST(arguments, cpuid_rw_assembly->immediates[2] == (IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT | IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE |
+                                                                              IR_INLINE_ASSEMBLY_CONSTRAINT_C));
+            }
+            if (cpuid_tied_assembly)
+            {
+                BUSTER_TEST(arguments, (cpuid_tied_assembly->immediates[4] & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0 &&
+                                             IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(cpuid_tied_assembly->immediates[4]) == 0);
+                BUSTER_TEST(arguments, (cpuid_tied_assembly->immediates[5] & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0 &&
+                                             IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(cpuid_tied_assembly->immediates[5]) == 2);
+            }
+            if (cpuid_reordered_assembly)
+            {
+                BUSTER_TEST(arguments, (cpuid_reordered_assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_C);
+                BUSTER_TEST(arguments, (cpuid_reordered_assembly->immediates[1] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_D);
+                BUSTER_TEST(arguments, (cpuid_reordered_assembly->immediates[2] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_A);
+                BUSTER_TEST(arguments, (cpuid_reordered_assembly->immediates[3] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_B);
+                BUSTER_TEST(arguments, (cpuid_reordered_assembly->immediates[4] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_C);
+                BUSTER_TEST(arguments, (cpuid_reordered_assembly->immediates[5] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_A);
+            }
+            if (cpuid_named_tied_assembly)
+            {
+                BUSTER_TEST(arguments, (cpuid_named_tied_assembly->immediates[2] & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0 &&
+                                             IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(cpuid_named_tied_assembly->immediates[2]) == 0);
+                BUSTER_TEST(arguments, (cpuid_named_tied_assembly->immediates[3] & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0 &&
+                                             IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(cpuid_named_tied_assembly->immediates[3]) == 1);
+            }
+            if (cpuid_pointer_assembly)
+            {
+                BUSTER_TEST(arguments, (cpuid_pointer_assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_A);
+                BUSTER_TEST(arguments, (cpuid_pointer_assembly->immediates[1] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_A);
+                BUSTER_TEST(arguments, (cpuid_pointer_assembly->immediates[2] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_C);
+            }
+            if (xgetbv_outputs_assembly)
+            {
+                BUSTER_TEST(arguments, (xgetbv_outputs_assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_A);
+                BUSTER_TEST(arguments, (xgetbv_outputs_assembly->immediates[1] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_D);
+                BUSTER_TEST(arguments, (xgetbv_outputs_assembly->immediates[2] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_C);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(special_lowered.program, module).error == IR_VALIDATION_NONE);
+        }
+
+        String8 invalid_sources[] = {
+            S8("unsigned invalid_cpuid_generic(unsigned value) { unsigned eax = value; __asm__(\"cpuid\" : \"+a\"(eax) : \"r\"(value)); return eax; }\n"),
+            S8("unsigned invalid_cpuid_hidden_rbx(unsigned value) { unsigned eax = value, ecx = value; __asm__(\"cpuid\" : \"+a\"(eax), \"+c\"(ecx)); return eax; }\n"),
+            S8("unsigned invalid_cpuid_missing_eax(unsigned value) { unsigned eax, ecx, edx; __asm__(\"cpuid\" : \"=a\"(eax), \"=c\"(ecx), \"=d\"(edx) : \"c\"(value)); return eax; }\n"),
+            S8("unsigned invalid_cpuid_bad_input(unsigned value) { unsigned eax, ebx, ecx, edx; __asm__(\"cpuid\" : \"=a\"(eax), \"=b\"(ebx), \"=c\"(ecx), \"=d\"(edx) : \"a\"(value), \"b\"(value)); return eax; }\n"),
+            S8("unsigned invalid_cpuid_rw_b(unsigned value) { unsigned ebx = value, ecx = value; __asm__(\"cpuid\" : \"+b\"(ebx), \"+c\"(ecx)); return ebx; }\n"),
+            S8("unsigned invalid_xgetbv_generic(unsigned value) { unsigned eax; __asm__(\"xgetbv\" : \"=a\"(eax) : \"r\"(value)); return eax; }\n"),
+            S8("unsigned invalid_xgetbv_a_input(unsigned value) { unsigned eax; __asm__(\"xgetbv\" : \"=a\"(eax) : \"a\"(value)); return eax; }\n"),
+            S8("unsigned invalid_xgetbv_rw(unsigned value) { unsigned eax = value; __asm__(\"xgetbv\" : \"+a\"(eax) : \"c\"(value)); return eax; }\n"),
+        };
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_sources); source_index += 1)
+        {
+            CPreprocessResult invalid_tokens = {0};
+            CParseResult invalid_parse = {0};
+            CIRLowerResult invalid_lowered = c_test_lower_source(special_literal_assembly_temporary.arena, invalid_sources[source_index], S8("invalid-special-assembly.c"),
+                                                                  x86_special_target, &invalid_tokens, &invalid_parse);
+            BUSTER_TEST(arguments, invalid_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, invalid_parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, invalid_lowered.diagnostic_count == 1);
+        }
+        scratch_end(special_literal_assembly_temporary);
+    }
+    {
         TemporalArena legacy_asm_operand_temporary = scratch_begin(0, 0);
         CPreprocessResult legacy_asm_operand_tokens = {0};
         CParseResult legacy_asm_operand_parse = {0};

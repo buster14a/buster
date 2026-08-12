@@ -38456,6 +38456,144 @@ BUSTER_GLOBAL_LOCAL bool c_ir_inline_assembly_substitute_named_operands(CInteger
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_ir_inline_assembly_special_literal_operands_valid(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, String8 assembly)
+{
+    bool cpuid = string_equal(assembly, S8("cpuid"));
+    bool xgetbv = string_equal(assembly, S8("xgetbv"));
+    if ((!cpuid && !xgetbv) || !builder || !state || builder->target.cpu_arch != CPU_ARCH_X86_64)
+    {
+        return true;
+    }
+
+    String8 failure_message = cpuid ? S8("cpuid inline assembly requires fixed register operands")
+                                    : S8("xgetbv inline assembly requires fixed register operands");
+    bool output_roles[4] = {0};
+    bool input_roles[4] = {0};
+    u32 output_count = state->output_count;
+    if (output_count > state->operand_count)
+    {
+        builder->failure_message = failure_message;
+        return false;
+    }
+
+    // The emitter's fixed-register loads/stores support scalar values whose
+    // storage occupies one, two, four, or eight bytes.  The instruction
+    // itself consumes/writes the low 32 bits; x86-64 zero-extension makes an
+    // eight-byte result well-defined, while a tied input still has to retain
+    // the usual exact-width compatibility checked by the constraint parser.
+    for (u32 operand_index = 0; operand_index < state->operand_count; operand_index += 1)
+    {
+        IrValueId operand = state->operands[operand_index];
+        if (operand.value >= builder->function->value_count)
+        {
+            builder->failure_message = failure_message;
+            return false;
+        }
+        IrType* operand_type = ir_type_from_id(&builder->program->types, builder->function->values[operand.value].canonical_type);
+        u32 operand_class = c_ir_inline_assembly_type_class(operand_type);
+        if ((operand_class != IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER && operand_class != IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER) ||
+            !operand_type->layout.resolved ||
+            (operand_type->layout.size != 1 && operand_type->layout.size != 2 && operand_type->layout.size != 4 && operand_type->layout.size != 8))
+        {
+            builder->failure_message = failure_message;
+            return false;
+        }
+        u64 constraint = state->constraints[operand_index];
+        u32 constraint_class = (u32)(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
+        bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+        bool read_write = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
+        bool matching = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0;
+        if (constraint_class > IR_INLINE_ASSEMBLY_CONSTRAINT_D || (read_write && !output))
+        {
+            builder->failure_message = failure_message;
+            return false;
+        }
+        if (operand_index < output_count)
+        {
+            if (!output || matching || output_roles[constraint_class])
+            {
+                builder->failure_message = failure_message;
+                return false;
+            }
+            output_roles[constraint_class] = true;
+            if (cpuid)
+            {
+                if (read_write && constraint_class != IR_INLINE_ASSEMBLY_CONSTRAINT_A && constraint_class != IR_INLINE_ASSEMBLY_CONSTRAINT_C)
+                {
+                    builder->failure_message = failure_message;
+                    return false;
+                }
+                if (read_write)
+                {
+                    input_roles[constraint_class] = true;
+                }
+            }
+            else if (read_write)
+            {
+                builder->failure_message = failure_message;
+                return false;
+            }
+            continue;
+        }
+        if (output || read_write)
+        {
+            builder->failure_message = failure_message;
+            return false;
+        }
+        if (matching)
+        {
+            u32 match_index = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
+            if (match_index >= output_count || !output_roles[constraint_class] ||
+                (state->constraints[match_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) ||
+                (state->constraints[match_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) != constraint_class ||
+                !c_ir_inline_assembly_operand_types_compatible(builder, state->operands[match_index], operand))
+            {
+                builder->failure_message = failure_message;
+                return false;
+            }
+        }
+        if (input_roles[constraint_class])
+        {
+            builder->failure_message = failure_message;
+            return false;
+        }
+        input_roles[constraint_class] = true;
+    }
+
+    // CPUID consumes EAX and ECX.  XGETBV consumes ECX and has no input role
+    // in EAX/EDX; its optional outputs are pure stores only.
+    if (cpuid)
+    {
+        if (!input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_A] || !input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_C] || input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_B] ||
+            input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_D])
+        {
+            builder->failure_message = failure_message;
+            return false;
+        }
+        // CPUID overwrites EBX even when the source omits that result.  RBX
+        // is callee-saved in both x86-64 ABIs, and the canonical emitter's
+        // prologue preserves it only when a fixed B operand or RBX-family
+        // clobber makes the architectural side effect explicit.
+        bool preserves_rbx = output_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_B];
+        for (u32 clobber_index = 0; clobber_index < state->clobber_count && !preserves_rbx; clobber_index += 1)
+        {
+            preserves_rbx = c_ir_inline_assembly_clobber_matches_constraint(state->clobbers[clobber_index], IR_INLINE_ASSEMBLY_CONSTRAINT_B);
+        }
+        if (!preserves_rbx)
+        {
+            builder->failure_message = S8("cpuid inline assembly must expose or clobber RBX");
+            return false;
+        }
+    }
+    else if (!input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_C] || input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_A] || input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_B] ||
+             input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_D] || output_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_B] || output_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_C])
+    {
+        builder->failure_message = failure_message;
+        return false;
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state)
 {
     u64 assembly_length = 0;
@@ -38481,6 +38619,11 @@ BUSTER_GLOBAL_LOCAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder,
         .length = assembly_length,
     };
     if (!fragment_count)
+    {
+        return false;
+    }
+    if (!c_ir_inline_assembly_special_literal_operands_valid(builder, state,
+                                                              (String8){.pointer = (char8*)assembly.pointer, .length = assembly.length}))
     {
         return false;
     }
