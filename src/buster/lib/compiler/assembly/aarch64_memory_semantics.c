@@ -1645,7 +1645,7 @@ buster_a64_memory_encode(Target target, BusterA64MemoryInstruction const* instru
             operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE && !(operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LANE_INDEX)) { continue;
 }
         BusterA64MemoryArrangement selected = BUSTER_A64_MEMORY_ARRANGEMENT_INVALID;
-        if (buster_a64_memory_bound_arrangement(form, index, instruction->operands, &selected) && instruction->operands[index].aux != selected) {
+        if (buster_a64_memory_bound_arrangement(form, index, instruction->operands, &selected) && instruction->operands[index].aux != (u32)selected) {
             return BUSTER_A64_MEMORY_STATUS_RANGE;
 }
     }
