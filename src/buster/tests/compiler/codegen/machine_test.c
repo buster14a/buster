@@ -241,6 +241,14 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, (cmpxchg16_mir.frame_size + 8 * ((cmpxchg16_mir.callee_saved_mask >> MACHINE_X64_RBX) & 1u)) % 16 == 0);
     BUSTER_TEST(arguments, (cmpxchg16_fast.frame_size + 8 * ((cmpxchg16_fast.callee_saved_mask >> MACHINE_X64_RBX) & 1u)) % 16 == 0);
     BUSTER_TEST(arguments, (cmpxchg16_quality.frame_size + 8 * ((cmpxchg16_quality.callee_saved_mask >> MACHINE_X64_RBX) & 1u)) % 16 == 0);
+    // MIR_STACK must put every home below the callee-saved save area.  The
+    // CMPXCHG16B fixture has no virtual registers, so check its selector
+    // stack slots directly: slot zero must not alias [RBP-8], where the
+    // generated prologue saves RBX.
+    u32 cmpxchg16_push_area = 8;
+    BUSTER_TEST(arguments, cmpxchg16_mir.stack_slot_offsets[0] > cmpxchg16_push_area &&
+                               cmpxchg16_mir.stack_slot_offsets[1] > cmpxchg16_push_area &&
+                               cmpxchg16_mir.stack_slot_offsets[2] > cmpxchg16_push_area);
     u32 cmpxchg16_row = 1;
     BUSTER_TEST(arguments, cmpxchg16_mir.operand_registers[cmpxchg16_row * 4 + 3] == MACHINE_X64_RSI &&
                                    cmpxchg16_fast.operand_registers[cmpxchg16_row * 4 + 3] == MACHINE_X64_RSI &&
