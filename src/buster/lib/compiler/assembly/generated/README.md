@@ -3,12 +3,12 @@
 This directory contains deterministic, pointer-free assembly metadata emitted
 by `build import_assembly_metadata`. Normal builds do not parse JSON, execute
 XED/LLVM, or run TableGen. The generated x86-64 C header is consumed by the
-x86-64 metadata ABI and bounded lookup layer, while the current assembler
-encoder does not yet consume its encoding fields. The AArch64 packed tables are
-consumed by the metadata runtime and raw bit-layout encoder; semantic coverage
-and the Apple M1 profile remain provisional until raw LLVM aliases and the
-official Arm XML are independently validated. The profile is emitted as a
-separate, deterministic JSONL projection over the pinned AArch64 records.
+x86-64 metadata ABI, bounded lookup layer, source-form selector, and byte
+emitter. The AArch64 packed tables are consumed by the metadata runtime and raw
+bit-layout encoder; semantic coverage and the Apple M1 profile remain
+provisional until raw LLVM aliases and the official Arm XML are independently
+validated. The profile is emitted as a separate, deterministic JSONL projection
+over the pinned AArch64 records.
 
 - `x86_64-xed.jsonl`, `x86_64-assembly.generated.h`, and
   `x86_64-coverage.generated.inc` are the existing checked-in XED artifacts.
