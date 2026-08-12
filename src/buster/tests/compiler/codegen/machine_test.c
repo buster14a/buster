@@ -565,9 +565,32 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "unsigned long u128_to_u64(MachineWideUnsigned v) { return (unsigned long)v; }\n"
                                   "long i128_to_i64(MachineWideSigned v) { return (long)v; }\n"
                                   "MachineWideUnsigned u64_to_u128(unsigned long v) { return (MachineWideUnsigned)v; }\n"
-                                  "MachineWideSigned i64_to_i128(long v) { return (MachineWideSigned)v; }\n");
-    String8 machine_c_source =
+                                  "MachineWideSigned i64_to_i128(long v) { return (MachineWideSigned)v; }\n"
+                                  "int variadic_named(int first, ...) { return first; }\n"
+                                  "int variadic_named_caller(int first) { return variadic_named(first, 22, 3.5); }\n");
+    String8 machine_c_source_variadic = S8(
+                                  "#if defined(__x86_64__)\n"
+                                  "typedef void *va_list;\n"
+                                  "long variadic_observe(int first, ...) { va_list arguments; long total = first; __builtin_va_start(arguments, first);\n"
+                                  "    total += __builtin_va_arg(arguments, int); total += __builtin_va_arg(arguments, int);\n"
+                                  "    total += __builtin_va_arg(arguments, int); total += __builtin_va_arg(arguments, int);\n"
+                                  "    total += __builtin_va_arg(arguments, int); total += __builtin_va_arg(arguments, int);\n"
+                                  "    total += __builtin_va_arg(arguments, int);\n"
+                                  "    total += (long)__builtin_va_arg(arguments, double); total += (long)__builtin_va_arg(arguments, double);\n"
+                                  "    total += (long)__builtin_va_arg(arguments, double); total += (long)__builtin_va_arg(arguments, double);\n"
+                                  "    total += (long)__builtin_va_arg(arguments, double); total += (long)__builtin_va_arg(arguments, double);\n"
+                                  "    total += (long)__builtin_va_arg(arguments, double); total += (long)__builtin_va_arg(arguments, double);\n"
+                                  "    total += (long)__builtin_va_arg(arguments, double); __builtin_va_end(arguments); return total; }\n"
+                                  "long variadic_observe_caller(int first) { return variadic_observe(first, 1, 2, 3, 4, 5, 6, 7,\n"
+                                  "    1.25, 2.25, 3.25, 4.25, 5.25, 6.25, 7.25, 8.25, 9.25); }\n"
+                                  "int variadic_unsupported_first(int first, ...) { __asm__ volatile(\"\");\n"
+                                  "    va_list arguments; __builtin_va_start(arguments, first); return __builtin_va_arg(arguments, int); }\n"
+                                  "#endif\n");
+    String8 machine_c_source_base =
         string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra);
+    String8 machine_c_source =
+        string_format(arguments->arena, S8("{S8}{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra,
+                      machine_c_source_variadic);
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
     BUSTER_TEST(arguments, machine_program != 0);
     if (machine_program && machine_program->module_count)
@@ -719,6 +742,32 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         {
             MachineSelectResult variadic_selected = machine_select_canonical_function(arguments->arena, machine_program, variadic_function, machine_target);
             BUSTER_TEST(arguments, variadic_selected.supported);
+        }
+        IrFunction* variadic_named_function = machine_test_ir_function_find(machine_module, S8("variadic_named"));
+        IrFunction* variadic_named_caller_function = machine_test_ir_function_find(machine_module, S8("variadic_named_caller"));
+        IrFunction* variadic_observe_function = machine_test_ir_function_find(machine_module, S8("variadic_observe"));
+        IrFunction* variadic_observe_caller_function = machine_test_ir_function_find(machine_module, S8("variadic_observe_caller"));
+        IrFunction* variadic_unsupported_first_function = machine_test_ir_function_find(machine_module, S8("variadic_unsupported_first"));
+        BUSTER_TEST(arguments, variadic_named_function && variadic_named_caller_function && variadic_observe_function &&
+                                   variadic_observe_caller_function && variadic_unsupported_first_function);
+        if (variadic_named_function && variadic_named_caller_function && variadic_observe_function && variadic_observe_caller_function &&
+            variadic_unsupported_first_function)
+        {
+            MachineSelectResult variadic_named_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, variadic_named_function, machine_target);
+            MachineSelectResult variadic_named_caller_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, variadic_named_caller_function, machine_target);
+            MachineSelectResult variadic_observe_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, variadic_observe_function, machine_target);
+            MachineSelectResult variadic_observe_caller_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, variadic_observe_caller_function, machine_target);
+            MachineSelectResult variadic_unsupported_first_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, variadic_unsupported_first_function, machine_target);
+            BUSTER_TEST(arguments, variadic_named_selected.supported && variadic_named_caller_selected.supported &&
+                                       variadic_observe_caller_selected.supported);
+            BUSTER_TEST(arguments, !variadic_observe_selected.supported && variadic_observe_selected.failed_opcode == IR_OPCODE_VA_START);
+            BUSTER_TEST(arguments, !variadic_unsupported_first_selected.supported &&
+                                       variadic_unsupported_first_selected.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY);
         }
         // The lifted non-vector gaps: a thread-local address (ELF local-exec
         // fs sequence), an rvalue compound-literal array base, a variadic
@@ -1004,7 +1053,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                                                      });
         BUSTER_TEST(arguments, mir_module.error == CODEGEN_ERROR_NONE);
         BUSTER_TEST(arguments, none_module.statistics.fallback_function_count == 0);
-        BUSTER_TEST_RAW(arguments, mir_module.statistics.fallback_function_count == 1,
+        BUSTER_TEST_RAW(arguments, mir_module.statistics.fallback_function_count == 3,
                         string_format(arguments->arena, S8("mir fallbacks {u32}"), mir_module.statistics.fallback_function_count));
         IrFunction* mir_add_function = machine_test_ir_function_find(machine_module, S8("add"));
         if (mir_add_function)
@@ -1065,6 +1114,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("aligned_local"), S8_INITIALIZER("span_round_trip"), S8_INITIALIZER("single_round_trip"), S8_INITIALIZER("fmath"),
             S8_INITIALIZER("fcompare"), S8_INITIALIZER("fnan"), S8_INITIALIZER("call_stack"), S8_INITIALIZER("big_round"),
             S8_INITIALIZER("call_indirect"), S8_INITIALIZER("atomic_ops"), S8_INITIALIZER("kagg"), S8_INITIALIZER("vla_sum"),
+            S8_INITIALIZER("variadic_named"), S8_INITIALIZER("variadic_named_caller"), S8_INITIALIZER("variadic_observe_caller"),
         };
         typedef s64 MachineTestModuleCall2(s64, s64);
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(module_names) && none_module_executable.address && mir_module_executable.address;
@@ -1870,7 +1920,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         .cpu_arch = CPU_ARCH_AARCH64,
         .os = OPERATING_SYSTEM_LINUX,
     };
-    IrProgram* machine_a64_program = machine_test_compile_c(arguments->arena, S8("machine-stage11.c"), machine_c_source, machine_a64_target);
+    IrProgram* machine_a64_program = machine_test_compile_c(arguments->arena, S8("machine-stage11.c"), machine_c_source_base, machine_a64_target);
     BUSTER_TEST(arguments, machine_a64_program != 0);
     if (machine_a64_program && machine_a64_program->module_count)
     {

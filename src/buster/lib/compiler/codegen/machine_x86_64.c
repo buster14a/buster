@@ -2961,8 +2961,23 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         return result;
     }
     IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
-    if (!function_type || function_type->kind != IR_TYPE_FUNCTION || function_type->is_variadic ||
-        function_type->parameter_count > MACHINE_X64_MAX_ARGUMENTS)
+    if (!function_type || function_type->kind != IR_TYPE_FUNCTION)
+    {
+        return result;
+    }
+    if (function_type->is_variadic)
+    {
+        // The machine selector models the System V register sequence.  A
+        // Windows target has a different variadic definition ABI and stays
+        // on the canonical path even when the body ignores its tail.  SysV
+        // bodies continue through ordinary selection: the first va_* (or any
+        // earlier unsupported operation) is then reported in true IR order.
+        if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI)
+        {
+            return result;
+        }
+    }
+    if (function_type->parameter_count > MACHINE_X64_MAX_ARGUMENTS)
     {
         return result;
     }
