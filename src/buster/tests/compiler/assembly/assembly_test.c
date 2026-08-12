@@ -2615,6 +2615,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8("mrs x0, S2_0_C0_C0\n"),
         S8("mrs x0, S2_0_C0_C0_0x\n"),
         S8("mrs x0, {S2_0_C0_C0_0}\n"),
+        S8("mrs x0, S3_7_C15_C15_7\n"),
     };
     for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_system_raw); invalid_index += 1)
     {

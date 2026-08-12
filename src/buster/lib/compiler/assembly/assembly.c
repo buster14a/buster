@@ -6233,7 +6233,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_raw_reg_encoding(String8 text, 
         return false;
     }
     u16 value = (u16)((op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2);
-    if (op0 < 2 || op0 > 3)
+    if (op0 < 2 || op0 > 3 || value == UINT16_C(0xffff))
     {
         return false;
     }
