@@ -147,14 +147,15 @@ static bool buster_a64_complex_simd_operand_is_arrangement_selector(BusterA64Sem
 
 static bool buster_a64_complex_simd_operand_has_register_kind(BusterA64SemanticOperand operand)
 {
+    /* ``simd_lane`` covers both encoded lane registers and presentation-only
+     * element indices.  An immediate index is marked ``simd_lane_index`` but
+     * not ``simd_index_register``; its transform owns the encoded mapping.
+     * Keep all other lane metadata on the register path. */
     return buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER) ||
            buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST) ||
-           buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE);
-}
-
-static bool buster_a64_complex_simd_operand_is_pure_arrangement_selector(BusterA64SemanticOperand operand)
-{
-    return buster_a64_complex_simd_operand_is_arrangement_selector(operand) && !buster_a64_complex_simd_operand_has_register_kind(operand);
+           (buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE) &&
+            ((operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LANE_INDEX) == 0 ||
+             (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_INDEX_REGISTER) != 0));
 }
 
 static bool buster_a64_complex_simd_value_uint(BusterA64SemanticVMValue value, u64* result)
@@ -990,7 +991,7 @@ static bool buster_a64_complex_simd_encode_operand(u32 row_index, BusterA64Seman
     {
         return false;
     }
-    if (buster_a64_complex_simd_operand_is_pure_arrangement_selector(operand))
+    if (buster_a64_complex_simd_operand_is_arrangement_selector(operand))
     {
         return buster_a64_complex_simd_inverse_tables(form, operand, value, fields, assigned);
     }
@@ -1271,8 +1272,8 @@ static bool buster_a64_complex_simd_decode_register(u32 row_index, BusterA64Sema
     {
         arrangement = BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_Q;
     }
-    bool vector = (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0;
-    bool scalar = !vector && (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) != 0;
+    bool scalar = (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) != 0;
+    bool vector = !scalar && (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0;
     if (!scalar && !vector && arrangement_selected && buster_a64_complex_simd_arrangement_is_scalar(arrangement))
     {
         scalar = true;
@@ -1496,7 +1497,7 @@ static BusterA64ComplexSIMDStatus buster_a64_complex_simd_decode_internal(Target
         {
             return BUSTER_A64_COMPLEX_SIMD_STATUS_BOUNDS;
         }
-        if (buster_a64_complex_simd_operand_is_pure_arrangement_selector(operand))
+        if (buster_a64_complex_simd_operand_is_arrangement_selector(operand))
         {
             if (!buster_a64_complex_simd_decode_arrangement(form, operand, &decoded.fields, &values[index]))
             {
@@ -1678,8 +1679,8 @@ bool buster_a64_complex_simd_validate(void)
             {
                 return false;
             }
-            if ((binding->direction == 1 && binding->selector_index != operand_index + 1) ||
-                (binding->direction == -1 && (operand_index == 0 || binding->selector_index + 1 != operand_index)))
+            if ((binding->direction == 1 && (u32)binding->selector_index != operand_index + 1) ||
+                (binding->direction == -1 && (operand_index == 0 || (u32)binding->selector_index + 1 != operand_index)))
             {
                 return false;
             }
