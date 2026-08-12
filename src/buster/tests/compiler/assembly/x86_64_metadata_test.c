@@ -1516,7 +1516,8 @@ BUSTER_GLOBAL_LOCAL X86_64MetadataSourceReachabilityResult x86_64_metadata_test_
                                                     (AssemblyEncodeOptions){.target = target,
                                                                              .syntax = ASSEMBLY_SYNTAX_INTEL});
     result.source_encoded = encoded.diagnostic_count == 0;
-    result.diagnostic_kind = encoded.diagnostic_count ? encoded.diagnostics[0].kind : ASSEMBLY_DIAGNOSTIC_COUNT;
+    result.diagnostic_kind =
+        encoded.diagnostic_count ? (u32)encoded.diagnostics[0].kind : (u32)ASSEMBLY_DIAGNOSTIC_COUNT;
     result.source_byte_count = (u32)encoded.bytes.length;
     result.source_first_byte = encoded.bytes.length ? encoded.bytes.pointer[0] : 0;
     result.mismatch_index = UINT32_MAX;
@@ -1575,9 +1576,9 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_reachability_skeleton(UnitT
     };
     static X86_64MetadataSourceReachabilityCase const cases[] = {
         // Snapshot form IDs are stable for the checked-in generated table.
-        {9842, S8_INITIALIZER("mov rax, rax\n")},
-        {6939, S8_INITIALIZER("vaddps zmm0, zmm0, zmm0, {rn-sae}\n")},
-        {567, S8_INITIALIZER("add rax, rax, rax\n")},
+        {.form_id = 9842, .source = S8_INITIALIZER("mov rax, rax\n")},
+        {.form_id = 6939, .source = S8_INITIALIZER("vaddps zmm0, zmm0, zmm0, {rn-sae}\n")},
+        {.form_id = 567, .source = S8_INITIALIZER("add rax, rax, rax\n")},
     };
     bool all_success = true;
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
