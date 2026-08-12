@@ -107,38 +107,38 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
 #define A64_VALUE_SLOT_SIZE 32
 
 BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_names64[] = {
-    S8("rax"), S8("rcx"), S8("rdx"), S8("rbx"), S8("rsp"), S8("rbp"), S8("rsi"), S8("rdi"),
-    S8("r8"), S8("r9"), S8("r10"), S8("r11"), S8("r12"), S8("r13"), S8("r14"), S8("r15"),
+    S8_INITIALIZER("rax"), S8_INITIALIZER("rcx"), S8_INITIALIZER("rdx"), S8_INITIALIZER("rbx"), S8_INITIALIZER("rsp"), S8_INITIALIZER("rbp"), S8_INITIALIZER("rsi"), S8_INITIALIZER("rdi"),
+    S8_INITIALIZER("r8"), S8_INITIALIZER("r9"), S8_INITIALIZER("r10"), S8_INITIALIZER("r11"), S8_INITIALIZER("r12"), S8_INITIALIZER("r13"), S8_INITIALIZER("r14"), S8_INITIALIZER("r15"),
 };
 BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_names32[] = {
-    S8("eax"), S8("ecx"), S8("edx"), S8("ebx"), S8("esp"), S8("ebp"), S8("esi"), S8("edi"),
-    S8("r8d"), S8("r9d"), S8("r10d"), S8("r11d"), S8("r12d"), S8("r13d"), S8("r14d"), S8("r15d"),
+    S8_INITIALIZER("eax"), S8_INITIALIZER("ecx"), S8_INITIALIZER("edx"), S8_INITIALIZER("ebx"), S8_INITIALIZER("esp"), S8_INITIALIZER("ebp"), S8_INITIALIZER("esi"), S8_INITIALIZER("edi"),
+    S8_INITIALIZER("r8d"), S8_INITIALIZER("r9d"), S8_INITIALIZER("r10d"), S8_INITIALIZER("r11d"), S8_INITIALIZER("r12d"), S8_INITIALIZER("r13d"), S8_INITIALIZER("r14d"), S8_INITIALIZER("r15d"),
 };
 BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_names16[] = {
-    S8("ax"), S8("cx"), S8("dx"), S8("bx"), S8("sp"), S8("bp"), S8("si"), S8("di"),
-    S8("r8w"), S8("r9w"), S8("r10w"), S8("r11w"), S8("r12w"), S8("r13w"), S8("r14w"), S8("r15w"),
+    S8_INITIALIZER("ax"), S8_INITIALIZER("cx"), S8_INITIALIZER("dx"), S8_INITIALIZER("bx"), S8_INITIALIZER("sp"), S8_INITIALIZER("bp"), S8_INITIALIZER("si"), S8_INITIALIZER("di"),
+    S8_INITIALIZER("r8w"), S8_INITIALIZER("r9w"), S8_INITIALIZER("r10w"), S8_INITIALIZER("r11w"), S8_INITIALIZER("r12w"), S8_INITIALIZER("r13w"), S8_INITIALIZER("r14w"), S8_INITIALIZER("r15w"),
 };
 BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_names8[] = {
-    S8("al"), S8("cl"), S8("dl"), S8("bl"), S8("spl"), S8("bpl"), S8("sil"), S8("dil"),
-    S8("r8b"), S8("r9b"), S8("r10b"), S8("r11b"), S8("r12b"), S8("r13b"), S8("r14b"), S8("r15b"),
+    S8_INITIALIZER("al"), S8_INITIALIZER("cl"), S8_INITIALIZER("dl"), S8_INITIALIZER("bl"), S8_INITIALIZER("spl"), S8_INITIALIZER("bpl"), S8_INITIALIZER("sil"), S8_INITIALIZER("dil"),
+    S8_INITIALIZER("r8b"), S8_INITIALIZER("r9b"), S8_INITIALIZER("r10b"), S8_INITIALIZER("r11b"), S8_INITIALIZER("r12b"), S8_INITIALIZER("r13b"), S8_INITIALIZER("r14b"), S8_INITIALIZER("r15b"),
 };
 BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
-    S8("mov"), S8("movb"), S8("movw"), S8("movl"), S8("movq"), S8("movzx"), S8("movsx"), S8("movzb"), S8("movzw"), S8("movzl"),
-    S8("movsxb"), S8("movsxw"), S8("movsxl"), S8("add"), S8("addb"), S8("addw"), S8("addl"), S8("addq"), S8("sub"), S8("subb"),
-    S8("subw"), S8("subl"), S8("subq"), S8("xor"), S8("xorb"), S8("xorw"), S8("xorl"), S8("xorq"), S8("or"), S8("orb"), S8("orw"),
-    S8("orl"), S8("orq"), S8("and"), S8("andb"), S8("andw"), S8("andl"), S8("andq"), S8("cmp"), S8("cmpb"), S8("cmpw"), S8("cmpl"),
-    S8("cmpq"), S8("test"), S8("testb"), S8("testw"), S8("testl"), S8("testq"), S8("xchg"), S8("xchgb"), S8("xchgw"), S8("xchgl"),
-    S8("xchgq"), S8("inc"), S8("incb"), S8("incw"), S8("incl"), S8("incq"), S8("dec"), S8("decb"), S8("decw"), S8("decl"), S8("decq"),
-    S8("neg"), S8("negb"), S8("negw"), S8("negl"), S8("negq"), S8("not"), S8("notb"), S8("notw"), S8("notl"), S8("notq"), S8("bswap"),
-    S8("bswapl"), S8("bswapq"),
+    S8_INITIALIZER("mov"), S8_INITIALIZER("movb"), S8_INITIALIZER("movw"), S8_INITIALIZER("movl"), S8_INITIALIZER("movq"), S8_INITIALIZER("movzx"), S8_INITIALIZER("movsx"), S8_INITIALIZER("movzb"), S8_INITIALIZER("movzw"), S8_INITIALIZER("movzl"),
+    S8_INITIALIZER("movsxb"), S8_INITIALIZER("movsxw"), S8_INITIALIZER("movsxl"), S8_INITIALIZER("add"), S8_INITIALIZER("addb"), S8_INITIALIZER("addw"), S8_INITIALIZER("addl"), S8_INITIALIZER("addq"), S8_INITIALIZER("sub"), S8_INITIALIZER("subb"),
+    S8_INITIALIZER("subw"), S8_INITIALIZER("subl"), S8_INITIALIZER("subq"), S8_INITIALIZER("xor"), S8_INITIALIZER("xorb"), S8_INITIALIZER("xorw"), S8_INITIALIZER("xorl"), S8_INITIALIZER("xorq"), S8_INITIALIZER("or"), S8_INITIALIZER("orb"), S8_INITIALIZER("orw"),
+    S8_INITIALIZER("orl"), S8_INITIALIZER("orq"), S8_INITIALIZER("and"), S8_INITIALIZER("andb"), S8_INITIALIZER("andw"), S8_INITIALIZER("andl"), S8_INITIALIZER("andq"), S8_INITIALIZER("cmp"), S8_INITIALIZER("cmpb"), S8_INITIALIZER("cmpw"), S8_INITIALIZER("cmpl"),
+    S8_INITIALIZER("cmpq"), S8_INITIALIZER("test"), S8_INITIALIZER("testb"), S8_INITIALIZER("testw"), S8_INITIALIZER("testl"), S8_INITIALIZER("testq"), S8_INITIALIZER("xchg"), S8_INITIALIZER("xchgb"), S8_INITIALIZER("xchgw"), S8_INITIALIZER("xchgl"),
+    S8_INITIALIZER("xchgq"), S8_INITIALIZER("inc"), S8_INITIALIZER("incb"), S8_INITIALIZER("incw"), S8_INITIALIZER("incl"), S8_INITIALIZER("incq"), S8_INITIALIZER("dec"), S8_INITIALIZER("decb"), S8_INITIALIZER("decw"), S8_INITIALIZER("decl"), S8_INITIALIZER("decq"),
+    S8_INITIALIZER("neg"), S8_INITIALIZER("negb"), S8_INITIALIZER("negw"), S8_INITIALIZER("negl"), S8_INITIALIZER("negq"), S8_INITIALIZER("not"), S8_INITIALIZER("notb"), S8_INITIALIZER("notw"), S8_INITIALIZER("notl"), S8_INITIALIZER("notq"), S8_INITIALIZER("bswap"),
+    S8_INITIALIZER("bswapl"), S8_INITIALIZER("bswapq"),
 };
 BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_registers[] = {
-    S8("rax"), S8("eax"), S8("ax"), S8("al"), S8("rcx"), S8("ecx"), S8("cx"), S8("cl"), S8("rdx"), S8("edx"), S8("dx"), S8("dl"),
-    S8("rbx"), S8("ebx"), S8("bx"), S8("bl"), S8("rsp"), S8("esp"), S8("sp"), S8("spl"), S8("rbp"), S8("ebp"), S8("bp"), S8("bpl"),
-    S8("rsi"), S8("esi"), S8("si"), S8("sil"), S8("rdi"), S8("edi"), S8("di"), S8("dil"), S8("r8"), S8("r8d"), S8("r8w"), S8("r8b"),
-    S8("r9"), S8("r9d"), S8("r9w"), S8("r9b"), S8("r10"), S8("r10d"), S8("r10w"), S8("r10b"), S8("r11"), S8("r11d"), S8("r11w"),
-    S8("r11b"), S8("r12"), S8("r12d"), S8("r12w"), S8("r12b"), S8("r13"), S8("r13d"), S8("r13w"), S8("r13b"), S8("r14"), S8("r14d"),
-    S8("r14w"), S8("r14b"), S8("r15"), S8("r15d"), S8("r15w"), S8("r15b"),
+    S8_INITIALIZER("rax"), S8_INITIALIZER("eax"), S8_INITIALIZER("ax"), S8_INITIALIZER("al"), S8_INITIALIZER("rcx"), S8_INITIALIZER("ecx"), S8_INITIALIZER("cx"), S8_INITIALIZER("cl"), S8_INITIALIZER("rdx"), S8_INITIALIZER("edx"), S8_INITIALIZER("dx"), S8_INITIALIZER("dl"),
+    S8_INITIALIZER("rbx"), S8_INITIALIZER("ebx"), S8_INITIALIZER("bx"), S8_INITIALIZER("bl"), S8_INITIALIZER("rsp"), S8_INITIALIZER("esp"), S8_INITIALIZER("sp"), S8_INITIALIZER("spl"), S8_INITIALIZER("rbp"), S8_INITIALIZER("ebp"), S8_INITIALIZER("bp"), S8_INITIALIZER("bpl"),
+    S8_INITIALIZER("rsi"), S8_INITIALIZER("esi"), S8_INITIALIZER("si"), S8_INITIALIZER("sil"), S8_INITIALIZER("rdi"), S8_INITIALIZER("edi"), S8_INITIALIZER("di"), S8_INITIALIZER("dil"), S8_INITIALIZER("r8"), S8_INITIALIZER("r8d"), S8_INITIALIZER("r8w"), S8_INITIALIZER("r8b"),
+    S8_INITIALIZER("r9"), S8_INITIALIZER("r9d"), S8_INITIALIZER("r9w"), S8_INITIALIZER("r9b"), S8_INITIALIZER("r10"), S8_INITIALIZER("r10d"), S8_INITIALIZER("r10w"), S8_INITIALIZER("r10b"), S8_INITIALIZER("r11"), S8_INITIALIZER("r11d"), S8_INITIALIZER("r11w"),
+    S8_INITIALIZER("r11b"), S8_INITIALIZER("r12"), S8_INITIALIZER("r12d"), S8_INITIALIZER("r12w"), S8_INITIALIZER("r12b"), S8_INITIALIZER("r13"), S8_INITIALIZER("r13d"), S8_INITIALIZER("r13w"), S8_INITIALIZER("r13b"), S8_INITIALIZER("r14"), S8_INITIALIZER("r14d"),
+    S8_INITIALIZER("r14w"), S8_INITIALIZER("r14b"), S8_INITIALIZER("r15"), S8_INITIALIZER("r15d"), S8_INITIALIZER("r15w"), S8_INITIALIZER("r15b"),
 };
 BUSTER_GLOBAL_LOCAL X64Register const codegen_x64_asm_system_v_registers[] = {
     X64_REGISTER_RAX, X64_REGISTER_RCX, X64_REGISTER_RDX, X64_REGISTER_RSI, X64_REGISTER_RDI,

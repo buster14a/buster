@@ -2916,7 +2916,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             for (u32 template_index = 0; template_index < BUSTER_ARRAY_LENGTH(rejected_templates); template_index += 1)
             {
-                u32 case_index = dialect_index * BUSTER_ARRAY_LENGTH(rejected_templates) + template_index;
+                u32 case_index = dialect_index * (u32)BUSTER_ARRAY_LENGTH(rejected_templates) + template_index;
                 String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-invalid-asm-template"),
                                                                   string_format(arguments->arena, S8("-{u32}.c"), case_index));
                 String8 source = string_format(arguments->arena, S8("int invalid_template(int value) {{ __asm__ volatile(\"{S8}\" : \"+r\"(value)); return value; }}\n"),
@@ -3677,6 +3677,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, os_process_wait_sync(c_asm_arena, spawn).result == PROCESS_RESULT_SUCCESS);
             }
         }
+#if BUSTER_CPU_ARCH_X86_64
         String8 dialects[] = {S8("att"), S8("intel")};
         for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
         {
@@ -3700,6 +3701,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 }
             }
         }
+#endif
     }
     String8 c_asm_aarch64_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-aarch64"), S8(""));
     String8 c_asm_aarch64_command_line[] = {
