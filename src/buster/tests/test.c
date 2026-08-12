@@ -23,6 +23,8 @@
 #include <buster/lib/compiler/assembly/aarch64_syntax.h>
 #include <buster/lib/compiler/assembly/aarch64_semantic_vm.h>
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h>
+#include <buster/lib/compiler/assembly/aarch64_complex_simd_semantics.h>
+#include <buster/lib/compiler/assembly/aarch64_memory_semantics.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/ir/ir.h>
@@ -58,6 +60,8 @@
 #include <buster/tests/compiler/assembly/aarch64_syntax_test.h>
 #include <buster/tests/compiler/assembly/aarch64_semantic_vm_test.h>
 #include <buster/tests/compiler/assembly/aarch64_direct_simd_test.h>
+#include <buster/tests/compiler/assembly/aarch64_complex_simd_test.h>
+#include <buster/tests/compiler/assembly/aarch64_memory_semantics_test.h>
 #include <buster/tests/compiler/assembly/assembly_test.h>
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.h>
 #include <buster/tests/compiler/ir/ir_test.h>
@@ -100,6 +104,8 @@
 #include <buster/tests/compiler/assembly/aarch64_syntax_test.c>
 #include <buster/tests/compiler/assembly/aarch64_semantic_vm_test.c>
 #include <buster/tests/compiler/assembly/aarch64_direct_simd_test.c>
+#include <buster/tests/compiler/assembly/aarch64_complex_simd_test.c>
+#include <buster/tests/compiler/assembly/aarch64_memory_semantics_test.c>
 #include <buster/tests/compiler/assembly/assembly_test.c>
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.c>
 #include <buster/tests/compiler/ir/ir_test.c>
@@ -230,6 +236,8 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
     {S8_INITIALIZER("aarch64_syntax_tests"), &aarch64_syntax_tests},
     {S8_INITIALIZER("aarch64_semantic_vm_tests"), &aarch64_semantic_vm_tests},
     {S8_INITIALIZER("aarch64_direct_simd_tests"), &aarch64_direct_simd_tests},
+    {S8_INITIALIZER("aarch64_complex_simd_tests"), &aarch64_complex_simd_tests},
+    {S8_INITIALIZER("aarch64_memory_semantics_tests"), &aarch64_memory_semantics_tests},
     {S8_INITIALIZER("assembly_tests"), &assembly_tests},
     {S8_INITIALIZER("x86_64_metadata_tests"), &x86_64_metadata_tests},
     {S8_INITIALIZER("analysis_tests"), &analysis_tests},
@@ -251,9 +259,9 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
 };
 
 #if BUSTER_CPU_ARCH_X86_64
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 40);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 42);
 #else
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 39);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 41);
 #endif
 #endif
 

@@ -847,6 +847,8 @@ buster_register_module(compiler_aarch64_system_semantics "${BUSTER_SOURCE_DIR}/c
 buster_register_module(compiler_aarch64_syntax "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_syntax${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_semantic_vm "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_semantic_vm${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_direct_simd "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_direct_simd_semantics${COMMON_EXTENSION}")
+buster_register_module(compiler_aarch64_complex_simd "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_complex_simd_semantics${COMMON_EXTENSION}")
+buster_register_module(compiler_aarch64_memory_semantics "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_memory_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly "${BUSTER_SOURCE_DIR}/compiler/assembly/assembly${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly_metadata "${BUSTER_SOURCE_DIR}/compiler/assembly/x86_64_metadata${COMMON_EXTENSION}")
 buster_register_module(compiler_ir "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTENSION}")
@@ -900,6 +902,8 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/assembly/aarch64_syntax_test.c
     src/buster/tests/compiler/assembly/aarch64_semantic_vm_test.c
     src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c
+    src/buster/tests/compiler/assembly/aarch64_complex_simd_test.c
+    src/buster/tests/compiler/assembly/aarch64_memory_semantics_test.c
     src/buster/tests/compiler/assembly/assembly_test.c
     src/buster/tests/compiler/assembly/x86_64_metadata_test.c
     src/buster/tests/compiler/ir/ir_test.c
@@ -940,6 +944,8 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/assembly/aarch64_syntax_test.h
     src/buster/tests/compiler/assembly/aarch64_semantic_vm_test.h
     src/buster/tests/compiler/assembly/aarch64_direct_simd_test.h
+    src/buster/tests/compiler/assembly/aarch64_complex_simd_test.h
+    src/buster/tests/compiler/assembly/aarch64_memory_semantics_test.h
     src/buster/tests/compiler/assembly/assembly_test.h
     src/buster/tests/compiler/assembly/x86_64_metadata_test.h
     src/buster/tests/compiler/ir/ir_test.h
@@ -1787,6 +1793,8 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_aarch64_syntax
     compiler_aarch64_semantic_vm
     compiler_aarch64_direct_simd
+    compiler_aarch64_complex_simd
+    compiler_aarch64_memory_semantics
     compiler_assembly
     compiler_assembly_metadata
     compiler_ir
