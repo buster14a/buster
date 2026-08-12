@@ -1,0 +1,5075 @@
+{
+  "arrangement_binding_count": 352,
+  "canonical_sha256": "8485c5c61835d5394d325757ab2964890e8bdfea304c6faa8fd4c23e4c7aabec",
+  "cmode_logical_slice_rows": [
+    "arm-a64@2026-06:BIC_asimdimm_L_hl",
+    "arm-a64@2026-06:BIC_asimdimm_L_sl",
+    "arm-a64@2026-06:MOVI_asimdimm_L_hl",
+    "arm-a64@2026-06:MOVI_asimdimm_L_sl",
+    "arm-a64@2026-06:MOVI_asimdimm_M_sm",
+    "arm-a64@2026-06:MVNI_asimdimm_L_hl",
+    "arm-a64@2026-06:MVNI_asimdimm_L_sl",
+    "arm-a64@2026-06:MVNI_asimdimm_M_sm"
+  ],
+  "denominator_sha256": "b186dfa380b7067e23f007df9d5b78d0a21130e89886e6c1ede4379885fed0c5",
+  "denominator_sha256_computed": "b186dfa380b7067e23f007df9d5b78d0a21130e89886e6c1ede4379885fed0c5",
+  "executable_row_count": 345,
+  "feature_gated_row_count": 345,
+  "literal_control_overlap_rows": [
+    "arm-a64@2026-06:LDR_D_loadlit",
+    "arm-a64@2026-06:LDR_Q_loadlit",
+    "arm-a64@2026-06:LDR_S_loadlit"
+  ],
+  "max_operands": 8,
+  "operand_kind_counts": {
+    "condition": 6,
+    "fixed_constant": 51,
+    "fp_immediate": 81,
+    "gpr_register": 67,
+    "gpr_width_selector": 1,
+    "integer_immediate": 51,
+    "nzcv_flags": 6,
+    "rotate": 4,
+    "shift": 63,
+    "simd_arrangement": 410,
+    "simd_lane": 56,
+    "simd_register": 781,
+    "simd_width_selector": 60
+  },
+  "owner": "complex_simd_fp",
+  "row_count": 345,
+  "rows": [
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:ADDHN_asimddiff_N",
+      "row_index": 0,
+      "semantic_form_id": 6,
+      "source_digest": "0xf1c196811ac76f6a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        }
+      ],
+      "id": "arm-a64@2026-06:BIC_asimdimm_L_hl",
+      "row_index": 1,
+      "semantic_form_id": 72,
+      "source_digest": "0xa056525b222e5510",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        }
+      ],
+      "id": "arm-a64@2026-06:BIC_asimdimm_L_sl",
+      "row_index": 2,
+      "semantic_form_id": 73,
+      "source_digest": "0x697ab80c6ad90af2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:CMEQ_asimdmisc_Z",
+      "row_index": 3,
+      "semantic_form_id": 141,
+      "source_digest": "0xc22daabf73e7e45c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:CMEQ_asisdmisc_Z",
+      "row_index": 4,
+      "semantic_form_id": 143,
+      "source_digest": "0x49d01863f5d554e8",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:CMGE_asimdmisc_Z",
+      "row_index": 5,
+      "semantic_form_id": 145,
+      "source_digest": "0xc1b3a927132a7f94",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:CMGE_asisdmisc_Z",
+      "row_index": 6,
+      "semantic_form_id": 147,
+      "source_digest": "0xdf77e7af6b89a184",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:CMGT_asimdmisc_Z",
+      "row_index": 7,
+      "semantic_form_id": 149,
+      "source_digest": "0x1a9c49282148e1d2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:CMGT_asisdmisc_Z",
+      "row_index": 8,
+      "semantic_form_id": 151,
+      "source_digest": "0xdbedfe008b1b19cb",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:CMLE_asimdmisc_Z",
+      "row_index": 9,
+      "semantic_form_id": 157,
+      "source_digest": "0xfee244a4171b6077",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:CMLE_asisdmisc_Z",
+      "row_index": 10,
+      "semantic_form_id": 158,
+      "source_digest": "0x242c6686b1bc648f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:CMLT_asimdmisc_Z",
+      "row_index": 11,
+      "semantic_form_id": 159,
+      "source_digest": "0x8e0d9b4eb167e773",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:CMLT_asisdmisc_Z",
+      "row_index": 12,
+      "semantic_form_id": 160,
+      "source_digest": "0x2b6b170141da575b",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:DUP_asimdins_DV_v",
+      "row_index": 13,
+      "semantic_form_id": 208,
+      "source_digest": "0xc281f358d02f4bed",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:DUP_asisdone_only",
+      "row_index": 14,
+      "semantic_form_id": 209,
+      "source_digest": "0xc98c70c3d388f8aa",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        },
+        {
+          "direction": 1,
+          "operand_index": 4,
+          "selector_index": 5
+        }
+      ],
+      "id": "arm-a64@2026-06:EXT_asimdext_only",
+      "row_index": 15,
+      "semantic_form_id": 225,
+      "source_digest": "0x4ec181867db6db95",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        },
+        {
+          "direction": 1,
+          "operand_index": 4,
+          "selector_index": 5
+        }
+      ],
+      "id": "arm-a64@2026-06:FCADD_asimdsame2_C",
+      "row_index": 16,
+      "semantic_form_id": 252,
+      "source_digest": "0x7a28c9410afd80d9",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCCMPE_D_floatccmp",
+      "row_index": 17,
+      "semantic_form_id": 253,
+      "source_digest": "0xa99444fb43bfa236",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCCMPE_H_floatccmp",
+      "row_index": 18,
+      "semantic_form_id": 254,
+      "source_digest": "0x294eaee0e97527a8",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCCMPE_S_floatccmp",
+      "row_index": 19,
+      "semantic_form_id": 255,
+      "source_digest": "0x8253542e19f14267",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCCMP_D_floatccmp",
+      "row_index": 20,
+      "semantic_form_id": 256,
+      "source_digest": "0x52e65dc19edfcb83",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCCMP_H_floatccmp",
+      "row_index": 21,
+      "semantic_form_id": 257,
+      "source_digest": "0x31e9a4c0d39cb0aa",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCCMP_S_floatccmp",
+      "row_index": 22,
+      "semantic_form_id": 258,
+      "source_digest": "0x374a0fd9b0b5c533",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMEQ_asimdmisc_FZ",
+      "row_index": 23,
+      "semantic_form_id": 259,
+      "source_digest": "0xb156c8ce856b3636",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMEQ_asimdmiscfp16_FZ",
+      "row_index": 24,
+      "semantic_form_id": 260,
+      "source_digest": "0xb203bcbff796308",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMEQ_asisdmisc_FZ",
+      "row_index": 25,
+      "semantic_form_id": 263,
+      "source_digest": "0x4f4bac5c0af7739c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCMEQ_asisdmiscfp16_FZ",
+      "row_index": 26,
+      "semantic_form_id": 264,
+      "source_digest": "0xf392a9c47c059be7",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMGE_asimdmisc_FZ",
+      "row_index": 27,
+      "semantic_form_id": 267,
+      "source_digest": "0x4f8acbc8ea03e25c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMGE_asimdmiscfp16_FZ",
+      "row_index": 28,
+      "semantic_form_id": 268,
+      "source_digest": "0x3340567061caf709",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMGE_asisdmisc_FZ",
+      "row_index": 29,
+      "semantic_form_id": 271,
+      "source_digest": "0xacc9d6910e90e2d8",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCMGE_asisdmiscfp16_FZ",
+      "row_index": 30,
+      "semantic_form_id": 272,
+      "source_digest": "0x1b4a88c9beef0c0e",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMGT_asimdmisc_FZ",
+      "row_index": 31,
+      "semantic_form_id": 275,
+      "source_digest": "0xce685c2d76b082ed",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMGT_asimdmiscfp16_FZ",
+      "row_index": 32,
+      "semantic_form_id": 276,
+      "source_digest": "0x8c075e38eba4e17b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMGT_asisdmisc_FZ",
+      "row_index": 33,
+      "semantic_form_id": 279,
+      "source_digest": "0x1d02bfad3e578cc8",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCMGT_asisdmiscfp16_FZ",
+      "row_index": 34,
+      "semantic_form_id": 280,
+      "source_digest": "0x3e6ae8a8ed2c008d",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        },
+        {
+          "direction": 1,
+          "operand_index": 4,
+          "selector_index": 5
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMLA_advsimd_elt",
+      "row_index": 35,
+      "semantic_form_id": 283,
+      "source_digest": "0xe41bd398c34b421f",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        },
+        {
+          "direction": 1,
+          "operand_index": 4,
+          "selector_index": 5
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMLA_asimdsame2_C",
+      "row_index": 36,
+      "semantic_form_id": 284,
+      "source_digest": "0xd6227d6a429260b5",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMLE_asimdmisc_FZ",
+      "row_index": 37,
+      "semantic_form_id": 285,
+      "source_digest": "0xdabac08a410f5c96",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMLE_asimdmiscfp16_FZ",
+      "row_index": 38,
+      "semantic_form_id": 286,
+      "source_digest": "0x91738f5e5bb077cf",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMLE_asisdmisc_FZ",
+      "row_index": 39,
+      "semantic_form_id": 287,
+      "source_digest": "0xf59e77a4c5db75e",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCMLE_asisdmiscfp16_FZ",
+      "row_index": 40,
+      "semantic_form_id": 288,
+      "source_digest": "0xa9b006a334dfa28f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMLT_asimdmisc_FZ",
+      "row_index": 41,
+      "semantic_form_id": 289,
+      "source_digest": "0xaba0acf7f0ad7193",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMLT_asimdmiscfp16_FZ",
+      "row_index": 42,
+      "semantic_form_id": 290,
+      "source_digest": "0x71767ab8dc5404fa",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:FCMLT_asisdmisc_FZ",
+      "row_index": 43,
+      "semantic_form_id": 291,
+      "source_digest": "0x1a7493e9b2106eb8",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCMLT_asisdmiscfp16_FZ",
+      "row_index": 44,
+      "semantic_form_id": 292,
+      "source_digest": "0x5c5e42ec4e57ee70",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCMPE_DZ_floatcmp",
+      "row_index": 45,
+      "semantic_form_id": 293,
+      "source_digest": "0x23712523877e6166",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCMPE_HZ_floatcmp",
+      "row_index": 46,
+      "semantic_form_id": 295,
+      "source_digest": "0xf8baf17076048fda",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCMPE_SZ_floatcmp",
+      "row_index": 47,
+      "semantic_form_id": 297,
+      "source_digest": "0xba4baca00cdec382",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCMP_DZ_floatcmp",
+      "row_index": 48,
+      "semantic_form_id": 299,
+      "source_digest": "0x9298c769f208561d",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCMP_HZ_floatcmp",
+      "row_index": 49,
+      "semantic_form_id": 301,
+      "source_digest": "0xe492c51675ee5ce4",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCMP_SZ_floatcmp",
+      "row_index": 50,
+      "semantic_form_id": 303,
+      "source_digest": "0x85101b2fb9b79beb",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTPU_64D_float2int",
+      "row_index": 51,
+      "semantic_form_id": 383,
+      "source_digest": "0xf4e086247d3749a",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTPU_64H_float2int",
+      "row_index": 52,
+      "semantic_form_id": 384,
+      "source_digest": "0x945ffb3256a9a451",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTPU_64S_float2int",
+      "row_index": 53,
+      "semantic_form_id": 385,
+      "source_digest": "0x7b5b2b7d42d35a9f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:FCVTXN_asimdmisc_N",
+      "row_index": 54,
+      "semantic_form_id": 390,
+      "source_digest": "0x4e83cfdbc8f3e194",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZS_32D_float2fix",
+      "row_index": 55,
+      "semantic_form_id": 392,
+      "source_digest": "0x3fa16d0dcd19c8fe",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZS_32D_float2int",
+      "row_index": 56,
+      "semantic_form_id": 393,
+      "source_digest": "0x77dbf280586fc161",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZS_32H_float2fix",
+      "row_index": 57,
+      "semantic_form_id": 394,
+      "source_digest": "0xfeb4b2fce4943cb2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZS_32H_float2int",
+      "row_index": 58,
+      "semantic_form_id": 395,
+      "source_digest": "0x727d1da380aa3eda",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZS_32S_float2fix",
+      "row_index": 59,
+      "semantic_form_id": 396,
+      "source_digest": "0x44a65c27147f5336",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZS_32S_float2int",
+      "row_index": 60,
+      "semantic_form_id": 397,
+      "source_digest": "0x168f5a024edaf86e",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZS_64D_float2fix",
+      "row_index": 61,
+      "semantic_form_id": 398,
+      "source_digest": "0xee0c4e4d046f0725",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZS_64D_float2int",
+      "row_index": 62,
+      "semantic_form_id": 399,
+      "source_digest": "0x18f3a11e97818697",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZS_64H_float2fix",
+      "row_index": 63,
+      "semantic_form_id": 400,
+      "source_digest": "0xa28a84b5b11685c4",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZS_64H_float2int",
+      "row_index": 64,
+      "semantic_form_id": 401,
+      "source_digest": "0x8c73e22bc70e47b1",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZS_64S_float2fix",
+      "row_index": 65,
+      "semantic_form_id": 402,
+      "source_digest": "0xf2988ba26c09103c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZS_64S_float2int",
+      "row_index": 66,
+      "semantic_form_id": 403,
+      "source_digest": "0xca60b0c2b18af002",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FCVTZS_asimdshf_C",
+      "row_index": 67,
+      "semantic_form_id": 406,
+      "source_digest": "0xa99b7c66583ab1a6",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:FCVTZS_asisdshf_C",
+      "row_index": 68,
+      "semantic_form_id": 409,
+      "source_digest": "0x82737a7e0b279b79",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZU_32D_float2fix",
+      "row_index": 69,
+      "semantic_form_id": 410,
+      "source_digest": "0x69d3a96ec9757546",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZU_32D_float2int",
+      "row_index": 70,
+      "semantic_form_id": 411,
+      "source_digest": "0x383e63e962b5f179",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZU_32H_float2fix",
+      "row_index": 71,
+      "semantic_form_id": 412,
+      "source_digest": "0x98309bf3576802bd",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZU_32H_float2int",
+      "row_index": 72,
+      "semantic_form_id": 413,
+      "source_digest": "0xdb091af0e9a1fa1f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZU_32S_float2fix",
+      "row_index": 73,
+      "semantic_form_id": 414,
+      "source_digest": "0x8aaa88f788282c21",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZU_32S_float2int",
+      "row_index": 74,
+      "semantic_form_id": 415,
+      "source_digest": "0xf161e8e4a38eca87",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZU_64D_float2fix",
+      "row_index": 75,
+      "semantic_form_id": 416,
+      "source_digest": "0x5f819d7b7dc58111",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZU_64D_float2int",
+      "row_index": 76,
+      "semantic_form_id": 417,
+      "source_digest": "0x9f838e410a5b7601",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZU_64H_float2fix",
+      "row_index": 77,
+      "semantic_form_id": 418,
+      "source_digest": "0x70d1cd9ed3373bcc",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZU_64H_float2int",
+      "row_index": 78,
+      "semantic_form_id": 419,
+      "source_digest": "0xd0a518ad81cc0d14",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZU_64S_float2fix",
+      "row_index": 79,
+      "semantic_form_id": 420,
+      "source_digest": "0xb569df4263bc32e1",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVTZU_64S_float2int",
+      "row_index": 80,
+      "semantic_form_id": 421,
+      "source_digest": "0xb3bfaa9b32122ee7",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FCVTZU_asimdshf_C",
+      "row_index": 81,
+      "semantic_form_id": 424,
+      "source_digest": "0x51cab52c3396765a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:FCVTZU_asisdshf_C",
+      "row_index": 82,
+      "semantic_form_id": 427,
+      "source_digest": "0xf747330f76c70003",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVT_DH_floatdp1",
+      "row_index": 83,
+      "semantic_form_id": 428,
+      "source_digest": "0x3219c274a7058af3",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVT_DS_floatdp1",
+      "row_index": 84,
+      "semantic_form_id": 429,
+      "source_digest": "0x5e2722831c125ad0",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVT_HD_floatdp1",
+      "row_index": 85,
+      "semantic_form_id": 430,
+      "source_digest": "0xe79032685c67da66",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVT_HS_floatdp1",
+      "row_index": 86,
+      "semantic_form_id": 431,
+      "source_digest": "0xd154d52d6fc8fb20",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVT_SD_floatdp1",
+      "row_index": 87,
+      "semantic_form_id": 432,
+      "source_digest": "0x23de71e6af520d18",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FCVT_SH_floatdp1",
+      "row_index": 88,
+      "semantic_form_id": 433,
+      "source_digest": "0x6084482e65ac3815",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FDIV_D_floatdp2",
+      "row_index": 89,
+      "semantic_form_id": 434,
+      "source_digest": "0x1248b51e48f2be7f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FDIV_H_floatdp2",
+      "row_index": 90,
+      "semantic_form_id": 435,
+      "source_digest": "0xd665deb98cf42d1e",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FDIV_S_floatdp2",
+      "row_index": 91,
+      "semantic_form_id": 436,
+      "source_digest": "0xc53b46b61df78717",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FJCVTZS_32D_float2int",
+      "row_index": 92,
+      "semantic_form_id": 439,
+      "source_digest": "0xc59309203425a4c8",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMADD_D_floatdp3",
+      "row_index": 93,
+      "semantic_form_id": 440,
+      "source_digest": "0x317fd9a37ad93c1",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMADD_H_floatdp3",
+      "row_index": 94,
+      "semantic_form_id": 441,
+      "source_digest": "0xbc9635d4d5a3e91b",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMADD_S_floatdp3",
+      "row_index": 95,
+      "semantic_form_id": 442,
+      "source_digest": "0x97a9b5a2808de6ce",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMAXNM_D_floatdp2",
+      "row_index": 96,
+      "semantic_form_id": 449,
+      "source_digest": "0xa4ae4001ecf7f40",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMAXNM_H_floatdp2",
+      "row_index": 97,
+      "semantic_form_id": 450,
+      "source_digest": "0xc51affbfcd35fdad",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMAXNM_S_floatdp2",
+      "row_index": 98,
+      "semantic_form_id": 451,
+      "source_digest": "0xf8fc87979f5ffd92",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMAX_D_floatdp2",
+      "row_index": 99,
+      "semantic_form_id": 460,
+      "source_digest": "0x875e77c7ec2499b5",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMAX_H_floatdp2",
+      "row_index": 100,
+      "semantic_form_id": 461,
+      "source_digest": "0xd6642b4ef0802b91",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMAX_S_floatdp2",
+      "row_index": 101,
+      "semantic_form_id": 462,
+      "source_digest": "0xbadf86cc524625a2",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMINNM_D_floatdp2",
+      "row_index": 102,
+      "semantic_form_id": 471,
+      "source_digest": "0x5206dd684293318f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMINNM_H_floatdp2",
+      "row_index": 103,
+      "semantic_form_id": 472,
+      "source_digest": "0x48cd1cf52c6fc89",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMINNM_S_floatdp2",
+      "row_index": 104,
+      "semantic_form_id": 473,
+      "source_digest": "0xa544f1ce077f835f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMIN_D_floatdp2",
+      "row_index": 105,
+      "semantic_form_id": 482,
+      "source_digest": "0xb5bdf1b3f6a04475",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMIN_H_floatdp2",
+      "row_index": 106,
+      "semantic_form_id": 483,
+      "source_digest": "0x2d8d0efc51121287",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMIN_S_floatdp2",
+      "row_index": 107,
+      "semantic_form_id": 484,
+      "source_digest": "0xd7fbfa20beb15d5b",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FMLAL2_asimdelem_LH",
+      "row_index": 108,
+      "semantic_form_id": 487,
+      "source_digest": "0x3571898ef783df6d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FMLAL_asimdelem_LH",
+      "row_index": 109,
+      "semantic_form_id": 489,
+      "source_digest": "0xf77fc1ea333fa05c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FMLA_asimdelem_RH_H",
+      "row_index": 110,
+      "semantic_form_id": 491,
+      "source_digest": "0xacbf4b89bd7a109",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        },
+        {
+          "direction": 1,
+          "operand_index": 4,
+          "selector_index": 5
+        }
+      ],
+      "id": "arm-a64@2026-06:FMLA_asimdelem_R_SD",
+      "row_index": 111,
+      "semantic_form_id": 492,
+      "source_digest": "0xc34b3f06ac1c649b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMLA_asisdelem_RH_H",
+      "row_index": 112,
+      "semantic_form_id": 495,
+      "source_digest": "0xc6002e7f9efe9647",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 4,
+          "selector_index": 5
+        }
+      ],
+      "id": "arm-a64@2026-06:FMLA_asisdelem_R_SD",
+      "row_index": 113,
+      "semantic_form_id": 496,
+      "source_digest": "0x4df3eda5dcc60893",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FMLSL2_asimdelem_LH",
+      "row_index": 114,
+      "semantic_form_id": 497,
+      "source_digest": "0x4c45dcff9f294f9c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FMLSL_asimdelem_LH",
+      "row_index": 115,
+      "semantic_form_id": 499,
+      "source_digest": "0x18154a0bde8f7ce4",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FMLS_asimdelem_RH_H",
+      "row_index": 116,
+      "semantic_form_id": 501,
+      "source_digest": "0x2e5ff15eeacd5c04",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        },
+        {
+          "direction": 1,
+          "operand_index": 4,
+          "selector_index": 5
+        }
+      ],
+      "id": "arm-a64@2026-06:FMLS_asimdelem_R_SD",
+      "row_index": 117,
+      "semantic_form_id": 502,
+      "source_digest": "0xddf192915f7125c8",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMLS_asisdelem_RH_H",
+      "row_index": 118,
+      "semantic_form_id": 505,
+      "source_digest": "0x252e3f18cdee2e29",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 4,
+          "selector_index": 5
+        }
+      ],
+      "id": "arm-a64@2026-06:FMLS_asisdelem_R_SD",
+      "row_index": 119,
+      "semantic_form_id": 506,
+      "source_digest": "0xb358e2673b322eb7",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_32H_float2int",
+      "row_index": 120,
+      "semantic_form_id": 507,
+      "source_digest": "0x2fe429b47bfb5465",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_32S_float2int",
+      "row_index": 121,
+      "semantic_form_id": 508,
+      "source_digest": "0x888333a8aae17dcb",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_64D_float2int",
+      "row_index": 122,
+      "semantic_form_id": 509,
+      "source_digest": "0x825dd12c51f55d6e",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_64H_float2int",
+      "row_index": 123,
+      "semantic_form_id": 510,
+      "source_digest": "0x91df10bba795b3c7",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_64VX_float2int",
+      "row_index": 124,
+      "semantic_form_id": 511,
+      "source_digest": "0x5154e002bcee4629",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_D64_float2int",
+      "row_index": 125,
+      "semantic_form_id": 512,
+      "source_digest": "0xf9276ac21ba6a4a2",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_D_floatdp1",
+      "row_index": 126,
+      "semantic_form_id": 513,
+      "source_digest": "0xbd3e1318901a07cc",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_D_floatimm",
+      "row_index": 127,
+      "semantic_form_id": 514,
+      "source_digest": "0xde4b390d6d6eaa85",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_H32_float2int",
+      "row_index": 128,
+      "semantic_form_id": 515,
+      "source_digest": "0x1aadcc67d95a354b",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_H64_float2int",
+      "row_index": 129,
+      "semantic_form_id": 516,
+      "source_digest": "0xefcea020693012f3",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_H_floatdp1",
+      "row_index": 130,
+      "semantic_form_id": 517,
+      "source_digest": "0xedaec99569d1dcd4",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_H_floatimm",
+      "row_index": 131,
+      "semantic_form_id": 518,
+      "source_digest": "0xc073947aca2806d7",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_S32_float2int",
+      "row_index": 132,
+      "semantic_form_id": 519,
+      "source_digest": "0xb6c27d8bd0fd8fec",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_S_floatdp1",
+      "row_index": 133,
+      "semantic_form_id": 520,
+      "source_digest": "0xefb492bbf6fa1bcb",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_S_floatimm",
+      "row_index": 134,
+      "semantic_form_id": 521,
+      "source_digest": "0xcbb47b40b43146ce",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_V64I_float2int",
+      "row_index": 135,
+      "semantic_form_id": 522,
+      "source_digest": "0xdc9a9fa73165c41",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMOV_asimdimm_D2_d",
+      "row_index": 136,
+      "semantic_form_id": 523,
+      "source_digest": "0x34fb8838f967b4aa",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        }
+      ],
+      "id": "arm-a64@2026-06:FMOV_asimdimm_H_h",
+      "row_index": 137,
+      "semantic_form_id": 524,
+      "source_digest": "0xa48c0744b6d74d8a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        }
+      ],
+      "id": "arm-a64@2026-06:FMOV_asimdimm_S_s",
+      "row_index": 138,
+      "semantic_form_id": 525,
+      "source_digest": "0xcd6d5a7454d6f7a9",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMSUB_D_floatdp3",
+      "row_index": 139,
+      "semantic_form_id": 526,
+      "source_digest": "0xd0ec9a03c3ebb4d0",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMSUB_H_floatdp3",
+      "row_index": 140,
+      "semantic_form_id": 527,
+      "source_digest": "0xf5e4e0a5688f5e7f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMSUB_S_floatdp3",
+      "row_index": 141,
+      "semantic_form_id": 528,
+      "source_digest": "0x8c435f1d305986b6",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FMULX_asimdelem_RH_H",
+      "row_index": 142,
+      "semantic_form_id": 529,
+      "source_digest": "0x16c46ad1346d869d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        },
+        {
+          "direction": 1,
+          "operand_index": 4,
+          "selector_index": 5
+        }
+      ],
+      "id": "arm-a64@2026-06:FMULX_asimdelem_R_SD",
+      "row_index": 143,
+      "semantic_form_id": 530,
+      "source_digest": "0xafc0f10c8894eb8c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMULX_asisdelem_RH_H",
+      "row_index": 144,
+      "semantic_form_id": 533,
+      "source_digest": "0x2d11b914a2025f37",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 4,
+          "selector_index": 5
+        }
+      ],
+      "id": "arm-a64@2026-06:FMULX_asisdelem_R_SD",
+      "row_index": 145,
+      "semantic_form_id": 534,
+      "source_digest": "0xaedcd7f2f9af4b5",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMUL_D_floatdp2",
+      "row_index": 146,
+      "semantic_form_id": 537,
+      "source_digest": "0x281d65b7bf4b980c",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMUL_H_floatdp2",
+      "row_index": 147,
+      "semantic_form_id": 538,
+      "source_digest": "0xa1f37c7217afe686",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMUL_S_floatdp2",
+      "row_index": 148,
+      "semantic_form_id": 539,
+      "source_digest": "0xfb5c92381ee28e49",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:FMUL_asimdelem_RH_H",
+      "row_index": 149,
+      "semantic_form_id": 540,
+      "source_digest": "0x63309efb9090a58a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        },
+        {
+          "direction": 1,
+          "operand_index": 4,
+          "selector_index": 5
+        }
+      ],
+      "id": "arm-a64@2026-06:FMUL_asimdelem_R_SD",
+      "row_index": 150,
+      "semantic_form_id": 541,
+      "source_digest": "0x34f63bed540c0c1b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FMUL_asisdelem_RH_H",
+      "row_index": 151,
+      "semantic_form_id": 544,
+      "source_digest": "0x10db214dfe55f386",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 4,
+          "selector_index": 5
+        }
+      ],
+      "id": "arm-a64@2026-06:FMUL_asisdelem_R_SD",
+      "row_index": 152,
+      "semantic_form_id": 545,
+      "source_digest": "0x1d28ddd2976ee259",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FNEG_D_floatdp1",
+      "row_index": 153,
+      "semantic_form_id": 546,
+      "source_digest": "0xbfb6d82dee98307e",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FNEG_H_floatdp1",
+      "row_index": 154,
+      "semantic_form_id": 547,
+      "source_digest": "0xba6ee96c70d383ef",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FNEG_S_floatdp1",
+      "row_index": 155,
+      "semantic_form_id": 548,
+      "source_digest": "0xd4a0fc91e02737d",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FNMADD_D_floatdp3",
+      "row_index": 156,
+      "semantic_form_id": 551,
+      "source_digest": "0x6b6fec443b61089a",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FNMADD_H_floatdp3",
+      "row_index": 157,
+      "semantic_form_id": 552,
+      "source_digest": "0x83e4d90f35fcffca",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FNMADD_S_floatdp3",
+      "row_index": 158,
+      "semantic_form_id": 553,
+      "source_digest": "0x4c759b6ca3348d73",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FNMSUB_D_floatdp3",
+      "row_index": 159,
+      "semantic_form_id": 554,
+      "source_digest": "0x31f1ac762528f6c0",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FNMSUB_H_floatdp3",
+      "row_index": 160,
+      "semantic_form_id": 555,
+      "source_digest": "0x3471a826cd789d93",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FNMSUB_S_floatdp3",
+      "row_index": 161,
+      "semantic_form_id": 556,
+      "source_digest": "0x9fb931668ca5d71a",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FNMUL_D_floatdp2",
+      "row_index": 162,
+      "semantic_form_id": 557,
+      "source_digest": "0xaea10e0780c2f8b",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FNMUL_H_floatdp2",
+      "row_index": 163,
+      "semantic_form_id": 558,
+      "source_digest": "0x693bf48999f9aad1",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FNMUL_S_floatdp2",
+      "row_index": 164,
+      "semantic_form_id": 559,
+      "source_digest": "0xe2d30de40c1b9586",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINT32X_D_floatdp1",
+      "row_index": 165,
+      "semantic_form_id": 570,
+      "source_digest": "0x26f95d4f02313f3d",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINT32X_S_floatdp1",
+      "row_index": 166,
+      "semantic_form_id": 571,
+      "source_digest": "0xfbfa634e0293348b",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINT32Z_D_floatdp1",
+      "row_index": 167,
+      "semantic_form_id": 573,
+      "source_digest": "0x3d385eb308c6e7c0",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINT32Z_S_floatdp1",
+      "row_index": 168,
+      "semantic_form_id": 574,
+      "source_digest": "0xb0d4e98c05185545",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINT64X_D_floatdp1",
+      "row_index": 169,
+      "semantic_form_id": 576,
+      "source_digest": "0x5c1dd2cbb875be35",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINT64X_S_floatdp1",
+      "row_index": 170,
+      "semantic_form_id": 577,
+      "source_digest": "0x2176bcf1f51ccb67",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINT64Z_D_floatdp1",
+      "row_index": 171,
+      "semantic_form_id": 579,
+      "source_digest": "0x38a270084950a93e",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINT64Z_S_floatdp1",
+      "row_index": 172,
+      "semantic_form_id": 580,
+      "source_digest": "0x19569a28b1106068",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTA_D_floatdp1",
+      "row_index": 173,
+      "semantic_form_id": 582,
+      "source_digest": "0xc871d62e0efbceaf",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTA_H_floatdp1",
+      "row_index": 174,
+      "semantic_form_id": 583,
+      "source_digest": "0x10f4f576d39b388c",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTA_S_floatdp1",
+      "row_index": 175,
+      "semantic_form_id": 584,
+      "source_digest": "0xe0e35c666f942de9",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTI_D_floatdp1",
+      "row_index": 176,
+      "semantic_form_id": 587,
+      "source_digest": "0xfddd5f55578e6c38",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTI_H_floatdp1",
+      "row_index": 177,
+      "semantic_form_id": 588,
+      "source_digest": "0x743530f27b198a8b",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTI_S_floatdp1",
+      "row_index": 178,
+      "semantic_form_id": 589,
+      "source_digest": "0xe31b311828584591",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTM_D_floatdp1",
+      "row_index": 179,
+      "semantic_form_id": 592,
+      "source_digest": "0x73191f2356f3e083",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTM_H_floatdp1",
+      "row_index": 180,
+      "semantic_form_id": 593,
+      "source_digest": "0xb5d4ad529cfbfee0",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTM_S_floatdp1",
+      "row_index": 181,
+      "semantic_form_id": 594,
+      "source_digest": "0xee5b70028cf8998",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTN_D_floatdp1",
+      "row_index": 182,
+      "semantic_form_id": 597,
+      "source_digest": "0xb9d8f24821d879e4",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTN_H_floatdp1",
+      "row_index": 183,
+      "semantic_form_id": 598,
+      "source_digest": "0x5ccc56ee098f46c9",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTN_S_floatdp1",
+      "row_index": 184,
+      "semantic_form_id": 599,
+      "source_digest": "0xe969ee282151a0ef",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTP_D_floatdp1",
+      "row_index": 185,
+      "semantic_form_id": 602,
+      "source_digest": "0x61289c8814a7b4b7",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTP_H_floatdp1",
+      "row_index": 186,
+      "semantic_form_id": 603,
+      "source_digest": "0xfffea0bd9d345e72",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTP_S_floatdp1",
+      "row_index": 187,
+      "semantic_form_id": 604,
+      "source_digest": "0x25d301bc07ca52d1",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTX_D_floatdp1",
+      "row_index": 188,
+      "semantic_form_id": 607,
+      "source_digest": "0x8f847aec0848c60b",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTX_H_floatdp1",
+      "row_index": 189,
+      "semantic_form_id": 608,
+      "source_digest": "0x93f6705d54dc2cd9",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTX_S_floatdp1",
+      "row_index": 190,
+      "semantic_form_id": 609,
+      "source_digest": "0x9caa91f0a5a31773",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTZ_D_floatdp1",
+      "row_index": 191,
+      "semantic_form_id": 612,
+      "source_digest": "0x2bddd5193698fbbc",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTZ_H_floatdp1",
+      "row_index": 192,
+      "semantic_form_id": 613,
+      "source_digest": "0x6fa24885df1e8b1e",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FRINTZ_S_floatdp1",
+      "row_index": 193,
+      "semantic_form_id": 614,
+      "source_digest": "0xb19db24356de086c",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FSQRT_D_floatdp1",
+      "row_index": 194,
+      "semantic_form_id": 625,
+      "source_digest": "0x13d8050d80e50db",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FSQRT_H_floatdp1",
+      "row_index": 195,
+      "semantic_form_id": 626,
+      "source_digest": "0xb1c3be651d9f73a1",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FSQRT_S_floatdp1",
+      "row_index": 196,
+      "semantic_form_id": 627,
+      "source_digest": "0x41439111e12f6f95",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FSUB_D_floatdp2",
+      "row_index": 197,
+      "semantic_form_id": 630,
+      "source_digest": "0x86d3eaea1022adf",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FSUB_H_floatdp2",
+      "row_index": 198,
+      "semantic_form_id": 631,
+      "source_digest": "0x92c849a04940ad59",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:FSUB_S_floatdp2",
+      "row_index": 199,
+      "semantic_form_id": 632,
+      "source_digest": "0xe320570c040a30c4",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        }
+      ],
+      "id": "arm-a64@2026-06:INS_asimdins_IR_r",
+      "row_index": 200,
+      "semantic_form_id": 639,
+      "source_digest": "0xf45213f4acbb3423",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:INS_asimdins_IV_v",
+      "row_index": 201,
+      "semantic_form_id": 640,
+      "source_digest": "0x45918818a277c3bf",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        },
+        {
+          "direction": -1,
+          "operand_index": 4,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:MLA_asimdelem_R",
+      "row_index": 202,
+      "semantic_form_id": 1014,
+      "source_digest": "0x8ba6ea89d235c8ff",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        },
+        {
+          "direction": -1,
+          "operand_index": 4,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:MLS_asimdelem_R",
+      "row_index": 203,
+      "semantic_form_id": 1016,
+      "source_digest": "0xd4cf72278844f286",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:MOVI_asimdimm_D2_d",
+      "row_index": 204,
+      "semantic_form_id": 1020,
+      "source_digest": "0xa2282b9c16088f91",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:MOVI_asimdimm_D_ds",
+      "row_index": 205,
+      "semantic_form_id": 1021,
+      "source_digest": "0x258069ec0b99392c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        }
+      ],
+      "id": "arm-a64@2026-06:MOVI_asimdimm_L_hl",
+      "row_index": 206,
+      "semantic_form_id": 1022,
+      "source_digest": "0x53702c4452a3a89d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        }
+      ],
+      "id": "arm-a64@2026-06:MOVI_asimdimm_L_sl",
+      "row_index": 207,
+      "semantic_form_id": 1023,
+      "source_digest": "0xba42aa7e81edb36b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        }
+      ],
+      "id": "arm-a64@2026-06:MOVI_asimdimm_M_sm",
+      "row_index": 208,
+      "semantic_form_id": 1024,
+      "source_digest": "0x21a6b376eb7eea5b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        }
+      ],
+      "id": "arm-a64@2026-06:MOVI_asimdimm_N_b",
+      "row_index": 209,
+      "semantic_form_id": 1025,
+      "source_digest": "0xc5c27df9a50be57b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        },
+        {
+          "direction": -1,
+          "operand_index": 4,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:MUL_asimdelem_R",
+      "row_index": 210,
+      "semantic_form_id": 1055,
+      "source_digest": "0x8db135f95c35726d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        }
+      ],
+      "id": "arm-a64@2026-06:MVNI_asimdimm_L_hl",
+      "row_index": 211,
+      "semantic_form_id": 1057,
+      "source_digest": "0x5ad4192b9eac1c7d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        }
+      ],
+      "id": "arm-a64@2026-06:MVNI_asimdimm_L_sl",
+      "row_index": 212,
+      "semantic_form_id": 1058,
+      "source_digest": "0xa882c9306192dd99",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        }
+      ],
+      "id": "arm-a64@2026-06:MVNI_asimdimm_M_sm",
+      "row_index": 213,
+      "semantic_form_id": 1059,
+      "source_digest": "0xaa8157cd9193fb2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        }
+      ],
+      "id": "arm-a64@2026-06:ORR_asimdimm_L_hl",
+      "row_index": 214,
+      "semantic_form_id": 1082,
+      "source_digest": "0x55233f22246ee92e",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        }
+      ],
+      "id": "arm-a64@2026-06:ORR_asimdimm_L_sl",
+      "row_index": 215,
+      "semantic_form_id": 1083,
+      "source_digest": "0x3298dc55efc6e9e9",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:PMULL_asimddiff_L",
+      "row_index": 216,
+      "semantic_form_id": 1100,
+      "source_digest": "0x840f1ac23dd4438b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:RADDHN_asimddiff_N",
+      "row_index": 217,
+      "semantic_form_id": 1107,
+      "source_digest": "0x8ffedbd24c80b9d7",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:RSHRN_asimdshf_N",
+      "row_index": 218,
+      "semantic_form_id": 1131,
+      "source_digest": "0xbf06764218157067",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:RSUBHN_asimddiff_N",
+      "row_index": 219,
+      "semantic_form_id": 1132,
+      "source_digest": "0x57359b8c488b17ce",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:SABAL_asimddiff_L",
+      "row_index": 220,
+      "semantic_form_id": 1133,
+      "source_digest": "0x21c3052484f0f909",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:SABDL_asimddiff_L",
+      "row_index": 221,
+      "semantic_form_id": 1135,
+      "source_digest": "0xbc3f03b2ed8db4ac",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:SADDL_asimddiff_L",
+      "row_index": 222,
+      "semantic_form_id": 1140,
+      "source_digest": "0xb414a0b848e9734c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:SADDW_asimddiff_W",
+      "row_index": 223,
+      "semantic_form_id": 1141,
+      "source_digest": "0x85438fd72836b340",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SCVTF_D32_float2fix",
+      "row_index": 224,
+      "semantic_form_id": 1153,
+      "source_digest": "0x1ec1ce25a6d1293b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SCVTF_D32_float2int",
+      "row_index": 225,
+      "semantic_form_id": 1154,
+      "source_digest": "0x34e13de0741ebecb",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SCVTF_D64_float2fix",
+      "row_index": 226,
+      "semantic_form_id": 1155,
+      "source_digest": "0xee5d28af6b2d11a6",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SCVTF_D64_float2int",
+      "row_index": 227,
+      "semantic_form_id": 1156,
+      "source_digest": "0xc5c812061e21cb0f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SCVTF_H32_float2fix",
+      "row_index": 228,
+      "semantic_form_id": 1157,
+      "source_digest": "0x5f07dd9db5e5acec",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SCVTF_H32_float2int",
+      "row_index": 229,
+      "semantic_form_id": 1158,
+      "source_digest": "0x69c36ef59fd04e25",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SCVTF_H64_float2fix",
+      "row_index": 230,
+      "semantic_form_id": 1159,
+      "source_digest": "0x29344e23997fba01",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SCVTF_H64_float2int",
+      "row_index": 231,
+      "semantic_form_id": 1160,
+      "source_digest": "0xb92415d141884cc2",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SCVTF_S32_float2fix",
+      "row_index": 232,
+      "semantic_form_id": 1161,
+      "source_digest": "0xdafca99315e01dd",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SCVTF_S32_float2int",
+      "row_index": 233,
+      "semantic_form_id": 1162,
+      "source_digest": "0x22b069d5e54e7fba",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SCVTF_S64_float2fix",
+      "row_index": 234,
+      "semantic_form_id": 1163,
+      "source_digest": "0x1ab5e61f4be9e04",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SCVTF_S64_float2int",
+      "row_index": 235,
+      "semantic_form_id": 1164,
+      "source_digest": "0x52527750795b68f7",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:SCVTF_asimdshf_C",
+      "row_index": 236,
+      "semantic_form_id": 1167,
+      "source_digest": "0x64101cc0716d18f5",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SCVTF_asisdshf_C",
+      "row_index": 237,
+      "semantic_form_id": 1170,
+      "source_digest": "0x9f9599105a0fd226",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:SDOT_asimdelem_D",
+      "row_index": 238,
+      "semantic_form_id": 1173,
+      "source_digest": "0x6fc686602851539e",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:SHLL_asimdmisc_S",
+      "row_index": 239,
+      "semantic_form_id": 1194,
+      "source_digest": "0xfe7e938503995074",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:SHL_asimdshf_R",
+      "row_index": 240,
+      "semantic_form_id": 1195,
+      "source_digest": "0x6b97670018ff1a1c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SHL_asisdshf_R",
+      "row_index": 241,
+      "semantic_form_id": 1196,
+      "source_digest": "0xce09a242f0b73b1f",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:SHRN_asimdshf_N",
+      "row_index": 242,
+      "semantic_form_id": 1197,
+      "source_digest": "0xe15fb4ab420be86d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:SLI_asimdshf_R",
+      "row_index": 243,
+      "semantic_form_id": 1199,
+      "source_digest": "0xe8a7567f44ed7491",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SLI_asisdshf_R",
+      "row_index": 244,
+      "semantic_form_id": 1200,
+      "source_digest": "0xc4afebb3be9f809a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:SMLAL_asimddiff_L",
+      "row_index": 245,
+      "semantic_form_id": 1209,
+      "source_digest": "0xa6e656d6140afa77",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": -1,
+          "operand_index": 5,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:SMLAL_asimdelem_L",
+      "row_index": 246,
+      "semantic_form_id": 1210,
+      "source_digest": "0xa42d15475dcf351",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:SMLSL_asimddiff_L",
+      "row_index": 247,
+      "semantic_form_id": 1211,
+      "source_digest": "0x9ce7a12531de8b4b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": -1,
+          "operand_index": 5,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:SMLSL_asimdelem_L",
+      "row_index": 248,
+      "semantic_form_id": 1212,
+      "source_digest": "0xfa6bb9b967eeb3b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SMOV_asimdins_W_w",
+      "row_index": 249,
+      "semantic_form_id": 1214,
+      "source_digest": "0xd0385d798ee9efdc",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SMOV_asimdins_X_x",
+      "row_index": 250,
+      "semantic_form_id": 1215,
+      "source_digest": "0x80b5e7d51f73f507",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:SMULL_asimddiff_L",
+      "row_index": 251,
+      "semantic_form_id": 1219,
+      "source_digest": "0xa97cb15d501c043a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": -1,
+          "operand_index": 5,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:SMULL_asimdelem_L",
+      "row_index": 252,
+      "semantic_form_id": 1220,
+      "source_digest": "0x77b1d9bd5a13efd1",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:SQDMLAL_asimddiff_L",
+      "row_index": 253,
+      "semantic_form_id": 1225,
+      "source_digest": "0xedc0006089389f7d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": -1,
+          "operand_index": 5,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:SQDMLAL_asimdelem_L",
+      "row_index": 254,
+      "semantic_form_id": 1226,
+      "source_digest": "0x61c9c39ba762deda",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SQDMLAL_asisdelem_L",
+      "row_index": 255,
+      "semantic_form_id": 1228,
+      "source_digest": "0x98a9e8ee40cc7518",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:SQDMLSL_asimddiff_L",
+      "row_index": 256,
+      "semantic_form_id": 1229,
+      "source_digest": "0x406aad6ef688db3b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": -1,
+          "operand_index": 5,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:SQDMLSL_asimdelem_L",
+      "row_index": 257,
+      "semantic_form_id": 1230,
+      "source_digest": "0x7ce2d400e65486f2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SQDMLSL_asisdelem_L",
+      "row_index": 258,
+      "semantic_form_id": 1232,
+      "source_digest": "0x10590f83931155b2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        },
+        {
+          "direction": -1,
+          "operand_index": 4,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:SQDMULH_asimdelem_R",
+      "row_index": 259,
+      "semantic_form_id": 1233,
+      "source_digest": "0xc2b91c99a91552b1",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SQDMULH_asisdelem_R",
+      "row_index": 260,
+      "semantic_form_id": 1235,
+      "source_digest": "0x3aa42f34a99b4c4a",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:SQDMULL_asimddiff_L",
+      "row_index": 261,
+      "semantic_form_id": 1237,
+      "source_digest": "0xc29e650be026c2bc",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": -1,
+          "operand_index": 5,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:SQDMULL_asimdelem_L",
+      "row_index": 262,
+      "semantic_form_id": 1238,
+      "source_digest": "0x6eff11bfa09be4a7",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SQDMULL_asisdelem_L",
+      "row_index": 263,
+      "semantic_form_id": 1240,
+      "source_digest": "0x349e7cc3c7a9163",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        },
+        {
+          "direction": -1,
+          "operand_index": 4,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:SQRDMLAH_asimdelem_R",
+      "row_index": 264,
+      "semantic_form_id": 1243,
+      "source_digest": "0xc9355719653646a2",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SQRDMLAH_asisdelem_R",
+      "row_index": 265,
+      "semantic_form_id": 1245,
+      "source_digest": "0x2da1c89cbbc1cefd",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        },
+        {
+          "direction": -1,
+          "operand_index": 4,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:SQRDMLSH_asimdelem_R",
+      "row_index": 266,
+      "semantic_form_id": 1247,
+      "source_digest": "0xee546988dd1eadb3",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SQRDMLSH_asisdelem_R",
+      "row_index": 267,
+      "semantic_form_id": 1249,
+      "source_digest": "0xcabfe4a5cb551654",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        },
+        {
+          "direction": -1,
+          "operand_index": 4,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:SQRDMULH_asimdelem_R",
+      "row_index": 268,
+      "semantic_form_id": 1251,
+      "source_digest": "0x59ba8a5ecc9307db",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SQRDMULH_asisdelem_R",
+      "row_index": 269,
+      "semantic_form_id": 1253,
+      "source_digest": "0x886061c47bd6cf1c",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:SQRSHRN_asimdshf_N",
+      "row_index": 270,
+      "semantic_form_id": 1257,
+      "source_digest": "0x5064ab61cd472b89",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SQRSHRN_asisdshf_N",
+      "row_index": 271,
+      "semantic_form_id": 1258,
+      "source_digest": "0x7a99fe0944edba14",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:SQRSHRUN_asimdshf_N",
+      "row_index": 272,
+      "semantic_form_id": 1259,
+      "source_digest": "0xad2daa3a3b4e1d6d",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SQRSHRUN_asisdshf_N",
+      "row_index": 273,
+      "semantic_form_id": 1260,
+      "source_digest": "0x30e1cbba8b932682",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:SQSHLU_asimdshf_R",
+      "row_index": 274,
+      "semantic_form_id": 1261,
+      "source_digest": "0xfb68c39c2029cac0",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SQSHLU_asisdshf_R",
+      "row_index": 275,
+      "semantic_form_id": 1262,
+      "source_digest": "0x64ffe6530ffde093",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:SQSHL_asimdshf_R",
+      "row_index": 276,
+      "semantic_form_id": 1264,
+      "source_digest": "0x4031b9c8a203fff7",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SQSHL_asisdshf_R",
+      "row_index": 277,
+      "semantic_form_id": 1266,
+      "source_digest": "0xe9cf65d044d6ac95",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:SQSHRN_asimdshf_N",
+      "row_index": 278,
+      "semantic_form_id": 1267,
+      "source_digest": "0x7f18feddf9e6e2e4",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SQSHRN_asisdshf_N",
+      "row_index": 279,
+      "semantic_form_id": 1268,
+      "source_digest": "0x4e511a24712848dd",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:SQSHRUN_asimdshf_N",
+      "row_index": 280,
+      "semantic_form_id": 1269,
+      "source_digest": "0x9b214527dba74a63",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:SQSHRUN_asisdshf_N",
+      "row_index": 281,
+      "semantic_form_id": 1270,
+      "source_digest": "0xfa0192fe7e62a9e6",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:SQXTN_asimdmisc_N",
+      "row_index": 282,
+      "semantic_form_id": 1273,
+      "source_digest": "0xea0138160f11a777",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:SQXTUN_asimdmisc_N",
+      "row_index": 283,
+      "semantic_form_id": 1275,
+      "source_digest": "0xe9b2d13566ce4406",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:SRI_asimdshf_R",
+      "row_index": 284,
+      "semantic_form_id": 1278,
+      "source_digest": "0x42d2f59a0f052385",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SRI_asisdshf_R",
+      "row_index": 285,
+      "semantic_form_id": 1279,
+      "source_digest": "0xff3212acf943a2ff",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:SRSHR_asimdshf_R",
+      "row_index": 286,
+      "semantic_form_id": 1282,
+      "source_digest": "0x77258c14af52f806",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SRSHR_asisdshf_R",
+      "row_index": 287,
+      "semantic_form_id": 1283,
+      "source_digest": "0x6866adf7de55ce73",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:SRSRA_asimdshf_R",
+      "row_index": 288,
+      "semantic_form_id": 1284,
+      "source_digest": "0x5d66a47c56c69cd9",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SRSRA_asisdshf_R",
+      "row_index": 289,
+      "semantic_form_id": 1285,
+      "source_digest": "0x57f54c9b821e67b7",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:SSHLL_asimdshf_L",
+      "row_index": 290,
+      "semantic_form_id": 1287,
+      "source_digest": "0xa7c71f20158cd515",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:SSHR_asimdshf_R",
+      "row_index": 291,
+      "semantic_form_id": 1290,
+      "source_digest": "0xbc570185281563a4",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SSHR_asisdshf_R",
+      "row_index": 292,
+      "semantic_form_id": 1291,
+      "source_digest": "0x8957e49b5b33d8f0",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:SSRA_asimdshf_R",
+      "row_index": 293,
+      "semantic_form_id": 1292,
+      "source_digest": "0x3a3a88daed876c61",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:SSRA_asisdshf_R",
+      "row_index": 294,
+      "semantic_form_id": 1293,
+      "source_digest": "0x221ff06ad190e047",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:SSUBL_asimddiff_L",
+      "row_index": 295,
+      "semantic_form_id": 1294,
+      "source_digest": "0xd9119a516513a2a5",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:SSUBW_asimddiff_W",
+      "row_index": 296,
+      "semantic_form_id": 1295,
+      "source_digest": "0xb56dd0b23afa6bb4",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:SUBHN_asimddiff_N",
+      "row_index": 297,
+      "semantic_form_id": 1524,
+      "source_digest": "0x3bbff5bb2f1dc919",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:UABAL_asimddiff_L",
+      "row_index": 298,
+      "semantic_form_id": 1584,
+      "source_digest": "0x1da3eec81988af6f",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:UABDL_asimddiff_L",
+      "row_index": 299,
+      "semantic_form_id": 1586,
+      "source_digest": "0x482d4e6528a83496",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:UADDL_asimddiff_L",
+      "row_index": 300,
+      "semantic_form_id": 1591,
+      "source_digest": "0xe266ee182ca65004",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:UADDW_asimddiff_W",
+      "row_index": 301,
+      "semantic_form_id": 1592,
+      "source_digest": "0xd60bca6712649536",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:UCVTF_D32_float2fix",
+      "row_index": 302,
+      "semantic_form_id": 1599,
+      "source_digest": "0x36de02ce8bb07624",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:UCVTF_D32_float2int",
+      "row_index": 303,
+      "semantic_form_id": 1600,
+      "source_digest": "0xb63a125eef6a638f",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:UCVTF_D64_float2fix",
+      "row_index": 304,
+      "semantic_form_id": 1601,
+      "source_digest": "0x353dcb1acda15f09",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:UCVTF_D64_float2int",
+      "row_index": 305,
+      "semantic_form_id": 1602,
+      "source_digest": "0x4d78e74fb7e73d96",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:UCVTF_H32_float2fix",
+      "row_index": 306,
+      "semantic_form_id": 1603,
+      "source_digest": "0x38e3617e41dd8866",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:UCVTF_H32_float2int",
+      "row_index": 307,
+      "semantic_form_id": 1604,
+      "source_digest": "0xa204cc55d9b6df4d",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:UCVTF_H64_float2fix",
+      "row_index": 308,
+      "semantic_form_id": 1605,
+      "source_digest": "0xf39c776b5ae752b1",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:UCVTF_H64_float2int",
+      "row_index": 309,
+      "semantic_form_id": 1606,
+      "source_digest": "0x3f9cf870fe55f1cc",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:UCVTF_S32_float2fix",
+      "row_index": 310,
+      "semantic_form_id": 1607,
+      "source_digest": "0xd4ca41508b73d4ed",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:UCVTF_S32_float2int",
+      "row_index": 311,
+      "semantic_form_id": 1608,
+      "source_digest": "0xea5d7356c039057c",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:UCVTF_S64_float2fix",
+      "row_index": 312,
+      "semantic_form_id": 1609,
+      "source_digest": "0xb8f73fa9c13f062",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:UCVTF_S64_float2int",
+      "row_index": 313,
+      "semantic_form_id": 1610,
+      "source_digest": "0x89fc8c6ce2234eb",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:UCVTF_asimdshf_C",
+      "row_index": 314,
+      "semantic_form_id": 1613,
+      "source_digest": "0xdc0519554aff5570",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:UCVTF_asisdshf_C",
+      "row_index": 315,
+      "semantic_form_id": 1616,
+      "source_digest": "0xfd72645df60a31f6",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:UDOT_asimdelem_D",
+      "row_index": 316,
+      "semantic_form_id": 1620,
+      "source_digest": "0x53cc0b57ec77a321",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:UMLAL_asimddiff_L",
+      "row_index": 317,
+      "semantic_form_id": 1631,
+      "source_digest": "0x63f52ac4691452bf",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": -1,
+          "operand_index": 5,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:UMLAL_asimdelem_L",
+      "row_index": 318,
+      "semantic_form_id": 1632,
+      "source_digest": "0x951fac0d05b50180",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:UMLSL_asimddiff_L",
+      "row_index": 319,
+      "semantic_form_id": 1633,
+      "source_digest": "0x7ccfe9a9d92a1c7b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": -1,
+          "operand_index": 5,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:UMLSL_asimdelem_L",
+      "row_index": 320,
+      "semantic_form_id": 1634,
+      "source_digest": "0x88c324b6447649c5",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:UMOV_asimdins_W_w",
+      "row_index": 321,
+      "semantic_form_id": 1636,
+      "source_digest": "0xbb8dc9cbc8aa819",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:UMOV_asimdins_X_x",
+      "row_index": 322,
+      "semantic_form_id": 1637,
+      "source_digest": "0xe177b3861770bef7",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:UMULL_asimddiff_L",
+      "row_index": 323,
+      "semantic_form_id": 1641,
+      "source_digest": "0x720c4ae6159bcb91",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": -1,
+          "operand_index": 5,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:UMULL_asimdelem_L",
+      "row_index": 324,
+      "semantic_form_id": 1642,
+      "source_digest": "0x8c1965ff8d04209e",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:UQRSHRN_asimdshf_N",
+      "row_index": 325,
+      "semantic_form_id": 1647,
+      "source_digest": "0x7e8d978878277a00",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:UQRSHRN_asisdshf_N",
+      "row_index": 326,
+      "semantic_form_id": 1648,
+      "source_digest": "0x772502ef2d44ab5f",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:UQSHL_asimdshf_R",
+      "row_index": 327,
+      "semantic_form_id": 1650,
+      "source_digest": "0x504f6fcf45c5b2bf",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:UQSHL_asisdshf_R",
+      "row_index": 328,
+      "semantic_form_id": 1652,
+      "source_digest": "0x103b163cdf920afe",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:UQSHRN_asimdshf_N",
+      "row_index": 329,
+      "semantic_form_id": 1653,
+      "source_digest": "0x9e1aa266340197ae",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": -1,
+          "operand_index": 1,
+          "selector_index": 0
+        },
+        {
+          "direction": -1,
+          "operand_index": 3,
+          "selector_index": 2
+        }
+      ],
+      "id": "arm-a64@2026-06:UQSHRN_asisdshf_N",
+      "row_index": 330,
+      "semantic_form_id": 1654,
+      "source_digest": "0xe8005d66d7ff03c0",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:UQXTN_asimdmisc_N",
+      "row_index": 331,
+      "semantic_form_id": 1657,
+      "source_digest": "0x27533aa49424bdc7",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:URSHR_asimdshf_R",
+      "row_index": 332,
+      "semantic_form_id": 1663,
+      "source_digest": "0x226cf81ed566c0b4",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:URSHR_asisdshf_R",
+      "row_index": 333,
+      "semantic_form_id": 1664,
+      "source_digest": "0xd43b608d32a5e1d1",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:URSRA_asimdshf_R",
+      "row_index": 334,
+      "semantic_form_id": 1666,
+      "source_digest": "0xedc220671240e564",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:URSRA_asisdshf_R",
+      "row_index": 335,
+      "semantic_form_id": 1667,
+      "source_digest": "0x2cf2de3d4585087b",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:USHLL_asimdshf_L",
+      "row_index": 336,
+      "semantic_form_id": 1668,
+      "source_digest": "0x766e0a29709626d0",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:USHR_asimdshf_R",
+      "row_index": 337,
+      "semantic_form_id": 1671,
+      "source_digest": "0xbd19303ff6c61c84",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:USHR_asisdshf_R",
+      "row_index": 338,
+      "semantic_form_id": 1672,
+      "source_digest": "0xdff53e046d802419",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 0,
+          "selector_index": 1
+        },
+        {
+          "direction": 1,
+          "operand_index": 2,
+          "selector_index": 3
+        }
+      ],
+      "id": "arm-a64@2026-06:USRA_asimdshf_R",
+      "row_index": 339,
+      "semantic_form_id": 1675,
+      "source_digest": "0x87cf752cd81129ed",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:USRA_asisdshf_R",
+      "row_index": 340,
+      "semantic_form_id": 1676,
+      "source_digest": "0x20f5b1b6b61d8095",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:USUBL_asimddiff_L",
+      "row_index": 341,
+      "semantic_form_id": 1677,
+      "source_digest": "0x8952fb59e51dbbf5",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        },
+        {
+          "direction": 1,
+          "operand_index": 5,
+          "selector_index": 6
+        }
+      ],
+      "id": "arm-a64@2026-06:USUBW_asimddiff_W",
+      "row_index": 342,
+      "semantic_form_id": 1678,
+      "source_digest": "0x3c273576ae10f942",
+      "status": "executable",
+      "transform_bearing": true
+    },
+    {
+      "arrangement_bindings": [],
+      "id": "arm-a64@2026-06:XAR_VVV2_crypto3_imm6",
+      "row_index": 343,
+      "semantic_form_id": 1687,
+      "source_digest": "0xda281e4a0826cff2",
+      "status": "executable",
+      "transform_bearing": false
+    },
+    {
+      "arrangement_bindings": [
+        {
+          "direction": 1,
+          "operand_index": 1,
+          "selector_index": 2
+        },
+        {
+          "direction": 1,
+          "operand_index": 3,
+          "selector_index": 4
+        }
+      ],
+      "id": "arm-a64@2026-06:XTN_asimdmisc_N",
+      "row_index": 344,
+      "semantic_form_id": 1691,
+      "source_digest": "0xc8284fde945c2067",
+      "status": "executable",
+      "transform_bearing": true
+    }
+  ],
+  "schema_version": 1,
+  "target": "apple-m1",
+  "transform_kind_counts": {
+    "concat": 305,
+    "integer_decode": 35,
+    "slice": 10,
+    "value_table": 536
+  },
+  "transform_row_count": 206
+}
