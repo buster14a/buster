@@ -3,6 +3,7 @@
 
 #include <buster/tests/compiler/assembly/generated/aarch64_scalar_integer_corpus.generated.h>
 #include <buster/lib/compiler/assembly/aarch64_control_semantics.h>
+#include <buster/lib/compiler/assembly/aarch64_system_registers.h>
 #include <buster/lib/compiler/assembly/aarch64_syntax.h>
 
 BUSTER_GLOBAL_LOCAL bool assembly_test_bytes_equal(ByteSlice actual, u8 const* expected, u32 expected_count)
@@ -2564,6 +2565,47 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         arguments->arena, S8("adcs w1, w2, w3\n"), (AssemblyEncodeOptions){.target = aarch64_target});
     BUSTER_TEST(arguments, aarch64_direct_gpr_generic.diagnostic_count == 1 &&
                                aarch64_direct_gpr_generic.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
+
+    AssemblyEncodeResult aarch64_system = assembly_encode(
+        arguments->arena,
+        S8("brk #1\n"
+           "clrex\n"
+           "dmb ish\n"
+           "dsb #15\n"
+           "isb sy\n"
+           "hint #0\n"
+           "mrs x0, nzcv\n"
+           "msr nzcv, x0\n"
+           "msr daifset, #15\n"
+           "sys #0, c7, c8, #1\n"
+           "sys #0, c7, c8, #1, x0\n"
+           "sysl x0, #0, c7, c8, #1\n"
+           "svc #2\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    static u8 const expected_aarch64_system[] = {
+        0x20, 0x00, 0x20, 0xd4, 0x5f, 0x30, 0x03, 0xd5, 0xbf, 0x3b, 0x03, 0xd5,
+        0x9f, 0x3f, 0x03, 0xd5, 0xdf, 0x3f, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5,
+        0x00, 0x42, 0x3b, 0xd5, 0x00, 0x42, 0x1b, 0xd5, 0xdf, 0x4f, 0x03, 0xd5,
+        0x01, 0x78, 0x08, 0xd5, 0x20, 0x78, 0x08, 0xd5, 0x20, 0x78, 0x28, 0xd5,
+        0x41, 0x00, 0x00, 0xd4,
+    };
+    BUSTER_TEST(arguments, aarch64_system.diagnostic_count == 0 &&
+                               aarch64_system.bytes.length == sizeof(expected_aarch64_system) &&
+                               memcmp(aarch64_system.bytes.pointer, expected_aarch64_system, sizeof(expected_aarch64_system)) == 0);
+    AssemblyEncodeResult aarch64_system_raw = assembly_encode(
+        arguments->arena, S8("mrs x1, S3_3_C7_C8_1\nmsr S3_3_C7_C8_1, x1\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    BUSTER_TEST(arguments, aarch64_system_raw.diagnostic_count == 0 && aarch64_system_raw.bytes.length == 8);
+    AssemblyEncodeResult aarch64_system_bad = assembly_encode(
+        arguments->arena, S8("mrs w0, nzcv\nmsr nzcv, w0\ndmb #0\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    BUSTER_TEST(arguments, aarch64_system_bad.diagnostic_count == 3 && aarch64_system_bad.bytes.length == 0);
+    AssemblyEncodeResult aarch64_system_generic = assembly_encode(
+        arguments->arena, S8("brk #1\nmrs x0, nzcv\n"), (AssemblyEncodeOptions){.target = aarch64_target});
+    BUSTER_TEST(arguments, aarch64_system_generic.diagnostic_count == 2 && aarch64_system_generic.bytes.length == 0);
+    Aarch64SystemRegisterLookup nzcv_lookup = {0};
+    BUSTER_TEST(arguments, aarch64_system_register_lookup_name(S8("nzcv"), &nzcv_lookup) &&
+                               nzcv_lookup.packed_encoding == UINT16_C(0xda10) && nzcv_lookup.mode == AARCH64_SYSTEM_REGISTER_MODE_READ_WRITE);
 
     AssemblyEncodeResult aarch64_scalar_integer = assembly_encode(
         arguments->arena,

@@ -1,6 +1,8 @@
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_control_semantics.h>
+#include <buster/lib/compiler/assembly/aarch64_system_semantics.h>
+#include <buster/lib/compiler/assembly/aarch64_system_registers.h>
 #include <buster/lib/compiler/assembly/aarch64_syntax.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 
@@ -386,7 +388,17 @@ typedef enum AssemblyEncodingKind
     ASSEMBLY_ENCODING_AARCH64_M1_GPR,
     ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER,
     ASSEMBLY_ENCODING_AARCH64_CONTROL,
+    ASSEMBLY_ENCODING_AARCH64_SYSTEM_SEMANTICS,
+    ASSEMBLY_ENCODING_AARCH64_SYSTEM_REGISTER,
 } AssemblyEncodingKind;
+
+typedef enum AssemblyAarch64SystemRegisterOperation
+{
+    ASSEMBLY_AARCH64_SYSTEM_REGISTER_MRS,
+    ASSEMBLY_AARCH64_SYSTEM_REGISTER_MSR,
+    ASSEMBLY_AARCH64_SYSTEM_REGISTER_MRRS,
+    ASSEMBLY_AARCH64_SYSTEM_REGISTER_MSRR,
+} AssemblyAarch64SystemRegisterOperation;
 
 struct AssemblyInstruction
 {
@@ -423,6 +435,12 @@ struct AssemblyInstruction
     AssemblyExpression aarch64_control_expressions[4];
     u8 aarch64_control_expression_mask;
     u8 aarch64_control_reserved[3];
+    BusterAarch64SystemInstruction aarch64_system_instruction;
+    u16 aarch64_system_register_encoding;
+    u8 aarch64_system_register_operation;
+    u8 aarch64_system_register_rt;
+    u8 aarch64_system_register_rt2;
+    u8 aarch64_system_reserved[3];
     String8 metadata_mnemonic;
     u8 metadata_address_size;
     u8 metadata_reserved_address[3];
@@ -1468,6 +1486,7 @@ struct AssemblyInstructionInfo
     AssemblyEncodingKind encoding_kind;
     u32 fixed_word;
     u32 aarch64_control_row_index;
+    u32 aarch64_system_row_index;
     AssemblyAmdForm const* amd_form;
 };
 
@@ -1490,6 +1509,60 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_condition_parse(String8 text, 
         }
     }
     return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_mnemonic_row(Target target, String8 mnemonic, u32* row)
+{
+    if (!row || !buster_aarch64_system_semantic_target_supported(target)) return false;
+    for (u32 index = 0; index < buster_aarch64_system_semantic_count(); index += 1)
+    {
+        BusterAarch64SystemSemanticRecord metadata = {0};
+        String8 name = {0};
+        if (buster_aarch64_system_semantic_row(index, &metadata) &&
+            buster_aarch64_system_semantic_string(metadata.mnemonic, &name) && assembly_word_equal(mnemonic, name))
+        {
+            *row = index;
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_lookup(Target target, String8 mnemonic, AssemblyInstructionInfo* result)
+{
+    if (!result || !buster_aarch64_system_semantic_target_supported(target)) return false;
+    u32 row = UINT32_MAX;
+    if (assembly_word_equal(mnemonic, S8("msr")))
+    {
+        *result = (AssemblyInstructionInfo){
+            .opcode = ASSEMBLY_OPCODE_COUNT,
+            .operand_count = 2,
+            .encoding_kind = ASSEMBLY_ENCODING_AARCH64_SYSTEM_SEMANTICS,
+            .aarch64_system_row_index = UINT32_MAX,
+        };
+        return true;
+    }
+    if (!assembly_aarch64_system_mnemonic_row(target, mnemonic, &row)) return false;
+    BusterAarch64SystemSemanticRecord metadata = {0};
+    if (!buster_aarch64_system_semantic_row(row, &metadata)) return false;
+    *result = (AssemblyInstructionInfo){
+        .opcode = ASSEMBLY_OPCODE_COUNT,
+        .operand_count = metadata.field_count,
+        .encoding_kind = ASSEMBLY_ENCODING_AARCH64_SYSTEM_SEMANTICS,
+        .aarch64_system_row_index = row,
+    };
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_fixed_row(Target target, String8 mnemonic, AssemblyInstructionInfo* result)
+{
+    if (!result || !buster_aarch64_arm_m1_fixed_target(target)) return false;
+    BusterAarch64ArmM1FixedSpelling fixed = {0};
+    if (!buster_aarch64_arm_m1_fixed_lookup(mnemonic, &fixed) || !fixed.system ||
+        !buster_aarch64_arm_m1_fixed_supported_for_target(fixed, target)) return false;
+    *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_COUNT, .encoding_kind = ASSEMBLY_ENCODING_AARCH64_FIXED_WORD,
+                                       .fixed_word = fixed.word};
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_lookup(Target target, String8 mnemonic, AssemblyInstructionInfo* result)
@@ -2217,6 +2290,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
         }
         else
         {
+            if (assembly_aarch64_system_fixed_row(target, mnemonic, result))
+            {
+                return true;
+            }
+            if (assembly_aarch64_system_lookup(target, mnemonic, result))
+            {
+                return true;
+            }
             if (!buster_aarch64_arm_m1_scalar_integer_target(target)) return false;
             u32 scalar_form_count = buster_aarch64_arm_m1_scalar_integer_form_count();
             u8 scalar_operand_count = 0;
@@ -5979,6 +6060,229 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_immediate(AssemblyBuilder* bui
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_immediate(AssemblyBuilder* builder, String8 text, u32 maximum, u32* value)
+{
+    u64 parsed = 0;
+    text = assembly_trim(text);
+    if (!value || !text.length || text.pointer[0] != '#' || !assembly_aarch64_scalar_constant(builder, text, &parsed) || parsed > maximum)
+    {
+        return false;
+    }
+    *value = (u32)parsed;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_c_register(String8 text, u32* value)
+{
+    text = assembly_trim(text);
+    if (!value || text.length < 2 || (text.pointer[0] != 'c' && text.pointer[0] != 'C')) return false;
+    u32 parsed = 0;
+    for (u64 index = 1; index < text.length; index += 1)
+    {
+        char8 digit = text.pointer[index];
+        if (digit < '0' || digit > '9' || parsed > (UINT32_MAX - (u32)(digit - '0')) / 10u) return false;
+        parsed = parsed * 10u + (u32)(digit - '0');
+    }
+    if (parsed > 15) return false;
+    *value = parsed;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_option(String8 text, u32* value)
+{
+    static String8 const names[] = {
+        S8_INITIALIZER("oshst"), S8_INITIALIZER("oshld"), S8_INITIALIZER("osh"), S8_INITIALIZER("nshst"),
+        S8_INITIALIZER("nshld"), S8_INITIALIZER("nsh"), S8_INITIALIZER("ishst"), S8_INITIALIZER("ishld"),
+        S8_INITIALIZER("ish"), S8_INITIALIZER("st"), S8_INITIALIZER("ld"), S8_INITIALIZER("sy"),
+    };
+    static u8 const values[] = {2, 1, 3, 6, 5, 7, 10, 9, 11, 14, 13, 15};
+    if (!value) return false;
+    text = assembly_trim(text);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        if (assembly_word_equal(text, names[index]))
+        {
+            *value = values[index];
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_pstate(String8 text, u32* op2, u32* crm, u32* op1)
+{
+    typedef struct A64PStateName A64PStateName;
+    struct A64PStateName { String8 name; u8 op2; u8 crm; u8 op1; };
+    static A64PStateName const names[] = {
+        {S8_INITIALIZER("spsel"), 5, 0, 0}, {S8_INITIALIZER("daifset"), 6, 0, 0},
+        {S8_INITIALIZER("daifclr"), 6, 1, 0}, {S8_INITIALIZER("pan"), 4, 4, 0},
+        {S8_INITIALIZER("uao"), 4, 3, 0}, {S8_INITIALIZER("ssbs"), 6, 2, 0},
+        {S8_INITIALIZER("dit"), 6, 3, 0}, {S8_INITIALIZER("tco"), 6, 4, 0},
+    };
+    if (!op2 || !crm || !op1) return false;
+    text = assembly_trim(text);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        if (assembly_word_equal(text, names[index].name))
+        {
+            *op2 = names[index].op2;
+            *crm = names[index].crm;
+            *op1 = names[index].op1;
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_reg_encoding(String8 text, bool read, u16* packed)
+{
+    if (!packed) return false;
+    text = assembly_trim(text);
+    if (aarch64_system_register_parse_raw_s3(text, packed)) return true;
+    Aarch64SystemRegisterLookup lookup = {0};
+    if (!aarch64_system_register_lookup_name(text, &lookup) ||
+        (read ? !(lookup.mode & AARCH64_SYSTEM_REGISTER_MODE_READ) : !(lookup.mode & AARCH64_SYSTEM_REGISTER_MODE_WRITE)))
+    {
+        return false;
+    }
+    *packed = lookup.packed_encoding;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_set_field(BusterAarch64SystemInstruction* instruction, u32 row, u32 field,
+                                                            s64 value, u8 kind, u8 width)
+{
+    BusterAarch64SystemFieldSchema schema = {0};
+    if (!instruction || !buster_aarch64_system_semantic_field(row, field, &schema) || schema.kind != kind || schema.width != width)
+    {
+        return false;
+    }
+    instruction->fields[field] = (BusterAarch64SystemOperandValue){.value = value, .kind = kind, .width = width};
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_instruction_parse(AssemblyBuilder* builder, String8 mnemonic, String8 operands_text,
+                                                                    AssemblyInstruction* instruction, u32 row)
+{
+    if (!builder || !instruction) return false;
+    BUSTER_UNUSED(mnemonic);
+    String8 tokens[ASSEMBLY_MAX_OPERANDS] = {0};
+    u32 token_count = 0;
+    u64 cursor = 0;
+    while (cursor < operands_text.length)
+    {
+        if (token_count >= BUSTER_ARRAY_LENGTH(tokens)) return false;
+        String8 token = {0};
+        if (assembly_operand_split_next(operands_text, &cursor, &token) != ASSEMBLY_OPERAND_SPLIT_SUCCESS) return false;
+        tokens[token_count++] = assembly_trim(token);
+    }
+    if (row == UINT32_MAX && assembly_word_equal(mnemonic, S8("msr")))
+    {
+        if (!token_count) return false;
+        u32 op2 = 0, crm = 0, op1 = 0;
+        row = assembly_aarch64_system_pstate(tokens[0], &op2, &crm, &op1) ? BUSTER_AARCH64_SYSTEM_FORM_MSR_PSTATE
+                                                                            : BUSTER_AARCH64_SYSTEM_FORM_MSR;
+    }
+    if (row >= buster_aarch64_system_semantic_count()) return false;
+    BusterAarch64SystemSemanticRecord metadata = {0};
+    if (!buster_aarch64_system_semantic_row(row, &metadata)) return false;
+    BusterAarch64SystemInstruction candidate = {.row = (u16)row, .field_count = metadata.field_count};
+    for (u32 field = 0; field < metadata.field_count; field += 1)
+    {
+        BusterAarch64SystemFieldSchema schema = {0};
+        if (!buster_aarch64_system_semantic_field(row, field, &schema)) return false;
+        candidate.fields[field] = (BusterAarch64SystemOperandValue){.kind = schema.kind, .width = schema.width};
+    }
+    u32 value = 0;
+    AssemblyRegister reg = {0};
+    if (row == BUSTER_AARCH64_SYSTEM_FORM_MRS || row == BUSTER_AARCH64_SYSTEM_FORM_MSR)
+    {
+        bool read = row == BUSTER_AARCH64_SYSTEM_FORM_MRS;
+        u32 register_token = read ? 0u : 1u;
+        u32 system_token = read ? 1u : 0u;
+        if (token_count != 2 || !assembly_aarch64_gpr_register_parse(tokens[register_token], &reg) || reg.width != 64 ||
+            !assembly_aarch64_system_reg_encoding(tokens[system_token], read, &instruction->aarch64_system_register_encoding)) return false;
+        u16 packed = instruction->aarch64_system_register_encoding;
+        u32 op0 = (packed >> 14) & 3u, op1 = (packed >> 11) & 7u, crn = (packed >> 7) & 15u, crm = (packed >> 3) & 15u, op2 = packed & 7u;
+        if (op0 < 2 || !assembly_aarch64_system_set_field(&candidate, row, 0, reg.index, BUSTER_AARCH64_SYSTEM_FIELD_REGISTER, 5) ||
+            !assembly_aarch64_system_set_field(&candidate, row, 1, op2, BUSTER_AARCH64_SYSTEM_FIELD_OP2, 3) ||
+            !assembly_aarch64_system_set_field(&candidate, row, 2, crm, BUSTER_AARCH64_SYSTEM_FIELD_CRM, 4) ||
+            !assembly_aarch64_system_set_field(&candidate, row, 3, crn, BUSTER_AARCH64_SYSTEM_FIELD_CRN, 4) ||
+            !assembly_aarch64_system_set_field(&candidate, row, 4, op1, BUSTER_AARCH64_SYSTEM_FIELD_OP1, 3) ||
+            !assembly_aarch64_system_set_field(&candidate, row, 5, op0 - 2u, BUSTER_AARCH64_SYSTEM_FIELD_O0, 1)) return false;
+    }
+    else if (row == BUSTER_AARCH64_SYSTEM_FORM_MSR_PSTATE)
+    {
+        u32 op2 = 0, crm = 0, op1 = 0;
+        if (token_count != 2 || !assembly_aarch64_system_pstate(tokens[0], &op2, &crm, &op1) ||
+            !assembly_aarch64_system_immediate(builder, tokens[1], 15, &value) ||
+            !assembly_aarch64_system_set_field(&candidate, row, 0, op2, BUSTER_AARCH64_SYSTEM_FIELD_OP2, 3) ||
+            !assembly_aarch64_system_set_field(&candidate, row, 1, value, BUSTER_AARCH64_SYSTEM_FIELD_CRM, 4) ||
+            !assembly_aarch64_system_set_field(&candidate, row, 2, op1, BUSTER_AARCH64_SYSTEM_FIELD_OP1, 3)) return false;
+        candidate.fields[0].value = op2;
+        candidate.fields[1].value = value;
+        candidate.fields[2].value = op1;
+        BUSTER_UNUSED(crm);
+    }
+    else if (row == BUSTER_AARCH64_SYSTEM_FORM_SYS)
+    {
+        u32 op1 = 0, op2 = 0, crn = 0, crm = 0;
+        if ((token_count != 4 && token_count != 5) || !assembly_aarch64_system_immediate(builder, tokens[0], 7, &op1) ||
+            !assembly_aarch64_system_c_register(tokens[1], &crn) || !assembly_aarch64_system_c_register(tokens[2], &crm) ||
+            !assembly_aarch64_system_immediate(builder, tokens[3], 7, &op2)) return false;
+        candidate.fields[1].value = op2; candidate.fields[2].value = crm; candidate.fields[3].value = crn; candidate.fields[4].value = op1;
+        if (token_count == 5)
+        {
+            if (!assembly_aarch64_gpr_register_parse(tokens[4], &reg) || reg.width != 64) return false;
+            candidate.fields[0].value = reg.index;
+        }
+        else
+        {
+            candidate.fields[0].value = 31;
+            candidate.defaulted_mask = 1;
+        }
+    }
+    else if (row == BUSTER_AARCH64_SYSTEM_FORM_SYSL)
+    {
+        u32 op1 = 0, op2 = 0, crn = 0, crm = 0;
+        if (token_count != 5 || !assembly_aarch64_gpr_register_parse(tokens[0], &reg) || reg.width != 64 ||
+            !assembly_aarch64_system_immediate(builder, tokens[1], 7, &op1) || !assembly_aarch64_system_c_register(tokens[2], &crn) ||
+            !assembly_aarch64_system_c_register(tokens[3], &crm) || !assembly_aarch64_system_immediate(builder, tokens[4], 7, &op2)) return false;
+        candidate.fields[0].value = reg.index; candidate.fields[1].value = op2; candidate.fields[2].value = crm;
+        candidate.fields[3].value = crn; candidate.fields[4].value = op1;
+    }
+    else if (row == BUSTER_AARCH64_SYSTEM_FORM_DMB || row == BUSTER_AARCH64_SYSTEM_FORM_DSB || row == BUSTER_AARCH64_SYSTEM_FORM_ISB)
+    {
+        if (token_count != 1 || (!assembly_aarch64_system_option(tokens[0], &value) && !assembly_aarch64_system_immediate(builder, tokens[0], 15, &value))) return false;
+        candidate.fields[0].value = value;
+    }
+    else if (row == BUSTER_AARCH64_SYSTEM_FORM_CLREX)
+    {
+        if (token_count > 1 || (token_count && (!assembly_aarch64_system_immediate(builder, tokens[0], 15, &value)))) return false;
+        candidate.fields[0].value = token_count ? value : 15; candidate.defaulted_mask = token_count ? 0 : 1;
+    }
+    else if (row == BUSTER_AARCH64_SYSTEM_FORM_HINT)
+    {
+        if (token_count != 1 || !assembly_aarch64_system_immediate(builder, tokens[0], 31, &value)) return false;
+        candidate.fields[0].value = value & 7u; candidate.fields[1].value = value >> 3;
+    }
+    else
+    {
+        if (token_count != 1 || !assembly_aarch64_system_immediate(builder, tokens[0], 65535, &value)) return false;
+        candidate.fields[0].value = value;
+    }
+    instruction->aarch64_system_instruction = candidate;
+    instruction->aarch64_system_register_operation = row == BUSTER_AARCH64_SYSTEM_FORM_MRS ? ASSEMBLY_AARCH64_SYSTEM_REGISTER_MRS
+                                                 : row == BUSTER_AARCH64_SYSTEM_FORM_MSR ? ASSEMBLY_AARCH64_SYSTEM_REGISTER_MSR
+                                                                                          : ASSEMBLY_AARCH64_SYSTEM_REGISTER_MSR;
+    instruction->aarch64_system_instruction.field_count = metadata.field_count;
+    instruction->operand_count = metadata.field_count;
+    instruction->size = 4;
+    u32 ignored = 0;
+    if (!buster_aarch64_system_semantic_encode(builder->target, &candidate, &ignored)) return false;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_row_select(String8 mnemonic, BusterAarch64ControlInstruction candidate,
                                                               u32* row_index)
 {
@@ -6333,6 +6637,17 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         .amd_form = info.amd_form,
         .fixed_word = info.fixed_word,
     };
+    if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_SYSTEM_SEMANTICS)
+    {
+        if (!assembly_aarch64_system_instruction_parse(builder, mnemonic, operands, &instruction, info.aarch64_system_row_index))
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                (u32)operands.length, S8("invalid AArch64 system instruction operands"));
+            return;
+        }
+        builder->instructions[builder->instruction_count++] = instruction;
+        return;
+    }
     if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER)
     {
         if (!assembly_aarch64_scalar_instruction_parse(builder, mnemonic, operands, &instruction, line, column))
@@ -10396,6 +10711,18 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                     return;
                 }
                 word = patched;
+            }
+            assembly_emit_u32(builder, word);
+            continue;
+        }
+        if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_SYSTEM_SEMANTICS)
+        {
+            u32 word = 0;
+            if (!buster_aarch64_system_semantic_encode(builder->target, &instruction->aarch64_system_instruction, &word))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
+                                    S8("AArch64 system instruction could not be encoded"));
+                return;
             }
             assembly_emit_u32(builder, word);
             continue;
