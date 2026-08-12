@@ -835,37 +835,29 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_is_bsr0(BusterX86Metadata
            x86_64_metadata_test_string_equal(metadata.atom, S8("XED_REG_BSR0"));
 }
 
-BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_visible_schema_equal(u32 first_form_id, u32 second_form_id)
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_schema_equal(u32 first_form_id, u32 second_form_id)
 {
     BusterX86MetadataForm first = {0};
     BusterX86MetadataForm second = {0};
     if (!buster_x86_metadata_form(first_form_id, &first) || !buster_x86_metadata_form(second_form_id, &second)) return false;
-    u32 first_index = 0;
-    u32 second_index = 0;
-    for (;;)
+    if (first.operand_count != second.operand_count) return false;
+    for (u32 operand_index = 0; operand_index < first.operand_count; operand_index += 1)
     {
         BusterX86MetadataOperand first_operand = {0};
         BusterX86MetadataOperand second_operand = {0};
-        bool first_visible = false;
-        bool second_visible = false;
-        while (first_index < first.operand_count && !first_visible)
-        {
-            if (!buster_x86_metadata_operand(first_form_id, first_index++, &first_operand)) return false;
-            first_visible = first_operand.visible;
-        }
-        while (second_index < second.operand_count && !second_visible)
-        {
-            if (!buster_x86_metadata_operand(second_form_id, second_index++, &second_operand)) return false;
-            second_visible = second_operand.visible;
-        }
-        if (first_visible != second_visible) return false;
-        if (!first_visible) return true;
-        if (first_operand.kind != second_operand.kind || first_operand.access != second_operand.access ||
+        if (!buster_x86_metadata_operand(first_form_id, operand_index, &first_operand) ||
+            !buster_x86_metadata_operand(second_form_id, operand_index, &second_operand))
+            return false;
+        if (first_operand.slot != second_operand.slot || first_operand.visible != second_operand.visible ||
+            first_operand.kind != second_operand.kind || first_operand.access != second_operand.access ||
             first_operand.field_source != second_operand.field_source ||
             first_operand.physical_class != second_operand.physical_class ||
-            first_operand.physical_width_flags != second_operand.physical_width_flags)
+            first_operand.physical_width_flags != second_operand.physical_width_flags ||
+            !x86_64_metadata_test_string_equal(first_operand.atom, buster_x86_metadata_string_span(second_operand.atom)) ||
+            !x86_64_metadata_test_string_equal(first_operand.width, buster_x86_metadata_string_span(second_operand.width)))
             return false;
     }
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_alias_matches(BusterX86MetadataPhysicalQuery physical, u32 form_id,
@@ -881,12 +873,11 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_alias_matches(BusterX86Meta
         BusterX86MetadataForm candidate = {0};
         if (!buster_x86_metadata_candidate_at(candidates, candidate_index, &candidate_id) || candidate_id == form_id ||
             !buster_x86_metadata_form(candidate_id, &candidate) || candidate.encoder_family == BUSTER_X86_METADATA_ENCODER_AMX ||
-            !x86_64_metadata_test_visible_schema_equal(form_id, candidate_id))
+            !x86_64_metadata_test_schema_equal(form_id, candidate_id))
             continue;
         u8 alias_bytes[32] = {0};
         BusterX86MetadataRelocation alias_relocations[8] = {0};
         BusterX86MetadataPhysicalQuery alias_query = physical;
-        alias_query.source_semantics = true;
         BusterX86MetadataEmitResult alias = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
             .physical = alias_query,
             .form_id = candidate_id,
@@ -1558,9 +1549,10 @@ BUSTER_GLOBAL_LOCAL X86_64MetadataSourceReachabilityResult x86_64_metadata_test_
     else if (!encoded.diagnostic_count &&
              x86_64_metadata_test_source_alias_matches(physical, test_case.form_id, encoded.bytes.pointer, (u32)encoded.bytes.length))
     {
-        // A public spelling can deliberately select a shorter normalized alias
-        // (for example APX REX2 for an APXEVEX row).  That is source-form
-        // ambiguity, not a missing public encoding capability.
+        // A public spelling can deliberately select a different encoding only
+        // when the candidate has the same complete operand schema (including
+        // hidden records) and emits the exact source bytes for this query.
+        // Otherwise preserve the mismatch as a real public-source gap.
         result.classification = X86_64_METADATA_SOURCE_REACHABILITY_AMBIGUITY;
     }
     else if (!encoded.diagnostic_count)
