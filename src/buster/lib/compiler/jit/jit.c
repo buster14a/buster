@@ -308,7 +308,12 @@ BUSTER_GLOBAL_LOCAL bool jit_symbol_address(JitProgram const* program, ObjectSym
     {
         return false;
     }
-    *address = (u64)(uintptr_t)program->section_addresses[symbol->section] + symbol->value;
+    u64 base = (u64)(uintptr_t)program->section_addresses[symbol->section];
+    if (symbol->value > UINT64_MAX - base)
+    {
+        return false;
+    }
+    *address = base + symbol->value;
     return true;
 }
 
@@ -497,6 +502,20 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
             }
             memcpy(patch, &patched, sizeof(patched));
         }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
+        {
+            s64 displacement = 0;
+            if (((u64)(uintptr_t)patch & 3) ||
+                !jit_address_difference(target, (u64)(uintptr_t)patch, relocation->addend, &displacement) || displacement < INT32_MIN ||
+                displacement > INT32_MAX)
+            {
+                program->error = JIT_ERROR_CAPACITY;
+                program->failing_symbol = symbol->name;
+                return false;
+            }
+            s32 value = (s32)displacement;
+            memcpy(patch, &value, sizeof(value));
+        }
         else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
         {
             if (!jit_apply_aarch64_mach_page_relocation(relocation->kind, patch, (u64)(uintptr_t)patch, target, relocation->addend))
@@ -633,6 +652,13 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
         if (!jit_relocation_is_supported(relocation->kind, object->target.cpu_arch))
         {
             result.error = JIT_ERROR_UNSUPPORTED_RELOCATION;
+            result.failing_symbol = symbol->name;
+            return result;
+        }
+        if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32 &&
+            ((relocation->offset & 3) || object->sections[relocation->section].alignment < 4))
+        {
+            result.error = JIT_ERROR_INVALID_INPUT;
             result.failing_symbol = symbol->name;
             return result;
         }
