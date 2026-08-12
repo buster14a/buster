@@ -324,6 +324,25 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
     },
+    [MACHINE_X64_VA_SAVE] = {
+        .name = S8_INITIALIZER("x64_va_save"),
+        .operand_count = 1,
+        // The operand is a frame slot, so no register class is attached.
+        .operand_info = {0},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+    },
+    [MACHINE_X64_VA_ARG] = {
+        .name = S8_INITIALIZER("x64_va_arg"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_DEFINE_GENERAL},
+        // The row has a fixed scratch contract: slot 0 is RAX (the list
+        // pointer), slot 1 is RCX for scalar results.  RDX/R8-R11 are
+        // internal offset/data scratches and must be kept clear of live
+        // virtual registers across the row.
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1u << MACHINE_X64_RDX) | (1u << MACHINE_X64_R8) | (1u << MACHINE_X64_R9) |
+                        (1u << MACHINE_X64_R10) | (1u << MACHINE_X64_R11),
+    },
     [MACHINE_X64_PUSH_FRAME] = {
         .name = S8_INITIALIZER("x64_push_frame"),
         .operand_count = 1,
@@ -1069,8 +1088,17 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
                 continue;
             }
             u32 virtual_register = machine_ref_payload(ref);
-            u32 operand_class = (info->operand_info[slot] >> MACHINE_OPERAND_CLASS_SHIFT) & 0x7u;
-            *operand_register = operand_class == MACHINE_REGISTER_CLASS_VECTOR ? target->vector_slot_scratch[slot] : target->slot_scratch[slot];
+            if (instruction->opcode == MACHINE_X64_VA_ARG)
+            {
+                // The encoder's bounded sequence reserves RAX for the
+                // va_list pointer and RCX for a scalar result.
+                *operand_register = (u8)(slot == 0 ? MACHINE_X64_RAX : MACHINE_X64_RCX);
+            }
+            else
+            {
+                u32 operand_class = (info->operand_info[slot] >> MACHINE_OPERAND_CLASS_SHIFT) & 0x7u;
+                *operand_register = operand_class == MACHINE_REGISTER_CLASS_VECTOR ? target->vector_slot_scratch[slot] : target->slot_scratch[slot];
+            }
             // A copy into a fixed physical register reloads its source
             // directly into that register: argument sequences would
             // otherwise clobber already-placed argument registers through

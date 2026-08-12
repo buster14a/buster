@@ -998,7 +998,49 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 machine_select_canonical_function(arguments->arena, machine_program, variadic_unsupported_first_function, machine_target);
             BUSTER_TEST(arguments, variadic_named_selected.supported && variadic_named_caller_selected.supported &&
                                        variadic_observe_caller_selected.supported);
-            BUSTER_TEST(arguments, !variadic_observe_selected.supported && variadic_observe_selected.failed_opcode == IR_OPCODE_VA_START);
+            // SysV variadic bodies are now selected by the machine path.  The
+            // selector emits one entry save row and carries every VA_ARG's
+            // ABI classification in the function side table; VA_START itself
+            // is lowered to ordinary frame stores and therefore is no longer
+            // the first unsupported opcode.
+            BUSTER_TEST(arguments, variadic_observe_selected.supported);
+            if (variadic_observe_selected.supported)
+            {
+                u32 va_save_rows = 0;
+                u32 va_arg_rows = 0;
+                for (u32 instruction_index = 0; instruction_index < variadic_observe_selected.function.instruction_count; instruction_index += 1)
+                {
+                    MachineInstruction* machine_instruction = variadic_observe_selected.function.instructions + instruction_index;
+                    if (machine_instruction->opcode == MACHINE_X64_VA_SAVE)
+                    {
+                        va_save_rows += 1;
+                    }
+                    else if (machine_instruction->opcode == MACHINE_X64_VA_ARG)
+                    {
+                        va_arg_rows += 1;
+                        BUSTER_TEST(arguments, machine_instruction->payload < variadic_observe_selected.function.va_arg_count);
+                        if (machine_instruction->payload < variadic_observe_selected.function.va_arg_count)
+                        {
+                            MachineVaArg* metadata = variadic_observe_selected.function.va_args + machine_instruction->payload;
+                            BUSTER_TEST(arguments, metadata->part_count == 1 && !metadata->result_is_frame);
+                            BUSTER_TEST(arguments, metadata->parts[0].is_memory == 0);
+                            // The scalar result is the constrained fixed RCX
+                            // operand, while the list pointer is fixed RAX.
+                            BUSTER_TEST(arguments, machine_ref_kind(machine_instruction->operands[0]) == MACHINE_REF_VIRTUAL_REGISTER);
+                            BUSTER_TEST(arguments, machine_ref_kind(machine_instruction->operands[1]) == MACHINE_REF_VIRTUAL_REGISTER);
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, va_save_rows == 1);
+                BUSTER_TEST(arguments, va_arg_rows == variadic_observe_selected.function.va_arg_count && va_arg_rows == 16);
+            }
+            // The Windows x86-64 variadic definition ABI is intentionally
+            // outside this SysV machine subset and must stay on fallback.
+            Target windows_machine_target = machine_target;
+            windows_machine_target.os = OPERATING_SYSTEM_WINDOWS;
+            MachineSelectResult windows_variadic_selected =
+                machine_select_canonical_function(arguments->arena, machine_program, variadic_observe_function, windows_machine_target);
+            BUSTER_TEST(arguments, !windows_variadic_selected.supported);
             BUSTER_TEST(arguments, !variadic_unsupported_first_selected.supported &&
                                        variadic_unsupported_first_selected.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY);
         }
@@ -1286,7 +1328,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                                                      });
         BUSTER_TEST(arguments, mir_module.error == CODEGEN_ERROR_NONE);
         BUSTER_TEST(arguments, none_module.statistics.fallback_function_count == 0);
-        BUSTER_TEST_RAW(arguments, mir_module.statistics.fallback_function_count == 3,
+        BUSTER_TEST_RAW(arguments, mir_module.statistics.fallback_function_count == 2,
                         string_format(arguments->arena, S8("mir fallbacks {u32}"), mir_module.statistics.fallback_function_count));
         IrFunction* mir_add_function = machine_test_ir_function_find(machine_module, S8("add"));
         if (mir_add_function)

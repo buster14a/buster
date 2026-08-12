@@ -310,6 +310,14 @@ typedef enum MachineOpcode
     // arguments right to left, and SUB/ADD_RSP keep the call-site stack
     // aligned and cleaned (payload = bytes).
     MACHINE_X64_LOAD_INCOMING, // def; payload byte offset into incoming args
+    // SysV x86-64 variadic machinery. VA_SAVE snapshots the incoming
+    // register argument file into the selector-owned 176-byte save area;
+    // VA_ARG performs the register/overflow split against one va_list value.
+    // The latter's payload indexes MachineVaArg side data and its two
+    // operands are the list pointer and either a GP result vreg or a frame
+    // slot for an aggregate result.
+    MACHINE_X64_VA_SAVE,       // slot ref; payload unused
+    MACHINE_X64_VA_ARG,        // use list pointer, define scalar/slot result
     MACHINE_X64_PUSH_FRAME,    // slot ref; payload byte offset into the slot
     MACHINE_X64_PUSH_REGISTER, // use
     MACHINE_X64_SUB_RSP,       // payload bytes
@@ -653,6 +661,38 @@ struct MachineTargetDescription
 // payloads index `stack_slot_sizes` (slot offsets are frame-layout output,
 // not selection output).
 typedef struct MachineFunction MachineFunction;
+
+// Side data for the SysV x86-64 VA_ARG row.  The selector records the
+// ABI-classified eightbytes once; the encoder then emits the bounded register
+// save-area/overflow-area sequence without consulting IR or calling back into
+// the canonical emitter.  A memory-class part has `is_memory` set and makes
+// the row use the overflow path directly.
+#define MACHINE_VA_ARG_PART_LIMIT 2
+typedef struct MachineVaArgPart MachineVaArgPart;
+struct MachineVaArgPart
+{
+    u32 value_offset;
+    u32 save_offset;
+    u8 size;
+    u8 is_float;
+    u8 is_memory;
+    u8 reserved;
+};
+
+typedef struct MachineVaArg MachineVaArg;
+struct MachineVaArg
+{
+    u32 size;
+    u32 alignment;
+    u32 stack_size;
+    u32 part_count;
+    MachineVaArgPart parts[MACHINE_VA_ARG_PART_LIMIT];
+    u32 result_slot;
+    u8 result_is_frame;
+    u8 scalar_size;
+    u8 reserved[2];
+};
+
 struct MachineFunction
 {
     MachineInstruction* instructions;
@@ -666,6 +706,7 @@ struct MachineFunction
     IrSymbolId* call_targets;
     MachineSwitchCase* switch_cases;
     MachineLineMark* line_marks;
+    MachineVaArg* va_args;
     // The backend that selected this function; placement reads its register
     // file and special-opcode identities from here.
     MachineTargetDescription const* target;
@@ -677,6 +718,7 @@ struct MachineFunction
     u32 call_target_count;
     u32 switch_case_count;
     u32 line_mark_count;
+    u32 va_arg_count;
     u32 reserved;
 };
 

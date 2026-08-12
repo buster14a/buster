@@ -11552,11 +11552,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     MachineEncodeResult encoded = target.cpu_arch == CPU_ARCH_AARCH64
                                                       ? machine_encode_aarch64(machine_scratch.arena, &selected.function, &placement)
                                                       : machine_encode_x86_64(machine_scratch.arena, &selected.function, &placement);
-                    if (!encoded.valid || buffer.count + encoded.byte_count > buffer.capacity)
+                    bool encoded_fits = encoded.valid && buffer.count <= buffer.capacity &&
+                                        encoded.byte_count <= buffer.capacity - buffer.count;
+                    if (encoded.valid && !encoded_fits)
+                    {
+                        codegen_buffer_report_exhausted(&buffer);
+                    }
+                    if (!encoded.valid)
                     {
                         result.statistics.fallback_encode_count += 1;
                     }
-                    if (encoded.valid && buffer.count + encoded.byte_count <= buffer.capacity && target.cpu_arch == CPU_ARCH_AARCH64)
+                    if (encoded_fits && target.cpu_arch == CPU_ARCH_AARCH64)
                     {
                         // The machine prologue mirrors the canonical
                         // AArch64 shape exactly: stp x29/x30, establish
@@ -11661,7 +11667,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.statistics.allocator_split_register_count += placement.split_register_count;
                         }
                     }
-                    else if (encoded.valid && buffer.count + encoded.byte_count <= buffer.capacity)
+                    else if (encoded_fits)
                     {
                         bool machine_unwind_valid =
                             codegen_unwind_action_append(descriptor, unwind_action_capacity, 1, CODEGEN_UNWIND_ACTION_PUSH_REGISTER, X64_REGISTER_RBP, 0);
