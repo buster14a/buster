@@ -381,7 +381,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_aarch64_memory_register(ObjectAs
 
 BUSTER_GLOBAL_LOCAL void object_assembly_append_aarch64_fp_register(ObjectAssemblyBuffer* buffer, u32 register_index, u32 size, bool vector128)
 {
-    static String8 const scalar_names[] = {S8("b"), S8("h"), S8("s"), S8("d")};
+    static String8 const scalar_names[] = {S8_INITIALIZER("b"), S8_INITIALIZER("h"), S8_INITIALIZER("s"), S8_INITIALIZER("d")};
     object_assembly_append_string(buffer, vector128 ? S8("q") : scalar_names[size & 3]);
     object_assembly_append_u64_decimal(buffer, register_index & 31);
 }
@@ -389,12 +389,12 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_aarch64_fp_register(ObjectAssemb
 BUSTER_GLOBAL_LOCAL void object_assembly_append_aarch64_prefetch_operation(ObjectAssemblyBuffer* buffer, u32 operation)
 {
     static String8 const names[] = {
-        S8("pldl1keep"), S8("pldl1strm"), S8("pldl2keep"), S8("pldl2strm"),
-        S8("pldl3keep"), S8("pldl3strm"), {0}, {0},
-        S8("plil1keep"), S8("plil1strm"), S8("plil2keep"), S8("plil2strm"),
-        S8("plil3keep"), S8("plil3strm"), {0}, {0},
-        S8("pstl1keep"), S8("pstl1strm"), S8("pstl2keep"), S8("pstl2strm"),
-        S8("pstl3keep"), S8("pstl3strm"),
+        S8_INITIALIZER("pldl1keep"), S8_INITIALIZER("pldl1strm"), S8_INITIALIZER("pldl2keep"), S8_INITIALIZER("pldl2strm"),
+        S8_INITIALIZER("pldl3keep"), S8_INITIALIZER("pldl3strm"), {0}, {0},
+        S8_INITIALIZER("plil1keep"), S8_INITIALIZER("plil1strm"), S8_INITIALIZER("plil2keep"), S8_INITIALIZER("plil2strm"),
+        S8_INITIALIZER("plil3keep"), S8_INITIALIZER("plil3strm"), {0}, {0},
+        S8_INITIALIZER("pstl1keep"), S8_INITIALIZER("pstl1strm"), S8_INITIALIZER("pstl2keep"), S8_INITIALIZER("pstl2strm"),
+        S8_INITIALIZER("pstl3keep"), S8_INITIALIZER("pstl3strm"),
     };
     if (operation < BUSTER_ARRAY_LENGTH(names) && names[operation].length)
     {
