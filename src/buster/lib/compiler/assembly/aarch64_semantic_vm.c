@@ -771,6 +771,89 @@ buster_a64_semantic_vm_atom_matches(BusterA64SemanticValueAtom atom, BusterA64Se
     return false;
 }
 
+static bool
+buster_a64_semantic_vm_atom_projection_fixed_compatible(BusterA64SemanticValueAtom atom,
+                                                          BusterA64SemanticVMGeneratedFieldRef reference)
+{
+    if (reference.projection_count == 0) return true;
+    if (reference.logical_high < reference.logical_low || reference.logical_high >= 32) return false;
+    u8 logical_width = (u8)(reference.logical_high - reference.logical_low + 1);
+    u64 value = 0;
+    u64 mask = 0;
+    if (atom.kind == BUSTER_A64_SEMANTIC_VALUE_BITS)
+    {
+        u8 width = 0;
+        if (!buster_a64_semantic_vm_parse_bits(atom.text, &value, &mask, &width) || width != logical_width) return false;
+    }
+    else if (atom.kind == BUSTER_A64_SEMANTIC_VALUE_INTEGER)
+    {
+        if (atom.integer < 0 || (logical_width < 64 && (u64)atom.integer > buster_a64_semantic_vm_width_mask(logical_width))) return false;
+        value = (u64)atom.integer;
+        mask = buster_a64_semantic_vm_width_mask(logical_width);
+    }
+    else return false;
+    if (!buster_a64_semantic_vm_range(reference.projection_first, reference.projection_count,
+                                      BUSTER_AARCH64_SEMANTIC_VM_PROJECTION_BIT_COUNT)) return false;
+    for (u32 index = 0; index < reference.projection_count; index += 1)
+    {
+        BusterA64SemanticVMGeneratedProjectionBit bit = buster_a64_semantic_vm_projection_bits[reference.projection_first + index];
+        if (bit.logical_bit >= logical_width || (bit.flags & ~BUSTER_AARCH64_SEMANTIC_VM_PROJECTION_FIXED) != 0) return false;
+        if ((bit.flags & BUSTER_AARCH64_SEMANTIC_VM_PROJECTION_FIXED) == 0) continue;
+        if (bit.fixed_value > 1 || ((mask >> bit.logical_bit) & 1u) == 0) continue;
+        if (((value >> bit.logical_bit) & 1u) != bit.fixed_value) return false;
+    }
+    return true;
+}
+
+static bool
+buster_a64_semantic_vm_atom_matches_projected(BusterA64SemanticValueAtom atom,
+                                                BusterA64SemanticVMValue actual,
+                                                BusterA64SemanticVMGeneratedFieldRef reference)
+{
+    if (reference.projection_count == 0) return buster_a64_semantic_vm_atom_matches(atom, actual);
+    if (!buster_a64_semantic_vm_atom_projection_fixed_compatible(atom, reference) ||
+        reference.high < reference.low || reference.logical_high < reference.logical_low)
+        return false;
+    u8 actual_width = (u8)(reference.high - reference.low + 1);
+    u8 logical_width = (u8)(reference.logical_high - reference.logical_low + 1);
+    if (actual.width != actual_width || actual_width > 32 || logical_width > 32) return false;
+    u64 actual_value = 0;
+    if (!buster_a64_semantic_vm_value_uint(actual, &actual_value)) return false;
+    u64 expected_value = 0;
+    u64 expected_mask = 0;
+    if (atom.kind == BUSTER_A64_SEMANTIC_VALUE_BITS)
+    {
+        if (!buster_a64_semantic_vm_parse_bits(atom.text, &expected_value, &expected_mask, &logical_width) ||
+            logical_width != (u8)(reference.logical_high - reference.logical_low + 1)) return false;
+    }
+    else if (atom.kind == BUSTER_A64_SEMANTIC_VALUE_INTEGER)
+    {
+        if (atom.integer < 0 || (u64)atom.integer > buster_a64_semantic_vm_width_mask(logical_width)) return false;
+        expected_value = (u64)atom.integer;
+        expected_mask = buster_a64_semantic_vm_width_mask(logical_width);
+    }
+    else return buster_a64_semantic_vm_atom_matches(atom, actual);
+    for (u32 index = 0; index < reference.projection_count; index += 1)
+    {
+        BusterA64SemanticVMGeneratedProjectionBit bit = buster_a64_semantic_vm_projection_bits[reference.projection_first + index];
+        if (bit.logical_bit >= logical_width) return false;
+        if (((expected_mask >> bit.logical_bit) & 1u) == 0) continue;
+        u64 actual_bit = 0;
+        if ((bit.flags & BUSTER_AARCH64_SEMANTIC_VM_PROJECTION_FIXED) != 0)
+        {
+            if (bit.fixed_value > 1) return false;
+            actual_bit = bit.fixed_value;
+        }
+        else
+        {
+            if (bit.actual_bit < reference.low || bit.actual_bit > reference.high) return false;
+            actual_bit = (actual_value >> (bit.actual_bit - reference.low)) & 1u;
+        }
+        if (actual_bit != ((expected_value >> bit.logical_bit) & 1u)) return false;
+    }
+    return true;
+}
+
 static BusterA64SemanticVMStatus
 buster_a64_semantic_vm_eval_table(u32 form_id, u32 transform_id, BusterA64SemanticVMFields const* fields,
                                   BusterA64SemanticVMValue* result)
@@ -798,7 +881,9 @@ buster_a64_semantic_vm_eval_table(u32 form_id, u32 transform_id, BusterA64Semant
                                                                                        buster_a64_semantic_vm_field_refs[generated->key_ref_first + key_index], &actual);
             if (status != BUSTER_A64_SEMANTIC_VM_STATUS_OK) return status;
             BusterA64SemanticValueAtom atom = {0};
-            if (!buster_a64_semantic_value_atom(entry.key_first + key_index, &atom) || !buster_a64_semantic_vm_atom_matches(atom, actual))
+            BusterA64SemanticVMGeneratedFieldRef const* reference = &buster_a64_semantic_vm_field_refs[generated->key_ref_first + key_index];
+            if (!buster_a64_semantic_value_atom(entry.key_first + key_index, &atom) ||
+                !buster_a64_semantic_vm_atom_matches_projected(atom, actual, *reference))
             {
                 matches = false;
                 break;
@@ -1213,13 +1298,43 @@ buster_a64_semantic_vm_alias(u32 form_id, BusterA64SemanticVMAliasInfo* result)
 bool
 buster_a64_semantic_vm_validate(void)
 {
-    if (!buster_a64_semantic_validate() || buster_a64_semantic_schema_version() != 2u || BUSTER_AARCH64_SEMANTIC_VM_SCHEMA_VERSION != 2u ||
+    if (!buster_a64_semantic_validate() || buster_a64_semantic_schema_version() != 2u || BUSTER_AARCH64_SEMANTIC_VM_SCHEMA_VERSION != 3u ||
         BUSTER_AARCH64_SEMANTIC_VM_FORM_COUNT != 1695u ||
         BUSTER_AARCH64_SEMANTIC_VM_CANONICAL_COUNT != 1523u || BUSTER_AARCH64_SEMANTIC_VM_ALIAS_COUNT != 172u ||
         BUSTER_AARCH64_SEMANTIC_VM_TRANSFORM_COUNT != buster_a64_semantic_transform_count() ||
         BUSTER_AARCH64_SEMANTIC_VM_TRANSFORM_PROGRAM_COUNT != buster_a64_semantic_parsed_program_count() ||
         BUSTER_AARCH64_SEMANTIC_VM_ATOM_PROGRAM_COUNT != buster_a64_semantic_value_program_count()) return false;
     u32 transform_programs = 0;
+    for (u32 field_index = 0; field_index < BUSTER_AARCH64_SEMANTIC_VM_FIELD_REF_COUNT; field_index += 1)
+    {
+        BusterA64SemanticVMGeneratedFieldRef const* reference = &buster_a64_semantic_vm_field_refs[field_index];
+        if (reference->name_offset >= BUSTER_AARCH64_SEMANTIC_VM_FIELD_NAME_BYTES ||
+            reference->name_length > BUSTER_AARCH64_SEMANTIC_VM_FIELD_NAME_BYTES - reference->name_offset ||
+            reference->high < reference->low || reference->high >= 32) return false;
+        if (reference->projection_count == 0)
+        {
+            if (reference->projection_first != 0 || reference->logical_low != 0 || reference->logical_high != 0) return false;
+            continue;
+        }
+        if (reference->logical_high < reference->logical_low || reference->logical_high >= 32 ||
+            !buster_a64_semantic_vm_range(reference->projection_first, reference->projection_count,
+                                          BUSTER_AARCH64_SEMANTIC_VM_PROJECTION_BIT_COUNT) ||
+            reference->projection_count != (u8)(reference->logical_high - reference->logical_low + 1)) return false;
+        u32 logical_seen = 0;
+        for (u32 projection_index = 0; projection_index < reference->projection_count; projection_index += 1)
+        {
+            BusterA64SemanticVMGeneratedProjectionBit bit = buster_a64_semantic_vm_projection_bits[reference->projection_first + projection_index];
+            if (bit.logical_bit >= reference->projection_count || (logical_seen & (UINT32_C(1) << bit.logical_bit)) != 0 ||
+                (bit.flags & ~BUSTER_AARCH64_SEMANTIC_VM_PROJECTION_FIXED) != 0) return false;
+            logical_seen |= UINT32_C(1) << bit.logical_bit;
+            if ((bit.flags & BUSTER_AARCH64_SEMANTIC_VM_PROJECTION_FIXED) != 0)
+            {
+                if (bit.actual_bit != 0xFF || bit.fixed_value > 1) return false;
+            }
+            else if (bit.actual_bit < reference->low || bit.actual_bit > reference->high) return false;
+        }
+        if (logical_seen != buster_a64_semantic_vm_width_mask(reference->projection_count)) return false;
+    }
     for (u32 index = 0; index < BUSTER_AARCH64_SEMANTIC_VM_TRANSFORM_COUNT; index += 1)
     {
         BusterA64SemanticVMGeneratedTransform const* transform = &buster_a64_semantic_vm_transforms[index];
@@ -1228,6 +1343,26 @@ buster_a64_semantic_vm_validate(void)
             !buster_a64_semantic_vm_range(transform->key_ref_first, transform->key_ref_count, BUSTER_AARCH64_SEMANTIC_VM_FIELD_REF_COUNT)) return false;
         BusterA64SemanticTransform semantic = {0};
         if (!buster_a64_semantic_transform(index, &semantic)) return false;
+        if ((semantic.kind == BUSTER_A64_SEMANTIC_TRANSFORM_VALUE_TABLE) !=
+            (transform->op == BUSTER_A64_SEMANTIC_VM_OP_TABLE_EXACT_WILDCARD)) return false;
+        if (semantic.kind == BUSTER_A64_SEMANTIC_TRANSFORM_VALUE_TABLE)
+        {
+            if (transform->key_ref_count == 0 || transform->field_ref_count != 0 ||
+                transform->key_ref_count > 8) return false;
+            for (u32 entry_index = 0; entry_index < semantic.value_count; entry_index += 1)
+            {
+                BusterA64SemanticValue entry = {0};
+                if (!buster_a64_semantic_transform_value(index, entry_index, &entry) ||
+                    entry.key_count != transform->key_ref_count || entry.result_count != 1) return false;
+                for (u32 key_index = 0; key_index < transform->key_ref_count; key_index += 1)
+                {
+                    BusterA64SemanticValueAtom atom = {0};
+                    BusterA64SemanticVMGeneratedFieldRef reference = buster_a64_semantic_vm_field_refs[transform->key_ref_first + key_index];
+                    if (reference.projection_count == 0 || !buster_a64_semantic_value_atom(entry.key_first + key_index, &atom) ||
+                        !buster_a64_semantic_vm_atom_projection_fixed_compatible(atom, reference)) return false;
+                }
+            }
+        }
         if (semantic.program_count != transform->program_count) return false;
         if (semantic.program_count != 0)
         {

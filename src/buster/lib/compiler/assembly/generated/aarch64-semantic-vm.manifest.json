@@ -1862,8 +1862,13 @@
     "integer_decode",
     "shared_decode"
   ],
+  "projection": {
+    "field_ref_count": 4228,
+    "projected_table_key_count": 2182,
+    "projection_bit_count": 3617
+  },
   "rows": 1695,
-  "schema_version": 2,
+  "schema_version": 3,
   "source_policy": {
     "arm_xml": "pinned-official",
     "canonical_jsonl": "pinned",

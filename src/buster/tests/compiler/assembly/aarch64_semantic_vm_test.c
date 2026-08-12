@@ -89,6 +89,35 @@ static bool a64_vm_find_table_by_header(u32 form_id, String8 name, u32* transfor
     return false;
 }
 
+static bool a64_vm_find_table_by_three_headers(u32 form_id, String8 first_name, String8 second_name,
+                                                String8 third_name, u32* transform_id)
+{
+    BusterA64SemanticForm form = {0};
+    if (!transform_id || !buster_a64_semantic_form(form_id, &form)) return false;
+    for (u32 ordinal = 0; ordinal < form.transform_count; ordinal += 1)
+    {
+        BusterA64SemanticTransform transform = {0};
+        if (!buster_a64_semantic_transform(form.transform_first + ordinal, &transform) ||
+            transform.kind != BUSTER_A64_SEMANTIC_TRANSFORM_VALUE_TABLE) continue;
+        u32 table_id = UINT32_MAX;
+        BusterA64SemanticTableHeader table = {0};
+        BusterA64SemanticString first = {0};
+        BusterA64SemanticString second = {0};
+        BusterA64SemanticString third = {0};
+        if (!buster_a64_semantic_transform_table_header(transform.id, &table_id) ||
+            !buster_a64_semantic_table_header(table_id, &table) || table.key_header_count != 3 ||
+            !buster_a64_semantic_table_key_header(table_id, 0, &first) ||
+            !buster_a64_semantic_table_key_header(table_id, 1, &second) ||
+            !buster_a64_semantic_table_key_header(table_id, 2, &third)) continue;
+        if (a64_vm_string_is(first, first_name) && a64_vm_string_is(second, second_name) && a64_vm_string_is(third, third_name))
+        {
+            *transform_id = transform.id;
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool a64_vm_find_program_table_transform(u32 form_id, u32* transform_id)
 {
     BusterA64SemanticForm form = {0};
@@ -134,6 +163,118 @@ static bool a64_vm_set_field(u32 form_id, BusterA64SemanticVMFields* fields, Str
     return false;
 }
 
+static bool a64_vm_key_bit(BusterA64SemanticValueAtom atom, u8 width, u8 logical_bit, bool* known, u32* value)
+{
+    if (!known || !value || logical_bit >= width || width == 0 || width > 32) return false;
+    if (atom.kind == BUSTER_A64_SEMANTIC_VALUE_INTEGER)
+    {
+        if (atom.integer < 0 || (u64)atom.integer > ((UINT64_C(1) << width) - 1)) return false;
+        *known = true;
+        *value = (u32)(((u64)atom.integer >> logical_bit) & 1u);
+        return true;
+    }
+    if (atom.kind != BUSTER_A64_SEMANTIC_VALUE_BITS || atom.text.length != width) return false;
+    char8 character = buster_a64_semantic_string_byte(atom.text, width - 1u - logical_bit);
+    if (character == 'x' || character == 'X')
+    {
+        *known = false;
+        *value = 0;
+        return true;
+    }
+    if (character != '0' && character != '1') return false;
+    *known = true;
+    *value = character == '1';
+    return true;
+}
+
+static bool a64_vm_build_table_entry_fields(u32 form_id, BusterA64SemanticTransform transform,
+                                             BusterA64SemanticValue entry, BusterA64SemanticVMFields* fields)
+{
+    BusterA64SemanticForm form = {0};
+    if (!fields || !buster_a64_semantic_form(form_id, &form) || entry.key_count == 0 || entry.key_count > 8 ||
+        entry.key_count != buster_a64_semantic_vm_transforms[transform.id].key_ref_count) return false;
+    fields->count = form.field_count;
+    u32 assigned[64] = {0};
+    for (u32 key_index = 0; key_index < entry.key_count; key_index += 1)
+    {
+        BusterA64SemanticValueAtom atom = {0};
+        BusterA64SemanticVMGeneratedFieldRef const* reference = &buster_a64_semantic_vm_field_refs[
+            buster_a64_semantic_vm_transforms[transform.id].key_ref_first + key_index];
+        if (reference->projection_count == 0 || reference->logical_high < reference->logical_low ||
+            reference->field_ordinal >= form.field_count || !buster_a64_semantic_value_atom(entry.key_first + key_index, &atom)) return false;
+        u8 logical_width = (u8)(reference->logical_high - reference->logical_low + 1);
+        BusterA64SemanticField field = {0};
+        if (!buster_a64_semantic_field(form.field_first + reference->field_ordinal, &field) || reference->high >= field.width) return false;
+        if (reference->projection_first > BUSTER_AARCH64_SEMANTIC_VM_PROJECTION_BIT_COUNT ||
+            reference->projection_count > BUSTER_AARCH64_SEMANTIC_VM_PROJECTION_BIT_COUNT - reference->projection_first) return false;
+        for (u32 projection_index = 0; projection_index < reference->projection_count; projection_index += 1)
+        {
+            BusterA64SemanticVMGeneratedProjectionBit projection = buster_a64_semantic_vm_projection_bits[
+                reference->projection_first + projection_index];
+            bool known = false;
+            u32 value = 0;
+            if (!a64_vm_key_bit(atom, logical_width, projection.logical_bit, &known, &value)) return false;
+            if (!known) continue;
+            if ((projection.flags & BUSTER_AARCH64_SEMANTIC_VM_PROJECTION_FIXED) != 0)
+            {
+                if (projection.fixed_value != value) return false;
+                continue;
+            }
+            if (projection.actual_bit < reference->low || projection.actual_bit > reference->high || projection.actual_bit >= field.width) return false;
+            u32 bit = UINT32_C(1) << projection.actual_bit;
+            u32* assigned_bits = &assigned[reference->field_ordinal];
+            if ((*assigned_bits & bit) != 0 && ((fields->values[reference->field_ordinal] & bit) != (value ? bit : 0))) return false;
+            *assigned_bits |= bit;
+            if (value) fields->values[reference->field_ordinal] |= bit;
+            else fields->values[reference->field_ordinal] &= ~bit;
+        }
+    }
+    return true;
+}
+
+static bool a64_vm_table_entries_matchable(void)
+{
+    u32 entry_count = 0;
+    for (u32 form_id = 0; form_id < BUSTER_AARCH64_SEMANTIC_VM_FORM_COUNT; form_id += 1)
+    {
+        BusterA64SemanticForm form = {0};
+        if (!buster_a64_semantic_form(form_id, &form)) return false;
+        for (u32 ordinal = 0; ordinal < form.transform_count; ordinal += 1)
+        {
+            BusterA64SemanticTransform transform = {0};
+            if (!buster_a64_semantic_transform(form.transform_first + ordinal, &transform)) return false;
+            if (transform.kind != BUSTER_A64_SEMANTIC_TRANSFORM_VALUE_TABLE) continue;
+            BusterA64SemanticVMGeneratedTransform const* generated = &buster_a64_semantic_vm_transforms[transform.id];
+            if (generated->op != BUSTER_A64_SEMANTIC_VM_OP_TABLE_EXACT_WILDCARD) return false;
+            for (u32 value_index = 0; value_index < transform.value_count; value_index += 1)
+            {
+                BusterA64SemanticValue entry = {0};
+                if (!buster_a64_semantic_transform_value(transform.id, value_index, &entry)) return false;
+                BusterA64SemanticVMFields fields = {0};
+                if (!a64_vm_build_table_entry_fields(form_id, transform, entry, &fields)) return false;
+                BusterA64SemanticVMValue sentinel = buster_a64_semantic_vm_value_unsigned(UINT64_C(0xa5), 8);
+                BusterA64SemanticVMValue before = sentinel;
+                BusterA64SemanticVMStatus status = buster_a64_semantic_vm_eval_transform(form_id, transform.id, &fields, &sentinel);
+                BusterA64SemanticValueAtom result_atom = {0};
+                if (!buster_a64_semantic_value_atom(entry.result_first, &result_atom)) return false;
+                bool reserved = false;
+                if (result_atom.kind == BUSTER_A64_SEMANTIC_VALUE_ENUM && result_atom.text.length == 8)
+                {
+                    static char8 const reserved_text[] = {'R', 'E', 'S', 'E', 'R', 'V', 'E', 'D'};
+                    reserved = true;
+                    for (u32 index = 0; index < 8; index += 1)
+                        reserved = reserved && buster_a64_semantic_string_byte(result_atom.text, index) == reserved_text[index];
+                }
+                if ((reserved && status != BUSTER_A64_SEMANTIC_VM_STATUS_RESERVED) ||
+                    (!reserved && status != BUSTER_A64_SEMANTIC_VM_STATUS_OK) ||
+                    (status == BUSTER_A64_SEMANTIC_VM_STATUS_RESERVED && memcmp(&sentinel, &before, sizeof(sentinel)) != 0)) return false;
+                entry_count += 1;
+            }
+        }
+    }
+    return entry_count == 7681;
+}
+
 static bool a64_vm_raw_round_trip_all_rows(void)
 {
 #if BUSTER_A64_SEMANTIC_VM_TEST_HAS_CANONICAL_RAW
@@ -170,7 +311,7 @@ UnitTestResult aarch64_semantic_vm_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_UNUSED(arguments);
-    BUSTER_TEST(arguments, buster_a64_semantic_vm_schema_version() == 2);
+    BUSTER_TEST(arguments, buster_a64_semantic_vm_schema_version() == 3);
     BUSTER_TEST(arguments, buster_a64_semantic_vm_form_count() == 1695);
     BUSTER_TEST(arguments, buster_a64_semantic_vm_raw_codec_count() == 1522);
     BUSTER_TEST(arguments, buster_a64_semantic_vm_transform_count() == 2808);
@@ -179,6 +320,7 @@ UnitTestResult aarch64_semantic_vm_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, buster_a64_semantic_vm_semantic_executable_count() == 0);
     BUSTER_TEST(arguments, buster_a64_semantic_vm_validate());
     BUSTER_TEST(arguments, a64_vm_raw_round_trip_all_rows());
+    BUSTER_TEST(arguments, a64_vm_table_entries_matchable());
 
     BusterA64SemanticVMValue invalid = buster_a64_semantic_vm_value_unsigned(1, 0);
     BUSTER_TEST(arguments, invalid.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID);
@@ -307,6 +449,36 @@ UnitTestResult aarch64_semantic_vm_tests(UnitTestArguments* arguments)
                            buster_a64_semantic_transform_value(bic_table_id, 1, &bic_entry) && bic_entry.result_count == 1 &&
                            buster_a64_semantic_value_atom(bic_entry.result_first, &bic_result) &&
                            bic_result.kind == BUSTER_A64_SEMANTIC_VALUE_INTEGER && bic_result.integer == 8);
+    BusterA64SemanticForm bic_form = {0};
+    BusterA64SemanticVMFields bic_fields = {0};
+    BusterA64SemanticVMValue bic_output = {0};
+    BUSTER_TEST(arguments, buster_a64_semantic_form(bic_id, &bic_form));
+    bic_fields.count = bic_form.field_count;
+    for (u32 cmode = 0; cmode < 4; cmode += 1)
+    {
+        bic_fields = (BusterA64SemanticVMFields){.count = bic_form.field_count};
+        BUSTER_TEST(arguments, a64_vm_set_field(bic_id, &bic_fields, S8("cmode"), cmode));
+        BUSTER_TEST(arguments, buster_a64_semantic_vm_eval_transform(bic_id, bic_table_id, &bic_fields, &bic_output) == BUSTER_A64_SEMANTIC_VM_STATUS_OK &&
+                               bic_output.kind == BUSTER_A64_SEMANTIC_VM_VALUE_UNSIGNED_INTEGER && bic_output.payload == (u64)(cmode * 8));
+    }
+
+    /* AT's CRm key is a four-bit logical XML field with only its low bit
+       variable in the compact canonical field.  A logical key mismatch must
+       reject without changing output.  Fixed-bit compatibility is checked
+       transactionally by the generator and buster_a64_semantic_vm_validate. */
+    u32 at_id = UINT32_MAX;
+    u32 at_table_id = UINT32_MAX;
+    BusterA64SemanticForm at_form = {0};
+    BusterA64SemanticVMFields at_fields = {0};
+    BusterA64SemanticVMValue at_sentinel = buster_a64_semantic_vm_value_unsigned(UINT64_C(0x77), 8);
+    BusterA64SemanticVMValue at_before = at_sentinel;
+    BUSTER_TEST(arguments, buster_a64_semantic_find_form(S8("arm-a64@2026-06:AT_SYS_CR_systeminstrs"), 0, &at_id) &&
+                           buster_a64_semantic_form(at_id, &at_form) &&
+                           a64_vm_find_table_by_three_headers(at_id, S8("op1"), S8("CRm"), S8("op2"), &at_table_id));
+    at_fields = (BusterA64SemanticVMFields){.count = at_form.field_count};
+    BUSTER_TEST(arguments, a64_vm_set_field(at_id, &at_fields, S8("op1"), 1));
+    BUSTER_TEST(arguments, buster_a64_semantic_vm_eval_transform(at_id, at_table_id, &at_fields, &at_sentinel) == BUSTER_A64_SEMANTIC_VM_STATUS_RANGE);
+    BUSTER_TEST(arguments, memcmp(&at_sentinel, &at_before, sizeof(at_sentinel)) == 0);
 
     BUSTER_TEST(arguments, buster_a64_semantic_form(208, &form));
     fields = (BusterA64SemanticVMFields){.count = form.field_count};

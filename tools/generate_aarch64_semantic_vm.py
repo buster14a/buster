@@ -77,6 +77,9 @@ GAP_UNSUPPORTED_TRANSFORM = 2
 GAP_ALIAS_CONDITION = 3
 GAP_INCOMPLETE_SEMANTICS = 4
 
+VM_SCHEMA_VERSION = 3
+PROJECTION_FIXED = 1 << 0
+
 IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 FORMULA_RE = re.compile(
     r"(?P<body>(?:\d+\s*-\s*)?UInt\(\s*[\"']?\s*(?P<concat>[A-Za-z0-9_:]+)\s*[\"']?\s*\)\s*(?P<tail>[+-]\s*\d+)?)",
@@ -118,6 +121,60 @@ def xml_encoding_texts(xml_root: Path, xml_file: str, encoding_name: str) -> lis
             if hover:
                 result.append(hover)
         return result
+    raise RuntimeError(f"XML encoding {encoding_name!r} not found in {path}")
+
+
+def xml_encoding_layout(xml_root: Path, xml_file: str, encoding_name: str) -> dict[str, dict[int, dict[str, int | str | None]]]:
+    """Return logical field bits from the encoding's XML regdiagram.
+
+    The canonical importer intentionally drops fixed bits from a field's
+    compact value.  Arm's XML boxes retain the logical field positions,
+    including those fixed bits, so table keys must be projected through this
+    layout before the VM can match them.
+    """
+    path = xml_root / xml_file
+    if not path.is_file():
+        raise RuntimeError(f"missing pinned Arm XML source: {path}")
+    root = ET.parse(path).getroot()
+    for iclass in root.iter():
+        if local_name(iclass.tag) != "iclass":
+            continue
+        regdiagram = next((child for child in iclass if local_name(child.tag) == "regdiagram"), None)
+        if regdiagram is None:
+            continue
+        for encoding in iclass:
+            if local_name(encoding.tag) != "encoding" or encoding.attrib.get("name") != encoding_name:
+                continue
+            result: dict[str, dict[int, dict[str, int | str | None]]] = {}
+            for box in regdiagram:
+                if local_name(box.tag) != "box" or not box.attrib.get("name"):
+                    continue
+                name = box.attrib["name"]
+                try:
+                    width = int(box.attrib.get("width", "1"))
+                    hibit = int(box.attrib["hibit"])
+                except (KeyError, ValueError) as error:
+                    raise RuntimeError(f"invalid XML field box in {path}: {box.attrib!r}") from error
+                if width <= 0 or hibit < width - 1 or hibit >= 32:
+                    raise RuntimeError(f"invalid XML field box in {path}: {box.attrib!r}")
+                low = hibit - width + 1
+                pattern = box.attrib.get("psbits")
+                if pattern is not None and len(pattern) != width:
+                    pattern = None
+                field = result.setdefault(name, {})
+                for logical_bit in range(width):
+                    instruction_lsb = low + logical_bit
+                    fixed = None
+                    if pattern is not None:
+                        candidate = pattern[width - 1 - logical_bit]
+                        if candidate in "01":
+                            fixed = candidate
+                    previous = field.get(logical_bit)
+                    bit = {"instruction_lsb": instruction_lsb, "fixed": fixed}
+                    if previous is not None and previous != bit:
+                        raise RuntimeError(f"duplicate XML logical field bit: {path}:{encoding_name}:{name}[{logical_bit}]")
+                    field[logical_bit] = bit
+            return result
     raise RuntimeError(f"XML encoding {encoding_name!r} not found in {path}")
 
 
@@ -164,6 +221,145 @@ def parse_slice_header(header: str) -> tuple[str, int, int] | None:
     return name, low, high
 
 
+def parse_fixed_integer(row: dict[str, Any], key: str) -> int:
+    value = row.get(key, 0)
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str):
+        raise RuntimeError(f"invalid {key} in {row.get('id', '<unknown>')}")
+    try:
+        return int(value, 0)
+    except ValueError as error:
+        raise RuntimeError(f"invalid {key} in {row.get('id', '<unknown>')}: {value!r}") from error
+
+
+def canonical_field_bit_map(row: dict[str, Any]) -> dict[int, tuple[str, int]]:
+    """Map instruction bits to compact canonical field bits.
+
+    The canonical importer intentionally packs only variable bits into a
+    field's value.  Keeping this map at generator time lets the VM retain the
+    compact field ABI while matching table keys in the XML field's logical
+    bit numbering.
+    """
+    result: dict[int, tuple[str, int]] = {}
+    for field in row.get("fields", []):
+        name = field.get("name")
+        if not isinstance(name, str) or not name:
+            raise RuntimeError(f"field without a name in {row.get('id', '<unknown>')}")
+        for segment in field.get("segments", []):
+            try:
+                instruction_lsb = int(segment["instruction_lsb"])
+                value_lsb = int(segment["value_lsb"])
+                width = int(segment["width"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise RuntimeError(f"invalid canonical field segment in {row.get('id', '<unknown>')}: {segment!r}") from error
+            if instruction_lsb < 0 or value_lsb < 0 or width <= 0 or instruction_lsb + width > 32 or value_lsb + width > 32:
+                raise RuntimeError(f"canonical field segment out of bounds in {row.get('id', '<unknown>')}: {segment!r}")
+            for offset in range(width):
+                instruction_bit = instruction_lsb + offset
+                value_bit = value_lsb + offset
+                previous = result.get(instruction_bit)
+                current = (name, value_bit)
+                if previous is not None and previous != current:
+                    raise RuntimeError(f"canonical field segment overlap in {row.get('id', '<unknown>')} at bit {instruction_bit}")
+                result[instruction_bit] = current
+    return result
+
+
+def value_atom_integer(atom: dict[str, Any], row_id: str, header: str) -> int | None:
+    if atom.get("type") != "integer":
+        return None
+    value = atom.get("value")
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RuntimeError(f"invalid integer table key in {row_id}:{header}: {atom!r}")
+    return value
+
+
+def validate_projection_atom(atom: dict[str, Any], projection: list[dict[str, int]], logical_width: int,
+                             row_id: str, header: str) -> None:
+    """Validate key atom width and its fixed logical bits.
+
+    This runs before any generated output is written.  A malformed fixed-bit
+    key therefore fails the whole generation transaction instead of silently
+    producing a partially usable VM table.
+    """
+    atom_type = atom.get("type")
+    if atom_type == "bits":
+        text = atom.get("value")
+        if not isinstance(text, str) or len(text) != logical_width:
+            raise RuntimeError(f"table key width mismatch in {row_id}:{header}: expected {logical_width}, got {text!r}")
+        for bit in projection:
+            if not (bit["flags"] & PROJECTION_FIXED):
+                continue
+            character = text[logical_width - 1 - bit["logical_bit"]]
+            if character in "01" and int(character) != bit["fixed_value"]:
+                raise RuntimeError(f"table key fixed-bit mismatch in {row_id}:{header}: {text!r}")
+            if character not in "01xX":
+                raise RuntimeError(f"invalid bit table key in {row_id}:{header}: {text!r}")
+        return
+    if atom_type == "integer":
+        value = value_atom_integer(atom, row_id, header)
+        assert value is not None
+        if value < 0 or (logical_width < 63 and value >= (1 << logical_width)) or (logical_width == 63 and value > ((1 << 63) - 1)):
+            raise RuntimeError(f"table integer key out of range in {row_id}:{header}: {value}")
+        for bit in projection:
+            if bit["flags"] & PROJECTION_FIXED and ((value >> bit["logical_bit"]) & 1) != bit["fixed_value"]:
+                raise RuntimeError(f"table key fixed-bit mismatch in {row_id}:{header}: {value}")
+        return
+    raise RuntimeError(f"unsupported table key atom in {row_id}:{header}: {atom_type!r}")
+
+
+def table_key_projection(row: dict[str, Any], header: str, xml_layout: dict[str, dict[int, dict[str, int | str | None]]]) -> tuple[str, int, int, int, list[dict[str, int]]]:
+    """Project one logical XML key slice onto a compact canonical field.
+
+    The returned field range is in canonical compact-value bits.  Each
+    projection entry records the corresponding logical key bit and either a
+    compact variable bit or a fixed instruction bit value.
+    """
+    parsed = parse_slice_header(header)
+    if parsed is None:
+        raise RuntimeError(f"invalid table key header: {row.get('id', '<unknown>')}:{header!r}")
+    name, logical_low, logical_high = parsed
+    layout = xml_layout.get(name)
+    if not layout:
+        raise RuntimeError(f"XML field {name!r} missing for table key {row.get('id', '<unknown>')}:{header!r}")
+    if "[" not in header:
+        logical_low, logical_high = min(layout), max(layout)
+    if logical_low < 0 or logical_high < logical_low or logical_high > 31:
+        raise RuntimeError(f"invalid logical table key range {row.get('id', '<unknown>')}:{header!r}")
+    canonical_bits = canonical_field_bit_map(row)
+    fixed_mask = parse_fixed_integer(row, "fixed_mask")
+    fixed_value = parse_fixed_integer(row, "fixed_value")
+    projection: list[dict[str, int]] = []
+    variable_names: set[str] = set()
+    variable_bits: list[int] = []
+    for logical_bit in range(logical_low, logical_high + 1):
+        box = layout.get(logical_bit)
+        if box is None:
+            raise RuntimeError(f"logical XML bit {name}[{logical_bit}] missing for {row.get('id', '<unknown>')}:{header!r}")
+        instruction_bit = int(box["instruction_lsb"])
+        variable = canonical_bits.get(instruction_bit)
+        item = {"logical_bit": logical_bit - logical_low, "actual_bit": 0xFF, "fixed_value": 0, "flags": 0}
+        if variable is not None:
+            variable_name, actual_bit = variable
+            variable_names.add(variable_name)
+            variable_bits.append(actual_bit)
+            item["actual_bit"] = actual_bit
+        elif fixed_mask & (1 << instruction_bit):
+            item["fixed_value"] = (fixed_value >> instruction_bit) & 1
+            item["flags"] = PROJECTION_FIXED
+        else:
+            raise RuntimeError(f"unmapped logical XML bit {name}[{logical_bit}] at instruction bit {instruction_bit} for {row.get('id', '<unknown>')}:{header!r}")
+        projection.append(item)
+    if len(variable_names) != 1 or not variable_bits:
+        raise RuntimeError(f"table key {row.get('id', '<unknown>')}:{header!r} does not project to one canonical field")
+    actual_low = min(variable_bits)
+    actual_high = max(variable_bits)
+    if actual_low < 0 or actual_high > 31 or actual_high < actual_low:
+        raise RuntimeError(f"invalid compact table key range {row.get('id', '<unknown>')}:{header!r}")
+    return next(iter(variable_names)), actual_low, actual_high, logical_low, projection
+
+
 def rows_load(path: Path) -> list[dict[str, Any]]:
     raw = path.read_bytes()
     # The canonical artifact is the source of the denominator.  Some callers
@@ -191,6 +387,7 @@ def emit_header(
     rows: list[dict[str, Any]],
     transform_records: list[dict[str, Any]],
     field_refs: list[dict[str, int]],
+    projection_bits: list[dict[str, int]],
     field_name_bytes: list[int],
     atom_program_ids: list[int],
     aliases: list[dict[str, int]],
@@ -213,7 +410,16 @@ def emit_header(
                 record.get("program_count", 0),
             )
         )
-    field_values = ["{%u, %u, %u, %u, %u, %u, {0, 0}}" % (x["name_hash"], x["name_offset"], x["name_length"], x["field_ordinal"], x["low"], x["high"]) for x in field_refs]
+    field_values = [
+        "{%u, %u, %u, %u, %u, %u, %u, %u, %u, %u}"
+        % (
+            x["name_hash"], x["name_offset"], x["name_length"], x["field_ordinal"],
+            x["low"], x["high"], x["projection_first"], x["projection_count"],
+            x["logical_low"], x["logical_high"],
+        )
+        for x in field_refs
+    ]
+    projection_values = ["{%u, %u, %u, %u}" % (x["logical_bit"], x["actual_bit"], x["fixed_value"], x["flags"]) for x in projection_bits]
     atom_values = ["{%u}" % atom_id for atom_id in atom_program_ids]
     alias_values = ["{%u, %u, %u, %u, %u, %u, 0}" % (a["target"], a["injected"], a["same"], a["condition_digest"], a["preference_count"], a["condition_supported"]) for a in aliases]
     lines = [
@@ -222,7 +428,7 @@ def emit_header(
         "#define BUSTER_AARCH64_SEMANTIC_VM_GENERATED_H",
         "#include <buster/lib/base.h>",
         "",
-        f"#define BUSTER_AARCH64_SEMANTIC_VM_SCHEMA_VERSION 2u",
+        f"#define BUSTER_AARCH64_SEMANTIC_VM_SCHEMA_VERSION {VM_SCHEMA_VERSION}u",
         f"#define BUSTER_AARCH64_SEMANTIC_VM_FORM_COUNT {len(rows)}u",
         f"#define BUSTER_AARCH64_SEMANTIC_VM_CANONICAL_COUNT {CANONICAL_COUNT}u",
         f"#define BUSTER_AARCH64_SEMANTIC_VM_ALIAS_COUNT {ALIAS_COUNT}u",
@@ -235,8 +441,12 @@ def emit_header(
         f"#define BUSTER_AARCH64_SEMANTIC_VM_SEMANTIC_EXECUTABLE_COUNT {sum(bool(x & ROW_SEMANTIC_EXECUTABLE) for x in coverage)}u",
         "",
         f"#define BUSTER_AARCH64_SEMANTIC_VM_FIELD_NAME_BYTES {len(field_name_bytes)}u",
+        f"#define BUSTER_AARCH64_SEMANTIC_VM_PROJECTION_BIT_COUNT {len(projection_bits)}u",
+        f"#define BUSTER_AARCH64_SEMANTIC_VM_PROJECTION_FIXED {PROJECTION_FIXED}u",
         "typedef struct BusterA64SemanticVMGeneratedFieldRef BusterA64SemanticVMGeneratedFieldRef;",
-        "struct BusterA64SemanticVMGeneratedFieldRef { u32 name_hash; u32 name_offset; u16 name_length; u16 field_ordinal; u8 low; u8 high; u8 reserved[2]; };",
+        "struct BusterA64SemanticVMGeneratedFieldRef { u32 name_hash; u32 name_offset; u16 name_length; u16 field_ordinal; u8 low; u8 high; u32 projection_first; u8 projection_count; u8 logical_low; u8 logical_high; };",
+        "typedef struct BusterA64SemanticVMGeneratedProjectionBit BusterA64SemanticVMGeneratedProjectionBit;",
+        "struct BusterA64SemanticVMGeneratedProjectionBit { u8 logical_bit; u8 actual_bit; u8 fixed_value; u8 flags; };",
         "typedef struct BusterA64SemanticVMGeneratedTransform BusterA64SemanticVMGeneratedTransform;",
         "struct BusterA64SemanticVMGeneratedTransform { u32 semantic_transform_id; u32 field_ref_first; u16 field_ref_count; u32 key_ref_first; u16 key_ref_count; u8 op; u8 affine_op; u16 constant; u8 program_count; u8 reserved[3]; };",
         "typedef struct BusterA64SemanticVMGeneratedAtomProgram BusterA64SemanticVMGeneratedAtomProgram;",
@@ -246,6 +456,9 @@ def emit_header(
         "",
         "static const BusterA64SemanticVMGeneratedFieldRef buster_a64_semantic_vm_field_refs[] = {",
         c_array(field_values),
+        "};",
+        "static const BusterA64SemanticVMGeneratedProjectionBit buster_a64_semantic_vm_projection_bits[] = {",
+        c_array(projection_values, 8),
         "};",
         "static const char8 buster_a64_semantic_vm_field_name_bytes[] = {",
         c_array([str(x) for x in field_name_bytes], 24),
@@ -306,6 +519,7 @@ def main() -> int:
         raise RuntimeError("canonical ordinal mismatch")
 
     field_refs: list[dict[str, int]] = []
+    projection_bits: list[dict[str, int]] = []
     field_name_bytes: list[int] = []
     field_name_offsets: dict[str, int] = {}
 
@@ -319,7 +533,9 @@ def main() -> int:
         return offset
 
     def make_field_ref(name: str, low: int | None = None, high: int | None = None,
-                       widths: dict[str, int] | None = None, ordinals: dict[str, int] | None = None) -> dict[str, int] | None:
+                       widths: dict[str, int] | None = None, ordinals: dict[str, int] | None = None,
+                       logical_low: int = 0, logical_high: int = 0,
+                       projection_first: int = 0, projection_count: int = 0) -> dict[str, int] | None:
         if low is None or high is None:
             width = (widths or {}).get(name, 0)
             low = 0
@@ -336,7 +552,10 @@ def main() -> int:
             "field_ordinal": (ordinals or {}).get(name, 0xFFFF),
             "low": low,
             "high": high,
-            "reserved": 0,
+            "projection_first": projection_first,
+            "projection_count": projection_count,
+            "logical_low": logical_low,
+            "logical_high": logical_high,
         }
 
     transform_records: list[dict[str, Any]] = []
@@ -361,6 +580,7 @@ def main() -> int:
         }
         field_ordinals = {field["name"]: ordinal for ordinal, field in enumerate(row.get("fields", []))}
         xml_texts = xml_encoding_texts(args.xml_root, row["provenance"]["xml_file"], row["encoding_name"])
+        xml_layout = xml_encoding_layout(args.xml_root, row["provenance"]["xml_file"], row["encoding_name"])
         # The semantic C projection orders transforms by operand ownership,
         # not by the source row's presentation order.  Reproduce that
         # bounded ordering so a form's ``transform_first`` range indexes the
@@ -458,12 +678,16 @@ def main() -> int:
                     parsed = parse_slice_header(header)
                     if parsed is None:
                         continue
-                    name, low, high = parsed
+                    name, _, _ = parsed
                     if name not in form_fields:
+                        op = OP_INVALID
                         continue
-                    if "[" not in header:
-                        low, high = 0, field_widths.get(name, 0) - 1
-                    reference = make_field_ref(name, low, high, field_widths, field_ordinals)
+                    projected_name, low, high, logical_low, projection = table_key_projection(row, header, xml_layout)
+                    logical_high = logical_low + len(projection) - 1
+                    projection_first = len(projection_bits)
+                    projection_bits.extend(projection)
+                    reference = make_field_ref(projected_name, low, high, field_widths, field_ordinals,
+                                               logical_low, logical_high, projection_first, len(projection))
                     if reference is None:
                         op = OP_INVALID
                         continue
@@ -521,7 +745,20 @@ def main() -> int:
             # metadata; the VM must not emit a second 20k-row atom table.
             if kind == "value_table":
                 table_supported = True
-                for entry in transform.get("entries", []):
+                entries = transform.get("entries", [])
+                if not typed_program and len(fields) != key_ref_count:
+                    raise RuntimeError(f"table key/ref count mismatch in {row['id']}")
+                for entry in entries:
+                    if not typed_program and len(entry.get("key", [])) != key_ref_count:
+                        raise RuntimeError(f"table entry key count mismatch in {row['id']}")
+                    if not typed_program:
+                        for key_index, atom in enumerate(entry.get("key", [])):
+                            reference = field_refs[key_ref_first + key_index]
+                            first = reference["projection_first"]
+                            last = first + reference["projection_count"]
+                            validate_projection_atom(atom, projection_bits[first:last],
+                                                     reference["logical_high"] - reference["logical_low"] + 1,
+                                                     row["id"], transform.get("key_headers", [])[key_index])
                     for atom in entry.get("key", []) + entry.get("result", []):
                         if atom.get("type") == "program":
                             atom_program_ids.append(semantic_atom_id)
@@ -591,15 +828,20 @@ def main() -> int:
 
     args.output_header.parent.mkdir(parents=True, exist_ok=True)
     args.output_manifest.parent.mkdir(parents=True, exist_ok=True)
-    emit_header(args.output_header, rows, transform_records, field_refs, field_name_bytes, atom_program_ids, aliases, coverage, gaps, canonical_raw_indices)
+    emit_header(args.output_header, rows, transform_records, field_refs, projection_bits, field_name_bytes, atom_program_ids, aliases, coverage, gaps, canonical_raw_indices)
     manifest = {
-        "schema_version": 2,
+        "schema_version": VM_SCHEMA_VERSION,
         "canonical_sha256": CANONICAL_SHA256,
         "canonical_rows": CANONICAL_COUNT,
         "alias_rows": ALIAS_COUNT,
         "rows": TOTAL_COUNT,
         "source_policy": {"canonical_jsonl": "pinned", "arm_xml": "pinned-official", "raw_prose_emitted": False},
         "operation_count": OP_COUNT,
+        "projection": {
+            "field_ref_count": len(field_refs),
+            "projection_bit_count": len(projection_bits),
+            "projected_table_key_count": sum(record["key_ref_count"] for record in transform_records if record["op"] == OP_TABLE_EXACT_WILDCARD),
+        },
         "typed_programs": {"transform_count": transform_program_count, "value_atom_count": len(atom_program_ids), "value_atom_ids_sparse": True},
         "operation_names": [
             "invalid", "field", "extract", "concat", "uint_extend", "signed_extend", "add_const", "sub_const",
