@@ -834,6 +834,73 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_is_bsr0(BusterX86Metadata
            x86_64_metadata_test_string_equal(metadata.atom, S8("XED_REG_BSR0"));
 }
 
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_visible_schema_equal(u32 first_form_id, u32 second_form_id)
+{
+    BusterX86MetadataForm first = {0};
+    BusterX86MetadataForm second = {0};
+    if (!buster_x86_metadata_form(first_form_id, &first) || !buster_x86_metadata_form(second_form_id, &second)) return false;
+    u32 first_index = 0;
+    u32 second_index = 0;
+    for (;;)
+    {
+        BusterX86MetadataOperand first_operand = {0};
+        BusterX86MetadataOperand second_operand = {0};
+        bool first_visible = false;
+        bool second_visible = false;
+        while (first_index < first.operand_count && !first_visible)
+        {
+            if (!buster_x86_metadata_operand(first_form_id, first_index++, &first_operand)) return false;
+            first_visible = first_operand.visible;
+        }
+        while (second_index < second.operand_count && !second_visible)
+        {
+            if (!buster_x86_metadata_operand(second_form_id, second_index++, &second_operand)) return false;
+            second_visible = second_operand.visible;
+        }
+        if (first_visible != second_visible) return false;
+        if (!first_visible) return true;
+        if (first_operand.kind != second_operand.kind || first_operand.access != second_operand.access ||
+            first_operand.field_source != second_operand.field_source ||
+            first_operand.physical_class != second_operand.physical_class ||
+            first_operand.physical_width_flags != second_operand.physical_width_flags)
+            return false;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_alias_matches(BusterX86MetadataPhysicalQuery physical, u32 form_id,
+                                                                    u8 const* source_bytes, u32 source_byte_count)
+{
+    if (!source_bytes || !source_byte_count) return false;
+    BusterX86MetadataForm form = {0};
+    if (!buster_x86_metadata_form(form_id, &form)) return false;
+    BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_iclass(buster_x86_metadata_string_span(form.iclass));
+    for (u32 candidate_index = 0; candidate_index < candidates.count; candidate_index += 1)
+    {
+        u32 candidate_id = UINT32_MAX;
+        BusterX86MetadataForm candidate = {0};
+        if (!buster_x86_metadata_candidate_at(candidates, candidate_index, &candidate_id) || candidate_id == form_id ||
+            !buster_x86_metadata_form(candidate_id, &candidate) || candidate.encoder_family == BUSTER_X86_METADATA_ENCODER_AMX ||
+            !x86_64_metadata_test_visible_schema_equal(form_id, candidate_id))
+            continue;
+        u8 alias_bytes[32] = {0};
+        BusterX86MetadataRelocation alias_relocations[8] = {0};
+        BusterX86MetadataPhysicalQuery alias_query = physical;
+        alias_query.source_semantics = true;
+        BusterX86MetadataEmitResult alias = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = alias_query,
+            .form_id = candidate_id,
+            .output = alias_bytes,
+            .output_capacity = BUSTER_ARRAY_LENGTH(alias_bytes),
+            .relocations = alias_relocations,
+            .relocation_capacity = BUSTER_ARRAY_LENGTH(alias_relocations),
+        });
+        if (alias.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && alias.relocation_count == 0 && alias.byte_count == source_byte_count &&
+            memcmp(alias_bytes, source_bytes, source_byte_count) == 0)
+            return true;
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL String8 x86_64_metadata_test_source_register_atom(Arena* arena,
                                                                        BusterX86MetadataPhysicalRegister register_value,
                                                                        BusterX86MetadataString atom)
@@ -1242,6 +1309,14 @@ BUSTER_GLOBAL_LOCAL X86_64MetadataSourceReachabilityResult x86_64_metadata_test_
     {
         result.classification = physical.operand_count == 0 ? X86_64_METADATA_SOURCE_REACHABILITY_IMPLICIT_HIDDEN
                                                               : X86_64_METADATA_SOURCE_REACHABILITY_AMBIGUITY;
+    }
+    else if (!encoded.diagnostic_count &&
+             x86_64_metadata_test_source_alias_matches(physical, test_case.form_id, encoded.bytes.pointer, (u32)encoded.bytes.length))
+    {
+        // A public spelling can deliberately select a shorter normalized alias
+        // (for example APX REX2 for an APXEVEX row).  That is source-form
+        // ambiguity, not a missing public encoding capability.
+        result.classification = X86_64_METADATA_SOURCE_REACHABILITY_AMBIGUITY;
     }
     else if (!encoded.diagnostic_count)
     {
