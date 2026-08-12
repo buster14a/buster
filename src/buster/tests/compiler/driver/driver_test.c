@@ -1906,6 +1906,30 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_wide_argument_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    if (target_native.cpu_arch == CPU_ARCH_X86_64 &&
+        (target_native.os == OPERATING_SYSTEM_LINUX || target_native.os == OPERATING_SYSTEM_MACOS))
+    {
+        String8 c_f80_transport_path = buster_test_temporary_path(arguments->arena, S8("buster-c-f80-transport"), S8(""));
+        String8 c_f80_transport_command_line[] = {
+            S8("-o"), c_f80_transport_path, S8("tests/basic_c_f80_transport.c"),
+        };
+        CompilerDriverResult c_f80_transport = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_f80_transport_command_line)));
+        BUSTER_TEST(arguments, c_f80_transport.error == COMPILER_DRIVER_ERROR_NONE);
+        if (c_f80_transport.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 c_f80_transport_run_arguments[] = {c_f80_transport_path};
+            ProcessSpawnResult c_f80_transport_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_f80_transport_run_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, c_f80_transport_spawn.handle != 0);
+            if (c_f80_transport_spawn.handle)
+            {
+                ProcessWaitResult c_f80_transport_wait = os_process_wait_sync(arguments->arena, c_f80_transport_spawn);
+                BUSTER_TEST(arguments, c_f80_transport_wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
     if (target_native.cpu_arch == CPU_ARCH_X86_64)
     {
         String8 c_int128_path = buster_test_temporary_path(arguments->arena, S8("buster-c-int128"),

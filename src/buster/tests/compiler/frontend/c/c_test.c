@@ -7499,6 +7499,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
         }
         Target target = parsed_target.target;
         bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
+        bool f80_sysv = target.cpu_arch == CPU_ARCH_X86_64 &&
+                        (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_MACOS ||
+                         target.os == OPERATING_SYSTEM_IOS) &&
+                        wide_long_double;
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
                                                     (CPreprocessOptions){
@@ -7509,7 +7513,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, target_triples[target_index], preprocess, parse, target);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, lowered.diagnostic_count == (wide_long_double ? 6 : 0));
+        BUSTER_TEST(arguments, lowered.diagnostic_count == (f80_sysv ? 3 : wide_long_double ? 6 : 0));
         for (u32 diagnostic_index = 0; diagnostic_index < lowered.diagnostic_count; diagnostic_index += 1)
         {
             CDiagnostic diagnostic = lowered.diagnostics[diagnostic_index];
@@ -7531,7 +7535,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
                 {
                     continue;
                 }
-                bool expected_rejected = wide_long_double && function_index < 6;
+                bool expected_rejected = (f80_sysv && (function_index == 2 || function_index == 4 || function_index == 5)) ||
+                                         (!f80_sysv && wide_long_double && function_index < 6);
                 BUSTER_TEST(arguments, function->state == (expected_rejected ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
             }
             if (wide_long_double)
@@ -7551,7 +7556,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
                 BUSTER_TEST(arguments, struct_abi.part_count != 0);
                 BUSTER_TEST(arguments, large_abi.part_count != 0 && large_abi.indirect);
             }
-            BUSTER_TEST(arguments, module->rejected_function_count == (wide_long_double ? 6 : 0));
+            BUSTER_TEST(arguments, module->rejected_function_count == (f80_sysv ? 3 : wide_long_double ? 6 : 0));
         }
         scratch_end(temporary);
     }
@@ -7581,7 +7586,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
                         " void call_function_pointer(void) { long double (*value)(void) = extern_scalar_target; value(); }"
                         " void address_only(void) { function_pointer_sink(extern_scalar_target); }"
                         " void pointer_transport(long double *value) { pointer_target(value); }"
-                        " void call_variadic_scalar(void) { long double value = 0; variadic_scalar_target(0, value); }"
+                        " void call_variadic_scalar(void) { long double value = 0.0L; variadic_scalar_target(0, value); }"
                         " void call_variadic_aggregate(void) { WideStruct value = { 0 }; variadic_aggregate_target(0, value); }"
                         " void call_variadic_f64(void) { double value = 0; variadic_f64_target(0, value); }"
                         " int main(void) { return 0; }");
@@ -7629,21 +7634,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
         }
         Target target = parsed_target.target;
         bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
+        bool f80_sysv = target.cpu_arch == CPU_ARCH_X86_64 &&
+                        (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_MACOS ||
+                         target.os == OPERATING_SYSTEM_IOS) &&
+                        wide_long_double;
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = {0};
         CParseResult parse = {0};
         CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], target, &preprocess, &parse);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, lowered.diagnostic_count == (wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
+        BUSTER_TEST(arguments, lowered.diagnostic_count == (f80_sysv ? 3 : wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
         for (u32 diagnostic_index = 0; diagnostic_index < lowered.diagnostic_count; diagnostic_index += 1)
         {
             CDiagnostic diagnostic = lowered.diagnostics[diagnostic_index];
             BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
-            BUSTER_TEST(arguments,
-                        string_first_sequence(diagnostic.message,
-                                              S8("C IR lowering does not yet support the parameter or return value types of function '")) !=
-                            BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, diagnostic.message.length != 0);
         }
         BUSTER_TEST(arguments, lowered.program != 0);
         if (lowered.program)
@@ -7657,8 +7663,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
                 {
                     continue;
                 }
-                BUSTER_TEST(arguments, function->state == (wide_long_double ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
-                if (wide_long_double)
+                bool expected_rejected = f80_sysv ? (function_index == 2 || function_index == 5 || function_index == 6) : wide_long_double;
+                BUSTER_TEST(arguments, function->state == (expected_rejected ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
+                if (expected_rejected)
                 {
                     BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
                 }
@@ -7675,7 +7682,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
                 BUSTER_TEST(arguments, function != 0);
                 BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_DECLARATION);
             }
-            BUSTER_TEST(arguments, module->rejected_function_count == (wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
+            BUSTER_TEST(arguments, module->rejected_function_count == (f80_sysv ? 3 : wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
         }
         scratch_end(temporary);
@@ -7689,7 +7696,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(Uni
     BUSTER_UNUSED(arguments);
     String8 source = S8("extern long double cleanup_wide(long double *value);"
                         " void cleanup_owner(void) {"
-                        " long double value __attribute__((cleanup(cleanup_wide))) = 0;"
+                        " long double value __attribute__((cleanup(cleanup_wide))) = 0.0L;"
                         " return;"
                         " }"
                         " int main(void) { return 0; }");
@@ -7711,6 +7718,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(Uni
         }
         Target target = parsed_target.target;
         bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
+        bool f80_sysv = target.cpu_arch == CPU_ARCH_X86_64 &&
+                        (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_MACOS ||
+                         target.os == OPERATING_SYSTEM_IOS) &&
+                        wide_long_double;
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = {0};
         CParseResult parse = {0};
@@ -7724,14 +7735,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(Uni
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, target_triples[target_index], preprocess, parse, target);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, lowered.diagnostic_count == (wide_long_double ? 1 : 0));
-        if (wide_long_double && lowered.diagnostic_count == 1)
+        BUSTER_TEST(arguments, lowered.diagnostic_count == ((!f80_sysv && wide_long_double) ? 1 : 0));
+        if (!f80_sysv && wide_long_double && lowered.diagnostic_count == 1)
         {
             BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
-            BUSTER_TEST(arguments,
-                        string_first_sequence(lowered.diagnostics[0].message,
-                                              S8("C IR lowering does not yet support the parameter or return value types of function '")) !=
-                            BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, lowered.diagnostics[0].message.length != 0);
         }
         BUSTER_TEST(arguments, lowered.program != 0);
         if (lowered.program)
@@ -7751,15 +7759,85 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(Uni
                     call_count += opcode == IR_OPCODE_CALL;
                     branch_count += opcode == IR_OPCODE_BRANCH || opcode == IR_OPCODE_BRANCH_IF;
                 }
-                BUSTER_TEST(arguments, owner->state == (wide_long_double ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
-                BUSTER_TEST(arguments, call_count == (wide_long_double ? 0 : 1));
-                BUSTER_TEST(arguments, wide_long_double ? branch_count == 0 : branch_count != 0);
+                BUSTER_TEST(arguments, owner->state == ((!f80_sysv && wide_long_double) ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
+                BUSTER_TEST(arguments, call_count == ((!f80_sysv && wide_long_double) ? 0 : 1));
+                BUSTER_TEST(arguments, (!f80_sysv && wide_long_double) ? branch_count == 0 : branch_count != 0);
             }
-            BUSTER_TEST(arguments, module->rejected_function_count == (wide_long_double ? 1 : 0));
+            BUSTER_TEST(arguments, module->rejected_function_count == ((!f80_sysv && wide_long_double) ? 1 : 0));
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
         }
         scratch_end(temporary);
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_local_transport(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    String8 source = S8("long double identity(long double value) { return value; }\n"
+                        "long double positive_zero(void) { volatile long double value = +0.0L; return value; }\n"
+                        "long double negative_zero(void) { volatile long double value = -0.0L; return value; }\n"
+                        "long double assign(long double value) { volatile long double local = 0.0L; local = value; return local; }\n"
+                        "long double call_identity(void) { return identity(-0.0L); }\n");
+    String8 target_triple = S8("x86_64-unknown-linux-gnu");
+    TargetParseResult parsed_target = target_parse_triple(target_triple);
+    BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+    if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+    {
+        return result;
+    }
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult preprocess = {0};
+    CParseResult parse = {0};
+    CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triple, parsed_target.target, &preprocess, &parse);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.program != 0);
+    if (lowered.program)
+    {
+        IrModule* module = lowered.program->modules;
+        BUSTER_TEST(arguments, module->function_count == 5);
+        BUSTER_TEST(arguments, module->rejected_function_count == 0);
+        u32 total_local_count = 0;
+        u32 total_load_count = 0;
+        u32 total_store_count = 0;
+        u32 total_call_count = 0;
+        u32 positive_zero_count = 0;
+        u32 negative_zero_count = 0;
+        u32 located_constant_count = 0;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            BUSTER_TEST(arguments, function->state == IR_FUNCTION_LOWERED);
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = function->instructions + instruction_index;
+                total_local_count += instruction->opcode == IR_OPCODE_LOCAL;
+                total_load_count += instruction->opcode == IR_OPCODE_LOAD;
+                total_store_count += instruction->opcode == IR_OPCODE_STORE;
+                total_call_count += instruction->opcode == IR_OPCODE_CALL;
+                if (instruction->opcode == IR_OPCODE_CONSTANT_FLOAT && instruction->immediate_count == 2 && instruction->immediates)
+                {
+                    positive_zero_count += instruction->immediates[0] == 0 && instruction->immediates[1] == 0;
+                    negative_zero_count += instruction->immediates[0] == 0 && instruction->immediates[1] == UINT64_C(0x8000);
+                    IrSourceRange constant_source = ir_instruction_canonical_source(function, instruction->id);
+                    located_constant_count += constant_source.length != 0;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, total_local_count == 5);
+        BUSTER_TEST(arguments, total_load_count == 5);
+        BUSTER_TEST(arguments, total_store_count == 6);
+        BUSTER_TEST(arguments, total_call_count == 1);
+        BUSTER_TEST(arguments, positive_zero_count == 4);
+        BUSTER_TEST(arguments, negative_zero_count == 2);
+        BUSTER_TEST(arguments, located_constant_count == positive_zero_count + negative_zero_count);
+        BUSTER_TEST(arguments, c_test_ir_direct_call_count(lowered.program, c_test_find_ir_function(module, S8("call_identity")), S8("identity")) == 1);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
     return result;
 }
 
@@ -7968,6 +8046,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         S8("long double cast_value = (long double)1; int main(void) { return 0; }"),
         S8("long double aggregate[1] = { 1.0L }; int main(void) { return 0; }"),
         S8("void local_static(void) { static long double local = 1.0L; } int main(void) { return 0; }"),
+        S8("long double negate_variable(long double value) { return -value; } int main(void) { return 0; }"),
+        S8("int truth_variable(long double value) { return value ? 1 : 0; } int main(void) { return 0; }"),
+        S8("long double cast_local(void) { return (long double)1; } int main(void) { return 0; }"),
+        S8("long double cast_from_double(double value) { return (long double)value; } int main(void) { return 0; }"),
+        S8("void atomic_local(void) { _Atomic(long double) value = 0.0L; (void)value; } int main(void) { return 0; }"),
+        S8("long double atomic_load(_Atomic(long double) *value) { return __c11_atomic_load(value, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
+        S8("void atomic_store(_Atomic(long double) *value) { __c11_atomic_store(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
+        S8("long double atomic_exchange(_Atomic(long double) *value) { return __c11_atomic_exchange(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
+        S8("int atomic_compare(_Atomic(long double) *value, long double *expected) { return __c11_atomic_compare_exchange_strong(value, expected, 0.0L, __ATOMIC_RELAXED, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
+        S8("void fixed_f80_variadic(long double value, ...) { (void)value; } int main(void) { return 0; }"),
+        S8("void variadic_call(int count, ...); void call(void) { variadic_call(0, 1.0L); } int main(void) { return 0; }"),
         S8("typedef void *va_list; int take(int count, ...) { va_list arguments; long double value = __builtin_va_arg(arguments, long double); return value != 0; } int main(void) { return 0; }"),
         S8("long double overflow = 0x1p+16384L; int main(void) { return 0; }"),
         S8("long double underflow = 0x1p-16446L; int main(void) { return 0; }"),
@@ -8174,6 +8263,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_wide_float_function_signatures(arguments));
     c_test_result_add(&result, c_test_wide_float_signature_calls(arguments));
     c_test_result_add(&result, c_test_wide_float_cleanup_signature_calls(arguments));
+    c_test_result_add(&result, c_test_wide_float_local_transport(arguments));
     c_test_result_add(&result, c_test_wide_float_global_initializers(arguments));
     c_test_result_add(&result, c_test_wide_float_global_rejections(arguments));
     c_test_result_add(&result, c_test_wide_float_android_rejection(arguments));

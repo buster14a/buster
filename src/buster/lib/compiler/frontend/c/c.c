@@ -17790,6 +17790,44 @@ BUSTER_GLOBAL_LOCAL bool c_ir_type_contains_wide_float(IrProgram* program, CIrWi
     return cache->state[root_type.value] == C_IR_WIDE_FLOAT_UNSUPPORTED;
 }
 
+// The C frontend only exposes the canonical x87 spelling on a target whose
+// selected ABI actually carries it.  The target layout is the frontend's
+// source of truth for the spelling; the ABI classifier below is the source of
+// truth for how a value with that spelling crosses a function boundary.
+BUSTER_GLOBAL_LOCAL bool c_ir_target_supports_f80(Target target)
+{
+    TargetDataLayout layout = target_data_layout(target);
+    bool supported_os = target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+    return target.cpu_arch == CPU_ARCH_X86_64 && supported_os &&
+           ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_SYSTEMV_X86_64 &&
+           layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 80 && layout.long_double_type.size == 16 &&
+           layout.long_double_type.alignment == 16;
+}
+
+// A wide value is safe for the canonical x86 backend only when the existing
+// SysV classifier proves the complete value is the two-part x87 return shape.
+// This intentionally asks the classifier rather than walking fields here:
+// nested one-field wrappers, one-element arrays, and same-representation
+// unions are admitted exactly when their ABI classes match the scalar case;
+// mixed or offset aggregates become MEMORY/INTEGER and are rejected.
+BUSTER_GLOBAL_LOCAL bool c_ir_type_is_f80_x87_shape(IrProgram* program, CIrWideFloatCache* wide_float_cache, IrTypeId type_id, Target target)
+{
+    if (!program || !c_ir_target_supports_f80(target) || !c_ir_type_contains_wide_float(program, wide_float_cache, type_id))
+    {
+        return false;
+    }
+    IrType* type = ir_type_from_id(&program->types, type_id);
+    if (!type || type->is_atomic || !type->layout.resolved || type->layout.size != 16 || type->layout.alignment != 16 ||
+        (type->kind != IR_TYPE_FLOAT && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_ARRAY))
+    {
+        return false;
+    }
+    IrAbiValue abi = ir_type_abi_value(program, type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+    return !abi.memory && !abi.indirect && abi.part_count == 2 && abi.parts[0].abi_class == IR_ABI_CLASS_X87 &&
+           abi.parts[1].abi_class == IR_ABI_CLASS_X87_UP && abi.parts[0].value_offset == 0 && abi.parts[1].value_offset == 8 &&
+           abi.parts[0].size == 8 && abi.parts[1].size == 8;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_ir_signature_type_supported(IrProgram* program, CIrWideFloatCache* wide_float_cache, IrTypeId type_id,
                                                        bool result_type, Target target)
 {
@@ -17806,18 +17844,27 @@ BUSTER_GLOBAL_LOCAL bool c_ir_signature_type_supported(IrProgram* program, CIrWi
     {
         return true;
     }
-    if (c_ir_type_contains_wide_float(program, wide_float_cache, type_id))
-    {
-        return false;
-    }
     IrAbiValue abi = ir_type_abi_value(program, type_id, ir_abi_convention_for_target(target),
                                        result_type ? IR_ABI_USE_RESULT : IR_ABI_USE_ARGUMENT);
+    if (c_ir_type_contains_wide_float(program, wide_float_cache, type_id))
+    {
+        if (!c_ir_type_is_f80_x87_shape(program, wide_float_cache, type_id, target))
+        {
+            return false;
+        }
+        // SysV passes both scalar f80 and ABI-proven wrappers by value in a
+        // sixteen-byte stack slot.  Results use the x87 pair checked above.
+        if (!result_type && (!abi.memory || abi.indirect || abi.part_count != 1 || abi.parts[0].abi_class != IR_ABI_CLASS_MEMORY || abi.parts[0].size != 16))
+        {
+            return false;
+        }
+    }
     return type->kind != IR_TYPE_FUNCTION && (type->kind != IR_TYPE_VECTOR || type->layout.size <= 64) &&
            (type->kind != IR_TYPE_VA_LIST || type->layout.size <= 32) && abi.part_count;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_signature_body_supported(IrProgram* program, CIrWideFloatCache* wide_float_cache, IrTypeId return_type,
-                                                        IrTypeId* parameter_types, u32 parameter_count, Target target)
+                                                        IrTypeId* parameter_types, u32 parameter_count, bool is_variadic, Target target)
 {
     if ((parameter_count && !parameter_types) || !c_ir_signature_type_supported(program, wide_float_cache, return_type, true, target))
     {
@@ -17825,6 +17872,13 @@ BUSTER_GLOBAL_LOCAL bool c_ir_signature_body_supported(IrProgram* program, CIrWi
     }
     for (u32 parameter_index = 0; parameter_index < parameter_count; parameter_index += 1)
     {
+        // The canonical SysV va_start path cannot account for a fixed x87
+        // parameter yet.  Reject the complete signature here so neither a
+        // definition nor a call reaches code generation with a late error.
+        if (is_variadic && c_ir_type_contains_wide_float(program, wide_float_cache, parameter_types[parameter_index]))
+        {
+            return false;
+        }
         if (!c_ir_signature_type_supported(program, wide_float_cache, parameter_types[parameter_index], false, target))
         {
             return false;
@@ -17918,7 +17972,7 @@ BUSTER_GLOBAL_LOCAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram
         }
     }
     result.body_supported = c_ir_signature_body_supported(program, wide_float_cache, result.return_type, result.parameter_types,
-                                                          result.parameter_count, target);
+                                                          result.parameter_count, result.is_variadic, target);
     result.valid = true;
     return result;
 }
@@ -19983,6 +20037,12 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken
     {
         return IR_VALUE_ID_INVALID;
     }
+    IrType* local_type = ir_type_from_id(&builder->program->types, type);
+    if (local_type && local_type->is_atomic && local_type->kind == IR_TYPE_FLOAT && local_type->bit_width > 64)
+    {
+        builder->failure_message = S8("C IR lowering does not yet support atomic wide floating-point objects");
+        return IR_VALUE_ID_INVALID;
+    }
     IrLocalId local_id = {
         .value = builder->function->local_count++,
     };
@@ -20246,6 +20306,11 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builde
 {
     IrType* place_type = ir_type_from_id(&builder->program->types, type);
     bool atomic = place_type && place_type->is_atomic;
+    if (atomic && c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, type))
+    {
+        builder->failure_message = S8("C IR lowering does not yet support atomic wide floating-point loads");
+        return IR_VALUE_ID_INVALID;
+    }
     IrTypeId result_type = atomic ? place_type->unqualified_type : type;
     IrValueId result = c_ir_add_result(builder, result_type);
     if (place.value < builder->function->value_count)
@@ -20386,6 +20451,15 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValue
     {
         return value;
     }
+    bool source_wide_float = source_value->kind == IR_TYPE_FLOAT && source_value->bit_width > 64;
+    bool target_wide_float = target_value->kind == IR_TYPE_FLOAT && target_value->bit_width > 64;
+    bool same_wide_float_representation = source_wide_float && target_wide_float && source_value->bit_width == target_value->bit_width &&
+                                          source_value->layout.size == target_value->layout.size;
+    if (c_ir_target_supports_f80(builder->target) && (source_wide_float || target_wide_float) && !same_wide_float_representation)
+    {
+        builder->failure_message = S8("C IR lowering does not yet support wide floating-point conversions");
+        return IR_VALUE_ID_INVALID;
+    }
     if (c_ir_value_contains_label_provenance(builder, value))
     {
         bool original_void_pointer = source_type.value == target_type.value && source_value->kind == IR_TYPE_POINTER && target_value->kind == IR_TYPE_POINTER &&
@@ -20502,6 +20576,11 @@ BUSTER_GLOBAL_LOCAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrVal
     }
     IrType* atomic_place_type = ir_type_from_id(&builder->program->types, type);
     bool atomic = atomic_place_type && atomic_place_type->is_atomic;
+    if (atomic && c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, type))
+    {
+        builder->failure_message = S8("C IR lowering does not yet support atomic wide floating-point stores");
+        return false;
+    }
     IrTypeId stored_type = atomic ? atomic_place_type->unqualified_type : type;
     if (value.value < builder->function->value_count)
     {
@@ -22288,9 +22367,8 @@ BUSTER_GLOBAL_LOCAL bool c_ir_ext80_parse_integer(String8 spelling, u64* value_o
 BUSTER_GLOBAL_LOCAL bool c_ir_ext80_static_scalar_target(Target target, IrType* type)
 {
     TargetDataLayout layout = target_data_layout(target);
-    return target.cpu_arch == CPU_ARCH_X86_64 &&
-           (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS) && type &&
-           type->kind == IR_TYPE_FLOAT && type->bit_width == 80 && type->layout.size == 16 && layout.endianness == TARGET_ENDIAN_LITTLE;
+    return c_ir_target_supports_f80(target) && type && !type->is_atomic && type->kind == IR_TYPE_FLOAT && type->bit_width == 80 &&
+           type->layout.size == 16 && layout.endianness == TARGET_ENDIAN_LITTLE;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ir_ext80_global_literal(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, u32 start, u32 end,
@@ -22429,17 +22507,55 @@ BUSTER_GLOBAL_LOCAL bool c_ir_ext80_global_literal(CIntegerIrBuilder* builder, C
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_float(CIntegerIrBuilder* builder, CToken token)
+BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_f80_constant_bits(CIntegerIrBuilder* builder, IrSourceRange source, String8 literal, u64 significand,
+                                                          u16 sign_exponent)
 {
-    f64 value = 0.0;
-    char8 suffix = 0;
-    if (!c_ir_float_parse(c_token_spelling(builder->preprocess.spelling_base, token), &value, &suffix))
+    IrType* type = ir_type_from_id(&builder->program->types, builder->long_double_type);
+    if (!type || !c_ir_target_supports_f80(builder->target) || type->kind != IR_TYPE_FLOAT || type->bit_width != 80 || type->layout.size != 16 ||
+        type->layout.alignment != 16)
     {
         return IR_VALUE_ID_INVALID;
     }
+    IrValueId result = c_ir_add_result(builder, builder->long_double_type);
+    u64* immediate = arena_allocate(builder->arena, u64, 2);
+    immediate[0] = significand;
+    immediate[1] = sign_exponent;
+    IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_CONSTANT_FLOAT, builder->long_double_type);
+    instruction.immediates = immediate;
+    instruction.immediate_count = 2;
+    instruction.result = result;
+    IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+    ir_instruction_extra_ensure(builder->arena, builder->function, id)->literal = literal;
+    builder->function->values[result.value].definition = id;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_float(CIntegerIrBuilder* builder, CToken token)
+{
+    String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
+    char8 suffix = spelling.length ? spelling.pointer[spelling.length - 1] : 0;
     IrTypeId type = suffix == 'f' || suffix == 'F' ? builder->f32_type : suffix == 'l' || suffix == 'L' ? builder->long_double_type : builder->f64_type;
     IrType* type_value = ir_type_from_id(&builder->program->types, type);
-    if (!type_value || type_value->kind != IR_TYPE_FLOAT || type_value->bit_width > 64)
+    if (!type_value || type_value->kind != IR_TYPE_FLOAT)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    if (type_value->bit_width == 80)
+    {
+        u64 significand = 0;
+        u16 sign_exponent = 0;
+        if (!c_ir_ext80_parse_long_literal(spelling, false, &significand, &sign_exponent))
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+        return c_ir_emit_f80_constant_bits(builder, c_ir_token_source_range(builder, token), spelling, significand, sign_exponent);
+    }
+    if (type_value->bit_width > 64)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    f64 value = 0.0;
+    if (!c_ir_float_parse(spelling, &value, &suffix))
     {
         return IR_VALUE_ID_INVALID;
     }
@@ -26776,6 +26892,11 @@ BUSTER_GLOBAL_LOCAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CInte
             {
                 return false;
             }
+            if (c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, atomic_type))
+            {
+                builder->failure_message = S8("C IR lowering does not yet support atomic wide floating-point builtins");
+                return false;
+            }
             IrMemoryOrder order = IR_MEMORY_ORDER_RELAXED;
             if (selected->builtin_atomic != C_IR_ATOMIC_BUILTIN_INIT && !c_ir_atomic_memory_order(builder, starts[expected_count == 5 ? 3 : expected_count - 1],
                                                                                                   ends[expected_count == 5 ? 3 : expected_count - 1], &order))
@@ -27792,7 +27913,8 @@ BUSTER_GLOBAL_LOCAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CInte
                     .is_variadic = function_type->is_variadic,
                 };
                 signature.body_supported = c_ir_signature_body_supported(builder->program, builder->wide_float_cache, signature.return_type,
-                                                                           signature.parameter_types, signature.parameter_count, builder->target);
+                                                                           signature.parameter_types, signature.parameter_count,
+                                                                           signature.is_variadic, builder->target);
                 builder->failure_token_index = selected->open_index - 1;
                 if (!c_ir_signature_call_supported(builder, signature, S8("<function pointer>")))
                 {
@@ -29059,6 +29181,38 @@ BUSTER_GLOBAL_LOCAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CCondi
             }
         }
     }
+    if (operation_type_value->kind == IR_TYPE_FLOAT && operation_type_value->bit_width > 64)
+    {
+        // A source-level negative literal is a constant spelling, not a
+        // request for runtime x87 arithmetic.  Fold only a direct f80
+        // constant by toggling its sign/exponent immediate; every variable
+        // negation and every binary/comparison operation remains rejected.
+        if (unary == IR_UNARY_INTEGER_NEGATE && operand_count == 1)
+        {
+            IrValueId operand = values[first];
+            if (operand.value < builder->function->value_count)
+            {
+                IrInstructionId definition = builder->function->values[operand.value].definition;
+                if (definition.value < builder->function->instruction_count)
+                {
+                    IrInstruction* constant = builder->function->instructions + definition.value;
+                    if (constant->opcode == IR_OPCODE_CONSTANT_FLOAT && constant->immediate_count == 2 && constant->immediates)
+                    {
+                        IrValueId negated = c_ir_emit_f80_constant_bits(builder, source, ir_instruction_extra(builder->function, definition).literal,
+                                                                         constant->immediates[0], (u16)(constant->immediates[1] ^ UINT64_C(0x8000)));
+                        if (negated.value != IR_ID_UNDERLYING_INVALID)
+                        {
+                            *value_count = first;
+                            values[(*value_count)++] = negated;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        builder->failure_message = S8("C IR lowering does not yet support wide floating-point arithmetic");
+        return false;
+    }
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, operand_count);
     for (u32 index = 0; index < operand_count; index += 1)
     {
@@ -29982,13 +30136,23 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, I
             IrValueId zero = IR_VALUE_ID_INVALID;
             if (type->kind == IR_TYPE_FLOAT)
             {
-                CToken zero_token = {
-                    .offset = C_SPELLING_FLOAT_ZERO,
-                    .length = type->bit_width == 32 ? 4u : 3u,
-                    .kind = C_TOKEN_PREPROCESSING_NUMBER,
-                };
-                zero = c_ir_emit_float(builder, zero_token);
-                zero = c_ir_emit_cast(builder, zero, task.type, c_ir_token_source_range(builder, token));
+                if (type->bit_width == 80)
+                {
+                    // The f80 constant carries the semantic ten bytes as two
+                    // integer immediates; do not route synthetic zero through
+                    // a host f64 literal or a generic floating conversion.
+                    zero = c_ir_emit_f80_constant_bits(builder, c_ir_token_source_range(builder, token), S8("0.0L"), 0, 0);
+                }
+                else
+                {
+                    CToken zero_token = {
+                        .offset = C_SPELLING_FLOAT_ZERO,
+                        .length = type->bit_width == 32 ? 4u : 3u,
+                        .kind = C_TOKEN_PREPROCESSING_NUMBER,
+                    };
+                    zero = c_ir_emit_float(builder, zero_token);
+                    zero = c_ir_emit_cast(builder, zero, task.type, c_ir_token_source_range(builder, token));
+                }
             }
             else if (type->kind == IR_TYPE_INTEGER)
             {
@@ -33292,6 +33456,14 @@ BUSTER_GLOBAL_LOCAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrVal
     IrType* type = ir_type_from_id(&builder->program->types, type_id);
     if (!type)
     {
+        return IR_VALUE_ID_INVALID;
+    }
+    // The accepted f80 subset is a byte-preserving transport type.  Truth
+    // conversion would require x87 comparison semantics, which the canonical
+    // backend deliberately does not provide.
+    if (type->kind == IR_TYPE_FLOAT && type->bit_width > 64)
+    {
+        builder->failure_message = S8("C IR lowering does not yet support wide floating-point truth conversion");
         return IR_VALUE_ID_INVALID;
     }
     if (type->kind == IR_TYPE_BOOLEAN)

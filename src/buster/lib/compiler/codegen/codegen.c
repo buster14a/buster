@@ -12422,11 +12422,27 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.error = CODEGEN_ERROR_INVALID_IR;
                             return result;
                         }
-                        if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, function->values[instruction->operands[0].value].canonical_type) ||
-                            codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type))
+                        bool source_contains_f80 = codegen_canonical_x64_type_contains_f80_cached(
+                            f80_cache, program, function->values[instruction->operands[0].value].canonical_type);
+                        bool target_contains_f80 = codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type);
+                        if (source_contains_f80 || target_contains_f80)
                         {
-                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-                            return result;
+                            if (conversion != IR_CONVERSION_IDENTITY || !source_contains_f80 || !target_contains_f80 ||
+                                result.abi != CODEGEN_ABI_X86_64_SYSTEM_V || !source_type->layout.resolved || !target_type->layout.resolved ||
+                                source_type->layout.size != 16 || target_type->layout.size != 16 ||
+                                !codegen_canonical_x64_type_is_f80_x87_shape_cached(
+                                    f80_cache, program, function->values[instruction->operands[0].value].canonical_type) ||
+                                !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, instruction->canonical_type) ||
+                                !codegen_canonical_x64_emit_f80_copy(
+                                    &buffer, X64_REGISTER_RBP,
+                                    C_X64_FRAME_DISPLACEMENT(value_offsets[instruction->operands[0].value]), X64_REGISTER_RBP,
+                                    result_displacement, &x87_stack_depth))
+                            {
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            instruction_id = instruction->next;
+                            continue;
                         }
                         bool source_integer128 = source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128;
                         bool target_integer128 = target_type->kind == IR_TYPE_INTEGER && target_type->bit_width == 128;
