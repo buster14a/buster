@@ -44,8 +44,8 @@ def generic_condition_supported(program: list[str]) -> bool:
 
 
 def generic_operand_projection_supported(row: dict[str, Any]) -> bool:
-    return all(int(operand.get("transform_count", 0)) == 0 and len(operand.get("fields", [])) == 1
-               for operand in row.get("operands", []))
+    return all(int(operand.get("transform_count", 0)) == 0 and len(operand.get("fields", [])) == 1 and
+               "simd_lane" not in operand.get("kinds", []) for operand in row.get("operands", []))
 
 
 def generic_projection_executable(row: dict[str, Any]) -> bool:
