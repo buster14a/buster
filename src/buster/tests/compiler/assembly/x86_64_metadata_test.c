@@ -1813,6 +1813,163 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_reachability_skeleton(UnitT
     return all_success;
 }
 
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_decorator_case(
+    UnitTestArguments* arguments, Target target, String8 mnemonic, u32 form_id,
+    BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+    BusterX86MetadataPhysicalAttributes attributes, String8 const* features, u32 feature_count,
+    String8 intel_source, String8 att_source, u8 const* expected, u32 expected_count)
+{
+    BusterX86MetadataPhysicalQuery physical = x86_64_metadata_test_physical_query(
+        mnemonic, operands, operand_count, attributes, features, feature_count);
+    u8 direct_bytes[32] = {0};
+    BusterX86MetadataRelocation direct_relocations[8] = {0};
+    BusterX86MetadataEmitResult direct = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+        .physical = physical,
+        .form_id = form_id,
+        .output = direct_bytes,
+        .output_capacity = BUSTER_ARRAY_LENGTH(direct_bytes),
+        .relocations = direct_relocations,
+        .relocation_capacity = BUSTER_ARRAY_LENGTH(direct_relocations),
+    });
+    AssemblyEncodeResult intel = assembly_encode(
+        arguments->arena, intel_source, (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult att = assembly_encode(
+        arguments->arena, att_source, (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    bool direct_matches = direct.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && direct.relocation_count == 0 &&
+                          x86_64_metadata_test_bytes_equal(direct_bytes, direct.byte_count, expected, expected_count);
+    bool intel_matches = intel.diagnostic_count == 0 && intel.relocation_count == 0 &&
+                         x86_64_metadata_test_bytes_equal(intel.bytes.pointer, (u32)intel.bytes.length, expected, expected_count);
+    bool att_matches = att.diagnostic_count == 0 && att.relocation_count == 0 &&
+                       x86_64_metadata_test_bytes_equal(att.bytes.pointer, (u32)att.bytes.length, expected, expected_count);
+    u32 intel_class = intel_matches ? X86_64_METADATA_SOURCE_REACHABILITY_SUCCESS
+                                    : intel.diagnostic_count ? X86_64_METADATA_SOURCE_REACHABILITY_SYNTAX_CONSTRUCTION
+                                                              : X86_64_METADATA_SOURCE_REACHABILITY_PUBLIC_GAP;
+    u32 att_class = att_matches ? X86_64_METADATA_SOURCE_REACHABILITY_SUCCESS
+                                : att.diagnostic_count ? X86_64_METADATA_SOURCE_REACHABILITY_SYNTAX_CONSTRUCTION
+                                                        : X86_64_METADATA_SOURCE_REACHABILITY_PUBLIC_GAP;
+    arguments->show(arguments, S8("X86_SOURCE_DECORATOR form={u32} direct={u32} intel={u32} att={u32} intel_class={u32} att_class={u32} bytes={u32}\n"),
+                    form_id, direct_matches, intel_matches, att_matches, intel_class, att_class, expected_count);
+    return direct_matches && intel_matches && att_matches;
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_decorator_reachability(UnitTestArguments* arguments)
+{
+    Target target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    target.cpu_features_explicit = true;
+    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+        TARGET_CPU_FEATURE_X86_SSE2,
+        TARGET_CPU_FEATURE_X86_AVX,
+        TARGET_CPU_FEATURE_X86_AVX512F,
+        TARGET_CPU_FEATURE_X86_AVX512VL,
+        TARGET_CPU_FEATURE_X86_AVX512BW,
+        TARGET_CPU_FEATURE_X86_AVX512DQ,
+        TARGET_CPU_FEATURE_X86_APX,
+        TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF,
+    }, 8);
+    String8 wildcard[1] = {S8("*")};
+    bool success = true;
+
+    // EVEX mask+zeroing: Intel writes decorators after the destination while
+    // AT&T writes them after the destination's final operand.
+    BusterX86MetadataPhysicalOperand masked_add[3] = {
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 2, 512),
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 3, 512),
+    };
+    BusterX86MetadataPhysicalAttributes mask_zero = {
+        .decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK | BUSTER_X86_METADATA_DECORATOR_ZEROING,
+        .has_mask_register = true,
+        .mask_register = 1,
+        .zeroing = true,
+    };
+    u8 mask_zero_bytes[] = {0x62, 0xf1, 0x6c, 0xc9, 0x58, 0xc3};
+    success &= x86_64_metadata_test_source_decorator_case(
+        arguments, target, S8("VADDPS"), 6938, masked_add, BUSTER_ARRAY_LENGTH(masked_add), mask_zero, wildcard,
+        BUSTER_ARRAY_LENGTH(wildcard), S8("vaddps zmm0 {k1}{z}, zmm2, zmm3\n"),
+        S8("vaddps %zmm3, %zmm2, %zmm0 {%k1}{z}\n"), mask_zero_bytes, BUSTER_ARRAY_LENGTH(mask_zero_bytes));
+
+    // SAE on a mask-producing compare has distinct Intel/AT&T placement.
+    BusterX86MetadataPhysicalOperand sae_compare[4] = {
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK, 1, 64),
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 2, 512),
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 3, 512),
+        x86_64_metadata_test_physical_imm(7, 8),
+    };
+    BusterX86MetadataPhysicalAttributes sae = {
+        .decorator_flags = BUSTER_X86_METADATA_DECORATOR_SAE,
+        .sae = true,
+    };
+    u8 sae_bytes[] = {0x62, 0xf1, 0x6c, 0x18, 0xc2, 0xcb, 0x07};
+    success &= x86_64_metadata_test_source_decorator_case(
+        arguments, target, S8("VCMPPS"), 6967, sae_compare, BUSTER_ARRAY_LENGTH(sae_compare), sae, wildcard,
+        BUSTER_ARRAY_LENGTH(wildcard), S8("vcmpps k1, zmm2, zmm3, {sae}, 7\n"),
+        S8("vcmpps $7, {sae}, %zmm3, %zmm2, %k1\n"), sae_bytes, BUSTER_ARRAY_LENGTH(sae_bytes));
+
+    // The metadata table exposes all four explicit EVEX rounding controls on
+    // the fixed-round VADDPS form.  Keep one source pair per mode so each
+    // control value is independently checked in both dialects.
+    BusterX86MetadataPhysicalOperand rounded_add[3] = {
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 1, 512),
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 2, 512),
+    };
+    static struct
+    {
+        u8 mode;
+        String8 decorator;
+        u8 bytes[6];
+    } const rounding_cases[] = {
+        {BUSTER_X86_METADATA_ROUNDING_NEAREST, S8_INITIALIZER("rn-sae"), {0x62, 0xf1, 0x74, 0x18, 0x58, 0xc2}},
+        {BUSTER_X86_METADATA_ROUNDING_DOWN, S8_INITIALIZER("rd-sae"), {0x62, 0xf1, 0x74, 0x38, 0x58, 0xc2}},
+        {BUSTER_X86_METADATA_ROUNDING_UP, S8_INITIALIZER("ru-sae"), {0x62, 0xf1, 0x74, 0x58, 0x58, 0xc2}},
+        {BUSTER_X86_METADATA_ROUNDING_ZERO, S8_INITIALIZER("rz-sae"), {0x62, 0xf1, 0x74, 0x78, 0x58, 0xc2}},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rounding_cases); index += 1)
+    {
+        BusterX86MetadataPhysicalAttributes rounding = {
+            .decorator_flags = BUSTER_X86_METADATA_DECORATOR_ROUNDING,
+            .rounding_mode = rounding_cases[index].mode,
+        };
+        String8 intel_source = string_format(arguments->arena, S8("vaddps zmm0, zmm1, zmm2, {{{S8}}}\n"),
+                                              rounding_cases[index].decorator);
+        String8 att_source = string_format(arguments->arena, S8("vaddps {{{S8}}}, %zmm2, %zmm1, %zmm0\n"),
+                                            rounding_cases[index].decorator);
+        success &= x86_64_metadata_test_source_decorator_case(
+            arguments, target, S8("VADDPS"), 6939, rounded_add, BUSTER_ARRAY_LENGTH(rounded_add), rounding, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), intel_source, att_source, rounding_cases[index].bytes,
+            BUSTER_ARRAY_LENGTH(rounding_cases[index].bytes));
+    }
+
+    // APX no-flags (`{nf}`) is a control prefix rather than a mask decorator.
+    BusterX86MetadataPhysicalOperand no_flags_add[2] = {
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 16, 32),
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 17, 32),
+    };
+    u8 no_flags_bytes[] = {0x62, 0xec, 0x7c, 0x0c, 0x01, 0xc8};
+    success &= x86_64_metadata_test_source_decorator_case(
+        arguments, target, S8("ADD"), 561, no_flags_add, BUSTER_ARRAY_LENGTH(no_flags_add),
+        (BusterX86MetadataPhysicalAttributes){.no_flags = true}, wildcard, BUSTER_ARRAY_LENGTH(wildcard),
+        S8("{nf} add r16d, r17d\n"), S8("{nf} addl %r17d, %r16d\n"), no_flags_bytes,
+        BUSTER_ARRAY_LENGTH(no_flags_bytes));
+
+    // APX DFV/SCC carries the data-flow value as a pseudo-operand in Intel
+    // syntax and as an immediate prefix in AT&T syntax.
+    BusterX86MetadataPhysicalOperand ccmp[2] = {
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 2, 8),
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 14, 8),
+    };
+    u8 ccmp_bytes[] = {0x62, 0x74, 0x14, 0x02, 0x38, 0xf2};
+    success &= x86_64_metadata_test_source_decorator_case(
+        arguments, target, S8("CCMPB"), 779, ccmp, BUSTER_ARRAY_LENGTH(ccmp),
+        (BusterX86MetadataPhysicalAttributes){.has_dfv = true, .dfv = 2}, wildcard, BUSTER_ARRAY_LENGTH(wildcard),
+        S8("ccmpb 2, dl, r14b\n"), S8("ccmpb $2, %r14b, %dl\n"), ccmp_bytes,
+        BUSTER_ARRAY_LENGTH(ccmp_bytes));
+    return success;
+}
+
 BUSTER_GLOBAL_LOCAL u8 x86_64_metadata_test_relocation_width(AssemblyRelocationKind kind)
 {
     switch (kind)
@@ -2114,6 +2271,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
 
     BUSTER_TEST(arguments, x86_64_metadata_test_source_reachability_skeleton(arguments));
+    BUSTER_TEST(arguments, x86_64_metadata_test_source_decorator_reachability(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_source_memory_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_source_immediate_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_source_relative_absolute_skeleton(arguments));
