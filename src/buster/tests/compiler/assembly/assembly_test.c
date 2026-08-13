@@ -2802,6 +2802,65 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    invalid_sha512su_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
 
+    AssemblyEncodeResult aarch64_sha512h = assembly_encode(
+        arguments->arena,
+        S8("sha512h q0, q1, v2.2d\n"
+           "sha512h2 q0, q1, v2.2d\n"),
+        (AssemblyEncodeOptions){.target = aarch64_sha3_target});
+    static u8 const expected_aarch64_sha512h[] = {
+        0x20, 0x80, 0x62, 0xce,
+        0x20, 0x84, 0x62, 0xce,
+    };
+    BUSTER_TEST(arguments, aarch64_sha512h.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_sha512h.bytes, expected_aarch64_sha512h,
+                                                         sizeof(expected_aarch64_sha512h)));
+    AssemblyEncodeResult aarch64_sha512h_case_insensitive = assembly_encode(
+        arguments->arena, S8("SHA512H Q0, Q1, V2.2D\n"), (AssemblyEncodeOptions){.target = aarch64_sha3_target});
+    BUSTER_TEST(arguments, aarch64_sha512h_case_insensitive.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_sha512h_case_insensitive.bytes,
+                                                         expected_aarch64_sha512h, 4));
+    AssemblyEncodeResult aarch64_sha512h_boundary = assembly_encode(
+        arguments->arena,
+        S8("sha512h q31, q30, v29.2d\n"
+           "sha512h2 q31, q30, v29.2d\n"),
+        (AssemblyEncodeOptions){.target = aarch64_sha3_target});
+    static u8 const expected_aarch64_sha512h_boundary[] = {
+        0xdf, 0x83, 0x7d, 0xce,
+        0xdf, 0x87, 0x7d, 0xce,
+    };
+    BUSTER_TEST(arguments, aarch64_sha512h_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_sha512h_boundary.bytes,
+                                                         expected_aarch64_sha512h_boundary,
+                                                         sizeof(expected_aarch64_sha512h_boundary)));
+    Target aarch64_no_sha512h_sha3 = aarch64_sha3_target;
+    aarch64_no_sha512h_sha3.cpu_features =
+        target_cpu_features_remove(aarch64_no_sha512h_sha3.cpu_features, TARGET_CPU_FEATURE_AARCH64_SHA3);
+    AssemblyEncodeResult aarch64_sha512h_without_feature = assembly_encode(
+        arguments->arena, S8("sha512h q0, q1, v2.2d\n"), (AssemblyEncodeOptions){.target = aarch64_no_sha512h_sha3});
+    BUSTER_TEST(arguments, aarch64_sha512h_without_feature.diagnostic_count == 1 &&
+                               aarch64_sha512h_without_feature.bytes.length == 0 &&
+                               aarch64_sha512h_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    static String8 const invalid_aarch64_sha512h[] = {
+        S8_INITIALIZER("sha512h q0.2d, q1, v2.2d\n"),
+        S8_INITIALIZER("sha512h v0, q1, v2.2d\n"),
+        S8_INITIALIZER("sha512h q0, v1, v2.2d\n"),
+        S8_INITIALIZER("sha512h q0, q1, v2\n"),
+        S8_INITIALIZER("sha512h q0, q1, v2.16b\n"),
+        S8_INITIALIZER("sha512h q0, q1\n"),
+        S8_INITIALIZER("sha512h q0, q1, v2.2d, v3.2d\n"),
+        S8_INITIALIZER("sha512h q32, q1, v2.2d\n"),
+        S8_INITIALIZER("sha512h q0, q32, v2.2d\n"),
+        S8_INITIALIZER("sha512h q0, q1, v32.2d\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_sha512h); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_sha512h_case = assembly_encode(
+            arguments->arena, invalid_aarch64_sha512h[invalid_index],
+            (AssemblyEncodeOptions){.target = aarch64_sha3_target});
+        BUSTER_TEST(arguments, invalid_sha512h_case.diagnostic_count == 1 && invalid_sha512h_case.bytes.length == 0 &&
+                                   invalid_sha512h_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
     BusterAarch64SyntaxMnemonicRange csel_range = {0};
     BUSTER_TEST(arguments, buster_aarch64_syntax_mnemonic_lookup(S8("csel"), &csel_range) && csel_range.candidate_count > 0);
     u32 csel_row = UINT32_MAX;
