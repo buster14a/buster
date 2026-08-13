@@ -1685,6 +1685,255 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_reachability_skeleton(UnitT
     return all_success;
 }
 
+BUSTER_GLOBAL_LOCAL u8 x86_64_metadata_test_relocation_width(AssemblyRelocationKind kind)
+{
+    switch (kind)
+    {
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE8:
+    case ASSEMBLY_RELOCATION_X86_PC8: return 1;
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE16:
+    case ASSEMBLY_RELOCATION_X86_PC16: return 2;
+    case ASSEMBLY_RELOCATION_X86_PC32:
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32:
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED:
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32_ZERO_EXTENDED: return 4;
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE64:
+    case ASSEMBLY_RELOCATION_X86_PC64: return 8;
+    default: return 0;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_metadata_relocation_kind(u8 metadata_kind, AssemblyRelocationKind* result)
+{
+    if (!result) return false;
+    switch ((BusterX86MetadataRelocationKind)metadata_kind)
+    {
+    case BUSTER_X86_METADATA_RELOCATION_ABSOLUTE8:
+        *result = ASSEMBLY_RELOCATION_X86_ABSOLUTE8;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_ABSOLUTE16:
+        *result = ASSEMBLY_RELOCATION_X86_ABSOLUTE16;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32:
+        *result = ASSEMBLY_RELOCATION_X86_ABSOLUTE32;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_ABSOLUTE64:
+        *result = ASSEMBLY_RELOCATION_X86_ABSOLUTE64;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED:
+        *result = ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_ZERO_EXTENDED:
+        *result = ASSEMBLY_RELOCATION_X86_ABSOLUTE32_ZERO_EXTENDED;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_PC8:
+        *result = ASSEMBLY_RELOCATION_X86_PC8;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_PC16:
+        *result = ASSEMBLY_RELOCATION_X86_PC16;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_PC32:
+        *result = ASSEMBLY_RELOCATION_X86_PC32;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_PC64:
+        *result = ASSEMBLY_RELOCATION_X86_PC64;
+        return true;
+    case BUSTER_X86_METADATA_RELOCATION_KIND_COUNT: break;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_relocation_case(
+    Arena* arena, Target target, String8 source, AssemblySyntax syntax, u32 form_id,
+    BusterX86MetadataPhysicalQuery direct_query, AssemblyRelocationKind expected_kind)
+{
+    u8 direct_bytes[64] = {0};
+    BusterX86MetadataRelocation direct_relocations[8] = {0};
+    BusterX86MetadataEmitResult direct = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+        .physical = direct_query,
+        .form_id = form_id,
+        .output = direct_bytes,
+        .output_capacity = BUSTER_ARRAY_LENGTH(direct_bytes),
+        .relocations = direct_relocations,
+        .relocation_capacity = BUSTER_ARRAY_LENGTH(direct_relocations),
+    });
+    AssemblyEncodeResult encoded = assembly_encode(arena, source, (AssemblyEncodeOptions){.target = target, .syntax = syntax});
+    bool success = direct.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && encoded.diagnostic_count == 0;
+    if (!success) return false;
+
+    bool expects_relocation = expected_kind != ASSEMBLY_RELOCATION_COUNT;
+    success &= direct.relocation_count == (expects_relocation ? 1u : 0u);
+    success &= encoded.relocation_count == (expects_relocation ? 1u : 0u);
+    if (!success) return false;
+    if (expects_relocation)
+    {
+        BusterX86MetadataRelocation metadata = direct_relocations[0];
+        AssemblyRelocation source_relocation = encoded.relocations[0];
+        AssemblyRelocationKind metadata_kind = ASSEMBLY_RELOCATION_COUNT;
+        success &= x86_64_metadata_test_metadata_relocation_kind(metadata.kind, &metadata_kind);
+        success &= metadata_kind == expected_kind && source_relocation.kind == expected_kind;
+        success &= metadata.width == x86_64_metadata_test_relocation_width(expected_kind);
+        success &= source_relocation.offset == metadata.offset && source_relocation.addend == metadata.addend;
+        if (source_relocation.symbol >= encoded.symbol_count || !encoded.symbols) return false;
+        success &= string_equal(encoded.symbols[source_relocation.symbol].name, metadata.symbol);
+        if (!success) return false;
+    }
+
+    // Compare the resolved instruction bytes, but deliberately exclude the
+    // relocation field itself.  The target semantics above (kind, width,
+    // offset, addend, and symbol name) are the oracle for that field rather
+    // than its zero-filled placeholder spelling.
+    success &= encoded.bytes.length == direct.byte_count;
+    if (!success) return false;
+    for (u32 byte_index = 0; byte_index < direct.byte_count; byte_index += 1)
+    {
+        bool in_relocation = false;
+        if (expects_relocation)
+        {
+            u32 offset = direct_relocations[0].offset;
+            u32 width = direct_relocations[0].width;
+            in_relocation = byte_index >= offset && byte_index < offset + width;
+        }
+        if (!in_relocation && encoded.bytes.pointer[byte_index] != direct_bytes[byte_index]) return false;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_relative_absolute_skeleton(UnitTestArguments* arguments)
+{
+    Target target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_INTEL_DIAMOND_RAPIDS,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    String8 wildcard[1] = {S8("*")};
+    bool all_success = true;
+
+    // A CS branch-hint prefix forces the metadata source path and retains the
+    // short conditional form.  The local label checks the fully resolved
+    // displacement in both source dialects.
+    BusterX86MetadataPhysicalOperand short_local = x86_64_metadata_test_physical_relative(-3, 8);
+    BusterX86MetadataPhysicalQuery short_local_query = x86_64_metadata_test_physical_query(
+        S8("JZ"), &short_local, 1,
+        (BusterX86MetadataPhysicalAttributes){.branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NOT_TAKEN}, wildcard,
+        BUSTER_ARRAY_LENGTH(wildcard));
+    static String8 const short_local_source = S8_INITIALIZER("target:\ncs jz target\n");
+    static AssemblySyntax const syntaxes[] = {ASSEMBLY_SYNTAX_INTEL, ASSEMBLY_SYNTAX_ATT};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(syntaxes); index += 1)
+    {
+        bool case_success = x86_64_metadata_test_source_relocation_case(
+            arguments->arena, target, short_local_source, syntaxes[index], 9805, short_local_query,
+            ASSEMBLY_RELOCATION_COUNT);
+        all_success &= case_success;
+        arguments->show(arguments, S8("X86_SOURCE_RELATIVE_LOCAL syntax={u32} form={u32} success={u32}\n"),
+                        syntaxes[index], 9805, case_success);
+    }
+
+    // A symbolic short displacement carries a non-zero addend.  This keeps
+    // the metadata PC8 relocation and the public source relocation aligned in
+    // both dialects without comparing their placeholder bytes.
+    BusterX86MetadataPhysicalOperand short_symbol = {
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE,
+        .width = 8,
+        .symbol = S8("external"),
+        .addend = 7,
+        .has_symbol = true,
+    };
+    BusterX86MetadataPhysicalQuery short_symbol_query = x86_64_metadata_test_physical_query(
+        S8("JZ"), &short_symbol, 1,
+        (BusterX86MetadataPhysicalAttributes){.branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NOT_TAKEN}, wildcard,
+        BUSTER_ARRAY_LENGTH(wildcard));
+    static String8 const short_symbol_source = S8_INITIALIZER("cs jz external+7\n");
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(syntaxes); index += 1)
+    {
+        bool case_success = x86_64_metadata_test_source_relocation_case(
+            arguments->arena, target, short_symbol_source, syntaxes[index], 9805, short_symbol_query,
+            ASSEMBLY_RELOCATION_X86_PC8);
+        all_success &= case_success;
+        arguments->show(arguments, S8("X86_SOURCE_RELATIVE_ADDEND syntax={u32} form={u32} success={u32}\n"),
+                        syntaxes[index], 9805, case_success);
+    }
+
+    // Plain `jmp expression` is intentionally the handwritten near-default,
+    // not a short-form candidate: assembly_x86_instruction_size assigns an
+    // expression operand five bytes, and the x86 branch in
+    // assembly_instructions_emit writes E9 plus rel32 before metadata
+    // fallback is considered.  The local spelling below therefore checks an
+    // exact five-byte E9 encoding against form 10060; the external spelling
+    // checks the source/direct relocation contract and its addend in Intel and
+    // AT&T syntax.
+    BusterX86MetadataPhysicalOperand near_local = x86_64_metadata_test_physical_relative(-5, 32);
+    BusterX86MetadataPhysicalQuery near_local_query = x86_64_metadata_test_physical_query(
+        S8("JMP"), &near_local, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard));
+    BusterX86MetadataSelectResult near_select = buster_x86_metadata_select_form(near_local_query);
+    bool near_form_selected = near_select.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && near_select.form_id == 10060 &&
+                              near_select.selected_byte_count == 5;
+    all_success &= near_form_selected;
+    if (near_form_selected)
+    {
+        static String8 const near_local_source = S8_INITIALIZER("target:\njmp target\n");
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(syntaxes); index += 1)
+        {
+            bool case_success = x86_64_metadata_test_source_relocation_case(
+                arguments->arena, target, near_local_source, syntaxes[index], near_select.form_id,
+                near_local_query, ASSEMBLY_RELOCATION_COUNT);
+            all_success &= case_success;
+            arguments->show(arguments, S8("X86_SOURCE_RELATIVE_NEAR_LOCAL syntax={u32} form={u32} success={u32}\n"),
+                            syntaxes[index], near_select.form_id, case_success);
+        }
+    }
+    BusterX86MetadataPhysicalOperand near_symbol = {
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE,
+        .width = 32,
+        .symbol = S8("external"),
+        .addend = 7,
+        .has_symbol = true,
+    };
+    BusterX86MetadataPhysicalQuery near_symbol_query = x86_64_metadata_test_physical_query(
+        S8("JMP"), &near_symbol, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard));
+    if (near_form_selected)
+    {
+        static String8 const near_symbol_source = S8_INITIALIZER("jmp external+7\n");
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(syntaxes); index += 1)
+        {
+            bool case_success = x86_64_metadata_test_source_relocation_case(
+                arguments->arena, target, near_symbol_source, syntaxes[index], near_select.form_id,
+                near_symbol_query, ASSEMBLY_RELOCATION_X86_PC32);
+            all_success &= case_success;
+            arguments->show(arguments, S8("X86_SOURCE_RELATIVE_NEAR_ADDEND syntax={u32} form={u32} success={u32}\n"),
+                            syntaxes[index], near_select.form_id, case_success);
+        }
+    }
+
+    // JMPABS is an absolute (not PC-relative) metadata operand.  AT&T marks
+    // that expression with '$'; Intel leaves it bare.  The ABSOLUTE64 kind
+    // and addend make this distinction explicit at the public source boundary.
+    BusterX86MetadataPhysicalOperand absolute_symbol = {
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_ABSOLUTE,
+        .width = 64,
+        .symbol = S8("absolute_target"),
+        .addend = 7,
+        .has_symbol = true,
+    };
+    BusterX86MetadataPhysicalQuery absolute_query = x86_64_metadata_test_physical_query(
+        S8("JMPABS"), &absolute_symbol, 1, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+        BUSTER_ARRAY_LENGTH(wildcard));
+    static String8 const absolute_sources[] = {
+        S8_INITIALIZER("jmpabs absolute_target+7\n"),
+        S8_INITIALIZER("jmpabs $absolute_target+7\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(syntaxes); index += 1)
+    {
+        bool case_success = x86_64_metadata_test_source_relocation_case(
+            arguments->arena, target, absolute_sources[index], syntaxes[index], 2931, absolute_query,
+            ASSEMBLY_RELOCATION_X86_ABSOLUTE64);
+        all_success &= case_success;
+        arguments->show(arguments, S8("X86_SOURCE_ABSOLUTE syntax={u32} form={u32} success={u32}\n"),
+                        syntaxes[index], 2931, case_success);
+    }
+    return all_success;
+}
+
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArguments* arguments)
 {
     u32 emitted = 0;
@@ -1739,6 +1988,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_64_metadata_test_source_reachability_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_source_memory_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_source_immediate_skeleton(arguments));
+    BUSTER_TEST(arguments, x86_64_metadata_test_source_relative_absolute_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_register_only_census(arguments));
 
     {
