@@ -1,6 +1,5 @@
 #include "c_internal.h"
 
-#line 43 "src/buster/lib/compiler/frontend/c/c.c"
 // Locations are recorded as checkpoints instead of one entry per translated
 // byte: within a run the original offset and the column both advance one per
 // output byte and the line is constant, so a checkpoint is needed only where

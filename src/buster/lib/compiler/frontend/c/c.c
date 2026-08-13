@@ -3,13 +3,12 @@
 // Keep the frontend historical declaration order and one-translation-unit
 // linkage while making the large implementation mechanically navigable. The
 // same .c files are included here in historical order for unity builds and are
-// compiled as independent sources in non-unity builds. Each starts with a
-// #line back to this file so __FILE__/__LINE__ and diagnostics retain the c.c
-// contract.
+// compiled as independent sources in non-unity builds. Each implementation
+// owns its physical source path and line numbers in both modes so debuggers,
+// profilers, and diagnostics point at the split file that contains the code.
 #include "c_source.c"
 #include "c_parse.c"
 #include "c_gen.c"
-#line 48383 "src/buster/lib/compiler/frontend/c/c.c"
 CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target)
 {
     CIRLowerResult result = {0};

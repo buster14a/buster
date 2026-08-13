@@ -1,6 +1,5 @@
 #include "c_internal.h"
 
-#line 17159 "src/buster/lib/compiler/frontend/c/c.c"
 BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
 
 // Preprocess file indices are registered as IR sources in table order, so a

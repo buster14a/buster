@@ -1,6 +1,5 @@
 #include "c_internal.h"
 
-#line 6333 "src/buster/lib/compiler/frontend/c/c.c"
 BUSTER_C_INTERNAL bool c_declaration_keyword(String8 spelling)
 {
     if (!c_declaration_keyword_slots_built)
@@ -9952,7 +9951,6 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
     }
     return result;
 }
-#line 16465 "src/buster/lib/compiler/frontend/c/c.c"
 BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out);
 
 BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)
@@ -10647,7 +10645,6 @@ CParseResult c_parse(Arena* arena, CPreprocessResult preprocess)
 }
 
 #if !BUSTER_UNITY_BUILD
-#line 48383 "src/buster/lib/compiler/frontend/c/c.c"
 CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target)
 {
     CIRLowerResult result = {0};
