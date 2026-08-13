@@ -8415,6 +8415,11 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         // no ptr qualifier, so resolve an unsized memory operand here; an
         // explicit q suffix remains accepted by the generic alias path.
         implicit_memory_width = 64;
+    else if (implicit_att_memory &&
+             (assembly_word_equal(mnemonic, S8("tileloaddrs")) || assembly_word_equal(mnemonic, S8("tileloaddrst1"))))
+        // AMX MOVRS has one fixed u32 memory schema. AT&T carries no `ptr`
+        // qualifier, so resolve the unsized address before metadata selection.
+        implicit_memory_width = 32;
     else if (cet_unsized_intel) implicit_memory_width = 64;
     if (implicit_memory_width)
     {

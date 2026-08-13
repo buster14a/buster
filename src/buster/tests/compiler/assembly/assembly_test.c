@@ -4121,6 +4121,63 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     {
         BUSTER_TEST(arguments, invalid_amx_rip_att.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
+    {
+        Target amx_movrs_target = advanced_target;
+        amx_movrs_target.cpu_features = target_cpu_features_add(amx_movrs_target.cpu_features,
+                                                                TARGET_CPU_FEATURE_X86_AMX_MOVRS);
+        u8 expected_tileloaddrs_apx[] = {0x62, 0xfa, 0x7f, 0x08, 0x4a, 0x04, 0x20};
+        u8 expected_tileloaddrst1_apx[] = {0x62, 0xfa, 0x7d, 0x08, 0x4a, 0x04, 0x20};
+        AssemblyEncodeResult tileloaddrs_apx_intel = assembly_encode(
+            arguments->arena, S8("tileloaddrs tmm0, dword ptr [r16]\n"),
+            (AssemblyEncodeOptions){.target = amx_movrs_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult tileloaddrs_apx_att = assembly_encode(
+            arguments->arena, S8("tileloaddrs (%r16), %tmm0\n"),
+            (AssemblyEncodeOptions){.target = amx_movrs_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        AssemblyEncodeResult tileloaddrst1_apx_intel = assembly_encode(
+            arguments->arena, S8("tileloaddrst1 tmm0, dword ptr [r16]\n"),
+            (AssemblyEncodeOptions){.target = amx_movrs_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult tileloaddrst1_apx_att = assembly_encode(
+            arguments->arena, S8("tileloaddrst1 (%r16), %tmm0\n"),
+            (AssemblyEncodeOptions){.target = amx_movrs_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, tileloaddrs_apx_intel.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(tileloaddrs_apx_intel.bytes, expected_tileloaddrs_apx,
+                                                             sizeof(expected_tileloaddrs_apx)));
+        BUSTER_TEST(arguments, tileloaddrs_apx_att.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(tileloaddrs_apx_att.bytes, expected_tileloaddrs_apx,
+                                                             sizeof(expected_tileloaddrs_apx)));
+        BUSTER_TEST(arguments, tileloaddrst1_apx_intel.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(tileloaddrst1_apx_intel.bytes, expected_tileloaddrst1_apx,
+                                                             sizeof(expected_tileloaddrst1_apx)));
+        BUSTER_TEST(arguments, tileloaddrst1_apx_att.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(tileloaddrst1_apx_att.bytes, expected_tileloaddrst1_apx,
+                                                             sizeof(expected_tileloaddrst1_apx)));
+        AssemblyEncodeResult tileloaddrs_missing_movrs = assembly_encode(
+            arguments->arena, S8("tileloaddrs tmm0, dword ptr [r16]\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, tileloaddrs_missing_movrs.bytes.length == 0);
+        BUSTER_TEST(arguments, tileloaddrs_missing_movrs.diagnostic_count == 1);
+        BUSTER_TEST(arguments,
+                    tileloaddrs_missing_movrs.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+        Target amx_movrs_without_apx = amx_movrs_target;
+        amx_movrs_without_apx.cpu_features =
+            target_cpu_features_remove(amx_movrs_without_apx.cpu_features, TARGET_CPU_FEATURE_X86_APX);
+        amx_movrs_without_apx.cpu_features = target_cpu_features_remove(amx_movrs_without_apx.cpu_features,
+                                                                        TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF);
+        u8 expected_tileloaddrs_vex[] = {0xc4, 0xe2, 0x7b, 0x4a, 0x04, 0x20};
+        u8 expected_tileloaddrst1_vex[] = {0xc4, 0xe2, 0x79, 0x4a, 0x04, 0x20};
+        AssemblyEncodeResult tileloaddrs_att_without_apx = assembly_encode(
+            arguments->arena, S8("tileloaddrs (%rax), %tmm0\n"),
+            (AssemblyEncodeOptions){.target = amx_movrs_without_apx, .syntax = ASSEMBLY_SYNTAX_ATT});
+        AssemblyEncodeResult tileloaddrst1_att_without_apx = assembly_encode(
+            arguments->arena, S8("tileloaddrst1 (%rax), %tmm0\n"),
+            (AssemblyEncodeOptions){.target = amx_movrs_without_apx, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, tileloaddrs_att_without_apx.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(tileloaddrs_att_without_apx.bytes, expected_tileloaddrs_vex,
+                                                             sizeof(expected_tileloaddrs_vex)));
+        BUSTER_TEST(arguments, tileloaddrst1_att_without_apx.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(tileloaddrst1_att_without_apx.bytes, expected_tileloaddrst1_vex,
+                                                             sizeof(expected_tileloaddrst1_vex)));
+    }
 
     AssemblyEncodeResult invalid_amx_repeated_tiles = assembly_encode(
         arguments->arena,

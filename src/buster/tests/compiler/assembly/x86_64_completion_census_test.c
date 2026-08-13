@@ -160,8 +160,9 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, 1436, false);
     BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
     {
-        u32 const apx_amx_form_ids[] = {490, 493, 494};
-        u8 const apx_amx_opcode_prefixes[] = {0x7f, 0x7d, 0x7e};
+        u32 const apx_amx_form_ids[] = {490, 491, 492, 493, 494};
+        u8 const apx_amx_opcode_prefixes[] = {0x7f, 0x7f, 0x7d, 0x7d, 0x7e};
+        u8 const apx_amx_opcodes[] = {0x4b, 0x4a, 0x4a, 0x4b, 0x4b};
         for (probe_index = 0; probe_index < BUSTER_ARRAY_LENGTH(apx_amx_form_ids); probe_index += 1)
         {
             probe_form_id = apx_amx_form_ids[probe_index];
@@ -183,7 +184,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, probe_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && probe_emit.byte_count == 7 &&
                                      probe_bytes[0] == 0x62 && probe_bytes[1] == 0xfa &&
                                      probe_bytes[2] == apx_amx_opcode_prefixes[probe_index] && probe_bytes[3] == 0x08 &&
-                                     probe_bytes[4] == 0x4b &&
+                                     probe_bytes[4] == apx_amx_opcodes[probe_index] &&
                                      probe_bytes[5] == 0x04 && probe_bytes[6] == 0x20);
             probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, probe_form_id, false);
             BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);

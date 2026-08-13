@@ -152,15 +152,22 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_completion_apx_amx_memory_witness(BusterX86M
 {
     String8 iclass = buster_x86_metadata_string_span(form.iclass);
     String8 iform = buster_x86_metadata_string_span(form.iform);
-    return buster_x86_completion_string_equal(buster_x86_metadata_string_span(form.isa_set), S8("APX_F_AMX")) &&
+    String8 isa_set = buster_x86_metadata_string_span(form.isa_set);
+    bool ordinary = buster_x86_completion_string_equal(isa_set, S8("APX_F_AMX"));
+    bool movrs = buster_x86_completion_string_equal(isa_set, S8("APX_F_AMX_MOVRS"));
+    return (ordinary || movrs) &&
            buster_x86_completion_string_equal(buster_x86_metadata_string_span(form.extension), S8("AMX_TILE")) &&
-           buster_x86_completion_string_contains(buster_x86_metadata_string_span(form.attributes), S8("DISP8_NO_SCALE")) &&
+           (!ordinary || buster_x86_completion_string_contains(buster_x86_metadata_string_span(form.attributes), S8("DISP8_NO_SCALE"))) &&
            ((buster_x86_completion_string_equal(iclass, S8("TILELOADD")) &&
              buster_x86_completion_string_equal(iform, S8("TILELOADD_TMMu32_MEMu32_APX"))) ||
             (buster_x86_completion_string_equal(iclass, S8("TILELOADDT1")) &&
              buster_x86_completion_string_equal(iform, S8("TILELOADDT1_TMMu32_MEMu32_APX"))) ||
             (buster_x86_completion_string_equal(iclass, S8("TILESTORED")) &&
-             buster_x86_completion_string_equal(iform, S8("TILESTORED_MEMu32_TMMu32_APX"))));
+             buster_x86_completion_string_equal(iform, S8("TILESTORED_MEMu32_TMMu32_APX"))) ||
+            (buster_x86_completion_string_equal(iclass, S8("TILELOADDRS")) &&
+             buster_x86_completion_string_equal(iform, S8("TILELOADDRS_TMMu32_MEMu32_APX"))) ||
+            (buster_x86_completion_string_equal(iclass, S8("TILELOADDRST1")) &&
+             buster_x86_completion_string_equal(iform, S8("TILELOADDRST1_TMMu32_MEMu32_APX"))));
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_completion_hidden_bsr0(BusterX86MetadataForm form, bool* first)
