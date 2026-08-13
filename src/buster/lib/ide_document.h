@@ -8,6 +8,9 @@
 #define IDE_DOCUMENT_DEFAULT_MAX_DISCOVERED_FILES 4096u
 #define IDE_DOCUMENT_DEFAULT_MAX_TRAVERSAL_ENTRIES 65536u
 #define IDE_DOCUMENT_DEFAULT_MAX_DIAGNOSTICS 16384u
+#define IDE_DOCUMENT_SESSION_MAX_DOCUMENTS 4096u
+#define IDE_DOCUMENT_SESSION_MAX_STRING_LENGTH 65536u
+#define IDE_DOCUMENT_SESSION_MAX_BYTES (16u * 1024u * 1024u)
 
 typedef enum IdeDocumentErrorKind
 {
@@ -342,6 +345,8 @@ BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_initialize(IdeDocumentMode
                                                                  IdeDocumentModelOptions options);
 BUSTER_F_DECL void ide_document_model_deinitialize(IdeDocumentModel* model);
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_refresh_workspace(IdeDocumentModel* model);
+BUSTER_F_DECL bool ide_document_model_session_load(IdeDocumentModel* model);
+BUSTER_F_DECL bool ide_document_model_session_save(IdeDocumentModel* model);
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_open(IdeDocumentModel* model, String8 path);
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_open_path(IdeDocumentModel* model, String8 path);
 BUSTER_F_DECL IdeDocumentErrorKind ide_document_model_close(IdeDocumentModel* model, String8 path);

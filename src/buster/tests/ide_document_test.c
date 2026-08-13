@@ -164,6 +164,45 @@ BUSTER_GLOBAL_LOCAL bool ide_document_test_analysis_outcome_equal(IdeDocumentMod
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL u32 ide_document_test_session_u32(const u8* bytes, u64 offset)
+{
+    return (u32)bytes[offset] | ((u32)bytes[offset + 1] << 8) | ((u32)bytes[offset + 2] << 16) | ((u32)bytes[offset + 3] << 24);
+}
+
+BUSTER_GLOBAL_LOCAL bool ide_document_test_session_duplicate(ByteSlice source, u8* destination)
+{
+    memcpy(destination, source.pointer, source.length);
+    u32 count = source.length >= 20 ? ide_document_test_session_u32(destination, 16) : 0;
+    u64 cursor = 32;
+    u32 first_length = 0;
+    u64 first_offset = 0;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        if (cursor > source.length || source.length - cursor < 64) return false;
+        u32 path_length = ide_document_test_session_u32(destination, cursor);
+        u32 query_length = ide_document_test_session_u32(destination, cursor + 4);
+        u32 replacement_length = ide_document_test_session_u32(destination, cursor + 8);
+        u64 path_offset = cursor + 64;
+        if (path_offset > source.length || path_length > source.length - path_offset) return false;
+        if (!index)
+        {
+            first_length = path_length;
+            first_offset = path_offset;
+        }
+        else if (path_length == first_length && first_length)
+        {
+            memcpy(destination + path_offset, destination + first_offset, first_length);
+            return true;
+        }
+        cursor = path_offset + path_length;
+        if (query_length > source.length - cursor) return false;
+        cursor += query_length;
+        if (replacement_length > source.length - cursor) return false;
+        cursor += replacement_length;
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ide_document_incremental_analysis_tests(UnitTestArguments* arguments, Arena* test_arena, Arena* arena,
                                                                            Arena* staging_arena)
 {
@@ -1033,8 +1072,109 @@ UnitTestResult ide_document_tests(UnitTestArguments* arguments)
         }
         BUSTER_STRING_TEST(arguments, model.workspace.filter.query, S8("bbb"));
         BUSTER_TEST(arguments, model.workspace.filter.show_dirty_only);
+        String8 reload_source = diagnostic_document ? string_duplicate_arena(test_arena, diagnostic_document->source, true) : (String8){0};
 
-        String8 reload_source = diagnostic_document ? diagnostic_document->source : (String8){0};
+        BUSTER_TEST(arguments, ide_document_model_open(&model, b_path) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_open(&model, z_path) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_set_active(&model, a_path) == IDE_DOCUMENT_ERROR_NONE);
+        u64 session_generation = model.workspace.analysis_generation;
+        u32 session_imports = model.workspace.import_count;
+        u32 session_entities = model.workspace.entity_count;
+        IdeDocument* session_document = ide_document_model_find(&model, a_path);
+        String8 session_source = session_document ? string_duplicate_arena(test_arena, session_document->source, true) : (String8){0};
+        u32 session_diagnostics = session_document ? session_document->diagnostic_count : 0;
+        IdeDocumentViewState session_view = {.cursor_offset = 3, .selection_start = 1, .selection_end = 3, .scroll_x = 7.0f, .scroll_y = 8.0f, .zoom = 1.5f};
+        BUSTER_TEST(arguments, ide_document_model_set_view(&model, a_path, session_view) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_set_search_state(&model, a_path, (IdeDocumentSearchState){.query = S8("return"), .replacement = S8("yield"), .match_count = 4, .case_sensitive = true}) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_set_filter_state(&model, (IdeDocumentWorkspaceFilterState){.query = S8("session"), .show_open_only = true, .show_diagnostics_only = true}) == IDE_DOCUMENT_ERROR_NONE);
+        String8 session_path = string_format_z(test_arena, S8("{S8}/.buster-session"), root);
+        bool session_saved = ide_document_model_session_save(&model);
+        BUSTER_TEST(arguments, session_saved);
+        ByteSlice session_bytes = file_read(test_arena, session_path, (FileReadOptions){0});
+        BUSTER_TEST(arguments, session_bytes.length >= 32 && memcmp(session_bytes.pointer, "BUSTERUI", 8) == 0);
+        u8* session_copy = session_bytes.length ? arena_allocate(test_arena, u8, session_bytes.length) : 0;
+        if (session_copy) memcpy(session_copy, session_bytes.pointer, session_bytes.length);
+        BUSTER_TEST(arguments, ide_document_model_close(&model, b_path) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_close(&model, z_path) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_set_filter_state(&model, (IdeDocumentWorkspaceFilterState){0}) == IDE_DOCUMENT_ERROR_NONE);
+        BUSTER_TEST(arguments, ide_document_model_session_load(&model));
+        session_document = ide_document_model_find(&model, a_path);
+        BUSTER_TEST(arguments, session_document && session_document->is_open && session_document->view.cursor_offset == session_view.cursor_offset && session_document->view.zoom == session_view.zoom);
+        BUSTER_TEST(arguments, ide_document_model_find(&model, b_path) && ide_document_model_find(&model, b_path)->is_open && ide_document_model_find(&model, z_path) && ide_document_model_find(&model, z_path)->is_open);
+        BUSTER_TEST(arguments, model.workspace.filter.show_open_only && model.workspace.filter.show_diagnostics_only && string_equal(model.workspace.filter.query, S8("session")));
+        BUSTER_TEST(arguments, model.workspace.analysis_generation == session_generation && model.workspace.import_count == session_imports && model.workspace.entity_count == session_entities);
+        BUSTER_TEST(arguments, session_document && string_equal(session_document->source, session_source) && session_document->diagnostic_count == session_diagnostics);
+        if (session_copy)
+        {
+            u8* malformed = arena_allocate(test_arena, u8, session_bytes.length);
+            memcpy(malformed, session_copy, session_bytes.length); malformed[0] ^= 1;
+            BUSTER_TEST(arguments, file_write(session_path, (ByteSlice){malformed, session_bytes.length}) && !ide_document_model_session_load(&model));
+            BUSTER_TEST(arguments, model.workspace.analysis_generation == session_generation && ide_document_model_find(&model, a_path)->is_open);
+            memcpy(malformed, session_copy, session_bytes.length); malformed[8] = 2;
+            BUSTER_TEST(arguments, file_write(session_path, (ByteSlice){malformed, session_bytes.length}) && !ide_document_model_session_load(&model));
+            BUSTER_TEST(arguments, model.workspace.analysis_generation == session_generation);
+            BUSTER_TEST(arguments, file_write(session_path, (ByteSlice){session_copy, session_bytes.length - 1}) && !ide_document_model_session_load(&model));
+            BUSTER_TEST(arguments, model.workspace.analysis_generation == session_generation);
+            BUSTER_TEST(arguments, file_write(session_path, (ByteSlice){session_copy, session_bytes.length}));
+            memcpy(malformed, session_copy, session_bytes.length); malformed[16] = 0xff; malformed[17] = 0xff; malformed[18] = 0xff; malformed[19] = 0xff;
+            BUSTER_TEST(arguments, file_write(session_path, (ByteSlice){malformed, session_bytes.length}) && !ide_document_model_session_load(&model));
+            BUSTER_TEST(arguments, file_write(session_path, (ByteSlice){session_copy, session_bytes.length}));
+            memcpy(malformed, session_copy, session_bytes.length);
+            BUSTER_TEST(arguments, ide_document_test_session_duplicate(session_bytes, malformed));
+            BUSTER_TEST(arguments, file_write(session_path, (ByteSlice){malformed, session_bytes.length}) && !ide_document_model_session_load(&model));
+            BUSTER_TEST(arguments, file_write(session_path, (ByteSlice){session_copy, session_bytes.length}));
+            memcpy(malformed, session_copy, session_bytes.length);
+            u64 first_path = 32 + 64;
+            if (session_bytes.length > first_path + 5) memcpy(malformed + first_path, "../..", 5);
+            BUSTER_TEST(arguments, file_write(session_path, (ByteSlice){malformed, session_bytes.length}) && !ide_document_model_session_load(&model));
+            BUSTER_TEST(arguments, file_write(session_path, (ByteSlice){session_copy, session_bytes.length}));
+            memcpy(malformed, session_copy, session_bytes.length);
+            if (session_bytes.length > first_path + 5) memcpy(malformed + first_path, "x/a.b", 5);
+            BUSTER_TEST(arguments, file_write(session_path, (ByteSlice){malformed, session_bytes.length}) && ide_document_model_session_load(&model));
+            BUSTER_TEST(arguments, ide_document_model_find(&model, a_path) && !ide_document_model_find(&model, a_path)->is_open);
+            BUSTER_TEST(arguments, file_write(session_path, (ByteSlice){session_copy, session_bytes.length}));
+            BUSTER_TEST(arguments, os_file_delete(z_path));
+            BUSTER_TEST(arguments, ide_document_model_refresh_workspace(&model) == IDE_DOCUMENT_ERROR_NONE && ide_document_model_session_load(&model));
+            BUSTER_TEST(arguments, ide_document_model_find(&model, z_path) != 0 && !ide_document_model_find(&model, z_path)->is_open);
+            BUSTER_TEST(arguments, file_write(z_path, BUSTER_SLICE_TO_BYTE_SLICE(z_source)));
+            BUSTER_TEST(arguments, ide_document_model_refresh_workspace(&model) == IDE_DOCUMENT_ERROR_NONE);
+#if defined(__linux__) || defined(__APPLE__)
+            String8 session_outside_root = ide_document_test_temporary_root(test_arena, S8("buster-ide-session-outside"));
+            String8 session_outside_file = string_format_z(test_arena, S8("{S8}/session"), session_outside_root);
+            os_directory_delete(session_outside_root);
+            os_make_directory(session_outside_root);
+            BUSTER_TEST(arguments, file_write(session_outside_file, BUSTER_SLICE_TO_BYTE_SLICE(S8("outside session"))));
+            BUSTER_TEST(arguments, os_file_delete(session_path));
+            BUSTER_TEST(arguments, symlink((const char*)session_outside_file.pointer, (const char*)session_path.pointer) == 0);
+            BUSTER_TEST(arguments, !ide_document_model_session_save(&model));
+            BUSTER_TEST(arguments, !ide_document_model_session_load(&model));
+            BUSTER_TEST(arguments, os_file_delete(session_path));
+            int oversized_descriptor = open((const char*)session_path.pointer, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            BUSTER_TEST(arguments, oversized_descriptor >= 0);
+            if (oversized_descriptor >= 0)
+            {
+                BUSTER_TEST(arguments, ftruncate(oversized_descriptor, (off_t)IDE_DOCUMENT_SESSION_MAX_BYTES + 1) == 0);
+                BUSTER_TEST(arguments, close(oversized_descriptor) == 0);
+            }
+            BUSTER_TEST(arguments, !ide_document_model_session_load(&model));
+            BUSTER_TEST(arguments, file_write(session_path, (ByteSlice){session_copy, session_bytes.length}));
+            BUSTER_TEST(arguments, os_file_delete(session_outside_file));
+            BUSTER_TEST(arguments, os_directory_delete(session_outside_root));
+#endif
+            BUSTER_TEST(arguments, os_file_delete(session_path));
+            ide_document_model_test_set_save_replace_failure(true);
+            BUSTER_TEST(arguments, !ide_document_model_session_save(&model));
+            ide_document_model_test_set_save_replace_failure(false);
+#if defined(__linux__) || defined(__APPLE__)
+            struct stat missing_session_stats = {0};
+            BUSTER_TEST(arguments, lstat((const char*)session_path.pointer, &missing_session_stats) != 0);
+#elif defined(_WIN32)
+            String16 missing_session_path_w = string16_from_string8(test_arena, session_path, true);
+            BUSTER_TEST(arguments, GetFileAttributesW(missing_session_path_w.pointer) == INVALID_FILE_ATTRIBUTES);
+#endif
+            BUSTER_TEST(arguments, ide_document_model_session_save(&model));
+        }
+
         BUSTER_TEST(arguments, ide_document_model_refresh_workspace(&model) == IDE_DOCUMENT_ERROR_NONE);
         diagnostic_document = ide_document_model_find(&model, a_path);
         if (diagnostic_document)

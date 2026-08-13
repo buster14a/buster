@@ -3196,6 +3196,398 @@ void ide_document_model_deinitialize(IdeDocumentModel* model)
     memset(model, 0, sizeof(*model));
 }
 
+typedef struct IdeSessionRecord IdeSessionRecord;
+struct IdeSessionRecord
+{
+    String8 path;
+    String8 query;
+    String8 replacement;
+    u64 order;
+    IdeDocumentViewState view;
+    u32 match_count;
+    u32 flags;
+};
+
+typedef struct IdeSessionSnapshot IdeSessionSnapshot;
+struct IdeSessionSnapshot
+{
+    IdeSessionRecord* records;
+    u32 count;
+    String8 active;
+    String8 filter;
+    u32 filter_flags;
+};
+
+enum { IDE_SESSION_HEADER = 32, IDE_SESSION_RECORD = 64, IDE_SESSION_VERSION = 1 };
+BUSTER_GLOBAL_LOCAL const u8 ide_session_magic[8] = {'B', 'U', 'S', 'T', 'E', 'R', 'U', 'I'};
+
+BUSTER_GLOBAL_LOCAL void ide_session_put(u8** cursor, const void* data, u64 size)
+{
+    memcpy(*cursor, data, size);
+    *cursor += size;
+}
+BUSTER_GLOBAL_LOCAL void ide_session_put_u32(u8** cursor, u32 value)
+{
+    u8 data[4] = {(u8)value, (u8)(value >> 8), (u8)(value >> 16), (u8)(value >> 24)};
+    ide_session_put(cursor, data, sizeof(data));
+}
+BUSTER_GLOBAL_LOCAL void ide_session_put_u64(u8** cursor, u64 value)
+{
+    u8 data[8] = {0};
+    u32 index;
+    for (index = 0; index < 8; index += 1) data[index] = (u8)(value >> (index * 8));
+    ide_session_put(cursor, data, sizeof(data));
+}
+BUSTER_GLOBAL_LOCAL bool ide_session_take(const u8* bytes, u64 length, u64* cursor, void* data, u64 size)
+{
+    if (*cursor > length || size > length - *cursor) return false;
+    memcpy(data, bytes + *cursor, size);
+    *cursor += size;
+    return true;
+}
+BUSTER_GLOBAL_LOCAL bool ide_session_take_u32(const u8* bytes, u64 length, u64* cursor, u32* result)
+{
+    u8 data[4];
+    if (!ide_session_take(bytes, length, cursor, data, sizeof(data))) return false;
+    *result = (u32)data[0] | ((u32)data[1] << 8) | ((u32)data[2] << 16) | ((u32)data[3] << 24);
+    return true;
+}
+BUSTER_GLOBAL_LOCAL bool ide_session_take_u64(const u8* bytes, u64 length, u64* cursor, u64* result)
+{
+    u8 data[8];
+    if (!ide_session_take(bytes, length, cursor, data, sizeof(data))) return false;
+    *result = 0;
+    u32 index;
+    for (index = 0; index < 8; index += 1) *result |= (u64)data[index] << (index * 8);
+    return true;
+}
+BUSTER_GLOBAL_LOCAL bool ide_session_string(Arena* arena, const u8* bytes, u64 length, u64* cursor, u32 size, String8* result)
+{
+    if (size > IDE_DOCUMENT_SESSION_MAX_STRING_LENGTH || *cursor > length || size > length - *cursor) return false;
+    *result = ide_string_copy(arena, (String8){.pointer = (char8*)(bytes + *cursor), .length = size});
+    *cursor += size;
+    return size == 0 || result->pointer != 0;
+}
+BUSTER_GLOBAL_LOCAL bool ide_session_relative(String8 value)
+{
+    if (!value.length || value.length > IDE_DOCUMENT_SESSION_MAX_STRING_LENGTH || ide_path_is_absolute(value)) return false;
+    u64 start = 0;
+    u64 index;
+    for (index = 0; index <= value.length; index += 1)
+    {
+        if (index == value.length || ide_path_separator(value.pointer[index]))
+        {
+            String8 part = string_slice(value, start, index);
+            if (!part.length || string_equal(part, S8(".")) || string_equal(part, S8(".."))) return false;
+            start = index + 1;
+        }
+        else if (!value.pointer[index]) return false;
+    }
+    return true;
+}
+BUSTER_GLOBAL_LOCAL String8 ide_session_rel(Arena* arena, String8 root, String8 path)
+{
+    if (!ide_document_path_is_within(root, path)) return (String8){0};
+    u64 start = root.length;
+    while (start < path.length && ide_path_separator(path.pointer[start])) start += 1;
+    if (path.length - start > IDE_DOCUMENT_SESSION_MAX_STRING_LENGTH) return (String8){0};
+    String8 result = ide_string_copy(arena, string_slice(path, start, path.length));
+    return ide_session_relative(result) ? result : (String8){0};
+}
+BUSTER_GLOBAL_LOCAL String8 ide_session_path(Arena* arena, String8 root)
+{
+    return ide_path_join(arena, root, S8(".buster-session"), false);
+}
+BUSTER_GLOBAL_LOCAL bool ide_session_float(u32 bits)
+{
+    return (bits & 0x7f800000u) != 0x7f800000u;
+}
+BUSTER_GLOBAL_LOCAL bool ide_session_parse(Arena* arena, ByteSlice bytes, IdeSessionSnapshot* result)
+{
+    *result = (IdeSessionSnapshot){0};
+    if (!bytes.pointer || bytes.length < IDE_SESSION_HEADER || bytes.length > IDE_DOCUMENT_SESSION_MAX_BYTES) return false;
+    u64 cursor = 0;
+    u8 magic[8]; u32 version, header, count, active_size, filter_size, filter_flags;
+    if (!ide_session_take(bytes.pointer, bytes.length, &cursor, magic, sizeof(magic)) || memcmp(magic, ide_session_magic, 8) != 0 ||
+        !ide_session_take_u32(bytes.pointer, bytes.length, &cursor, &version) || !ide_session_take_u32(bytes.pointer, bytes.length, &cursor, &header) ||
+        !ide_session_take_u32(bytes.pointer, bytes.length, &cursor, &count) || !ide_session_take_u32(bytes.pointer, bytes.length, &cursor, &active_size) ||
+        !ide_session_take_u32(bytes.pointer, bytes.length, &cursor, &filter_size) || !ide_session_take_u32(bytes.pointer, bytes.length, &cursor, &filter_flags) ||
+        version != IDE_SESSION_VERSION || header != IDE_SESSION_HEADER || count > IDE_DOCUMENT_SESSION_MAX_DOCUMENTS ||
+        active_size > IDE_DOCUMENT_SESSION_MAX_STRING_LENGTH || filter_size > IDE_DOCUMENT_SESSION_MAX_STRING_LENGTH || (filter_flags & ~15u)) return false;
+    result->records = count ? arena_allocate(arena, IdeSessionRecord, count) : 0;
+    if (count && !result->records) return false;
+    u32 index;
+    for (index = 0; index < count; index += 1)
+    {
+        IdeSessionRecord* record = result->records + index; u32 path_size, query_size, replacement_size, flags, match_count, bits; u64 order; u32 previous;
+        if (!ide_session_take_u32(bytes.pointer, bytes.length, &cursor, &path_size) || !ide_session_take_u32(bytes.pointer, bytes.length, &cursor, &query_size) ||
+            !ide_session_take_u32(bytes.pointer, bytes.length, &cursor, &replacement_size) || !ide_session_take_u32(bytes.pointer, bytes.length, &cursor, &flags) ||
+            !ide_session_take_u32(bytes.pointer, bytes.length, &cursor, &match_count) || !ide_session_take_u64(bytes.pointer, bytes.length, &cursor, &order) ||
+            !ide_session_take_u64(bytes.pointer, bytes.length, &cursor, &record->view.cursor_offset) || !ide_session_take_u64(bytes.pointer, bytes.length, &cursor, &record->view.selection_start) ||
+            !ide_session_take_u64(bytes.pointer, bytes.length, &cursor, &record->view.selection_end) || !ide_session_take_u32(bytes.pointer, bytes.length, &cursor, &bits) || !ide_session_float(bits)) return false;
+        memcpy(&record->view.scroll_x, &bits, sizeof(bits));
+        if (!ide_session_take_u32(bytes.pointer, bytes.length, &cursor, &bits) || !ide_session_float(bits)) return false;
+        memcpy(&record->view.scroll_y, &bits, sizeof(bits));
+        if (!ide_session_take_u32(bytes.pointer, bytes.length, &cursor, &bits) || !ide_session_float(bits)) return false;
+        memcpy(&record->view.zoom, &bits, sizeof(bits));
+        if (order >= UINT64_MAX - 1 || (flags & ~7u) || !ide_session_string(arena, bytes.pointer, bytes.length, &cursor, path_size, &record->path) || !ide_session_relative(record->path) ||
+            !ide_session_string(arena, bytes.pointer, bytes.length, &cursor, query_size, &record->query) || !ide_session_string(arena, bytes.pointer, bytes.length, &cursor, replacement_size, &record->replacement)) return false;
+        record->order = order; record->flags = flags; record->match_count = match_count;
+        for (previous = 0; previous < index; previous += 1) { if (record->order == result->records[previous].order || ide_identity_equal(record->path, result->records[previous].path)) return false; }
+    }
+    if (!ide_session_string(arena, bytes.pointer, bytes.length, &cursor, active_size, &result->active) || (result->active.length && !ide_session_relative(result->active)) ||
+        !ide_session_string(arena, bytes.pointer, bytes.length, &cursor, filter_size, &result->filter) || cursor != bytes.length) return false;
+    result->count = count; result->filter_flags = filter_flags; return true;
+}
+
+BUSTER_GLOBAL_LOCAL String8 ide_session_resolve(Arena* arena, String8 root, String8 relative)
+{
+    if (!ide_session_relative(relative)) return (String8){0};
+    String8 candidate = ide_path_join(arena, root, relative, false);
+    String8 canonical = ide_document_path_canonical(arena, candidate);
+    if (!canonical.length || !ide_document_path_is_within(root, canonical)) return (String8){0};
+    return canonical;
+}
+BUSTER_GLOBAL_LOCAL bool ide_session_validate_path(Arena* arena, String8 root, String8 relative)
+{
+    String8 candidate = ide_path_join(arena, root, relative, false);
+    IdePathComponentStatus status = ide_path_component_status(arena, root, candidate, 0);
+    if (status == IDE_PATH_COMPONENT_UNSAFE) return false;
+    if (status == IDE_PATH_COMPONENT_MISSING) return true;
+    String8 canonical = ide_document_path_canonical(arena, candidate);
+    return canonical.length && ide_document_path_is_within(root, canonical);
+}
+BUSTER_GLOBAL_LOCAL bool ide_session_size(u64* total, u64 amount)
+{
+    if (amount > IDE_DOCUMENT_SESSION_MAX_BYTES - *total) return false;
+    *total += amount;
+    return true;
+}
+BUSTER_GLOBAL_LOCAL ByteSlice ide_session_read(Arena* arena, String8 path)
+{
+#if defined(__linux__) || defined(__APPLE__)
+    int descriptor = open((const char*)path.pointer, O_RDONLY | O_NOFOLLOW);
+    if (descriptor < 0) return (ByteSlice){0};
+    struct stat stats = {0};
+    bool regular = fstat(descriptor, &stats) == 0 && S_ISREG(stats.st_mode) && stats.st_size >= 0;
+    u64 size = regular ? (u64)stats.st_size : 0;
+    u8* data = regular && size <= IDE_DOCUMENT_SESSION_MAX_BYTES ? arena_allocate(arena, u8, BUSTER_MAX(size, 1u)) : 0;
+    u64 offset = 0;
+    while (data && offset < size)
+    {
+        ssize_t count = read(descriptor, data + offset, (size_t)BUSTER_MIN(size - offset, (u64)(SIZE_MAX >> 1)));
+        if (count <= 0) { data = 0; break; }
+        offset += (u64)count;
+    }
+    bool closed = close(descriptor) == 0;
+    return data && offset == size && closed ? (ByteSlice){data, size} : (ByteSlice){0};
+#elif defined(_WIN32)
+    String16 path_w = string16_from_string8(arena, path, true);
+    HANDLE file = CreateFileW(path_w.pointer, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, 0);
+    if (file == INVALID_HANDLE_VALUE) return (ByteSlice){0};
+    BY_HANDLE_FILE_INFORMATION information = {0};
+    LARGE_INTEGER file_size = {0};
+    bool regular = GetFileInformationByHandle(file, &information) && !(information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
+                   GetFileSizeEx(file, &file_size) && file_size.QuadPart >= 0;
+    u64 size = regular ? (u64)file_size.QuadPart : 0;
+    u8* data = regular && size <= IDE_DOCUMENT_SESSION_MAX_BYTES ? arena_allocate(arena, u8, BUSTER_MAX(size, 1u)) : 0;
+    u64 offset = 0;
+    while (data && offset < size)
+    {
+        DWORD count = 0;
+        if (!ReadFile(file, data + offset, (DWORD)BUSTER_MIN(size - offset, (u64)UINT32_MAX), &count, 0) || !count) { data = 0; break; }
+        offset += count;
+    }
+    bool closed = CloseHandle(file) != 0;
+    return data && offset == size && closed ? (ByteSlice){data, size} : (ByteSlice){0};
+#else
+    BUSTER_UNUSED(arena); BUSTER_UNUSED(path); return (ByteSlice){0};
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL bool ide_session_create(Arena* arena, String8 path)
+{
+#if defined(__linux__) || defined(__APPLE__)
+    BUSTER_UNUSED(arena);
+    int descriptor = open((const char*)path.pointer, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    return descriptor >= 0 && close(descriptor) == 0;
+#elif defined(_WIN32)
+    String16 path_w = string16_from_string8(arena, path, true);
+    HANDLE file = CreateFileW(path_w.pointer, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, CREATE_NEW,
+                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, 0);
+    return file != INVALID_HANDLE_VALUE && CloseHandle(file) != 0;
+#else
+    BUSTER_UNUSED(arena); BUSTER_UNUSED(path); return false;
+#endif
+}
+
+bool ide_document_model_session_save(IdeDocumentModel* model)
+{
+    if (!model || !model->initialized || !model->workspace.root_path.length) return false;
+    Arena* conflicts[] = {model->active_arena, model->staging_arena};
+    TemporalArena scratch = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+    u32 count = 0;
+    u32 index;
+    for (index = 0; index < model->workspace.document_count; index += 1) count += model->workspace.documents[index].is_open;
+    if (count > IDE_DOCUMENT_SESSION_MAX_DOCUMENTS) { scratch_end(scratch); return false; }
+    IdeSessionRecord* records = count ? arena_allocate(scratch.arena, IdeSessionRecord, count) : 0;
+    bool success = !count || records;
+    u32 record_count = 0;
+    for (index = 0; success && index < model->workspace.document_count; index += 1)
+    {
+        IdeDocument* document = model->workspace.documents + index;
+        if (!document->is_open) continue;
+        IdeSessionRecord* record = records + record_count++;
+        *record = (IdeSessionRecord){.path = ide_session_rel(scratch.arena, model->workspace.root_path, document->path), .order = document->open_order,
+                                     .view = document->view, .match_count = document->search.match_count,
+                                     .flags = (document->search.case_sensitive ? 1u : 0u) | (document->search.whole_word ? 2u : 0u) |
+                                              (document->search.regular_expression ? 4u : 0u)};
+        if (document->search.query.length <= IDE_DOCUMENT_SESSION_MAX_STRING_LENGTH && document->search.replacement.length <= IDE_DOCUMENT_SESSION_MAX_STRING_LENGTH)
+        {
+            record->query = ide_string_copy(scratch.arena, document->search.query);
+            record->replacement = ide_string_copy(scratch.arena, document->search.replacement);
+        }
+        u32 view_bits[3] = {0};
+        memcpy(view_bits, &record->view.scroll_x, sizeof(view_bits));
+        success = record->path.length && record->order < UINT64_MAX - 1 && ide_session_relative(record->path) && record->query.length == document->search.query.length &&
+                  record->replacement.length == document->search.replacement.length && ide_session_float(view_bits[0]) && ide_session_float(view_bits[1]) && ide_session_float(view_bits[2]);
+        u32 previous;
+        for (previous = 0; success && previous + 1 < record_count; previous += 1)
+        {
+            success = record->order != records[previous].order && !ide_identity_equal(record->path, records[previous].path);
+        }
+    }
+    String8 active = {0};
+    if (success && model->workspace.active_document_index != IDE_DOCUMENT_INDEX_INVALID && model->workspace.active_document_index < model->workspace.document_count &&
+        model->workspace.documents[model->workspace.active_document_index].is_open)
+    {
+        active = ide_session_rel(scratch.arena, model->workspace.root_path, model->workspace.documents[model->workspace.active_document_index].path);
+        success = active.length != 0;
+    }
+    bool filter_ok = model->workspace.filter.query.length <= IDE_DOCUMENT_SESSION_MAX_STRING_LENGTH;
+    String8 filter = filter_ok ? ide_string_copy(scratch.arena, model->workspace.filter.query) : (String8){0};
+    u32 filter_flags = (model->workspace.filter.show_open_only ? 1u : 0u) | (model->workspace.filter.show_dirty_only ? 2u : 0u) |
+                       (model->workspace.filter.show_diagnostics_only ? 4u : 0u) | (model->workspace.filter.case_sensitive ? 8u : 0u);
+    u64 total = IDE_SESSION_HEADER;
+    success = success && filter_ok && active.length <= IDE_DOCUMENT_SESSION_MAX_STRING_LENGTH && filter.length <= IDE_DOCUMENT_SESSION_MAX_STRING_LENGTH &&
+              ide_session_size(&total, active.length) && ide_session_size(&total, filter.length);
+    for (index = 0; success && index < record_count; index += 1)
+    {
+        success = ide_session_size(&total, IDE_SESSION_RECORD) && ide_session_size(&total, records[index].path.length) &&
+                  ide_session_size(&total, records[index].query.length) && ide_session_size(&total, records[index].replacement.length);
+    }
+    if (success)
+    {
+        u8* output = arena_allocate(scratch.arena, u8, total);
+        success = output != 0;
+        if (success)
+        {
+            u8* cursor = output;
+            ide_session_put(&cursor, ide_session_magic, sizeof(ide_session_magic));
+            ide_session_put_u32(&cursor, IDE_SESSION_VERSION); ide_session_put_u32(&cursor, IDE_SESSION_HEADER); ide_session_put_u32(&cursor, record_count);
+            ide_session_put_u32(&cursor, (u32)active.length); ide_session_put_u32(&cursor, (u32)filter.length); ide_session_put_u32(&cursor, filter_flags);
+            for (index = 0; index < record_count; index += 1)
+            {
+                IdeSessionRecord* record = records + index; u32 bits = 0;
+                ide_session_put_u32(&cursor, (u32)record->path.length); ide_session_put_u32(&cursor, (u32)record->query.length);
+                ide_session_put_u32(&cursor, (u32)record->replacement.length); ide_session_put_u32(&cursor, record->flags); ide_session_put_u32(&cursor, record->match_count);
+                ide_session_put_u64(&cursor, record->order); ide_session_put_u64(&cursor, record->view.cursor_offset); ide_session_put_u64(&cursor, record->view.selection_start);
+                ide_session_put_u64(&cursor, record->view.selection_end); memcpy(&bits, &record->view.scroll_x, sizeof(bits)); ide_session_put_u32(&cursor, bits);
+                memcpy(&bits, &record->view.scroll_y, sizeof(bits)); ide_session_put_u32(&cursor, bits); memcpy(&bits, &record->view.zoom, sizeof(bits)); ide_session_put_u32(&cursor, bits);
+                ide_session_put(&cursor, record->path.pointer, record->path.length); ide_session_put(&cursor, record->query.pointer, record->query.length);
+                ide_session_put(&cursor, record->replacement.pointer, record->replacement.length);
+            }
+            ide_session_put(&cursor, active.pointer, active.length); ide_session_put(&cursor, filter.pointer, filter.length);
+            String8 path = ide_session_path(scratch.arena, model->workspace.root_path);
+            String8 directory = ide_path_parent(scratch.arena, path);
+            bool missing = false, created = false;
+            if (ide_path_component_status(scratch.arena, model->workspace.root_path, directory, &missing) == IDE_PATH_COMPONENT_MISSING && missing) os_make_directory(directory);
+            if (ide_path_component_status(scratch.arena, model->workspace.root_path, directory, 0) == IDE_PATH_COMPONENT_SAFE && ide_path_kind(path) == IDE_PATH_MISSING)
+            {
+                created = ide_session_create(scratch.arena, path);
+                success = created;
+            }
+            success = success && ide_path_kind(path) == IDE_PATH_REGULAR && ide_atomic_write_file(scratch.arena, path, (String8){.pointer = (char8*)output, .length = total});
+            if (created && !success) os_file_delete(path);
+        }
+    }
+    scratch_end(scratch);
+    return success;
+}
+
+bool ide_document_model_session_load(IdeDocumentModel* model)
+{
+    if (!model || !model->initialized || !model->workspace.root_path.length) return false;
+    Arena* conflicts[] = {model->active_arena, model->staging_arena};
+    TemporalArena scratch = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+    String8 path = ide_session_path(scratch.arena, model->workspace.root_path);
+    String8 directory = ide_path_parent(scratch.arena, path);
+    bool missing = false;
+    IdePathComponentStatus directory_status = ide_path_component_status(scratch.arena, model->workspace.root_path, directory, &missing);
+    IdePathComponentStatus file_status = directory_status == IDE_PATH_COMPONENT_SAFE ? ide_path_component_status(scratch.arena, model->workspace.root_path, path, 0) : IDE_PATH_COMPONENT_UNSAFE;
+    ByteSlice bytes = {0};
+    if (directory_status == IDE_PATH_COMPONENT_SAFE && ide_path_kind(directory) == IDE_PATH_DIRECTORY && file_status == IDE_PATH_COMPONENT_SAFE &&
+        ide_path_kind(path) == IDE_PATH_REGULAR)
+    {
+        bytes = ide_session_read(scratch.arena, path);
+    }
+    IdeSessionSnapshot snapshot = {0};
+    bool success = ide_session_parse(scratch.arena, bytes, &snapshot);
+    u32 index;
+    for (index = 0; success && index < snapshot.count; index += 1)
+    {
+        success = ide_session_validate_path(scratch.arena, model->workspace.root_path, snapshot.records[index].path);
+    }
+    if (success && snapshot.active.length)
+    {
+        success = ide_session_validate_path(scratch.arena, model->workspace.root_path, snapshot.active);
+    }
+    if (!success) { scratch_end(scratch); return false; }
+    ide_model_reset_staging(model);
+    IdeDocumentWorkspace workspace = {0};
+    success = ide_workspace_copy_to_arena(model->staging_arena, &workspace, &model->workspace);
+    u8* restored = workspace.document_count ? arena_allocate(model->staging_arena, u8, workspace.document_count) : 0;
+    success = success && (!workspace.document_count || restored);
+    if (restored) memset(restored, 0, workspace.document_count);
+    for (index = 0; success && index < workspace.document_count; index += 1) { workspace.documents[index].is_open = false; workspace.documents[index].open_order = 0; }
+    u64 maximum = 0;
+    for (index = 0; success && index < snapshot.count; index += 1)
+    {
+        IdeSessionRecord* record = snapshot.records + index;
+        String8 canonical = ide_session_resolve(model->staging_arena, workspace.root_path, record->path);
+        u32 document_index = canonical.length && ide_path_kind(canonical) == IDE_PATH_REGULAR
+                                 ? ide_workspace_find_path(model->staging_arena, &workspace, canonical)
+                                 : IDE_DOCUMENT_INDEX_INVALID;
+        if (document_index == IDE_DOCUMENT_INDEX_INVALID) continue;
+        if (restored[document_index]) { success = false; break; }
+        IdeDocument* document = workspace.documents + document_index; restored[document_index] = 1; document->is_open = true; document->open_order = record->order;
+        document->view = record->view; document->search.query = ide_string_copy(model->staging_arena, record->query); document->search.replacement = ide_string_copy(model->staging_arena, record->replacement);
+        document->search.match_count = record->match_count; document->search.case_sensitive = (record->flags & 1u) != 0; document->search.whole_word = (record->flags & 2u) != 0; document->search.regular_expression = (record->flags & 4u) != 0;
+        ide_document_clamp_view(document); maximum = BUSTER_MAX(maximum, record->order);
+    }
+    workspace.filter = (IdeDocumentWorkspaceFilterState){.query = ide_string_copy(model->staging_arena, snapshot.filter), .show_open_only = (snapshot.filter_flags & 1u) != 0,
+                                                           .show_dirty_only = (snapshot.filter_flags & 2u) != 0, .show_diagnostics_only = (snapshot.filter_flags & 4u) != 0,
+                                                           .case_sensitive = (snapshot.filter_flags & 8u) != 0};
+    workspace.open_document_count = 0; workspace.active_document_index = IDE_DOCUMENT_INDEX_INVALID;
+    for (index = 0; index < workspace.document_count; index += 1) workspace.open_document_count += workspace.documents[index].is_open;
+    if (snapshot.active.length)
+    {
+        String8 canonical = ide_session_resolve(model->staging_arena, workspace.root_path, snapshot.active);
+        index = canonical.length ? ide_workspace_find_path(model->staging_arena, &workspace, canonical) : IDE_DOCUMENT_INDEX_INVALID;
+        if (index != IDE_DOCUMENT_INDEX_INVALID && workspace.documents[index].is_open) workspace.active_document_index = index;
+    }
+    if (workspace.active_document_index == IDE_DOCUMENT_INDEX_INVALID)
+    {
+        for (index = 0; index < workspace.document_count; index += 1)
+            if (workspace.documents[index].is_open && (workspace.active_document_index == IDE_DOCUMENT_INDEX_INVALID || workspace.documents[index].open_order < workspace.documents[workspace.active_document_index].open_order)) workspace.active_document_index = index;
+    }
+    workspace.next_open_order = maximum < UINT64_MAX - 1 ? maximum + 1 : 1;
+    if (success) ide_model_commit(model, workspace); else ide_model_reset_staging(model);
+    scratch_end(scratch);
+    return success;
+}
+
 IdeDocumentErrorKind ide_document_model_refresh_workspace(IdeDocumentModel* model)
 {
     if (!model || !model->initialized)
