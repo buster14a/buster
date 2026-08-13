@@ -2652,6 +2652,59 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    invalid_aes_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
 
+    Target aarch64_sha3_target = aarch64_m1_explicit_target;
+    BUSTER_TEST(arguments, target_cpu_feature_has(aarch64_sha3_target, TARGET_CPU_FEATURE_AARCH64_SHA3));
+    AssemblyEncodeResult aarch64_sha3 = assembly_encode(
+        arguments->arena,
+        S8("bcax v0.16b, v1.16b, v2.16b, v3.16b\n"
+           "eor3 v0.16b, v1.16b, v2.16b, v3.16b\n"),
+        (AssemblyEncodeOptions){.target = aarch64_sha3_target});
+    static u8 const expected_aarch64_sha3[] = {
+        0x20, 0x0c, 0x22, 0xce,
+        0x20, 0x0c, 0x02, 0xce,
+    };
+    BUSTER_TEST(arguments, aarch64_sha3.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_sha3.bytes, expected_aarch64_sha3,
+                                                         sizeof(expected_aarch64_sha3)));
+    AssemblyEncodeResult aarch64_sha3_case_insensitive = assembly_encode(
+        arguments->arena, S8("BCAX V0.16B, V1.16B, V2.16B, V3.16B\n"),
+        (AssemblyEncodeOptions){.target = aarch64_sha3_target});
+    BUSTER_TEST(arguments, aarch64_sha3_case_insensitive.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_sha3_case_insensitive.bytes, expected_aarch64_sha3, 4));
+    AssemblyEncodeResult aarch64_sha3_boundary = assembly_encode(
+        arguments->arena,
+        S8("bcax v31.16b, v31.16b, v31.16b, v31.16b\n"
+           "eor3 v31.16b, v31.16b, v31.16b, v31.16b\n"),
+        (AssemblyEncodeOptions){.target = aarch64_sha3_target});
+    static u8 const expected_aarch64_sha3_boundary[] = {
+        0xff, 0x7f, 0x3f, 0xce,
+        0xff, 0x7f, 0x1f, 0xce,
+    };
+    BUSTER_TEST(arguments, aarch64_sha3_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_sha3_boundary.bytes, expected_aarch64_sha3_boundary,
+                                                         sizeof(expected_aarch64_sha3_boundary)));
+    Target aarch64_no_sha3 = aarch64_sha3_target;
+    aarch64_no_sha3.cpu_features = target_cpu_features_remove(aarch64_no_sha3.cpu_features, TARGET_CPU_FEATURE_AARCH64_SHA3);
+    AssemblyEncodeResult aarch64_sha3_without_feature = assembly_encode(
+        arguments->arena, S8("bcax v0.16b, v1.16b, v2.16b, v3.16b\n"),
+        (AssemblyEncodeOptions){.target = aarch64_no_sha3});
+    BUSTER_TEST(arguments, aarch64_sha3_without_feature.diagnostic_count == 1 && aarch64_sha3_without_feature.bytes.length == 0 &&
+                               aarch64_sha3_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    static String8 const invalid_aarch64_sha3[] = {
+        S8_INITIALIZER("bcax v0.8b, v1.8b, v2.8b, v3.8b\n"),
+        S8_INITIALIZER("eor3 v0.16b, v1.16b, v2.16b\n"),
+        S8_INITIALIZER("bcax x0.16b, v1.16b, v2.16b, v3.16b\n"),
+        S8_INITIALIZER("eor3 v0.16b, v1.16b, v2.16b, v32.16b\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_sha3); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_sha3_case = assembly_encode(
+            arguments->arena, invalid_aarch64_sha3[invalid_index],
+            (AssemblyEncodeOptions){.target = aarch64_sha3_target});
+        BUSTER_TEST(arguments, invalid_sha3_case.diagnostic_count == 1 && invalid_sha3_case.bytes.length == 0 &&
+                                   invalid_sha3_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
     BusterAarch64SyntaxMnemonicRange csel_range = {0};
     BUSTER_TEST(arguments, buster_aarch64_syntax_mnemonic_lookup(S8("csel"), &csel_range) && csel_range.candidate_count > 0);
     u32 csel_row = UINT32_MAX;
