@@ -257,6 +257,17 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_multiply
     {S8_INITIALIZER("sqrdmulh s0, s1, s31\n"), {0x20, 0xb4, 0xbf, 0x7e}},
 };
 
+/* The bit-select trio is deliberately separate from the legacy M1/GPR
+ * mnemonic corpus: these are the only new rows in this cohort. */
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_bitselect_cases[] = {
+    {S8_INITIALIZER("bif v0.8b, v1.8b, v2.8b\n"), {0x20, 0x1c, 0xe2, 0x2e}},
+    {S8_INITIALIZER("bif v0.16b, v1.16b, v2.16b\n"), {0x20, 0x1c, 0xe2, 0x6e}},
+    {S8_INITIALIZER("bit v0.8b, v1.8b, v2.8b\n"), {0x20, 0x1c, 0xa2, 0x2e}},
+    {S8_INITIALIZER("bit v0.16b, v1.16b, v2.16b\n"), {0x20, 0x1c, 0xa2, 0x6e}},
+    {S8_INITIALIZER("bsl v0.8b, v1.8b, v2.8b\n"), {0x20, 0x1c, 0x62, 0x2e}},
+    {S8_INITIALIZER("bsl v0.16b, v1.16b, v2.16b\n"), {0x20, 0x1c, 0x62, 0x6e}},
+};
+
 static AssemblyA64DirectSIMDNeonCase const assembly_a64_direct_simd_neon_cases[] = {
     {S8_INITIALIZER("addp d0, v1.2d\n"), {0x20, 0xb8, 0xf1, 0x5e}, S8_INITIALIZER("addp d31, v30.2d\n"), {0xdf, 0xbb, 0xf1, 0x5e}},
     {S8_INITIALIZER("cmeq d0, d1, d2\n"), {0x20, 0x8c, 0xe2, 0x7e}, S8_INITIALIZER("cmeq d31, d30, d29\n"), {0xdf, 0x8f, 0xfd, 0x7e}},
@@ -923,12 +934,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 217);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 217);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 173);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 155);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 220);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 220);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 170);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 158);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 62);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 108);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 105);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 65);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
@@ -3974,6 +3985,68 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
                                    no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     }
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_bitselect_cases) == 6);
+    for (u32 bitselect_index = 0; bitselect_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_bitselect_cases); bitselect_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase bitselect_case = assembly_a64_direct_simd_bitselect_cases[bitselect_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, bitselect_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, bitselect_case.bytes, 4));
+        AssemblyEncodeResult no_neon = assembly_encode(
+            arguments->arena, bitselect_case.source, (AssemblyEncodeOptions){.target = aarch64_no_advsimd_neon});
+        BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
+                                   no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    AssemblyEncodeResult bitselect_upper_boundary = assembly_encode(
+        arguments->arena,
+        S8("BIF V31.16B, V30.16B, V29.16B\n"
+           "BIT V31.16B, V30.16B, V29.16B\n"
+           "BSL V31.16B, V30.16B, V29.16B\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    BUSTER_TEST(arguments, bitselect_upper_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(bitselect_upper_boundary.bytes,
+                                                         (u8 const[]){0xdf, 0x1f, 0xfd, 0x6e,
+                                                                      0xdf, 0x1f, 0xbd, 0x6e,
+                                                                      0xdf, 0x1f, 0x7d, 0x6e},
+                                                         12));
+    AssemblyEncodeResult bitselect_m1_regression = assembly_encode(
+        arguments->arena,
+        S8("and w0, w1, w2\n"
+           "bic w3, w4, w5\n"
+           "eor x6, x7, x8\n"
+           "orn x9, x10, x11\n"
+           "orr w12, w13, w14\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    BUSTER_TEST(arguments, bitselect_m1_regression.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(bitselect_m1_regression.bytes,
+                                                         (u8 const[]){0x20, 0x00, 0x02, 0x0a,
+                                                                      0x83, 0x00, 0x25, 0x0a,
+                                                                      0xe6, 0x00, 0x08, 0xca,
+                                                                      0x49, 0x01, 0x2b, 0xaa,
+                                                                      0xac, 0x01, 0x0e, 0x2a},
+                                                         20));
+    static String8 const malformed_aarch64_advsimd_bitselect[] = {
+        S8_INITIALIZER("bif v0.8b, v1.8b, v2.b[0]\n"),
+        S8_INITIALIZER("bit v0.8b, v1.8b, v2.b[0]\n"),
+        S8_INITIALIZER("bsl v0.8b, v1.8b, v2.b[0]\n"),
+        S8_INITIALIZER("bif v0.8h, v1.8h, v2.8h\n"),
+        S8_INITIALIZER("bit v0.8b, v1.16b, v2.8b\n"),
+        S8_INITIALIZER("bsl v0.8b, v1.8b, v2.4h\n"),
+        S8_INITIALIZER("bif v0.8b, v1.8b\n"),
+        S8_INITIALIZER("bit v0.8b, v1.8b, v2.8b, v3.8b\n"),
+        S8_INITIALIZER("bsl s0, s1, s2\n"),
+        S8_INITIALIZER("bif w0, w1, w2\n"),
+        S8_INITIALIZER("bit x0, x1, x2\n"),
+        S8_INITIALIZER("bsl v32.8b, v1.8b, v2.8b\n"),
+    };
+    for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed_aarch64_advsimd_bitselect); malformed_index += 1)
+    {
+        AssemblyEncodeResult malformed = assembly_encode(
+            arguments->arena, malformed_aarch64_advsimd_bitselect[malformed_index],
+            (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
+                                   malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
     AssemblyEncodeResult multiply_upper_boundary = assembly_encode(
         arguments->arena,
         S8("MLA V31.4S, V30.4S, V29.4S\n"
@@ -4795,6 +4868,22 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                aarch64_scalar_integer.bytes.length == sizeof(expected_aarch64_scalar_integer) &&
                                memcmp(aarch64_scalar_integer.bytes.pointer, expected_aarch64_scalar_integer,
                                       sizeof(expected_aarch64_scalar_integer)) == 0);
+    AssemblyEncodeResult aarch64_m1_gpr_collision_regression = assembly_encode(
+        arguments->arena,
+        S8("and wzr, w1, w2, lsr #3\n"
+           "bic wzr, w1, w2, lsr #3\n"
+           "eor wzr, w1, w2, lsr #3\n"
+           "orn wzr, w1, w2, lsr #3\n"
+           "orr wzr, w1, w2, lsr #3\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_target});
+    BUSTER_TEST(arguments, aarch64_m1_gpr_collision_regression.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_m1_gpr_collision_regression.bytes,
+                                                         (u8 const[]){0x3f, 0x0c, 0x42, 0x0a,
+                                                                      0x3f, 0x0c, 0x62, 0x0a,
+                                                                      0x3f, 0x0c, 0x42, 0x4a,
+                                                                      0x3f, 0x0c, 0x62, 0x2a,
+                                                                      0x3f, 0x0c, 0x42, 0x2a},
+                                                         20));
     static String8 const invalid_aarch64_scalar_integer[] = {
         S8_INITIALIZER("add lsl #1, x0, x1, x2\n"),
         S8_INITIALIZER("add x0, lsl #1, x1, x2\n"),
