@@ -24,7 +24,7 @@ struct BatchTestResult
         {                                                                                                                                                      \
             /* The stringified expression is data, not a format string. It can */                                                                              \
             /* legitimately contain formatting syntax such as S8("{S8}"). */                                                                                 \
-            buster_test_error(__LINE__, BUSTER_FUNCTION, S8(__FILE__), S8("{S8}"), log);                                                                      \
+            buster_test_error_arguments((args), __LINE__, BUSTER_FUNCTION, S8(__FILE__), S8("{S8}"), log);                                                   \
         }                                                                                                                                                      \
         result.succeeded_test_count += (success_);                                                                                                             \
         result.test_count += 1;                                                                                                                                \
@@ -69,6 +69,7 @@ BUSTER_F_DECL void consume_unit_tests(BatchTestResult* batch, UnitTestResult uni
 BUSTER_F_DECL void consume_external_tests(BatchTestResult* batch, ProcessResult result);
 
 BUSTER_F_DECL void buster_test_error(u32 line, String8 function, String8 file_path, String8 format, ...);
+BUSTER_F_DECL void buster_test_error_arguments(UnitTestArguments* arguments, u32 line, String8 function, String8 file_path, String8 format, ...);
 BUSTER_F_DECL String8 buster_test_temporary_path(Arena* arena, String8 name, String8 suffix);
 // Limits test-internal parallel work to a validated positive matrix quota.
 BUSTER_F_DECL u64 buster_test_worker_count(u64 requested);

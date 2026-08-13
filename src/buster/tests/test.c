@@ -139,11 +139,19 @@
 
 #if BUSTER_INCLUDE_TESTS
 typedef struct TestDescriptor TestDescriptor;
+typedef enum TestDescriptorParallelKind
+{
+    TEST_DESCRIPTOR_PARALLEL_NONE,
+    TEST_DESCRIPTOR_PARALLEL_AARCH64_DIRECT_SIMD,
+    TEST_DESCRIPTOR_PARALLEL_AARCH64_COMPLEX_SIMD,
+    TEST_DESCRIPTOR_PARALLEL_AARCH64_MEMORY_SEMANTICS,
+} TestDescriptorParallelKind;
 struct TestDescriptor
 {
     String8 name;
     TestFunction* function;
     bool requires_temporary_root;
+    TestDescriptorParallelKind parallel_kind;
 };
 
 typedef struct TestTimingRecord TestTimingRecord;
@@ -246,9 +254,9 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
     {S8_INITIALIZER("aarch64_system_semantics_tests"), &aarch64_system_semantics_tests},
     {S8_INITIALIZER("aarch64_syntax_tests"), &aarch64_syntax_tests},
     {S8_INITIALIZER("aarch64_semantic_vm_tests"), &aarch64_semantic_vm_tests},
-    {S8_INITIALIZER("aarch64_direct_simd_tests"), &aarch64_direct_simd_tests},
-    {S8_INITIALIZER("aarch64_complex_simd_tests"), &aarch64_complex_simd_tests},
-    {S8_INITIALIZER("aarch64_memory_semantics_tests"), &aarch64_memory_semantics_tests},
+    {S8_INITIALIZER("aarch64_direct_simd_tests"), &aarch64_direct_simd_tests, false, TEST_DESCRIPTOR_PARALLEL_AARCH64_DIRECT_SIMD},
+    {S8_INITIALIZER("aarch64_complex_simd_tests"), &aarch64_complex_simd_tests, false, TEST_DESCRIPTOR_PARALLEL_AARCH64_COMPLEX_SIMD},
+    {S8_INITIALIZER("aarch64_memory_semantics_tests"), &aarch64_memory_semantics_tests, false, TEST_DESCRIPTOR_PARALLEL_AARCH64_MEMORY_SEMANTICS},
     {S8_INITIALIZER("aarch64_alias_projection_tests"), &aarch64_alias_projection_tests},
     {S8_INITIALIZER("assembly_tests"), &assembly_tests},
     {S8_INITIALIZER("x86_64_metadata_tests"), &x86_64_metadata_tests},
@@ -273,6 +281,87 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
     {S8_INITIALIZER("x86_64_tests"), &x86_64_tests},
 #endif
 };
+
+typedef struct TestParallelRecord TestParallelRecord;
+struct TestParallelRecord
+{
+    TestTimingRecord timing;
+    char8* output_pointer;
+    u64 output_length;
+    Arena* output_arena;
+    bool completed;
+    u8 reserved[7];
+};
+
+typedef struct TestParallelState TestParallelState;
+struct TestParallelState
+{
+    TestDescriptor* descriptors;
+    u64* eligible_indices;
+    TestParallelRecord* records;
+    u64 eligible_count;
+};
+
+typedef struct TestParallelArguments TestParallelArguments;
+struct TestParallelArguments
+{
+    UnitTestArguments base;
+    Arena* output_arena;
+};
+
+BUSTER_GLOBAL_LOCAL void test_parallel_show(UnitTestArguments* arguments, String8 format, ...)
+{
+    TestParallelArguments* parallel_arguments = (TestParallelArguments*)arguments;
+    if (!parallel_arguments->output_arena)
+    {
+        return;
+    }
+    va_list variable_arguments;
+    va_start(variable_arguments, format);
+    String8 text = string_format_va(parallel_arguments->output_arena, format, variable_arguments);
+    va_end(variable_arguments);
+    BUSTER_UNUSED(text);
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult test_parallel_call(TestDescriptorParallelKind kind, UnitTestArguments* arguments)
+{
+    switch (kind)
+    {
+        case TEST_DESCRIPTOR_PARALLEL_AARCH64_DIRECT_SIMD: return aarch64_direct_simd_tests(arguments);
+        case TEST_DESCRIPTOR_PARALLEL_AARCH64_COMPLEX_SIMD: return aarch64_complex_simd_tests(arguments);
+        case TEST_DESCRIPTOR_PARALLEL_AARCH64_MEMORY_SEMANTICS: return aarch64_memory_semantics_tests(arguments);
+        case TEST_DESCRIPTOR_PARALLEL_NONE: break;
+    }
+    return (UnitTestResult){0};
+}
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType test_parallel_lane(void* argument)
+{
+    TestParallelState* state = (TestParallelState*)argument;
+    LaneRange range = lane_range(state->eligible_count);
+    for (u64 work_index = range.start; work_index < range.end; work_index += 1)
+    {
+        u64 descriptor_index = state->eligible_indices[work_index];
+        TestDescriptor descriptor = state->descriptors[descriptor_index];
+        // Match the test harness's bounded working reservation. It is a
+        // lazy/no-reserve mapping; only the initial 64 KiB is committed per
+        // active lane.
+        Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256), .initial_size = BUSTER_KB(64)});
+        Arena* output_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64)});
+        BUSTER_CHECK(arena != 0 && output_arena != 0);
+        TestParallelArguments arguments = {.base = {.arena = arena, .show = &test_parallel_show}, .output_arena = output_arena};
+        TimeDataType start = timestamp_take();
+        UnitTestResult result = test_parallel_call(descriptor.parallel_kind, &arguments.base);
+        TimeDataType end = timestamp_take();
+        TestParallelRecord* record = &state->records[descriptor_index];
+        record->timing = (TestTimingRecord){.index = descriptor_index, .module = descriptor.name, .duration_ns = timestamp_ns_between(start, end), .result = result};
+        record->output_pointer = (char8*)arena_buffer_start(output_arena);
+        record->output_length = arena_buffer_size(output_arena);
+        record->output_arena = output_arena;
+        record->completed = true;
+        BUSTER_CHECK(arena_destroy(arena, 1));
+    }
+}
 
 #if BUSTER_CPU_ARCH_X86_64
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 46);
@@ -309,6 +398,23 @@ void buster_test_error(u32 line, String8 function, String8 file_path, String8 fo
     va_end(variable_arguments);
 
     string_print(S8("{S8} failed at {S8}:{S8}:{u32}\n"), message, file_path, function, line);
+    scratch_end(scratch);
+
+    if (is_debugger_present())
+    {
+        os_fail();
+    }
+}
+
+void buster_test_error_arguments(UnitTestArguments* arguments, u32 line, String8 function, String8 file_path, String8 format, ...)
+{
+    TemporalArena scratch = scratch_begin(0, 0);
+    va_list variable_arguments;
+    va_start(variable_arguments, format);
+    String8 message = string_format_va(scratch.arena, format, variable_arguments);
+    va_end(variable_arguments);
+
+    arguments->show(arguments, S8("{S8} failed at {S8}:{S8}:{u32}\n"), message, file_path, function, line);
     scratch_end(scratch);
 
     if (is_debugger_present())
@@ -539,7 +645,7 @@ u64 buster_test_worker_count(u64 requested)
 }
 
 BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_descriptors(UnitTestArguments* arguments, TestDescriptor* descriptors, u64 descriptor_count,
-                                                                 bool timing_enabled, u64* timing_record_count)
+                                                                 bool timing_enabled, u64* timing_record_count, u64 descriptor_index_base)
 {
     BatchTestResult result = {0};
     for (u64 i = 0; i < descriptor_count; i += 1)
@@ -565,7 +671,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_descriptors(UnitTestArgument
         u64 arena_position = arguments->arena->position;
         if (timing_enabled)
         {
-            TestTimingRecord timing = test_timing_run_descriptor(arguments, descriptor, i);
+            TestTimingRecord timing = test_timing_run_descriptor(arguments, descriptor, descriptor_index_base + i);
             consume_unit_tests(&result, timing.result);
             arena_set_position(arguments->arena, arena_position);
             test_timing_report(arguments, timing);
@@ -589,6 +695,99 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_descriptors(UnitTestArgument
             break;
         }
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTestArguments* arguments, TestDescriptor* descriptors, u64 descriptor_count,
+                                                                          bool timing_enabled, u64* timing_record_count)
+{
+    BatchTestResult result = {0};
+    u64 eligible_count = 0;
+    for (u64 index = 0; index < descriptor_count; index += 1)
+    {
+        eligible_count += descriptors[index].parallel_kind != TEST_DESCRIPTOR_PARALLEL_NONE;
+    }
+    if (!eligible_count)
+    {
+        return buster_test_run_descriptors(arguments, descriptors, descriptor_count, timing_enabled, timing_record_count, 0);
+    }
+
+    u64 arena_position = arguments->arena->position;
+    u64* eligible_indices = arena_allocate(arguments->arena, u64, eligible_count);
+    TestParallelRecord* records = arena_allocate(arguments->arena, TestParallelRecord, descriptor_count);
+    memset(records, 0, sizeof(*records) * descriptor_count);
+    u64 eligible_index = 0;
+    for (u64 index = 0; index < descriptor_count; index += 1)
+    {
+        if (descriptors[index].parallel_kind != TEST_DESCRIPTOR_PARALLEL_NONE)
+        {
+            eligible_indices[eligible_index++] = index;
+        }
+    }
+
+    TestParallelState state = {
+        .descriptors = descriptors,
+        .eligible_indices = eligible_indices,
+        .records = records,
+        .eligible_count = eligible_count,
+    };
+
+    // The initial lane is one contiguous, side-effect-free group. Run the
+    // serial prefix first and suffix after replay so thread-count-sensitive
+    // modules (notably os_tests) never overlap the gang.
+    u64 first_eligible = eligible_indices[0];
+    u64 last_eligible = eligible_indices[eligible_count - 1];
+    BUSTER_CHECK(last_eligible - first_eligible + 1 == eligible_count);
+    if (first_eligible)
+    {
+        BatchTestResult prefix = buster_test_run_descriptors(arguments, descriptors, first_eligible, timing_enabled, timing_record_count, 0);
+        result.succeeded_unit_test_count += prefix.succeeded_unit_test_count;
+        result.unit_test_count += prefix.unit_test_count;
+        result.succeeded_module_test_count += prefix.succeeded_module_test_count;
+        result.module_test_count += prefix.module_test_count;
+        result.succeeded_external_test_count += prefix.succeeded_external_test_count;
+        result.external_test_count += prefix.external_test_count;
+        if (buster_test_temporary_root_failed)
+        {
+            arena_set_position(arguments->arena, arena_position);
+            return result;
+        }
+    }
+
+    compiler_prewarm();
+    buster_x86_metadata_prewarm();
+    u64 requested_lanes = buster_test_worker_count(eligible_count);
+    lane_run(BUSTER_MIN(requested_lanes, eligible_count), &test_parallel_lane, &state);
+
+    for (u64 index = first_eligible; index <= last_eligible; index += 1)
+    {
+        TestParallelRecord* record = &records[index];
+        BUSTER_CHECK(record->completed);
+        consume_unit_tests(&result, record->timing.result);
+        if (record->output_length)
+        {
+            arguments->show(arguments, S8("{S8}"), (String8){record->output_pointer, record->output_length});
+        }
+        if (timing_enabled)
+        {
+            test_timing_report(arguments, record->timing);
+            *timing_record_count += 1;
+        }
+        BUSTER_CHECK(arena_destroy(record->output_arena, 1));
+    }
+
+    if (last_eligible + 1 < descriptor_count)
+    {
+        BatchTestResult suffix = buster_test_run_descriptors(arguments, descriptors + last_eligible + 1, descriptor_count - last_eligible - 1,
+                                                             timing_enabled, timing_record_count, last_eligible + 1);
+        result.succeeded_unit_test_count += suffix.succeeded_unit_test_count;
+        result.unit_test_count += suffix.unit_test_count;
+        result.succeeded_module_test_count += suffix.succeeded_module_test_count;
+        result.module_test_count += suffix.module_test_count;
+        result.succeeded_external_test_count += suffix.succeeded_external_test_count;
+        result.external_test_count += suffix.external_test_count;
+    }
+    arena_set_position(arguments->arena, arena_position);
     return result;
 }
 
@@ -617,7 +816,7 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_failure_self_test(UnitTestAr
     buster_test_temporary_root_ready = false;
 
     u64 timing_record_count = 0;
-    BatchTestResult test = buster_test_run_descriptors(arguments, &descriptor, 1, false, &timing_record_count);
+    BatchTestResult test = buster_test_run_descriptors(arguments, &descriptor, 1, false, &timing_record_count, 0);
     bool result = !buster_test_temporary_root_failure_body_called && buster_test_temporary_path_call_count == 0 && timing_record_count == 0 &&
                   test.succeeded_unit_test_count == 0 && test.unit_test_count == 1 && test.succeeded_module_test_count == 0 && test.module_test_count == 0 &&
                   test.succeeded_external_test_count == 0 && test.external_test_count == 0;
@@ -677,7 +876,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     }
 
     u64 timing_record_count = 0;
-    result = buster_test_run_descriptors(arguments, test_descriptors, BUSTER_ARRAY_LENGTH(test_descriptors), timing_enabled, &timing_record_count);
+    result = buster_test_run_parallel_descriptors(arguments, test_descriptors, BUSTER_ARRAY_LENGTH(test_descriptors), timing_enabled, &timing_record_count);
     BUSTER_CHECK(!timing_enabled || buster_test_temporary_root_failed || timing_record_count == BUSTER_ARRAY_LENGTH(test_descriptors));
 
     bool temporary_root_succeeded = true;
