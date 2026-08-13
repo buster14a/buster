@@ -5549,22 +5549,15 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataString buster_x86_metadata_emit_required_fe
     return (BusterX86MetadataString){0};
 }
 
-BusterX86MetadataEmitResult buster_x86_metadata_emit_form(BusterX86MetadataEmitQuery query)
+BUSTER_GLOBAL_LOCAL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_with_form(BusterX86MetadataEmitQuery query,
+                                                                                         BusterX86MetadataForm form,
+                                                                                         bool check_mnemonic)
 {
     BusterX86MetadataEmitResult result = {
         .status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT,
-        .form_id = query.form_id,
+        .form_id = form.id,
     };
-    if (!buster_x86_metadata_emit_physical_query_valid(query.physical) ||
-        (query.output_capacity && !query.output) || (query.relocation_capacity && !query.relocations))
-        return result;
-    BusterX86MetadataForm form = {0};
-    if (!buster_x86_metadata_form(query.form_id, &form))
-    {
-        result.status = BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM;
-        return result;
-    }
-    if (!buster_x86_metadata_emit_form_mnemonic_matches(query.physical.mnemonic, query.form_id))
+    if (check_mnemonic && !buster_x86_metadata_emit_form_mnemonic_matches(query.physical.mnemonic, form.id))
     {
         result.status = BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM;
         return result;
@@ -5594,6 +5587,68 @@ BusterX86MetadataEmitResult buster_x86_metadata_emit_form(BusterX86MetadataEmitQ
     result.relocation_count = scratch.relocation_count;
     result.status = BUSTER_X86_METADATA_ENCODE_SUCCESS;
     return result;
+}
+
+BusterX86MetadataEmitResult buster_x86_metadata_emit_form(BusterX86MetadataEmitQuery query)
+{
+    BusterX86MetadataEmitResult result = {
+        .status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT,
+        .form_id = query.form_id,
+    };
+    if (!buster_x86_metadata_emit_physical_query_valid(query.physical) ||
+        (query.output_capacity && !query.output) || (query.relocation_capacity && !query.relocations))
+        return result;
+    BusterX86MetadataForm form = {0};
+    if (!buster_x86_metadata_form(query.form_id, &form))
+    {
+        result.status = BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM;
+        return result;
+    }
+    return buster_x86_metadata_emit_form_with_form(query, form, true);
+}
+
+BusterX86MetadataEmitResult buster_x86_metadata_emit_form_exact(BusterX86MetadataEmitQuery query,
+                                                                  BusterX86MetadataFormKey key)
+{
+    BusterX86MetadataEmitResult result = {
+        .status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT,
+        .form_id = key.form_id,
+    };
+    if (!buster_x86_metadata_form_key_valid(key))
+    {
+        result.status = BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM;
+        return result;
+    }
+    if ((query.output_capacity && !query.output) || (query.relocation_capacity && !query.relocations)) return result;
+    BusterX86MetadataForm form = {0};
+    if (!buster_x86_metadata_lookup_form_key(key, &form))
+    {
+        result.status = BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM;
+        return result;
+    }
+    // Exact callers deliberately do not provide a source mnemonic.  The
+    // form's canonical iclass is supplied only to the shared structural
+    // validator and form transform; it is never looked up or compared to the
+    // caller's spelling.  Clearing source_semantics suppresses source-level
+    // operand diagnostics while retaining physical shape/range checks.
+    BusterX86MetadataEmitQuery normalized = query;
+    normalized.form_id = key.form_id;
+    normalized.physical.mnemonic = buster_x86_metadata_string_span(form.iclass);
+    normalized.physical.source_semantics = false;
+    if (!buster_x86_metadata_emit_physical_query_valid(normalized.physical)) return result;
+    return buster_x86_metadata_emit_form_with_form(normalized, form, false);
+}
+
+BusterX86MetadataEmitResult buster_x86_metadata_emit_form_key(BusterX86MetadataEmitQuery query,
+                                                                BusterX86MetadataFormKey key)
+{
+    return buster_x86_metadata_emit_form_exact(query, key);
+}
+
+BusterX86MetadataEmitResult buster_x86_metadata_emit_exact(BusterX86MetadataEmitQuery query,
+                                                             BusterX86MetadataFormKey key)
+{
+    return buster_x86_metadata_emit_form_exact(query, key);
 }
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_coverage_structural_blocker(BusterX86MetadataForm form)
@@ -6807,6 +6862,40 @@ bool buster_x86_metadata_form(u32 form_id, BusterX86MetadataForm* result)
     if (!buster_x86_metadata_form_record_valid(form_id)) return false;
     buster_x86_metadata_normalized_form(form_id, result);
     return true;
+}
+
+bool buster_x86_metadata_form_key(u32 form_id, BusterX86MetadataFormKey* result)
+{
+    BusterX86MetadataForm form = {0};
+    if (!result || !buster_x86_metadata_form(form_id, &form)) return false;
+    *result = (BusterX86MetadataFormKey){.form_id = form_id, .stable_hash = form.stable_hash};
+    return true;
+}
+
+bool buster_x86_metadata_form_key_from_id(u32 form_id, BusterX86MetadataFormKey* result)
+{
+    return buster_x86_metadata_form_key(form_id, result);
+}
+
+bool buster_x86_metadata_form_key_valid(BusterX86MetadataFormKey key)
+{
+    BusterX86MetadataForm form = {0};
+    return key.stable_hash != 0 && buster_x86_metadata_form(key.form_id, &form) && form.stable_hash == key.stable_hash;
+}
+
+bool buster_x86_metadata_form_key_from_stable_hash(u64 stable_hash, BusterX86MetadataFormKey* result)
+{
+    if (!result || !stable_hash) return false;
+    BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_form_hash(stable_hash);
+    if (candidates.count != 1) return false;
+    u32 form_id = 0;
+    if (!buster_x86_metadata_candidate_at(candidates, 0, &form_id)) return false;
+    return buster_x86_metadata_form_key(form_id, result) && result->stable_hash == stable_hash;
+}
+
+bool buster_x86_metadata_lookup_form_key(BusterX86MetadataFormKey key, BusterX86MetadataForm* result)
+{
+    return result && buster_x86_metadata_form_key_valid(key) && buster_x86_metadata_form(key.form_id, result);
 }
 
 bool buster_x86_metadata_form_is_moffs(u32 form_id)

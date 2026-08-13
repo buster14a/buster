@@ -337,6 +337,23 @@ struct BusterX86MetadataForm
     u16 reason_id;
 };
 
+// A form key combines the snapshot-local dense row ID with the durable hash
+// emitted from the imported XED source.  Callers that persist an exact form
+// must retain both fields: the ID permits direct table access while the hash
+// prevents a stale key from silently selecting a different row after a
+// metadata regeneration.
+typedef struct BusterX86MetadataFormKey BusterX86MetadataFormKey;
+struct BusterX86MetadataFormKey
+{
+    u32 form_id;
+    u64 stable_hash;
+};
+BUSTER_CT_CHECK(sizeof(BusterX86MetadataFormKey) == 16);
+
+// Short aliases mirror the A64 exact bridge naming used by backend clients
+// while keeping the architecture-qualified type as the canonical ABI name.
+typedef BusterX86MetadataFormKey X64ExactFormKey;
+
 typedef struct BusterX86MetadataCoverage BusterX86MetadataCoverage;
 struct BusterX86MetadataCoverage
 {
@@ -893,6 +910,13 @@ BUSTER_F_DECL u8 buster_x86_metadata_string_byte(BusterX86MetadataString string,
 // test for every byte examined.
 BUSTER_F_DECL String8 buster_x86_metadata_string_span(BusterX86MetadataString string);
 BUSTER_F_DECL bool buster_x86_metadata_form(u32 form_id, BusterX86MetadataForm* result);
+// Forms addressed through a key validate the dense ID against its durable
+// source hash before exposing the row or entering the exact emitter.
+BUSTER_F_DECL bool buster_x86_metadata_form_key(u32 form_id, BusterX86MetadataFormKey* result);
+BUSTER_F_DECL bool buster_x86_metadata_form_key_from_id(u32 form_id, BusterX86MetadataFormKey* result);
+BUSTER_F_DECL bool buster_x86_metadata_form_key_valid(BusterX86MetadataFormKey key);
+BUSTER_F_DECL bool buster_x86_metadata_form_key_from_stable_hash(u64 stable_hash, BusterX86MetadataFormKey* result);
+BUSTER_F_DECL bool buster_x86_metadata_lookup_form_key(BusterX86MetadataFormKey key, BusterX86MetadataForm* result);
 // Returns whether the generated form is one of the four legacy MOV moffs
 // encodings (A0-A3).  The pattern details remain private to the metadata
 // decoder; callers only need this classification when deciding whether a
@@ -932,6 +956,16 @@ BUSTER_F_DECL BusterX86MetadataSelectResult buster_x86_metadata_select_form(Bust
 // and relocation arrays are caller-owned; symbols in relocations are borrowed
 // from the query and remain format-neutral.
 BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_form(BusterX86MetadataEmitQuery query);
+// Trusted exact-form emission bypasses mnemonic lookup, candidate scanning,
+// and source-level mnemonic/operand diagnostics.  Physical operand shape,
+// address/immediate ranges, output capacities, instruction length, feature
+// policy, and relocation validation remain in the shared encoder transform.
+BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_exact(BusterX86MetadataEmitQuery query,
+                                                                                BusterX86MetadataFormKey key);
+BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_key(BusterX86MetadataEmitQuery query,
+                                                                              BusterX86MetadataFormKey key);
+BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_exact(BusterX86MetadataEmitQuery query,
+                                                                          BusterX86MetadataFormKey key);
 // The architectural instruction-length guard is shared by final emission and
 // tests that exercise the boundary without requiring an impossible hardware
 // encoding to be synthesized.

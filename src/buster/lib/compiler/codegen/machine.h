@@ -58,7 +58,7 @@ BUSTER_CT_CHECK(MACHINE_POINT_PHASE_COUNT <= (1u << MACHINE_POINT_PHASE_BITS));
 
 // The hot instruction row. Static per-opcode metadata supplies operand
 // roles, classes, ties, early clobbers, implicit registers, regmasks, memory
-// alternatives, encoding form, and side effects; the row carries only the
+// alternatives, emission recipe, and side effects; the row carries only the
 // selected opcode, four inline packed operands, an immediate-or-side-table
 // payload, and rare dynamic flags. No source/debug information, no linked
 // pointers, no allocator state.
@@ -177,6 +177,48 @@ struct MachineLocationSegment
     u32 location;
 };
 BUSTER_CT_CHECK(sizeof(MachineLocationSegment) == 16);
+
+// Emit recipes intentionally identify emission policy, not an architectural
+// encoding form. The two high bits carry the category; the remaining bits
+// are a target-local index owned by the recipe projection. Keeping this
+// namespace compact and independent lets exact-form, selection, and
+// scheduling identities evolve without changing MachineOpcode metadata.
+typedef u16 MachineEmitRecipeId;
+
+typedef enum MachineEmitRecipeCategory
+{
+    MACHINE_EMIT_RECIPE_CATEGORY_NONE,
+    MACHINE_EMIT_RECIPE_CATEGORY_DIRECT,
+    MACHINE_EMIT_RECIPE_CATEGORY_FAMILY,
+    MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION,
+    MACHINE_EMIT_RECIPE_CATEGORY_COUNT,
+} MachineEmitRecipeCategory;
+
+#define MACHINE_EMIT_RECIPE_CATEGORY_BITS 2u
+#define MACHINE_EMIT_RECIPE_INDEX_BITS (sizeof(MachineEmitRecipeId) * 8u - MACHINE_EMIT_RECIPE_CATEGORY_BITS)
+#define MACHINE_EMIT_RECIPE_CATEGORY_SHIFT MACHINE_EMIT_RECIPE_INDEX_BITS
+#define MACHINE_EMIT_RECIPE_INDEX_LIMIT (1u << MACHINE_EMIT_RECIPE_INDEX_BITS)
+#define MACHINE_EMIT_RECIPE_INDEX_MASK ((MachineEmitRecipeId)(MACHINE_EMIT_RECIPE_INDEX_LIMIT - 1u))
+#define MACHINE_EMIT_RECIPE_INVALID ((MachineEmitRecipeId)UINT16_MAX)
+#define MACHINE_EMIT_RECIPE_NONE ((MachineEmitRecipeId)0)
+#define MACHINE_EMIT_RECIPE_MAKE(category, index)                                                                                                               \
+    ((MachineEmitRecipeId)((((MachineEmitRecipeId)(category)) << MACHINE_EMIT_RECIPE_CATEGORY_SHIFT) | ((MachineEmitRecipeId)(index) & MACHINE_EMIT_RECIPE_INDEX_MASK)))
+BUSTER_CT_CHECK(MACHINE_EMIT_RECIPE_CATEGORY_COUNT <= (1u << MACHINE_EMIT_RECIPE_CATEGORY_BITS));
+BUSTER_CT_CHECK(MACHINE_EMIT_RECIPE_INDEX_BITS < 16u);
+
+// These identities are deliberately separate namespaces. Their tables will
+// be added by instruction selection and scheduling work; for now only the
+// invalid sentinels are reserved.
+typedef u16 SelectionPatternId;
+typedef u16 SchedulingClassId;
+#define SELECTION_PATTERN_ID_INVALID ((SelectionPatternId)UINT16_MAX)
+#define SCHEDULING_CLASS_ID_INVALID ((SchedulingClassId)UINT16_MAX)
+#define MACHINE_SELECTION_PATTERN_ID_INVALID SELECTION_PATTERN_ID_INVALID
+#define MACHINE_SCHEDULING_CLASS_ID_INVALID SCHEDULING_CLASS_ID_INVALID
+
+BUSTER_CT_CHECK(sizeof(MachineEmitRecipeId) == sizeof(u16));
+BUSTER_CT_CHECK(sizeof(SelectionPatternId) == sizeof(u16));
+BUSTER_CT_CHECK(sizeof(SchedulingClassId) == sizeof(u16));
 
 // Static opcode metadata. One row per opcode, never per instruction. The
 // x86-64 selector stage adds the real target opcodes; the skeleton opcodes
@@ -586,7 +628,10 @@ struct MachineOpcodeInfo
     u8 early_clobber_mask;
     u16 fixed_register_set;
     u16 memory_fold_alternate;
-    u16 encoding_form;
+    // Reserved layout-neutral seam. Recipe lookup is kept in a separate
+    // read-only projection so opcode metadata remains constant and safe to
+    // query concurrently; use machine_opcode_emit_recipe().
+    MachineEmitRecipeId emit_recipe;
     u16 attributes;
     // Extra registers the opcode's encoder sequence scribbles on beyond its
     // declared operands; owners must vacate before the instruction runs.
@@ -1014,6 +1059,10 @@ BUSTER_F_DECL u32 machine_ref_payload(MachineRef ref);
 BUSTER_F_DECL MachinePoint machine_point_make(u32 instruction_index, MachinePointPhase phase);
 BUSTER_F_DECL u32 machine_point_instruction(MachinePoint point);
 BUSTER_F_DECL MachinePointPhase machine_point_phase(MachinePoint point);
+BUSTER_F_DECL MachineEmitRecipeCategory machine_emit_recipe_category(MachineEmitRecipeId recipe);
+BUSTER_F_DECL u16 machine_emit_recipe_index(MachineEmitRecipeId recipe);
+BUSTER_F_DECL bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe);
+BUSTER_F_DECL MachineEmitRecipeId machine_opcode_emit_recipe(u16 opcode);
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode);
 BUSTER_F_DECL MachineTargetDescription const* machine_target_x86_64(void);
 BUSTER_F_DECL MachineTargetDescription const* machine_target_aarch64(void);

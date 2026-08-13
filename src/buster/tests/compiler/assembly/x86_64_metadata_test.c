@@ -996,6 +996,23 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_emit_exact(
            x86_64_metadata_test_bytes_equal(output, result.byte_count, expected, expected_count);
 }
 
+BUSTER_GLOBAL_LOCAL BusterX86MetadataEmitResult x86_64_metadata_test_emit_named_exact(
+    BusterX86MetadataFormKey key, BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+    BusterX86MetadataPhysicalAttributes attributes, String8 const* features, u32 feature_count, u8* output,
+    u32 output_capacity, BusterX86MetadataRelocation* relocations, u32 relocation_capacity)
+{
+    BusterX86MetadataPhysicalQuery physical = x86_64_metadata_test_physical_query(
+        (String8){0}, operands, operand_count, attributes, features, feature_count);
+    return buster_x86_metadata_emit_form_exact((BusterX86MetadataEmitQuery){
+        .physical = physical,
+        .form_id = key.form_id,
+        .output = output,
+        .output_capacity = output_capacity,
+        .relocations = relocations,
+        .relocation_capacity = relocation_capacity,
+    }, key);
+}
+
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_mem128_forms(void)
 {
     // Keep every generated NELEM_MEM128 row covered.  The public tuple kind
@@ -3653,6 +3670,69 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, coverage_hash.count == 1 && x86_64_metadata_test_coverage_candidate(coverage_hash, 0, &first_coverage_hash_id) &&
                                first_coverage_hash_id == first_coverage.id);
     BUSTER_TEST(arguments, buster_x86_metadata_lookup_form_hash(0).count == 0 && buster_x86_metadata_lookup_coverage_hash(0).count == 0);
+
+    {
+        // Exact keys are durable only when both halves agree.  Emission uses
+        // the key's row directly, accepts an absent source mnemonic, and
+        // remains byte/fixup-equivalent to the ordinary form path.
+        BusterX86MetadataFormKey nop_key = {0};
+        BusterX86MetadataForm nop_form = {0};
+        BusterX86MetadataFormKey hash_key = {0};
+        BUSTER_TEST(arguments, buster_x86_metadata_form_key(9852, &nop_key) && buster_x86_metadata_lookup_form_key(nop_key, &nop_form) &&
+                                   nop_form.id == nop_key.form_id && nop_form.stable_hash == nop_key.stable_hash &&
+                                   buster_x86_metadata_form_key_from_stable_hash(nop_key.stable_hash, &hash_key) &&
+                                   hash_key.form_id == nop_key.form_id && hash_key.stable_hash == nop_key.stable_hash &&
+                                   buster_x86_metadata_form_key_valid(nop_key));
+        BusterX86MetadataPhysicalOperand mov_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64),
+            x86_64_metadata_test_physical_imm(UINT64_C(0x12345678), 64),
+        };
+        String8 wildcard[1] = {S8("*")};
+        u8 ordinary_bytes[16] = {0};
+        u8 exact_bytes[16] = {0};
+        BusterX86MetadataRelocation ordinary_relocations[2] = {0};
+        BusterX86MetadataRelocation exact_relocations[2] = {0};
+        BusterX86MetadataPhysicalQuery ordinary_physical = x86_64_metadata_test_physical_query(
+            S8("MOV"), mov_operands, BUSTER_ARRAY_LENGTH(mov_operands), (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard));
+        BusterX86MetadataEmitResult ordinary = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = ordinary_physical,
+            .form_id = 10018,
+            .output = ordinary_bytes,
+            .output_capacity = BUSTER_ARRAY_LENGTH(ordinary_bytes),
+            .relocations = ordinary_relocations,
+            .relocation_capacity = BUSTER_ARRAY_LENGTH(ordinary_relocations),
+        });
+        BusterX86MetadataFormKey mov_key = {0};
+        BUSTER_TEST(arguments, buster_x86_metadata_form_key(10018, &mov_key) &&
+                                   buster_x86_metadata_form_key_from_id(10018, &hash_key) &&
+                                   hash_key.form_id == mov_key.form_id && hash_key.stable_hash == mov_key.stable_hash);
+        BusterX86MetadataEmitResult exact = x86_64_metadata_test_emit_named_exact(
+            mov_key, mov_operands, BUSTER_ARRAY_LENGTH(mov_operands), (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), exact_bytes, BUSTER_ARRAY_LENGTH(exact_bytes), exact_relocations,
+            BUSTER_ARRAY_LENGTH(exact_relocations));
+        BUSTER_TEST(arguments, ordinary.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && exact.status == ordinary.status &&
+                                   exact.form_id == mov_key.form_id && exact.stable_hash == mov_key.stable_hash &&
+                                   exact.byte_count == ordinary.byte_count && exact.relocation_count == ordinary.relocation_count &&
+                                   x86_64_metadata_test_bytes_equal(exact_bytes, exact.byte_count, ordinary_bytes, ordinary.byte_count) &&
+                                   memcmp(exact_relocations, ordinary_relocations,
+                                          exact.relocation_count * sizeof(*exact_relocations)) == 0);
+        BusterX86MetadataFormKey stale_key = mov_key;
+        stale_key.stable_hash ^= UINT64_C(1);
+        BusterX86MetadataEmitResult stale = x86_64_metadata_test_emit_named_exact(
+            stale_key, mov_operands, BUSTER_ARRAY_LENGTH(mov_operands), (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), exact_bytes, BUSTER_ARRAY_LENGTH(exact_bytes), exact_relocations,
+            BUSTER_ARRAY_LENGTH(exact_relocations));
+        BusterX86MetadataFormKey bad_id_key = mov_key;
+        bad_id_key.form_id = buster_x86_metadata_form_count();
+        BusterX86MetadataEmitResult bad_id = x86_64_metadata_test_emit_named_exact(
+            bad_id_key, mov_operands, BUSTER_ARRAY_LENGTH(mov_operands), (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), exact_bytes, BUSTER_ARRAY_LENGTH(exact_bytes), exact_relocations,
+            BUSTER_ARRAY_LENGTH(exact_relocations));
+        BUSTER_TEST(arguments, stale.status == BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM &&
+                                   bad_id.status == BUSTER_X86_METADATA_ENCODE_UNKNOWN_FORM &&
+                                   !buster_x86_metadata_form_key_valid(stale_key) && !buster_x86_metadata_form_key_valid(bad_id_key));
+    }
 
     {
         BusterX86MetadataForm mov_form = {0};

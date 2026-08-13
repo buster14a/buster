@@ -270,6 +270,56 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         }
     }
     BUSTER_TEST(arguments, cmpxchg16_encoded.valid && saw_cmpxchg16 && saw_result_store);
+    // Recipe IDs are a packed, target-local policy namespace.  Keep this
+    // contract independent from exact encoding, selection, and scheduling
+    // tables, and audit every current opcode so a newly added row cannot
+    // silently inherit NONE.
+    MachineEmitRecipeId sample_recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_FAMILY, 37);
+    BUSTER_TEST(arguments, machine_emit_recipe_is_valid(sample_recipe));
+    BUSTER_TEST(arguments, machine_emit_recipe_category(sample_recipe) == MACHINE_EMIT_RECIPE_CATEGORY_FAMILY);
+    BUSTER_TEST(arguments, machine_emit_recipe_index(sample_recipe) == 37);
+    BUSTER_TEST(arguments, machine_emit_recipe_category(MACHINE_EMIT_RECIPE_INVALID) == MACHINE_EMIT_RECIPE_CATEGORY_COUNT);
+    BUSTER_TEST(arguments, !machine_emit_recipe_is_valid(MACHINE_EMIT_RECIPE_INVALID));
+    BUSTER_TEST(arguments, SELECTION_PATTERN_ID_INVALID == (SelectionPatternId)UINT16_MAX);
+    BUSTER_TEST(arguments, SCHEDULING_CLASS_ID_INVALID == (SchedulingClassId)UINT16_MAX);
+
+    u32 recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
+    bool recipe_indices_in_range = true;
+    for (u16 opcode = 0; opcode < MACHINE_OPCODE_COUNT; opcode += 1)
+    {
+        MachineEmitRecipeId recipe = machine_opcode_emit_recipe(opcode);
+        MachineEmitRecipeCategory category = machine_emit_recipe_category(recipe);
+        MachineOpcodeInfo const* info = machine_opcode_info(opcode);
+        recipe_indices_in_range &= info && machine_emit_recipe_is_valid(recipe);
+        if (category < MACHINE_EMIT_RECIPE_CATEGORY_COUNT)
+        {
+            recipe_counts[category] += 1;
+        }
+    }
+    BUSTER_TEST(arguments, recipe_indices_in_range);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 52);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 45);
+    BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
+
+    u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
+    for (u16 opcode = MACHINE_X64_MOV_RI; opcode <= MACHINE_X64_VBINARY; opcode += 1)
+    {
+        x64_counts[machine_emit_recipe_category(machine_opcode_emit_recipe(opcode))] += 1;
+    }
+    BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 47);
+    BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 49);
+    BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 26);
+
+    u32 a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
+    for (u16 opcode = MACHINE_A64_MOV_RI; opcode <= MACHINE_A64_LEA_SYMBOL; opcode += 1)
+    {
+        a64_counts[machine_emit_recipe_category(machine_opcode_emit_recipe(opcode))] += 1;
+    }
+    BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 51);
+    BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 3);
+    BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 19);
 
     MachineFunction function = machine_test_build_function(arguments->arena);
     BUSTER_TEST(arguments, function.instruction_count == 4);

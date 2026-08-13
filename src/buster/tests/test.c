@@ -16,6 +16,7 @@
 #include <buster/lib/compiler/frontend/buster/analysis.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#include <buster/lib/compiler/assembly/aarch64_exact_bridge.h>
 #include <buster/lib/compiler/assembly/aarch64_control_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_system_registers.h>
 #include <buster/lib/compiler/assembly/aarch64_semantics.h>
@@ -53,6 +54,7 @@
 #include <buster/tests/compiler/frontend/buster/analysis_test.h>
 #include <buster/tests/compiler/frontend/c/c_test.h>
 #include <buster/tests/compiler/assembly/aarch64_encoding_test.h>
+#include <buster/tests/compiler/assembly/aarch64_exact_bridge_test.h>
 #include <buster/tests/compiler/assembly/aarch64_control_semantics_test.h>
 #include <buster/tests/compiler/assembly/aarch64_system_registers_test.h>
 #include <buster/tests/compiler/assembly/aarch64_semantics_test.h>
@@ -98,6 +100,7 @@
 #include <buster/tests/compiler/frontend/buster/analysis_test.c>
 #include <buster/tests/compiler/frontend/c/c_test.c>
 #include <buster/tests/compiler/assembly/aarch64_encoding_test.c>
+#include <buster/tests/compiler/assembly/aarch64_exact_bridge_test.c>
 #include <buster/tests/compiler/assembly/aarch64_control_semantics_test.c>
 #include <buster/tests/compiler/assembly/aarch64_system_registers_test.c>
 #include <buster/tests/compiler/assembly/aarch64_semantics_test.c>
@@ -231,6 +234,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
     {S8_INITIALIZER("parser_file_tests"), &parser_file_tests},
     {S8_INITIALIZER("c_frontend_tests"), &c_frontend_tests},
     {S8_INITIALIZER("aarch64_encoding_tests"), &aarch64_encoding_tests},
+    {S8_INITIALIZER("aarch64_exact_bridge_tests"), &aarch64_exact_bridge_tests},
     {S8_INITIALIZER("aarch64_control_semantics_tests"), &aarch64_control_semantics_tests},
     {S8_INITIALIZER("aarch64_system_registers_tests"), &aarch64_system_registers_tests},
     {S8_INITIALIZER("aarch64_semantics_tests"), &aarch64_semantics_tests},
@@ -262,9 +266,9 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
 };
 
 #if BUSTER_CPU_ARCH_X86_64
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 43);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 44);
 #else
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 42);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(test_descriptors) == 43);
 #endif
 #endif
 
