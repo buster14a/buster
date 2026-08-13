@@ -43,6 +43,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_IMPORT_ARM_A64_SYSREG,
     BUILD_COMMAND_TEST_SELF_HOST,
     BUILD_COMMAND_SELF_HOST_FROM_EXISTING,
+    BUILD_COMMAND_X86_64_COMPLETION_CENSUS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -8157,8 +8158,221 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_requested_for_platform(bool ci, b
 BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_consumer_supported_for_platform(bool linux_host, bool macos, bool windows, bool x86_64);
 BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_selection_is_valid(bool requested, bool supported, bool producer_selected);
 BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_cleanup_action(Arena* arena, void* data);
+BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_capture_action(Arena* arena, void* data);
+BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_clean_action(Arena* arena, void* data);
+BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_release_success_action(Arena* arena, void* data);
 BUSTER_GLOBAL_LOCAL ProcessSpawnResult process_run_spawn(Arena* arena, ProcessRun* run);
 BUSTER_GLOBAL_LOCAL ProcessResult process_run_wait(Arena* arena, ProcessRun* run);
+
+typedef struct X86CompletionCensusPlan X86CompletionCensusPlan;
+struct X86CompletionCensusPlan
+{
+    BuildArtifactFanout fanout;
+    BuildArtifactFanout* fanout_state;
+    String8 output_path;
+};
+
+BUSTER_GLOBAL_LOCAL ProcessResult x86_completion_census_validate_action(Arena* arena, void* data)
+{
+#if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS)
+    X86CompletionCensusPlan* plan = (X86CompletionCensusPlan*)data;
+    ProcessResult result = build_artifact_fanout_release_success_action(arena, &plan->fanout);
+    if (result != PROCESS_RESULT_SUCCESS)
+    {
+        return result;
+    }
+    if (!path_exists(arena, plan->fanout.artifact_path))
+    {
+        string_print(S8("error: canonical Clang Release IDE is missing for x86_64 completion census: {S8}\n"), plan->fanout.artifact_path);
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("X86_COMPLETION_CENSUS provenance=validated record={S8} artifact={S8}\n"), plan->fanout.provenance_record_path,
+                 plan->fanout.artifact_path);
+    return PROCESS_RESULT_SUCCESS;
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(data);
+    string_print(S8("error: x86_64 completion census is supported only on x86-64 desktop targets\n"));
+    return PROCESS_RESULT_FAILED;
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult x86_completion_census_existing_validate_action(Arena* arena, void* data)
+{
+#if BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX
+    X86CompletionCensusPlan* plan = (X86CompletionCensusPlan*)data;
+    BuildArtifactFanout* fanout = plan->fanout_state;
+    bool provenance_consumed = fanout && fanout->provenance_record_path.length && !path_exists(arena, fanout->provenance_record_path);
+    if (!fanout || !fanout->provenance_captured || !fanout->producer_clean_succeeded || !provenance_consumed ||
+        !path_exists(arena, fanout->artifact_path))
+    {
+        string_print(S8("error: canonical Clang Release provenance/artifact is unavailable for x86_64 completion census\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("X86_COMPLETION_CENSUS provenance=consumed record={S8} artifact={S8}\n"), fanout->provenance_record_path,
+                 fanout->artifact_path);
+    return PROCESS_RESULT_SUCCESS;
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(data);
+    return PROCESS_RESULT_FAILED;
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult x86_completion_census_prepare_output_action(Arena* arena, void* data)
+{
+    X86CompletionCensusPlan* plan = (X86CompletionCensusPlan*)data;
+    if (!plan || !plan->output_path.length)
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    remove_path_recursive(arena, plan->output_path);
+    return path_exists(arena, plan->output_path) ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void x86_completion_census_add(Arena* arena, String8 build_directory, bool ci)
+{
+#if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS)
+    String8 ide_name =
+#if BUSTER_WINDOWS
+        S8("ide.exe");
+#else
+        S8("ide");
+#endif
+    // `build` contains the running build driver, so keep the standalone
+    // producer in a child tree before generate_add() removes its destination.
+    String8 running_build_directory = os_path_absolute(arena, S8("build"), true);
+    String8 requested_build_directory = os_path_absolute(arena, build_directory, true);
+    bool targets_running_build_driver = running_build_directory.length && requested_build_directory.length &&
+                                        build_artifact_fanout_path_equal(running_build_directory, requested_build_directory);
+    String8 producer_directory = targets_running_build_driver ? path_join(arena, build_directory, S8("x86_64-completion-census-tree")) : build_directory;
+    String8 artifact_path = path_join(arena, path_join(arena, producer_directory, S8("Release")), ide_name);
+    String8 output_path = path_join(arena, S8("build"), S8("x86_64-completion-census.manifest"));
+    String8 provenance_record_path = path_join(arena, producer_directory, S8("x86_64-completion-census.provenance"));
+    String8* ci_arguments = arena_allocate(arena, String8, 1);
+    ci_arguments[0] = S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY");
+    Generate canonical = {
+        .build_directory = producer_directory,
+        .configuration_types = S8("Release"),
+        .compiler = BUILD_COMPILER_CLANG,
+        .fuzz_available = 1,
+        .ci = ci,
+        .optimize = 1,
+        .optimize_set = 1,
+        .link_libc = 1,
+        .include_tests = 1,
+        .check_optional_warnings = 0,
+        .developer_targets = 0,
+        .cmake_arguments = ci ? (SliceString8){.pointer = ci_arguments, .length = 1} : (SliceString8){0},
+    };
+    CmakeBuildOptions release = {
+        .config = S8("Release"),
+        .optimize = 1,
+        .optimize_set = 1,
+        .parallel_jobs = 1,
+    };
+    X86CompletionCensusPlan* plan = arena_allocate(arena, X86CompletionCensusPlan, 1);
+    *plan = (X86CompletionCensusPlan){
+        .fanout = {
+            .build_directory = producer_directory,
+            .artifact_path = artifact_path,
+            .provenance_record_path = provenance_record_path,
+            .generate = canonical,
+            .options = release,
+            .release_build_scheduled = 1,
+            .producer_clean_scheduled = 1,
+        },
+        .output_path = output_path,
+    };
+
+    BuildStep* generate_step = step_add(arena);
+    generate_add(arena, generate_step, canonical);
+    BuildStep* capture_step = step_add(arena);
+    ProcessRun* capture_run = run_add(arena, capture_step);
+    *capture_run = (ProcessRun){
+        .callback = build_artifact_fanout_capture_action,
+        .callback_data = &plan->fanout,
+    };
+    String8 clean_target[] = {S8("clean")};
+    BuildStep* clean_step = step_add(arena);
+    ProcessRun* clean_run = build_run_add(arena, clean_step, producer_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(clean_target),
+                                          (SliceString8){0}, release);
+    clean_run->timing_description = S8("x86_64 completion census producer clean");
+    BuildStep* clean_success_step = step_add(arena);
+    ProcessRun* clean_success_run = run_add(arena, clean_success_step);
+    *clean_success_run = (ProcessRun){
+        .callback = build_artifact_fanout_clean_action,
+        .callback_data = &plan->fanout,
+    };
+    BuildStep* build_step = step_add(arena);
+    build_run_add(arena, build_step, producer_directory, (SliceString8){0}, (SliceString8){0}, release);
+
+    BuildStep* validate_step = step_add(arena);
+    ProcessRun* validate_run = run_add(arena, validate_step);
+    *validate_run = (ProcessRun){.callback = x86_completion_census_validate_action, .callback_data = plan};
+
+    BuildStep* prepare_output_step = step_add(arena);
+    ProcessRun* prepare_output_run = run_add(arena, prepare_output_step);
+    *prepare_output_run = (ProcessRun){.callback = x86_completion_census_prepare_output_action, .callback_data = plan};
+
+    String8 census_argument = string_format(arena, S8("--output={S8}"), output_path);
+    String8* census_arguments = arena_allocate(arena, String8, 3);
+    census_arguments[0] = artifact_path;
+    census_arguments[1] = S8("x86_64_completion_census");
+    census_arguments[2] = census_argument;
+    BuildStep* census_step = step_add(arena);
+    ProcessRun* census_run = run_add(arena, census_step);
+    *census_run = (ProcessRun){
+        .arguments = {.pointer = census_arguments, .length = 3},
+        .timing_description = S8("x86_64 completion census"),
+        .timeout_seconds = SELF_HOST_TIMEOUT_SECONDS,
+        .spawn_options = {.use_process_environment = 1},
+    };
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(build_directory);
+    BUSTER_UNUSED(ci);
+    BuildStep* unsupported_step = step_add(arena);
+    ProcessRun* unsupported_run = run_add(arena, unsupported_step);
+    *unsupported_run = (ProcessRun){.callback = x86_completion_census_validate_action};
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL void x86_completion_census_add_existing(Arena* arena, BuildArtifactFanout* fanout)
+{
+#if BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX
+    X86CompletionCensusPlan* plan = arena_allocate(arena, X86CompletionCensusPlan, 1);
+    *plan = (X86CompletionCensusPlan){
+        .fanout = *fanout,
+        .fanout_state = fanout,
+        .output_path = path_join(arena, S8("build"), S8("x86_64-completion-census.manifest")),
+    };
+    BuildStep* validate_step = step_add(arena);
+    ProcessRun* validate_run = run_add(arena, validate_step);
+    *validate_run = (ProcessRun){.callback = x86_completion_census_existing_validate_action, .callback_data = plan};
+
+    BuildStep* prepare_output_step = step_add(arena);
+    ProcessRun* prepare_output_run = run_add(arena, prepare_output_step);
+    *prepare_output_run = (ProcessRun){.callback = x86_completion_census_prepare_output_action, .callback_data = plan};
+
+    String8 census_argument = string_format(arena, S8("--output={S8}"), plan->output_path);
+    String8* census_arguments = arena_allocate(arena, String8, 3);
+    census_arguments[0] = plan->fanout.artifact_path;
+    census_arguments[1] = S8("x86_64_completion_census");
+    census_arguments[2] = census_argument;
+    BuildStep* census_step = step_add(arena);
+    ProcessRun* census_run = run_add(arena, census_step);
+    *census_run = (ProcessRun){
+        .arguments = {.pointer = census_arguments, .length = 3},
+        .timing_description = S8("x86_64 completion census"),
+        .timeout_seconds = SELF_HOST_TIMEOUT_SECONDS,
+        .spawn_options = {.use_process_environment = 1},
+    };
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(fanout);
+#endif
+}
 
 BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool include_large_snapshot)
 {
@@ -9747,6 +9961,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         BuildStep* superbuild_step = step_add(arena);
         build_run_add(arena, superbuild_step, superbuild_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(superbuild_targets), (SliceString8){0},
                       superbuild_options);
+#if BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX
+        // The canonical producer and its provenance have already been built,
+        // cleaned, and consumed by the pooled self-host worker above. Run the
+        // census once against that same artifact, after the outer superbuild,
+        // rather than rebuilding it per matrix combination.
+        if (ci && fanout && fanout_requested)
+        {
+            x86_completion_census_add_existing(arena, fanout);
+        }
+#endif
         return PROCESS_RESULT_SUCCESS;
     }
 
@@ -20914,6 +21138,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_IMPORT_ARM_A64_SYSREG] = S8_INITIALIZER("import_arm_a64_sysregs"),
         [BUILD_COMMAND_TEST_SELF_HOST] = S8_INITIALIZER("test_self_host"),
         [BUILD_COMMAND_SELF_HOST_FROM_EXISTING] = S8_INITIALIZER("self_host_from_existing"),
+        [BUILD_COMMAND_X86_64_COMPLETION_CENSUS] = S8_INITIALIZER("x86_64_completion_census"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -21321,6 +21546,15 @@ ProcessResult process_arguments(void)
                 else if (command == BUILD_COMMAND_CLANG_ANALYZE)
                 {
                     clang_analyze_options.config = config;
+                }
+                else if (command == BUILD_COMMAND_X86_64_COMPLETION_CENSUS && string_equal(config, S8("Release")))
+                {
+                    // The census always uses the canonical Release producer;
+                    // accepting its explicit spelling keeps the command-line
+                    // shape consistent with other build-driver commands.
+                    options.config = config;
+                    options.optimize = 1;
+                    options.optimize_set = 1;
                 }
                 else
                 {
@@ -21837,6 +22071,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_SELF_HOST_FROM_EXISTING:
         {
             result = self_host_from_existing_command_add(arena, build_directory, provenance_record_path, options, generate);
+        }
+        break;
+        case BUILD_COMMAND_X86_64_COMPLETION_CENSUS:
+        {
+            x86_completion_census_add(arena, build_directory, false);
         }
         break;
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:
