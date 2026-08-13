@@ -28,6 +28,7 @@
 #include <buster/lib/compiler/assembly/aarch64_memory_semantics.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
+#include <buster/lib/compiler/assembly/x86_64_completion_census.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/interpreter.h>
 #include <buster/lib/compiler/dwarf/dwarf.h>
@@ -67,6 +68,7 @@
 #include <buster/tests/compiler/assembly/aarch64_alias_projection_test.h>
 #include <buster/tests/compiler/assembly/assembly_test.h>
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.h>
+#include <buster/tests/compiler/assembly/x86_64_completion_census_test.h>
 #include <buster/tests/compiler/ir/ir_test.h>
 #include <buster/tests/compiler/ir/interpreter_test.h>
 #include <buster/tests/compiler/codegen/machine_test.h>
@@ -113,6 +115,7 @@
 #include <buster/tests/compiler/assembly/aarch64_alias_projection_test.c>
 #include <buster/tests/compiler/assembly/assembly_test.c>
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.c>
+#include <buster/tests/compiler/assembly/x86_64_completion_census_test.c>
 #include <buster/tests/compiler/ir/ir_test.c>
 #include <buster/tests/compiler/ir/interpreter_test.c>
 #include <buster/tests/compiler/codegen/machine_test.c>
@@ -247,6 +250,9 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[] = {
     {S8_INITIALIZER("aarch64_alias_projection_tests"), &aarch64_alias_projection_tests},
     {S8_INITIALIZER("assembly_tests"), &assembly_tests},
     {S8_INITIALIZER("x86_64_metadata_tests"), &x86_64_metadata_tests},
+#if BUSTER_CPU_ARCH_X86_64
+    {S8_INITIALIZER("x86_64_completion_census_tests"), &x86_64_completion_census_tests},
+#endif
     {S8_INITIALIZER("analysis_tests"), &analysis_tests},
     {S8_INITIALIZER("ir_tests"), &ir_tests},
     {S8_INITIALIZER("ir_interpreter_tests"), &ir_interpreter_tests},

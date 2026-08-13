@@ -6115,6 +6115,191 @@ BusterX86MetadataCoverageAuditResult buster_x86_metadata_coverage_audit(BusterX8
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL u64 buster_x86_metadata_completion_digest_byte(u64 hash, u8 value)
+{
+    return (hash ^ value) * UINT64_C(1099511628211);
+}
+
+BUSTER_GLOBAL_LOCAL u64 buster_x86_metadata_completion_digest_u16(u64 hash, u16 value)
+{
+    hash = buster_x86_metadata_completion_digest_byte(hash, (u8)value);
+    return buster_x86_metadata_completion_digest_byte(hash, (u8)(value >> 8));
+}
+
+BUSTER_GLOBAL_LOCAL u64 buster_x86_metadata_completion_digest_u32(u64 hash, u32 value)
+{
+    hash = buster_x86_metadata_completion_digest_byte(hash, (u8)value);
+    hash = buster_x86_metadata_completion_digest_byte(hash, (u8)(value >> 8));
+    hash = buster_x86_metadata_completion_digest_byte(hash, (u8)(value >> 16));
+    return buster_x86_metadata_completion_digest_byte(hash, (u8)(value >> 24));
+}
+
+BUSTER_GLOBAL_LOCAL u64 buster_x86_metadata_completion_digest_u64(u64 hash, u64 value)
+{
+    hash = buster_x86_metadata_completion_digest_u32(hash, (u32)value);
+    return buster_x86_metadata_completion_digest_u32(hash, (u32)(value >> 32));
+}
+
+BUSTER_GLOBAL_LOCAL u64 buster_x86_metadata_completion_digest_string(u64 hash, BusterX86MetadataString value)
+{
+    u32 index = 0;
+    hash = buster_x86_metadata_completion_digest_u32(hash, value.offset);
+    hash = buster_x86_metadata_completion_digest_u32(hash, value.length);
+    for (; index < value.length; index += 1)
+        hash = buster_x86_metadata_completion_digest_byte(hash, buster_x86_metadata_string_byte(value, index));
+    return hash;
+}
+
+BUSTER_GLOBAL_LOCAL u64 buster_x86_metadata_completion_digest_operand(u64 hash, BusterX86MetadataOperand value)
+{
+    u32 index = 0;
+    hash = buster_x86_metadata_completion_digest_string(hash, value.atom);
+    hash = buster_x86_metadata_completion_digest_string(hash, value.width);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.slot);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.visible);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.kind);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.access);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.field_source);
+    for (; index < BUSTER_ARRAY_LENGTH(value.reserved); index += 1)
+        hash = buster_x86_metadata_completion_digest_byte(hash, value.reserved[index]);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.physical_class);
+    return buster_x86_metadata_completion_digest_u16(hash, value.physical_width_flags);
+}
+
+BUSTER_GLOBAL_LOCAL u64 buster_x86_metadata_completion_digest_form(u64 hash, BusterX86MetadataForm value)
+{
+    u32 index = 0;
+    hash = buster_x86_metadata_completion_digest_u32(hash, value.id);
+    hash = buster_x86_metadata_completion_digest_u64(hash, value.stable_hash);
+#define BUSTER_X86_METADATA_DIGEST_FORM_STRING(field) hash = buster_x86_metadata_completion_digest_string(hash, value.field)
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(source);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(iclass);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(iform);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(isa_set);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(category);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(extension);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(attributes);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(cpl);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(exceptions);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(flags);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(disasm);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(disasm_intel);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(disasm_att);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(real_opcode);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(uname);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(comment);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(version);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(pattern);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(operands);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(operand_annotation);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(tuple);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(element_size);
+    BUSTER_X86_METADATA_DIGEST_FORM_STRING(reason);
+#undef BUSTER_X86_METADATA_DIGEST_FORM_STRING
+    hash = buster_x86_metadata_completion_digest_u32(hash, value.operand_first);
+    hash = buster_x86_metadata_completion_digest_u16(hash, value.operand_count);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.coverage_class);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.encoder_family);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.test_class);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.prefix_kind);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.map);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.fixed_byte_count);
+    for (; index < BUSTER_ARRAY_LENGTH(value.fixed_bytes); index += 1)
+        hash = buster_x86_metadata_completion_digest_byte(hash, value.fixed_bytes[index]);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.mandatory_prefix);
+    hash = buster_x86_metadata_completion_digest_u16(hash, value.field_flags);
+    hash = buster_x86_metadata_completion_digest_u16(hash, value.decorator_flags);
+    hash = buster_x86_metadata_completion_digest_u16(hash, value.apx_flags);
+    hash = buster_x86_metadata_completion_digest_u16(hash, value.amx_flags);
+    hash = buster_x86_metadata_completion_digest_u16(hash, value.mode_flags);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.displacement_width);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.displacement_scale);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.immediate_width);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.immediate_signed);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.relocation_base);
+    hash = buster_x86_metadata_completion_digest_byte(hash, value.tuple_kind);
+    hash = buster_x86_metadata_completion_digest_u32(hash, value.tuple_offset);
+    hash = buster_x86_metadata_completion_digest_u32(hash, value.element_size_offset);
+    hash = buster_x86_metadata_completion_digest_u32(hash, value.token_count);
+    return buster_x86_metadata_completion_digest_u16(hash, value.reason_id);
+}
+
+u64 buster_x86_metadata_coverage_digest(BusterX86MetadataCoverageLedgerEntry const* entries, u32 entry_count, u32 entry_capacity)
+{
+    u32 form_count = 0;
+    u64 hash = 0;
+    u32 form_id = 0;
+    form_count = buster_x86_metadata_form_count();
+    if (entry_count > form_count) entry_count = form_count;
+    hash = UINT64_C(14695981039346656037);
+    hash = buster_x86_metadata_completion_digest_u32(hash, entry_count);
+    for (; form_id < entry_count; form_id += 1)
+    {
+        BusterX86MetadataForm form = {0};
+        BusterX86MetadataCoverageLedgerEntry entry = {0};
+        u32 entry_reserved_index = 0;
+        u32 operand_index = 0;
+        u32 visible_count = 0;
+        u32 operand_kind_counts[BUSTER_X86_METADATA_OPERAND_KIND_COUNT] = {0};
+        u32 operand_kind_index = 0;
+        BusterX86MetadataOperand operand = {0};
+        bool retrieved = false;
+        if (!buster_x86_metadata_form(form_id, &form)) continue;
+        if (entries && form_id < entry_capacity) entry = entries[form_id];
+        hash = buster_x86_metadata_completion_digest_form(hash, form);
+        hash = buster_x86_metadata_completion_digest_u32(hash, entry.form_id);
+        hash = buster_x86_metadata_completion_digest_u64(hash, entry.stable_hash);
+        hash = buster_x86_metadata_completion_digest_byte(hash, entry.coverage_class);
+        hash = buster_x86_metadata_completion_digest_byte(hash, entry.encoder_family);
+        hash = buster_x86_metadata_completion_digest_byte(hash, entry.disposition);
+        hash = buster_x86_metadata_completion_digest_byte(hash, entry.blocker);
+        hash = buster_x86_metadata_completion_digest_byte(hash, entry.encoder_capable);
+        hash = buster_x86_metadata_completion_digest_byte(hash, entry.policy_excluded);
+        for (; entry_reserved_index < BUSTER_ARRAY_LENGTH(entry.reserved); entry_reserved_index += 1)
+            hash = buster_x86_metadata_completion_digest_byte(hash, entry.reserved[entry_reserved_index]);
+        for (; operand_index < form.operand_count; operand_index += 1)
+        {
+            operand = (BusterX86MetadataOperand){0};
+            hash = buster_x86_metadata_completion_digest_u32(hash, operand_index);
+            retrieved = buster_x86_metadata_operand(form_id, operand_index, &operand);
+            hash = buster_x86_metadata_completion_digest_byte(hash, retrieved);
+            if (retrieved) hash = buster_x86_metadata_completion_digest_operand(hash, operand);
+        }
+
+        // Keep one authoritative structural digest stream. This compact
+        // classification tuple is part of the checked-in ledger contract and
+        // follows the complete decoded row and operands above.
+        operand_index = 0;
+        for (; operand_index < form.operand_count; operand_index += 1)
+        {
+            operand = (BusterX86MetadataOperand){0};
+            if (!buster_x86_metadata_operand(form_id, operand_index, &operand)) continue;
+            visible_count += operand.visible != 0;
+            if (operand.kind < BUSTER_X86_METADATA_OPERAND_KIND_COUNT) operand_kind_counts[operand.kind] += 1;
+        }
+        hash = buster_x86_metadata_completion_digest_u32(hash, form.id);
+        hash = buster_x86_metadata_completion_digest_u64(hash, form.stable_hash);
+        hash = buster_x86_metadata_completion_digest_byte(hash, form.coverage_class);
+        hash = buster_x86_metadata_completion_digest_byte(hash, entry.disposition);
+        hash = buster_x86_metadata_completion_digest_byte(hash, entry.blocker);
+        hash = buster_x86_metadata_completion_digest_byte(hash, entry.encoder_family);
+        hash = buster_x86_metadata_completion_digest_byte(hash, entry.encoder_capable != 0);
+        hash = buster_x86_metadata_completion_digest_byte(hash, entry.policy_excluded != 0);
+        hash = buster_x86_metadata_completion_digest_u16(hash, form.field_flags);
+        hash = buster_x86_metadata_completion_digest_u16(hash, form.decorator_flags);
+        hash = buster_x86_metadata_completion_digest_u16(hash, form.apx_flags);
+        hash = buster_x86_metadata_completion_digest_u16(hash, form.amx_flags);
+        hash = buster_x86_metadata_completion_digest_u16(hash, form.mode_flags);
+        hash = buster_x86_metadata_completion_digest_byte(hash, form.prefix_kind);
+        hash = buster_x86_metadata_completion_digest_byte(hash, form.map);
+        hash = buster_x86_metadata_completion_digest_byte(hash, (u8)visible_count);
+        hash = buster_x86_metadata_completion_digest_u16(hash, form.operand_count);
+        for (; operand_kind_index < BUSTER_X86_METADATA_OPERAND_KIND_COUNT; operand_kind_index += 1)
+            hash = buster_x86_metadata_completion_digest_u32(hash, operand_kind_counts[operand_kind_index]);
+    }
+    return hash;
+}
+
 bool buster_x86_metadata_canonical_query(u32 form_id, BusterX86MetadataPhysicalQuery* query,
                                          BusterX86MetadataPhysicalOperand operands[16], String8 features[1],
                                          char8 mnemonic_buffer[128])

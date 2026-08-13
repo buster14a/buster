@@ -26,6 +26,7 @@
 #include <buster/lib/compiler/assembly/aarch64_alias_projection.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
+#include <buster/lib/compiler/assembly/x86_64_completion_census.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/interpreter.h>
 #include <buster/lib/compiler/debug/debug.h>
@@ -103,6 +104,7 @@
 #include <buster/lib/compiler/assembly/aarch64_alias_projection.c>
 #include <buster/lib/compiler/assembly/assembly.c>
 #include <buster/lib/compiler/assembly/x86_64_metadata.c>
+#include <buster/lib/compiler/assembly/x86_64_completion_census.c>
 #include <buster/lib/compiler/ir/ir.c>
 #include <buster/lib/compiler/ir/interpreter.c>
 #include <buster/lib/compiler/debug/debug.c>
@@ -171,6 +173,7 @@ struct IdeProgram
     String8 compile_module_root;
     String8 jit_source_path;
     String8 jit_module_root;
+    String8 completion_census_output_path;
     SliceString8 cc_arguments;
     SliceString8 fuzz_arguments;
     SliceString8 jit_arguments;
@@ -180,6 +183,7 @@ struct IdeProgram
     bool compile_debug_info;
     bool cc;
     bool jit;
+    bool completion_census;
     bool fuzz;
     bool test_app;
     bool document_model_ready;
@@ -834,6 +838,51 @@ ProcessResult process_arguments(void)
             break;
 #endif
         }
+        else if (string_equal(arg, S8("x86_64_completion_census")))
+        {
+#if !BUSTER_CPU_ARCH_X86_64
+            string_print(S8("x86_64_completion_census is not available on this target\n"));
+            result = PROCESS_RESULT_FAILED;
+            break;
+#else
+            if (i != 1 || ide_state.test || ide_state.bench || ide_state.compile || ide_state.cc || ide_state.jit || ide_state.fuzz ||
+                ide_state.completion_census)
+            {
+                string_print(S8("usage: ide x86_64_completion_census [--output=<path>]\n"));
+                result = PROCESS_RESULT_FAILED;
+                break;
+            }
+            ide_state.completion_census = true;
+            for (i += 1; i < arguments.length; i += 1)
+            {
+                arg = arguments.pointer[i];
+                if (string_starts_with_sequence(arg, S8("--output=")))
+                {
+                    if (ide_state.completion_census_output_path.length)
+                    {
+                        string_print(S8("x86_64_completion_census: --output may only be specified once\n"));
+                        result = PROCESS_RESULT_FAILED;
+                        break;
+                    }
+                    ide_state.completion_census_output_path = (String8){
+                        .pointer = arg.pointer + S8("--output=").length,
+                        .length = arg.length - S8("--output=").length,
+                    };
+                    if (!ide_state.completion_census_output_path.length)
+                    {
+                        string_print(S8("x86_64_completion_census: expected a path after --output=\n"));
+                        result = PROCESS_RESULT_FAILED;
+                        break;
+                    }
+                    continue;
+                }
+                string_print(S8("x86_64_completion_census: unsupported option: {S8}\n"), arg);
+                result = PROCESS_RESULT_FAILED;
+                break;
+            }
+            break;
+#endif
+        }
         else if (string_equal(arg, S8("cc")))
         {
             ide_state.cc = true;
@@ -917,7 +966,7 @@ ProcessResult process_arguments(void)
         }
     }
 
-    if (ide_state.test || ide_state.bench || ide_state.compile || ide_state.cc || ide_state.jit || ide_state.fuzz)
+    if (ide_state.test || ide_state.bench || ide_state.compile || ide_state.cc || ide_state.jit || ide_state.fuzz || ide_state.completion_census)
     {
         ide_state.startup_open_path = (String8){0};
     }
@@ -2671,6 +2720,126 @@ cleanup:
 #endif
 }
 
+#if BUSTER_CPU_ARCH_X86_64
+BUSTER_GLOBAL_LOCAL void ide_completion_census_manifest_line(Arena* arena, String8* output, String8 key, u64 value)
+{
+    String8 line = string_format(arena, S8("{S8}={u64}\n"), key, value);
+    *output = string_format(arena, S8("{S8}{S8}"), *output, line);
+}
+
+BUSTER_GLOBAL_LOCAL void ide_completion_census_manifest_hex_line(Arena* arena, String8* output, String8 key, u64 value)
+{
+    String8 line = string_format(arena, S8("{S8}=0x{u64:x,no_prefix}\n"), key, value);
+    *output = string_format(arena, S8("{S8}{S8}"), *output, line);
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult run_completion_census(void)
+{
+    Arena* arena = arena_create((ArenaCreation){
+        .reserved_size = BUSTER_MB(256),
+        .initial_size = BUSTER_MB(16),
+        .granularity = BUSTER_MB(2),
+        .flags = {.no_pool = 1},
+    });
+    if (!arena) return PROCESS_RESULT_FAILED;
+    u32 form_count = buster_x86_metadata_form_count();
+    BusterX86CompletionCensusRecord* records = arena_allocate(arena, BusterX86CompletionCensusRecord, form_count);
+    BusterX86CompletionCensusDiagnostic* diagnostics = arena_allocate(arena, BusterX86CompletionCensusDiagnostic, 128);
+    BusterX86MetadataCoverageLedgerEntry* ledger = arena_allocate(arena, BusterX86MetadataCoverageLedgerEntry, form_count);
+    BusterX86MetadataCoverageAuditResult audit = buster_x86_metadata_coverage_audit(ledger, form_count);
+    Target census_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_INTEL_DIAMOND_RAPIDS,
+        .os = OPERATING_SYSTEM_LINUX,
+        .cpu_features_explicit = true,
+        .cpu_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_DIAMOND_RAPIDS),
+    };
+    BusterX86CompletionCensusResult census = buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
+        .arena = arena,
+        .target = census_target,
+        .records = records,
+        .record_capacity = form_count,
+        .diagnostics = diagnostics,
+        .diagnostic_capacity = 128,
+        .run_intel = true,
+        .run_att = true,
+    });
+    u64 ledger_digest = buster_x86_metadata_coverage_digest(ledger, audit.entry_count, form_count);
+    string_print(S8("X86_COMPLETION_CENSUS forms={u32} normalized={u32} emitted={u32} blocked={u32} intel_exact={u32} intel_unresolved={u32} att_exact={u32} att_unresolved={u32} structural={u32} ledger_digest=0x{u64:x,no_prefix}\n"),
+                 census.scanned_form_count, census.normalized_form_count, census.metadata_emitted_count, census.metadata_blocked_count,
+                 census.intel_exact_count, census.intel_unresolved_count, census.att_exact_count, census.att_unresolved_count,
+                 census.structural_complete, ledger_digest);
+    ProcessResult result = census.structural_complete && audit.complete ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    if (ide_state.completion_census_output_path.length)
+    {
+        String8 manifest = S8("");
+        ide_completion_census_manifest_line(arena, &manifest, S8("schema"), 1);
+        ide_completion_census_manifest_line(arena, &manifest, S8("structural_complete"), census.structural_complete);
+        ide_completion_census_manifest_line(arena, &manifest, S8("records_complete"), census.records_complete);
+        ide_completion_census_manifest_line(arena, &manifest, S8("form_partition_complete"), census.form_partition_complete);
+        ide_completion_census_manifest_line(arena, &manifest, S8("normalized_partition_complete"), census.normalized_partition_complete);
+        ide_completion_census_manifest_line(arena, &manifest, S8("metadata_partition_complete"), census.metadata_partition_complete);
+        ide_completion_census_manifest_line(arena, &manifest, S8("required_form_count"), census.required_form_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("form_count"), census.scanned_form_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("record_count"), census.record_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("normalized_count"), census.normalized_form_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("non_normalized_count"), census.non_normalized_form_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("metadata_emitted_count"), census.metadata_emitted_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("metadata_emit_failed_count"), census.metadata_emit_failed_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("canonical_query_failed_count"), census.canonical_query_failed_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("metadata_blocked_count"), census.metadata_blocked_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("policy_excluded_count"), census.policy_excluded_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("source_partition_expected_count"), census.source_partition_expected_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("intel_source_partition_count"), census.intel_source_partition_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("att_source_partition_count"), census.att_source_partition_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("intel_attempted_count"), census.intel_attempted_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("intel_exact_count"), census.intel_exact_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("intel_normalized_relocation_count"), census.intel_normalized_relocation_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("intel_alias_equivalent_count"), census.intel_alias_equivalent_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("intel_policy_rejected_count"), census.intel_policy_rejected_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("intel_different_encoding_count"), census.intel_different_encoding_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("intel_byte_mismatch_count"), census.intel_byte_mismatch_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("intel_relocation_mismatch_count"), census.intel_relocation_mismatch_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("intel_unresolved_count"), census.intel_unresolved_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("att_attempted_count"), census.att_attempted_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("att_exact_count"), census.att_exact_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("att_normalized_relocation_count"), census.att_normalized_relocation_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("att_alias_equivalent_count"), census.att_alias_equivalent_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("att_policy_rejected_count"), census.att_policy_rejected_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("att_different_encoding_count"), census.att_different_encoding_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("att_byte_mismatch_count"), census.att_byte_mismatch_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("att_relocation_mismatch_count"), census.att_relocation_mismatch_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("att_unresolved_count"), census.att_unresolved_count);
+        ide_completion_census_manifest_hex_line(arena, &manifest, S8("structural_digest"), ledger_digest);
+        ide_completion_census_manifest_line(arena, &manifest, S8("diagnostic_count"), census.diagnostic_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("diagnostic_dropped_count"), census.diagnostic_dropped_count);
+        for (u32 class_index = 0; class_index < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT; class_index += 1)
+        {
+            String8 key = string_format(arena, S8("structural_class_{u32}_count"), class_index);
+            ide_completion_census_manifest_line(arena, &manifest, key, census.class_counts[class_index]);
+            key = string_format(arena, S8("intel_class_{u32}_count"), class_index);
+            ide_completion_census_manifest_line(arena, &manifest, key, census.intel_class_counts[class_index]);
+            key = string_format(arena, S8("att_class_{u32}_count"), class_index);
+            ide_completion_census_manifest_line(arena, &manifest, key, census.att_class_counts[class_index]);
+        }
+        for (u32 index = 0; index < census.diagnostic_count; index += 1)
+        {
+            BusterX86CompletionCensusDiagnostic diagnostic = diagnostics[index];
+            String8 line = string_format(arena, S8("diagnostic_0x{u64:x,no_prefix}_dialect_{u8}=stable_hash:0x{u64:x,no_prefix},form_id:{u32},dialect:{u8},class:{u8},kind:{u16},mismatch:{u32},direct:0x{u8:x,no_prefix},source:0x{u8:x,no_prefix}\n"),
+                                         diagnostic.stable_hash, diagnostic.dialect, diagnostic.stable_hash, diagnostic.form_id, diagnostic.dialect, diagnostic.classification,
+                                         diagnostic.assembly_diagnostic_kind, diagnostic.mismatch_index, diagnostic.direct_byte, diagnostic.source_byte);
+            manifest = string_format(arena, S8("{S8}{S8}"), manifest, line);
+        }
+        bool manifest_written = manifest.length < BUSTER_MB(2) && file_write(ide_state.completion_census_output_path, BUSTER_SLICE_TO_BYTE_SLICE(manifest));
+        if (!manifest_written) result = PROCESS_RESULT_FAILED;
+        string_print(S8("X86_COMPLETION_CENSUS_MANIFEST path={S8} bytes={u64} written={u32}\n"), ide_state.completion_census_output_path,
+                     manifest.length, manifest_written);
+    }
+    arena_destroy(arena, 1);
+    return result;
+}
+#endif
+
 // The source measurement table (see CSourceMetrics), two aggregates side by
 // side so include amplification reads off the page: `unique` covers the
 // distinct files of the include closure, `lexed` every inclusion, and a
@@ -3015,6 +3184,12 @@ ProcessResult entry_point(void)
     {
         return run_jit();
     }
+#if BUSTER_CPU_ARCH_X86_64
+    if (ide_state.completion_census)
+    {
+        return run_completion_census();
+    }
+#endif
     if (ide_state.bench)
     {
         return run_benchmarks();

@@ -984,6 +984,15 @@ BUSTER_F_DECL BusterX86MetadataEncodeStatus buster_x86_metadata_instruction_leng
 // retained in the ledger with their explicit mode/privilege/reserved blocker.
 BUSTER_F_DECL BusterX86MetadataCoverageAuditResult buster_x86_metadata_coverage_audit(
     BusterX86MetadataCoverageLedgerEntry* entries, u32 entry_capacity);
+// Computes a stable, padding-free digest over the decoded forms, operands, and
+// production coverage-ledger rows. `entry_count` is the number of form rows to
+// include in the digest; `entry_capacity` is the number of rows available in
+// `entries`, so callers can safely provide a partial/NULL ledger for a
+// diagnostic digest. A complete audit passes both counts as the form count.
+// The digest uses a little-endian FNV-1a stream and is independent of C
+// padding or pointer addresses.
+BUSTER_F_DECL u64 buster_x86_metadata_coverage_digest(BusterX86MetadataCoverageLedgerEntry const* entries, u32 entry_count,
+                                                       u32 entry_capacity);
 
 #if BUSTER_INCLUDE_TESTS
 // Test-only access to the same constraint-aware physical query used by the
