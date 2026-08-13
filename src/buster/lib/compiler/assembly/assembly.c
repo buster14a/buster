@@ -2192,6 +2192,12 @@ struct AssemblyAarch64DirectSIMDSpelling
 };
 
 BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDSpelling const assembly_aarch64_direct_simd_spellings[] = {
+    {S8_INITIALIZER("abs"), UINT64_C(0x29cfa5a7b75f135a), S8_INITIALIZER("arm-a64@2026-06:ABS_asisdmisc_R"), 2,
+     TARGET_CPU_FEATURE_AARCH64_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D}},
+    {S8_INITIALIZER("neg"), UINT64_C(0x6f2db5cd0e80e8df), S8_INITIALIZER("arm-a64@2026-06:NEG_asisdmisc_R"), 2,
+     TARGET_CPU_FEATURE_AARCH64_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D}},
     {S8_INITIALIZER("aesd"), UINT64_C(0x6cacc320d32f7696), S8_INITIALIZER("arm-a64@2026-06:AESD_B_cryptoaes"), 2,
      TARGET_CPU_FEATURE_AARCH64_AES, {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B}},
     {S8_INITIALIZER("aese"), UINT64_C(0x64d13665bc040990), S8_INITIALIZER("arm-a64@2026-06:AESE_B_cryptoaes"), 2,
@@ -6143,7 +6149,29 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_register_parse(String8 tex
     {
         return false;
     }
-    char8 expected_prefix = arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_Q ? 'q' : 'v';
+    bool scalar = arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B || arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H ||
+                  arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S || arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D;
+    char8 expected_prefix = 'v';
+    switch (arrangement)
+    {
+    case BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_Q:
+        expected_prefix = 'q';
+        break;
+    case BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B:
+        expected_prefix = 'b';
+        break;
+    case BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H:
+        expected_prefix = 'h';
+        break;
+    case BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S:
+        expected_prefix = 's';
+        break;
+    case BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D:
+        expected_prefix = 'd';
+        break;
+    default:
+        break;
+    }
     if (assembly_ascii_lower(text.pointer[0]) != expected_prefix)
     {
         return false;
@@ -6166,7 +6194,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_register_parse(String8 tex
     {
         return false;
     }
-    if (arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_Q)
+    if (arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_Q || scalar)
     {
         if (dot != text.length)
         {
@@ -11206,9 +11234,15 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             };
             for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
             {
-                direct_simd_instruction.operands[operand_index] = buster_a64_direct_simd_value_vector(
-                    instruction->aarch64_direct_simd_registers[operand_index],
-                    (BusterA64DirectSIMDArrangement)instruction->aarch64_direct_simd_arrangements[operand_index]);
+                BusterA64DirectSIMDArrangement arrangement =
+                    (BusterA64DirectSIMDArrangement)instruction->aarch64_direct_simd_arrangements[operand_index];
+                bool scalar = arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B ||
+                              arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H ||
+                              arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S ||
+                              arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D;
+                direct_simd_instruction.operands[operand_index] =
+                    scalar ? buster_a64_direct_simd_value_scalar(instruction->aarch64_direct_simd_registers[operand_index], arrangement)
+                           : buster_a64_direct_simd_value_vector(instruction->aarch64_direct_simd_registers[operand_index], arrangement);
             }
             BusterA64DirectSIMDStatus status = buster_a64_direct_simd_encode(
                 builder->target, &direct_simd_instruction, &word);

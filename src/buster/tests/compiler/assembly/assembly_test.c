@@ -2978,6 +2978,58 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    invalid_sha256h_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
 
+    Target aarch64_advsimd_target = aarch64_m1_explicit_target;
+    BUSTER_TEST(arguments, target_cpu_feature_has(aarch64_advsimd_target, TARGET_CPU_FEATURE_AARCH64_NEON));
+    AssemblyEncodeResult aarch64_advsimd_absneg = assembly_encode(
+        arguments->arena, S8("abs d0, d1\nneg d0, d1\n"), (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    static u8 const expected_aarch64_advsimd_absneg[] = {
+        0x20, 0xb8, 0xe0, 0x5e,
+        0x20, 0xb8, 0xe0, 0x7e,
+    };
+    BUSTER_TEST(arguments, aarch64_advsimd_absneg.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_advsimd_absneg.bytes, expected_aarch64_advsimd_absneg,
+                                                         sizeof(expected_aarch64_advsimd_absneg)));
+    AssemblyEncodeResult aarch64_advsimd_absneg_case_insensitive = assembly_encode(
+        arguments->arena, S8("ABS D0, D1\nNEG D0, D1\n"), (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    BUSTER_TEST(arguments, aarch64_advsimd_absneg_case_insensitive.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_advsimd_absneg_case_insensitive.bytes,
+                                                         expected_aarch64_advsimd_absneg,
+                                                         sizeof(expected_aarch64_advsimd_absneg)));
+    AssemblyEncodeResult aarch64_advsimd_absneg_boundary = assembly_encode(
+        arguments->arena, S8("abs d31, d30\nneg d31, d30\n"), (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    static u8 const expected_aarch64_advsimd_absneg_boundary[] = {
+        0xdf, 0xbb, 0xe0, 0x5e,
+        0xdf, 0xbb, 0xe0, 0x7e,
+    };
+    BUSTER_TEST(arguments, aarch64_advsimd_absneg_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_advsimd_absneg_boundary.bytes,
+                                                         expected_aarch64_advsimd_absneg_boundary,
+                                                         sizeof(expected_aarch64_advsimd_absneg_boundary)));
+    Target aarch64_no_advsimd_neon = aarch64_advsimd_target;
+    aarch64_no_advsimd_neon.cpu_features =
+        target_cpu_features_remove(aarch64_no_advsimd_neon.cpu_features, TARGET_CPU_FEATURE_AARCH64_NEON);
+    AssemblyEncodeResult aarch64_advsimd_without_feature = assembly_encode(
+        arguments->arena, S8("abs d0, d1\n"), (AssemblyEncodeOptions){.target = aarch64_no_advsimd_neon});
+    BUSTER_TEST(arguments, aarch64_advsimd_without_feature.diagnostic_count == 1 &&
+                               aarch64_advsimd_without_feature.bytes.length == 0 &&
+                               aarch64_advsimd_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    static String8 const invalid_aarch64_advsimd_absneg[] = {
+        S8_INITIALIZER("abs q0, q1\n"),
+        S8_INITIALIZER("neg v0.2d, v1.2d\n"),
+        S8_INITIALIZER("abs d0.2d, d1.2d\n"),
+        S8_INITIALIZER("neg d0\n"),
+        S8_INITIALIZER("abs d32, d1\n"),
+        S8_INITIALIZER("neg d0, d32\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_advsimd_absneg); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_advsimd_case = assembly_encode(
+            arguments->arena, invalid_aarch64_advsimd_absneg[invalid_index],
+            (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, invalid_advsimd_case.diagnostic_count == 1 && invalid_advsimd_case.bytes.length == 0 &&
+                                   invalid_advsimd_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
     BusterAarch64SyntaxMnemonicRange csel_range = {0};
     BUSTER_TEST(arguments, buster_aarch64_syntax_mnemonic_lookup(S8("csel"), &csel_range) && csel_range.candidate_count > 0);
     u32 csel_row = UINT32_MAX;
