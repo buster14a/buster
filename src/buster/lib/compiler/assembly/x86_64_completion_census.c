@@ -227,6 +227,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_completion_normalize_query(BusterX86Metadata
     bool compact_immediate_sibling = buster_x86_completion_has_compact_immediate_sibling(form);
     bool no_scale_displacement = buster_x86_completion_string_contains(buster_x86_metadata_string_span(form.attributes),
                                                                          S8("DISP8_NO_SCALE"));
+    bool moffs = buster_x86_metadata_form_is_moffs(form.id);
     for (; metadata_index < form.operand_count && physical_index < query.operand_count; metadata_index += 1)
     {
         if (!buster_x86_metadata_operand(form.id, metadata_index, &metadata)) return;
@@ -244,6 +245,19 @@ BUSTER_GLOBAL_LOCAL void buster_x86_completion_normalize_query(BusterX86Metadata
                 else gpr_role_index = physical_index;
                 operands[physical_index].reg.index = (u16)gpr_role_index;
             }
+        }
+        else if (operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && moffs)
+        {
+            // A small absolute address is also representable by ordinary
+            // ModRM MOV.  Use an address outside signed 32-bit range so the
+            // public source selector must retain the A0-A3 moffs form.
+            operands[physical_index].memory.has_base = false;
+            operands[physical_index].memory.has_index = false;
+            operands[physical_index].memory.rip_relative = false;
+            operands[physical_index].memory.has_displacement = true;
+            operands[physical_index].memory.displacement = INT64_C(0x1122334455667788);
+            operands[physical_index].memory.has_segment = true;
+            operands[physical_index].memory.segment = BUSTER_X86_METADATA_SEGMENT_ES;
         }
         else if (operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && no_scale_displacement)
         {
@@ -375,6 +389,27 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
     String8 spelling = {0};
     source = buster_x86_completion_mnemonic(form);
     if (!source.length) return (String8){0};
+    if (buster_x86_metadata_form_is_moffs(form.id))
+    {
+        String8 accumulator = {0};
+        bool store = false;
+        BusterX86MetadataPhysicalOperand source_memory = {0};
+        if (query.operand_count != 1 || !query.operands ||
+            query.operands[0].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY || !form.fixed_byte_count)
+            return (String8){0};
+        source_memory = query.operands[0];
+        accumulator = form.fixed_bytes[0] == 0xa0 || form.fixed_bytes[0] == 0xa2 ? S8("al") : S8("eax");
+        if (form.fixed_bytes[0] == 0xa1 || form.fixed_bytes[0] == 0xa3)
+        {
+            source_memory.width = 32;
+            source_memory.memory.source_width = 32;
+        }
+        spelling = buster_x86_completion_memory_intel(arena, source_memory, query.attributes);
+        if (!spelling.length) return (String8){0};
+        store = form.fixed_bytes[0] == 0xa2 || form.fixed_bytes[0] == 0xa3;
+        return store ? string_format(arena, S8("{S8} {S8}, {S8}\n"), source, spelling, accumulator)
+                     : string_format(arena, S8("{S8} {S8}, {S8}\n"), source, accumulator, spelling);
+    }
     // These controls are encoded as hidden prefix fields. The public Intel
     // grammar has no bounded spelling for the canonical hidden segment or
     // legacy branch-hint forms, so keep them explicitly source-unrepresentable

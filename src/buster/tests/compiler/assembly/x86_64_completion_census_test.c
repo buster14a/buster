@@ -14,6 +14,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     u32 form_count = buster_x86_metadata_form_count();
     u32 class_index = 0;
     u32 probe_index = 0;
+    u32 probe_form_id = 0;
     u8 probe_bytes[16] = {0};
     BusterX86MetadataPhysicalOperand probe_operands[16] = {0};
     String8 probe_features[1] = {0};
@@ -132,6 +133,22 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
     probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, 1436, false);
     BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
+    for (probe_index = 0; probe_index < 4; probe_index += 1)
+    {
+        probe_form_id = 9891 + probe_index;
+        memset(probe_operands, 0, sizeof(probe_operands));
+        memset(probe_features, 0, sizeof(probe_features));
+        memset(probe_mnemonic, 0, sizeof(probe_mnemonic));
+        probe_query = (BusterX86MetadataPhysicalQuery){0};
+        BUSTER_TEST(arguments, buster_x86_completion_census_test_query(probe_form_id, &probe_query, probe_operands, probe_features,
+                                                                        probe_mnemonic));
+        BUSTER_TEST(arguments, probe_query.operand_count == 1 &&
+                                 probe_operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY);
+        BUSTER_TEST(arguments, probe_operands[0].memory.has_displacement &&
+                                 probe_operands[0].memory.displacement == INT64_C(0x1122334455667788));
+        probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, probe_form_id, false);
+        BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
+    }
 #else
     BUSTER_TEST(arguments, true);
 #endif
