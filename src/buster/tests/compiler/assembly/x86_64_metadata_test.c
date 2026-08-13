@@ -2485,9 +2485,9 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
     BusterX86MetadataCoverageAuditResult audit = buster_x86_metadata_coverage_audit(ledger, ledger_capacity);
     BusterX86CompletionLedger completion = x86_64_metadata_test_completion_ledger(ledger, audit.entry_count);
     BusterX86CompletionLedger empty_completion = x86_64_metadata_test_completion_ledger(0, 0);
-    bool completion_totals_match = completion.digest == UINT64_C(0xbebc4833a78c441c) &&
+    bool completion_totals_match = completion.digest == UINT64_C(0xc17fa2a15eca311e) &&
                                    completion.form_count == 11013 && completion.normalized_count == 10636 &&
-                                   completion.emitted_count == 10606 && completion.blocked_count == 407 && completion.operand_count == 32813 &&
+                                   completion.emitted_count == 10607 && completion.blocked_count == 406 && completion.operand_count == 32813 &&
                                    completion.duplicate_form_id_count == 0 && completion.duplicate_stable_hash_count == 0 &&
                                    completion.zero_stable_hash_count == 0 && completion.emitted_nonzero_blocker_count == 0;
     static u32 const expected_operand_totals[] = {0, 24461, 5412, 2243, 84, 1, 246, 244, 9, 113};
@@ -2496,8 +2496,8 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
     static u32 const expected_field_cohorts[][9] = {
         {10609, 10, 80, 5377, 10416, 3276, 2216, 87, 87},
         {10301, 10, 80, 5228, 10067, 3244, 2159, 49, 49},
-        {10274, 10, 80, 5212, 10041, 3244, 2159, 46, 46},
-        {335, 0, 0, 165, 375, 32, 57, 41, 41},
+        {10275, 10, 80, 5213, 10042, 3244, 2159, 46, 46},
+        {334, 0, 0, 164, 374, 32, 57, 41, 41},
     };
     static u32 const expected_decorator_cohorts[][5] = {
         {4061, 3527, 1145, 345, 345}, {4056, 3524, 1145, 325, 325},
@@ -2528,11 +2528,11 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
             completion_vectors_match &= completion.amx_cohorts[cohort][index] == expected_amx_cohorts[cohort][index];
     }
     static u32 const expected_family_all[] = {1929, 202, 5, 1698, 196, 6812, 49, 122};
-    static u32 const expected_family_all_emitted[] = {1783, 197, 5, 1644, 176, 6728, 49, 24};
-    static u32 const expected_family_all_blocked[] = {146, 5, 0, 54, 20, 84, 0, 98};
+    static u32 const expected_family_all_emitted[] = {1784, 197, 5, 1644, 176, 6728, 49, 24};
+    static u32 const expected_family_all_blocked[] = {145, 5, 0, 54, 20, 84, 0, 98};
     static u32 const expected_family_normalized[] = {1812, 198, 5, 1644, 176, 6728, 49, 24};
-    static u32 const expected_family_normalized_emitted[] = {1783, 197, 5, 1644, 176, 6728, 49, 24};
-    static u32 const expected_family_normalized_blocked[] = {29, 1, 0, 0, 0, 0, 0, 0};
+    static u32 const expected_family_normalized_emitted[] = {1784, 197, 5, 1644, 176, 6728, 49, 24};
+    static u32 const expected_family_normalized_blocked[] = {28, 1, 0, 0, 0, 0, 0, 0};
     for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         completion_vectors_match &= completion.family_all_counts[family] == expected_family_all[family] &&
                                     completion.family_all_emitted_counts[family] == expected_family_all_emitted[family] &&
@@ -2540,7 +2540,7 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
                                     completion.family_counts[family] == expected_family_normalized[family] &&
                                     completion.family_emitted_counts[family] == expected_family_normalized_emitted[family] &&
                                     completion.family_blocked_counts[family] == expected_family_normalized_blocked[family];
-    static u32 const expected_blockers[] = {10606, 268, 108, 30, 0, 1, 0, 0, 0, 0, 0, 0};
+    static u32 const expected_blockers[] = {10607, 268, 108, 29, 0, 1, 0, 0, 0, 0, 0, 0};
     for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
         completion_vectors_match &= completion.blocker_counts[blocker] == expected_blockers[blocker];
     bool completion_structural_ok = completion_totals_match && completion_vectors_match &&
@@ -4825,15 +4825,15 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         // contributes the four indirect CALL/JMP rows. These are disjoint
         // normalized rows on top of the fixed NOT16 rows; REP_MONTMUL's
         // EAMODE16 row remains schema-blocked under XED's long-mode mapping.
-        BUSTER_TEST(arguments, audit.emitted_count == 10606 && audit.blocked_count == 407 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10606 &&
-                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 407);
-        BUSTER_TEST(arguments, audit.encoder_capable_count == 10714 && audit.policy_excluded_count == 377 &&
-                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 30);
+        BUSTER_TEST(arguments, audit.emitted_count == 10607 && audit.blocked_count == 406 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_EMITTED] == 10607 &&
+                                   audit.disposition_counts[BUSTER_X86_METADATA_COVERAGE_BLOCKED] == 406);
+        BUSTER_TEST(arguments, audit.encoder_capable_count == 10715 && audit.policy_excluded_count == 377 &&
+                                   audit.explicitly_unsupported_count == 268 && audit.schema_inexpressible_count == 29);
 
         u32 expected_families[BUSTER_X86_METADATA_ENCODER_COUNT] = {1812, 198, 5, 1644, 176, 6728, 49, 24};
-        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1783, 197, 5, 1644, 176, 6728, 49, 24};
-        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {29, 1, 0, 0, 0, 0, 0, 0};
+        u32 expected_family_emitted[BUSTER_X86_METADATA_ENCODER_COUNT] = {1784, 197, 5, 1644, 176, 6728, 49, 24};
+        u32 expected_family_blocked[BUSTER_X86_METADATA_ENCODER_COUNT] = {28, 1, 0, 0, 0, 0, 0, 0};
         bool family_counts_match = true;
         for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
         {
@@ -4843,7 +4843,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, family_counts_match);
 
-        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10606, 268, 108, 30, 0, 1, 0, 0, 0, 0, 0, 0};
+        u32 expected_blockers[BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT] = {10607, 268, 108, 29, 0, 1, 0, 0, 0, 0, 0, 0};
         bool blocker_counts_match = true;
         for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
             blocker_counts_match &= audit.blocker_counts[blocker] == expected_blockers[blocker];
@@ -8278,6 +8278,38 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                   emitted.status == BUSTER_X86_METADATA_ENCODE_MISSING_SCHEMA;
         }
         BUSTER_TEST(arguments, encdelete_contract);
+
+        // Form 7976 is the noncanonical NOP alias for 0f 1c with a memory
+        // operand and a ModRM.reg field in the bounded range 1..7.  It is
+        // metadata-only (the public selector must continue to prefer the
+        // architectural CLDEMOTE spelling), but direct emission must retain
+        // every legal register field and reject the CLDEMOTE value zero.
+        BusterX86MetadataForm nop_range_form = {0};
+        BusterX86MetadataPhysicalOperand nop_range_operands[2] = {0};
+        nop_range_operands[0] = x86_64_metadata_test_physical_mem_base(0, 32, 0);
+        bool nop_range_shape = buster_x86_metadata_form(7976, &nop_range_form) &&
+                               x86_64_metadata_test_string_equal(nop_range_form.iclass, S8("NOP")) &&
+                               x86_64_metadata_test_pattern_has_token(nop_range_form.pattern, S8("REG[1-7]"));
+        bool nop_range_bytes = true;
+        for (u16 reg = 1; reg <= 7; reg += 1)
+        {
+            nop_range_operands[1] = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, reg, 32);
+            u8 expected[3] = {0x0f, 0x1c, (u8)(reg << 3)};
+            nop_range_bytes &= x86_64_metadata_test_emit_exact(
+                S8("NOP"), 7976, nop_range_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                BUSTER_ARRAY_LENGTH(wildcard), expected, BUSTER_ARRAY_LENGTH(expected));
+        }
+        nop_range_operands[1] = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 32);
+        BusterX86MetadataEmitResult nop_range_reg0 = x86_64_metadata_test_emit_form(
+            S8("NOP"), 7976, nop_range_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[8]){0}, 8, 0, 0);
+        nop_range_operands[1] = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 8, 32);
+        BusterX86MetadataEmitResult nop_range_reg8 = x86_64_metadata_test_emit_form(
+            S8("NOP"), 7976, nop_range_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard), (u8[8]){0}, 8, 0, 0);
+        BUSTER_TEST(arguments, nop_range_shape && nop_range_bytes &&
+                                   nop_range_reg0.status == BUSTER_X86_METADATA_ENCODE_REGISTER_ENCODING &&
+                                   nop_range_reg8.status == BUSTER_X86_METADATA_ENCODE_REGISTER_ENCODING);
 
         u32 const residual_neighbors[] = {7969, 7976, 7977, 7978};
         bool neighbor_exclusions = true;
