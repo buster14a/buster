@@ -7920,8 +7920,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_width_matches(AssemblyInst
     // A suffix must describe a data-width operand.  This excludes metadata
     // mnemonics whose visible operand is only an immediate or branch target
     // (for example intb), while retaining register and memory aliases such as
-    // smswl and pushpq.
-    return saw_width_operand;
+    // smswl and pushpq.  PUSH's stack width is implicit, so the immediate-only
+    // pushq spelling is the one valid suffix alias in 64-bit mode.
+    return saw_width_operand ||
+           (info.opcode == ASSEMBLY_OPCODE_X86_PUSH && suffix_width == 64 && operand_count == 1 &&
+            operands[0].kind == ASSEMBLY_OPERAND_EXPRESSION);
 }
 
 BUSTER_GLOBAL_LOCAL BusterX86MetadataSelectResult assembly_x86_metadata_select_source_form(
@@ -7950,6 +7953,55 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataSelectResult assembly_x86_metadata_select_s
         *selected_mnemonic = suffix_base;
     }
     return suffix_selection;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_select_symbolic_push_imm32(BusterX86MetadataPhysicalQuery query,
+                                                                            BusterX86MetadataSelectResult* selection)
+{
+    if (!selection || selection->status != BUSTER_X86_METADATA_ENCODE_SUCCESS || selection->selected_byte_count >= 5)
+    {
+        return false;
+    }
+    bool has_symbol = false;
+    for (u32 index = 0; index < query.operand_count; index += 1)
+    {
+        has_symbol |= query.operands[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE &&
+                      query.operands[index].has_symbol;
+    }
+    if (!has_symbol)
+    {
+        return false;
+    }
+    BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(query.mnemonic);
+    for (u32 position = 0; position < candidates.count; position += 1)
+    {
+        u32 form_id = 0;
+        BusterX86MetadataForm form = {0};
+        if (!buster_x86_metadata_candidate_at(candidates, position, &form_id) || !buster_x86_metadata_form(form_id, &form) ||
+            form.immediate_width != 4 || !form.immediate_signed)
+        {
+            continue;
+        }
+        u8 bytes[64] = {0};
+        BusterX86MetadataRelocation relocations[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
+        BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_form(
+            (BusterX86MetadataEmitQuery){
+                .physical = query,
+                .form_id = form_id,
+                .output = bytes,
+                .output_capacity = BUSTER_ARRAY_LENGTH(bytes),
+                .relocations = relocations,
+                .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations),
+            });
+        if (emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.byte_count == 5)
+        {
+            selection->form_id = form_id;
+            selection->stable_hash = emitted.stable_hash;
+            selection->selected_byte_count = emitted.byte_count;
+            return true;
+        }
+    }
+    return false;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_operand_decorators(BusterX86MetadataPhysicalAttributes* attributes,
@@ -8344,6 +8396,22 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     {
         return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
     }
+    AssemblyInstructionInfo mnemonic_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+    bool is_push_mnemonic = assembly_instruction_lookup(target, syntax, mnemonic, &mnemonic_info) &&
+                            mnemonic_info.opcode == ASSEMBLY_OPCODE_X86_PUSH;
+    // An unresolved PUSH immediate cannot be proven to fit the short form.
+    // Reserve the architectural sign-extended imm32 relocation so linking a
+    // normal symbol address does not depend on it happening to fit in 8 bits.
+    if (is_push_mnemonic)
+    {
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE && physical[index].has_symbol)
+            {
+                physical[index].width = 32;
+            }
+        }
+    }
     for (u32 immediate_index = 0; immediate_index < operand_count; immediate_index += 1)
     {
         if (physical[immediate_index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE || physical[immediate_index].width)
@@ -8498,6 +8566,11 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         }
         return selection.status;
     }
+    if (is_push_mnemonic)
+    {
+        query.operands = physical;
+        assembly_x86_metadata_select_symbolic_push_imm32(query, &selection);
+    }
     if (builder->instruction_count >= builder->instruction_capacity)
     {
         return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
@@ -8541,6 +8614,16 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_has_unsigned_expression(Assemb
 
 BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_instruction_is_novel(AssemblyInstruction instruction)
 {
+    // PUSH immediate is a classic encoding that has no handwritten form yet.
+    // Preserve its metadata result instead of restoring the handwritten
+    // invalid-operand diagnostic just because the encoding is not an ISA
+    // extension.  Metadata selects the signed-imm8 or sign-extended imm32
+    // form and carries symbol relocations through to emission.
+    if (assembly_word_equal(instruction.metadata_mnemonic, S8("PUSH")) && instruction.metadata_operand_count == 1 &&
+        instruction.metadata_operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE)
+    {
+        return true;
+    }
     for (u32 index = 0; index < instruction.metadata_operand_count; index += 1)
     {
         BusterX86MetadataPhysicalOperand operand = instruction.metadata_operands[index];

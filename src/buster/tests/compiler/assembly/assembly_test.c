@@ -538,6 +538,69 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_att_immediate.diagnostic_count == 0 &&
                                assembly_test_bytes_equal(x86_att_immediate.bytes, expected_x86_att_immediate,
                                                          BUSTER_ARRAY_LENGTH(expected_x86_att_immediate)));
+    AssemblyEncodeResult push_immediate_probe = assembly_encode(
+        arguments->arena, S8("push 0x7f\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    BUSTER_TEST(arguments, push_immediate_probe.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(push_immediate_probe.bytes, (u8 const[]){0x6a, 0x7f}, 2));
+    typedef struct PushImmediateAssemblyCase PushImmediateAssemblyCase;
+    struct PushImmediateAssemblyCase
+    {
+        String8 intel;
+        String8 att;
+        u8 bytes[5];
+        u8 byte_count;
+        bool valid;
+    };
+    static PushImmediateAssemblyCase const push_immediate_cases[] = {
+        {S8_INITIALIZER("push -128\n"), S8_INITIALIZER("pushq $-128\n"), {0x6a, 0x80}, 2, true},
+        {S8_INITIALIZER("push 127\n"), S8_INITIALIZER("pushq $127\n"), {0x6a, 0x7f}, 2, true},
+        {S8_INITIALIZER("push -129\n"), S8_INITIALIZER("pushq $-129\n"), {0x68, 0x7f, 0xff, 0xff, 0xff}, 5, true},
+        {S8_INITIALIZER("push 128\n"), S8_INITIALIZER("pushq $128\n"), {0x68, 0x80, 0x00, 0x00, 0x00}, 5, true},
+        {S8_INITIALIZER("push -2147483648\n"), S8_INITIALIZER("pushq $-2147483648\n"), {0x68, 0x00, 0x00, 0x00, 0x80}, 5, true},
+        {S8_INITIALIZER("push 2147483647\n"), S8_INITIALIZER("pushq $2147483647\n"), {0x68, 0xff, 0xff, 0xff, 0x7f}, 5, true},
+        {S8_INITIALIZER("push 2147483648\n"), S8_INITIALIZER("pushq $2147483648\n"), {0}, 0, false},
+        {S8_INITIALIZER("push 0x80000000\n"), S8_INITIALIZER("pushq $0x80000000\n"), {0}, 0, false},
+    };
+    for (u32 push_index = 0; push_index < BUSTER_ARRAY_LENGTH(push_immediate_cases); push_index += 1)
+    {
+        PushImmediateAssemblyCase push_case = push_immediate_cases[push_index];
+        AssemblyEncodeResult push_intel = assembly_encode(
+            arguments->arena, push_case.intel,
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult push_att = assembly_encode(
+            arguments->arena, push_case.att,
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        if (push_case.valid)
+        {
+            BUSTER_TEST(arguments, push_intel.diagnostic_count == 0 &&
+                                       assembly_test_bytes_equal(push_intel.bytes, push_case.bytes, push_case.byte_count) &&
+                                       push_att.diagnostic_count == 0 &&
+                                       assembly_test_bytes_equal(push_att.bytes, push_case.bytes, push_case.byte_count));
+        }
+        else
+        {
+            BUSTER_TEST(arguments, push_intel.diagnostic_count == 1 && push_intel.bytes.length == 0 &&
+                                       push_att.diagnostic_count == 1 && push_att.bytes.length == 0);
+        }
+    }
+    AssemblyEncodeResult push_symbol = assembly_encode(
+        arguments->arena, S8("push external\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    AssemblyEncodeResult push_symbol_att = assembly_encode(
+        arguments->arena, S8("pushq $external\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    AssemblyEncodeResult push_att_wrong_suffix = assembly_encode(
+        arguments->arena, S8("pushl $1\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    BUSTER_TEST(arguments, push_symbol.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(push_symbol.bytes, (u8 const[]){0x68, 0, 0, 0, 0}, 5) &&
+                               push_symbol.relocation_count == 1 && push_symbol.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32 &&
+                               push_symbol.relocations[0].offset == 1 && push_symbol_att.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(push_symbol_att.bytes, (u8 const[]){0x68, 0, 0, 0, 0}, 5) &&
+                               push_symbol_att.relocation_count == 1 && push_symbol_att.relocations[0].offset == 1 &&
+                               push_symbol_att.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32);
+    BUSTER_TEST(arguments, push_att_wrong_suffix.diagnostic_count == 1 && push_att_wrong_suffix.bytes.length == 0);
     // CET indirect-branch tracking has a typed `notrack` source prefix.  It
     // is accepted in both dialects for register and memory CALL/JMP forms,
     // while ordinary handwritten call/jmp syntax remains unprefixed.
