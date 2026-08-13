@@ -220,6 +220,43 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_widening
     {S8_INITIALIZER("uaddlp v31.2d, v30.4s\n"), {0xdf, 0x2b, 0xa0, 0x6e}},
 };
 
+/* Exhaustive legal arrangements for the same-register multiply family.
+ * Bytes are independent llvm-mc 22.1.8 literals. */
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_multiply_cases[] = {
+    {S8_INITIALIZER("mla v0.8b, v1.8b, v31.8b\n"), {0x20, 0x94, 0x3f, 0x0e}},
+    {S8_INITIALIZER("mla v0.16b, v1.16b, v31.16b\n"), {0x20, 0x94, 0x3f, 0x4e}},
+    {S8_INITIALIZER("mla v0.4h, v1.4h, v31.4h\n"), {0x20, 0x94, 0x7f, 0x0e}},
+    {S8_INITIALIZER("mla v0.8h, v1.8h, v31.8h\n"), {0x20, 0x94, 0x7f, 0x4e}},
+    {S8_INITIALIZER("mla v0.2s, v1.2s, v31.2s\n"), {0x20, 0x94, 0xbf, 0x0e}},
+    {S8_INITIALIZER("mla v0.4s, v1.4s, v31.4s\n"), {0x20, 0x94, 0xbf, 0x4e}},
+    {S8_INITIALIZER("mls v0.8b, v1.8b, v31.8b\n"), {0x20, 0x94, 0x3f, 0x2e}},
+    {S8_INITIALIZER("mls v0.16b, v1.16b, v31.16b\n"), {0x20, 0x94, 0x3f, 0x6e}},
+    {S8_INITIALIZER("mls v0.4h, v1.4h, v31.4h\n"), {0x20, 0x94, 0x7f, 0x2e}},
+    {S8_INITIALIZER("mls v0.8h, v1.8h, v31.8h\n"), {0x20, 0x94, 0x7f, 0x6e}},
+    {S8_INITIALIZER("mls v0.2s, v1.2s, v31.2s\n"), {0x20, 0x94, 0xbf, 0x2e}},
+    {S8_INITIALIZER("mls v0.4s, v1.4s, v31.4s\n"), {0x20, 0x94, 0xbf, 0x6e}},
+    {S8_INITIALIZER("mul v0.8b, v1.8b, v31.8b\n"), {0x20, 0x9c, 0x3f, 0x0e}},
+    {S8_INITIALIZER("mul v0.16b, v1.16b, v31.16b\n"), {0x20, 0x9c, 0x3f, 0x4e}},
+    {S8_INITIALIZER("mul v0.4h, v1.4h, v31.4h\n"), {0x20, 0x9c, 0x7f, 0x0e}},
+    {S8_INITIALIZER("mul v0.8h, v1.8h, v31.8h\n"), {0x20, 0x9c, 0x7f, 0x4e}},
+    {S8_INITIALIZER("mul v0.2s, v1.2s, v31.2s\n"), {0x20, 0x9c, 0xbf, 0x0e}},
+    {S8_INITIALIZER("mul v0.4s, v1.4s, v31.4s\n"), {0x20, 0x9c, 0xbf, 0x4e}},
+    {S8_INITIALIZER("pmul v0.8b, v1.8b, v31.8b\n"), {0x20, 0x9c, 0x3f, 0x2e}},
+    {S8_INITIALIZER("pmul v0.16b, v1.16b, v31.16b\n"), {0x20, 0x9c, 0x3f, 0x6e}},
+    {S8_INITIALIZER("sqdmulh v0.4h, v1.4h, v31.4h\n"), {0x20, 0xb4, 0x7f, 0x0e}},
+    {S8_INITIALIZER("sqdmulh v0.8h, v1.8h, v31.8h\n"), {0x20, 0xb4, 0x7f, 0x4e}},
+    {S8_INITIALIZER("sqdmulh v0.2s, v1.2s, v31.2s\n"), {0x20, 0xb4, 0xbf, 0x0e}},
+    {S8_INITIALIZER("sqdmulh v0.4s, v1.4s, v31.4s\n"), {0x20, 0xb4, 0xbf, 0x4e}},
+    {S8_INITIALIZER("sqdmulh h0, h1, h31\n"), {0x20, 0xb4, 0x7f, 0x5e}},
+    {S8_INITIALIZER("sqdmulh s0, s1, s31\n"), {0x20, 0xb4, 0xbf, 0x5e}},
+    {S8_INITIALIZER("sqrdmulh v0.4h, v1.4h, v31.4h\n"), {0x20, 0xb4, 0x7f, 0x2e}},
+    {S8_INITIALIZER("sqrdmulh v0.8h, v1.8h, v31.8h\n"), {0x20, 0xb4, 0x7f, 0x6e}},
+    {S8_INITIALIZER("sqrdmulh v0.2s, v1.2s, v31.2s\n"), {0x20, 0xb4, 0xbf, 0x2e}},
+    {S8_INITIALIZER("sqrdmulh v0.4s, v1.4s, v31.4s\n"), {0x20, 0xb4, 0xbf, 0x6e}},
+    {S8_INITIALIZER("sqrdmulh h0, h1, h31\n"), {0x20, 0xb4, 0x7f, 0x7e}},
+    {S8_INITIALIZER("sqrdmulh s0, s1, s31\n"), {0x20, 0xb4, 0xbf, 0x7e}},
+};
+
 static AssemblyA64DirectSIMDNeonCase const assembly_a64_direct_simd_neon_cases[] = {
     {S8_INITIALIZER("addp d0, v1.2d\n"), {0x20, 0xb8, 0xf1, 0x5e}, S8_INITIALIZER("addp d31, v30.2d\n"), {0xdf, 0xbb, 0xf1, 0x5e}},
     {S8_INITIALIZER("cmeq d0, d1, d2\n"), {0x20, 0x8c, 0xe2, 0x7e}, S8_INITIALIZER("cmeq d31, d30, d29\n"), {0xdf, 0x8f, 0xfd, 0x7e}},
@@ -886,12 +923,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 209);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 209);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 181);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 147);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 217);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 217);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 173);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 155);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 62);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 116);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 108);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 65);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
@@ -3924,6 +3961,69 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
             arguments->arena, widening_case.source, (AssemblyEncodeOptions){.target = aarch64_no_advsimd_neon});
         BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
                                    no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_multiply_cases) == 32);
+    for (u32 multiply_index = 0; multiply_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_multiply_cases); multiply_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase multiply_case = assembly_a64_direct_simd_multiply_cases[multiply_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, multiply_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, multiply_case.bytes, 4));
+        AssemblyEncodeResult no_neon = assembly_encode(
+            arguments->arena, multiply_case.source, (AssemblyEncodeOptions){.target = aarch64_no_advsimd_neon});
+        BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
+                                   no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    AssemblyEncodeResult multiply_upper_boundary = assembly_encode(
+        arguments->arena,
+        S8("MLA V31.4S, V30.4S, V29.4S\n"
+           "MLS V31.4S, V30.4S, V29.4S\n"
+           "MUL V31.4S, V30.4S, V29.4S\n"
+           "PMUL V31.16B, V30.16B, V29.16B\n"
+           "SQDMULH V31.4S, V30.4S, V29.4S\n"
+           "SQDMULH S31, S30, S29\n"
+           "SQRDMULH V31.4S, V30.4S, V29.4S\n"
+           "SQRDMULH S31, S30, S29\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    BUSTER_TEST(arguments, multiply_upper_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(multiply_upper_boundary.bytes,
+                                                         (u8 const[]){0xdf, 0x97, 0xbd, 0x4e,
+                                                                      0xdf, 0x97, 0xbd, 0x6e,
+                                                                      0xdf, 0x9f, 0xbd, 0x4e,
+                                                                      0xdf, 0x9f, 0x3d, 0x6e,
+                                                                      0xdf, 0xb7, 0xbd, 0x4e,
+                                                                      0xdf, 0xb7, 0xbd, 0x5e,
+                                                                      0xdf, 0xb7, 0xbd, 0x6e,
+                                                                      0xdf, 0xb7, 0xbd, 0x7e},
+                                                         32));
+    static String8 const malformed_aarch64_advsimd_multiply[] = {
+        S8_INITIALIZER("mla v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("mla v0.4s, v1.2s, v2.4s\n"),
+        S8_INITIALIZER("mla v0.4s, v1.4s\n"),
+        S8_INITIALIZER("mla v0.4s, v1.4s, v2.s[0]\n"),
+        S8_INITIALIZER("mls v0.4s, v1.4s, v2.s[0]\n"),
+        S8_INITIALIZER("mul v0.4s, v1.4s, v2.s[0]\n"),
+        S8_INITIALIZER("mul v0.4s, v1.4s\n"),
+        S8_INITIALIZER("pmul v0.4h, v1.4h, v2.4h\n"),
+        S8_INITIALIZER("sqdmulh v0.8b, v1.8b, v2.8b\n"),
+        S8_INITIALIZER("sqdmulh v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("sqdmulh v0.4s, v1.4s, v2.s[0]\n"),
+        S8_INITIALIZER("sqrdmulh v0.8b, v1.8b, v2.8b\n"),
+        S8_INITIALIZER("sqrdmulh v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("sqrdmulh v0.4s, v1.4s, v2.s[0]\n"),
+        S8_INITIALIZER("sqdmulh h0, s1, h2\n"),
+        S8_INITIALIZER("sqdmulh h0, h1, s2\n"),
+        S8_INITIALIZER("sqrdmulh h0, h1\n"),
+        S8_INITIALIZER("mla v32.4s, v1.4s, v2.4s\n"),
+        S8_INITIALIZER("sqrdmulh s32, s1, s2\n"),
+    };
+    for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed_aarch64_advsimd_multiply); malformed_index += 1)
+    {
+        AssemblyEncodeResult malformed = assembly_encode(
+            arguments->arena, malformed_aarch64_advsimd_multiply[malformed_index],
+            (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
+                                   malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
     AssemblyEncodeResult widening_upper = assembly_encode(
         arguments->arena,
