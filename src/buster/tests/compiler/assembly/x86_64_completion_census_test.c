@@ -9,6 +9,7 @@
 UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
 #if BUSTER_CPU_ARCH_X86_64
     u32 form_count = buster_x86_metadata_form_count();
     u32 class_index = 0;
