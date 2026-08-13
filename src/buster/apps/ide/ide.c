@@ -2277,6 +2277,7 @@ void async_user_tick(void)
 BUSTER_GLOBAL_LOCAL ProcessResult run_graphical_app(void)
 {
     ProcessResult result = PROCESS_RESULT_SUCCESS;
+    bool graphical_running = false;
 
     ide_state.document_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
     ide_state.document_staging_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
@@ -2297,6 +2298,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_graphical_app(void)
         else
         {
             ide_state.document_model_ready = true;
+            (void)ide_document_model_session_load(&ide_state.document_model);
             ide_app_copy_storage(ide_state.path_bar_storage, IDE_OPEN_PATH_CAPACITY - 1, (String8){0}, &ide_state.path_bar);
             ide_app_copy_storage(ide_state.query_storage, IDE_QUERY_CAPACITY - 1, (String8){0}, &ide_state.query);
             ide_state.metadata_show_path = true;
@@ -2381,6 +2383,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_graphical_app(void)
 
                     ide_state.last_frame_timestamp = timestamp_take();
 
+                    graphical_running = true;
                     bool test = ide_state.test && !program_flag_get(PROGRAM_FLAG_TEST_PERSIST);
                     u64 loop_times = test ? (u64)3 : UINT64_MAX;
                     for (u64 i = 0; i < loop_times && ide_state.first_window; i += 1)
@@ -2449,6 +2452,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_graphical_app(void)
         }
     }
 
+    if (result == PROCESS_RESULT_SUCCESS && graphical_running && ide_state.document_model_ready && !ide_state.test)
+    {
+        (void)ide_document_model_session_save(&ide_state.document_model);
+    }
     if (ide_state.document_model_ready)
     {
         ide_document_model_deinitialize(&ide_state.document_model);
