@@ -13,6 +13,244 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_string_equal(BusterX86MetadataStri
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL u64 x86_64_metadata_test_completion_hash_byte(u64 hash, u8 value)
+{
+    return (hash ^ value) * UINT64_C(1099511628211);
+}
+
+BUSTER_GLOBAL_LOCAL u64 x86_64_metadata_test_completion_hash_u16(u64 hash, u16 value)
+{
+    hash = x86_64_metadata_test_completion_hash_byte(hash, (u8)value);
+    return x86_64_metadata_test_completion_hash_byte(hash, (u8)(value >> 8));
+}
+
+BUSTER_GLOBAL_LOCAL u64 x86_64_metadata_test_completion_hash_u32(u64 hash, u32 value)
+{
+    hash = x86_64_metadata_test_completion_hash_byte(hash, (u8)value);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, (u8)(value >> 8));
+    hash = x86_64_metadata_test_completion_hash_byte(hash, (u8)(value >> 16));
+    return x86_64_metadata_test_completion_hash_byte(hash, (u8)(value >> 24));
+}
+
+BUSTER_GLOBAL_LOCAL u64 x86_64_metadata_test_completion_hash_u64(u64 hash, u64 value)
+{
+    hash = x86_64_metadata_test_completion_hash_u32(hash, (u32)value);
+    return x86_64_metadata_test_completion_hash_u32(hash, (u32)(value >> 32));
+}
+
+BUSTER_GLOBAL_LOCAL u64 x86_64_metadata_test_completion_hash_string(u64 hash, BusterX86MetadataString value)
+{
+    hash = x86_64_metadata_test_completion_hash_u32(hash, value.offset);
+    hash = x86_64_metadata_test_completion_hash_u32(hash, value.length);
+    for (u32 index = 0; index < value.length; index += 1)
+        hash = x86_64_metadata_test_completion_hash_byte(hash, buster_x86_metadata_string_byte(value, index));
+    return hash;
+}
+
+BUSTER_GLOBAL_LOCAL u64 x86_64_metadata_test_completion_hash_operand(u64 hash, BusterX86MetadataOperand value)
+{
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.atom);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.width);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.slot);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.visible);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.kind);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.access);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.field_source);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(value.reserved); index += 1)
+        hash = x86_64_metadata_test_completion_hash_byte(hash, value.reserved[index]);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.physical_class);
+    return x86_64_metadata_test_completion_hash_u16(hash, value.physical_width_flags);
+}
+
+BUSTER_GLOBAL_LOCAL u64 x86_64_metadata_test_completion_hash_form(u64 hash, BusterX86MetadataForm value)
+{
+    hash = x86_64_metadata_test_completion_hash_u32(hash, value.id);
+    hash = x86_64_metadata_test_completion_hash_u64(hash, value.stable_hash);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.source);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.iclass);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.iform);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.isa_set);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.category);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.extension);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.attributes);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.cpl);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.exceptions);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.flags);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.disasm);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.disasm_intel);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.disasm_att);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.real_opcode);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.uname);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.comment);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.version);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.pattern);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.operands);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.operand_annotation);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.tuple);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.element_size);
+    hash = x86_64_metadata_test_completion_hash_string(hash, value.reason);
+    hash = x86_64_metadata_test_completion_hash_u32(hash, value.operand_first);
+    hash = x86_64_metadata_test_completion_hash_u16(hash, value.operand_count);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.coverage_class);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.encoder_family);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.test_class);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.prefix_kind);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.map);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.fixed_byte_count);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(value.fixed_bytes); index += 1)
+        hash = x86_64_metadata_test_completion_hash_byte(hash, value.fixed_bytes[index]);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.mandatory_prefix);
+    hash = x86_64_metadata_test_completion_hash_u16(hash, value.field_flags);
+    hash = x86_64_metadata_test_completion_hash_u16(hash, value.decorator_flags);
+    hash = x86_64_metadata_test_completion_hash_u16(hash, value.apx_flags);
+    hash = x86_64_metadata_test_completion_hash_u16(hash, value.amx_flags);
+    hash = x86_64_metadata_test_completion_hash_u16(hash, value.mode_flags);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.displacement_width);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.displacement_scale);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.immediate_width);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.immediate_signed);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.relocation_base);
+    hash = x86_64_metadata_test_completion_hash_byte(hash, value.tuple_kind);
+    hash = x86_64_metadata_test_completion_hash_u32(hash, value.tuple_offset);
+    hash = x86_64_metadata_test_completion_hash_u32(hash, value.element_size_offset);
+    hash = x86_64_metadata_test_completion_hash_u32(hash, value.token_count);
+    return x86_64_metadata_test_completion_hash_u16(hash, value.reason_id);
+}
+
+BUSTER_GLOBAL_LOCAL u32 x86_64_metadata_test_completion_status_index(BusterX86MetadataForm form,
+                                                                      BusterX86MetadataCoverageLedgerEntry entry)
+{
+    if (entry.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED) return BUSTER_X86_COMPLETION_COHORT_EMITTED;
+    if (entry.disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED) return BUSTER_X86_COMPLETION_COHORT_BLOCKED;
+    return form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED ? BUSTER_X86_COMPLETION_COHORT_NORMALIZED
+                                                                           : BUSTER_X86_COMPLETION_COHORT_BLOCKED;
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86CompletionLedger x86_64_metadata_test_completion_ledger(
+    BusterX86MetadataCoverageLedgerEntry const* entries, u32 entry_count)
+{
+    BusterX86CompletionLedger result = {0};
+    result.form_count = entry_count;
+    result.digest = UINT64_C(14695981039346656037);
+    result.digest = x86_64_metadata_test_completion_hash_u32(result.digest, entry_count);
+    for (u32 form_id = 0; form_id < entry_count; form_id += 1)
+    {
+        BusterX86MetadataForm form = {0};
+        BusterX86MetadataCoverageLedgerEntry entry = entries ? entries[form_id] : (BusterX86MetadataCoverageLedgerEntry){0};
+        if (!buster_x86_metadata_form(form_id, &form)) continue;
+
+        result.normalized_count += form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED;
+        result.emitted_count += entry.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED;
+        result.blocked_count += entry.disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED;
+        if (entry.encoder_family < BUSTER_X86_METADATA_ENCODER_COUNT)
+        {
+            result.family_all_counts[entry.encoder_family] += 1;
+            result.family_all_emitted_counts[entry.encoder_family] += entry.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED;
+            result.family_all_blocked_counts[entry.encoder_family] += entry.disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED;
+            if (form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED)
+            {
+                result.family_counts[entry.encoder_family] += 1;
+                result.family_emitted_counts[entry.encoder_family] += entry.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED;
+                result.family_blocked_counts[entry.encoder_family] += entry.disposition == BUSTER_X86_METADATA_COVERAGE_BLOCKED;
+            }
+        }
+        if (entry.blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT) result.blocker_counts[entry.blocker] += 1;
+        result.duplicate_form_id_count += form.id != form_id;
+        result.zero_stable_hash_count += form.stable_hash == 0;
+        result.duplicate_stable_hash_count += buster_x86_metadata_lookup_form_hash(form.stable_hash).count > 1;
+        result.emitted_nonzero_blocker_count += entry.disposition == BUSTER_X86_METADATA_COVERAGE_EMITTED &&
+                                                 entry.blocker != BUSTER_X86_METADATA_BLOCKER_NONE;
+
+        // Serialize the complete decoded row and its ordered operand records.
+        // Every value is fed in an explicit fixed-width little-endian form;
+        // no struct padding, host pointers, or arena addresses enter the
+        // durable snapshot digest.
+        result.digest = x86_64_metadata_test_completion_hash_form(result.digest, form);
+        result.digest = x86_64_metadata_test_completion_hash_u32(result.digest, entry.form_id);
+        result.digest = x86_64_metadata_test_completion_hash_u64(result.digest, entry.stable_hash);
+        result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, entry.coverage_class);
+        result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, entry.encoder_family);
+        result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, entry.disposition);
+        result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, entry.blocker);
+        result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, entry.encoder_capable);
+        result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, entry.policy_excluded);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(entry.reserved); index += 1)
+            result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, entry.reserved[index]);
+
+        u32 status_index = x86_64_metadata_test_completion_status_index(form, entry);
+        u32 visible_count = 0;
+        u32 operand_kind_counts[BUSTER_X86_METADATA_OPERAND_KIND_COUNT] = {0};
+        for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+        {
+            BusterX86MetadataOperand operand = {0};
+            bool operand_retrieved = buster_x86_metadata_operand(form_id, operand_index, &operand);
+            result.digest = x86_64_metadata_test_completion_hash_u32(result.digest, operand_index);
+            result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, operand_retrieved);
+            if (!operand_retrieved) continue;
+            result.digest = x86_64_metadata_test_completion_hash_operand(result.digest, operand);
+            result.operand_count += 1;
+            if (operand.kind < BUSTER_X86_METADATA_OPERAND_KIND_COUNT) result.operand_kind_counts[operand.kind] += 1;
+            if (operand.visible)
+            {
+                visible_count += 1;
+                if (operand.kind < BUSTER_X86_METADATA_OPERAND_KIND_COUNT)
+                    result.visible_operand_kind_counts[operand.kind] += 1;
+            }
+            if (operand.kind < BUSTER_X86_METADATA_OPERAND_KIND_COUNT) operand_kind_counts[operand.kind] += 1;
+        }
+        if (visible_count <= BUSTER_X86_COMPLETION_MAX_VISIBLE_OPERANDS)
+            result.visible_count_distribution[visible_count] += 1;
+
+        u32 field_mask = form.field_flags;
+        u32 decorator_mask = form.decorator_flags;
+        u32 apx_mask = form.apx_flags;
+        u32 amx_mask = form.amx_flags;
+        for (u32 cohort = 1; cohort < BUSTER_X86_COMPLETION_COHORT_COUNT; cohort += 1)
+        {
+            bool include = cohort == status_index || (cohort == BUSTER_X86_COMPLETION_COHORT_NORMALIZED &&
+                                                      form.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED);
+            if (!include) continue;
+            for (u32 bit = 0; bit < 9; bit += 1)
+                result.field_cohorts[cohort][bit] += (field_mask & (1u << bit)) != 0;
+            for (u32 bit = 0; bit < 5; bit += 1)
+                result.decorator_cohorts[cohort][bit] += (decorator_mask & (1u << bit)) != 0;
+            for (u32 bit = 0; bit < 6; bit += 1)
+                result.apx_cohorts[cohort][bit] += (apx_mask & (1u << bit)) != 0;
+            for (u32 bit = 0; bit < 4; bit += 1)
+                result.amx_cohorts[cohort][bit] += (amx_mask & (1u << bit)) != 0;
+        }
+        for (u32 bit = 0; bit < 9; bit += 1)
+            result.field_cohorts[BUSTER_X86_COMPLETION_COHORT_ALL][bit] += (field_mask & (1u << bit)) != 0;
+        for (u32 bit = 0; bit < 5; bit += 1)
+            result.decorator_cohorts[BUSTER_X86_COMPLETION_COHORT_ALL][bit] += (decorator_mask & (1u << bit)) != 0;
+        for (u32 bit = 0; bit < 6; bit += 1)
+            result.apx_cohorts[BUSTER_X86_COMPLETION_COHORT_ALL][bit] += (apx_mask & (1u << bit)) != 0;
+        for (u32 bit = 0; bit < 4; bit += 1)
+            result.amx_cohorts[BUSTER_X86_COMPLETION_COHORT_ALL][bit] += (amx_mask & (1u << bit)) != 0;
+
+        result.digest = x86_64_metadata_test_completion_hash_u32(result.digest, form.id);
+        result.digest = x86_64_metadata_test_completion_hash_u64(result.digest, form.stable_hash);
+        result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, form.coverage_class);
+        result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, entry.disposition);
+        result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, entry.blocker);
+        result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, entry.encoder_family);
+        result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, entry.encoder_capable != 0);
+        result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, entry.policy_excluded != 0);
+        result.digest = x86_64_metadata_test_completion_hash_u16(result.digest, form.field_flags);
+        result.digest = x86_64_metadata_test_completion_hash_u16(result.digest, form.decorator_flags);
+        result.digest = x86_64_metadata_test_completion_hash_u16(result.digest, form.apx_flags);
+        result.digest = x86_64_metadata_test_completion_hash_u16(result.digest, form.amx_flags);
+        result.digest = x86_64_metadata_test_completion_hash_u16(result.digest, form.mode_flags);
+        result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, form.prefix_kind);
+        result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, form.map);
+        result.digest = x86_64_metadata_test_completion_hash_byte(result.digest, (u8)visible_count);
+        result.digest = x86_64_metadata_test_completion_hash_u16(result.digest, form.operand_count);
+        for (u32 kind = 0; kind < BUSTER_X86_METADATA_OPERAND_KIND_COUNT; kind += 1)
+            result.digest = x86_64_metadata_test_completion_hash_u32(result.digest, operand_kind_counts[kind]);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_string_contains(BusterX86MetadataString value, String8 needle)
 {
     if (!needle.length || value.length < needle.length) return false;
@@ -2228,6 +2466,101 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
     BusterX86MetadataCoverageLedgerEntry* ledger =
         arena_allocate(arguments->arena, BusterX86MetadataCoverageLedgerEntry, ledger_capacity);
     BusterX86MetadataCoverageAuditResult audit = buster_x86_metadata_coverage_audit(ledger, ledger_capacity);
+    BusterX86CompletionLedger completion = x86_64_metadata_test_completion_ledger(ledger, audit.entry_count);
+    BusterX86CompletionLedger empty_completion = x86_64_metadata_test_completion_ledger(0, 0);
+    bool completion_totals_match = completion.digest == UINT64_C(0xbebc4833a78c441c) &&
+                                   completion.form_count == 11013 && completion.normalized_count == 10636 &&
+                                   completion.emitted_count == 10606 && completion.blocked_count == 407 && completion.operand_count == 32813 &&
+                                   completion.duplicate_form_id_count == 0 && completion.duplicate_stable_hash_count == 0 &&
+                                   completion.zero_stable_hash_count == 0 && completion.emitted_nonzero_blocker_count == 0;
+    static u32 const expected_operand_totals[] = {0, 24461, 5412, 2243, 84, 1, 246, 244, 9, 113};
+    static u32 const expected_operand_visible[] = {0, 22643, 5170, 2043, 84, 1, 4, 0, 9, 6};
+    static u32 const expected_visible_distribution[] = {412, 858, 3420, 3375, 2603, 345};
+    static u32 const expected_field_cohorts[][9] = {
+        {10609, 10, 80, 5377, 10416, 3276, 2216, 87, 87},
+        {10301, 10, 80, 5228, 10067, 3244, 2159, 49, 49},
+        {10274, 10, 80, 5212, 10041, 3244, 2159, 46, 46},
+        {335, 0, 0, 165, 375, 32, 57, 41, 41},
+    };
+    static u32 const expected_decorator_cohorts[][5] = {
+        {4061, 3527, 1145, 345, 345}, {4056, 3524, 1145, 325, 325},
+        {4056, 3524, 1145, 325, 325}, {5, 3, 0, 20, 20},
+    };
+    static u32 const expected_apx_cohorts[][6] = {
+        {2473, 2450, 1622, 806, 640, 75}, {2465, 2442, 1614, 806, 640, 69},
+        {2465, 2442, 1614, 806, 640, 69}, {8, 8, 8, 0, 0, 6},
+    };
+    static u32 const expected_amx_cohorts[][4] = {
+        {49, 10, 4, 2}, {49, 10, 4, 2}, {49, 10, 4, 2}, {0, 0, 0, 0},
+    };
+    bool completion_vectors_match = true;
+    for (u32 kind = 0; kind < BUSTER_X86_METADATA_OPERAND_KIND_COUNT; kind += 1)
+        completion_vectors_match &= completion.operand_kind_counts[kind] == expected_operand_totals[kind] &&
+                                    completion.visible_operand_kind_counts[kind] == expected_operand_visible[kind];
+    for (u32 visible = 0; visible < BUSTER_ARRAY_LENGTH(expected_visible_distribution); visible += 1)
+        completion_vectors_match &= completion.visible_count_distribution[visible] == expected_visible_distribution[visible];
+    for (u32 cohort = 0; cohort < BUSTER_X86_COMPLETION_COHORT_COUNT; cohort += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected_field_cohorts[0]); index += 1)
+            completion_vectors_match &= completion.field_cohorts[cohort][index] == expected_field_cohorts[cohort][index];
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected_decorator_cohorts[0]); index += 1)
+            completion_vectors_match &= completion.decorator_cohorts[cohort][index] == expected_decorator_cohorts[cohort][index];
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected_apx_cohorts[0]); index += 1)
+            completion_vectors_match &= completion.apx_cohorts[cohort][index] == expected_apx_cohorts[cohort][index];
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected_amx_cohorts[0]); index += 1)
+            completion_vectors_match &= completion.amx_cohorts[cohort][index] == expected_amx_cohorts[cohort][index];
+    }
+    static u32 const expected_family_all[] = {1929, 202, 5, 1698, 196, 6812, 49, 122};
+    static u32 const expected_family_all_emitted[] = {1783, 197, 5, 1644, 176, 6728, 49, 24};
+    static u32 const expected_family_all_blocked[] = {146, 5, 0, 54, 20, 84, 0, 98};
+    static u32 const expected_family_normalized[] = {1812, 198, 5, 1644, 176, 6728, 49, 24};
+    static u32 const expected_family_normalized_emitted[] = {1783, 197, 5, 1644, 176, 6728, 49, 24};
+    static u32 const expected_family_normalized_blocked[] = {29, 1, 0, 0, 0, 0, 0, 0};
+    for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
+        completion_vectors_match &= completion.family_all_counts[family] == expected_family_all[family] &&
+                                    completion.family_all_emitted_counts[family] == expected_family_all_emitted[family] &&
+                                    completion.family_all_blocked_counts[family] == expected_family_all_blocked[family] &&
+                                    completion.family_counts[family] == expected_family_normalized[family] &&
+                                    completion.family_emitted_counts[family] == expected_family_normalized_emitted[family] &&
+                                    completion.family_blocked_counts[family] == expected_family_normalized_blocked[family];
+    static u32 const expected_blockers[] = {10606, 268, 108, 30, 0, 1, 0, 0, 0, 0, 0, 0};
+    for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
+        completion_vectors_match &= completion.blocker_counts[blocker] == expected_blockers[blocker];
+    bool completion_structural_ok = completion_totals_match && completion_vectors_match &&
+                                    empty_completion.digest == UINT64_C(0x4d25767f9dce13f5);
+    arguments->show(arguments, S8("X86_COMPLETION_LEDGER digest={u64} forms={u32} normalized={u32} emitted={u32} blocked={u32} operands={u32} dup_form={u32} dup_hash={u32} zero_hash={u32} emitted_blocker={u32}\n"),
+                    completion.digest, completion.form_count, completion.normalized_count, completion.emitted_count,
+                    completion.blocked_count, completion.operand_count, completion.duplicate_form_id_count,
+                    completion.duplicate_stable_hash_count, completion.zero_stable_hash_count, completion.emitted_nonzero_blocker_count);
+    for (u32 kind = 0; kind < BUSTER_X86_METADATA_OPERAND_KIND_COUNT; kind += 1)
+        arguments->show(arguments, S8("X86_COMPLETION_OPERAND kind={u32} total={u32} visible={u32}\n"), kind,
+                        completion.operand_kind_counts[kind], completion.visible_operand_kind_counts[kind]);
+    for (u32 visible = 0; visible <= BUSTER_X86_COMPLETION_MAX_VISIBLE_OPERANDS; visible += 1)
+        if (completion.visible_count_distribution[visible])
+            arguments->show(arguments, S8("X86_COMPLETION_VISIBLE count={u32} rows={u32}\n"), visible,
+                            completion.visible_count_distribution[visible]);
+    for (u32 cohort = 0; cohort < BUSTER_X86_COMPLETION_COHORT_COUNT; cohort += 1)
+    {
+        arguments->show(arguments, S8("X86_COMPLETION_COHORT cohort={u32} field={u32},{u32},{u32},{u32},{u32},{u32},{u32},{u32},{u32} decorator={u32},{u32},{u32},{u32},{u32} apx={u32},{u32},{u32},{u32},{u32},{u32} amx={u32},{u32},{u32},{u32}\n"),
+                        cohort, completion.field_cohorts[cohort][0], completion.field_cohorts[cohort][1],
+                        completion.field_cohorts[cohort][2], completion.field_cohorts[cohort][3], completion.field_cohorts[cohort][4],
+                        completion.field_cohorts[cohort][5], completion.field_cohorts[cohort][6], completion.field_cohorts[cohort][7],
+                        completion.field_cohorts[cohort][8], completion.decorator_cohorts[cohort][0], completion.decorator_cohorts[cohort][1],
+                        completion.decorator_cohorts[cohort][2], completion.decorator_cohorts[cohort][3], completion.decorator_cohorts[cohort][4],
+                        completion.apx_cohorts[cohort][0], completion.apx_cohorts[cohort][1], completion.apx_cohorts[cohort][2],
+                        completion.apx_cohorts[cohort][3], completion.apx_cohorts[cohort][4], completion.apx_cohorts[cohort][5],
+                        completion.amx_cohorts[cohort][0], completion.amx_cohorts[cohort][1], completion.amx_cohorts[cohort][2],
+                        completion.amx_cohorts[cohort][3]);
+    }
+    for (u32 family = 0; family < BUSTER_X86_METADATA_ENCODER_COUNT; family += 1)
+        arguments->show(arguments, S8("X86_COMPLETION_FAMILY family={u32} all={u32},{u32},{u32} normalized={u32},{u32},{u32}\n"), family,
+                        completion.family_all_counts[family], completion.family_all_emitted_counts[family], completion.family_all_blocked_counts[family],
+                        completion.family_counts[family], completion.family_emitted_counts[family], completion.family_blocked_counts[family]);
+    for (u32 blocker = 0; blocker < BUSTER_X86_METADATA_COVERAGE_BLOCKER_COUNT; blocker += 1)
+        arguments->show(arguments, S8("X86_COMPLETION_BLOCKER blocker={u32} count={u32}\n"), blocker, completion.blocker_counts[blocker]);
+    arguments->show(arguments, S8("X86_COMPLETION_INVARIANTS duplicate_form={u32} duplicate_hash={u32} zero_hash={u32} emitted_blocker={u32}\n"),
+                    completion.duplicate_form_id_count, completion.duplicate_stable_hash_count, completion.zero_stable_hash_count,
+                    completion.emitted_nonzero_blocker_count);
     for (u32 form_id = 0; form_id < audit.entry_count; form_id += 1)
     {
         if (ledger[form_id].disposition != BUSTER_X86_METADATA_COVERAGE_EMITTED) continue;
@@ -2262,7 +2595,7 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
     arguments->show(arguments, S8("X86_SOURCE_REGISTER_CENSUS emitted={u32} register_only={u32} success={u32} syntax={u32} policy={u32} ambiguity={u32} implicit={u32} gap={u32}\n"),
                     emitted, register_only, class_counts[0], class_counts[1], class_counts[2], class_counts[3],
                     class_counts[4], class_counts[5]);
-    return audit.complete && emitted == audit.emitted_count && class_counts[0] + class_counts[1] + class_counts[2] +
+    return completion_structural_ok && audit.complete && emitted == audit.emitted_count && class_counts[0] + class_counts[1] + class_counts[2] +
                class_counts[3] + class_counts[4] + class_counts[5] == register_only;
 }
 
