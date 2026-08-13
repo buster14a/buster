@@ -1428,6 +1428,134 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_immediate_skeleton(UnitTest
     return success;
 }
 
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_att_memory_case(
+    UnitTestArguments* arguments, Target target, String8 mnemonic, u32 form_id,
+    BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+    BusterX86MetadataPhysicalAttributes attributes, String8 const* features, u32 feature_count,
+    String8 source, u8 const* expected, u32 expected_count)
+{
+    BusterX86MetadataPhysicalQuery physical = x86_64_metadata_test_physical_query(
+        mnemonic, operands, operand_count, attributes, features, feature_count);
+    u8 direct_bytes[32] = {0};
+    BusterX86MetadataRelocation direct_relocations[8] = {0};
+    BusterX86MetadataEmitResult direct = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+        .physical = physical,
+        .form_id = form_id,
+        .output = direct_bytes,
+        .output_capacity = BUSTER_ARRAY_LENGTH(direct_bytes),
+        .relocations = direct_relocations,
+        .relocation_capacity = BUSTER_ARRAY_LENGTH(direct_relocations),
+    });
+    BusterX86MetadataSelectResult selected = buster_x86_metadata_select_form(physical);
+    AssemblyEncodeResult encoded = assembly_encode(arguments->arena, source,
+                                                    (AssemblyEncodeOptions){.target = target,
+                                                                             .syntax = ASSEMBLY_SYNTAX_ATT});
+    bool direct_matches = direct.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && direct.relocation_count == 0 &&
+                          x86_64_metadata_test_bytes_equal(direct_bytes, direct.byte_count, expected, expected_count);
+    bool source_matches = encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                          x86_64_metadata_test_bytes_equal(encoded.bytes.pointer, (u32)encoded.bytes.length, expected,
+                                                           expected_count);
+    bool bytes_match = encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                       encoded.bytes.length == direct.byte_count &&
+                       x86_64_metadata_test_bytes_equal(encoded.bytes.pointer, (u32)encoded.bytes.length, direct_bytes,
+                                                        direct.byte_count);
+    arguments->show(arguments, S8("X86_SOURCE_ATT_MEMORY form={u32} selected={u32} select_status={u32} status={u32} reloc={u32} direct={u32} source={u32} match={u32} bytes={u32} direct_first={u32} source_first={u32}\n"),
+                    form_id, selected.form_id, selected.status, direct.status, direct.relocation_count, direct_matches,
+                    source_matches, bytes_match, direct.byte_count, direct.byte_count ? direct_bytes[0] : 0,
+                    encoded.bytes.length ? encoded.bytes.pointer[0] : 0);
+    return direct_matches && source_matches && bytes_match;
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_att_memory_skeleton(UnitTestArguments* arguments)
+{
+    Target target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    target.cpu_features_explicit = true;
+    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+        TARGET_CPU_FEATURE_X86_SSE2,
+        TARGET_CPU_FEATURE_X86_AVX,
+        TARGET_CPU_FEATURE_X86_AVX512F,
+        TARGET_CPU_FEATURE_X86_AVX512VL,
+        TARGET_CPU_FEATURE_X86_APX,
+    }, 5);
+    String8 wildcard[1] = {S8("*")};
+    String8 avx512[2] = {S8("avx512f"), S8("avx512vl")};
+    String8 avx512_apx[3] = {S8("avx512f"), S8("avx512vl"), S8("apx")};
+
+    // Classic base/index/scale/displacement: AT&T reverses the visible
+    // operands and the q suffix supplies the memory width.
+    BusterX86MetadataPhysicalOperand classic_memory = x86_64_metadata_test_physical_mem_base(3, 64, 16);
+    classic_memory.memory.has_index = true;
+    classic_memory.memory.index = (BusterX86MetadataPhysicalRegister){
+        .index = 1, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR};
+    classic_memory.memory.scale = 4;
+    BusterX86MetadataPhysicalOperand classic_operands[2] = {
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64), classic_memory};
+    u8 classic_bytes[] = {0x48, 0x8b, 0x44, 0x8b, 0x10};
+    bool classic = x86_64_metadata_test_source_att_memory_case(
+        arguments, target, S8("MOV"), 9845, classic_operands, BUSTER_ARRAY_LENGTH(classic_operands),
+        (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard),
+        S8("movq 16(%rbx,%rcx,4), %rax\n"), classic_bytes, BUSTER_ARRAY_LENGTH(classic_bytes));
+
+    // EVEX tuple displacement: 16 bytes is represented by a compressed
+    // disp8 in the VPSLLD memory form, while AT&T still writes the source
+    // memory operand first.
+    BusterX86MetadataPhysicalOperand vpslld_memory = x86_64_metadata_test_physical_mem_base(0, 0, 16);
+    vpslld_memory.memory.source_width = 128;
+    BusterX86MetadataPhysicalOperand vpslld_operands[3] = {
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM, 0, 256),
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM, 1, 256), vpslld_memory};
+    u8 vpslld_bytes[] = {0x62, 0xf1, 0x75, 0x28, 0xf2, 0x40, 0x01};
+    bool vpslld = x86_64_metadata_test_source_att_memory_case(
+        arguments, target, S8("VPSLLD"), 6460, vpslld_operands, BUSTER_ARRAY_LENGTH(vpslld_operands),
+        (BusterX86MetadataPhysicalAttributes){0}, avx512, BUSTER_ARRAY_LENGTH(avx512),
+        S8("vpslld 16(%rax), %ymm1, %ymm0\n"), vpslld_bytes, BUSTER_ARRAY_LENGTH(vpslld_bytes));
+
+    // EVEX broadcast decorator on a scalar memory element widened to zmm.
+    BusterX86MetadataPhysicalOperand vaddps_operands[3] = {
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 0, 512),
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM, 1, 512),
+        x86_64_metadata_test_physical_mem_base(0, 32, 0),
+    };
+    BusterX86MetadataPhysicalAttributes broadcast = {
+        .decorator_flags = BUSTER_X86_METADATA_DECORATOR_BROADCAST,
+        .broadcast_elements = 16,
+    };
+    u8 vaddps_bytes[] = {0x62, 0xf1, 0x74, 0x58, 0x58, 0x00};
+    bool vaddps = x86_64_metadata_test_source_att_memory_case(
+        arguments, target, S8("VADDPS"), 6940, vaddps_operands, BUSTER_ARRAY_LENGTH(vaddps_operands), broadcast,
+        avx512, BUSTER_ARRAY_LENGTH(avx512), S8("vaddps (%rax){1to16}, %zmm1, %zmm0\n"), vaddps_bytes,
+        BUSTER_ARRAY_LENGTH(vaddps_bytes));
+
+    // APX extends the EVEX memory base to EGPR r16; retain the explicit APX
+    // feature gate in both metadata and the source assembler target.
+    BusterX86MetadataPhysicalOperand egpr_operands[2] = {
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 0, 128),
+        x86_64_metadata_test_physical_mem_base(16, 32, 0),
+    };
+    u8 egpr_bytes[] = {0x62, 0xf9, 0x7d, 0x08, 0x6f, 0x00};
+    bool egpr = x86_64_metadata_test_source_att_memory_case(
+        arguments, target, S8("VMOVDQA32"), 5584, egpr_operands, BUSTER_ARRAY_LENGTH(egpr_operands),
+        (BusterX86MetadataPhysicalAttributes){0}, avx512_apx, BUSTER_ARRAY_LENGTH(avx512_apx),
+        S8("vmovdqa32 (%r16), %xmm0\n"), egpr_bytes, BUSTER_ARRAY_LENGTH(egpr_bytes));
+
+    // Explicit FS segment prefix on a classic memory source; no relocation
+    // is needed, so the direct byte oracle remains exact here as well.
+    BusterX86MetadataPhysicalOperand segment_memory = x86_64_metadata_test_physical_mem_base(3, 64, 0);
+    segment_memory.memory.has_segment = true;
+    segment_memory.memory.segment = BUSTER_X86_METADATA_SEGMENT_FS;
+    BusterX86MetadataPhysicalOperand segment_operands[2] = {
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64), segment_memory};
+    u8 segment_bytes[] = {0x64, 0x48, 0x8b, 0x03};
+    bool segment = x86_64_metadata_test_source_att_memory_case(
+        arguments, target, S8("MOV"), 9845, segment_operands, BUSTER_ARRAY_LENGTH(segment_operands),
+        (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard),
+        S8("movq %fs:(%rbx), %rax\n"), segment_bytes, BUSTER_ARRAY_LENGTH(segment_bytes));
+    return classic && vpslld && vaddps && egpr && segment;
+}
+
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_mask_is_decorator(u32 form_id, u32 operand_index)
 {
     BusterX86MetadataForm form = {0};
@@ -1989,6 +2117,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_64_metadata_test_source_memory_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_source_immediate_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_source_relative_absolute_skeleton(arguments));
+    BUSTER_TEST(arguments, x86_64_metadata_test_source_att_memory_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_register_only_census(arguments));
 
     {
