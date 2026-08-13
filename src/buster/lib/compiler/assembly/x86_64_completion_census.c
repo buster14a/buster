@@ -148,6 +148,21 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_completion_apx_evex_memory_witness(BusterX86
                                                S8("VMOVDQA32_XMMu32_MASKmskw_MEMu32_AVX512"));
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_completion_apx_amx_memory_witness(BusterX86MetadataForm form)
+{
+    String8 iclass = buster_x86_metadata_string_span(form.iclass);
+    String8 iform = buster_x86_metadata_string_span(form.iform);
+    return buster_x86_completion_string_equal(buster_x86_metadata_string_span(form.isa_set), S8("APX_F_AMX")) &&
+           buster_x86_completion_string_equal(buster_x86_metadata_string_span(form.extension), S8("AMX_TILE")) &&
+           buster_x86_completion_string_contains(buster_x86_metadata_string_span(form.attributes), S8("DISP8_NO_SCALE")) &&
+           ((buster_x86_completion_string_equal(iclass, S8("TILELOADD")) &&
+             buster_x86_completion_string_equal(iform, S8("TILELOADD_TMMu32_MEMu32_APX"))) ||
+            (buster_x86_completion_string_equal(iclass, S8("TILELOADDT1")) &&
+             buster_x86_completion_string_equal(iform, S8("TILELOADDT1_TMMu32_MEMu32_APX"))) ||
+            (buster_x86_completion_string_equal(iclass, S8("TILESTORED")) &&
+             buster_x86_completion_string_equal(iform, S8("TILESTORED_MEMu32_TMMu32_APX"))));
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_completion_hidden_bsr0(BusterX86MetadataForm form, bool* first)
 {
     bool found = false;
@@ -279,6 +294,18 @@ BUSTER_GLOBAL_LOCAL void buster_x86_completion_normalize_query(BusterX86Metadata
             operands[physical_index].memory.displacement = INT64_C(0x1122334455667788);
             operands[physical_index].memory.has_segment = true;
             operands[physical_index].memory.segment = BUSTER_X86_METADATA_SEGMENT_ES;
+        }
+        else if (operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+                 buster_x86_completion_apx_amx_memory_witness(form))
+        {
+            // The low-register spelling legitimately selects the shorter VEX
+            // AMX form.  An EGPR address is the public, semantic witness for
+            // the APX-EVEX row and is accepted by both source dialects.
+            operands[physical_index].memory.has_base = true;
+            operands[physical_index].memory.base = (BusterX86MetadataPhysicalRegister){
+                .index = 16, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR};
+            operands[physical_index].memory.has_displacement = false;
+            operands[physical_index].memory.displacement = 0;
         }
         else if (operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && no_scale_displacement)
         {
@@ -546,7 +573,9 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_source(Arena* arena, Buste
     // The AT&T bridge starts with the proven scalar/register and plain-memory
     // cohort.  Decorated EVEX, APX role controls, and hidden operands remain
     // explicitly unresolved until their dialect grammar is generalized.
-    if (query.attributes.decorator_flags || query.attributes.apx_flags || query.attributes.amx_flags || query.attributes.has_dfv ||
+    bool apx_amx_witness = buster_x86_completion_apx_amx_memory_witness(form);
+    if (query.attributes.decorator_flags || (query.attributes.apx_flags && !apx_amx_witness) ||
+        (query.attributes.amx_flags && !apx_amx_witness) || query.attributes.has_dfv ||
         query.attributes.no_flags || query.attributes.branch_hint || query.attributes.notrack || query.attributes.rep ||
         query.attributes.repne || query.attributes.lock)
         return (String8){0};

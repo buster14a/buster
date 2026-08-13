@@ -159,6 +159,38 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
     probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, 1436, false);
     BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
+    {
+        u32 const apx_amx_form_ids[] = {490, 493, 494};
+        u8 const apx_amx_opcode_prefixes[] = {0x7f, 0x7d, 0x7e};
+        for (probe_index = 0; probe_index < BUSTER_ARRAY_LENGTH(apx_amx_form_ids); probe_index += 1)
+        {
+            probe_form_id = apx_amx_form_ids[probe_index];
+            memset(probe_operands, 0, sizeof(probe_operands));
+            memset(probe_features, 0, sizeof(probe_features));
+            memset(probe_mnemonic, 0, sizeof(probe_mnemonic));
+            memset(probe_bytes, 0, sizeof(probe_bytes));
+            probe_query = (BusterX86MetadataPhysicalQuery){0};
+            BUSTER_TEST(arguments, buster_x86_completion_census_test_query(
+                                       probe_form_id, &probe_query, probe_operands, probe_features, probe_mnemonic));
+            for (class_index = 0; class_index < probe_query.operand_count; class_index += 1)
+                if (probe_operands[class_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY) break;
+            BUSTER_TEST(arguments, class_index < probe_query.operand_count &&
+                                     probe_operands[class_index].memory.has_base &&
+                                     probe_operands[class_index].memory.base.index == 16 &&
+                                     probe_operands[class_index].memory.base.width == 64);
+            probe_emit = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                .physical = probe_query, .form_id = probe_form_id, .output = probe_bytes, .output_capacity = sizeof(probe_bytes)});
+            BUSTER_TEST(arguments, probe_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && probe_emit.byte_count == 7 &&
+                                     probe_bytes[0] == 0x62 && probe_bytes[1] == 0xfa &&
+                                     probe_bytes[2] == apx_amx_opcode_prefixes[probe_index] && probe_bytes[3] == 0x08 &&
+                                     probe_bytes[4] == 0x4b &&
+                                     probe_bytes[5] == 0x04 && probe_bytes[6] == 0x20);
+            probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, probe_form_id, false);
+            BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
+            probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, probe_form_id, true);
+            BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
+        }
+    }
     for (probe_index = 0; probe_index < 4; probe_index += 1)
     {
         probe_form_id = 9891 + probe_index;
