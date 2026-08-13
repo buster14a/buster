@@ -12,6 +12,32 @@ deliberately left untaken, and the mistakes an earlier audit already paid for.
 When an audit lands, add a new dated entry at the top and leave the older ones
 as written — they are a record, not documentation to keep current.
 
+`2026-08-13c` (Linux x86_64; C frontend true 3-TU split, based on
+`39bc0ffa`, uncommitted during measurement). Non-unity CMake now compiles
+`c_source.c`, `c_parse.c` (parser plus semantic analysis), and `c_gen.c`; the
+unity aggregator retains their historical include order and `c.c` diagnostics
+mapping. Three fresh default-parallel Debug split-vs-baseline pairs (Clang 22,
+tests/Vulkan/shaders off) measured generate+build wall: baseline 2.9855/2.9526/
+3.1921 s, split 2.4730/2.6503/2.6103 s (means 3.0434 vs 2.5779 s, -15.3%).
+Ninja sums were baseline 20,237/20,121/21,555 ms versus split
+20,312/21,664/21,934 ms; maxima baseline 1,958/1,957/2,096 ms versus split
+1,479/1,662/1,568 ms. Frontend object sums rise because three TUs each parse
+the private contract: baseline c.c 2,020/2,015/2,156 ms versus split
+source+parse+gen 3,340/3,714/3,820 ms. Three -j1 comparisons similarly show
+the expected aggregate-work increase (baseline 9,714 ms total/1,450 ms
+frontend; split 10,044/1,805 ms). The parallel critical-path wall improvement
+is the relevant split-build result; the aggregate work tradeoff is recorded.
+
+Exact paired fresh Release unity self-hosts on the same base/config remained
+deterministic: baseline bytes 46,898,816 and 3,121,216 tokens, split bytes
+46,900,352 and 3,122,265 tokens; stage-1 instructions 9,412,710,684 versus
+9,414,576,385 (+0.02%), stage-2 131,954,589,274 versus 131,967,674,970
+(+0.01%). Unity bench medians were baseline IO/parse 1.786656/1.605340 ms and
+split 1.791887/1.588326 ms. Both split and unity test suites passed 278,208
+assertions and 46/46 modules. The instruction deltas are deterministic and
+attributable to the 1,049 added unity tokens; the source-layout/header token
+delta is recorded rather than hidden.
+
 `2026-08-13b` (Linux x86_64; bounded Clang split-TU PCH A/B experiment,
 based on `aba451f3`, not landed). The opt-in experiment used one stable header
 containing only `base.h`, `arena.h`, `integer.h`, and `string.h`, and an

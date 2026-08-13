@@ -1,53 +1,13 @@
-#include <buster/lib/compiler/frontend/c/c.h>
-
-#include <buster/lib/compiler/ir/ir.h>
-#include <buster/lib/file.h>
-#include <buster/lib/hash.h>
-#include <buster/lib/simd.h>
-#include <buster/lib/string.h>
-
-// The lexer's compaction emitter wants exactly the feature set BUSTER_SIMD_512
-// already decides -- AVX-512 plus VBMI for vpermi2b and VBMI2 for vpcompressb
-// -- so it reuses that one condition rather than restating it and letting the
-// two drift.
-//
-// Unlike the buster tokenizer, this emitter is still written in raw
-// intrinsics rather than the target-fixed <buster/lib/simd.h> vocabulary, so
-// it additionally excludes the self-hosted stages, which have no vendor
-// headers. Moving it over is worth doing and is not mechanical: a 16-byte
-// CToken row carries an offset, so building rows needs a 32-bit lane add and
-// a masked byte broadcast that the vocabulary does not expose yet (a 4-byte
-// Token, which is all the buster tokenizer stores, needs neither). Until then
-// the scalar loop remains the byte-identical fallback here for the
-// self-hosted stages, MSVC, AArch64 and pre-AVX-512 x86.
-#if BUSTER_SIMD_512 && !defined(__BUSTER__)
-#define BUSTER_C_LEX_COMPACT 1
-#else
-#define BUSTER_C_LEX_COMPACT 0
-#endif
-
-// Source translation needs only AVX-512F and AVX-512BW, so keep its less
-// restrictive guard separate from the compact lexer's VBMI/VBMI2 requirement.
-// MSVC, non-x86 hosts, and self-hosted stages retain the SWAR path without
-// needing vendor headers.
-#if BUSTER_CPU_ARCH_X86_64 && defined(__AVX512F__) && defined(__AVX512BW__) && !defined(__BUSTER__) && !BUSTER_COMPILER_MSVC
-#define BUSTER_C_TRANSLATE_AVX512 1
-#else
-#define BUSTER_C_TRANSLATE_AVX512 0
-#endif
-
-#if BUSTER_C_LEX_COMPACT || BUSTER_C_TRANSLATE_AVX512
-#include <immintrin.h>
-#endif
-
+#include "c_internal.h"
 
 // Keep the frontend historical declaration order and one-translation-unit
-// linkage while making the large implementation mechanically navigable. These
-// .c files are fragments, not CMake sources: each starts with a #line back to
-// this file so __FILE__/__LINE__ and diagnostics retain the c.c contract.
+// linkage while making the large implementation mechanically navigable. The
+// same .c files are included here in historical order for unity builds and are
+// compiled as independent sources in non-unity builds. Each starts with a
+// #line back to this file so __FILE__/__LINE__ and diagnostics retain the c.c
+// contract.
 #include "c_source.c"
 #include "c_parse.c"
-#include "c_sema.c"
 #include "c_gen.c"
 #line 48383 "src/buster/lib/compiler/frontend/c/c.c"
 CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target)
