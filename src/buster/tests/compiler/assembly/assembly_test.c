@@ -2861,6 +2861,64 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    invalid_sha512h_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
 
+    Target aarch64_sha2_target = aarch64_m1_explicit_target;
+    BUSTER_TEST(arguments, target_cpu_feature_has(aarch64_sha2_target, TARGET_CPU_FEATURE_AARCH64_SHA2));
+    AssemblyEncodeResult aarch64_sha256su = assembly_encode(
+        arguments->arena,
+        S8("sha256su0 v0.4s, v1.4s\n"
+           "sha256su1 v0.4s, v1.4s, v2.4s\n"),
+        (AssemblyEncodeOptions){.target = aarch64_sha2_target});
+    static u8 const expected_aarch64_sha256su[] = {
+        0x20, 0x28, 0x28, 0x5e,
+        0x20, 0x60, 0x02, 0x5e,
+    };
+    BUSTER_TEST(arguments, aarch64_sha256su.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_sha256su.bytes, expected_aarch64_sha256su,
+                                                         sizeof(expected_aarch64_sha256su)));
+    AssemblyEncodeResult aarch64_sha256su_case_insensitive = assembly_encode(
+        arguments->arena, S8("SHA256SU0 V0.4S, V1.4S\n"), (AssemblyEncodeOptions){.target = aarch64_sha2_target});
+    BUSTER_TEST(arguments, aarch64_sha256su_case_insensitive.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_sha256su_case_insensitive.bytes,
+                                                         expected_aarch64_sha256su, 4));
+    AssemblyEncodeResult aarch64_sha256su_boundary = assembly_encode(
+        arguments->arena,
+        S8("sha256su0 v31.4s, v30.4s\n"
+           "sha256su1 v31.4s, v30.4s, v29.4s\n"),
+        (AssemblyEncodeOptions){.target = aarch64_sha2_target});
+    static u8 const expected_aarch64_sha256su_boundary[] = {
+        0xdf, 0x2b, 0x28, 0x5e,
+        0xdf, 0x63, 0x1d, 0x5e,
+    };
+    BUSTER_TEST(arguments, aarch64_sha256su_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_sha256su_boundary.bytes,
+                                                         expected_aarch64_sha256su_boundary,
+                                                         sizeof(expected_aarch64_sha256su_boundary)));
+    Target aarch64_no_sha256_sha2 = aarch64_sha2_target;
+    aarch64_no_sha256_sha2.cpu_features =
+        target_cpu_features_remove(aarch64_no_sha256_sha2.cpu_features, TARGET_CPU_FEATURE_AARCH64_SHA2);
+    AssemblyEncodeResult aarch64_sha256su_without_feature = assembly_encode(
+        arguments->arena, S8("sha256su0 v0.4s, v1.4s\n"), (AssemblyEncodeOptions){.target = aarch64_no_sha256_sha2});
+    BUSTER_TEST(arguments, aarch64_sha256su_without_feature.diagnostic_count == 1 &&
+                               aarch64_sha256su_without_feature.bytes.length == 0 &&
+                               aarch64_sha256su_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    static String8 const invalid_aarch64_sha256su[] = {
+        S8_INITIALIZER("sha256su0 v0.2d, v1.2d\n"),
+        S8_INITIALIZER("sha256su1 v0.16b, v1.16b, v2.16b\n"),
+        S8_INITIALIZER("sha256su0 v0.4s\n"),
+        S8_INITIALIZER("sha256su1 v0.4s, v1.4s\n"),
+        S8_INITIALIZER("sha256su0 x0.4s, v1.4s\n"),
+        S8_INITIALIZER("sha256su1 v0.4s, v1.4s, x2.4s\n"),
+        S8_INITIALIZER("sha256su0 v32.4s, v1.4s\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_sha256su); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_sha256su_case = assembly_encode(
+            arguments->arena, invalid_aarch64_sha256su[invalid_index],
+            (AssemblyEncodeOptions){.target = aarch64_sha2_target});
+        BUSTER_TEST(arguments, invalid_sha256su_case.diagnostic_count == 1 && invalid_sha256su_case.bytes.length == 0 &&
+                                   invalid_sha256su_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
     BusterAarch64SyntaxMnemonicRange csel_range = {0};
     BUSTER_TEST(arguments, buster_aarch64_syntax_mnemonic_lookup(S8("csel"), &csel_range) && csel_range.candidate_count > 0);
     u32 csel_row = UINT32_MAX;
