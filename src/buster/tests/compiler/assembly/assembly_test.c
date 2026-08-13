@@ -2746,6 +2746,62 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    invalid_rax1_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
 
+    AssemblyEncodeResult aarch64_sha512su = assembly_encode(
+        arguments->arena,
+        S8("sha512su0 v0.2d, v1.2d\n"
+           "sha512su1 v0.2d, v1.2d, v2.2d\n"),
+        (AssemblyEncodeOptions){.target = aarch64_sha3_target});
+    static u8 const expected_aarch64_sha512su[] = {
+        0x20, 0x80, 0xc0, 0xce,
+        0x20, 0x88, 0x62, 0xce,
+    };
+    BUSTER_TEST(arguments, aarch64_sha512su.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_sha512su.bytes, expected_aarch64_sha512su,
+                                                         sizeof(expected_aarch64_sha512su)));
+    AssemblyEncodeResult aarch64_sha512su_case_insensitive = assembly_encode(
+        arguments->arena, S8("SHA512SU0 V0.2D, V1.2D\n"), (AssemblyEncodeOptions){.target = aarch64_sha3_target});
+    BUSTER_TEST(arguments, aarch64_sha512su_case_insensitive.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_sha512su_case_insensitive.bytes,
+                                                         expected_aarch64_sha512su, 4));
+    AssemblyEncodeResult aarch64_sha512su_boundary = assembly_encode(
+        arguments->arena,
+        S8("sha512su0 v31.2d, v30.2d\n"
+           "sha512su1 v31.2d, v30.2d, v29.2d\n"),
+        (AssemblyEncodeOptions){.target = aarch64_sha3_target});
+    static u8 const expected_aarch64_sha512su_boundary[] = {
+        0xdf, 0x83, 0xc0, 0xce,
+        0xdf, 0x8b, 0x7d, 0xce,
+    };
+    BUSTER_TEST(arguments, aarch64_sha512su_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_sha512su_boundary.bytes,
+                                                         expected_aarch64_sha512su_boundary,
+                                                         sizeof(expected_aarch64_sha512su_boundary)));
+    Target aarch64_no_sha512_sha3 = aarch64_sha3_target;
+    aarch64_no_sha512_sha3.cpu_features =
+        target_cpu_features_remove(aarch64_no_sha512_sha3.cpu_features, TARGET_CPU_FEATURE_AARCH64_SHA3);
+    AssemblyEncodeResult aarch64_sha512su_without_feature = assembly_encode(
+        arguments->arena, S8("sha512su0 v0.2d, v1.2d\n"), (AssemblyEncodeOptions){.target = aarch64_no_sha512_sha3});
+    BUSTER_TEST(arguments, aarch64_sha512su_without_feature.diagnostic_count == 1 &&
+                               aarch64_sha512su_without_feature.bytes.length == 0 &&
+                               aarch64_sha512su_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    static String8 const invalid_aarch64_sha512su[] = {
+        S8_INITIALIZER("sha512su0 v0.16b, v1.16b\n"),
+        S8_INITIALIZER("sha512su1 v0.1d, v1.1d, v2.1d\n"),
+        S8_INITIALIZER("sha512su0 v0.2d\n"),
+        S8_INITIALIZER("sha512su1 v0.2d, v1.2d\n"),
+        S8_INITIALIZER("sha512su0 x0.2d, v1.2d\n"),
+        S8_INITIALIZER("sha512su1 v0.2d, v1.2d, x2.2d\n"),
+        S8_INITIALIZER("sha512su0 v32.2d, v1.2d\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_sha512su); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_sha512su_case = assembly_encode(
+            arguments->arena, invalid_aarch64_sha512su[invalid_index],
+            (AssemblyEncodeOptions){.target = aarch64_sha3_target});
+        BUSTER_TEST(arguments, invalid_sha512su_case.diagnostic_count == 1 && invalid_sha512su_case.bytes.length == 0 &&
+                                   invalid_sha512su_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
     BusterAarch64SyntaxMnemonicRange csel_range = {0};
     BUSTER_TEST(arguments, buster_aarch64_syntax_mnemonic_lookup(S8("csel"), &csel_range) && csel_range.candidate_count > 0);
     u32 csel_row = UINT32_MAX;
