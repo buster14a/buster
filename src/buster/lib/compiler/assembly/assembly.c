@@ -430,6 +430,7 @@ struct AssemblyInstruction
     u32 aarch64_control_row_index;
     u32 aarch64_direct_simd_row_index;
     u8 aarch64_direct_simd_registers[4];
+    u8 aarch64_direct_simd_arrangement;
     u8 aarch64_scalar_integer_operand_count;
     u8 aarch64_scalar_integer_modifier_count;
     u8 aarch64_scalar_integer_reserved[2];
@@ -1493,6 +1494,7 @@ struct AssemblyInstructionInfo
     u32 aarch64_system_row_index;
     u32 aarch64_direct_simd_row_index;
     TargetCpuFeature aarch64_direct_simd_feature;
+    BusterA64DirectSIMDArrangement aarch64_direct_simd_arrangement;
     AssemblyAmdForm const* amd_form;
 };
 
@@ -2186,21 +2188,24 @@ struct AssemblyAarch64DirectSIMDSpelling
     String8 semantic_id;
     u8 operand_count;
     TargetCpuFeature feature;
+    BusterA64DirectSIMDArrangement arrangement;
 };
 
 BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDSpelling const assembly_aarch64_direct_simd_spellings[] = {
     {S8_INITIALIZER("aesd"), UINT64_C(0x6cacc320d32f7696), S8_INITIALIZER("arm-a64@2026-06:AESD_B_cryptoaes"), 2,
-     TARGET_CPU_FEATURE_AARCH64_AES},
+     TARGET_CPU_FEATURE_AARCH64_AES, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B},
     {S8_INITIALIZER("aese"), UINT64_C(0x64d13665bc040990), S8_INITIALIZER("arm-a64@2026-06:AESE_B_cryptoaes"), 2,
-     TARGET_CPU_FEATURE_AARCH64_AES},
+     TARGET_CPU_FEATURE_AARCH64_AES, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B},
     {S8_INITIALIZER("aesimc"), UINT64_C(0xafd75da1d5d14815), S8_INITIALIZER("arm-a64@2026-06:AESIMC_B_cryptoaes"), 2,
-     TARGET_CPU_FEATURE_AARCH64_AES},
+     TARGET_CPU_FEATURE_AARCH64_AES, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B},
     {S8_INITIALIZER("aesmc"), UINT64_C(0x6a644c32fd7849e2), S8_INITIALIZER("arm-a64@2026-06:AESMC_B_cryptoaes"), 2,
-     TARGET_CPU_FEATURE_AARCH64_AES},
+     TARGET_CPU_FEATURE_AARCH64_AES, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B},
     {S8_INITIALIZER("bcax"), UINT64_C(0xfab88050fa075b6f), S8_INITIALIZER("arm-a64@2026-06:BCAX_VVV16_crypto4"), 4,
-     TARGET_CPU_FEATURE_AARCH64_SHA3},
+     TARGET_CPU_FEATURE_AARCH64_SHA3, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B},
     {S8_INITIALIZER("eor3"), UINT64_C(0x9a2c72cc6e6d8045), S8_INITIALIZER("arm-a64@2026-06:EOR3_VVV16_crypto4"), 4,
-     TARGET_CPU_FEATURE_AARCH64_SHA3},
+     TARGET_CPU_FEATURE_AARCH64_SHA3, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B},
+    {S8_INITIALIZER("rax1"), UINT64_C(0xd81c13f95e34182a), S8_INITIALIZER("arm-a64@2026-06:RAX1_VVV2_cryptosha512_3"), 3,
+     TARGET_CPU_FEATURE_AARCH64_SHA3, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_2D},
 };
 
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_lookup(String8 mnemonic, AssemblyInstructionInfo* result)
@@ -2233,6 +2238,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_lookup(String8 mnemonic, A
             .encoding_kind = ASSEMBLY_ENCODING_AARCH64_DIRECT_SIMD,
             .aarch64_direct_simd_row_index = row.row_index,
             .aarch64_direct_simd_feature = spelling.feature,
+            .aarch64_direct_simd_arrangement = (u8)spelling.arrangement,
         };
         return true;
     }
@@ -6097,10 +6103,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_instruction_parse(AssemblyBuild
     return true;
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_register_parse(String8 text, u32* number)
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_register_parse(String8 text, BusterA64DirectSIMDArrangement arrangement, u32* number)
 {
     text = assembly_trim(text);
-    if (!number || text.length < 6 || assembly_ascii_lower(text.pointer[0]) != 'v')
+    if (!number || text.length < 4 || assembly_ascii_lower(text.pointer[0]) != 'v')
     {
         return false;
     }
@@ -6119,7 +6125,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_register_parse(String8 tex
     {
         parsed_number = parsed_number * 10u + (u32)(text.pointer[index] - '0');
     }
-    if (parsed_number > 31 || !assembly_word_equal(string_slice(text, dot + 1, text.length), S8("16b")))
+    if (parsed_number > 31 ||
+        !assembly_word_equal(string_slice(text, dot + 1, text.length), buster_a64_direct_simd_arrangement_string(arrangement)))
     {
         return false;
     }
@@ -6130,6 +6137,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_register_parse(String8 tex
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_instruction_parse(AssemblyBuilder* builder, String8 mnemonic,
                                                                          String8 operands_text, AssemblyInstruction* instruction,
                                                                          u32 row_index, u8 operand_count, TargetCpuFeature feature,
+                                                                         BusterA64DirectSIMDArrangement arrangement,
                                                                          u32 line, u32 column)
 {
     if (!builder || !instruction)
@@ -6152,14 +6160,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_instruction_parse(Assembly
         }
         tokens[token_count++] = assembly_trim(token);
     }
-    if (token_count != operand_count || (operand_count != 2 && operand_count != 4))
+    if (token_count != operand_count || operand_count < 2 || operand_count > 4)
     {
         return false;
     }
     u32 registers[4] = {0};
     for (u32 index = 0; index < operand_count; index += 1)
     {
-        if (!assembly_aarch64_direct_simd_register_parse(tokens[index], &registers[index]))
+        if (!assembly_aarch64_direct_simd_register_parse(tokens[index], arrangement, &registers[index]))
         {
             return false;
         }
@@ -6171,6 +6179,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_instruction_parse(Assembly
         return false;
     }
     instruction->aarch64_direct_simd_row_index = row_index;
+    instruction->aarch64_direct_simd_arrangement = (u8)arrangement;
     for (u32 index = 0; index < operand_count; index += 1)
     {
         instruction->aarch64_direct_simd_registers[index] = (u8)registers[index];
@@ -6970,6 +6979,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         .amd_form = info.amd_form,
         .fixed_word = info.fixed_word,
         .aarch64_direct_simd_row_index = info.aarch64_direct_simd_row_index,
+        .aarch64_direct_simd_arrangement = (u8)info.aarch64_direct_simd_arrangement,
     };
     if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_SYSTEM_SEMANTICS)
     {
@@ -7002,12 +7012,12 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         u32 diagnostic_count = builder->result.diagnostic_count;
         if (!assembly_aarch64_direct_simd_instruction_parse(
                 builder, mnemonic, operands, &instruction, info.aarch64_direct_simd_row_index, info.operand_count,
-                info.aarch64_direct_simd_feature, line, column))
+                info.aarch64_direct_simd_feature, info.aarch64_direct_simd_arrangement, line, column))
         {
             if (builder->result.diagnostic_count == diagnostic_count)
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
-                                    (u32)operands.length, S8("invalid AArch64 AES instruction operands"));
+                                    (u32)operands.length, S8("invalid AArch64 direct SIMD instruction operands"));
             }
             return;
         }
@@ -11150,7 +11160,8 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
             {
                 direct_simd_instruction.operands[operand_index] = buster_a64_direct_simd_value_vector(
-                    instruction->aarch64_direct_simd_registers[operand_index], BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_16B);
+                    instruction->aarch64_direct_simd_registers[operand_index],
+                    (BusterA64DirectSIMDArrangement)instruction->aarch64_direct_simd_arrangement);
             }
             BusterA64DirectSIMDStatus status = buster_a64_direct_simd_encode(
                 builder->target, &direct_simd_instruction, &word);
@@ -11163,7 +11174,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                                     instruction->line, instruction->column, 1,
                                     status == BUSTER_A64_DIRECT_SIMD_STATUS_TARGET_MISMATCH
                                         ? S8("instruction requires an enabled AArch64 target feature")
-                                        : S8("AArch64 AES instruction could not be encoded"));
+                                        : S8("AArch64 direct SIMD instruction could not be encoded"));
                 return;
             }
             assembly_emit_u32(builder, word);
