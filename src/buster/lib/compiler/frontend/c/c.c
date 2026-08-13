@@ -43,12 +43,12 @@
 
 // Keep the frontend historical declaration order and one-translation-unit
 // linkage while making the large implementation mechanically navigable. These
-// .inc files are fragments, not CMake sources: each starts with a #line back to
+// .c files are fragments, not CMake sources: each starts with a #line back to
 // this file so __FILE__/__LINE__ and diagnostics retain the c.c contract.
-#include "c_source.inc"
-#include "c_parse.inc"
-#include "c_sema.inc"
-#include "c_gen.inc"
+#include "c_source.c"
+#include "c_parse.c"
+#include "c_sema.c"
+#include "c_gen.c"
 #line 48383 "src/buster/lib/compiler/frontend/c/c.c"
 CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target)
 {
