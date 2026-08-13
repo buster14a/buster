@@ -817,6 +817,10 @@ struct X86_64MetadataSourceReachabilityCase
     u32 form_id;
     String8 source;
     bool memory_source;
+    bool immediate_source;
+    s64 immediate_value;
+    u64 immediate_unsigned_value;
+    bool immediate_unsigned;
 };
 
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_mask_is_decorator(u32 form_id, u32 operand_index);
@@ -959,6 +963,17 @@ BUSTER_GLOBAL_LOCAL String8 x86_64_metadata_test_source_register(Arena* arena,
     }
 }
 
+BUSTER_GLOBAL_LOCAL String8 x86_64_metadata_test_source_immediate(Arena* arena,
+                                                                   BusterX86MetadataPhysicalOperand operand)
+{
+    if (operand.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE) return (String8){0};
+    if (operand.has_unsigned_value) return string_format(arena, S8("0x{u64:x,no_prefix}"), operand.unsigned_value);
+    if (!operand.has_value) return (String8){0};
+    if (operand.value >= 0) return string_format(arena, S8("0x{u64:x,no_prefix}"), (u64)operand.value);
+    if (operand.value == INT64_MIN) return string_format(arena, S8("-0x8000000000000000"));
+    return string_format(arena, S8("-0x{u64:x,no_prefix}"), (u64)-operand.value);
+}
+
 typedef struct X86_64MetadataSourceQuery X86_64MetadataSourceQuery;
 struct X86_64MetadataSourceQuery
 {
@@ -1066,7 +1081,8 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_memory_query(Arena* arena, 
         if (!buster_x86_metadata_operand(form_id, metadata_index, &metadata)) return false;
         if (!metadata.visible) continue;
         if (output_count >= canonical.operand_count || output_count >= BUSTER_ARRAY_LENGTH(result->operands)) return false;
-        if (metadata.kind != BUSTER_X86_METADATA_OPERAND_REGISTER && metadata.kind != BUSTER_X86_METADATA_OPERAND_MEMORY)
+        if (metadata.kind != BUSTER_X86_METADATA_OPERAND_REGISTER && metadata.kind != BUSTER_X86_METADATA_OPERAND_MEMORY &&
+            metadata.kind != BUSTER_X86_METADATA_OPERAND_IMMEDIATE)
             return false;
         result->metadata[output_count] = metadata;
         result->operands[output_count] = canonical.operands[output_count];
@@ -1165,7 +1181,9 @@ BUSTER_GLOBAL_LOCAL String8 x86_64_metadata_test_source_memory_operands(Arena* a
         BusterX86MetadataPhysicalOperand operand = query.operands[operand_index++];
         String8 spelling = operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY
                                ? x86_64_metadata_test_source_memory(arena, operand, query.attributes)
-                               : x86_64_metadata_test_source_register_atom(arena, operand.reg, metadata.atom);
+                               : operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE
+                                     ? x86_64_metadata_test_source_immediate(arena, operand)
+                                     : x86_64_metadata_test_source_register_atom(arena, operand.reg, metadata.atom);
         if (!spelling.length) return (String8){0};
         if (!wrote_operand) source = string_format(arena, S8("{S8} {S8}"), source, spelling);
         else source = string_format(arena, S8("{S8}, {S8}"), source, spelling);
@@ -1326,6 +1344,32 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_query(Arena* arena, u32 for
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_apply_immediate(
+    X86_64MetadataSourceReachabilityCase test_case, BusterX86MetadataPhysicalOperand* operands, u32 operand_count)
+{
+    if (!test_case.immediate_source || !operands) return true;
+    bool found = false;
+    for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
+    {
+        BusterX86MetadataPhysicalOperand* operand = operands + operand_index;
+        if (operand->kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE) continue;
+        if (test_case.immediate_unsigned)
+        {
+            operand->has_value = false;
+            operand->has_unsigned_value = true;
+            operand->unsigned_value = test_case.immediate_unsigned_value;
+        }
+        else
+        {
+            operand->has_unsigned_value = false;
+            operand->has_value = true;
+            operand->value = test_case.immediate_value;
+        }
+        found = true;
+    }
+    return found;
+}
+
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_memory_skeleton(UnitTestArguments* arguments)
 {
     Target target = {
@@ -1344,6 +1388,42 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_memory_skeleton(UnitTestArg
         success &= form_success;
         arguments->show(arguments, S8("X86_SOURCE_MEMORY_SKELETON form={u32} success={u32} diag={u32} source={S8}\n"), form_id,
                         form_success, result.diagnostic_kind, result.source);
+    }
+    return success;
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_immediate_skeleton(UnitTestArguments* arguments)
+{
+    Target target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_INTEL_DIAMOND_RAPIDS,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    static X86_64MetadataSourceReachabilityCase const cases[] = {
+        // ADD exercises a classic signed imm8 source spelling.
+        {.form_id = 9247, .immediate_source = true, .immediate_value = 0x7f},
+        // The lower signed imm8 boundary must retain its negative spelling.
+        {.form_id = 9247, .immediate_source = true, .immediate_value = -128},
+        // MOV exercises a full-width immediate and its 64-bit hexadecimal spelling.
+        {.form_id = 10018, .immediate_source = true, .immediate_unsigned = true,
+         .immediate_unsigned_value = UINT64_C(0x1122334455667788)},
+        // APX NDD exercises a memory plus signed imm8 source form.
+        {.form_id = 552, .memory_source = true, .immediate_source = true, .immediate_value = 5},
+        // APX also exercises the lower signed imm8 boundary with memory.
+        {.form_id = 552, .memory_source = true, .immediate_source = true, .immediate_value = -128},
+        // EVEX exercises a control immediate predicate.
+        {.form_id = 7740, .immediate_source = true, .immediate_unsigned = true, .immediate_unsigned_value = 7},
+    };
+    bool success = true;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        X86_64MetadataSourceReachabilityResult result =
+            x86_64_metadata_test_source_reachability_case(arguments->arena, target, cases[index]);
+        bool case_success = result.classification == X86_64_METADATA_SOURCE_REACHABILITY_SUCCESS;
+        success &= case_success;
+        arguments->show(arguments, S8("X86_SOURCE_IMMEDIATE_SKELETON form={u32} success={u32} diag={u32} source={S8} direct_bytes={u32}:{u32} source_bytes={u32}:{u32} match={u32}\n"),
+                        result.form_id, case_success, result.diagnostic_kind, result.source, result.direct_byte_count,
+                        result.direct_first_byte, result.source_byte_count, result.source_first_byte, result.bytes_match);
     }
     return success;
 }
@@ -1431,10 +1511,12 @@ BUSTER_GLOBAL_LOCAL String8 x86_64_metadata_test_source_register_only(Arena* are
             }
             visible_index += 1;
         }
-        String8 register_name = x86_64_metadata_test_source_register_atom(arena, query.operands[index].reg, metadata.atom);
-        if (!register_name.length) return (String8){0};
-        if (!wrote_operand) source = string_format(arena, S8("{S8} {S8}"), source, register_name);
-        else source = string_format(arena, S8("{S8}, {S8}"), source, register_name);
+        String8 spelling = query.operands[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE
+                               ? x86_64_metadata_test_source_immediate(arena, query.operands[index])
+                               : x86_64_metadata_test_source_register_atom(arena, query.operands[index].reg, metadata.atom);
+        if (!spelling.length) return (String8){0};
+        if (!wrote_operand) source = string_format(arena, S8("{S8} {S8}"), source, spelling);
+        else source = string_format(arena, S8("{S8}, {S8}"), source, spelling);
         if (!wrote_operand && query.attributes.has_mask_register)
         {
             String8 mask = string_format(arena, S8("k{u8}"), query.attributes.mask_register);
@@ -1466,6 +1548,13 @@ BUSTER_GLOBAL_LOCAL X86_64MetadataSourceReachabilityResult x86_64_metadata_test_
                                                                        mnemonic_buffer);
     result.physical_operand_count = physical.operand_count;
     if (!result.canonical_query)
+    {
+        result.classification = X86_64_METADATA_SOURCE_REACHABILITY_SYNTAX_CONSTRUCTION;
+        return result;
+    }
+
+    if (test_case.immediate_source && !x86_64_metadata_test_source_apply_immediate(test_case, operands,
+                                                                                    physical.operand_count))
     {
         result.classification = X86_64_METADATA_SOURCE_REACHABILITY_SYNTAX_CONSTRUCTION;
         return result;
@@ -1649,6 +1738,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 
     BUSTER_TEST(arguments, x86_64_metadata_test_source_reachability_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_source_memory_skeleton(arguments));
+    BUSTER_TEST(arguments, x86_64_metadata_test_source_immediate_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_register_only_census(arguments));
 
     {
