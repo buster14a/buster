@@ -5303,6 +5303,81 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         AssemblyEncodeResult metadata_apx_scc_att = assembly_encode(
             arguments->arena, S8("ccmpb $2, %r14b, %dl\n"),
             (AssemblyEncodeOptions){.target = apx_scc_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+
+        // Generated APX disassembly aliases expose the otherwise-hidden NDD
+        // forms without changing ordinary IMUL/SETcc selection.  `{nf}` is
+        // still explicit, so IMULZU covers both ZU and ZU+NF rows.
+        u8 expected_imulzu[] = {0x62, 0xf4, 0xfc, 0x18, 0x6b, 0xc0, 0x00};
+        u8 expected_imulzu_nf[] = {0x62, 0xf4, 0xfc, 0x1c, 0x6b, 0xc0, 0x00};
+        AssemblyEncodeResult metadata_imulzu = assembly_encode(
+            arguments->arena, S8("imulzu rax, rax, 0\n"),
+            (AssemblyEncodeOptions){.target = apx_scc_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_imulzu_nf = assembly_encode(
+            arguments->arena, S8("{nf} imulzu rax, rax, 0\n"),
+            (AssemblyEncodeOptions){.target = apx_scc_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_imulzu_att = assembly_encode(
+            arguments->arena, S8("imulzu $0, %rax, %rax\n"),
+            (AssemblyEncodeOptions){.target = apx_scc_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_imulzu.diagnostic_count == 0 && metadata_imulzu.bytes.length == sizeof(expected_imulzu) &&
+                                   memcmp(metadata_imulzu.bytes.pointer, expected_imulzu, sizeof(expected_imulzu)) == 0);
+        BUSTER_TEST(arguments, metadata_imulzu_nf.diagnostic_count == 0 && metadata_imulzu_nf.bytes.length == sizeof(expected_imulzu_nf) &&
+                                   memcmp(metadata_imulzu_nf.bytes.pointer, expected_imulzu_nf, sizeof(expected_imulzu_nf)) == 0);
+        BUSTER_TEST(arguments, metadata_imulzu_att.diagnostic_count == 0 && metadata_imulzu_att.bytes.length == sizeof(expected_imulzu) &&
+                                   memcmp(metadata_imulzu_att.bytes.pointer, expected_imulzu, sizeof(expected_imulzu)) == 0);
+
+        u8 expected_setzub[] = {0x62, 0xf4, 0x7c, 0x18, 0x42, 0xc0};
+        u8 expected_setzub_mem[] = {0x62, 0xf4, 0x7c, 0x18, 0x42, 0x00};
+        AssemblyEncodeResult metadata_setzub = assembly_encode(
+            arguments->arena, S8("setzub al\n"),
+            (AssemblyEncodeOptions){.target = apx_scc_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_setzub_mem = assembly_encode(
+            arguments->arena, S8("setzub byte ptr [rax]\n"),
+            (AssemblyEncodeOptions){.target = apx_scc_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_setzub_att = assembly_encode(
+            arguments->arena, S8("setzub %al\n"),
+            (AssemblyEncodeOptions){.target = apx_scc_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        AssemblyEncodeResult metadata_setzub_egpr = assembly_encode(
+            arguments->arena, S8("setzub r16b\n"),
+            (AssemblyEncodeOptions){.target = apx_scc_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_setzub.diagnostic_count == 0 && metadata_setzub.bytes.length == sizeof(expected_setzub) &&
+                                   memcmp(metadata_setzub.bytes.pointer, expected_setzub, sizeof(expected_setzub)) == 0);
+        BUSTER_TEST(arguments, metadata_setzub_mem.diagnostic_count == 0 &&
+                                   metadata_setzub_mem.bytes.length == sizeof(expected_setzub_mem) &&
+                                   memcmp(metadata_setzub_mem.bytes.pointer, expected_setzub_mem, sizeof(expected_setzub_mem)) == 0);
+        BUSTER_TEST(arguments, metadata_setzub_att.diagnostic_count == 0 && metadata_setzub_att.bytes.length == sizeof(expected_setzub) &&
+                                   memcmp(metadata_setzub_att.bytes.pointer, expected_setzub, sizeof(expected_setzub)) == 0 &&
+                                   metadata_setzub_egpr.diagnostic_count == 0 && metadata_setzub_egpr.bytes.length == sizeof(expected_setzub) &&
+                                   memcmp(metadata_setzub_egpr.bytes.pointer, (u8[]){0x62, 0xfc, 0x7c, 0x18, 0x42, 0xc0},
+                                          sizeof(expected_setzub)) == 0);
+
+        AssemblyEncodeResult metadata_setb_legacy = assembly_encode(
+            arguments->arena, S8("setb al\n"),
+            (AssemblyEncodeOptions){.target = apx_scc_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        u8 expected_setb_legacy[] = {0x0f, 0x92, 0xc0};
+        BUSTER_TEST(arguments, metadata_setb_legacy.diagnostic_count == 0 && metadata_setb_legacy.bytes.length == sizeof(expected_setb_legacy) &&
+                                   memcmp(metadata_setb_legacy.bytes.pointer, expected_setb_legacy, sizeof(expected_setb_legacy)) == 0);
+
+        AssemblyEncodeResult metadata_setzub_missing = assembly_encode(
+            arguments->arena, S8("setzub al\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_imulzu_missing = assembly_encode(
+            arguments->arena, S8("imulzu rax, rcx, 0\n"),
+            (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_setzub_missing.diagnostic_count == 1);
+        BUSTER_TEST(arguments, metadata_setzub_missing.diagnostic_count == 1 &&
+                                   metadata_setzub_missing.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+        BUSTER_TEST(arguments, metadata_imulzu_missing.diagnostic_count == 1);
+        BUSTER_TEST(arguments, metadata_imulzu_missing.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+        AssemblyEncodeResult metadata_imulzu_wrong_count = assembly_encode(
+            arguments->arena, S8("imulzu rax, rax\n"),
+            (AssemblyEncodeOptions){.target = apx_scc_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_setzub_nf = assembly_encode(
+            arguments->arena, S8("{nf} setzub al\n"),
+            (AssemblyEncodeOptions){.target = apx_scc_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_imulzu_wrong_count.diagnostic_count == 1 &&
+                                   metadata_imulzu_wrong_count.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   metadata_setzub_nf.diagnostic_count == 1 &&
+                                   metadata_setzub_nf.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
         u8 expected_apx_scc_dfv15[] = {0x62, 0x74, 0x7c, 0x02, 0x38, 0xf2};
         AssemblyEncodeResult metadata_apx_scc_dfv15_intel = assembly_encode(
             arguments->arena, S8("ccmpb 15, dl, r14b\n"),

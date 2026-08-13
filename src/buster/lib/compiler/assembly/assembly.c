@@ -7767,6 +7767,41 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_metadata_mnemonic(String8 mnemonic)
     return mnemonic;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_apx_disasm_alias(
+    String8 mnemonic, BusterX86MetadataPhysicalAttributes* attributes)
+{
+    if (!mnemonic.length || !attributes)
+    {
+        return false;
+    }
+    BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
+    bool found = false;
+    bool ambiguous = false;
+    for (u32 position = 0; position < candidates.count; position += 1)
+    {
+        u32 form_id = 0;
+        BusterX86MetadataForm form = {0};
+        if (!buster_x86_metadata_candidate_at(candidates, position, &form_id) || !buster_x86_metadata_form(form_id, &form))
+        {
+            continue;
+        }
+        String8 disasm = buster_x86_metadata_string_span(form.disasm);
+        if (disasm.length == mnemonic.length && assembly_word_equal(disasm, mnemonic))
+        {
+            found = true;
+            ambiguous |= !(form.apx_flags & BUSTER_X86_METADATA_APX_NDD);
+        }
+    }
+    if (found && !ambiguous)
+    {
+        // The generated disassembly aliases (IMULZU and SET*ZU) select the
+        // APX NDD family.  An explicit {nf} remains an independent source
+        // attribute, so IMULZU can select either its NF=0 or NF=1 row.
+        attributes->apx_flags |= BUSTER_X86_METADATA_APX_NDD;
+    }
+    return found && !ambiguous;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_mnemonic_requires_dfv(String8 mnemonic)
 {
     BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
@@ -8457,6 +8492,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     {
         attributes.apx_flags |= BUSTER_X86_METADATA_APX_NF;
     }
+    assembly_x86_metadata_apx_disasm_alias(metadata_source_mnemonic, &attributes);
     if (leading_sae)
     {
         attributes.sae = true;
