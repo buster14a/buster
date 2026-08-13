@@ -2596,6 +2596,62 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         (AssemblyEncodeOptions){.target = aarch64_m1_target});
     BUSTER_TEST(arguments, aarch64_direct_gpr_bad.diagnostic_count == 3 && aarch64_direct_gpr_bad.bytes.length == 0);
 
+    AssemblyEncodeResult aarch64_aes = assembly_encode(
+        arguments->arena,
+        S8("aesd v0.16b, v1.16b\n"
+           "aese v0.16b, v1.16b\n"
+           "aesimc v0.16b, v1.16b\n"
+           "aesmc v0.16b, v1.16b\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_explicit_target});
+    static u8 const expected_aarch64_aes[] = {
+        0x20, 0x58, 0x28, 0x4e,
+        0x20, 0x48, 0x28, 0x4e,
+        0x20, 0x78, 0x28, 0x4e,
+        0x20, 0x68, 0x28, 0x4e,
+    };
+    BUSTER_TEST(arguments, aarch64_aes.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_aes.bytes, expected_aarch64_aes,
+                                                         sizeof(expected_aarch64_aes)));
+    AssemblyEncodeResult aarch64_aes_case_insensitive = assembly_encode(
+        arguments->arena, S8("AESD V0.16B, V1.16B\n"), (AssemblyEncodeOptions){.target = aarch64_m1_explicit_target});
+    BUSTER_TEST(arguments, aarch64_aes_case_insensitive.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_aes_case_insensitive.bytes, expected_aarch64_aes,
+                                                         4));
+    AssemblyEncodeResult aarch64_aes_boundary = assembly_encode(
+        arguments->arena,
+        S8("aesd v31.16b, v31.16b\n"
+           "aese v31.16b, v31.16b\n"
+           "aesimc v31.16b, v31.16b\n"
+           "aesmc v31.16b, v31.16b\n"),
+        (AssemblyEncodeOptions){.target = aarch64_m1_explicit_target});
+    static u8 const expected_aarch64_aes_boundary[] = {
+        0xff, 0x5b, 0x28, 0x4e,
+        0xff, 0x4b, 0x28, 0x4e,
+        0xff, 0x7b, 0x28, 0x4e,
+        0xff, 0x6b, 0x28, 0x4e,
+    };
+    BUSTER_TEST(arguments, aarch64_aes_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_aes_boundary.bytes, expected_aarch64_aes_boundary,
+                                                         sizeof(expected_aarch64_aes_boundary)));
+    AssemblyEncodeResult aarch64_aes_without_feature = assembly_encode(
+        arguments->arena, S8("aesd v0.16b, v1.16b\n"), (AssemblyEncodeOptions){.target = aarch64_target});
+    BUSTER_TEST(arguments, aarch64_aes_without_feature.diagnostic_count == 1 &&
+                               aarch64_aes_without_feature.bytes.length == 0 &&
+                               aarch64_aes_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    static String8 const invalid_aarch64_aes[] = {
+        S8_INITIALIZER("aesd v0.8b, v1.8b\n"),
+        S8_INITIALIZER("aese v0.16b\n"),
+        S8_INITIALIZER("aesimc x0.16b, v1.16b\n"),
+        S8_INITIALIZER("aesmc v0.16b, v32.16b\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_aes); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_aes_case = assembly_encode(
+            arguments->arena, invalid_aarch64_aes[invalid_index], (AssemblyEncodeOptions){.target = aarch64_m1_explicit_target});
+        BUSTER_TEST(arguments, invalid_aes_case.diagnostic_count == 1 && invalid_aes_case.bytes.length == 0 &&
+                                   invalid_aes_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
     BusterAarch64SyntaxMnemonicRange csel_range = {0};
     BUSTER_TEST(arguments, buster_aarch64_syntax_mnemonic_lookup(S8("csel"), &csel_range) && csel_range.candidate_count > 0);
     u32 csel_row = UINT32_MAX;
