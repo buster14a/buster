@@ -966,6 +966,15 @@ BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_key(Bust
                                                                               BusterX86MetadataFormKey key);
 BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_exact(BusterX86MetadataEmitQuery query,
                                                                           BusterX86MetadataFormKey key);
+// Build the deterministic physical query used by coverage consumers.  The
+// returned operands, feature slot, and mnemonic buffer are caller-owned and
+// are only borrowed by the query; they must remain live until the caller has
+// finished selecting/emitting the form.  This is deliberately a production
+// seam: source-completion audits and the ordinary metadata encoder must use
+// the same canonical physical shape rather than maintaining parallel probes.
+BUSTER_F_DECL bool buster_x86_metadata_canonical_query(u32 form_id, BusterX86MetadataPhysicalQuery* query,
+                                                        BusterX86MetadataPhysicalOperand operands[16],
+                                                        String8 features[1], char8 mnemonic_buffer[128]);
 // The architectural instruction-length guard is shared by final emission and
 // tests that exercise the boundary without requiring an impossible hardware
 // encoding to be synthesized.

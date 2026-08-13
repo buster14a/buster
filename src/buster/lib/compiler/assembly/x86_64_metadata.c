@@ -6115,14 +6115,20 @@ BusterX86MetadataCoverageAuditResult buster_x86_metadata_coverage_audit(BusterX8
     return result;
 }
 
+bool buster_x86_metadata_canonical_query(u32 form_id, BusterX86MetadataPhysicalQuery* query,
+                                         BusterX86MetadataPhysicalOperand operands[16], String8 features[1],
+                                         char8 mnemonic_buffer[128])
+{
+    BusterX86MetadataForm form = {0};
+    return query && operands && features && mnemonic_buffer && buster_x86_metadata_form(form_id, &form) &&
+           buster_x86_metadata_coverage_canonical_query(form, query, operands, features, mnemonic_buffer);
+}
 #if BUSTER_INCLUDE_TESTS
 bool buster_x86_metadata_test_canonical_query(u32 form_id, BusterX86MetadataPhysicalQuery* query,
                                               BusterX86MetadataPhysicalOperand operands[16], String8 features[1],
                                               char8 mnemonic_buffer[128])
 {
-    BusterX86MetadataForm form = {0};
-    return query && operands && features && mnemonic_buffer && buster_x86_metadata_form(form_id, &form) &&
-           buster_x86_metadata_coverage_canonical_query(form, query, operands, features, mnemonic_buffer);
+    return buster_x86_metadata_canonical_query(form_id, query, operands, features, mnemonic_buffer);
 }
 #endif
 
