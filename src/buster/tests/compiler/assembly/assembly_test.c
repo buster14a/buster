@@ -220,6 +220,46 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_widening
     {S8_INITIALIZER("uaddlp v31.2d, v30.4s\n"), {0xdf, 0x2b, 0xa0, 0x6e}},
 };
 
+/* Exhaustive legal across-vector integer reductions.  Bytes are independent
+ * llvm-mc 22.1.8 literals; 2S/2D encodings are reserved and tested below. */
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_reduction_cases[] = {
+    {S8_INITIALIZER("addv b0, v1.8b\n"), {0x20, 0xb8, 0x31, 0x0e}},
+    {S8_INITIALIZER("addv b0, v1.16b\n"), {0x20, 0xb8, 0x31, 0x4e}},
+    {S8_INITIALIZER("addv h0, v1.4h\n"), {0x20, 0xb8, 0x71, 0x0e}},
+    {S8_INITIALIZER("addv h0, v1.8h\n"), {0x20, 0xb8, 0x71, 0x4e}},
+    {S8_INITIALIZER("addv s0, v1.4s\n"), {0x20, 0xb8, 0xb1, 0x4e}},
+    {S8_INITIALIZER("saddlv h0, v1.8b\n"), {0x20, 0x38, 0x30, 0x0e}},
+    {S8_INITIALIZER("saddlv h0, v1.16b\n"), {0x20, 0x38, 0x30, 0x4e}},
+    {S8_INITIALIZER("saddlv s0, v1.4h\n"), {0x20, 0x38, 0x70, 0x0e}},
+    {S8_INITIALIZER("saddlv s0, v1.8h\n"), {0x20, 0x38, 0x70, 0x4e}},
+    {S8_INITIALIZER("saddlv d0, v1.4s\n"), {0x20, 0x38, 0xb0, 0x4e}},
+    {S8_INITIALIZER("uaddlv h0, v1.8b\n"), {0x20, 0x38, 0x30, 0x2e}},
+    {S8_INITIALIZER("uaddlv h0, v1.16b\n"), {0x20, 0x38, 0x30, 0x6e}},
+    {S8_INITIALIZER("uaddlv s0, v1.4h\n"), {0x20, 0x38, 0x70, 0x2e}},
+    {S8_INITIALIZER("uaddlv s0, v1.8h\n"), {0x20, 0x38, 0x70, 0x6e}},
+    {S8_INITIALIZER("uaddlv d0, v1.4s\n"), {0x20, 0x38, 0xb0, 0x6e}},
+    {S8_INITIALIZER("smaxv b0, v1.8b\n"), {0x20, 0xa8, 0x30, 0x0e}},
+    {S8_INITIALIZER("smaxv b0, v1.16b\n"), {0x20, 0xa8, 0x30, 0x4e}},
+    {S8_INITIALIZER("smaxv h0, v1.4h\n"), {0x20, 0xa8, 0x70, 0x0e}},
+    {S8_INITIALIZER("smaxv h0, v1.8h\n"), {0x20, 0xa8, 0x70, 0x4e}},
+    {S8_INITIALIZER("smaxv s0, v1.4s\n"), {0x20, 0xa8, 0xb0, 0x4e}},
+    {S8_INITIALIZER("sminv b0, v1.8b\n"), {0x20, 0xa8, 0x31, 0x0e}},
+    {S8_INITIALIZER("sminv b0, v1.16b\n"), {0x20, 0xa8, 0x31, 0x4e}},
+    {S8_INITIALIZER("sminv h0, v1.4h\n"), {0x20, 0xa8, 0x71, 0x0e}},
+    {S8_INITIALIZER("sminv h0, v1.8h\n"), {0x20, 0xa8, 0x71, 0x4e}},
+    {S8_INITIALIZER("sminv s0, v1.4s\n"), {0x20, 0xa8, 0xb1, 0x4e}},
+    {S8_INITIALIZER("umaxv b0, v1.8b\n"), {0x20, 0xa8, 0x30, 0x2e}},
+    {S8_INITIALIZER("umaxv b0, v1.16b\n"), {0x20, 0xa8, 0x30, 0x6e}},
+    {S8_INITIALIZER("umaxv h0, v1.4h\n"), {0x20, 0xa8, 0x70, 0x2e}},
+    {S8_INITIALIZER("umaxv h0, v1.8h\n"), {0x20, 0xa8, 0x70, 0x6e}},
+    {S8_INITIALIZER("umaxv s0, v1.4s\n"), {0x20, 0xa8, 0xb0, 0x6e}},
+    {S8_INITIALIZER("uminv b0, v1.8b\n"), {0x20, 0xa8, 0x31, 0x2e}},
+    {S8_INITIALIZER("uminv b0, v1.16b\n"), {0x20, 0xa8, 0x31, 0x6e}},
+    {S8_INITIALIZER("uminv h0, v1.4h\n"), {0x20, 0xa8, 0x71, 0x2e}},
+    {S8_INITIALIZER("uminv h0, v1.8h\n"), {0x20, 0xa8, 0x71, 0x6e}},
+    {S8_INITIALIZER("uminv s0, v1.4s\n"), {0x20, 0xa8, 0xb1, 0x6e}},
+};
+
 /* Exhaustive legal arrangements for the same-register multiply family.
  * Bytes are independent llvm-mc 22.1.8 literals. */
 static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_multiply_cases[] = {
@@ -981,12 +1021,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 226);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 226);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 164);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 164);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 233);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 233);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 157);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 171);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 62);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 99);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 92);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 65);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
@@ -4019,6 +4059,49 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
             arguments->arena, widening_case.source, (AssemblyEncodeOptions){.target = aarch64_no_advsimd_neon});
         BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
                                    no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_reduction_cases) == 35);
+    for (u32 reduction_index = 0; reduction_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_reduction_cases); reduction_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase reduction_case = assembly_a64_direct_simd_reduction_cases[reduction_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, reduction_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, reduction_case.bytes, 4));
+        AssemblyEncodeResult no_neon = assembly_encode(
+            arguments->arena, reduction_case.source, (AssemblyEncodeOptions){.target = aarch64_no_advsimd_neon});
+        BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
+                                   no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    AssemblyEncodeResult reduction_upper = assembly_encode(
+        arguments->arena,
+        S8("ADDV B31, V30.16B\nSADDLV D31, V30.4S\nUADDLV D31, V30.4S\n"
+           "SMAXV S31, V30.4S\nSMINV S31, V30.4S\nUMAXV S31, V30.4S\nUMINV S31, V30.4S\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    BUSTER_TEST(arguments, reduction_upper.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(reduction_upper.bytes,
+                                                         (u8 const[]){0xdf, 0xbb, 0x31, 0x4e,
+                                                                      0xdf, 0x3b, 0xb0, 0x4e,
+                                                                      0xdf, 0x3b, 0xb0, 0x6e,
+                                                                      0xdf, 0xab, 0xb0, 0x4e,
+                                                                      0xdf, 0xab, 0xb1, 0x4e,
+                                                                      0xdf, 0xab, 0xb0, 0x6e,
+                                                                      0xdf, 0xab, 0xb1, 0x6e},
+                                                         28));
+    static String8 const invalid_reduction_cases[] = {
+        S8_INITIALIZER("addv s0, v1.2s\n"), S8_INITIALIZER("addv d0, v1.2d\n"),
+        S8_INITIALIZER("saddlv d0, v1.2s\n"), S8_INITIALIZER("saddlv q0, v1.8b\n"),
+        S8_INITIALIZER("uaddlv d0, v1.2s\n"), S8_INITIALIZER("smaxv s0, v1.2s\n"),
+        S8_INITIALIZER("sminv s0, v1.2s\n"), S8_INITIALIZER("umaxv s0, v1.2s\n"),
+        S8_INITIALIZER("uminv s0, v1.2s\n"), S8_INITIALIZER("addv b0, v1.8h\n"),
+        S8_INITIALIZER("addv b0\n"), S8_INITIALIZER("addv b32, v1.8b\n"),
+        S8_INITIALIZER("addv b0, x1.8b\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_reduction_cases); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_reduction = assembly_encode(
+            arguments->arena, invalid_reduction_cases[invalid_index], (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, invalid_reduction.diagnostic_count == 1 && invalid_reduction.bytes.length == 0 &&
+                                   invalid_reduction.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_multiply_cases) == 32);
     for (u32 multiply_index = 0; multiply_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_multiply_cases); multiply_index += 1)
