@@ -162,6 +162,106 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_completion_hidden_bsr0(BusterX86MetadataForm
     return found;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_completion_operand_schema_equal(BusterX86MetadataForm first_form,
+                                                                      BusterX86MetadataForm second_form)
+{
+    u32 first_index = 0;
+    BusterX86MetadataOperand first = {0};
+    BusterX86MetadataOperand second = {0};
+    if (first_form.operand_count != second_form.operand_count) return false;
+    for (; first_index < first_form.operand_count; first_index += 1)
+    {
+        if (!buster_x86_metadata_operand(first_form.id, first_index, &first) ||
+            !buster_x86_metadata_operand(second_form.id, first_index, &second))
+            return false;
+        if (first.kind != second.kind || first.visible != second.visible || first.access != second.access ||
+            first.field_source != second.field_source || first.slot != second.slot ||
+            first.physical_class != second.physical_class)
+            return false;
+        if (first.kind != BUSTER_X86_METADATA_OPERAND_IMMEDIATE &&
+            (first.physical_width_flags != second.physical_width_flags ||
+             !buster_x86_completion_string_equal(buster_x86_metadata_string_span(first.atom),
+                                                 buster_x86_metadata_string_span(second.atom)) ||
+             !buster_x86_completion_string_equal(buster_x86_metadata_string_span(first.width),
+                                                 buster_x86_metadata_string_span(second.width))))
+            return false;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_completion_has_compact_immediate_sibling(BusterX86MetadataForm form)
+{
+    BusterX86MetadataCandidateRange range = {0};
+    BusterX86MetadataForm candidate = {0};
+    u32 candidate_id = 0;
+    u32 position = 0;
+    if (!form.immediate_signed || form.immediate_width <= 1) return false;
+    range = buster_x86_metadata_lookup_iclass(buster_x86_metadata_string_span(form.iclass));
+    for (; position < range.count; position += 1)
+    {
+        if (!buster_x86_metadata_candidate_at(range, position, &candidate_id) || candidate_id == form.id ||
+            !buster_x86_metadata_form(candidate_id, &candidate))
+            continue;
+        if (candidate.coverage_class != BUSTER_X86_METADATA_COVERAGE_NORMALIZED || candidate.immediate_width != 1 ||
+            !candidate.immediate_signed || candidate.prefix_kind != form.prefix_kind || candidate.map != form.map ||
+            candidate.mandatory_prefix != form.mandatory_prefix || candidate.field_flags != form.field_flags ||
+            candidate.decorator_flags != form.decorator_flags || candidate.apx_flags != form.apx_flags ||
+            candidate.amx_flags != form.amx_flags || candidate.mode_flags != form.mode_flags ||
+            candidate.displacement_width != form.displacement_width || candidate.displacement_scale != form.displacement_scale ||
+            candidate.relocation_base != form.relocation_base || !buster_x86_completion_operand_schema_equal(form, candidate))
+            continue;
+        return true;
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL void buster_x86_completion_normalize_query(BusterX86MetadataForm form,
+                                                                BusterX86MetadataPhysicalQuery query,
+                                                                BusterX86MetadataPhysicalOperand* operands)
+{
+    u32 metadata_index = 0;
+    u32 physical_index = 0;
+    u32 gpr_role_index = 0;
+    BusterX86MetadataOperand metadata = {0};
+    String8 atom = {0};
+    bool compact_immediate_sibling = buster_x86_completion_has_compact_immediate_sibling(form);
+    bool no_scale_displacement = buster_x86_completion_string_contains(buster_x86_metadata_string_span(form.attributes),
+                                                                         S8("DISP8_NO_SCALE"));
+    for (; metadata_index < form.operand_count && physical_index < query.operand_count; metadata_index += 1)
+    {
+        if (!buster_x86_metadata_operand(form.id, metadata_index, &metadata)) return;
+        if (!metadata.visible) continue;
+        if ((form.apx_flags & BUSTER_X86_METADATA_APX_NDD) &&
+            operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+            operands[physical_index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR)
+        {
+            atom = buster_x86_metadata_string_span(metadata.atom);
+            if (metadata.field_source != BUSTER_X86_METADATA_FIELD_SOURCE_FIXED)
+            {
+                if (buster_x86_completion_string_contains(atom, S8("_N"))) gpr_role_index = 16;
+                else if (buster_x86_completion_string_contains(atom, S8("_R"))) gpr_role_index = 17;
+                else if (buster_x86_completion_string_contains(atom, S8("_B"))) gpr_role_index = 18;
+                else gpr_role_index = physical_index;
+                operands[physical_index].reg.index = (u16)gpr_role_index;
+            }
+        }
+        else if (operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && no_scale_displacement)
+        {
+            operands[physical_index].memory.has_displacement = true;
+            operands[physical_index].memory.displacement = 1;
+        }
+        else if (operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE &&
+                 compact_immediate_sibling)
+        {
+            operands[physical_index].value = 0x100;
+            operands[physical_index].has_value = true;
+            operands[physical_index].has_unsigned_value = false;
+            operands[physical_index].has_symbol = false;
+        }
+        physical_index += 1;
+    }
+}
+
 BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_memory_intel(Arena* arena,
                                                                 BusterX86MetadataPhysicalOperand operand,
                                                                 BusterX86MetadataPhysicalAttributes attributes)
@@ -601,6 +701,7 @@ BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86Comple
     char8 mnemonic_buffer[128] = {0};
     BusterX86MetadataPhysicalQuery canonical = {0};
     BusterX86MetadataPhysicalOperand direct_operands[16] = {0};
+    BusterX86MetadataPhysicalOperand original_operands[16] = {0};
     u32 index = 0;
     BusterX86MetadataPhysicalOperand* operand = 0;
     BusterX86MetadataPhysicalQuery direct_query = {0};
@@ -667,6 +768,8 @@ BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86Comple
                         operand->addend = 0;
                     }
                 }
+                memcpy(original_operands, direct_operands, sizeof(original_operands));
+                buster_x86_completion_normalize_query(form, canonical, direct_operands);
                 direct_query = canonical;
                 direct_query.operands = direct_operands;
                 memset(direct_bytes, 0, sizeof(direct_bytes));
@@ -674,6 +777,16 @@ BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86Comple
                 emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
                     .physical = direct_query, .form_id = form_id, .output = direct_bytes, .output_capacity = sizeof(direct_bytes),
                     .relocations = direct_relocations, .relocation_capacity = BUSTER_ARRAY_LENGTH(direct_relocations)});
+                if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                    memcmp(direct_operands, original_operands, sizeof(direct_operands)) != 0)
+                {
+                    memcpy(direct_operands, original_operands, sizeof(direct_operands));
+                    memset(direct_bytes, 0, sizeof(direct_bytes));
+                    memset(direct_relocations, 0, sizeof(direct_relocations));
+                    emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+                        .physical = direct_query, .form_id = form_id, .output = direct_bytes, .output_capacity = sizeof(direct_bytes),
+                        .relocations = direct_relocations, .relocation_capacity = BUSTER_ARRAY_LENGTH(direct_relocations)});
+                }
                 record.canonical_query = true;
                 record.canonical_operand_count = (u16)canonical.operand_count;
                 record.metadata_status = (u16)emitted.status;
@@ -794,3 +907,43 @@ BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86Comple
     result.diagnostics_complete = !query.diagnostics || result.diagnostic_dropped_count == 0;
     return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool buster_x86_completion_census_test_query(u32 form_id, BusterX86MetadataPhysicalQuery* query,
+                                              BusterX86MetadataPhysicalOperand operands[16], String8 features[1],
+                                              char8 mnemonic_buffer[128])
+{
+    BusterX86MetadataForm form = {0};
+    if (!query || !operands || !features || !mnemonic_buffer || !buster_x86_metadata_form(form_id, &form) ||
+        !buster_x86_metadata_canonical_query(form_id, query, operands, features, mnemonic_buffer))
+        return false;
+    buster_x86_completion_normalize_query(form, *query, operands);
+    query->operands = operands;
+    return true;
+}
+
+BusterX86CompletionCensusClass buster_x86_completion_census_test_source_class(Arena* arena, Target target, u32 form_id,
+                                                                               bool att)
+{
+    BusterX86MetadataForm form = {0};
+    BusterX86MetadataPhysicalQuery query = {0};
+    BusterX86MetadataPhysicalOperand operands[16] = {0};
+    String8 features[1] = {0};
+    char8 mnemonic_buffer[128] = {0};
+    u8 bytes[32] = {0};
+    BusterX86MetadataRelocation relocations[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
+    BusterX86MetadataEmitResult emitted = {0};
+    BusterX86CompletionCensusSourceResult source = {0};
+    if (!arena || !buster_x86_metadata_form(form_id, &form) ||
+        !buster_x86_completion_census_test_query(form_id, &query, operands, features, mnemonic_buffer))
+        return BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE;
+    emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+        .physical = query, .form_id = form_id, .output = bytes, .output_capacity = sizeof(bytes),
+        .relocations = relocations, .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations)});
+    if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
+        return BUSTER_X86_COMPLETION_CENSUS_DIRECT_EMIT_FAILURE;
+    source = buster_x86_completion_source_check(arena, target, form, query, bytes, emitted.byte_count, relocations,
+                                                 emitted.relocation_count, att);
+    return (BusterX86CompletionCensusClass)source.classification;
+}
+#endif

@@ -182,3 +182,13 @@ struct BusterX86CompletionCensusResult
 // undersized diagnostic array never makes structural_complete false; inspect
 // diagnostics_complete to know whether every diagnostic example fit.
 BUSTER_F_DECL BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86CompletionCensusQuery query);
+
+#if BUSTER_INCLUDE_TESTS
+// Exposes the census's deterministic source-query normalization without
+// running the all-form source census. The returned storage is caller-owned.
+BUSTER_F_DECL bool buster_x86_completion_census_test_query(u32 form_id, BusterX86MetadataPhysicalQuery* query,
+                                                            BusterX86MetadataPhysicalOperand operands[16],
+                                                            String8 features[1], char8 mnemonic_buffer[128]);
+BUSTER_F_DECL BusterX86CompletionCensusClass buster_x86_completion_census_test_source_class(Arena* arena, Target target,
+                                                                                             u32 form_id, bool att);
+#endif

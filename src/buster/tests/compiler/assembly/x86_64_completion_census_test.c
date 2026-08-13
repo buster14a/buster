@@ -13,6 +13,14 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
 #if BUSTER_CPU_ARCH_X86_64
     u32 form_count = buster_x86_metadata_form_count();
     u32 class_index = 0;
+    u32 probe_index = 0;
+    u8 probe_bytes[16] = {0};
+    BusterX86MetadataPhysicalOperand probe_operands[16] = {0};
+    String8 probe_features[1] = {0};
+    char8 probe_mnemonic[128] = {0};
+    BusterX86MetadataPhysicalQuery probe_query = {0};
+    BusterX86MetadataEmitResult probe_emit = {0};
+    BusterX86CompletionCensusClass probe_class = BUSTER_X86_COMPLETION_CENSUS_NOT_ATTEMPTED;
     BusterX86MetadataCoverageLedgerEntry* entries = arena_allocate(arguments->arena, BusterX86MetadataCoverageLedgerEntry, form_count);
     BusterX86MetadataCoverageAuditResult audit = buster_x86_metadata_coverage_audit(entries, form_count);
     BusterX86CompletionCensusRecord* records = arena_allocate(arguments->arena, BusterX86CompletionCensusRecord, form_count);
@@ -79,6 +87,51 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, aggregate.metadata_emitted_count == structural.metadata_emitted_count &&
                              aggregate.metadata_blocked_count == structural.metadata_blocked_count);
+
+    BUSTER_TEST(arguments, buster_x86_completion_census_test_query(511, &probe_query, probe_operands, probe_features,
+                                                                    probe_mnemonic));
+    BUSTER_TEST(arguments, probe_query.operand_count == 3);
+    BUSTER_TEST(arguments, probe_operands[0].reg.index == 16 && probe_operands[1].reg.index == 17 &&
+                             probe_operands[2].reg.index == 18);
+    probe_emit = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+        .physical = probe_query, .form_id = 511, .output = probe_bytes, .output_capacity = sizeof(probe_bytes)});
+    BUSTER_TEST(arguments, probe_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && probe_emit.byte_count == 6);
+
+    memset(probe_operands, 0, sizeof(probe_operands));
+    memset(probe_features, 0, sizeof(probe_features));
+    memset(probe_mnemonic, 0, sizeof(probe_mnemonic));
+    probe_query = (BusterX86MetadataPhysicalQuery){0};
+    BUSTER_TEST(arguments, buster_x86_completion_census_test_query(529, &probe_query, probe_operands, probe_features,
+                                                                    probe_mnemonic));
+    for (probe_index = 0; probe_index < probe_query.operand_count; probe_index += 1)
+    {
+        if (probe_operands[probe_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE) break;
+    }
+    BUSTER_TEST(arguments, probe_index < probe_query.operand_count);
+    BUSTER_TEST(arguments, probe_operands[probe_index].has_value && probe_operands[probe_index].value == 0x100);
+
+    memset(probe_operands, 0, sizeof(probe_operands));
+    memset(probe_features, 0, sizeof(probe_features));
+    memset(probe_mnemonic, 0, sizeof(probe_mnemonic));
+    probe_query = (BusterX86MetadataPhysicalQuery){0};
+    BUSTER_TEST(arguments, buster_x86_completion_census_test_query(1436, &probe_query, probe_operands, probe_features,
+                                                                    probe_mnemonic));
+    for (probe_index = 0; probe_index < probe_query.operand_count; probe_index += 1)
+    {
+        if (probe_operands[probe_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY) break;
+    }
+    BUSTER_TEST(arguments, probe_index < probe_query.operand_count);
+    BUSTER_TEST(arguments, probe_operands[probe_index].memory.has_displacement &&
+                             probe_operands[probe_index].memory.displacement == 1);
+    probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, 511, false);
+    // ADC has two opcode-direction rows. Distinct APX roles make the public
+    // spelling meaningful, but the strict census keeps form 511 as a byte
+    // mismatch until a decoder-level semantic-equivalence proof exists.
+    BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH);
+    probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, 529, false);
+    BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
+    probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, 1436, false);
+    BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
 #else
     BUSTER_TEST(arguments, true);
 #endif
