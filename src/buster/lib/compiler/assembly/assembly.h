@@ -117,7 +117,7 @@ struct AssemblyAarch64DirectSIMDSpellingTest
     u64 source_digest;
     String8 semantic_id;
     u8 operand_count;
-    TargetCpuFeature feature;
+    u8 requirement;
     u8 arrangements[4];
 };
 BUSTER_F_DECL u32 assembly_test_aarch64_direct_simd_spelling_count(void);

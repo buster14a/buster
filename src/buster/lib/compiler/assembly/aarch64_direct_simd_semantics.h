@@ -17,6 +17,21 @@
 
 #define BUSTER_A64_DIRECT_SIMD_MAX_OPERANDS 8u
 
+/* Compact, interned target requirements carried by public direct-SIMD
+ * spellings.  Keeping the mask in one table avoids putting a 32-byte
+ * TargetCpuFeatures value in every spelling row while still allowing a
+ * conjunction such as AdvSIMD && FP16 to be checked as a subset. */
+typedef enum BusterA64DirectSIMDRequirement
+{
+    BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NONE,
+    BUSTER_A64_DIRECT_SIMD_REQUIREMENT_AES,
+    BUSTER_A64_DIRECT_SIMD_REQUIREMENT_SHA2,
+    BUSTER_A64_DIRECT_SIMD_REQUIREMENT_SHA3,
+    BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON,
+    BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FULLFP16,
+    BUSTER_A64_DIRECT_SIMD_REQUIREMENT_COUNT,
+} BusterA64DirectSIMDRequirement;
+
 typedef enum BusterA64DirectSIMDStatus
 {
     BUSTER_A64_DIRECT_SIMD_STATUS_OK,
@@ -104,6 +119,8 @@ BUSTER_F_DECL u32 buster_a64_direct_simd_transform_row_count(void);
 BUSTER_F_DECL u32 buster_a64_direct_simd_executable_row_count(void);
 BUSTER_F_DECL u32 buster_a64_direct_simd_max_operands(void);
 BUSTER_F_DECL u32 buster_a64_direct_simd_arrangement_binding_count(void);
+BUSTER_F_DECL bool buster_a64_direct_simd_requirement_features(u8 requirement, TargetCpuFeatures* result);
+BUSTER_F_DECL bool buster_a64_direct_simd_requirement_supported(Target target, u8 requirement);
 BUSTER_F_DECL bool buster_a64_direct_simd_row(u32 row_index, BusterA64DirectSIMDRowInfo* result);
 BUSTER_F_DECL bool buster_a64_direct_simd_find_source_digest(u64 source_digest, u32* row_index);
 BUSTER_F_DECL bool buster_a64_direct_simd_arrangement_binding(u32 row_index, u32 operand_index, BusterA64DirectSIMDArrangementBinding* result);

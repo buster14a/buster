@@ -1,6 +1,43 @@
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h>
 #include <buster/lib/compiler/assembly/generated/aarch64-direct-simd.generated.h>
 
+BUSTER_CT_CHECK(TARGET_CPU_FEATURE_AARCH64_NEON == 11);
+BUSTER_CT_CHECK(TARGET_CPU_FEATURE_AARCH64_AES == 111);
+BUSTER_CT_CHECK(TARGET_CPU_FEATURE_AARCH64_FULLFP16 == 122);
+BUSTER_CT_CHECK(TARGET_CPU_FEATURE_AARCH64_SHA2 == 134);
+BUSTER_CT_CHECK(TARGET_CPU_FEATURE_AARCH64_SHA3 == 135);
+
+/* TargetCpuFeature stores feature N at bit N-1.  Keep these masks as static
+ * data so requirement lookup has no initialization path or per-row storage. */
+static TargetCpuFeatures const buster_a64_direct_simd_requirement_masks[BUSTER_A64_DIRECT_SIMD_REQUIREMENT_COUNT] = {
+    [BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NONE] = {{0, 0, 0, 0}},
+    [BUSTER_A64_DIRECT_SIMD_REQUIREMENT_AES] = {{0, UINT64_C(1) << 46, 0, 0}},
+    [BUSTER_A64_DIRECT_SIMD_REQUIREMENT_SHA2] = {{0, 0, UINT64_C(1) << 5, 0}},
+    [BUSTER_A64_DIRECT_SIMD_REQUIREMENT_SHA3] = {{0, 0, UINT64_C(1) << 6, 0}},
+    [BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON] = {{UINT64_C(1) << 10, 0, 0, 0}},
+    [BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FULLFP16] = {{UINT64_C(1) << 10, UINT64_C(1) << 57, 0, 0}},
+};
+
+bool buster_a64_direct_simd_requirement_features(u8 requirement, TargetCpuFeatures* result)
+{
+    if (!result || requirement <= BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NONE ||
+        requirement >= BUSTER_A64_DIRECT_SIMD_REQUIREMENT_COUNT)
+    {
+        return false;
+    }
+    *result = buster_a64_direct_simd_requirement_masks[requirement];
+    return true;
+}
+
+bool buster_a64_direct_simd_requirement_supported(Target target, u8 requirement)
+{
+    TargetCpuFeatures required = {0};
+    return requirement > BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NONE && target.cpu_arch == CPU_ARCH_AARCH64 &&
+           target_cpu_features_are_valid(target) &&
+           buster_a64_direct_simd_requirement_features(requirement, &required) &&
+           target_cpu_features_subset(required, target_cpu_features_effective(target));
+}
+
 static char8 buster_a64_direct_simd_arrangement_b[] = "B";
 static char8 buster_a64_direct_simd_arrangement_h[] = "H";
 static char8 buster_a64_direct_simd_arrangement_s[] = "S";

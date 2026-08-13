@@ -22,6 +22,151 @@ struct AssemblyA64DirectSIMDNeonCase
     u8 boundary_bytes[4];
 };
 
+// One legal spelling per FP16 row (and both 4H/8H selectors for transform rows).
+// Bytes are independent llvm-mc 22.1.8 encodings, not buster output.
+typedef struct AssemblyA64DirectSIMDFP16Case AssemblyA64DirectSIMDFP16Case;
+struct AssemblyA64DirectSIMDFP16Case
+{
+    String8 source;
+    u8 bytes[4];
+};
+
+static AssemblyA64DirectSIMDFP16Case const assembly_a64_direct_simd_fp16_cases[] = {
+    {S8_INITIALIZER("fabd v0.4h, v1.4h, v2.4h\n"), {0x20, 0x14, 0xc2, 0x2e}},
+    {S8_INITIALIZER("fabd v0.8h, v1.8h, v2.8h\n"), {0x20, 0x14, 0xc2, 0x6e}},
+    {S8_INITIALIZER("fabd h0, h1, h2\n"), {0x20, 0x14, 0xc2, 0x7e}},
+    {S8_INITIALIZER("fabs v0.4h, v1.4h\n"), {0x20, 0xf8, 0xf8, 0x0e}},
+    {S8_INITIALIZER("fabs v0.8h, v1.8h\n"), {0x20, 0xf8, 0xf8, 0x4e}},
+    {S8_INITIALIZER("facge v0.4h, v1.4h, v2.4h\n"), {0x20, 0x2c, 0x42, 0x2e}},
+    {S8_INITIALIZER("facge v0.8h, v1.8h, v2.8h\n"), {0x20, 0x2c, 0x42, 0x6e}},
+    {S8_INITIALIZER("facge h0, h1, h2\n"), {0x20, 0x2c, 0x42, 0x7e}},
+    {S8_INITIALIZER("facgt v0.4h, v1.4h, v2.4h\n"), {0x20, 0x2c, 0xc2, 0x2e}},
+    {S8_INITIALIZER("facgt v0.8h, v1.8h, v2.8h\n"), {0x20, 0x2c, 0xc2, 0x6e}},
+    {S8_INITIALIZER("facgt h0, h1, h2\n"), {0x20, 0x2c, 0xc2, 0x7e}},
+    {S8_INITIALIZER("faddp v0.4h, v1.4h, v2.4h\n"), {0x20, 0x14, 0x42, 0x2e}},
+    {S8_INITIALIZER("faddp v0.8h, v1.8h, v2.8h\n"), {0x20, 0x14, 0x42, 0x6e}},
+    {S8_INITIALIZER("faddp h0, v1.2h\n"), {0x20, 0xd8, 0x30, 0x5e}},
+    {S8_INITIALIZER("fadd v0.4h, v1.4h, v2.4h\n"), {0x20, 0x14, 0x42, 0x0e}},
+    {S8_INITIALIZER("fadd v0.8h, v1.8h, v2.8h\n"), {0x20, 0x14, 0x42, 0x4e}},
+    {S8_INITIALIZER("fcmeq v0.4h, v1.4h, v2.4h\n"), {0x20, 0x24, 0x42, 0x0e}},
+    {S8_INITIALIZER("fcmeq v0.8h, v1.8h, v2.8h\n"), {0x20, 0x24, 0x42, 0x4e}},
+    {S8_INITIALIZER("fcmeq h0, h1, h2\n"), {0x20, 0x24, 0x42, 0x5e}},
+    {S8_INITIALIZER("fcmge v0.4h, v1.4h, v2.4h\n"), {0x20, 0x24, 0x42, 0x2e}},
+    {S8_INITIALIZER("fcmge v0.8h, v1.8h, v2.8h\n"), {0x20, 0x24, 0x42, 0x6e}},
+    {S8_INITIALIZER("fcmge h0, h1, h2\n"), {0x20, 0x24, 0x42, 0x7e}},
+    {S8_INITIALIZER("fcmgt v0.4h, v1.4h, v2.4h\n"), {0x20, 0x24, 0xc2, 0x2e}},
+    {S8_INITIALIZER("fcmgt v0.8h, v1.8h, v2.8h\n"), {0x20, 0x24, 0xc2, 0x6e}},
+    {S8_INITIALIZER("fcmgt h0, h1, h2\n"), {0x20, 0x24, 0xc2, 0x7e}},
+    {S8_INITIALIZER("fcvtas v0.4h, v1.4h\n"), {0x20, 0xc8, 0x79, 0x0e}},
+    {S8_INITIALIZER("fcvtas v0.8h, v1.8h\n"), {0x20, 0xc8, 0x79, 0x4e}},
+    {S8_INITIALIZER("fcvtas h0, h1\n"), {0x20, 0xc8, 0x79, 0x5e}},
+    {S8_INITIALIZER("fcvtau v0.4h, v1.4h\n"), {0x20, 0xc8, 0x79, 0x2e}},
+    {S8_INITIALIZER("fcvtau v0.8h, v1.8h\n"), {0x20, 0xc8, 0x79, 0x6e}},
+    {S8_INITIALIZER("fcvtau h0, h1\n"), {0x20, 0xc8, 0x79, 0x7e}},
+    {S8_INITIALIZER("fcvtms v0.4h, v1.4h\n"), {0x20, 0xb8, 0x79, 0x0e}},
+    {S8_INITIALIZER("fcvtms v0.8h, v1.8h\n"), {0x20, 0xb8, 0x79, 0x4e}},
+    {S8_INITIALIZER("fcvtms h0, h1\n"), {0x20, 0xb8, 0x79, 0x5e}},
+    {S8_INITIALIZER("fcvtmu v0.4h, v1.4h\n"), {0x20, 0xb8, 0x79, 0x2e}},
+    {S8_INITIALIZER("fcvtmu v0.8h, v1.8h\n"), {0x20, 0xb8, 0x79, 0x6e}},
+    {S8_INITIALIZER("fcvtmu h0, h1\n"), {0x20, 0xb8, 0x79, 0x7e}},
+    {S8_INITIALIZER("fcvtns v0.4h, v1.4h\n"), {0x20, 0xa8, 0x79, 0x0e}},
+    {S8_INITIALIZER("fcvtns v0.8h, v1.8h\n"), {0x20, 0xa8, 0x79, 0x4e}},
+    {S8_INITIALIZER("fcvtns h0, h1\n"), {0x20, 0xa8, 0x79, 0x5e}},
+    {S8_INITIALIZER("fcvtnu v0.4h, v1.4h\n"), {0x20, 0xa8, 0x79, 0x2e}},
+    {S8_INITIALIZER("fcvtnu v0.8h, v1.8h\n"), {0x20, 0xa8, 0x79, 0x6e}},
+    {S8_INITIALIZER("fcvtnu h0, h1\n"), {0x20, 0xa8, 0x79, 0x7e}},
+    {S8_INITIALIZER("fcvtps v0.4h, v1.4h\n"), {0x20, 0xa8, 0xf9, 0x0e}},
+    {S8_INITIALIZER("fcvtps v0.8h, v1.8h\n"), {0x20, 0xa8, 0xf9, 0x4e}},
+    {S8_INITIALIZER("fcvtps h0, h1\n"), {0x20, 0xa8, 0xf9, 0x5e}},
+    {S8_INITIALIZER("fcvtpu v0.4h, v1.4h\n"), {0x20, 0xa8, 0xf9, 0x2e}},
+    {S8_INITIALIZER("fcvtpu v0.8h, v1.8h\n"), {0x20, 0xa8, 0xf9, 0x6e}},
+    {S8_INITIALIZER("fcvtpu h0, h1\n"), {0x20, 0xa8, 0xf9, 0x7e}},
+    {S8_INITIALIZER("fcvtzs v0.4h, v1.4h\n"), {0x20, 0xb8, 0xf9, 0x0e}},
+    {S8_INITIALIZER("fcvtzs v0.8h, v1.8h\n"), {0x20, 0xb8, 0xf9, 0x4e}},
+    {S8_INITIALIZER("fcvtzs h0, h1\n"), {0x20, 0xb8, 0xf9, 0x5e}},
+    {S8_INITIALIZER("fcvtzu v0.4h, v1.4h\n"), {0x20, 0xb8, 0xf9, 0x2e}},
+    {S8_INITIALIZER("fcvtzu v0.8h, v1.8h\n"), {0x20, 0xb8, 0xf9, 0x6e}},
+    {S8_INITIALIZER("fcvtzu h0, h1\n"), {0x20, 0xb8, 0xf9, 0x7e}},
+    {S8_INITIALIZER("fdiv v0.4h, v1.4h, v2.4h\n"), {0x20, 0x3c, 0x42, 0x2e}},
+    {S8_INITIALIZER("fdiv v0.8h, v1.8h, v2.8h\n"), {0x20, 0x3c, 0x42, 0x6e}},
+    {S8_INITIALIZER("fmaxnmp v0.4h, v1.4h, v2.4h\n"), {0x20, 0x04, 0x42, 0x2e}},
+    {S8_INITIALIZER("fmaxnmp v0.8h, v1.8h, v2.8h\n"), {0x20, 0x04, 0x42, 0x6e}},
+    {S8_INITIALIZER("fmaxnmp h0, v1.2h\n"), {0x20, 0xc8, 0x30, 0x5e}},
+    {S8_INITIALIZER("fmaxnmv h0, v1.4h\n"), {0x20, 0xc8, 0x30, 0x0e}},
+    {S8_INITIALIZER("fmaxnmv h0, v1.8h\n"), {0x20, 0xc8, 0x30, 0x4e}},
+    {S8_INITIALIZER("fmaxnm v0.4h, v1.4h, v2.4h\n"), {0x20, 0x04, 0x42, 0x0e}},
+    {S8_INITIALIZER("fmaxnm v0.8h, v1.8h, v2.8h\n"), {0x20, 0x04, 0x42, 0x4e}},
+    {S8_INITIALIZER("fmaxp v0.4h, v1.4h, v2.4h\n"), {0x20, 0x34, 0x42, 0x2e}},
+    {S8_INITIALIZER("fmaxp v0.8h, v1.8h, v2.8h\n"), {0x20, 0x34, 0x42, 0x6e}},
+    {S8_INITIALIZER("fmaxp h0, v1.2h\n"), {0x20, 0xf8, 0x30, 0x5e}},
+    {S8_INITIALIZER("fmaxv h0, v1.4h\n"), {0x20, 0xf8, 0x30, 0x0e}},
+    {S8_INITIALIZER("fmaxv h0, v1.8h\n"), {0x20, 0xf8, 0x30, 0x4e}},
+    {S8_INITIALIZER("fmax v0.4h, v1.4h, v2.4h\n"), {0x20, 0x34, 0x42, 0x0e}},
+    {S8_INITIALIZER("fmax v0.8h, v1.8h, v2.8h\n"), {0x20, 0x34, 0x42, 0x4e}},
+    {S8_INITIALIZER("fminnmp v0.4h, v1.4h, v2.4h\n"), {0x20, 0x04, 0xc2, 0x2e}},
+    {S8_INITIALIZER("fminnmp v0.8h, v1.8h, v2.8h\n"), {0x20, 0x04, 0xc2, 0x6e}},
+    {S8_INITIALIZER("fminnmp h0, v1.2h\n"), {0x20, 0xc8, 0xb0, 0x5e}},
+    {S8_INITIALIZER("fminnmv h0, v1.4h\n"), {0x20, 0xc8, 0xb0, 0x0e}},
+    {S8_INITIALIZER("fminnmv h0, v1.8h\n"), {0x20, 0xc8, 0xb0, 0x4e}},
+    {S8_INITIALIZER("fminnm v0.4h, v1.4h, v2.4h\n"), {0x20, 0x04, 0xc2, 0x0e}},
+    {S8_INITIALIZER("fminnm v0.8h, v1.8h, v2.8h\n"), {0x20, 0x04, 0xc2, 0x4e}},
+    {S8_INITIALIZER("fminp v0.4h, v1.4h, v2.4h\n"), {0x20, 0x34, 0xc2, 0x2e}},
+    {S8_INITIALIZER("fminp v0.8h, v1.8h, v2.8h\n"), {0x20, 0x34, 0xc2, 0x6e}},
+    {S8_INITIALIZER("fminp h0, v1.2h\n"), {0x20, 0xf8, 0xb0, 0x5e}},
+    {S8_INITIALIZER("fminv h0, v1.4h\n"), {0x20, 0xf8, 0xb0, 0x0e}},
+    {S8_INITIALIZER("fminv h0, v1.8h\n"), {0x20, 0xf8, 0xb0, 0x4e}},
+    {S8_INITIALIZER("fmin v0.4h, v1.4h, v2.4h\n"), {0x20, 0x34, 0xc2, 0x0e}},
+    {S8_INITIALIZER("fmin v0.8h, v1.8h, v2.8h\n"), {0x20, 0x34, 0xc2, 0x4e}},
+    {S8_INITIALIZER("fmla v0.4h, v1.4h, v2.4h\n"), {0x20, 0x0c, 0x42, 0x0e}},
+    {S8_INITIALIZER("fmla v0.8h, v1.8h, v2.8h\n"), {0x20, 0x0c, 0x42, 0x4e}},
+    {S8_INITIALIZER("fmls v0.4h, v1.4h, v2.4h\n"), {0x20, 0x0c, 0xc2, 0x0e}},
+    {S8_INITIALIZER("fmls v0.8h, v1.8h, v2.8h\n"), {0x20, 0x0c, 0xc2, 0x4e}},
+    {S8_INITIALIZER("fmulx v0.4h, v1.4h, v2.4h\n"), {0x20, 0x1c, 0x42, 0x0e}},
+    {S8_INITIALIZER("fmulx v0.8h, v1.8h, v2.8h\n"), {0x20, 0x1c, 0x42, 0x4e}},
+    {S8_INITIALIZER("fmulx h0, h1, h2\n"), {0x20, 0x1c, 0x42, 0x5e}},
+    {S8_INITIALIZER("fmul v0.4h, v1.4h, v2.4h\n"), {0x20, 0x1c, 0x42, 0x2e}},
+    {S8_INITIALIZER("fmul v0.8h, v1.8h, v2.8h\n"), {0x20, 0x1c, 0x42, 0x6e}},
+    {S8_INITIALIZER("fneg v0.4h, v1.4h\n"), {0x20, 0xf8, 0xf8, 0x2e}},
+    {S8_INITIALIZER("fneg v0.8h, v1.8h\n"), {0x20, 0xf8, 0xf8, 0x6e}},
+    {S8_INITIALIZER("frecpe v0.4h, v1.4h\n"), {0x20, 0xd8, 0xf9, 0x0e}},
+    {S8_INITIALIZER("frecpe v0.8h, v1.8h\n"), {0x20, 0xd8, 0xf9, 0x4e}},
+    {S8_INITIALIZER("frecpe h0, h1\n"), {0x20, 0xd8, 0xf9, 0x5e}},
+    {S8_INITIALIZER("frecps v0.4h, v1.4h, v2.4h\n"), {0x20, 0x3c, 0x42, 0x0e}},
+    {S8_INITIALIZER("frecps v0.8h, v1.8h, v2.8h\n"), {0x20, 0x3c, 0x42, 0x4e}},
+    {S8_INITIALIZER("frecps h0, h1, h2\n"), {0x20, 0x3c, 0x42, 0x5e}},
+    {S8_INITIALIZER("frecpx h0, h1\n"), {0x20, 0xf8, 0xf9, 0x5e}},
+    {S8_INITIALIZER("frinta v0.4h, v1.4h\n"), {0x20, 0x88, 0x79, 0x2e}},
+    {S8_INITIALIZER("frinta v0.8h, v1.8h\n"), {0x20, 0x88, 0x79, 0x6e}},
+    {S8_INITIALIZER("frinti v0.4h, v1.4h\n"), {0x20, 0x98, 0xf9, 0x2e}},
+    {S8_INITIALIZER("frinti v0.8h, v1.8h\n"), {0x20, 0x98, 0xf9, 0x6e}},
+    {S8_INITIALIZER("frintm v0.4h, v1.4h\n"), {0x20, 0x98, 0x79, 0x0e}},
+    {S8_INITIALIZER("frintm v0.8h, v1.8h\n"), {0x20, 0x98, 0x79, 0x4e}},
+    {S8_INITIALIZER("frintn v0.4h, v1.4h\n"), {0x20, 0x88, 0x79, 0x0e}},
+    {S8_INITIALIZER("frintn v0.8h, v1.8h\n"), {0x20, 0x88, 0x79, 0x4e}},
+    {S8_INITIALIZER("frintp v0.4h, v1.4h\n"), {0x20, 0x88, 0xf9, 0x0e}},
+    {S8_INITIALIZER("frintp v0.8h, v1.8h\n"), {0x20, 0x88, 0xf9, 0x4e}},
+    {S8_INITIALIZER("frintx v0.4h, v1.4h\n"), {0x20, 0x98, 0x79, 0x2e}},
+    {S8_INITIALIZER("frintx v0.8h, v1.8h\n"), {0x20, 0x98, 0x79, 0x6e}},
+    {S8_INITIALIZER("frintz v0.4h, v1.4h\n"), {0x20, 0x98, 0xf9, 0x0e}},
+    {S8_INITIALIZER("frintz v0.8h, v1.8h\n"), {0x20, 0x98, 0xf9, 0x4e}},
+    {S8_INITIALIZER("frsqrte v0.4h, v1.4h\n"), {0x20, 0xd8, 0xf9, 0x2e}},
+    {S8_INITIALIZER("frsqrte v0.8h, v1.8h\n"), {0x20, 0xd8, 0xf9, 0x6e}},
+    {S8_INITIALIZER("frsqrte h0, h1\n"), {0x20, 0xd8, 0xf9, 0x7e}},
+    {S8_INITIALIZER("frsqrts v0.4h, v1.4h, v2.4h\n"), {0x20, 0x3c, 0xc2, 0x0e}},
+    {S8_INITIALIZER("frsqrts v0.8h, v1.8h, v2.8h\n"), {0x20, 0x3c, 0xc2, 0x4e}},
+    {S8_INITIALIZER("frsqrts h0, h1, h2\n"), {0x20, 0x3c, 0xc2, 0x5e}},
+    {S8_INITIALIZER("fsqrt v0.4h, v1.4h\n"), {0x20, 0xf8, 0xf9, 0x2e}},
+    {S8_INITIALIZER("fsqrt v0.8h, v1.8h\n"), {0x20, 0xf8, 0xf9, 0x6e}},
+    {S8_INITIALIZER("fsub v0.4h, v1.4h, v2.4h\n"), {0x20, 0x14, 0xc2, 0x0e}},
+    {S8_INITIALIZER("fsub v0.8h, v1.8h, v2.8h\n"), {0x20, 0x14, 0xc2, 0x4e}},
+    {S8_INITIALIZER("scvtf v0.4h, v1.4h\n"), {0x20, 0xd8, 0x79, 0x0e}},
+    {S8_INITIALIZER("scvtf v0.8h, v1.8h\n"), {0x20, 0xd8, 0x79, 0x4e}},
+    {S8_INITIALIZER("scvtf h0, h1\n"), {0x20, 0xd8, 0x79, 0x5e}},
+    {S8_INITIALIZER("ucvtf v0.4h, v1.4h\n"), {0x20, 0xd8, 0x79, 0x2e}},
+    {S8_INITIALIZER("ucvtf v0.8h, v1.8h\n"), {0x20, 0xd8, 0x79, 0x6e}},
+    {S8_INITIALIZER("ucvtf h0, h1\n"), {0x20, 0xd8, 0x79, 0x7e}},
+};
+
 static AssemblyA64DirectSIMDNeonCase const assembly_a64_direct_simd_neon_cases[] = {
     {S8_INITIALIZER("addp d0, v1.2d\n"), {0x20, 0xb8, 0xf1, 0x5e}, S8_INITIALIZER("addp d31, v30.2d\n"), {0xdf, 0xbb, 0xf1, 0x5e}},
     {S8_INITIALIZER("cmeq d0, d1, d2\n"), {0x20, 0x8c, 0xe2, 0x7e}, S8_INITIALIZER("cmeq d31, d30, d29\n"), {0xdf, 0x8f, 0xfd, 0x7e}},
@@ -541,6 +686,10 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     u32 direct_simd_invalid_spelling_count = 0;
     u32 direct_simd_duplicate_spelling_count = 0;
     u32 direct_simd_duplicate_row_count = 0;
+    u32 direct_simd_compound_requirement_count = 0;
+    bool direct_simd_compound_requirement_exact = true;
+    bool direct_simd_first_fp16_row_exact = false;
+    bool direct_simd_last_fp16_row_exact = false;
     bool direct_simd_rows_unique = true;
     bool direct_simd_spellings_unique = true;
 
@@ -567,8 +716,33 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         AssemblyAarch64DirectSIMDSpellingTest spelling = {0};
         bool spelling_valid = assembly_test_aarch64_direct_simd_spelling_at(spelling_index, &spelling) &&
                               spelling.mnemonic.length != 0 && spelling.source_digest != 0 && spelling.semantic_id.length != 0 &&
-                              spelling.operand_count > 0 && spelling.operand_count <= 4 && spelling.feature > TARGET_CPU_FEATURE_NONE &&
-                              spelling.feature < TARGET_CPU_FEATURE_COUNT;
+                              spelling.operand_count > 0 && spelling.operand_count <= 4 &&
+                              spelling.requirement > BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NONE &&
+                              spelling.requirement < BUSTER_A64_DIRECT_SIMD_REQUIREMENT_COUNT;
+        TargetCpuFeatures spelling_required_features = {0};
+        bool spelling_requirement_valid = spelling_valid &&
+                                          buster_a64_direct_simd_requirement_features(spelling.requirement,
+                                                                                       &spelling_required_features) &&
+                                          target_cpu_features_any(spelling_required_features);
+        BUSTER_TEST(arguments, spelling_requirement_valid);
+        if (spelling_valid && spelling.requirement == BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FULLFP16)
+        {
+            direct_simd_compound_requirement_count += 1;
+            direct_simd_compound_requirement_exact =
+                direct_simd_compound_requirement_exact && spelling_required_features.words[0] == (UINT64_C(1) << 10) &&
+                spelling_required_features.words[1] == (UINT64_C(1) << 57) && spelling_required_features.words[2] == 0 &&
+                spelling_required_features.words[3] == 0;
+        }
+        if (spelling_valid && string_equal(spelling.semantic_id, S8("arm-a64@2026-06:FABD_asimdsamefp16_only")))
+        {
+            direct_simd_first_fp16_row_exact = spelling.source_digest == UINT64_C(0xeccb3d01478f107a) &&
+                                               spelling.requirement == BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FULLFP16;
+        }
+        if (spelling_valid && string_equal(spelling.semantic_id, S8("arm-a64@2026-06:UCVTF_asisdmiscfp16_R")))
+        {
+            direct_simd_last_fp16_row_exact = spelling.source_digest == UINT64_C(0xfa9f851b4423665f) &&
+                                              spelling.requirement == BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FULLFP16;
+        }
         for (u32 prior_index = 0; prior_index < spelling_index; prior_index += 1)
         {
             AssemblyAarch64DirectSIMDSpellingTest prior = {0};
@@ -659,14 +833,16 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 120);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 120);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 270);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 87);
-    BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 33);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 176);
-    BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 94);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 201);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 201);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 189);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 139);
+    BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 62);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 124);
+    BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 65);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
+    BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
+    BUSTER_TEST(arguments, direct_simd_first_fp16_row_exact && direct_simd_last_fp16_row_exact);
     arguments->show(arguments,
                     S8("A64_DIRECT_SIMD_COVERAGE rows={u32} executable={u32} transform={u32} bindings={u32} spellings={u32} covered={u32} remaining={u32} covered_transform={u32} covered_no_transform={u32} uncovered_transform={u32} uncovered_no_transform={u32}\n"),
                     direct_simd_row_count, direct_simd_executable_count, direct_simd_transform_count, direct_simd_binding_count,
@@ -3602,6 +3778,88 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
             arguments->arena, transform_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
         BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, transform_case.bytes, 4));
     }
+    Target aarch64_fp16_both = aarch64_advsimd_target;
+    aarch64_fp16_both.cpu_model = CPU_MODEL_BASELINE;
+    aarch64_fp16_both.cpu_features_explicit = true;
+    aarch64_fp16_both.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_AARCH64_FP_ARMV8, TARGET_CPU_FEATURE_AARCH64_NEON,
+                                   TARGET_CPU_FEATURE_AARCH64_FULLFP16},
+        3);
+    Target aarch64_fp16_no_full = aarch64_fp16_both;
+    aarch64_fp16_no_full.cpu_features = target_cpu_features_remove(aarch64_fp16_no_full.cpu_features,
+                                                                    TARGET_CPU_FEATURE_AARCH64_FULLFP16);
+    Target aarch64_fp16_no_neon = aarch64_fp16_both;
+    aarch64_fp16_no_neon.cpu_features = target_cpu_features_remove(aarch64_fp16_no_neon.cpu_features,
+                                                                   TARGET_CPU_FEATURE_AARCH64_NEON);
+    Target aarch64_fp16_no_both = aarch64_fp16_no_full;
+    aarch64_fp16_no_both.cpu_features = target_cpu_features_remove(aarch64_fp16_no_both.cpu_features,
+                                                                    TARGET_CPU_FEATURE_AARCH64_NEON);
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp16_both));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp16_no_full));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp16_no_neon));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(aarch64_fp16_no_both));
+    TargetCpuFeatures invalid_requirement_features = {0};
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON, 0));
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NONE,
+                                                                         &invalid_requirement_features));
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_COUNT,
+                                                                         &invalid_requirement_features));
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_features(BUSTER_A64_DIRECT_SIMD_REQUIREMENT_COUNT, 0));
+    Target invalid_aarch64_requirement_target = aarch64_fp16_both;
+    invalid_aarch64_requirement_target.cpu_arch = CPU_ARCH_X86_64;
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(
+                               invalid_aarch64_requirement_target, BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NEON_FULLFP16));
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_fp16_both,
+                                                                           BUSTER_A64_DIRECT_SIMD_REQUIREMENT_NONE));
+    BUSTER_TEST(arguments, !buster_a64_direct_simd_requirement_supported(aarch64_fp16_both,
+                                                                           BUSTER_A64_DIRECT_SIMD_REQUIREMENT_COUNT));
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fp16_cases) == 133);
+    for (u32 fp16_index = 0; fp16_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fp16_cases); fp16_index += 1)
+    {
+        AssemblyA64DirectSIMDFP16Case fp16_case = assembly_a64_direct_simd_fp16_cases[fp16_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, fp16_case.source, (AssemblyEncodeOptions){.target = aarch64_fp16_both});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, fp16_case.bytes, 4));
+    }
+    AssemblyEncodeResult fp16_upper_boundary = assembly_encode(
+        arguments->arena, S8("FABS V31.8H, V30.8H\n"), (AssemblyEncodeOptions){.target = aarch64_fp16_both});
+    BUSTER_TEST(arguments, fp16_upper_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(fp16_upper_boundary.bytes, (u8 const[]){0xdf, 0xfb, 0xf8, 0x4e}, 4));
+    AssemblyEncodeResult fp16_scalar_boundary = assembly_encode(
+        arguments->arena, S8("FADDP H31, V30.2H\n"), (AssemblyEncodeOptions){.target = aarch64_fp16_both});
+    BUSTER_TEST(arguments, fp16_scalar_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(fp16_scalar_boundary.bytes, (u8 const[]){0xdf, 0xdb, 0x30, 0x5e}, 4));
+    static String8 const malformed_fp16_cases[] = {
+        S8_INITIALIZER("fabs v0.8h, v1.8s\n"),
+        S8_INITIALIZER("fabs q0, q1\n"),
+        S8_INITIALIZER("fabs v0.8h\n"),
+        S8_INITIALIZER("fabs v0.8h, v1.8h, v2.8h\n"),
+        S8_INITIALIZER("fabs v32.8h, v1.8h\n"),
+        S8_INITIALIZER("fabs v0.8h, h1\n"),
+    };
+    for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed_fp16_cases); malformed_index += 1)
+    {
+        AssemblyEncodeResult malformed = assembly_encode(
+            arguments->arena, malformed_fp16_cases[malformed_index], (AssemblyEncodeOptions){.target = aarch64_fp16_both});
+        BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
+                                   malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+    for (u32 fp16_index = 0; fp16_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_fp16_cases); fp16_index += 1)
+    {
+        AssemblyA64DirectSIMDFP16Case fp16_case = assembly_a64_direct_simd_fp16_cases[fp16_index];
+        AssemblyEncodeResult no_full = assembly_encode(
+            arguments->arena, fp16_case.source, (AssemblyEncodeOptions){.target = aarch64_fp16_no_full});
+        AssemblyEncodeResult no_neon = assembly_encode(
+            arguments->arena, fp16_case.source, (AssemblyEncodeOptions){.target = aarch64_fp16_no_neon});
+        AssemblyEncodeResult no_both = assembly_encode(
+            arguments->arena, fp16_case.source, (AssemblyEncodeOptions){.target = aarch64_fp16_no_both});
+        BUSTER_TEST(arguments, no_full.diagnostic_count == 1 && no_full.bytes.length == 0 &&
+                                   no_full.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+        BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
+                                   no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+        BUSTER_TEST(arguments, no_both.diagnostic_count == 1 && no_both.bytes.length == 0 &&
+                                   no_both.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
     AssemblyEncodeResult aarch64_advsimd_transform_boundary = assembly_encode(
         arguments->arena,
         S8("abs v31.2d, v30.2d\n"
@@ -4051,8 +4309,8 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8_INITIALIZER("usqadd v0, v1\n"),
         S8_INITIALIZER("fabs v0.1d, v1.1d\n"),
         S8_INITIALIZER("fabs v0.8b, v1.8b\n"),
-        S8_INITIALIZER("fabs v0.4h, v1.4h\n"),
-        S8_INITIALIZER("fabs v0.8h, v1.8h\n"),
+        S8_INITIALIZER("fabs v0.4h, v1.4h, v2.4h\n"),
+        S8_INITIALIZER("fabs q0, q1\n"),
         S8_INITIALIZER("fabs v0.2d, v1.2d, v2.2d\n"),
         S8_INITIALIZER("fabs v32.2d, v1.2d\n"),
         S8_INITIALIZER("fcvtas v0.2s, v1.2d\n"),
@@ -4077,14 +4335,14 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8_INITIALIZER("frsqrte v0.2d\n"),
         S8_INITIALIZER("fsqrt v0.1d, v1.1d\n"),
         S8_INITIALIZER("scvtf v0.2d\n"),
-        S8_INITIALIZER("scvtf v0.4h, v1.4h\n"),
+        S8_INITIALIZER("scvtf v0.4h, v1.4h, v2.4h\n"),
         S8_INITIALIZER("ucvtf v0.2d, v1.2d, v2.2d\n"),
         S8_INITIALIZER("fabd v0.1d, v1.1d, v2.1d\n"),
         S8_INITIALIZER("fabd v0.2d, v1.2d\n"),
         S8_INITIALIZER("fabd v32.2d, v1.2d, v2.2d\n"),
         S8_INITIALIZER("fabd v0.2d, v1.2d, v2.2d, v3.2d\n"),
         S8_INITIALIZER("facge v0.8b, v1.8b, v2.8b\n"),
-        S8_INITIALIZER("facgt v0.4h, v1.4h, v2.4h\n"),
+        S8_INITIALIZER("facgt v0.4h, v1.4h\n"),
         S8_INITIALIZER("faddp v0.2d, v1.2d\n"),
         S8_INITIALIZER("fadd v0.2d, v1.2d, v2.2d, v3.2d\n"),
         S8_INITIALIZER("fadd v0.2s, v1.4s, v2.2s\n"),
@@ -4092,7 +4350,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8_INITIALIZER("fcmge v0.1d, v1.1d, v2.1d\n"),
         S8_INITIALIZER("fcmgt q0, q1, q2\n"),
         S8_INITIALIZER("fdiv v0.2d, v1.2d\n"),
-        S8_INITIALIZER("fmaxnmp v0.4h, v1.4h, v2.4h\n"),
+        S8_INITIALIZER("fmaxnmp v0.4h, v1.4h\n"),
         S8_INITIALIZER("fmaxnm v0.2d, v1.2d, v2.2d, v3.2d\n"),
         S8_INITIALIZER("fmaxp v0.2d, v1.2d\n"),
         S8_INITIALIZER("fmax v32.2d, v1.2d, v2.2d\n"),
@@ -4100,7 +4358,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8_INITIALIZER("fminnm v0.1d, v1.1d, v2.1d\n"),
         S8_INITIALIZER("fminp v0.2d, v1.2d, v2.2d, v3.2d\n"),
         S8_INITIALIZER("fmin v0.2d, v1.2d\n"),
-        S8_INITIALIZER("fmla v0.4h, v1.4h, v2.4h\n"),
+        S8_INITIALIZER("fmla v0.4h, v1.4h\n"),
         S8_INITIALIZER("fmla v0.4s, v1.4s, v2.s[0]\n"),
         S8_INITIALIZER("fmls v0.2d, v1.2d, v2.2d, v3.2d\n"),
         S8_INITIALIZER("fmulx v0.1d, v1.1d, v2.1d\n"),
