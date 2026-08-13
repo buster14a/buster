@@ -140,6 +140,14 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_completion_mask_decorator(BusterX86MetadataF
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_completion_apx_evex_memory_witness(BusterX86MetadataForm form)
+{
+    return form.id == 5584 &&
+           buster_x86_completion_string_equal(buster_x86_metadata_string_span(form.iclass), S8("VMOVDQA32")) &&
+           buster_x86_completion_string_equal(buster_x86_metadata_string_span(form.iform),
+                                               S8("VMOVDQA32_XMMu32_MASKmskw_MEMu32_AVX512"));
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_completion_hidden_bsr0(BusterX86MetadataForm form, bool* first)
 {
     bool found = false;
@@ -221,6 +229,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_completion_normalize_query(BusterX86Metadata
 {
     u32 metadata_index = 0;
     u32 physical_index = 0;
+    u32 visible_index = 0;
     u32 gpr_role_index = 0;
     BusterX86MetadataOperand metadata = {0};
     String8 atom = {0};
@@ -232,6 +241,18 @@ BUSTER_GLOBAL_LOCAL void buster_x86_completion_normalize_query(BusterX86Metadata
     {
         if (!buster_x86_metadata_operand(form.id, metadata_index, &metadata)) return;
         if (!metadata.visible) continue;
+        if (buster_x86_completion_apx_evex_memory_witness(form) &&
+            buster_x86_completion_mask_decorator(form, visible_index))
+        {
+            visible_index += 1;
+            if (physical_index < query.operand_count &&
+                operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                operands[physical_index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK &&
+                operands[physical_index].reg.index == 0)
+                physical_index += 1;
+            continue;
+        }
+        visible_index += 1;
         if ((form.apx_flags & BUSTER_X86_METADATA_APX_NDD) &&
             operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
             operands[physical_index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR)
@@ -263,6 +284,21 @@ BUSTER_GLOBAL_LOCAL void buster_x86_completion_normalize_query(BusterX86Metadata
         {
             operands[physical_index].memory.has_displacement = true;
             operands[physical_index].memory.displacement = 1;
+        }
+        else if (buster_x86_completion_apx_evex_memory_witness(form) &&
+                 operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+        {
+            // This EVEX load is the bounded public-source witness for an
+            // extended GPR address.  The element schema is u32, while the
+            // source memory tuple is the full XMM destination.  Use r16 so
+            // both dialects must retain the APX address extension instead
+            // of proving only the ordinary low-register AVX-512 spelling.
+            operands[physical_index].memory.has_base = true;
+            operands[physical_index].memory.base = (BusterX86MetadataPhysicalRegister){
+                .index = 16, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR};
+            operands[physical_index].memory.source_width = 128;
+            operands[physical_index].memory.has_displacement = false;
+            operands[physical_index].memory.displacement = 0;
         }
         else if (operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE &&
                  compact_immediate_sibling)
@@ -446,6 +482,13 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
                 query.operands[physical_index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK &&
                 query.operands[physical_index].reg.index == query.attributes.mask_register)
                 physical_index += 1;
+            else if (buster_x86_completion_apx_evex_memory_witness(form) && physical_index < query.operand_count &&
+                     query.operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                     query.operands[physical_index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK &&
+                     query.operands[physical_index].reg.index == 0)
+                // Form 5584 is the bounded EGPR-address witness. Its MASK1
+                // metadata slot is optional and k0 has no public decorator.
+                physical_index += 1;
             continue;
         }
         if (physical_index >= query.operand_count) return (String8){0};
@@ -491,6 +534,12 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_source(Arena* arena, Buste
 {
     u32 index = 0;
     u32 reverse = 0;
+    u32 metadata_index = 0;
+    u32 physical_index = 0;
+    u32 visible_index = 0;
+    u32 source_operand_count = 0;
+    BusterX86MetadataOperand metadata = {0};
+    BusterX86MetadataPhysicalOperand source_operands[16] = {0};
     BusterX86MetadataPhysicalOperand operand = {0};
     String8 spelling = {0};
     String8 source = {0};
@@ -502,15 +551,45 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_source(Arena* arena, Buste
         query.attributes.repne || query.attributes.lock)
         return (String8){0};
     if (query.attributes.implicit_segment != BUSTER_X86_METADATA_SEGMENT_NONE) return (String8){0};
-    for (index = 0; index < query.operand_count; index += 1)
-        if (query.operands[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
-            (query.operands[index].memory.vsib || query.operands[index].memory.has_segment))
+    if (buster_x86_completion_apx_evex_memory_witness(form))
+    {
+        for (metadata_index = 0; metadata_index < form.operand_count; metadata_index += 1)
+        {
+            metadata = (BusterX86MetadataOperand){0};
+            if (!buster_x86_metadata_operand(form.id, metadata_index, &metadata)) return (String8){0};
+            if (!metadata.visible) continue;
+            if (buster_x86_completion_mask_decorator(form, visible_index))
+            {
+                visible_index += 1;
+                if (physical_index < query.operand_count &&
+                    query.operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                    query.operands[physical_index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK &&
+                    query.operands[physical_index].reg.index == 0)
+                    physical_index += 1;
+                continue;
+            }
+            visible_index += 1;
+            if (physical_index >= query.operand_count || source_operand_count >= BUSTER_ARRAY_LENGTH(source_operands))
+                return (String8){0};
+            source_operands[source_operand_count++] = query.operands[physical_index++];
+        }
+        if (physical_index != query.operand_count) return (String8){0};
+    }
+    else
+    {
+        if (query.operand_count > BUSTER_ARRAY_LENGTH(source_operands)) return (String8){0};
+        source_operand_count = query.operand_count;
+        for (index = 0; index < query.operand_count; index += 1) source_operands[index] = query.operands[index];
+    }
+    for (index = 0; index < source_operand_count; index += 1)
+        if (source_operands[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+            (source_operands[index].memory.vsib || source_operands[index].memory.has_segment))
             return (String8){0};
     source = buster_x86_completion_mnemonic(form);
-    for (reverse = query.operand_count; reverse; reverse -= 1)
+    for (reverse = source_operand_count; reverse; reverse -= 1)
     {
         index = reverse - 1;
-        operand = query.operands[index];
+        operand = source_operands[index];
         spelling = operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER
                        ? buster_x86_completion_att_register(arena, operand.reg)
                        : operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY
@@ -520,8 +599,8 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_source(Arena* arena, Buste
                                    : operand.has_symbol ? string_format(arena, S8("${S8}"), buster_x86_completion_symbol(arena, operand.symbol, operand.addend))
                                                          : string_format(arena, S8("$0"));
         if (!spelling.length) return (String8){0};
-        source = index + 1 == query.operand_count ? string_format(arena, S8("{S8} {S8}"), source, spelling)
-                                                  : string_format(arena, S8("{S8}, {S8}"), source, spelling);
+        source = index + 1 == source_operand_count ? string_format(arena, S8("{S8} {S8}"), source, spelling)
+                                                   : string_format(arena, S8("{S8}, {S8}"), source, spelling);
     }
     return string_format(arena, S8("{S8}\n"), source);
 }

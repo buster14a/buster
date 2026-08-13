@@ -131,6 +131,32 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH);
     probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, 529, false);
     BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
+    memset(probe_operands, 0, sizeof(probe_operands));
+    memset(probe_features, 0, sizeof(probe_features));
+    memset(probe_mnemonic, 0, sizeof(probe_mnemonic));
+    memset(probe_bytes, 0, sizeof(probe_bytes));
+    probe_query = (BusterX86MetadataPhysicalQuery){0};
+    BUSTER_TEST(arguments, buster_x86_completion_census_test_query(5584, &probe_query, probe_operands, probe_features,
+                                                                    probe_mnemonic));
+    BUSTER_TEST(arguments, probe_query.operand_count == 3 &&
+                             probe_operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                             probe_operands[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM &&
+                             probe_operands[0].reg.index == 0 &&
+                             probe_operands[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                             probe_operands[1].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK &&
+                             probe_operands[1].reg.index == 0 &&
+                             probe_operands[2].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+                             probe_operands[2].memory.has_base && probe_operands[2].memory.base.index == 16 &&
+                             probe_operands[2].memory.base.width == 64 && probe_operands[2].memory.source_width == 128);
+    probe_emit = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+        .physical = probe_query, .form_id = 5584, .output = probe_bytes, .output_capacity = sizeof(probe_bytes)});
+    BUSTER_TEST(arguments, probe_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && probe_emit.byte_count == 6 &&
+                             probe_bytes[0] == 0x62 && probe_bytes[1] == 0xf9 && probe_bytes[2] == 0x7d &&
+                             probe_bytes[3] == 0x08 && probe_bytes[4] == 0x6f && probe_bytes[5] == 0x00);
+    probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, 5584, false);
+    BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
+    probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, 5584, true);
+    BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
     probe_class = buster_x86_completion_census_test_source_class(arguments->arena, census_target, 1436, false);
     BUSTER_TEST(arguments, probe_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT);
     for (probe_index = 0; probe_index < 4; probe_index += 1)
