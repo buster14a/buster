@@ -104,7 +104,12 @@ struct BusterX86CompletionCensusQuery
     // reported as excluded; this API does not synthesize them.
     bool run_intel;
     bool run_att;
-    u8 reserved[6];
+    // Structural-only mode still performs the canonical query and direct
+    // metadata emission, but deliberately skips all Intel/AT&T source
+    // synthesis and assembly checks.  In this mode the source partition
+    // fields in the result are zero by contract.
+    bool structural_only;
+    u8 reserved[5];
 };
 
 typedef struct BusterX86CompletionCensusResult BusterX86CompletionCensusResult;
@@ -127,6 +132,9 @@ struct BusterX86CompletionCensusResult
     u32 metadata_emit_failed_count;
     u32 canonical_query_failed_count;
     u32 metadata_blocked_count;
+    // These three fields are zero when the query is structural-only.  For a
+    // source-enabled query, each dialect partition is measured against the
+    // emitted metadata rows.
     u32 source_partition_expected_count;
     u32 intel_source_partition_count;
     u32 att_source_partition_count;

@@ -608,8 +608,12 @@ BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86Comple
     BusterX86MetadataRelocation direct_relocations[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
     BusterX86MetadataEmitResult emitted = {0};
     BusterX86CompletionCensusSourceResult source = {0};
-    run_intel = query.run_intel || (!query.run_intel && !query.run_att);
-    run_att = query.run_att || (!query.run_intel && !query.run_att);
+    // With neither dialect selected, preserve the ordinary behavior of
+    // running both.  Structural-only is an explicit override: it performs
+    // the structural/direct metadata pass while never constructing or
+    // assembling an Intel or AT&T spelling.
+    run_intel = !query.structural_only && (query.run_intel || (!query.run_intel && !query.run_att));
+    run_att = !query.structural_only && (query.run_att || (!query.run_intel && !query.run_att));
     result.records_complete = !query.records || query.record_capacity >= result.required_form_count;
     write_count = query.records ? BUSTER_MIN(query.record_capacity, result.required_form_count) : 0;
     buster_x86_metadata_prewarm();
@@ -775,13 +779,16 @@ BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86Comple
     result.metadata_partition_complete = result.metadata_emitted_count == BUSTER_X86_COMPLETION_CENSUS_EXPECTED_METADATA_EMITTED_COUNT &&
                                          result.metadata_blocked_count == BUSTER_X86_COMPLETION_CENSUS_EXPECTED_METADATA_BLOCKED_COUNT &&
                                          result.normalized_form_count == BUSTER_X86_COMPLETION_CENSUS_EXPECTED_NORMALIZED_COUNT;
-    result.source_partition_expected_count = result.metadata_emitted_count;
-    result.intel_source_partition_count = result.intel_exact_count + result.intel_normalized_relocation_count +
-                                          result.intel_alias_equivalent_count + result.intel_unresolved_count +
-                                          result.intel_byte_mismatch_count + result.intel_relocation_mismatch_count;
-    result.att_source_partition_count = result.att_exact_count + result.att_normalized_relocation_count +
-                                        result.att_alias_equivalent_count + result.att_unresolved_count +
-                                        result.att_byte_mismatch_count + result.att_relocation_mismatch_count;
+    if (!query.structural_only)
+    {
+        result.source_partition_expected_count = result.metadata_emitted_count;
+        result.intel_source_partition_count = result.intel_exact_count + result.intel_normalized_relocation_count +
+                                              result.intel_alias_equivalent_count + result.intel_unresolved_count +
+                                              result.intel_byte_mismatch_count + result.intel_relocation_mismatch_count;
+        result.att_source_partition_count = result.att_exact_count + result.att_normalized_relocation_count +
+                                            result.att_alias_equivalent_count + result.att_unresolved_count +
+                                            result.att_byte_mismatch_count + result.att_relocation_mismatch_count;
+    }
     result.structural_complete = result.records_complete && result.form_partition_complete && result.normalized_partition_complete &&
                                  result.metadata_partition_complete;
     result.diagnostics_complete = !query.diagnostics || result.diagnostic_dropped_count == 0;
