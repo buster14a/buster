@@ -167,6 +167,86 @@ static AssemblyA64DirectSIMDTransformCase const assembly_a64_direct_simd_transfo
     {S8_INITIALIZER("umin v0.8h, v1.8h, v2.8h\n"), {0x20, 0x6c, 0x62, 0x6e}},
     {S8_INITIALIZER("umin v0.2s, v1.2s, v2.2s\n"), {0x20, 0x6c, 0xa2, 0x2e}},
     {S8_INITIALIZER("umin v0.4s, v1.4s, v2.4s\n"), {0x20, 0x6c, 0xa2, 0x6e}},
+    {S8_INITIALIZER("sqadd v0.8b, v1.8b, v2.8b\n"), {0x20, 0x0c, 0x22, 0x0e}},
+    {S8_INITIALIZER("sqadd v0.16b, v1.16b, v2.16b\n"), {0x20, 0x0c, 0x22, 0x4e}},
+    {S8_INITIALIZER("sqadd v0.4h, v1.4h, v2.4h\n"), {0x20, 0x0c, 0x62, 0x0e}},
+    {S8_INITIALIZER("sqadd v0.8h, v1.8h, v2.8h\n"), {0x20, 0x0c, 0x62, 0x4e}},
+    {S8_INITIALIZER("sqadd v0.2s, v1.2s, v2.2s\n"), {0x20, 0x0c, 0xa2, 0x0e}},
+    {S8_INITIALIZER("sqadd v0.4s, v1.4s, v2.4s\n"), {0x20, 0x0c, 0xa2, 0x4e}},
+    {S8_INITIALIZER("sqadd v0.2d, v1.2d, v2.2d\n"), {0x20, 0x0c, 0xe2, 0x4e}},
+    {S8_INITIALIZER("sqsub v0.8b, v1.8b, v2.8b\n"), {0x20, 0x2c, 0x22, 0x0e}},
+    {S8_INITIALIZER("sqsub v0.16b, v1.16b, v2.16b\n"), {0x20, 0x2c, 0x22, 0x4e}},
+    {S8_INITIALIZER("sqsub v0.4h, v1.4h, v2.4h\n"), {0x20, 0x2c, 0x62, 0x0e}},
+    {S8_INITIALIZER("sqsub v0.8h, v1.8h, v2.8h\n"), {0x20, 0x2c, 0x62, 0x4e}},
+    {S8_INITIALIZER("sqsub v0.2s, v1.2s, v2.2s\n"), {0x20, 0x2c, 0xa2, 0x0e}},
+    {S8_INITIALIZER("sqsub v0.4s, v1.4s, v2.4s\n"), {0x20, 0x2c, 0xa2, 0x4e}},
+    {S8_INITIALIZER("sqsub v0.2d, v1.2d, v2.2d\n"), {0x20, 0x2c, 0xe2, 0x4e}},
+    {S8_INITIALIZER("uqadd v0.8b, v1.8b, v2.8b\n"), {0x20, 0x0c, 0x22, 0x2e}},
+    {S8_INITIALIZER("uqadd v0.16b, v1.16b, v2.16b\n"), {0x20, 0x0c, 0x22, 0x6e}},
+    {S8_INITIALIZER("uqadd v0.4h, v1.4h, v2.4h\n"), {0x20, 0x0c, 0x62, 0x2e}},
+    {S8_INITIALIZER("uqadd v0.8h, v1.8h, v2.8h\n"), {0x20, 0x0c, 0x62, 0x6e}},
+    {S8_INITIALIZER("uqadd v0.2s, v1.2s, v2.2s\n"), {0x20, 0x0c, 0xa2, 0x2e}},
+    {S8_INITIALIZER("uqadd v0.4s, v1.4s, v2.4s\n"), {0x20, 0x0c, 0xa2, 0x6e}},
+    {S8_INITIALIZER("uqadd v0.2d, v1.2d, v2.2d\n"), {0x20, 0x0c, 0xe2, 0x6e}},
+    {S8_INITIALIZER("uqsub v0.8b, v1.8b, v2.8b\n"), {0x20, 0x2c, 0x22, 0x2e}},
+    {S8_INITIALIZER("uqsub v0.16b, v1.16b, v2.16b\n"), {0x20, 0x2c, 0x22, 0x6e}},
+    {S8_INITIALIZER("uqsub v0.4h, v1.4h, v2.4h\n"), {0x20, 0x2c, 0x62, 0x2e}},
+    {S8_INITIALIZER("uqsub v0.8h, v1.8h, v2.8h\n"), {0x20, 0x2c, 0x62, 0x6e}},
+    {S8_INITIALIZER("uqsub v0.2s, v1.2s, v2.2s\n"), {0x20, 0x2c, 0xa2, 0x2e}},
+    {S8_INITIALIZER("uqsub v0.4s, v1.4s, v2.4s\n"), {0x20, 0x2c, 0xa2, 0x6e}},
+    {S8_INITIALIZER("uqsub v0.2d, v1.2d, v2.2d\n"), {0x20, 0x2c, 0xe2, 0x6e}},
+    {S8_INITIALIZER("sqrshl v0.8b, v1.8b, v2.8b\n"), {0x20, 0x5c, 0x22, 0x0e}},
+    {S8_INITIALIZER("sqrshl v0.16b, v1.16b, v2.16b\n"), {0x20, 0x5c, 0x22, 0x4e}},
+    {S8_INITIALIZER("sqrshl v0.4h, v1.4h, v2.4h\n"), {0x20, 0x5c, 0x62, 0x0e}},
+    {S8_INITIALIZER("sqrshl v0.8h, v1.8h, v2.8h\n"), {0x20, 0x5c, 0x62, 0x4e}},
+    {S8_INITIALIZER("sqrshl v0.2s, v1.2s, v2.2s\n"), {0x20, 0x5c, 0xa2, 0x0e}},
+    {S8_INITIALIZER("sqrshl v0.4s, v1.4s, v2.4s\n"), {0x20, 0x5c, 0xa2, 0x4e}},
+    {S8_INITIALIZER("sqrshl v0.2d, v1.2d, v2.2d\n"), {0x20, 0x5c, 0xe2, 0x4e}},
+    {S8_INITIALIZER("sqshl v0.8b, v1.8b, v2.8b\n"), {0x20, 0x4c, 0x22, 0x0e}},
+    {S8_INITIALIZER("sqshl v0.16b, v1.16b, v2.16b\n"), {0x20, 0x4c, 0x22, 0x4e}},
+    {S8_INITIALIZER("sqshl v0.4h, v1.4h, v2.4h\n"), {0x20, 0x4c, 0x62, 0x0e}},
+    {S8_INITIALIZER("sqshl v0.8h, v1.8h, v2.8h\n"), {0x20, 0x4c, 0x62, 0x4e}},
+    {S8_INITIALIZER("sqshl v0.2s, v1.2s, v2.2s\n"), {0x20, 0x4c, 0xa2, 0x0e}},
+    {S8_INITIALIZER("sqshl v0.4s, v1.4s, v2.4s\n"), {0x20, 0x4c, 0xa2, 0x4e}},
+    {S8_INITIALIZER("sqshl v0.2d, v1.2d, v2.2d\n"), {0x20, 0x4c, 0xe2, 0x4e}},
+    {S8_INITIALIZER("uqrshl v0.8b, v1.8b, v2.8b\n"), {0x20, 0x5c, 0x22, 0x2e}},
+    {S8_INITIALIZER("uqrshl v0.16b, v1.16b, v2.16b\n"), {0x20, 0x5c, 0x22, 0x6e}},
+    {S8_INITIALIZER("uqrshl v0.4h, v1.4h, v2.4h\n"), {0x20, 0x5c, 0x62, 0x2e}},
+    {S8_INITIALIZER("uqrshl v0.8h, v1.8h, v2.8h\n"), {0x20, 0x5c, 0x62, 0x6e}},
+    {S8_INITIALIZER("uqrshl v0.2s, v1.2s, v2.2s\n"), {0x20, 0x5c, 0xa2, 0x2e}},
+    {S8_INITIALIZER("uqrshl v0.4s, v1.4s, v2.4s\n"), {0x20, 0x5c, 0xa2, 0x6e}},
+    {S8_INITIALIZER("uqrshl v0.2d, v1.2d, v2.2d\n"), {0x20, 0x5c, 0xe2, 0x6e}},
+    {S8_INITIALIZER("uqshl v0.8b, v1.8b, v2.8b\n"), {0x20, 0x4c, 0x22, 0x2e}},
+    {S8_INITIALIZER("uqshl v0.16b, v1.16b, v2.16b\n"), {0x20, 0x4c, 0x22, 0x6e}},
+    {S8_INITIALIZER("uqshl v0.4h, v1.4h, v2.4h\n"), {0x20, 0x4c, 0x62, 0x2e}},
+    {S8_INITIALIZER("uqshl v0.8h, v1.8h, v2.8h\n"), {0x20, 0x4c, 0x62, 0x6e}},
+    {S8_INITIALIZER("uqshl v0.2s, v1.2s, v2.2s\n"), {0x20, 0x4c, 0xa2, 0x2e}},
+    {S8_INITIALIZER("uqshl v0.4s, v1.4s, v2.4s\n"), {0x20, 0x4c, 0xa2, 0x6e}},
+    {S8_INITIALIZER("uqshl v0.2d, v1.2d, v2.2d\n"), {0x20, 0x4c, 0xe2, 0x6e}},
+    {S8_INITIALIZER("srhadd v0.8b, v1.8b, v2.8b\n"), {0x20, 0x14, 0x22, 0x0e}},
+    {S8_INITIALIZER("srhadd v0.16b, v1.16b, v2.16b\n"), {0x20, 0x14, 0x22, 0x4e}},
+    {S8_INITIALIZER("srhadd v0.4h, v1.4h, v2.4h\n"), {0x20, 0x14, 0x62, 0x0e}},
+    {S8_INITIALIZER("srhadd v0.8h, v1.8h, v2.8h\n"), {0x20, 0x14, 0x62, 0x4e}},
+    {S8_INITIALIZER("srhadd v0.2s, v1.2s, v2.2s\n"), {0x20, 0x14, 0xa2, 0x0e}},
+    {S8_INITIALIZER("srhadd v0.4s, v1.4s, v2.4s\n"), {0x20, 0x14, 0xa2, 0x4e}},
+    {S8_INITIALIZER("urhadd v0.8b, v1.8b, v2.8b\n"), {0x20, 0x14, 0x22, 0x2e}},
+    {S8_INITIALIZER("urhadd v0.16b, v1.16b, v2.16b\n"), {0x20, 0x14, 0x22, 0x6e}},
+    {S8_INITIALIZER("urhadd v0.4h, v1.4h, v2.4h\n"), {0x20, 0x14, 0x62, 0x2e}},
+    {S8_INITIALIZER("urhadd v0.8h, v1.8h, v2.8h\n"), {0x20, 0x14, 0x62, 0x6e}},
+    {S8_INITIALIZER("urhadd v0.2s, v1.2s, v2.2s\n"), {0x20, 0x14, 0xa2, 0x2e}},
+    {S8_INITIALIZER("urhadd v0.4s, v1.4s, v2.4s\n"), {0x20, 0x14, 0xa2, 0x6e}},
+    {S8_INITIALIZER("uhadd v0.8b, v1.8b, v2.8b\n"), {0x20, 0x04, 0x22, 0x2e}},
+    {S8_INITIALIZER("uhadd v0.16b, v1.16b, v2.16b\n"), {0x20, 0x04, 0x22, 0x6e}},
+    {S8_INITIALIZER("uhadd v0.4h, v1.4h, v2.4h\n"), {0x20, 0x04, 0x62, 0x2e}},
+    {S8_INITIALIZER("uhadd v0.8h, v1.8h, v2.8h\n"), {0x20, 0x04, 0x62, 0x6e}},
+    {S8_INITIALIZER("uhadd v0.2s, v1.2s, v2.2s\n"), {0x20, 0x04, 0xa2, 0x2e}},
+    {S8_INITIALIZER("uhadd v0.4s, v1.4s, v2.4s\n"), {0x20, 0x04, 0xa2, 0x6e}},
+    {S8_INITIALIZER("uhsub v0.8b, v1.8b, v2.8b\n"), {0x20, 0x24, 0x22, 0x2e}},
+    {S8_INITIALIZER("uhsub v0.16b, v1.16b, v2.16b\n"), {0x20, 0x24, 0x22, 0x6e}},
+    {S8_INITIALIZER("uhsub v0.4h, v1.4h, v2.4h\n"), {0x20, 0x24, 0x62, 0x2e}},
+    {S8_INITIALIZER("uhsub v0.8h, v1.8h, v2.8h\n"), {0x20, 0x24, 0x62, 0x6e}},
+    {S8_INITIALIZER("uhsub v0.2s, v1.2s, v2.2s\n"), {0x20, 0x24, 0xa2, 0x2e}},
+    {S8_INITIALIZER("uhsub v0.4s, v1.4s, v2.4s\n"), {0x20, 0x24, 0xa2, 0x6e}},
 };
 
 // End-to-end direct-GPR corpus.  Sources use ordinary W/X registers (the
@@ -407,12 +487,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 52);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 52);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 338);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 19);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 64);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 64);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 326);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 31);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 33);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 244);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 232);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 94);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     arguments->show(arguments,
@@ -3370,7 +3450,19 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
            "umaxp v31.4s, v30.4s, v29.4s\n"
            "umax v31.4s, v30.4s, v29.4s\n"
            "uminp v31.4s, v30.4s, v29.4s\n"
-           "umin v31.4s, v30.4s, v29.4s\n"),
+           "umin v31.4s, v30.4s, v29.4s\n"
+           "sqadd v31.2d, v30.2d, v29.2d\n"
+           "sqsub v31.2d, v30.2d, v29.2d\n"
+           "uqadd v31.2d, v30.2d, v29.2d\n"
+           "uqsub v31.2d, v30.2d, v29.2d\n"
+           "sqrshl v31.2d, v30.2d, v29.2d\n"
+           "sqshl v31.2d, v30.2d, v29.2d\n"
+           "uqrshl v31.2d, v30.2d, v29.2d\n"
+           "uqshl v31.2d, v30.2d, v29.2d\n"
+           "srhadd v31.4s, v30.4s, v29.4s\n"
+           "urhadd v31.4s, v30.4s, v29.4s\n"
+           "uhadd v31.4s, v30.4s, v29.4s\n"
+           "uhsub v31.4s, v30.4s, v29.4s\n"),
         (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
     static u8 const expected_aarch64_advsimd_transform_boundary[] = {
         0xdf, 0xbb, 0xe0, 0x4e,
@@ -3392,6 +3484,18 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         0xdf, 0x67, 0xbd, 0x6e,
         0xdf, 0xaf, 0xbd, 0x6e,
         0xdf, 0x6f, 0xbd, 0x6e,
+        0xdf, 0x0f, 0xfd, 0x4e,
+        0xdf, 0x2f, 0xfd, 0x4e,
+        0xdf, 0x0f, 0xfd, 0x6e,
+        0xdf, 0x2f, 0xfd, 0x6e,
+        0xdf, 0x5f, 0xfd, 0x4e,
+        0xdf, 0x4f, 0xfd, 0x4e,
+        0xdf, 0x5f, 0xfd, 0x6e,
+        0xdf, 0x4f, 0xfd, 0x6e,
+        0xdf, 0x17, 0xbd, 0x4e,
+        0xdf, 0x17, 0xbd, 0x6e,
+        0xdf, 0x07, 0xbd, 0x6e,
+        0xdf, 0x27, 0xbd, 0x6e,
     };
     BUSTER_TEST(arguments, aarch64_advsimd_transform_boundary.diagnostic_count == 0 &&
                                assembly_test_bytes_equal(aarch64_advsimd_transform_boundary.bytes,
@@ -3419,7 +3523,27 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_advsimd_transform_case_insensitive.diagnostic_count == 0 &&
                                assembly_test_bytes_equal(aarch64_advsimd_transform_case_insensitive.bytes,
                                                          expected_aarch64_advsimd_transform_case_insensitive,
-                                                         sizeof(expected_aarch64_advsimd_transform_case_insensitive)));
+                               sizeof(expected_aarch64_advsimd_transform_case_insensitive)));
+    AssemblyEncodeResult aarch64_advsimd_new_case_insensitive = assembly_encode(
+        arguments->arena, S8("SQADD V0.2D, V1.2D, V2.2D\nSQSUB V0.2D, V1.2D, V2.2D\n"
+                             "UQADD V0.2D, V1.2D, V2.2D\nUQSUB V0.2D, V1.2D, V2.2D\n"
+                             "SQRSHL V0.2D, V1.2D, V2.2D\nSQSHL V0.2D, V1.2D, V2.2D\n"
+                             "UQRSHL V0.2D, V1.2D, V2.2D\nUQSHL V0.2D, V1.2D, V2.2D\n"
+                             "SRHADD V0.4S, V1.4S, V2.4S\nURHADD V0.4S, V1.4S, V2.4S\n"
+                             "UHADD V0.4S, V1.4S, V2.4S\nUHSUB V0.4S, V1.4S, V2.4S\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    static u8 const expected_aarch64_advsimd_new_case_insensitive[] = {
+        0x20, 0x0c, 0xe2, 0x4e, 0x20, 0x2c, 0xe2, 0x4e,
+        0x20, 0x0c, 0xe2, 0x6e, 0x20, 0x2c, 0xe2, 0x6e,
+        0x20, 0x5c, 0xe2, 0x4e, 0x20, 0x4c, 0xe2, 0x4e,
+        0x20, 0x5c, 0xe2, 0x6e, 0x20, 0x4c, 0xe2, 0x6e,
+        0x20, 0x14, 0xa2, 0x4e, 0x20, 0x14, 0xa2, 0x6e,
+        0x20, 0x04, 0xa2, 0x6e, 0x20, 0x24, 0xa2, 0x6e,
+    };
+    BUSTER_TEST(arguments, aarch64_advsimd_new_case_insensitive.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_advsimd_new_case_insensitive.bytes,
+                                                         expected_aarch64_advsimd_new_case_insensitive,
+                                                         sizeof(expected_aarch64_advsimd_new_case_insensitive)));
     Target aarch64_no_transform_neon = aarch64_advsimd_target;
     aarch64_no_transform_neon.cpu_features =
         target_cpu_features_remove(aarch64_no_transform_neon.cpu_features, TARGET_CPU_FEATURE_AARCH64_NEON);
@@ -3439,9 +3563,21 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                              "umaxp v0.4s, v1.4s, v2.4s\n"
                              "umax v0.4s, v1.4s, v2.4s\n"
                              "uminp v0.4s, v1.4s, v2.4s\n"
-                             "umin v0.4s, v1.4s, v2.4s\n"),
+                             "umin v0.4s, v1.4s, v2.4s\n"
+                             "sqadd v0.2d, v1.2d, v2.2d\n"
+                             "sqsub v0.2d, v1.2d, v2.2d\n"
+                             "uqadd v0.2d, v1.2d, v2.2d\n"
+                             "uqsub v0.2d, v1.2d, v2.2d\n"
+                             "sqrshl v0.2d, v1.2d, v2.2d\n"
+                             "sqshl v0.2d, v1.2d, v2.2d\n"
+                             "uqrshl v0.2d, v1.2d, v2.2d\n"
+                             "uqshl v0.2d, v1.2d, v2.2d\n"
+                             "srhadd v0.4s, v1.4s, v2.4s\n"
+                             "urhadd v0.4s, v1.4s, v2.4s\n"
+                             "uhadd v0.4s, v1.4s, v2.4s\n"
+                             "uhsub v0.4s, v1.4s, v2.4s\n"),
         (AssemblyEncodeOptions){.target = aarch64_no_transform_neon});
-    BUSTER_TEST(arguments, aarch64_advsimd_transform_without_feature.diagnostic_count == 16 &&
+    BUSTER_TEST(arguments, aarch64_advsimd_transform_without_feature.diagnostic_count == 28 &&
                                aarch64_advsimd_transform_without_feature.bytes.length == 0 &&
                                aarch64_advsimd_transform_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     for (u32 diagnostic_index = 0;
@@ -3477,6 +3613,22 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8_INITIALIZER("umax v0.2d, v1.2d, v2.2d\n"),
         S8_INITIALIZER("uminp v0.2d, v1.2d, v2.2d\n"),
         S8_INITIALIZER("umin v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("sqadd v0.2d, v1.2d\n"),
+        S8_INITIALIZER("sqsub v0.2d, v1.2d, v2.2d, v3.2d\n"),
+        S8_INITIALIZER("uqadd v32.4s, v1.4s, v2.4s\n"),
+        S8_INITIALIZER("uqsub v0.4s, v1.4s, v32.4s\n"),
+        S8_INITIALIZER("sqrshl v0.2d, v1.4s, v2.2d\n"),
+        S8_INITIALIZER("sqshl v0.1d, v1.1d, v2.1d\n"),
+        S8_INITIALIZER("uqrshl q0, q1, q2\n"),
+        S8_INITIALIZER("uqshl v0.2q, v1.2q, v2.2q\n"),
+        S8_INITIALIZER("srhadd v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("urhadd v0.4s, v1.4s\n"),
+        S8_INITIALIZER("uhadd v0.4s, v1.4s, v2.4s, v3.4s\n"),
+        S8_INITIALIZER("uhsub v32.4s, v1.4s, v2.4s\n"),
+        S8_INITIALIZER("srhadd v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("urhadd v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("uhadd v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("uhsub v0.2d, v1.2d, v2.2d\n"),
     };
     for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_advsimd_transform); invalid_index += 1)
     {
