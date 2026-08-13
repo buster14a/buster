@@ -3,6 +3,7 @@
 
 #include <buster/tests/compiler/assembly/generated/aarch64_scalar_integer_corpus.generated.h>
 #include <buster/lib/compiler/assembly/aarch64_control_semantics.h>
+#include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_system_registers.h>
 #include <buster/lib/compiler/assembly/aarch64_syntax.h>
 
@@ -108,6 +109,135 @@ static AssemblyA64M1GprCorpusCase const assembly_a64_m1_gpr_corpus[] = {
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+
+    /* The generated direct-SIMD owner table is the bounded denominator for
+     * the public spelling adapter.  Keep this census independent of the
+     * handwritten instruction tests below: stale digests, IDs, spellings, or
+     * generated-row metadata should fail before an individual form can mask
+     * the gap. */
+    u32 direct_simd_row_count = buster_a64_direct_simd_row_count();
+    u32 direct_simd_executable_count = buster_a64_direct_simd_executable_row_count();
+    u32 direct_simd_transform_count = buster_a64_direct_simd_transform_row_count();
+    u32 direct_simd_binding_count = buster_a64_direct_simd_arrangement_binding_count();
+    u32 direct_simd_spelling_count = assembly_test_aarch64_direct_simd_spelling_count();
+    BUSTER_TEST(arguments, direct_simd_row_count == 390);
+    BUSTER_TEST(arguments, direct_simd_executable_count == 390);
+    BUSTER_TEST(arguments, direct_simd_transform_count == 263);
+    BUSTER_TEST(arguments, direct_simd_binding_count == 658);
+    BUSTER_TEST(arguments, direct_simd_spelling_count > 0 && direct_simd_spelling_count <= direct_simd_row_count);
+
+    u8 direct_simd_covered_rows[390] = {0};
+    u32 direct_simd_covered_count = 0;
+    u32 direct_simd_covered_transform_count = 0;
+    u32 direct_simd_covered_no_transform_count = 0;
+    u32 direct_simd_invalid_spelling_count = 0;
+    u32 direct_simd_duplicate_spelling_count = 0;
+    u32 direct_simd_duplicate_row_count = 0;
+    bool direct_simd_rows_unique = true;
+    bool direct_simd_spellings_unique = true;
+
+    for (u32 row_index = 0; row_index < direct_simd_row_count; row_index += 1)
+    {
+        BusterA64DirectSIMDRowInfo row = {0};
+        bool row_valid = buster_a64_direct_simd_row(row_index, &row) && row.row_index == row_index && row.executable &&
+                         row.source_digest != 0 && row.id.length != 0 && row.operand_count > 0 &&
+                         row.operand_count <= BUSTER_A64_DIRECT_SIMD_MAX_OPERANDS;
+        BUSTER_TEST(arguments, row_valid);
+        for (u32 prior_index = 0; prior_index < row_index; prior_index += 1)
+        {
+            BusterA64DirectSIMDRowInfo prior = {0};
+            bool prior_valid = buster_a64_direct_simd_row(prior_index, &prior);
+            bool unique = !prior_valid || !row_valid ||
+                          (prior.source_digest != row.source_digest && !string_equal(prior.id, row.id));
+            direct_simd_rows_unique = direct_simd_rows_unique && unique;
+            direct_simd_duplicate_row_count += (u32)!unique;
+        }
+    }
+
+    for (u32 spelling_index = 0; spelling_index < direct_simd_spelling_count; spelling_index += 1)
+    {
+        AssemblyAarch64DirectSIMDSpellingTest spelling = {0};
+        bool spelling_valid = assembly_test_aarch64_direct_simd_spelling_at(spelling_index, &spelling) &&
+                              spelling.mnemonic.length != 0 && spelling.source_digest != 0 && spelling.semantic_id.length != 0 &&
+                              spelling.operand_count > 0 && spelling.operand_count <= 4 && spelling.feature > TARGET_CPU_FEATURE_NONE &&
+                              spelling.feature < TARGET_CPU_FEATURE_COUNT;
+        for (u32 operand_index = 0; operand_index < spelling.operand_count && operand_index < 4; operand_index += 1)
+        {
+            spelling_valid = spelling_valid && spelling.arrangements[operand_index] > BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID &&
+                             spelling.arrangements[operand_index] < BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_COUNT;
+        }
+        for (u32 operand_index = spelling.operand_count; operand_index < 4; operand_index += 1)
+        {
+            spelling_valid = spelling_valid && spelling.arrangements[operand_index] == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
+        }
+
+        for (u32 prior_index = 0; prior_index < spelling_index; prior_index += 1)
+        {
+            AssemblyAarch64DirectSIMDSpellingTest prior = {0};
+            bool prior_valid = assembly_test_aarch64_direct_simd_spelling_at(prior_index, &prior);
+            bool unique = !prior_valid || !spelling_valid ||
+                          (!string_equal(prior.mnemonic, spelling.mnemonic) && prior.source_digest != spelling.source_digest &&
+                           !string_equal(prior.semantic_id, spelling.semantic_id));
+            direct_simd_spellings_unique = direct_simd_spellings_unique && unique;
+            direct_simd_duplicate_spelling_count += (u32)!unique;
+        }
+
+        u32 row_index = UINT32_MAX;
+        BusterA64DirectSIMDRowInfo row = {0};
+        bool resolved = spelling_valid && buster_a64_direct_simd_find_source_digest(spelling.source_digest, &row_index) &&
+                        buster_a64_direct_simd_row(row_index, &row) && row.executable && row.operand_count == spelling.operand_count &&
+                        string_equal(row.id, spelling.semantic_id) && row_index < direct_simd_row_count && !direct_simd_covered_rows[row_index];
+        BUSTER_TEST(arguments, resolved);
+        if (!resolved)
+        {
+            direct_simd_invalid_spelling_count += 1;
+            continue;
+        }
+        direct_simd_covered_rows[row_index] = 1;
+        direct_simd_covered_count += 1;
+        if (row.transform_bearing)
+        {
+            direct_simd_covered_transform_count += 1;
+        }
+        else
+        {
+            direct_simd_covered_no_transform_count += 1;
+        }
+    }
+
+    u32 direct_simd_uncovered_count = direct_simd_row_count >= direct_simd_covered_count
+                                          ? direct_simd_row_count - direct_simd_covered_count
+                                          : 0;
+    u32 direct_simd_uncovered_transform_count = direct_simd_transform_count >= direct_simd_covered_transform_count
+                                                    ? direct_simd_transform_count - direct_simd_covered_transform_count
+                                                    : 0;
+    u32 direct_simd_no_transform_count = direct_simd_row_count >= direct_simd_transform_count
+                                             ? direct_simd_row_count - direct_simd_transform_count
+                                             : 0;
+    u32 direct_simd_uncovered_no_transform_count = direct_simd_no_transform_count >= direct_simd_covered_no_transform_count
+                                                       ? direct_simd_no_transform_count - direct_simd_covered_no_transform_count
+                                                       : 0;
+    BUSTER_TEST(arguments, direct_simd_invalid_spelling_count == 0);
+    BUSTER_TEST(arguments, direct_simd_spellings_unique && direct_simd_duplicate_spelling_count == 0);
+    BUSTER_TEST(arguments, direct_simd_rows_unique && direct_simd_duplicate_row_count == 0);
+    AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
+    BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
+                                                                            &direct_simd_out_of_range_spelling));
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 17);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 17);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 373);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 0);
+    BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 17);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 263);
+    BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 110);
+    BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
+    arguments->show(arguments,
+                    S8("A64_DIRECT_SIMD_COVERAGE rows={u32} executable={u32} transform={u32} bindings={u32} spellings={u32} covered={u32} remaining={u32} covered_transform={u32} covered_no_transform={u32} uncovered_transform={u32} uncovered_no_transform={u32}\n"),
+                    direct_simd_row_count, direct_simd_executable_count, direct_simd_transform_count, direct_simd_binding_count,
+                    direct_simd_spelling_count, direct_simd_covered_count, direct_simd_uncovered_count,
+                    direct_simd_covered_transform_count, direct_simd_covered_no_transform_count,
+                    direct_simd_uncovered_transform_count, direct_simd_uncovered_no_transform_count);
+
     Target x86_target = {
         .cpu_arch = CPU_ARCH_X86_64,
         .os = OPERATING_SYSTEM_LINUX,

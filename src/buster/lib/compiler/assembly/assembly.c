@@ -2247,6 +2247,32 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDSpelling const assembly_aarch64_dir
       BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S}},
 };
 
+#if BUSTER_INCLUDE_TESTS
+u32 assembly_test_aarch64_direct_simd_spelling_count(void)
+{
+    return BUSTER_ARRAY_LENGTH(assembly_aarch64_direct_simd_spellings);
+}
+
+bool assembly_test_aarch64_direct_simd_spelling_at(u32 index, AssemblyAarch64DirectSIMDSpellingTest* result)
+{
+    if (!result || index >= BUSTER_ARRAY_LENGTH(assembly_aarch64_direct_simd_spellings))
+    {
+        return false;
+    }
+    AssemblyAarch64DirectSIMDSpelling const spelling = assembly_aarch64_direct_simd_spellings[index];
+    *result = (AssemblyAarch64DirectSIMDSpellingTest){.mnemonic = spelling.mnemonic,
+                                                      .source_digest = spelling.source_digest,
+                                                      .semantic_id = spelling.semantic_id,
+                                                      .operand_count = spelling.operand_count,
+                                                      .feature = spelling.feature,
+                                                      .arrangements = {(u8)spelling.arrangements[0],
+                                                                       (u8)spelling.arrangements[1],
+                                                                       (u8)spelling.arrangements[2],
+                                                                       (u8)spelling.arrangements[3]}};
+    return true;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_lookup(String8 mnemonic, AssemblyInstructionInfo* result)
 {
     if (!result)

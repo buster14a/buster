@@ -106,4 +106,21 @@ BUSTER_F_DECL AssemblyEncodeResult assembly_encode(Arena* arena, String8 source,
 // Narrow parser seam for delimiter and capacity regression tests.  Production
 // assembly parsing uses this same splitter for handwritten and metadata forms.
 BUSTER_F_DECL bool assembly_test_split_operands(String8 source, String8* operands, u32 operand_capacity, u32* operand_count);
+
+// Read-only census seam for the private direct-SIMD public spelling table.
+// The production table stays private; tests use this snapshot to prove every
+// spelling resolves to one executable generated semantic row.
+typedef struct AssemblyAarch64DirectSIMDSpellingTest AssemblyAarch64DirectSIMDSpellingTest;
+struct AssemblyAarch64DirectSIMDSpellingTest
+{
+    String8 mnemonic;
+    u64 source_digest;
+    String8 semantic_id;
+    u8 operand_count;
+    TargetCpuFeature feature;
+    u8 arrangements[4];
+};
+BUSTER_F_DECL u32 assembly_test_aarch64_direct_simd_spelling_count(void);
+BUSTER_F_DECL bool assembly_test_aarch64_direct_simd_spelling_at(u32 index,
+                                                                  AssemblyAarch64DirectSIMDSpellingTest* result);
 #endif
