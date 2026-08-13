@@ -268,6 +268,53 @@ static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_bitselec
     {S8_INITIALIZER("bsl v0.16b, v1.16b, v2.16b\n"), {0x20, 0x1c, 0x62, 0x6e}},
 };
 
+/* Exhaustive legal arrangements for the integer comparison same-register
+ * cohort. Bytes are independent llvm-mc 22.1.8 literals. */
+static AssemblyA64DirectSIMDEncodingCase const assembly_a64_direct_simd_compare_cases[] = {
+    {S8_INITIALIZER("cmeq v0.8b, v1.8b, v2.8b\n"), {0x20, 0x8c, 0x22, 0x2e}},
+    {S8_INITIALIZER("cmeq v0.16b, v1.16b, v2.16b\n"), {0x20, 0x8c, 0x22, 0x6e}},
+    {S8_INITIALIZER("cmeq v0.4h, v1.4h, v2.4h\n"), {0x20, 0x8c, 0x62, 0x2e}},
+    {S8_INITIALIZER("cmeq v0.8h, v1.8h, v2.8h\n"), {0x20, 0x8c, 0x62, 0x6e}},
+    {S8_INITIALIZER("cmeq v0.2s, v1.2s, v2.2s\n"), {0x20, 0x8c, 0xa2, 0x2e}},
+    {S8_INITIALIZER("cmeq v0.4s, v1.4s, v2.4s\n"), {0x20, 0x8c, 0xa2, 0x6e}},
+    {S8_INITIALIZER("cmeq v0.2d, v1.2d, v2.2d\n"), {0x20, 0x8c, 0xe2, 0x6e}},
+    {S8_INITIALIZER("cmge v0.8b, v1.8b, v2.8b\n"), {0x20, 0x3c, 0x22, 0x0e}},
+    {S8_INITIALIZER("cmge v0.16b, v1.16b, v2.16b\n"), {0x20, 0x3c, 0x22, 0x4e}},
+    {S8_INITIALIZER("cmge v0.4h, v1.4h, v2.4h\n"), {0x20, 0x3c, 0x62, 0x0e}},
+    {S8_INITIALIZER("cmge v0.8h, v1.8h, v2.8h\n"), {0x20, 0x3c, 0x62, 0x4e}},
+    {S8_INITIALIZER("cmge v0.2s, v1.2s, v2.2s\n"), {0x20, 0x3c, 0xa2, 0x0e}},
+    {S8_INITIALIZER("cmge v0.4s, v1.4s, v2.4s\n"), {0x20, 0x3c, 0xa2, 0x4e}},
+    {S8_INITIALIZER("cmge v0.2d, v1.2d, v2.2d\n"), {0x20, 0x3c, 0xe2, 0x4e}},
+    {S8_INITIALIZER("cmgt v0.8b, v1.8b, v2.8b\n"), {0x20, 0x34, 0x22, 0x0e}},
+    {S8_INITIALIZER("cmgt v0.16b, v1.16b, v2.16b\n"), {0x20, 0x34, 0x22, 0x4e}},
+    {S8_INITIALIZER("cmgt v0.4h, v1.4h, v2.4h\n"), {0x20, 0x34, 0x62, 0x0e}},
+    {S8_INITIALIZER("cmgt v0.8h, v1.8h, v2.8h\n"), {0x20, 0x34, 0x62, 0x4e}},
+    {S8_INITIALIZER("cmgt v0.2s, v1.2s, v2.2s\n"), {0x20, 0x34, 0xa2, 0x0e}},
+    {S8_INITIALIZER("cmgt v0.4s, v1.4s, v2.4s\n"), {0x20, 0x34, 0xa2, 0x4e}},
+    {S8_INITIALIZER("cmgt v0.2d, v1.2d, v2.2d\n"), {0x20, 0x34, 0xe2, 0x4e}},
+    {S8_INITIALIZER("cmhi v0.8b, v1.8b, v2.8b\n"), {0x20, 0x34, 0x22, 0x2e}},
+    {S8_INITIALIZER("cmhi v0.16b, v1.16b, v2.16b\n"), {0x20, 0x34, 0x22, 0x6e}},
+    {S8_INITIALIZER("cmhi v0.4h, v1.4h, v2.4h\n"), {0x20, 0x34, 0x62, 0x2e}},
+    {S8_INITIALIZER("cmhi v0.8h, v1.8h, v2.8h\n"), {0x20, 0x34, 0x62, 0x6e}},
+    {S8_INITIALIZER("cmhi v0.2s, v1.2s, v2.2s\n"), {0x20, 0x34, 0xa2, 0x2e}},
+    {S8_INITIALIZER("cmhi v0.4s, v1.4s, v2.4s\n"), {0x20, 0x34, 0xa2, 0x6e}},
+    {S8_INITIALIZER("cmhi v0.2d, v1.2d, v2.2d\n"), {0x20, 0x34, 0xe2, 0x6e}},
+    {S8_INITIALIZER("cmhs v0.8b, v1.8b, v2.8b\n"), {0x20, 0x3c, 0x22, 0x2e}},
+    {S8_INITIALIZER("cmhs v0.16b, v1.16b, v2.16b\n"), {0x20, 0x3c, 0x22, 0x6e}},
+    {S8_INITIALIZER("cmhs v0.4h, v1.4h, v2.4h\n"), {0x20, 0x3c, 0x62, 0x2e}},
+    {S8_INITIALIZER("cmhs v0.8h, v1.8h, v2.8h\n"), {0x20, 0x3c, 0x62, 0x6e}},
+    {S8_INITIALIZER("cmhs v0.2s, v1.2s, v2.2s\n"), {0x20, 0x3c, 0xa2, 0x2e}},
+    {S8_INITIALIZER("cmhs v0.4s, v1.4s, v2.4s\n"), {0x20, 0x3c, 0xa2, 0x6e}},
+    {S8_INITIALIZER("cmhs v0.2d, v1.2d, v2.2d\n"), {0x20, 0x3c, 0xe2, 0x6e}},
+    {S8_INITIALIZER("cmtst v0.8b, v1.8b, v2.8b\n"), {0x20, 0x8c, 0x22, 0x0e}},
+    {S8_INITIALIZER("cmtst v0.16b, v1.16b, v2.16b\n"), {0x20, 0x8c, 0x22, 0x4e}},
+    {S8_INITIALIZER("cmtst v0.4h, v1.4h, v2.4h\n"), {0x20, 0x8c, 0x62, 0x0e}},
+    {S8_INITIALIZER("cmtst v0.8h, v1.8h, v2.8h\n"), {0x20, 0x8c, 0x62, 0x4e}},
+    {S8_INITIALIZER("cmtst v0.2s, v1.2s, v2.2s\n"), {0x20, 0x8c, 0xa2, 0x0e}},
+    {S8_INITIALIZER("cmtst v0.4s, v1.4s, v2.4s\n"), {0x20, 0x8c, 0xa2, 0x4e}},
+    {S8_INITIALIZER("cmtst v0.2d, v1.2d, v2.2d\n"), {0x20, 0x8c, 0xe2, 0x4e}},
+};
+
 static AssemblyA64DirectSIMDNeonCase const assembly_a64_direct_simd_neon_cases[] = {
     {S8_INITIALIZER("addp d0, v1.2d\n"), {0x20, 0xb8, 0xf1, 0x5e}, S8_INITIALIZER("addp d31, v30.2d\n"), {0xdf, 0xbb, 0xf1, 0x5e}},
     {S8_INITIALIZER("cmeq d0, d1, d2\n"), {0x20, 0x8c, 0xe2, 0x7e}, S8_INITIALIZER("cmeq d31, d30, d29\n"), {0xdf, 0x8f, 0xfd, 0x7e}},
@@ -934,12 +981,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 220);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 220);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 170);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 158);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 226);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 226);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 164);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 164);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 62);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 105);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 99);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 65);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     BUSTER_TEST(arguments, direct_simd_compound_requirement_count == 81 && direct_simd_compound_requirement_exact);
@@ -4009,6 +4056,79 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                                                       0xdf, 0x1f, 0xbd, 0x6e,
                                                                       0xdf, 0x1f, 0x7d, 0x6e},
                                                          12));
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_compare_cases) == 42);
+    for (u32 compare_index = 0; compare_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_compare_cases); compare_index += 1)
+    {
+        AssemblyA64DirectSIMDEncodingCase compare_case = assembly_a64_direct_simd_compare_cases[compare_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, compare_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, compare_case.bytes, 4));
+        AssemblyEncodeResult no_neon = assembly_encode(
+            arguments->arena, compare_case.source, (AssemblyEncodeOptions){.target = aarch64_no_advsimd_neon});
+        BUSTER_TEST(arguments, no_neon.diagnostic_count == 1 && no_neon.bytes.length == 0 &&
+                                   no_neon.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
+    AssemblyEncodeResult compare_upper_boundary = assembly_encode(
+        arguments->arena,
+        S8("CMEQ V31.2D, V30.2D, V29.2D\n"
+           "CMGE V31.2D, V30.2D, V29.2D\n"
+           "CMGT V31.2D, V30.2D, V29.2D\n"
+           "CMHI V31.2D, V30.2D, V29.2D\n"
+           "CMHS V31.2D, V30.2D, V29.2D\n"
+           "CMTST V31.2D, V30.2D, V29.2D\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    BUSTER_TEST(arguments, compare_upper_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(compare_upper_boundary.bytes,
+                                                         (u8 const[]){0xdf, 0x8f, 0xfd, 0x6e,
+                                                                      0xdf, 0x3f, 0xfd, 0x4e,
+                                                                      0xdf, 0x37, 0xfd, 0x4e,
+                                                                      0xdf, 0x37, 0xfd, 0x6e,
+                                                                      0xdf, 0x3f, 0xfd, 0x6e,
+                                                                      0xdf, 0x8f, 0xfd, 0x4e},
+                                                         24));
+    AssemblyEncodeResult compare_fixed_d_regression = assembly_encode(
+        arguments->arena,
+        S8("cmeq d0, d1, d2\n"
+           "cmge d0, d1, d2\n"
+           "cmgt d0, d1, d2\n"
+           "cmhi d0, d1, d2\n"
+           "cmhs d0, d1, d2\n"
+           "cmtst d0, d1, d2\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    BUSTER_TEST(arguments, compare_fixed_d_regression.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(compare_fixed_d_regression.bytes,
+                                                         (u8 const[]){0x20, 0x8c, 0xe2, 0x7e,
+                                                                      0x20, 0x3c, 0xe2, 0x5e,
+                                                                      0x20, 0x34, 0xe2, 0x5e,
+                                                                      0x20, 0x34, 0xe2, 0x7e,
+                                                                      0x20, 0x3c, 0xe2, 0x7e,
+                                                                      0x20, 0x8c, 0xe2, 0x5e},
+                                                         24));
+    static String8 const malformed_aarch64_advsimd_compare[] = {
+        S8_INITIALIZER("cmeq v0.1d, v1.1d, v2.1d\n"),
+        S8_INITIALIZER("cmge v0.2d, v1.2d, v2.2d, v3.2d\n"),
+        S8_INITIALIZER("cmgt v0.4s, v1.2s, v2.4s\n"),
+        S8_INITIALIZER("cmhi v0.2d, v1.2d\n"),
+        S8_INITIALIZER("cmhs v0.8h, v1.8h, v2.4h\n"),
+        S8_INITIALIZER("cmtst v32.8b, v1.8b, v2.8b\n"),
+        S8_INITIALIZER("cmeq q0, q1, q2\n"),
+        S8_INITIALIZER("cmge s0, s1, s2\n"),
+        S8_INITIALIZER("cmgt v0.8b, v1.b[0], v2.8b\n"),
+        S8_INITIALIZER("cmhi v0.8b, v1.8b, v2.b[0]\n"),
+        S8_INITIALIZER("cmhs v0.8b, v1.8b, v2.8b, v3.8b\n"),
+        S8_INITIALIZER("cmtst v0.8b, v1.8b\n"),
+        S8_INITIALIZER("cmeq v0.8b, v1.8b, #0\n"),
+        S8_INITIALIZER("cmge v0.4s, v1.4s, #0\n"),
+        S8_INITIALIZER("cmgt d0, d1, #0\n"),
+    };
+    for (u32 malformed_index = 0; malformed_index < BUSTER_ARRAY_LENGTH(malformed_aarch64_advsimd_compare); malformed_index += 1)
+    {
+        AssemblyEncodeResult malformed = assembly_encode(
+            arguments->arena, malformed_aarch64_advsimd_compare[malformed_index],
+            (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, malformed.diagnostic_count == 1 && malformed.bytes.length == 0 &&
+                                   malformed.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
     AssemblyEncodeResult bitselect_m1_regression = assembly_encode(
         arguments->arena,
         S8("and w0, w1, w2\n"
