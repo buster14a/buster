@@ -75,6 +75,50 @@ static AssemblyA64DirectSIMDTransformCase const assembly_a64_direct_simd_transfo
     {S8_INITIALIZER("shsub v0.8h, v1.8h, v2.8h\n"), {0x20, 0x24, 0x62, 0x4e}},
     {S8_INITIALIZER("shsub v0.2s, v1.2s, v2.2s\n"), {0x20, 0x24, 0xa2, 0x0e}},
     {S8_INITIALIZER("shsub v0.4s, v1.4s, v2.4s\n"), {0x20, 0x24, 0xa2, 0x4e}},
+    {S8_INITIALIZER("cnt v0.8b, v1.8b\n"), {0x20, 0x58, 0x20, 0x0e}},
+    {S8_INITIALIZER("cnt v0.16b, v1.16b\n"), {0x20, 0x58, 0x20, 0x4e}},
+    {S8_INITIALIZER("trn1 v0.8b, v1.8b, v2.8b\n"), {0x20, 0x28, 0x02, 0x0e}},
+    {S8_INITIALIZER("trn1 v0.16b, v1.16b, v2.16b\n"), {0x20, 0x28, 0x02, 0x4e}},
+    {S8_INITIALIZER("trn1 v0.4h, v1.4h, v2.4h\n"), {0x20, 0x28, 0x42, 0x0e}},
+    {S8_INITIALIZER("trn1 v0.8h, v1.8h, v2.8h\n"), {0x20, 0x28, 0x42, 0x4e}},
+    {S8_INITIALIZER("trn1 v0.2s, v1.2s, v2.2s\n"), {0x20, 0x28, 0x82, 0x0e}},
+    {S8_INITIALIZER("trn1 v0.4s, v1.4s, v2.4s\n"), {0x20, 0x28, 0x82, 0x4e}},
+    {S8_INITIALIZER("trn1 v0.2d, v1.2d, v2.2d\n"), {0x20, 0x28, 0xc2, 0x4e}},
+    {S8_INITIALIZER("trn2 v0.8b, v1.8b, v2.8b\n"), {0x20, 0x68, 0x02, 0x0e}},
+    {S8_INITIALIZER("trn2 v0.16b, v1.16b, v2.16b\n"), {0x20, 0x68, 0x02, 0x4e}},
+    {S8_INITIALIZER("trn2 v0.4h, v1.4h, v2.4h\n"), {0x20, 0x68, 0x42, 0x0e}},
+    {S8_INITIALIZER("trn2 v0.8h, v1.8h, v2.8h\n"), {0x20, 0x68, 0x42, 0x4e}},
+    {S8_INITIALIZER("trn2 v0.2s, v1.2s, v2.2s\n"), {0x20, 0x68, 0x82, 0x0e}},
+    {S8_INITIALIZER("trn2 v0.4s, v1.4s, v2.4s\n"), {0x20, 0x68, 0x82, 0x4e}},
+    {S8_INITIALIZER("trn2 v0.2d, v1.2d, v2.2d\n"), {0x20, 0x68, 0xc2, 0x4e}},
+    {S8_INITIALIZER("uzp1 v0.8b, v1.8b, v2.8b\n"), {0x20, 0x18, 0x02, 0x0e}},
+    {S8_INITIALIZER("uzp1 v0.16b, v1.16b, v2.16b\n"), {0x20, 0x18, 0x02, 0x4e}},
+    {S8_INITIALIZER("uzp1 v0.4h, v1.4h, v2.4h\n"), {0x20, 0x18, 0x42, 0x0e}},
+    {S8_INITIALIZER("uzp1 v0.8h, v1.8h, v2.8h\n"), {0x20, 0x18, 0x42, 0x4e}},
+    {S8_INITIALIZER("uzp1 v0.2s, v1.2s, v2.2s\n"), {0x20, 0x18, 0x82, 0x0e}},
+    {S8_INITIALIZER("uzp1 v0.4s, v1.4s, v2.4s\n"), {0x20, 0x18, 0x82, 0x4e}},
+    {S8_INITIALIZER("uzp1 v0.2d, v1.2d, v2.2d\n"), {0x20, 0x18, 0xc2, 0x4e}},
+    {S8_INITIALIZER("uzp2 v0.8b, v1.8b, v2.8b\n"), {0x20, 0x58, 0x02, 0x0e}},
+    {S8_INITIALIZER("uzp2 v0.16b, v1.16b, v2.16b\n"), {0x20, 0x58, 0x02, 0x4e}},
+    {S8_INITIALIZER("uzp2 v0.4h, v1.4h, v2.4h\n"), {0x20, 0x58, 0x42, 0x0e}},
+    {S8_INITIALIZER("uzp2 v0.8h, v1.8h, v2.8h\n"), {0x20, 0x58, 0x42, 0x4e}},
+    {S8_INITIALIZER("uzp2 v0.2s, v1.2s, v2.2s\n"), {0x20, 0x58, 0x82, 0x0e}},
+    {S8_INITIALIZER("uzp2 v0.4s, v1.4s, v2.4s\n"), {0x20, 0x58, 0x82, 0x4e}},
+    {S8_INITIALIZER("uzp2 v0.2d, v1.2d, v2.2d\n"), {0x20, 0x58, 0xc2, 0x4e}},
+    {S8_INITIALIZER("zip1 v0.8b, v1.8b, v2.8b\n"), {0x20, 0x38, 0x02, 0x0e}},
+    {S8_INITIALIZER("zip1 v0.16b, v1.16b, v2.16b\n"), {0x20, 0x38, 0x02, 0x4e}},
+    {S8_INITIALIZER("zip1 v0.4h, v1.4h, v2.4h\n"), {0x20, 0x38, 0x42, 0x0e}},
+    {S8_INITIALIZER("zip1 v0.8h, v1.8h, v2.8h\n"), {0x20, 0x38, 0x42, 0x4e}},
+    {S8_INITIALIZER("zip1 v0.2s, v1.2s, v2.2s\n"), {0x20, 0x38, 0x82, 0x0e}},
+    {S8_INITIALIZER("zip1 v0.4s, v1.4s, v2.4s\n"), {0x20, 0x38, 0x82, 0x4e}},
+    {S8_INITIALIZER("zip1 v0.2d, v1.2d, v2.2d\n"), {0x20, 0x38, 0xc2, 0x4e}},
+    {S8_INITIALIZER("zip2 v0.8b, v1.8b, v2.8b\n"), {0x20, 0x78, 0x02, 0x0e}},
+    {S8_INITIALIZER("zip2 v0.16b, v1.16b, v2.16b\n"), {0x20, 0x78, 0x02, 0x4e}},
+    {S8_INITIALIZER("zip2 v0.4h, v1.4h, v2.4h\n"), {0x20, 0x78, 0x42, 0x0e}},
+    {S8_INITIALIZER("zip2 v0.8h, v1.8h, v2.8h\n"), {0x20, 0x78, 0x42, 0x4e}},
+    {S8_INITIALIZER("zip2 v0.2s, v1.2s, v2.2s\n"), {0x20, 0x78, 0x82, 0x0e}},
+    {S8_INITIALIZER("zip2 v0.4s, v1.4s, v2.4s\n"), {0x20, 0x78, 0x82, 0x4e}},
+    {S8_INITIALIZER("zip2 v0.2d, v1.2d, v2.2d\n"), {0x20, 0x78, 0xc2, 0x4e}},
 };
 
 // End-to-end direct-GPR corpus.  Sources use ordinary W/X registers (the
@@ -315,12 +359,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 37);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 37);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 353);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 4);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 44);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 44);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 346);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 11);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 33);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 259);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 252);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 94);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     arguments->show(arguments,
@@ -3263,31 +3307,66 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8("abs v31.2d, v30.2d\n"
            "neg v31.2d, v30.2d\n"
            "shadd v31.4s, v30.4s, v29.4s\n"
-           "shsub v31.4s, v30.4s, v29.4s\n"),
+           "shsub v31.4s, v30.4s, v29.4s\n"
+           "cnt v31.16b, v30.16b\n"
+           "trn1 v31.2d, v30.2d, v29.2d\n"
+           "trn2 v31.2d, v30.2d, v29.2d\n"
+           "uzp1 v31.2d, v30.2d, v29.2d\n"
+           "uzp2 v31.2d, v30.2d, v29.2d\n"
+           "zip1 v31.2d, v30.2d, v29.2d\n"
+           "zip2 v31.2d, v30.2d, v29.2d\n"),
         (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
     static u8 const expected_aarch64_advsimd_transform_boundary[] = {
         0xdf, 0xbb, 0xe0, 0x4e,
         0xdf, 0xbb, 0xe0, 0x6e,
         0xdf, 0x07, 0xbd, 0x4e,
         0xdf, 0x27, 0xbd, 0x4e,
+        0xdf, 0x5b, 0x20, 0x4e,
+        0xdf, 0x2b, 0xdd, 0x4e,
+        0xdf, 0x6b, 0xdd, 0x4e,
+        0xdf, 0x1b, 0xdd, 0x4e,
+        0xdf, 0x5b, 0xdd, 0x4e,
+        0xdf, 0x3b, 0xdd, 0x4e,
+        0xdf, 0x7b, 0xdd, 0x4e,
     };
     BUSTER_TEST(arguments, aarch64_advsimd_transform_boundary.diagnostic_count == 0 &&
                                assembly_test_bytes_equal(aarch64_advsimd_transform_boundary.bytes,
                                                          expected_aarch64_advsimd_transform_boundary,
                                                          sizeof(expected_aarch64_advsimd_transform_boundary)));
     AssemblyEncodeResult aarch64_advsimd_transform_case_insensitive = assembly_encode(
-        arguments->arena, S8("SHADD V0.4S, V1.4S, V2.4S\n"), (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        arguments->arena, S8("SHADD V0.4S, V1.4S, V2.4S\nTRN1 V0.4S, V1.4S, V2.4S\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    static u8 const expected_aarch64_advsimd_transform_case_insensitive[] = {
+        0x20, 0x04, 0xa2, 0x4e,
+        0x20, 0x28, 0x82, 0x4e,
+    };
     BUSTER_TEST(arguments, aarch64_advsimd_transform_case_insensitive.diagnostic_count == 0 &&
                                assembly_test_bytes_equal(aarch64_advsimd_transform_case_insensitive.bytes,
-                                                         (u8 const[]){0x20, 0x04, 0xa2, 0x4e}, 4));
+                                                         expected_aarch64_advsimd_transform_case_insensitive,
+                                                         sizeof(expected_aarch64_advsimd_transform_case_insensitive)));
     Target aarch64_no_transform_neon = aarch64_advsimd_target;
     aarch64_no_transform_neon.cpu_features =
         target_cpu_features_remove(aarch64_no_transform_neon.cpu_features, TARGET_CPU_FEATURE_AARCH64_NEON);
     AssemblyEncodeResult aarch64_advsimd_transform_without_feature = assembly_encode(
-        arguments->arena, S8("shadd v0.4s, v1.4s, v2.4s\n"), (AssemblyEncodeOptions){.target = aarch64_no_transform_neon});
-    BUSTER_TEST(arguments, aarch64_advsimd_transform_without_feature.diagnostic_count == 1 &&
+        arguments->arena, S8("shadd v0.4s, v1.4s, v2.4s\n"
+                             "cnt v0.16b, v1.16b\n"
+                             "trn1 v0.4s, v1.4s, v2.4s\n"
+                             "trn2 v0.4s, v1.4s, v2.4s\n"
+                             "uzp1 v0.4s, v1.4s, v2.4s\n"
+                             "uzp2 v0.4s, v1.4s, v2.4s\n"
+                             "zip1 v0.4s, v1.4s, v2.4s\n"
+                             "zip2 v0.4s, v1.4s, v2.4s\n"),
+        (AssemblyEncodeOptions){.target = aarch64_no_transform_neon});
+    BUSTER_TEST(arguments, aarch64_advsimd_transform_without_feature.diagnostic_count == 8 &&
                                aarch64_advsimd_transform_without_feature.bytes.length == 0 &&
                                aarch64_advsimd_transform_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    for (u32 diagnostic_index = 0;
+         diagnostic_index < aarch64_advsimd_transform_without_feature.diagnostic_count;
+         diagnostic_index += 1)
+    {
+        BUSTER_TEST(arguments, aarch64_advsimd_transform_without_feature.diagnostics[diagnostic_index].kind ==
+                                   ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    }
     static String8 const invalid_aarch64_advsimd_transform[] = {
         S8_INITIALIZER("abs v0.2d, v1.2q\n"),
         S8_INITIALIZER("abs v0.1d, v1.1d\n"),
@@ -3297,6 +3376,15 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8_INITIALIZER("shadd v0.2d, v1.2d, v2.2d\n"),
         S8_INITIALIZER("shadd v0.4s, v1.4s\n"),
         S8_INITIALIZER("shadd v0.4s, v1.4s, v2.4s, v3.4s\n"),
+        S8_INITIALIZER("cnt v0.4h, v1.4h\n"),
+        S8_INITIALIZER("cnt d0, d1\n"),
+        S8_INITIALIZER("trn1 v0.1d, v1.1d, v2.1d\n"),
+        S8_INITIALIZER("trn1 v0.4s, v1.4s\n"),
+        S8_INITIALIZER("trn2 v0.4s, v1.4s, v2.4s, v3.4s\n"),
+        S8_INITIALIZER("uzp1 d0, d1, d2\n"),
+        S8_INITIALIZER("uzp2 v0.1d, v1.1d, v2.1d\n"),
+        S8_INITIALIZER("zip1 v0.4s, v1.4s, v2.4s, v3.4s\n"),
+        S8_INITIALIZER("zip2 v0.4s, v1.4s\n"),
     };
     for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_advsimd_transform); invalid_index += 1)
     {
