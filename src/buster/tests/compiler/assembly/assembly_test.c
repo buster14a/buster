@@ -275,6 +275,78 @@ static AssemblyA64DirectSIMDTransformCase const assembly_a64_direct_simd_transfo
     {S8_INITIALIZER("usqadd v0.2s, v1.2s\n"), {0x20, 0x38, 0xa0, 0x2e}},
     {S8_INITIALIZER("usqadd v0.4s, v1.4s\n"), {0x20, 0x38, 0xa0, 0x6e}},
     {S8_INITIALIZER("usqadd v0.2d, v1.2d\n"), {0x20, 0x38, 0xe0, 0x6e}},
+    {S8_INITIALIZER("fabs v0.2s, v1.2s\n"), {0x20, 0xf8, 0xa0, 0x0e}},
+    {S8_INITIALIZER("fabs v0.4s, v1.4s\n"), {0x20, 0xf8, 0xa0, 0x4e}},
+    {S8_INITIALIZER("fabs v0.2d, v1.2d\n"), {0x20, 0xf8, 0xe0, 0x4e}},
+    {S8_INITIALIZER("fcvtas v0.2s, v1.2s\n"), {0x20, 0xc8, 0x21, 0x0e}},
+    {S8_INITIALIZER("fcvtas v0.4s, v1.4s\n"), {0x20, 0xc8, 0x21, 0x4e}},
+    {S8_INITIALIZER("fcvtas v0.2d, v1.2d\n"), {0x20, 0xc8, 0x61, 0x4e}},
+    {S8_INITIALIZER("fcvtau v0.2s, v1.2s\n"), {0x20, 0xc8, 0x21, 0x2e}},
+    {S8_INITIALIZER("fcvtau v0.4s, v1.4s\n"), {0x20, 0xc8, 0x21, 0x6e}},
+    {S8_INITIALIZER("fcvtau v0.2d, v1.2d\n"), {0x20, 0xc8, 0x61, 0x6e}},
+    {S8_INITIALIZER("fcvtms v0.2s, v1.2s\n"), {0x20, 0xb8, 0x21, 0x0e}},
+    {S8_INITIALIZER("fcvtms v0.4s, v1.4s\n"), {0x20, 0xb8, 0x21, 0x4e}},
+    {S8_INITIALIZER("fcvtms v0.2d, v1.2d\n"), {0x20, 0xb8, 0x61, 0x4e}},
+    {S8_INITIALIZER("fcvtmu v0.2s, v1.2s\n"), {0x20, 0xb8, 0x21, 0x2e}},
+    {S8_INITIALIZER("fcvtmu v0.4s, v1.4s\n"), {0x20, 0xb8, 0x21, 0x6e}},
+    {S8_INITIALIZER("fcvtmu v0.2d, v1.2d\n"), {0x20, 0xb8, 0x61, 0x6e}},
+    {S8_INITIALIZER("fcvtns v0.2s, v1.2s\n"), {0x20, 0xa8, 0x21, 0x0e}},
+    {S8_INITIALIZER("fcvtns v0.4s, v1.4s\n"), {0x20, 0xa8, 0x21, 0x4e}},
+    {S8_INITIALIZER("fcvtns v0.2d, v1.2d\n"), {0x20, 0xa8, 0x61, 0x4e}},
+    {S8_INITIALIZER("fcvtnu v0.2s, v1.2s\n"), {0x20, 0xa8, 0x21, 0x2e}},
+    {S8_INITIALIZER("fcvtnu v0.4s, v1.4s\n"), {0x20, 0xa8, 0x21, 0x6e}},
+    {S8_INITIALIZER("fcvtnu v0.2d, v1.2d\n"), {0x20, 0xa8, 0x61, 0x6e}},
+    {S8_INITIALIZER("fcvtps v0.2s, v1.2s\n"), {0x20, 0xa8, 0xa1, 0x0e}},
+    {S8_INITIALIZER("fcvtps v0.4s, v1.4s\n"), {0x20, 0xa8, 0xa1, 0x4e}},
+    {S8_INITIALIZER("fcvtps v0.2d, v1.2d\n"), {0x20, 0xa8, 0xe1, 0x4e}},
+    {S8_INITIALIZER("fcvtpu v0.2s, v1.2s\n"), {0x20, 0xa8, 0xa1, 0x2e}},
+    {S8_INITIALIZER("fcvtpu v0.4s, v1.4s\n"), {0x20, 0xa8, 0xa1, 0x6e}},
+    {S8_INITIALIZER("fcvtpu v0.2d, v1.2d\n"), {0x20, 0xa8, 0xe1, 0x6e}},
+    {S8_INITIALIZER("fcvtzs v0.2s, v1.2s\n"), {0x20, 0xb8, 0xa1, 0x0e}},
+    {S8_INITIALIZER("fcvtzs v0.4s, v1.4s\n"), {0x20, 0xb8, 0xa1, 0x4e}},
+    {S8_INITIALIZER("fcvtzs v0.2d, v1.2d\n"), {0x20, 0xb8, 0xe1, 0x4e}},
+    {S8_INITIALIZER("fcvtzu v0.2s, v1.2s\n"), {0x20, 0xb8, 0xa1, 0x2e}},
+    {S8_INITIALIZER("fcvtzu v0.4s, v1.4s\n"), {0x20, 0xb8, 0xa1, 0x6e}},
+    {S8_INITIALIZER("fcvtzu v0.2d, v1.2d\n"), {0x20, 0xb8, 0xe1, 0x6e}},
+    {S8_INITIALIZER("fneg v0.2s, v1.2s\n"), {0x20, 0xf8, 0xa0, 0x2e}},
+    {S8_INITIALIZER("fneg v0.4s, v1.4s\n"), {0x20, 0xf8, 0xa0, 0x6e}},
+    {S8_INITIALIZER("fneg v0.2d, v1.2d\n"), {0x20, 0xf8, 0xe0, 0x6e}},
+    {S8_INITIALIZER("frecpe v0.2s, v1.2s\n"), {0x20, 0xd8, 0xa1, 0x0e}},
+    {S8_INITIALIZER("frecpe v0.4s, v1.4s\n"), {0x20, 0xd8, 0xa1, 0x4e}},
+    {S8_INITIALIZER("frecpe v0.2d, v1.2d\n"), {0x20, 0xd8, 0xe1, 0x4e}},
+    {S8_INITIALIZER("frinta v0.2s, v1.2s\n"), {0x20, 0x88, 0x21, 0x2e}},
+    {S8_INITIALIZER("frinta v0.4s, v1.4s\n"), {0x20, 0x88, 0x21, 0x6e}},
+    {S8_INITIALIZER("frinta v0.2d, v1.2d\n"), {0x20, 0x88, 0x61, 0x6e}},
+    {S8_INITIALIZER("frinti v0.2s, v1.2s\n"), {0x20, 0x98, 0xa1, 0x2e}},
+    {S8_INITIALIZER("frinti v0.4s, v1.4s\n"), {0x20, 0x98, 0xa1, 0x6e}},
+    {S8_INITIALIZER("frinti v0.2d, v1.2d\n"), {0x20, 0x98, 0xe1, 0x6e}},
+    {S8_INITIALIZER("frintm v0.2s, v1.2s\n"), {0x20, 0x98, 0x21, 0x0e}},
+    {S8_INITIALIZER("frintm v0.4s, v1.4s\n"), {0x20, 0x98, 0x21, 0x4e}},
+    {S8_INITIALIZER("frintm v0.2d, v1.2d\n"), {0x20, 0x98, 0x61, 0x4e}},
+    {S8_INITIALIZER("frintn v0.2s, v1.2s\n"), {0x20, 0x88, 0x21, 0x0e}},
+    {S8_INITIALIZER("frintn v0.4s, v1.4s\n"), {0x20, 0x88, 0x21, 0x4e}},
+    {S8_INITIALIZER("frintn v0.2d, v1.2d\n"), {0x20, 0x88, 0x61, 0x4e}},
+    {S8_INITIALIZER("frintp v0.2s, v1.2s\n"), {0x20, 0x88, 0xa1, 0x0e}},
+    {S8_INITIALIZER("frintp v0.4s, v1.4s\n"), {0x20, 0x88, 0xa1, 0x4e}},
+    {S8_INITIALIZER("frintp v0.2d, v1.2d\n"), {0x20, 0x88, 0xe1, 0x4e}},
+    {S8_INITIALIZER("frintx v0.2s, v1.2s\n"), {0x20, 0x98, 0x21, 0x2e}},
+    {S8_INITIALIZER("frintx v0.4s, v1.4s\n"), {0x20, 0x98, 0x21, 0x6e}},
+    {S8_INITIALIZER("frintx v0.2d, v1.2d\n"), {0x20, 0x98, 0x61, 0x6e}},
+    {S8_INITIALIZER("frintz v0.2s, v1.2s\n"), {0x20, 0x98, 0xa1, 0x0e}},
+    {S8_INITIALIZER("frintz v0.4s, v1.4s\n"), {0x20, 0x98, 0xa1, 0x4e}},
+    {S8_INITIALIZER("frintz v0.2d, v1.2d\n"), {0x20, 0x98, 0xe1, 0x4e}},
+    {S8_INITIALIZER("frsqrte v0.2s, v1.2s\n"), {0x20, 0xd8, 0xa1, 0x2e}},
+    {S8_INITIALIZER("frsqrte v0.4s, v1.4s\n"), {0x20, 0xd8, 0xa1, 0x6e}},
+    {S8_INITIALIZER("frsqrte v0.2d, v1.2d\n"), {0x20, 0xd8, 0xe1, 0x6e}},
+    {S8_INITIALIZER("fsqrt v0.2s, v1.2s\n"), {0x20, 0xf8, 0xa1, 0x2e}},
+    {S8_INITIALIZER("fsqrt v0.4s, v1.4s\n"), {0x20, 0xf8, 0xa1, 0x6e}},
+    {S8_INITIALIZER("fsqrt v0.2d, v1.2d\n"), {0x20, 0xf8, 0xe1, 0x6e}},
+    {S8_INITIALIZER("scvtf v0.2s, v1.2s\n"), {0x20, 0xd8, 0x21, 0x0e}},
+    {S8_INITIALIZER("scvtf v0.4s, v1.4s\n"), {0x20, 0xd8, 0x21, 0x4e}},
+    {S8_INITIALIZER("scvtf v0.2d, v1.2d\n"), {0x20, 0xd8, 0x61, 0x4e}},
+    {S8_INITIALIZER("ucvtf v0.2s, v1.2s\n"), {0x20, 0xd8, 0x21, 0x2e}},
+    {S8_INITIALIZER("ucvtf v0.4s, v1.4s\n"), {0x20, 0xd8, 0x21, 0x6e}},
+    {S8_INITIALIZER("ucvtf v0.2d, v1.2d\n"), {0x20, 0xd8, 0x61, 0x6e}},
 };
 
 // End-to-end direct-GPR corpus.  Sources use ordinary W/X registers (the
@@ -515,12 +587,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 72);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 72);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 318);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 39);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 96);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 96);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 294);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 63);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 33);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 224);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 200);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 94);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     arguments->show(arguments,
@@ -3494,7 +3566,31 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
            "sqabs v31.2d, v30.2d\n"
            "sqneg v31.2d, v30.2d\n"
            "suqadd v31.2d, v30.2d\n"
-           "usqadd v31.2d, v30.2d\n"),
+           "usqadd v31.2d, v30.2d\n"
+           "fabs v31.2d, v30.2d\n"
+           "fcvtas v31.2d, v30.2d\n"
+           "fcvtau v31.2d, v30.2d\n"
+           "fcvtms v31.2d, v30.2d\n"
+           "fcvtmu v31.2d, v30.2d\n"
+           "fcvtns v31.2d, v30.2d\n"
+           "fcvtnu v31.2d, v30.2d\n"
+           "fcvtps v31.2d, v30.2d\n"
+           "fcvtpu v31.2d, v30.2d\n"
+           "fcvtzs v31.2d, v30.2d\n"
+           "fcvtzu v31.2d, v30.2d\n"
+           "fneg v31.2d, v30.2d\n"
+           "frecpe v31.2d, v30.2d\n"
+           "frinta v31.2d, v30.2d\n"
+           "frinti v31.2d, v30.2d\n"
+           "frintm v31.2d, v30.2d\n"
+           "frintn v31.2d, v30.2d\n"
+           "frintp v31.2d, v30.2d\n"
+           "frintx v31.2d, v30.2d\n"
+           "frintz v31.2d, v30.2d\n"
+           "frsqrte v31.2d, v30.2d\n"
+           "fsqrt v31.2d, v30.2d\n"
+           "scvtf v31.2d, v30.2d\n"
+           "ucvtf v31.2d, v30.2d\n"),
         (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
     static u8 const expected_aarch64_advsimd_transform_boundary[] = {
         0xdf, 0xbb, 0xe0, 0x4e,
@@ -3532,6 +3628,30 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         0xdf, 0x7b, 0xe0, 0x6e,
         0xdf, 0x3b, 0xe0, 0x4e,
         0xdf, 0x3b, 0xe0, 0x6e,
+        0xdf, 0xfb, 0xe0, 0x4e,
+        0xdf, 0xcb, 0x61, 0x4e,
+        0xdf, 0xcb, 0x61, 0x6e,
+        0xdf, 0xbb, 0x61, 0x4e,
+        0xdf, 0xbb, 0x61, 0x6e,
+        0xdf, 0xab, 0x61, 0x4e,
+        0xdf, 0xab, 0x61, 0x6e,
+        0xdf, 0xab, 0xe1, 0x4e,
+        0xdf, 0xab, 0xe1, 0x6e,
+        0xdf, 0xbb, 0xe1, 0x4e,
+        0xdf, 0xbb, 0xe1, 0x6e,
+        0xdf, 0xfb, 0xe0, 0x6e,
+        0xdf, 0xdb, 0xe1, 0x4e,
+        0xdf, 0x8b, 0x61, 0x6e,
+        0xdf, 0x9b, 0xe1, 0x6e,
+        0xdf, 0x9b, 0x61, 0x4e,
+        0xdf, 0x8b, 0x61, 0x4e,
+        0xdf, 0x8b, 0xe1, 0x4e,
+        0xdf, 0x9b, 0x61, 0x6e,
+        0xdf, 0x9b, 0xe1, 0x4e,
+        0xdf, 0xdb, 0xe1, 0x6e,
+        0xdf, 0xfb, 0xe1, 0x6e,
+        0xdf, 0xdb, 0x61, 0x4e,
+        0xdf, 0xdb, 0x61, 0x6e,
     };
     BUSTER_TEST(arguments, aarch64_advsimd_transform_boundary.diagnostic_count == 0 &&
                                assembly_test_bytes_equal(aarch64_advsimd_transform_boundary.bytes,
@@ -3612,6 +3732,31 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                assembly_test_bytes_equal(aarch64_advsimd_new_case_insensitive.bytes,
                                                          expected_aarch64_advsimd_new_case_insensitive,
                                                          sizeof(expected_aarch64_advsimd_new_case_insensitive)));
+    AssemblyEncodeResult aarch64_advsimd_fp_unary_case_insensitive = assembly_encode(
+        arguments->arena,
+        S8("FABS V0.2D, V1.2D\nFCVTAS V0.2D, V1.2D\nFCVTAU V0.2D, V1.2D\n"
+           "FCVTMS V0.2D, V1.2D\nFCVTMU V0.2D, V1.2D\nFCVTNS V0.2D, V1.2D\n"
+           "FCVTNU V0.2D, V1.2D\nFCVTPS V0.2D, V1.2D\nFCVTPU V0.2D, V1.2D\n"
+           "FCVTZS V0.2D, V1.2D\nFCVTZU V0.2D, V1.2D\nFNEG V0.2D, V1.2D\n"
+           "FRECPE V0.2D, V1.2D\nFRINTA V0.2D, V1.2D\nFRINTI V0.2D, V1.2D\n"
+           "FRINTM V0.2D, V1.2D\nFRINTN V0.2D, V1.2D\nFRINTP V0.2D, V1.2D\n"
+           "FRINTX V0.2D, V1.2D\nFRINTZ V0.2D, V1.2D\nFRSQRTE V0.2D, V1.2D\n"
+           "FSQRT V0.2D, V1.2D\nSCVTF V0.2D, V1.2D\nUCVTF V0.2D, V1.2D\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    static u8 const expected_aarch64_advsimd_fp_unary_case_insensitive[] = {
+        0x20, 0xf8, 0xe0, 0x4e, 0x20, 0xc8, 0x61, 0x4e, 0x20, 0xc8, 0x61, 0x6e,
+        0x20, 0xb8, 0x61, 0x4e, 0x20, 0xb8, 0x61, 0x6e, 0x20, 0xa8, 0x61, 0x4e,
+        0x20, 0xa8, 0x61, 0x6e, 0x20, 0xa8, 0xe1, 0x4e, 0x20, 0xa8, 0xe1, 0x6e,
+        0x20, 0xb8, 0xe1, 0x4e, 0x20, 0xb8, 0xe1, 0x6e, 0x20, 0xf8, 0xe0, 0x6e,
+        0x20, 0xd8, 0xe1, 0x4e, 0x20, 0x88, 0x61, 0x6e, 0x20, 0x98, 0xe1, 0x6e,
+        0x20, 0x98, 0x61, 0x4e, 0x20, 0x88, 0x61, 0x4e, 0x20, 0x88, 0xe1, 0x4e,
+        0x20, 0x98, 0x61, 0x6e, 0x20, 0x98, 0xe1, 0x4e, 0x20, 0xd8, 0xe1, 0x6e,
+        0x20, 0xf8, 0xe1, 0x6e, 0x20, 0xd8, 0x61, 0x4e, 0x20, 0xd8, 0x61, 0x6e,
+    };
+    BUSTER_TEST(arguments, aarch64_advsimd_fp_unary_case_insensitive.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_advsimd_fp_unary_case_insensitive.bytes,
+                                                         expected_aarch64_advsimd_fp_unary_case_insensitive,
+                                                         sizeof(expected_aarch64_advsimd_fp_unary_case_insensitive)));
     Target aarch64_no_transform_neon = aarch64_advsimd_target;
     aarch64_no_transform_neon.cpu_features =
         target_cpu_features_remove(aarch64_no_transform_neon.cpu_features, TARGET_CPU_FEATURE_AARCH64_NEON);
@@ -3651,9 +3796,33 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                              "sqabs d0, d1\n"
                              "sqneg d0, d1\n"
                              "suqadd d0, d1\n"
-                             "usqadd d0, d1\n"),
+                             "usqadd d0, d1\n"
+                             "fabs v0.2d, v1.2d\n"
+                             "fcvtas v0.2d, v1.2d\n"
+                             "fcvtau v0.2d, v1.2d\n"
+                             "fcvtms v0.2d, v1.2d\n"
+                             "fcvtmu v0.2d, v1.2d\n"
+                             "fcvtns v0.2d, v1.2d\n"
+                             "fcvtnu v0.2d, v1.2d\n"
+                             "fcvtps v0.2d, v1.2d\n"
+                             "fcvtpu v0.2d, v1.2d\n"
+                             "fcvtzs v0.2d, v1.2d\n"
+                             "fcvtzu v0.2d, v1.2d\n"
+                             "fneg v0.2d, v1.2d\n"
+                             "frecpe v0.2d, v1.2d\n"
+                             "frinta v0.2d, v1.2d\n"
+                             "frinti v0.2d, v1.2d\n"
+                             "frintm v0.2d, v1.2d\n"
+                             "frintn v0.2d, v1.2d\n"
+                             "frintp v0.2d, v1.2d\n"
+                             "frintx v0.2d, v1.2d\n"
+                             "frintz v0.2d, v1.2d\n"
+                             "frsqrte v0.2d, v1.2d\n"
+                             "fsqrt v0.2d, v1.2d\n"
+                             "scvtf v0.2d, v1.2d\n"
+                             "ucvtf v0.2d, v1.2d\n"),
         (AssemblyEncodeOptions){.target = aarch64_no_transform_neon});
-    BUSTER_TEST(arguments, aarch64_advsimd_transform_without_feature.diagnostic_count == 36 &&
+    BUSTER_TEST(arguments, aarch64_advsimd_transform_without_feature.diagnostic_count == 60 &&
                                aarch64_advsimd_transform_without_feature.bytes.length == 0 &&
                                aarch64_advsimd_transform_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     for (u32 diagnostic_index = 0;
@@ -3711,6 +3880,36 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8_INITIALIZER("suqadd q0, q1\n"),
         S8_INITIALIZER("usqadd d32, d1\n"),
         S8_INITIALIZER("usqadd v0, v1\n"),
+        S8_INITIALIZER("fabs v0.1d, v1.1d\n"),
+        S8_INITIALIZER("fabs v0.8b, v1.8b\n"),
+        S8_INITIALIZER("fabs v0.4h, v1.4h\n"),
+        S8_INITIALIZER("fabs v0.8h, v1.8h\n"),
+        S8_INITIALIZER("fabs v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("fabs v32.2d, v1.2d\n"),
+        S8_INITIALIZER("fcvtas v0.2s, v1.2d\n"),
+        S8_INITIALIZER("fcvtau v0.2d, v1.2s\n"),
+        S8_INITIALIZER("fcvtms v0.2s, v1.2s, v2.2s\n"),
+        S8_INITIALIZER("fcvtmu v0.2s\n"),
+        S8_INITIALIZER("fcvtns q0, q1\n"),
+        S8_INITIALIZER("fcvtnu v0.1d, v1.1d\n"),
+        S8_INITIALIZER("fcvtps v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("fcvtpu v0.2s\n"),
+        S8_INITIALIZER("fcvtzs v0.2s, v1.2s, v2.2s\n"),
+        S8_INITIALIZER("fcvtzu v0.1d, v1.1d\n"),
+        S8_INITIALIZER("fneg v0.1d, v1.1d\n"),
+        S8_INITIALIZER("frecpe v0.2d\n"),
+        S8_INITIALIZER("frinta v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("frinti v32.2d, v1.2d\n"),
+        S8_INITIALIZER("frintm v0.1d, v1.1d\n"),
+        S8_INITIALIZER("frintn v0.2d\n"),
+        S8_INITIALIZER("frintp v0.2s, v1.2d\n"),
+        S8_INITIALIZER("frintx v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("frintz q0, q1\n"),
+        S8_INITIALIZER("frsqrte v0.2d\n"),
+        S8_INITIALIZER("fsqrt v0.1d, v1.1d\n"),
+        S8_INITIALIZER("scvtf v0.2d\n"),
+        S8_INITIALIZER("scvtf v0.4h, v1.4h\n"),
+        S8_INITIALIZER("ucvtf v0.2d, v1.2d, v2.2d\n"),
         S8_INITIALIZER("srhadd v0.2d, v1.2d, v2.2d\n"),
         S8_INITIALIZER("urhadd v0.2d, v1.2d, v2.2d\n"),
         S8_INITIALIZER("uhadd v0.2d, v1.2d, v2.2d\n"),
