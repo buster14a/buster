@@ -41,6 +41,42 @@ static AssemblyA64DirectSIMDNeonCase const assembly_a64_direct_simd_neon_cases[]
     {S8_INITIALIZER("ushl d0, d1, d2\n"), {0x20, 0x44, 0xe2, 0x7e}, S8_INITIALIZER("ushl d31, d30, d29\n"), {0xdf, 0x47, 0xfd, 0x7e}},
 };
 
+typedef struct AssemblyA64DirectSIMDTransformCase AssemblyA64DirectSIMDTransformCase;
+struct AssemblyA64DirectSIMDTransformCase
+{
+    String8 source;
+    u8 bytes[4];
+};
+
+static AssemblyA64DirectSIMDTransformCase const assembly_a64_direct_simd_transform_cases[] = {
+    {S8_INITIALIZER("abs v0.8b, v1.8b\n"), {0x20, 0xb8, 0x20, 0x0e}},
+    {S8_INITIALIZER("abs v0.16b, v1.16b\n"), {0x20, 0xb8, 0x20, 0x4e}},
+    {S8_INITIALIZER("abs v0.4h, v1.4h\n"), {0x20, 0xb8, 0x60, 0x0e}},
+    {S8_INITIALIZER("abs v0.8h, v1.8h\n"), {0x20, 0xb8, 0x60, 0x4e}},
+    {S8_INITIALIZER("abs v0.2s, v1.2s\n"), {0x20, 0xb8, 0xa0, 0x0e}},
+    {S8_INITIALIZER("abs v0.4s, v1.4s\n"), {0x20, 0xb8, 0xa0, 0x4e}},
+    {S8_INITIALIZER("abs v0.2d, v1.2d\n"), {0x20, 0xb8, 0xe0, 0x4e}},
+    {S8_INITIALIZER("neg v0.8b, v1.8b\n"), {0x20, 0xb8, 0x20, 0x2e}},
+    {S8_INITIALIZER("neg v0.16b, v1.16b\n"), {0x20, 0xb8, 0x20, 0x6e}},
+    {S8_INITIALIZER("neg v0.4h, v1.4h\n"), {0x20, 0xb8, 0x60, 0x2e}},
+    {S8_INITIALIZER("neg v0.8h, v1.8h\n"), {0x20, 0xb8, 0x60, 0x6e}},
+    {S8_INITIALIZER("neg v0.2s, v1.2s\n"), {0x20, 0xb8, 0xa0, 0x2e}},
+    {S8_INITIALIZER("neg v0.4s, v1.4s\n"), {0x20, 0xb8, 0xa0, 0x6e}},
+    {S8_INITIALIZER("neg v0.2d, v1.2d\n"), {0x20, 0xb8, 0xe0, 0x6e}},
+    {S8_INITIALIZER("shadd v0.8b, v1.8b, v2.8b\n"), {0x20, 0x04, 0x22, 0x0e}},
+    {S8_INITIALIZER("shadd v0.16b, v1.16b, v2.16b\n"), {0x20, 0x04, 0x22, 0x4e}},
+    {S8_INITIALIZER("shadd v0.4h, v1.4h, v2.4h\n"), {0x20, 0x04, 0x62, 0x0e}},
+    {S8_INITIALIZER("shadd v0.8h, v1.8h, v2.8h\n"), {0x20, 0x04, 0x62, 0x4e}},
+    {S8_INITIALIZER("shadd v0.2s, v1.2s, v2.2s\n"), {0x20, 0x04, 0xa2, 0x0e}},
+    {S8_INITIALIZER("shadd v0.4s, v1.4s, v2.4s\n"), {0x20, 0x04, 0xa2, 0x4e}},
+    {S8_INITIALIZER("shsub v0.8b, v1.8b, v2.8b\n"), {0x20, 0x24, 0x22, 0x0e}},
+    {S8_INITIALIZER("shsub v0.16b, v1.16b, v2.16b\n"), {0x20, 0x24, 0x22, 0x4e}},
+    {S8_INITIALIZER("shsub v0.4h, v1.4h, v2.4h\n"), {0x20, 0x24, 0x62, 0x0e}},
+    {S8_INITIALIZER("shsub v0.8h, v1.8h, v2.8h\n"), {0x20, 0x24, 0x62, 0x4e}},
+    {S8_INITIALIZER("shsub v0.2s, v1.2s, v2.2s\n"), {0x20, 0x24, 0xa2, 0x0e}},
+    {S8_INITIALIZER("shsub v0.4s, v1.4s, v2.4s\n"), {0x20, 0x24, 0xa2, 0x4e}},
+};
+
 // End-to-end direct-GPR corpus.  Sources use ordinary W/X registers (the
 // public encoder matrix below separately exercises register-31 roles), and
 // every expected byte is an independent llvm-mc 22.1.8 literal.
@@ -189,32 +225,60 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                               spelling.mnemonic.length != 0 && spelling.source_digest != 0 && spelling.semantic_id.length != 0 &&
                               spelling.operand_count > 0 && spelling.operand_count <= 4 && spelling.feature > TARGET_CPU_FEATURE_NONE &&
                               spelling.feature < TARGET_CPU_FEATURE_COUNT;
-        for (u32 operand_index = 0; operand_index < spelling.operand_count && operand_index < 4; operand_index += 1)
-        {
-            spelling_valid = spelling_valid && spelling.arrangements[operand_index] > BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID &&
-                             spelling.arrangements[operand_index] < BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_COUNT;
-        }
-        for (u32 operand_index = spelling.operand_count; operand_index < 4; operand_index += 1)
-        {
-            spelling_valid = spelling_valid && spelling.arrangements[operand_index] == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
-        }
-
         for (u32 prior_index = 0; prior_index < spelling_index; prior_index += 1)
         {
             AssemblyAarch64DirectSIMDSpellingTest prior = {0};
             bool prior_valid = assembly_test_aarch64_direct_simd_spelling_at(prior_index, &prior);
             bool unique = !prior_valid || !spelling_valid ||
-                          (!string_equal(prior.mnemonic, spelling.mnemonic) && prior.source_digest != spelling.source_digest &&
-                           !string_equal(prior.semantic_id, spelling.semantic_id));
+                          (prior.source_digest != spelling.source_digest && !string_equal(prior.semantic_id, spelling.semantic_id));
             direct_simd_spellings_unique = direct_simd_spellings_unique && unique;
             direct_simd_duplicate_spelling_count += (u32)!unique;
         }
 
         u32 row_index = UINT32_MAX;
         BusterA64DirectSIMDRowInfo row = {0};
+        BusterA64SemanticForm row_form = {0};
+        u32 public_operand_count = 0;
+        bool arrangements_valid = true;
+        if (spelling_valid && buster_a64_direct_simd_find_source_digest(spelling.source_digest, &row_index) &&
+            buster_a64_direct_simd_row(row_index, &row) && buster_a64_semantic_form(row.semantic_form_id, &row_form))
+        {
+            for (u32 operand_index = 0; operand_index < row_form.operand_count; operand_index += 1)
+            {
+                BusterA64SemanticOperand operand = {0};
+                public_operand_count += buster_a64_semantic_operand(row_form.operand_first + operand_index, &operand) &&
+                                        operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER;
+            }
+        }
+        if (spelling_valid && row.executable)
+        {
+            if (row.transform_bearing)
+            {
+                for (u32 operand_index = 0; operand_index < 4; operand_index += 1)
+                {
+                    arrangements_valid = arrangements_valid &&
+                                          spelling.arrangements[operand_index] == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
+                }
+            }
+            else
+            {
+                for (u32 operand_index = 0; operand_index < spelling.operand_count && operand_index < 4; operand_index += 1)
+                {
+                    arrangements_valid = arrangements_valid &&
+                                          spelling.arrangements[operand_index] > BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID &&
+                                          spelling.arrangements[operand_index] < BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_COUNT;
+                }
+                for (u32 operand_index = spelling.operand_count; operand_index < 4; operand_index += 1)
+                {
+                    arrangements_valid = arrangements_valid &&
+                                          spelling.arrangements[operand_index] == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
+                }
+            }
+        }
         bool resolved = spelling_valid && buster_a64_direct_simd_find_source_digest(spelling.source_digest, &row_index) &&
-                        buster_a64_direct_simd_row(row_index, &row) && row.executable && row.operand_count == spelling.operand_count &&
-                        string_equal(row.id, spelling.semantic_id) && row_index < direct_simd_row_count && !direct_simd_covered_rows[row_index];
+                        buster_a64_direct_simd_row(row_index, &row) && row.executable && public_operand_count == spelling.operand_count &&
+                        string_equal(row.id, spelling.semantic_id) && arrangements_valid && row_index < direct_simd_row_count &&
+                        !direct_simd_covered_rows[row_index];
         BUSTER_TEST(arguments, resolved);
         if (!resolved)
         {
@@ -251,12 +315,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 33);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 33);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 357);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 0);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 37);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 37);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 353);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 4);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 33);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 263);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 259);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 94);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     arguments->show(arguments,
@@ -3173,7 +3237,6 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                aarch64_advsimd_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     static String8 const invalid_aarch64_advsimd_absneg[] = {
         S8_INITIALIZER("abs q0, q1\n"),
-        S8_INITIALIZER("neg v0.2d, v1.2d\n"),
         S8_INITIALIZER("abs d0.2d, d1.2d\n"),
         S8_INITIALIZER("neg d0\n"),
         S8_INITIALIZER("abs d32, d1\n"),
@@ -3186,6 +3249,62 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
             (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
         BUSTER_TEST(arguments, invalid_advsimd_case.diagnostic_count == 1 && invalid_advsimd_case.bytes.length == 0 &&
                                    invalid_advsimd_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    for (u32 transform_index = 0; transform_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_transform_cases); transform_index += 1)
+    {
+        AssemblyA64DirectSIMDTransformCase transform_case = assembly_a64_direct_simd_transform_cases[transform_index];
+        AssemblyEncodeResult encoded = assembly_encode(
+            arguments->arena, transform_case.source, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && assembly_test_bytes_equal(encoded.bytes, transform_case.bytes, 4));
+    }
+    AssemblyEncodeResult aarch64_advsimd_transform_boundary = assembly_encode(
+        arguments->arena,
+        S8("abs v31.2d, v30.2d\n"
+           "neg v31.2d, v30.2d\n"
+           "shadd v31.4s, v30.4s, v29.4s\n"
+           "shsub v31.4s, v30.4s, v29.4s\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    static u8 const expected_aarch64_advsimd_transform_boundary[] = {
+        0xdf, 0xbb, 0xe0, 0x4e,
+        0xdf, 0xbb, 0xe0, 0x6e,
+        0xdf, 0x07, 0xbd, 0x4e,
+        0xdf, 0x27, 0xbd, 0x4e,
+    };
+    BUSTER_TEST(arguments, aarch64_advsimd_transform_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_advsimd_transform_boundary.bytes,
+                                                         expected_aarch64_advsimd_transform_boundary,
+                                                         sizeof(expected_aarch64_advsimd_transform_boundary)));
+    AssemblyEncodeResult aarch64_advsimd_transform_case_insensitive = assembly_encode(
+        arguments->arena, S8("SHADD V0.4S, V1.4S, V2.4S\n"), (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    BUSTER_TEST(arguments, aarch64_advsimd_transform_case_insensitive.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_advsimd_transform_case_insensitive.bytes,
+                                                         (u8 const[]){0x20, 0x04, 0xa2, 0x4e}, 4));
+    Target aarch64_no_transform_neon = aarch64_advsimd_target;
+    aarch64_no_transform_neon.cpu_features =
+        target_cpu_features_remove(aarch64_no_transform_neon.cpu_features, TARGET_CPU_FEATURE_AARCH64_NEON);
+    AssemblyEncodeResult aarch64_advsimd_transform_without_feature = assembly_encode(
+        arguments->arena, S8("shadd v0.4s, v1.4s, v2.4s\n"), (AssemblyEncodeOptions){.target = aarch64_no_transform_neon});
+    BUSTER_TEST(arguments, aarch64_advsimd_transform_without_feature.diagnostic_count == 1 &&
+                               aarch64_advsimd_transform_without_feature.bytes.length == 0 &&
+                               aarch64_advsimd_transform_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    static String8 const invalid_aarch64_advsimd_transform[] = {
+        S8_INITIALIZER("abs v0.2d, v1.2q\n"),
+        S8_INITIALIZER("abs v0.1d, v1.1d\n"),
+        S8_INITIALIZER("abs v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("abs q0, q1\n"),
+        S8_INITIALIZER("abs v32.8b, v1.8b\n"),
+        S8_INITIALIZER("shadd v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("shadd v0.4s, v1.4s\n"),
+        S8_INITIALIZER("shadd v0.4s, v1.4s, v2.4s, v3.4s\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_advsimd_transform); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_transform_case = assembly_encode(
+            arguments->arena, invalid_aarch64_advsimd_transform[invalid_index],
+            (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, invalid_transform_case.diagnostic_count == 1 && invalid_transform_case.bytes.length == 0 &&
+                                   invalid_transform_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
 
     for (u32 neon_index = 0; neon_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_neon_cases); neon_index += 1)

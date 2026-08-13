@@ -1493,6 +1493,9 @@ struct AssemblyInstructionInfo
     u32 aarch64_control_row_index;
     u32 aarch64_system_row_index;
     u32 aarch64_direct_simd_row_index;
+    u32 aarch64_direct_simd_spelling_first;
+    u8 aarch64_direct_simd_spelling_count;
+    u8 aarch64_direct_simd_generated;
     TargetCpuFeature aarch64_direct_simd_feature;
     BusterA64DirectSIMDArrangement aarch64_direct_simd_arrangements[4];
     AssemblyAmdForm const* amd_form;
@@ -2195,9 +2198,15 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDSpelling const assembly_aarch64_dir
     {S8_INITIALIZER("abs"), UINT64_C(0x29cfa5a7b75f135a), S8_INITIALIZER("arm-a64@2026-06:ABS_asisdmisc_R"), 2,
      TARGET_CPU_FEATURE_AARCH64_NEON,
      {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D}},
+    {S8_INITIALIZER("abs"), UINT64_C(0xfea2e56971759532), S8_INITIALIZER("arm-a64@2026-06:ABS_asimdmisc_R"), 2,
+     TARGET_CPU_FEATURE_AARCH64_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("neg"), UINT64_C(0x6f2db5cd0e80e8df), S8_INITIALIZER("arm-a64@2026-06:NEG_asisdmisc_R"), 2,
      TARGET_CPU_FEATURE_AARCH64_NEON,
      {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D}},
+    {S8_INITIALIZER("neg"), UINT64_C(0x2ecfb0df2a6f90aa), S8_INITIALIZER("arm-a64@2026-06:NEG_asimdmisc_R"), 2,
+     TARGET_CPU_FEATURE_AARCH64_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
     {S8_INITIALIZER("addp"), UINT64_C(0x98b8e2d558091216), S8_INITIALIZER("arm-a64@2026-06:ADDP_asisdpair_only"), 2,
      TARGET_CPU_FEATURE_AARCH64_NEON,
      {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_2D}},
@@ -2303,6 +2312,14 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDSpelling const assembly_aarch64_dir
      S8_INITIALIZER("arm-a64@2026-06:SHA256H2_QQV_cryptosha3"), 3, TARGET_CPU_FEATURE_AARCH64_SHA2,
      {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_Q, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_Q,
       BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_4S}},
+    {S8_INITIALIZER("shadd"), UINT64_C(0x56a53606b665014e),
+     S8_INITIALIZER("arm-a64@2026-06:SHADD_asimdsame_only"), 3, TARGET_CPU_FEATURE_AARCH64_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
+    {S8_INITIALIZER("shsub"), UINT64_C(0x39c9b1410b025abb),
+     S8_INITIALIZER("arm-a64@2026-06:SHSUB_asimdsame_only"), 3, TARGET_CPU_FEATURE_AARCH64_NEON,
+     {BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID, BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID,
+      BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID}},
 };
 
 #if BUSTER_INCLUDE_TESTS
@@ -2337,6 +2354,12 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_lookup(String8 mnemonic, A
     {
         return false;
     }
+    u32 spelling_first = UINT32_MAX;
+    u32 spelling_count = 0;
+    AssemblyAarch64DirectSIMDSpelling first_spelling = {0};
+    u32 first_row_index = UINT32_MAX;
+    u32 last_spelling_index = UINT32_MAX;
+    bool generated = false;
     for (u32 spelling_index = 0; spelling_index < BUSTER_ARRAY_LENGTH(assembly_aarch64_direct_simd_spellings); spelling_index += 1)
     {
         AssemblyAarch64DirectSIMDSpelling spelling = assembly_aarch64_direct_simd_spellings[spelling_index];
@@ -2350,22 +2373,66 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_lookup(String8 mnemonic, A
             return false;
         }
         BusterA64DirectSIMDRowInfo row = {0};
-        if (!buster_a64_direct_simd_row(row_index, &row) || !row.executable || row.operand_count != spelling.operand_count ||
+        BusterA64SemanticForm form = {0};
+        u32 public_operand_count = 0;
+        if (!buster_a64_direct_simd_row(row_index, &row) || !row.executable ||
+            !buster_a64_semantic_form(row.semantic_form_id, &form) ||
             !assembly_word_equal(row.id, spelling.semantic_id))
         {
             return false;
         }
-        *result = (AssemblyInstructionInfo){
-            .opcode = ASSEMBLY_OPCODE_COUNT,
-            .operand_count = spelling.operand_count,
-            .encoding_kind = ASSEMBLY_ENCODING_AARCH64_DIRECT_SIMD,
-            .aarch64_direct_simd_row_index = row.row_index,
-            .aarch64_direct_simd_feature = spelling.feature,
-        };
-        memcpy(result->aarch64_direct_simd_arrangements, spelling.arrangements, sizeof(result->aarch64_direct_simd_arrangements));
-        return true;
+        for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+        {
+            BusterA64SemanticOperand operand = {0};
+            if (!buster_a64_semantic_operand(form.operand_first + operand_index, &operand))
+            {
+                return false;
+            }
+            if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER)
+            {
+                public_operand_count += 1;
+            }
+            else if (operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT &&
+                     operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR &&
+                     operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR)
+            {
+                return false;
+            }
+        }
+        if (public_operand_count != spelling.operand_count)
+        {
+            return false;
+        }
+        if (spelling_first == UINT32_MAX)
+        {
+            spelling_first = spelling_index;
+            first_spelling = spelling;
+            first_row_index = row.row_index;
+        }
+        else if (spelling_index != last_spelling_index + 1)
+        {
+            return false;
+        }
+        last_spelling_index = spelling_index;
+        generated |= row.transform_bearing;
+        spelling_count += 1;
     }
-    return false;
+    if (spelling_first == UINT32_MAX || spelling_count > UINT8_MAX)
+    {
+        return false;
+    }
+    *result = (AssemblyInstructionInfo){
+        .opcode = ASSEMBLY_OPCODE_COUNT,
+        .operand_count = first_spelling.operand_count,
+        .encoding_kind = ASSEMBLY_ENCODING_AARCH64_DIRECT_SIMD,
+        .aarch64_direct_simd_row_index = first_row_index,
+        .aarch64_direct_simd_spelling_first = spelling_first,
+        .aarch64_direct_simd_spelling_count = (u8)spelling_count,
+        .aarch64_direct_simd_generated = generated,
+        .aarch64_direct_simd_feature = first_spelling.feature,
+    };
+    memcpy(result->aarch64_direct_simd_arrangements, first_spelling.arrangements, sizeof(result->aarch64_direct_simd_arrangements));
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySyntax syntax, String8 mnemonic, AssemblyInstructionInfo* result)
@@ -6294,6 +6361,419 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_register_parse(String8 tex
     return true;
 }
 
+typedef struct AssemblyAarch64DirectSIMDParsedRegister AssemblyAarch64DirectSIMDParsedRegister;
+struct AssemblyAarch64DirectSIMDParsedRegister
+{
+    u32 number;
+    BusterA64DirectSIMDArrangement arrangement;
+    char8 prefix;
+};
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_arrangement_parse(String8 text,
+                                                                         BusterA64DirectSIMDArrangement* result)
+{
+    if (!result)
+    {
+        return false;
+    }
+    for (u32 index = 1; index < BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_COUNT; index += 1)
+    {
+        BusterA64DirectSIMDArrangement arrangement = (BusterA64DirectSIMDArrangement)index;
+        if (assembly_word_equal(text, buster_a64_direct_simd_arrangement_string(arrangement)))
+        {
+            *result = arrangement;
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_register_parse_any(String8 text,
+                                                                          AssemblyAarch64DirectSIMDParsedRegister* result)
+{
+    text = assembly_trim(text);
+    if (!result || !text.length)
+    {
+        return false;
+    }
+    char8 prefix = assembly_ascii_lower(text.pointer[0]);
+    BusterA64DirectSIMDArrangement arrangement = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
+    if (prefix == 'q')
+    {
+        arrangement = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_Q;
+    }
+    else if (prefix == 'b')
+    {
+        arrangement = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B;
+    }
+    else if (prefix == 'h')
+    {
+        arrangement = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H;
+    }
+    else if (prefix == 's')
+    {
+        arrangement = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S;
+    }
+    else if (prefix == 'd')
+    {
+        arrangement = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D;
+    }
+    else if (prefix != 'v')
+    {
+        return false;
+    }
+    u64 dot = 1;
+    while (dot < text.length && text.pointer[dot] >= '0' && text.pointer[dot] <= '9')
+    {
+        dot += 1;
+    }
+    if (dot == 1 || dot > 3 || (dot > 2 && text.pointer[1] == '0'))
+    {
+        return false;
+    }
+    u32 number = 0;
+    for (u64 index = 1; index < dot; index += 1)
+    {
+        number = number * 10u + (u32)(text.pointer[index] - '0');
+    }
+    if (number > 31)
+    {
+        return false;
+    }
+    if (prefix == 'v')
+    {
+        if (dot >= text.length || text.pointer[dot] != '.' ||
+            !assembly_aarch64_direct_simd_arrangement_parse(string_slice(text, dot + 1, text.length), &arrangement))
+        {
+            return false;
+        }
+        if (buster_a64_direct_simd_value_vector(number, arrangement).kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID)
+        {
+            return false;
+        }
+    }
+    else if (dot != text.length)
+    {
+        return false;
+    }
+    *result = (AssemblyAarch64DirectSIMDParsedRegister){.number = number, .arrangement = arrangement, .prefix = prefix};
+    return true;
+}
+
+typedef enum AssemblyAarch64DirectSIMDCandidateResult
+{
+    ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID,
+    ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_FEATURE,
+    ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_MATCH,
+} AssemblyAarch64DirectSIMDCandidateResult;
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_semantic_values_build(
+    u32 row_index, BusterA64SemanticForm form, u32 const* registers, BusterA64DirectSIMDArrangement const* arrangements,
+    BusterA64DirectSIMDInstruction* result)
+{
+    if (!registers || !arrangements || !result || form.operand_count > BUSTER_A64_DIRECT_SIMD_MAX_OPERANDS)
+    {
+        return false;
+    }
+    u32 source_index[8] = {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX};
+    u32 source_count = 0;
+    for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+    {
+        BusterA64SemanticOperand operand = {0};
+        if (!buster_a64_semantic_operand(form.operand_first + operand_index, &operand))
+        {
+            return false;
+        }
+        if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER)
+        {
+            if (source_count >= 4)
+            {
+                return false;
+            }
+            source_index[operand_index] = source_count;
+            source_count += 1;
+        }
+        else if (operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT &&
+                 operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR &&
+                 operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR)
+        {
+            return false;
+        }
+    }
+    BusterA64DirectSIMDInstruction instruction = {.row_index = row_index, .operand_count = (u8)form.operand_count};
+    for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+    {
+        BusterA64SemanticOperand operand = {0};
+        if (!buster_a64_semantic_operand(form.operand_first + operand_index, &operand))
+        {
+            return false;
+        }
+        if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER)
+        {
+            u32 source = source_index[operand_index];
+            if (source >= source_count)
+            {
+                return false;
+            }
+            bool scalar = (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) != 0;
+            bool vector = (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0;
+            if (!scalar && !vector)
+            {
+                BusterA64SemanticVMValue scalar_value =
+                    buster_a64_direct_simd_value_scalar(registers[source], arrangements[source]);
+                BusterA64SemanticVMValue vector_value =
+                    buster_a64_direct_simd_value_vector(registers[source], arrangements[source]);
+                scalar = scalar_value.kind != BUSTER_A64_SEMANTIC_VM_VALUE_INVALID;
+                if (!scalar && vector_value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID)
+                {
+                    return false;
+                }
+            }
+            instruction.operands[operand_index] = scalar
+                ? buster_a64_direct_simd_value_scalar(registers[source], arrangements[source])
+                : buster_a64_direct_simd_value_vector(registers[source], arrangements[source]);
+        }
+        else
+        {
+            u32 bound_register = UINT32_MAX;
+            for (u32 register_index = 0; register_index < form.operand_count; register_index += 1)
+            {
+                BusterA64SemanticOperand candidate = {0};
+                BusterA64DirectSIMDArrangementBinding binding = {0};
+                if (!buster_a64_semantic_operand(form.operand_first + register_index, &candidate) ||
+                    candidate.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER ||
+                    !buster_a64_direct_simd_arrangement_binding(row_index, register_index, &binding) ||
+                    binding.selector_index != operand_index)
+                {
+                    continue;
+                }
+                bound_register = register_index;
+                break;
+            }
+            if (bound_register == UINT32_MAX || source_index[bound_register] >= source_count)
+            {
+                return false;
+            }
+            instruction.operands[operand_index] = buster_a64_direct_simd_value_arrangement(
+                arrangements[source_index[bound_register]]);
+        }
+        if (instruction.operands[operand_index].kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID)
+        {
+            return false;
+        }
+    }
+    *result = instruction;
+    return source_count != 0;
+}
+
+BUSTER_GLOBAL_LOCAL AssemblyAarch64DirectSIMDCandidateResult assembly_aarch64_direct_simd_generated_candidate(
+    Target target, String8 tokens[4], u32 token_count, AssemblyAarch64DirectSIMDSpelling spelling,
+    u32 row_index, u32* registers, BusterA64DirectSIMDArrangement* arrangements)
+{
+    BusterA64DirectSIMDRowInfo row = {0};
+    if (!buster_a64_direct_simd_row(row_index, &row))
+    {
+        return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+    }
+    if (!row.transform_bearing)
+    {
+        if (token_count != spelling.operand_count || token_count > 4)
+        {
+            return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+        }
+        for (u32 operand_index = 0; operand_index < token_count; operand_index += 1)
+        {
+            if (!assembly_aarch64_direct_simd_register_parse(tokens[operand_index], spelling.arrangements[operand_index],
+                                                              &registers[operand_index]))
+            {
+                return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+            }
+            arrangements[operand_index] = spelling.arrangements[operand_index];
+        }
+        if (!target_cpu_feature_has(target, spelling.feature))
+        {
+            return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_FEATURE;
+        }
+        BusterA64DirectSIMDInstruction fixed_instruction = {.row_index = row_index, .operand_count = (u8)token_count};
+        for (u32 operand_index = 0; operand_index < token_count; operand_index += 1)
+        {
+            BusterA64DirectSIMDArrangement arrangement = arrangements[operand_index];
+            bool scalar = arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B ||
+                          arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H ||
+                          arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S ||
+                          arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D;
+            fixed_instruction.operands[operand_index] =
+                scalar ? buster_a64_direct_simd_value_scalar(registers[operand_index], arrangement)
+                       : buster_a64_direct_simd_value_vector(registers[operand_index], arrangement);
+        }
+        u32 encoded_word = 0;
+        if (buster_a64_direct_simd_encode(target, &fixed_instruction, &encoded_word) != BUSTER_A64_DIRECT_SIMD_STATUS_OK)
+        {
+            return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+        }
+        return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_MATCH;
+    }
+    BusterA64SemanticForm form = {0};
+    if (!buster_a64_semantic_form(row.semantic_form_id, &form) || form.operand_count > BUSTER_A64_DIRECT_SIMD_MAX_OPERANDS)
+    {
+        return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+    }
+    u32 source_count = 0;
+    for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+    {
+        BusterA64SemanticOperand operand = {0};
+        if (!buster_a64_semantic_operand(form.operand_first + operand_index, &operand))
+        {
+            return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+        }
+        if (operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER &&
+            operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT &&
+            operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR &&
+            operand.kind != BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR)
+        {
+            return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+        }
+        if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER)
+        {
+            if (source_count >= 4 || token_count <= source_count)
+            {
+                return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+            }
+            AssemblyAarch64DirectSIMDParsedRegister parsed = {0};
+            if (!assembly_aarch64_direct_simd_register_parse_any(tokens[source_count], &parsed))
+            {
+                return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+            }
+            bool scalar = (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) != 0;
+            bool vector = (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0;
+            bool q = (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_WIDTH_Q128) != 0;
+            char8 expected_prefix = 0;
+            if (!scalar && !vector && !q && operand.symbol.length >= 2)
+            {
+                expected_prefix = assembly_ascii_lower(buster_a64_semantic_string_byte(operand.symbol, 1));
+            }
+            if ((vector && parsed.prefix != 'v') || (scalar && parsed.prefix == 'v') || (q && parsed.prefix != 'q'))
+            {
+                return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+            }
+            if (expected_prefix != 0 && parsed.prefix != expected_prefix)
+            {
+                return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+            }
+            registers[source_count] = parsed.number;
+            arrangements[source_count] = parsed.arrangement;
+            source_count += 1;
+        }
+    }
+    if (source_count != token_count)
+    {
+        return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+    }
+    BusterA64DirectSIMDInstruction instruction = {0};
+    if (!assembly_aarch64_direct_simd_semantic_values_build(row_index, form, registers, arrangements, &instruction))
+    {
+        return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+    }
+    if (!target_cpu_feature_has(target, spelling.feature))
+    {
+        return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_FEATURE;
+    }
+    u32 encoded_word = 0;
+    BusterA64DirectSIMDStatus status = buster_a64_direct_simd_encode(target, &instruction, &encoded_word);
+    if (status != BUSTER_A64_DIRECT_SIMD_STATUS_OK)
+    {
+        return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_INVALID;
+    }
+    return ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_MATCH;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_instruction_parse_generated(
+    AssemblyBuilder* builder, String8 mnemonic, String8 operands_text, AssemblyInstruction* instruction,
+    u32 spelling_first, u32 spelling_count, u32 line, u32 column)
+{
+    if (!builder || !instruction || spelling_count == 0 || spelling_count > BUSTER_ARRAY_LENGTH(assembly_aarch64_direct_simd_spellings))
+    {
+        return false;
+    }
+    String8 tokens[4] = {0};
+    u32 token_count = 0;
+    u64 cursor = 0;
+    while (cursor < operands_text.length)
+    {
+        if (token_count >= BUSTER_ARRAY_LENGTH(tokens))
+        {
+            return false;
+        }
+        String8 token = {0};
+        if (assembly_operand_split_next(operands_text, &cursor, &token) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
+        {
+            return false;
+        }
+        tokens[token_count++] = assembly_trim(token);
+    }
+    u32 match_count = 0;
+    u32 match_row_index = UINT32_MAX;
+    u32 match_registers[4] = {0};
+    BusterA64DirectSIMDArrangement match_arrangements[4] = {0};
+    bool feature_missing = false;
+    for (u32 offset = 0; offset < spelling_count; offset += 1)
+    {
+        u32 spelling_index = spelling_first + offset;
+        if (spelling_index >= BUSTER_ARRAY_LENGTH(assembly_aarch64_direct_simd_spellings))
+        {
+            return false;
+        }
+        AssemblyAarch64DirectSIMDSpelling spelling = assembly_aarch64_direct_simd_spellings[spelling_index];
+        if (!assembly_word_equal(mnemonic, spelling.mnemonic) || token_count != spelling.operand_count)
+        {
+            continue;
+        }
+        u32 row_index = UINT32_MAX;
+        if (!buster_a64_direct_simd_find_source_digest(spelling.source_digest, &row_index))
+        {
+            continue;
+        }
+        u32 registers[4] = {0};
+        BusterA64DirectSIMDArrangement arrangements[4] = {0};
+        AssemblyAarch64DirectSIMDCandidateResult candidate = assembly_aarch64_direct_simd_generated_candidate(
+            builder->target, tokens, token_count, spelling, row_index, registers, arrangements);
+        if (candidate == ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_FEATURE)
+        {
+            feature_missing = true;
+            continue;
+        }
+        if (candidate != ASSEMBLY_AARCH64_DIRECT_SIMD_CANDIDATE_MATCH)
+        {
+            continue;
+        }
+        match_count += 1;
+        if (match_count == 1)
+        {
+            match_row_index = row_index;
+            memcpy(match_registers, registers, sizeof(match_registers));
+            memcpy(match_arrangements, arrangements, sizeof(match_arrangements));
+        }
+    }
+    if (match_count != 1)
+    {
+        if (feature_missing && match_count == 0)
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
+                                S8("instruction requires an enabled AArch64 target feature"));
+        }
+        return false;
+    }
+    instruction->aarch64_direct_simd_row_index = match_row_index;
+    instruction->operand_count = (u8)token_count;
+    for (u32 index = 0; index < token_count; index += 1)
+    {
+        instruction->aarch64_direct_simd_registers[index] = (u8)match_registers[index];
+        instruction->aarch64_direct_simd_arrangements[index] = (u8)match_arrangements[index];
+    }
+    instruction->size = 4;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_direct_simd_instruction_parse(AssemblyBuilder* builder, String8 mnemonic,
                                                                          String8 operands_text, AssemblyInstruction* instruction,
                                                                          u32 row_index, u8 operand_count, TargetCpuFeature feature,
@@ -7169,9 +7649,14 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
     if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_DIRECT_SIMD)
     {
         u32 diagnostic_count = builder->result.diagnostic_count;
-        if (!assembly_aarch64_direct_simd_instruction_parse(
-                builder, mnemonic, operands, &instruction, info.aarch64_direct_simd_row_index, info.operand_count,
-                info.aarch64_direct_simd_feature, info.aarch64_direct_simd_arrangements, line, column))
+        bool parsed_direct_simd = info.aarch64_direct_simd_generated || info.aarch64_direct_simd_spelling_count > 1
+            ? assembly_aarch64_direct_simd_instruction_parse_generated(
+                  builder, mnemonic, operands, &instruction, info.aarch64_direct_simd_spelling_first,
+                  info.aarch64_direct_simd_spelling_count, line, column)
+            : assembly_aarch64_direct_simd_instruction_parse(
+                  builder, mnemonic, operands, &instruction, info.aarch64_direct_simd_row_index, info.operand_count,
+                  info.aarch64_direct_simd_feature, info.aarch64_direct_simd_arrangements, line, column);
+        if (!parsed_direct_simd)
         {
             if (builder->result.diagnostic_count == diagnostic_count)
             {
@@ -11312,21 +11797,50 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
         if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_DIRECT_SIMD)
         {
             u32 word = 0;
-            BusterA64DirectSIMDInstruction direct_simd_instruction = {
-                .row_index = instruction->aarch64_direct_simd_row_index,
-                .operand_count = instruction->operand_count,
-            };
-            for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+            BusterA64DirectSIMDInstruction direct_simd_instruction = {0};
+            BusterA64DirectSIMDRowInfo row_info = {0};
+            bool values_built = false;
+            if (buster_a64_direct_simd_row(instruction->aarch64_direct_simd_row_index, &row_info) && row_info.transform_bearing)
             {
-                BusterA64DirectSIMDArrangement arrangement =
-                    (BusterA64DirectSIMDArrangement)instruction->aarch64_direct_simd_arrangements[operand_index];
-                bool scalar = arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B ||
-                              arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H ||
-                              arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S ||
-                              arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D;
-                direct_simd_instruction.operands[operand_index] =
-                    scalar ? buster_a64_direct_simd_value_scalar(instruction->aarch64_direct_simd_registers[operand_index], arrangement)
-                           : buster_a64_direct_simd_value_vector(instruction->aarch64_direct_simd_registers[operand_index], arrangement);
+                BusterA64SemanticForm form = {0};
+                u32 registers[4] = {0};
+                BusterA64DirectSIMDArrangement arrangements[4] = {0};
+                for (u32 operand_index = 0; operand_index < instruction->operand_count && operand_index < 4; operand_index += 1)
+                {
+                    registers[operand_index] = instruction->aarch64_direct_simd_registers[operand_index];
+                    arrangements[operand_index] =
+                        (BusterA64DirectSIMDArrangement)instruction->aarch64_direct_simd_arrangements[operand_index];
+                }
+                values_built = buster_a64_semantic_form(row_info.semantic_form_id, &form) &&
+                               assembly_aarch64_direct_simd_semantic_values_build(
+                                   instruction->aarch64_direct_simd_row_index, form, registers, arrangements,
+                                   &direct_simd_instruction);
+            }
+            else
+            {
+                direct_simd_instruction = (BusterA64DirectSIMDInstruction){
+                    .row_index = instruction->aarch64_direct_simd_row_index,
+                    .operand_count = instruction->operand_count,
+                };
+                for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+                {
+                    BusterA64DirectSIMDArrangement arrangement =
+                        (BusterA64DirectSIMDArrangement)instruction->aarch64_direct_simd_arrangements[operand_index];
+                    bool scalar = arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B ||
+                                  arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H ||
+                                  arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S ||
+                                  arrangement == BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D;
+                    direct_simd_instruction.operands[operand_index] =
+                        scalar ? buster_a64_direct_simd_value_scalar(instruction->aarch64_direct_simd_registers[operand_index], arrangement)
+                               : buster_a64_direct_simd_value_vector(instruction->aarch64_direct_simd_registers[operand_index], arrangement);
+                }
+                values_built = true;
+            }
+            if (!values_built)
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
+                                    S8("AArch64 direct SIMD instruction could not be encoded"));
+                return;
             }
             BusterA64DirectSIMDStatus status = buster_a64_direct_simd_encode(
                 builder->target, &direct_simd_instruction, &word);
