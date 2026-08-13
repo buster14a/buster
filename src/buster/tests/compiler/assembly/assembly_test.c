@@ -247,6 +247,34 @@ static AssemblyA64DirectSIMDTransformCase const assembly_a64_direct_simd_transfo
     {S8_INITIALIZER("uhsub v0.8h, v1.8h, v2.8h\n"), {0x20, 0x24, 0x62, 0x6e}},
     {S8_INITIALIZER("uhsub v0.2s, v1.2s, v2.2s\n"), {0x20, 0x24, 0xa2, 0x2e}},
     {S8_INITIALIZER("uhsub v0.4s, v1.4s, v2.4s\n"), {0x20, 0x24, 0xa2, 0x6e}},
+    {S8_INITIALIZER("sqabs v0.8b, v1.8b\n"), {0x20, 0x78, 0x20, 0x0e}},
+    {S8_INITIALIZER("sqabs v0.16b, v1.16b\n"), {0x20, 0x78, 0x20, 0x4e}},
+    {S8_INITIALIZER("sqabs v0.4h, v1.4h\n"), {0x20, 0x78, 0x60, 0x0e}},
+    {S8_INITIALIZER("sqabs v0.8h, v1.8h\n"), {0x20, 0x78, 0x60, 0x4e}},
+    {S8_INITIALIZER("sqabs v0.2s, v1.2s\n"), {0x20, 0x78, 0xa0, 0x0e}},
+    {S8_INITIALIZER("sqabs v0.4s, v1.4s\n"), {0x20, 0x78, 0xa0, 0x4e}},
+    {S8_INITIALIZER("sqabs v0.2d, v1.2d\n"), {0x20, 0x78, 0xe0, 0x4e}},
+    {S8_INITIALIZER("sqneg v0.8b, v1.8b\n"), {0x20, 0x78, 0x20, 0x2e}},
+    {S8_INITIALIZER("sqneg v0.16b, v1.16b\n"), {0x20, 0x78, 0x20, 0x6e}},
+    {S8_INITIALIZER("sqneg v0.4h, v1.4h\n"), {0x20, 0x78, 0x60, 0x2e}},
+    {S8_INITIALIZER("sqneg v0.8h, v1.8h\n"), {0x20, 0x78, 0x60, 0x6e}},
+    {S8_INITIALIZER("sqneg v0.2s, v1.2s\n"), {0x20, 0x78, 0xa0, 0x2e}},
+    {S8_INITIALIZER("sqneg v0.4s, v1.4s\n"), {0x20, 0x78, 0xa0, 0x6e}},
+    {S8_INITIALIZER("sqneg v0.2d, v1.2d\n"), {0x20, 0x78, 0xe0, 0x6e}},
+    {S8_INITIALIZER("suqadd v0.8b, v1.8b\n"), {0x20, 0x38, 0x20, 0x0e}},
+    {S8_INITIALIZER("suqadd v0.16b, v1.16b\n"), {0x20, 0x38, 0x20, 0x4e}},
+    {S8_INITIALIZER("suqadd v0.4h, v1.4h\n"), {0x20, 0x38, 0x60, 0x0e}},
+    {S8_INITIALIZER("suqadd v0.8h, v1.8h\n"), {0x20, 0x38, 0x60, 0x4e}},
+    {S8_INITIALIZER("suqadd v0.2s, v1.2s\n"), {0x20, 0x38, 0xa0, 0x0e}},
+    {S8_INITIALIZER("suqadd v0.4s, v1.4s\n"), {0x20, 0x38, 0xa0, 0x4e}},
+    {S8_INITIALIZER("suqadd v0.2d, v1.2d\n"), {0x20, 0x38, 0xe0, 0x4e}},
+    {S8_INITIALIZER("usqadd v0.8b, v1.8b\n"), {0x20, 0x38, 0x20, 0x2e}},
+    {S8_INITIALIZER("usqadd v0.16b, v1.16b\n"), {0x20, 0x38, 0x20, 0x6e}},
+    {S8_INITIALIZER("usqadd v0.4h, v1.4h\n"), {0x20, 0x38, 0x60, 0x2e}},
+    {S8_INITIALIZER("usqadd v0.8h, v1.8h\n"), {0x20, 0x38, 0x60, 0x6e}},
+    {S8_INITIALIZER("usqadd v0.2s, v1.2s\n"), {0x20, 0x38, 0xa0, 0x2e}},
+    {S8_INITIALIZER("usqadd v0.4s, v1.4s\n"), {0x20, 0x38, 0xa0, 0x6e}},
+    {S8_INITIALIZER("usqadd v0.2d, v1.2d\n"), {0x20, 0x38, 0xe0, 0x6e}},
 };
 
 // End-to-end direct-GPR corpus.  Sources use ordinary W/X registers (the
@@ -487,12 +515,12 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 64);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 64);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 326);
-    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 31);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 72);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 72);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 318);
+    BUSTER_TEST(arguments, direct_simd_covered_transform_count == 39);
     BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 33);
-    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 232);
+    BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 224);
     BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 94);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     arguments->show(arguments,
@@ -3462,7 +3490,11 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
            "srhadd v31.4s, v30.4s, v29.4s\n"
            "urhadd v31.4s, v30.4s, v29.4s\n"
            "uhadd v31.4s, v30.4s, v29.4s\n"
-           "uhsub v31.4s, v30.4s, v29.4s\n"),
+           "uhsub v31.4s, v30.4s, v29.4s\n"
+           "sqabs v31.2d, v30.2d\n"
+           "sqneg v31.2d, v30.2d\n"
+           "suqadd v31.2d, v30.2d\n"
+           "usqadd v31.2d, v30.2d\n"),
         (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
     static u8 const expected_aarch64_advsimd_transform_boundary[] = {
         0xdf, 0xbb, 0xe0, 0x4e,
@@ -3496,11 +3528,44 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         0xdf, 0x17, 0xbd, 0x6e,
         0xdf, 0x07, 0xbd, 0x6e,
         0xdf, 0x27, 0xbd, 0x6e,
+        0xdf, 0x7b, 0xe0, 0x4e,
+        0xdf, 0x7b, 0xe0, 0x6e,
+        0xdf, 0x3b, 0xe0, 0x4e,
+        0xdf, 0x3b, 0xe0, 0x6e,
     };
     BUSTER_TEST(arguments, aarch64_advsimd_transform_boundary.diagnostic_count == 0 &&
                                assembly_test_bytes_equal(aarch64_advsimd_transform_boundary.bytes,
                                                          expected_aarch64_advsimd_transform_boundary,
                                                          sizeof(expected_aarch64_advsimd_transform_boundary)));
+    AssemblyEncodeResult aarch64_advsimd_scalar_boundary = assembly_encode(
+        arguments->arena,
+        S8("sqabs b31, b30\n"
+           "sqabs h31, h30\n"
+           "sqabs s31, s30\n"
+           "sqabs d31, d30\n"
+           "sqneg b31, b30\n"
+           "sqneg h31, h30\n"
+           "sqneg s31, s30\n"
+           "sqneg d31, d30\n"
+           "suqadd b31, b30\n"
+           "suqadd h31, h30\n"
+           "suqadd s31, s30\n"
+           "suqadd d31, d30\n"
+           "usqadd b31, b30\n"
+           "usqadd h31, h30\n"
+           "usqadd s31, s30\n"
+           "usqadd d31, d30\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    static u8 const expected_aarch64_advsimd_scalar_boundary[] = {
+        0xdf, 0x7b, 0x20, 0x5e, 0xdf, 0x7b, 0x60, 0x5e, 0xdf, 0x7b, 0xa0, 0x5e, 0xdf, 0x7b, 0xe0, 0x5e,
+        0xdf, 0x7b, 0x20, 0x7e, 0xdf, 0x7b, 0x60, 0x7e, 0xdf, 0x7b, 0xa0, 0x7e, 0xdf, 0x7b, 0xe0, 0x7e,
+        0xdf, 0x3b, 0x20, 0x5e, 0xdf, 0x3b, 0x60, 0x5e, 0xdf, 0x3b, 0xa0, 0x5e, 0xdf, 0x3b, 0xe0, 0x5e,
+        0xdf, 0x3b, 0x20, 0x7e, 0xdf, 0x3b, 0x60, 0x7e, 0xdf, 0x3b, 0xa0, 0x7e, 0xdf, 0x3b, 0xe0, 0x7e,
+    };
+    BUSTER_TEST(arguments, aarch64_advsimd_scalar_boundary.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(aarch64_advsimd_scalar_boundary.bytes,
+                                                         expected_aarch64_advsimd_scalar_boundary,
+                                                         sizeof(expected_aarch64_advsimd_scalar_boundary)));
     AssemblyEncodeResult aarch64_advsimd_transform_case_insensitive = assembly_encode(
         arguments->arena, S8("SHADD V0.4S, V1.4S, V2.4S\nTRN1 V0.4S, V1.4S, V2.4S\n"
                              "SMAXP V0.4S, V1.4S, V2.4S\nSMAX V0.4S, V1.4S, V2.4S\n"
@@ -3530,7 +3595,8 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                              "SQRSHL V0.2D, V1.2D, V2.2D\nSQSHL V0.2D, V1.2D, V2.2D\n"
                              "UQRSHL V0.2D, V1.2D, V2.2D\nUQSHL V0.2D, V1.2D, V2.2D\n"
                              "SRHADD V0.4S, V1.4S, V2.4S\nURHADD V0.4S, V1.4S, V2.4S\n"
-                             "UHADD V0.4S, V1.4S, V2.4S\nUHSUB V0.4S, V1.4S, V2.4S\n"),
+                             "UHADD V0.4S, V1.4S, V2.4S\nUHSUB V0.4S, V1.4S, V2.4S\n"
+                             "SQABS D0, D1\nSQNEG D0, D1\nSUQADD D0, D1\nUSQADD D0, D1\n"),
         (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
     static u8 const expected_aarch64_advsimd_new_case_insensitive[] = {
         0x20, 0x0c, 0xe2, 0x4e, 0x20, 0x2c, 0xe2, 0x4e,
@@ -3539,6 +3605,8 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         0x20, 0x5c, 0xe2, 0x6e, 0x20, 0x4c, 0xe2, 0x6e,
         0x20, 0x14, 0xa2, 0x4e, 0x20, 0x14, 0xa2, 0x6e,
         0x20, 0x04, 0xa2, 0x6e, 0x20, 0x24, 0xa2, 0x6e,
+        0x20, 0x78, 0xe0, 0x5e, 0x20, 0x78, 0xe0, 0x7e,
+        0x20, 0x38, 0xe0, 0x5e, 0x20, 0x38, 0xe0, 0x7e,
     };
     BUSTER_TEST(arguments, aarch64_advsimd_new_case_insensitive.diagnostic_count == 0 &&
                                assembly_test_bytes_equal(aarch64_advsimd_new_case_insensitive.bytes,
@@ -3575,9 +3643,17 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                              "srhadd v0.4s, v1.4s, v2.4s\n"
                              "urhadd v0.4s, v1.4s, v2.4s\n"
                              "uhadd v0.4s, v1.4s, v2.4s\n"
-                             "uhsub v0.4s, v1.4s, v2.4s\n"),
+                             "uhsub v0.4s, v1.4s, v2.4s\n"
+                             "sqabs v0.2d, v1.2d\n"
+                             "sqneg v0.2d, v1.2d\n"
+                             "suqadd v0.2d, v1.2d\n"
+                             "usqadd v0.2d, v1.2d\n"
+                             "sqabs d0, d1\n"
+                             "sqneg d0, d1\n"
+                             "suqadd d0, d1\n"
+                             "usqadd d0, d1\n"),
         (AssemblyEncodeOptions){.target = aarch64_no_transform_neon});
-    BUSTER_TEST(arguments, aarch64_advsimd_transform_without_feature.diagnostic_count == 28 &&
+    BUSTER_TEST(arguments, aarch64_advsimd_transform_without_feature.diagnostic_count == 36 &&
                                aarch64_advsimd_transform_without_feature.bytes.length == 0 &&
                                aarch64_advsimd_transform_without_feature.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
     for (u32 diagnostic_index = 0;
@@ -3625,6 +3701,16 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8_INITIALIZER("urhadd v0.4s, v1.4s\n"),
         S8_INITIALIZER("uhadd v0.4s, v1.4s, v2.4s, v3.4s\n"),
         S8_INITIALIZER("uhsub v32.4s, v1.4s, v2.4s\n"),
+        S8_INITIALIZER("sqabs v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("sqabs q0, q1\n"),
+        S8_INITIALIZER("sqabs b0, h1\n"),
+        S8_INITIALIZER("sqabs h0, b1\n"),
+        S8_INITIALIZER("sqneg v0.1d, v1.1d\n"),
+        S8_INITIALIZER("sqneg v0, v1\n"),
+        S8_INITIALIZER("suqadd v0.2d, v1.2d, v2.2d\n"),
+        S8_INITIALIZER("suqadd q0, q1\n"),
+        S8_INITIALIZER("usqadd d32, d1\n"),
+        S8_INITIALIZER("usqadd v0, v1\n"),
         S8_INITIALIZER("srhadd v0.2d, v1.2d, v2.2d\n"),
         S8_INITIALIZER("urhadd v0.2d, v1.2d, v2.2d\n"),
         S8_INITIALIZER("uhadd v0.2d, v1.2d, v2.2d\n"),
