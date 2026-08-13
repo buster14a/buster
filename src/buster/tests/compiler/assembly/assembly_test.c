@@ -13,6 +13,34 @@ BUSTER_GLOBAL_LOCAL bool assembly_test_bytes_equal(ByteSlice actual, u8 const* e
                                                                      memcmp(actual.pointer, expected, expected_count) == 0));
 }
 
+typedef struct AssemblyA64DirectSIMDNeonCase AssemblyA64DirectSIMDNeonCase;
+struct AssemblyA64DirectSIMDNeonCase
+{
+    String8 representative;
+    u8 representative_bytes[4];
+    String8 boundary;
+    u8 boundary_bytes[4];
+};
+
+static AssemblyA64DirectSIMDNeonCase const assembly_a64_direct_simd_neon_cases[] = {
+    {S8_INITIALIZER("addp d0, v1.2d\n"), {0x20, 0xb8, 0xf1, 0x5e}, S8_INITIALIZER("addp d31, v30.2d\n"), {0xdf, 0xbb, 0xf1, 0x5e}},
+    {S8_INITIALIZER("cmeq d0, d1, d2\n"), {0x20, 0x8c, 0xe2, 0x7e}, S8_INITIALIZER("cmeq d31, d30, d29\n"), {0xdf, 0x8f, 0xfd, 0x7e}},
+    {S8_INITIALIZER("cmge d0, d1, d2\n"), {0x20, 0x3c, 0xe2, 0x5e}, S8_INITIALIZER("cmge d31, d30, d29\n"), {0xdf, 0x3f, 0xfd, 0x5e}},
+    {S8_INITIALIZER("cmgt d0, d1, d2\n"), {0x20, 0x34, 0xe2, 0x5e}, S8_INITIALIZER("cmgt d31, d30, d29\n"), {0xdf, 0x37, 0xfd, 0x5e}},
+    {S8_INITIALIZER("cmhi d0, d1, d2\n"), {0x20, 0x34, 0xe2, 0x7e}, S8_INITIALIZER("cmhi d31, d30, d29\n"), {0xdf, 0x37, 0xfd, 0x7e}},
+    {S8_INITIALIZER("cmhs d0, d1, d2\n"), {0x20, 0x3c, 0xe2, 0x7e}, S8_INITIALIZER("cmhs d31, d30, d29\n"), {0xdf, 0x3f, 0xfd, 0x7e}},
+    {S8_INITIALIZER("cmtst d0, d1, d2\n"), {0x20, 0x8c, 0xe2, 0x5e}, S8_INITIALIZER("cmtst d31, d30, d29\n"), {0xdf, 0x8f, 0xfd, 0x5e}},
+    {S8_INITIALIZER("fcvtxn s0, d1\n"), {0x20, 0x68, 0x61, 0x7e}, S8_INITIALIZER("fcvtxn s31, d30\n"), {0xdf, 0x6b, 0x61, 0x7e}},
+    {S8_INITIALIZER("fmaxnmv s0, v1.4s\n"), {0x20, 0xc8, 0x30, 0x6e}, S8_INITIALIZER("fmaxnmv s31, v30.4s\n"), {0xdf, 0xcb, 0x30, 0x6e}},
+    {S8_INITIALIZER("fmaxv s0, v1.4s\n"), {0x20, 0xf8, 0x30, 0x6e}, S8_INITIALIZER("fmaxv s31, v30.4s\n"), {0xdf, 0xfb, 0x30, 0x6e}},
+    {S8_INITIALIZER("fminnmv s0, v1.4s\n"), {0x20, 0xc8, 0xb0, 0x6e}, S8_INITIALIZER("fminnmv s31, v30.4s\n"), {0xdf, 0xcb, 0xb0, 0x6e}},
+    {S8_INITIALIZER("fminv s0, v1.4s\n"), {0x20, 0xf8, 0xb0, 0x6e}, S8_INITIALIZER("fminv s31, v30.4s\n"), {0xdf, 0xfb, 0xb0, 0x6e}},
+    {S8_INITIALIZER("srshl d0, d1, d2\n"), {0x20, 0x54, 0xe2, 0x5e}, S8_INITIALIZER("srshl d31, d30, d29\n"), {0xdf, 0x57, 0xfd, 0x5e}},
+    {S8_INITIALIZER("sshl d0, d1, d2\n"), {0x20, 0x44, 0xe2, 0x5e}, S8_INITIALIZER("sshl d31, d30, d29\n"), {0xdf, 0x47, 0xfd, 0x5e}},
+    {S8_INITIALIZER("urshl d0, d1, d2\n"), {0x20, 0x54, 0xe2, 0x7e}, S8_INITIALIZER("urshl d31, d30, d29\n"), {0xdf, 0x57, 0xfd, 0x7e}},
+    {S8_INITIALIZER("ushl d0, d1, d2\n"), {0x20, 0x44, 0xe2, 0x7e}, S8_INITIALIZER("ushl d31, d30, d29\n"), {0xdf, 0x47, 0xfd, 0x7e}},
+};
+
 // End-to-end direct-GPR corpus.  Sources use ordinary W/X registers (the
 // public encoder matrix below separately exercises register-31 roles), and
 // every expected byte is an independent llvm-mc 22.1.8 literal.
@@ -223,13 +251,13 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     AssemblyAarch64DirectSIMDSpellingTest direct_simd_out_of_range_spelling = {0};
     BUSTER_TEST(arguments, !assembly_test_aarch64_direct_simd_spelling_at(direct_simd_spelling_count,
                                                                             &direct_simd_out_of_range_spelling));
-    BUSTER_TEST(arguments, direct_simd_spelling_count == 17);
-    BUSTER_TEST(arguments, direct_simd_covered_count == 17);
-    BUSTER_TEST(arguments, direct_simd_uncovered_count == 373);
+    BUSTER_TEST(arguments, direct_simd_spelling_count == 33);
+    BUSTER_TEST(arguments, direct_simd_covered_count == 33);
+    BUSTER_TEST(arguments, direct_simd_uncovered_count == 357);
     BUSTER_TEST(arguments, direct_simd_covered_transform_count == 0);
-    BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 17);
+    BUSTER_TEST(arguments, direct_simd_covered_no_transform_count == 33);
     BUSTER_TEST(arguments, direct_simd_uncovered_transform_count == 263);
-    BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 110);
+    BUSTER_TEST(arguments, direct_simd_uncovered_no_transform_count == 94);
     BUSTER_TEST(arguments, direct_simd_covered_count == direct_simd_spelling_count);
     arguments->show(arguments,
                     S8("A64_DIRECT_SIMD_COVERAGE rows={u32} executable={u32} transform={u32} bindings={u32} spellings={u32} covered={u32} remaining={u32} covered_transform={u32} covered_no_transform={u32} uncovered_transform={u32} uncovered_no_transform={u32}\n"),
@@ -3158,6 +3186,48 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
             (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
         BUSTER_TEST(arguments, invalid_advsimd_case.diagnostic_count == 1 && invalid_advsimd_case.bytes.length == 0 &&
                                    invalid_advsimd_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+    }
+
+    for (u32 neon_index = 0; neon_index < BUSTER_ARRAY_LENGTH(assembly_a64_direct_simd_neon_cases); neon_index += 1)
+    {
+        AssemblyA64DirectSIMDNeonCase neon_case = assembly_a64_direct_simd_neon_cases[neon_index];
+        AssemblyEncodeResult representative = assembly_encode(
+            arguments->arena, neon_case.representative, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        AssemblyEncodeResult boundary = assembly_encode(
+            arguments->arena, neon_case.boundary, (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, representative.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(representative.bytes, neon_case.representative_bytes, 4));
+        BUSTER_TEST(arguments, boundary.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(boundary.bytes, neon_case.boundary_bytes, 4));
+    }
+    AssemblyEncodeResult aarch64_direct_simd_neon_case = assembly_encode(
+        arguments->arena, S8("CMEQ D0, D1, D2\nFCVTXN S0, D1\nFMAXV S0, V1.4S\n"),
+        (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+    BUSTER_TEST(arguments, aarch64_direct_simd_neon_case.diagnostic_count == 0);
+    Target aarch64_no_advsimd_neon_tranche = aarch64_advsimd_target;
+    aarch64_no_advsimd_neon_tranche.cpu_features =
+        target_cpu_features_remove(aarch64_no_advsimd_neon_tranche.cpu_features, TARGET_CPU_FEATURE_AARCH64_NEON);
+    AssemblyEncodeResult aarch64_direct_simd_neon_without_feature = assembly_encode(
+        arguments->arena, S8("addp d0, v1.2d\n"), (AssemblyEncodeOptions){.target = aarch64_no_advsimd_neon_tranche});
+    BUSTER_TEST(arguments, aarch64_direct_simd_neon_without_feature.diagnostic_count == 1 &&
+                               aarch64_direct_simd_neon_without_feature.bytes.length == 0 &&
+                               aarch64_direct_simd_neon_without_feature.diagnostics[0].kind ==
+                                   ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    static String8 const invalid_aarch64_direct_simd_neon[] = {
+        S8_INITIALIZER("addp d0, v1.4s\n"),
+        S8_INITIALIZER("addp d0, v1\n"),
+        S8_INITIALIZER("cmeq d0, d1\n"),
+        S8_INITIALIZER("fcvtxn v0.4s, d1\n"),
+        S8_INITIALIZER("fmaxv s0, v1.2d\n"),
+        S8_INITIALIZER("ushl d32, d1, d2\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_aarch64_direct_simd_neon); invalid_index += 1)
+    {
+        AssemblyEncodeResult invalid_neon_case = assembly_encode(
+            arguments->arena, invalid_aarch64_direct_simd_neon[invalid_index],
+            (AssemblyEncodeOptions){.target = aarch64_advsimd_target});
+        BUSTER_TEST(arguments, invalid_neon_case.diagnostic_count == 1 && invalid_neon_case.bytes.length == 0 &&
+                                   invalid_neon_case.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
 
     BusterAarch64SyntaxMnemonicRange csel_range = {0};
