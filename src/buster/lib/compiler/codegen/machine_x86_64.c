@@ -698,6 +698,175 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_synthesize_register(MachineX64Selector* sele
                                                                 });
 }
 
+BUSTER_GLOBAL_LOCAL u32 machine_x64_select_immediate_register(MachineX64Selector* selector, u64 value)
+{
+    u32 result = machine_x64_synthesize_register(selector);
+    u32 immediate = selector->immediates.total_count;
+    u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
+    *immediate_row = value;
+    machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result),
+                                                          machine_ref_make(MACHINE_REF_IMMEDIATE, immediate)},
+                                             .opcode = MACHINE_X64_MOV_RI,
+                                         });
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 machine_x64_select_frame_load64(MachineX64Selector* selector, u32 slot, u32 payload)
+{
+    u32 result = machine_x64_synthesize_register(selector);
+    machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result),
+                                                          machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
+                                             .payload = payload,
+                                             .opcode = MACHINE_X64_LOAD_FRAME,
+                                         });
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_select_frame_store64(MachineX64Selector* selector, u32 slot, u32 payload, u32 value)
+{
+    machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value)},
+                                             .payload = payload,
+                                             .opcode = MACHINE_X64_STORE_FRAME64,
+                                         });
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_constant_shift_amount(MachineX64Selector* selector, IrValueId value, u32* amount_out)
+{
+    IrFunction* function = selector->function;
+    // The frontend normally leaves a shift count as one integer constant,
+    // optionally wrapped in a short cast chain while applying the usual
+    // arithmetic conversions.  Keep this walk explicitly bounded: an
+    // immediate machine lowering must never turn arbitrary IR into a
+    // compile-time search.
+    for (u32 depth = 0; depth < 4; depth += 1)
+    {
+        if (value.value >= function->value_count)
+        {
+            return false;
+        }
+        IrValue* ir_value = function->values + value.value;
+        if (ir_value->definition.value >= function->instruction_count)
+        {
+            return false;
+        }
+        IrInstruction* definition = function->instructions + ir_value->definition.value;
+        if (definition->opcode == IR_OPCODE_CONSTANT_INTEGER)
+        {
+            if (!definition->immediate_count || !definition->immediates || definition->immediate_is_negative || definition->immediates[0] > 127)
+            {
+                return false;
+            }
+            *amount_out = (u32)definition->immediates[0];
+            return true;
+        }
+        if (definition->opcode != IR_OPCODE_CAST || definition->operand_count < 1 || !definition->operands)
+        {
+            return false;
+        }
+        if (definition->operands[0].value >= function->value_count)
+        {
+            return false;
+        }
+        IrType* source_type = ir_type_from_id(&selector->program->types, function->values[definition->operands[0].value].canonical_type);
+        IrType* target_type = ir_type_from_id(&selector->program->types, definition->canonical_type);
+        if (!source_type || !target_type || source_type->kind != IR_TYPE_INTEGER ||
+            target_type->kind != IR_TYPE_INTEGER || target_type->bit_width < 8)
+        {
+            return false;
+        }
+        bool cast_preserves_small_nonnegative = definition->conversion_operation == IR_CONVERSION_IDENTITY ||
+                                                definition->conversion_operation == IR_CONVERSION_INTEGER_REINTERPRET ||
+                                                definition->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND ||
+                                                definition->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ||
+                                                (definition->conversion_operation == IR_CONVERSION_INTEGER_TRUNCATE && target_type->bit_width >= 8);
+        if (!cast_preserves_small_nonnegative)
+        {
+            return false;
+        }
+        value = definition->operands[0];
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_i128_unsigned_shift_right(MachineX64Selector* selector, IrInstruction* instruction, u32 amount)
+{
+    IrFunction* function = selector->function;
+    if (instruction->operand_count < 2 || instruction->result.value >= function->value_count || instruction->operands[0].value >= function->value_count || amount > 127)
+    {
+        return false;
+    }
+    u32 source_slot = selector->value_stack_slots[instruction->operands[0].value];
+    u32 result_slot = selector->value_stack_slots[instruction->result.value];
+    if (source_slot == UINT32_MAX || result_slot == UINT32_MAX)
+    {
+        return false;
+    }
+    if (amount == 0)
+    {
+        machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
+                                                 .payload = 16,
+                                                 .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
+                                             });
+        return true;
+    }
+    if (amount < 64)
+    {
+        u32 low = machine_x64_select_frame_load64(selector, source_slot, 0);
+        u32 high = machine_x64_select_frame_load64(selector, source_slot, 8);
+        u32 cross = machine_x64_synthesize_register(selector);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high)},
+                                                 .opcode = MACHINE_X64_MOV_RR,
+                                             });
+        u32 count = machine_x64_select_immediate_register(selector, amount);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, count)},
+                                                 .opcode = MACHINE_X64_SHR64,
+                                             });
+        machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, count)},
+                                                 .opcode = MACHINE_X64_SHR64,
+                                             });
+        u32 cross_count = machine_x64_select_immediate_register(selector, 64 - amount);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross_count)},
+                                                 .opcode = MACHINE_X64_SHL64,
+                                             });
+        machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross)},
+                                                 .opcode = MACHINE_X64_OR64,
+                                             });
+        machine_x64_select_frame_store64(selector, result_slot, 0, low);
+        machine_x64_select_frame_store64(selector, result_slot, 8, high);
+        return true;
+    }
+    u32 low = machine_x64_select_frame_load64(selector, source_slot, 8);
+    if (amount > 64)
+    {
+        u32 count = machine_x64_select_immediate_register(selector, amount - 64);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, count)},
+                                                 .opcode = MACHINE_X64_SHR64,
+                                             });
+    }
+    machine_x64_select_frame_store64(selector, result_slot, 0, low);
+    u32 zero = machine_x64_select_immediate_register(selector, 0);
+    machine_x64_select_frame_store64(selector, result_slot, 8, zero);
+    return true;
+}
+
 // Emits result-vreg definition rows for one typed instruction. Returns false
 // when the construct falls outside the selected subset.
 // One member of an aggregate or array literal lands in the value's slot
@@ -1088,10 +1257,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
         bool source_integer128 = source_type && source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128;
         bool target_integer128 = cast_target_type && cast_target_type->kind == IR_TYPE_INTEGER && cast_target_type->bit_width == 128;
         // i128 values use the same two-eightbyte frame representation as
-        // aggregate values.  Keep this path deliberately narrow: only the
-        // canonical integer truncation and extension forms between a 128-bit
-        // integer and a 64-bit integer are selected here.  Other aggregate
-        // casts continue through the explicit unsupported fallback below.
+        // aggregate values.  Keep this path direct and bounded: scalar
+        // integer extensions/truncations use the existing frame rows, while
+        // a 128-bit reinterpret is a byte-preserving frame copy. Other
+        // aggregate casts continue through the explicit unsupported fallback.
         if (source_integer128 || target_integer128)
         {
             if (!source_type || !cast_target_type || source_type->kind != IR_TYPE_INTEGER || cast_target_type->kind != IR_TYPE_INTEGER)
@@ -1100,10 +1269,28 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
             }
             u32 source_slot = selector->value_stack_slots[instruction->operands[0].value];
             u32 target_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
-            bool truncate_i128 = source_integer128 && cast_target_type->bit_width == 64 && instruction->conversion_operation == IR_CONVERSION_INTEGER_TRUNCATE;
-            bool extend_i128 = target_integer128 && source_type->bit_width == 64 &&
+            bool reinterpret_i128 = source_integer128 && target_integer128 &&
+                                   (instruction->conversion_operation == IR_CONVERSION_INTEGER_REINTERPRET ||
+                                    instruction->conversion_operation == IR_CONVERSION_IDENTITY);
+            bool truncate_i128 = source_integer128 && !target_integer128 && cast_target_type->bit_width <= 64 &&
+                                 instruction->conversion_operation == IR_CONVERSION_INTEGER_TRUNCATE;
+            bool extend_i128 = target_integer128 && !source_integer128 && source_type->bit_width >= 8 && source_type->bit_width <= 64 &&
                                (instruction->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND ||
                                 instruction->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND);
+            if (reinterpret_i128)
+            {
+                if (source_slot == UINT32_MAX || target_slot == UINT32_MAX)
+                {
+                    return false;
+                }
+                machine_x64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, target_slot),
+                                                                  machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
+                                                     .payload = 16,
+                                                     .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
+                                                 });
+                return true;
+            }
             if (truncate_i128)
             {
                 if (result_register == UINT32_MAX || source_slot == UINT32_MAX)
@@ -1116,19 +1303,47 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                                                .opcode = MACHINE_X64_LOAD_FRAME,
                                                            });
                 machine_x64_define(selector, result_register, row);
+                if (cast_target_type->bit_width < 64)
+                {
+                    u16 narrow_opcode = cast_target_type->bit_width == 8   ? MACHINE_X64_MOVZX8_RR
+                                        : cast_target_type->bit_width == 16 ? MACHINE_X64_MOVZX16_RR
+                                                                             : MACHINE_X64_MOV32_RR;
+                    machine_x64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                         .opcode = narrow_opcode,
+                                                     });
+                }
                 return true;
             }
             if (extend_i128)
             {
                 u32 source_register;
-                if (result_register != UINT32_MAX || target_slot == UINT32_MAX || source_bits != 64 ||
+                if (result_register != UINT32_MAX || target_slot == UINT32_MAX || source_bits < 8 || source_bits > 64 ||
                     !machine_x64_operand_register(selector, instruction->operands[0], &source_register))
                 {
                     return false;
                 }
+                u32 low_register = source_register;
+                if (source_bits < 64)
+                {
+                    u16 extend_opcode = instruction->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND
+                                            ? (source_bits == 8 ? MACHINE_X64_MOVSX8_RR
+                                               : source_bits == 16 ? MACHINE_X64_MOVSX16_RR
+                                                                   : MACHINE_X64_MOVSX32_RR)
+                                            : (source_bits == 8 ? MACHINE_X64_MOVZX8_RR
+                                               : source_bits == 16 ? MACHINE_X64_MOVZX16_RR
+                                                                   : MACHINE_X64_MOV32_RR);
+                    low_register = machine_x64_synthesize_register(selector);
+                    machine_x64_select_row(selector, (MachineInstruction){
+                                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low_register),
+                                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                         .opcode = extend_opcode,
+                                                     });
+                }
                 machine_x64_select_row(selector, (MachineInstruction){
                                                      .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, target_slot),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low_register)},
                                                      .opcode = MACHINE_X64_STORE_FRAME64,
                                                  });
                 u32 high_register = machine_x64_synthesize_register(selector);
@@ -1141,7 +1356,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                     // all zeroes.
                     machine_x64_select_row(selector, (MachineInstruction){
                                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_register),
-                                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low_register)},
                                                          .opcode = MACHINE_X64_MOV_RR,
                                                      });
                     u32 shift_register = machine_x64_synthesize_register(selector);
@@ -1466,6 +1681,22 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_instruction(MachineX64Selector* sele
                                                            });
                 machine_x64_define(selector, result_register, row);
                 return true;
+            }
+        }
+        if (instruction->operand_count >= 2 && instruction->operands[0].value < function->value_count && instruction->result.value < function->value_count)
+        {
+            IrType* left_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+            IrType* result_type = ir_type_from_id(&program->types, function->values[instruction->result.value].canonical_type);
+            if (left_type && result_type && left_type->kind == IR_TYPE_INTEGER && result_type->kind == IR_TYPE_INTEGER &&
+                left_type->bit_width == 128 && result_type->bit_width == 128 &&
+                instruction->binary_operation == IR_BINARY_UNSIGNED_SHIFT_RIGHT)
+            {
+                u32 amount;
+                if (!machine_x64_constant_shift_amount(selector, instruction->operands[1], &amount))
+                {
+                    return false;
+                }
+                return machine_x64_select_i128_unsigned_shift_right(selector, instruction, amount);
             }
         }
         u32 left_register;
@@ -3702,7 +3933,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD || instruction->opcode == IR_OPCODE_CALL ||
                       instruction->opcode == IR_OPCODE_VA_ARG ||
                       instruction->opcode == IR_OPCODE_CAST || instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY ||
-                      instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE) &&
+                      instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE || instruction->opcode == IR_OPCODE_BINARY) &&
                      value_type && value_type->layout.resolved && value_type->layout.size <= UINT32_MAX - 7 &&
                      (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE ||
                       (value_type->kind == IR_TYPE_INTEGER && value_type->bit_width == 128) ||

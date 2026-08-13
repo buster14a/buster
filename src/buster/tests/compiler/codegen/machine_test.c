@@ -664,6 +664,20 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "MachineWideSigned i64_to_i128(long v) { return (MachineWideSigned)v; }\n"
                                   "int variadic_named(int first, ...) { return first; }\n"
                                   "int variadic_named_caller(int first) { return variadic_named(first, 22, 3.5); }\n");
+    String8 machine_c_source_i128 = S8(
+                                  "MachineWideSigned i8_to_i128(signed char v) { return (MachineWideSigned)v; }\n"
+                                  "MachineWideUnsigned u8_to_u128(unsigned char v) { return (MachineWideUnsigned)v; }\n"
+                                  "MachineWideSigned i16_to_i128(short v) { return (MachineWideSigned)v; }\n"
+                                  "MachineWideUnsigned u16_to_u128(unsigned short v) { return (MachineWideUnsigned)v; }\n"
+                                  "MachineWideSigned i32_to_i128(int v) { return (MachineWideSigned)v; }\n"
+                                  "MachineWideUnsigned u32_to_u128(unsigned int v) { return (MachineWideUnsigned)v; }\n"
+                                  "MachineWideUnsigned i128_reinterpret(MachineWideSigned v) { return (MachineWideUnsigned)v; }\n"
+                                  "MachineWideUnsigned u128_shr0(MachineWideUnsigned v) { return v >> 0; }\n"
+                                  "MachineWideUnsigned u128_shr1(MachineWideUnsigned v) { return v >> 1; }\n"
+                                  "MachineWideUnsigned u128_shr63(MachineWideUnsigned v) { return v >> 63; }\n"
+                                  "MachineWideUnsigned u128_shr64(MachineWideUnsigned v) { return v >> 64; }\n"
+                                  "MachineWideUnsigned u128_shr65(MachineWideUnsigned v) { return v >> 65; }\n"
+                                  "MachineWideUnsigned u128_shr127(MachineWideUnsigned v) { return v >> 127; }\n");
     String8 machine_c_source_variadic = S8(
                                   "#if defined(__x86_64__)\n"
                                   "typedef void *va_list;\n"
@@ -692,9 +706,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "#endif\n");
     String8 machine_c_source_base =
         string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra);
-    String8 machine_c_source =
-        string_format(arguments->arena, S8("{S8}{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra,
-                      machine_c_source_variadic);
+    String8 machine_c_source = string_format(arguments->arena, S8("{S8}{S8}{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail,
+                                              machine_c_source_extra, machine_c_source_i128, machine_c_source_variadic);
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
     BUSTER_TEST(arguments, machine_program != 0);
     if (machine_program && machine_program->module_count)
@@ -1055,6 +1068,19 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             S8_INITIALIZER("rv_lit"),
             S8_INITIALIZER("u128_ferry"),
             S8_INITIALIZER("call_seventeen"),
+            S8_INITIALIZER("i8_to_i128"),
+            S8_INITIALIZER("u8_to_u128"),
+            S8_INITIALIZER("i16_to_i128"),
+            S8_INITIALIZER("u16_to_u128"),
+            S8_INITIALIZER("i32_to_i128"),
+            S8_INITIALIZER("u32_to_u128"),
+            S8_INITIALIZER("i128_reinterpret"),
+            S8_INITIALIZER("u128_shr0"),
+            S8_INITIALIZER("u128_shr1"),
+            S8_INITIALIZER("u128_shr63"),
+            S8_INITIALIZER("u128_shr64"),
+            S8_INITIALIZER("u128_shr65"),
+            S8_INITIALIZER("u128_shr127"),
         };
         for (u32 lifted_index = 0; lifted_index < BUSTER_ARRAY_LENGTH(lifted_gap_names); lifted_index += 1)
         {
@@ -1066,6 +1092,72 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 BUSTER_TEST_RAW(arguments, lifted_selected.supported,
                                 string_format(arguments->arena, S8("select {S8} failed at opcode {u32}"), lifted_gap_names[lifted_index],
                                               (u32)lifted_selected.failed_opcode));
+            }
+        }
+        String8 i128_machine_names[] = {
+            S8_INITIALIZER("i8_to_i128"), S8_INITIALIZER("u8_to_u128"), S8_INITIALIZER("i16_to_i128"), S8_INITIALIZER("u16_to_u128"),
+            S8_INITIALIZER("i32_to_i128"), S8_INITIALIZER("u32_to_u128"), S8_INITIALIZER("i128_reinterpret"), S8_INITIALIZER("u128_shr0"),
+            S8_INITIALIZER("u128_shr1"), S8_INITIALIZER("u128_shr63"), S8_INITIALIZER("u128_shr64"), S8_INITIALIZER("u128_shr65"),
+            S8_INITIALIZER("u128_shr127"),
+        };
+        for (u32 i128_index = 0; i128_index < BUSTER_ARRAY_LENGTH(i128_machine_names); i128_index += 1)
+        {
+            IrFunction* i128_function = machine_test_ir_function_find(machine_module, i128_machine_names[i128_index]);
+            BUSTER_TEST(arguments, i128_function != 0);
+            if (!i128_function)
+            {
+                continue;
+            }
+            MachineSelectResult i128_selected = machine_select_canonical_function(arguments->arena, machine_program, i128_function, machine_target);
+            BUSTER_TEST_RAW(arguments, i128_selected.supported,
+                            string_format(arguments->arena, S8("select {S8} failed at opcode {u32}"), i128_machine_names[i128_index],
+                                          (u32)i128_selected.failed_opcode));
+            if (i128_selected.supported)
+            {
+                bool saw_copy16 = false;
+                bool saw_shift = false;
+                bool saw_or = false;
+                bool saw_high_load = false;
+                bool saw_low_store = false;
+                bool saw_high_store = false;
+                bool saw_zero = false;
+                for (u32 row_index = 0; row_index < i128_selected.function.instruction_count; row_index += 1)
+                {
+                    MachineInstruction* row = i128_selected.function.instructions + row_index;
+                    saw_copy16 |= row->opcode == MACHINE_X64_COPY_FRAME_FROM_FRAME && row->payload == 16;
+                    saw_shift |= row->opcode == MACHINE_X64_SHR64;
+                    saw_or |= row->opcode == MACHINE_X64_OR64;
+                    saw_high_load |= row->opcode == MACHINE_X64_LOAD_FRAME && row->payload == 8;
+                    saw_low_store |= row->opcode == MACHINE_X64_STORE_FRAME64 && row->payload == 0;
+                    saw_high_store |= row->opcode == MACHINE_X64_STORE_FRAME64 && row->payload == 8;
+                    saw_zero |= row->opcode == MACHINE_X64_MOV_RI && machine_ref_kind(row->operands[1]) == MACHINE_REF_IMMEDIATE &&
+                                machine_ref_payload(row->operands[1]) < i128_selected.function.immediate_count &&
+                                i128_selected.function.immediates[machine_ref_payload(row->operands[1])] == 0;
+                }
+                if (i128_index == 6 || i128_index == 7)
+                {
+                    BUSTER_TEST(arguments, saw_copy16);
+                }
+                if (i128_index >= 8 && i128_index != 10)
+                {
+                    BUSTER_TEST_RAW(arguments, saw_shift,
+                                    string_format(arguments->arena, S8("{S8} missing shift"), i128_machine_names[i128_index]));
+                }
+                if (i128_index == 10)
+                {
+                    BUSTER_TEST_RAW(arguments, saw_high_load, S8("u128_shr64 missing high load"));
+                    BUSTER_TEST_RAW(arguments, saw_low_store, S8("u128_shr64 missing low store"));
+                    BUSTER_TEST_RAW(arguments, saw_high_store, S8("u128_shr64 missing high store"));
+                    BUSTER_TEST_RAW(arguments, saw_zero, S8("u128_shr64 missing zero"));
+                }
+                if (i128_index == 8 || i128_index == 9)
+                {
+                    BUSTER_TEST(arguments, saw_or);
+                }
+                MachineStackPlacement i128_placement = machine_stack_placement_build(arguments->arena, &i128_selected.function);
+                BUSTER_TEST(arguments, i128_placement.valid);
+                MachineEncodeResult i128_encoded = machine_encode_x86_64(arguments->arena, &i128_selected.function, &i128_placement);
+                BUSTER_TEST(arguments, i128_encoded.valid && i128_encoded.byte_count > 8);
             }
         }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
@@ -1165,6 +1257,159 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 codegen_release_executable(cast_machine_executable);
             }
             codegen_release_executable(cast_none_module_executable);
+        }
+        {
+            typedef __int128 MachineTestCallI8ToI128(signed char);
+            typedef unsigned __int128 MachineTestCallU8ToU128(unsigned char);
+            typedef __int128 MachineTestCallI16ToI128(short);
+            typedef unsigned __int128 MachineTestCallU16ToU128(unsigned short);
+            typedef __int128 MachineTestCallI32ToI128(int);
+            typedef unsigned __int128 MachineTestCallU32ToU128(unsigned int);
+            typedef unsigned __int128 MachineTestCallI128Reinterpret(__int128);
+            typedef unsigned __int128 MachineTestCallU128Shift(unsigned __int128);
+            String8 widening_names[] = {
+                S8_INITIALIZER("i8_to_i128"), S8_INITIALIZER("u8_to_u128"), S8_INITIALIZER("i16_to_i128"), S8_INITIALIZER("u16_to_u128"),
+                S8_INITIALIZER("i32_to_i128"), S8_INITIALIZER("u32_to_u128"), S8_INITIALIZER("i128_reinterpret"),
+            };
+            CodegenExecutable widening_none_executable = codegen_make_executable((CodegenFunction){.code = none_module.code});
+            BUSTER_TEST(arguments, widening_none_executable.error == CODEGEN_ERROR_NONE);
+            for (u32 widening_index = 0; widening_index < BUSTER_ARRAY_LENGTH(widening_names); widening_index += 1)
+            {
+                IrFunction* widening_function = machine_test_ir_function_find(machine_module, widening_names[widening_index]);
+                BUSTER_TEST(arguments, widening_function != 0);
+                if (!widening_function)
+                {
+                    continue;
+                }
+                MachineSelectResult widening_selected = {0};
+                MachineEncodeResult widening_machine = machine_test_encode(arguments->arena, machine_program, widening_function, machine_target, &widening_selected);
+                BUSTER_TEST(arguments, widening_selected.supported && widening_machine.valid);
+                u32 none_offset = machine_test_module_offset(&none_module, machine_module, widening_names[widening_index]);
+                BUSTER_TEST(arguments, none_offset != UINT32_MAX);
+                CodegenExecutable widening_machine_executable = codegen_make_executable((CodegenFunction){
+                    .code = {.pointer = widening_machine.bytes, .length = widening_machine.byte_count},
+                });
+                BUSTER_TEST(arguments, widening_machine_executable.error == CODEGEN_ERROR_NONE);
+                if (none_offset == UINT32_MAX || !widening_machine_executable.address || !widening_none_executable.address)
+                {
+                    codegen_release_executable(widening_machine_executable);
+                    continue;
+                }
+                void* none_address = (u8*)widening_none_executable.address + none_offset;
+                void* machine_address = widening_machine_executable.address;
+                bool equal = true;
+                if (widening_index == 0)
+                {
+                    MachineTestCallI8ToI128* none_call = 0;
+                    MachineTestCallI8ToI128* machine_call = 0;
+                    memcpy(&none_call, &none_address, sizeof(none_call));
+                    memcpy(&machine_call, &machine_address, sizeof(machine_call));
+                    signed char values[] = {INT8_MIN, -1, 0, 1, INT8_MAX};
+                    for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1) equal &= none_call(values[value_index]) == machine_call(values[value_index]);
+                }
+                else if (widening_index == 1)
+                {
+                    MachineTestCallU8ToU128* none_call = 0;
+                    MachineTestCallU8ToU128* machine_call = 0;
+                    memcpy(&none_call, &none_address, sizeof(none_call));
+                    memcpy(&machine_call, &machine_address, sizeof(machine_call));
+                    unsigned char values[] = {0, 1, 127, 128, UINT8_MAX};
+                    for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1) equal &= none_call(values[value_index]) == machine_call(values[value_index]);
+                }
+                else if (widening_index == 2)
+                {
+                    MachineTestCallI16ToI128* none_call = 0;
+                    MachineTestCallI16ToI128* machine_call = 0;
+                    memcpy(&none_call, &none_address, sizeof(none_call));
+                    memcpy(&machine_call, &machine_address, sizeof(machine_call));
+                    short values[] = {INT16_MIN, -1, 0, 1, INT16_MAX};
+                    for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1) equal &= none_call(values[value_index]) == machine_call(values[value_index]);
+                }
+                else if (widening_index == 3)
+                {
+                    MachineTestCallU16ToU128* none_call = 0;
+                    MachineTestCallU16ToU128* machine_call = 0;
+                    memcpy(&none_call, &none_address, sizeof(none_call));
+                    memcpy(&machine_call, &machine_address, sizeof(machine_call));
+                    unsigned short values[] = {0, 1, 32767, 32768, UINT16_MAX};
+                    for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1) equal &= none_call(values[value_index]) == machine_call(values[value_index]);
+                }
+                else if (widening_index == 4)
+                {
+                    MachineTestCallI32ToI128* none_call = 0;
+                    MachineTestCallI32ToI128* machine_call = 0;
+                    memcpy(&none_call, &none_address, sizeof(none_call));
+                    memcpy(&machine_call, &machine_address, sizeof(machine_call));
+                    int values[] = {INT32_MIN, -1, 0, 1, INT32_MAX};
+                    for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1) equal &= none_call(values[value_index]) == machine_call(values[value_index]);
+                }
+                else if (widening_index == 5)
+                {
+                    MachineTestCallU32ToU128* none_call = 0;
+                    MachineTestCallU32ToU128* machine_call = 0;
+                    memcpy(&none_call, &none_address, sizeof(none_call));
+                    memcpy(&machine_call, &machine_address, sizeof(machine_call));
+                    unsigned int values[] = {0, 1, UINT32_C(0x7fffffff), UINT32_C(0x80000000), UINT32_MAX};
+                    for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1) equal &= none_call(values[value_index]) == machine_call(values[value_index]);
+                }
+                else
+                {
+                    MachineTestCallI128Reinterpret* none_call = 0;
+                    MachineTestCallI128Reinterpret* machine_call = 0;
+                    memcpy(&none_call, &none_address, sizeof(none_call));
+                    memcpy(&machine_call, &machine_address, sizeof(machine_call));
+                    __int128 values[] = {0, -1, -((__int128)1 << 126) - ((__int128)1 << 125)};
+                    for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1) equal &= none_call(values[value_index]) == machine_call(values[value_index]);
+                }
+                BUSTER_TEST_RAW(arguments, equal, widening_names[widening_index]);
+                codegen_release_executable(widening_machine_executable);
+            }
+            codegen_release_executable(widening_none_executable);
+
+            String8 shift_names[] = {
+                S8_INITIALIZER("u128_shr0"), S8_INITIALIZER("u128_shr1"), S8_INITIALIZER("u128_shr63"), S8_INITIALIZER("u128_shr64"),
+                S8_INITIALIZER("u128_shr65"), S8_INITIALIZER("u128_shr127"),
+            };
+            for (u32 shift_index = 0; shift_index < BUSTER_ARRAY_LENGTH(shift_names); shift_index += 1)
+            {
+                IrFunction* shift_function = machine_test_ir_function_find(machine_module, shift_names[shift_index]);
+                BUSTER_TEST(arguments, shift_function != 0);
+                if (!shift_function)
+                {
+                    continue;
+                }
+                MachineSelectResult shift_selected = {0};
+                MachineEncodeResult shift_machine = machine_test_encode(arguments->arena, machine_program, shift_function, machine_target, &shift_selected);
+                BUSTER_TEST(arguments, shift_selected.supported && shift_machine.valid);
+                u32 none_offset = machine_test_module_offset(&none_module, machine_module, shift_names[shift_index]);
+                BUSTER_TEST(arguments, none_offset != UINT32_MAX);
+                CodegenExecutable shift_none_executable = codegen_make_executable((CodegenFunction){.code = none_module.code});
+                CodegenExecutable shift_machine_executable = codegen_make_executable((CodegenFunction){
+                    .code = {.pointer = shift_machine.bytes, .length = shift_machine.byte_count},
+                });
+                BUSTER_TEST(arguments, shift_none_executable.error == CODEGEN_ERROR_NONE && shift_machine_executable.error == CODEGEN_ERROR_NONE);
+                if (none_offset != UINT32_MAX && shift_none_executable.address && shift_machine_executable.address)
+                {
+                    MachineTestCallU128Shift* none_call = 0;
+                    MachineTestCallU128Shift* machine_call = 0;
+                    void* none_address = (u8*)shift_none_executable.address + none_offset;
+                    void* machine_address = shift_machine_executable.address;
+                    memcpy(&none_call, &none_address, sizeof(none_call));
+                    memcpy(&machine_call, &machine_address, sizeof(machine_call));
+                    unsigned __int128 values[] = {
+                        0,
+                        1,
+                        UINT64_MAX,
+                        ((unsigned __int128)UINT64_C(0x8000000000000001) << 64) | UINT64_C(0xdeadbeefcafebabe),
+                        (unsigned __int128)UINT64_MAX << 64,
+                    };
+                    bool equal = true;
+                    for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1) equal &= none_call(values[value_index]) == machine_call(values[value_index]);
+                    BUSTER_TEST_RAW(arguments, equal, shift_names[shift_index]);
+                }
+                codegen_release_executable(shift_machine_executable);
+                codegen_release_executable(shift_none_executable);
+            }
         }
 #endif
         // Live-range splitting: split_phase must take at least one split — a value
