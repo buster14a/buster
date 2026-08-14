@@ -11396,8 +11396,11 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             (BusterX86MetadataEmitQuery){.physical = trailing_query, .form_id = trailing_select.form_id, .output = trailing_bytes,
                                          .output_capacity = sizeof(trailing_bytes), .relocations = trailing_relocations,
                                          .relocation_capacity = BUSTER_ARRAY_LENGTH(trailing_relocations)});
+        // The qword memory operand supplies the data width for ADD's
+        // variable-width r/m form, so REX.W precedes ModRM and shifts the
+        // trailing PC32 relocation to offset 3.
         BUSTER_TEST(arguments, trailing_select.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && trailing_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
-                                   trailing_emit.relocation_count == 1 && trailing_relocations[0].offset == 2 &&
+                                   trailing_emit.relocation_count == 1 && trailing_relocations[0].offset == 3 &&
                                    trailing_relocations[0].width == 4 && trailing_relocations[0].kind == BUSTER_X86_METADATA_RELOCATION_PC32 &&
                                    trailing_relocations[0].addend == -2);
 

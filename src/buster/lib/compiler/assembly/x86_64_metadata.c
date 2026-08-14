@@ -5264,10 +5264,15 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     // Keep the physical width available for form selection while excluding
     // the generic scalar-width prefix heuristic from every X87 row.
     bool x87_form = buster_x86_metadata_string_input_equal(form.extension.offset, S8("X87"));
+    // MPX BND forms carry fixed-width bounds and use their legacy prefixes
+    // solely for opcode selection. Their qword address operand must not
+    // synthesize REX.W; only base/index extension bits may require REX.
+    bool mpx_form = buster_x86_metadata_string_input_equal(form.extension.offset, S8("MPX"));
     for (u32 index = 0; index < binding_count; index += 1)
     {
         BusterX86MetadataPhysicalOperand physical = bindings[index].physical;
-        if ((pattern.has_modrm || pattern.has_dynamic_opcode || moffs_form) &&
+        if (query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64 &&
+            (pattern.has_modrm || pattern.has_dynamic_opcode || moffs_form) &&
             physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
             physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR && physical.reg.width == 64)
             if ((!pattern.has_w || movsxd_form) && !apx_evex_fixed_width_no_w) rex_w = true;
@@ -5285,7 +5290,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
                                          form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX;
         if ((pattern.has_modrm || pattern.has_dynamic_opcode || moffs_form) &&
             physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !pattern.has_w && !apx_evex_fixed_width_no_w &&
-            !has_mmx_operand && !has_xmm_operand && !x87_form && scalar_memory_width_rex_w)
+            !has_mmx_operand && !has_xmm_operand && !x87_form && !mpx_form && !moffs_form && scalar_memory_width_rex_w)
         {
             u16 memory_width = physical.width ? physical.width : physical.memory.source_width;
             if (memory_width == 64) rex_w = true;
