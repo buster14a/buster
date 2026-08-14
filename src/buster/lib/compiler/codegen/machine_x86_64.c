@@ -6786,7 +6786,16 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_immediates(voi
                 u16 immediate_width = immediate_widths[immediate_width_index];
                 if (string_equal(names[name_index], S8("SHR")) && immediate_width != 8) continue;
                 operands[0] = machine_x64_exact_gpr_operand(0, register_width);
-                operands[1] = machine_x64_exact_immediate_operand(immediate_width == 8 ? 1 : 128, immediate_width);
+                // Keep the explicit-immediate SHR form in the prepared
+                // cache.  A representative value of one selects XED's
+                // shorter implicit `shr reg, 1` row, whose exact token has
+                // no visible immediate operand and therefore cannot be
+                // replayed through the two-operand machine bridge.  Values
+                // one and two share the same signed-int8 shape class, so
+                // workers still find this token for the runtime shift-by-one
+                // expansion while retaining its explicit immediate field.
+                s64 representative_immediate = string_equal(names[name_index], S8("SHR")) && immediate_width == 8 ? 2 : (immediate_width == 8 ? 1 : 128);
+                operands[1] = machine_x64_exact_immediate_operand(representative_immediate, immediate_width);
                 (void)machine_x64_metadata_shape_cache_add(names[name_index], operands, 2,
                                                             (BusterX86MetadataFeatureInput){0}, attributes);
                 // A width-32 immediate that fits the signed eight-bit form
