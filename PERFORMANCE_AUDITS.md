@@ -7,9 +7,9 @@ how to profile the sanitized and Release trees, how to symbolize — stays in
 the "Benchmarking and diagnostics" section of `AGENTS.md`.
 
 Entries written before the C-only consolidation on 2026-08-14 may mention the
-dormant experimental frontend, its fixtures, or its editor model. Their source
-and documentation remain in-tree for future work, but they are excluded from
-the current build, benchmarks, tests, and CI. Older entries remain historical
+removed experimental frontend, its fixtures, or its editor model. The `.bbb`
+fixtures and historical documentation remain in-tree for future work, while
+the C implementation and C tests are gone. Older entries remain historical
 measurement context rather than current implementation guidance.
 
 **Read the newest entry before starting performance work.** It carries the

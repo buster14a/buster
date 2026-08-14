@@ -2,9 +2,10 @@
 
 This document preserves the detailed architecture, testing, benchmarking, and
 implementation guidance for the experimental Buster-language compiler and IDE
-as it existed before the C-only build consolidation. Its sources, tests, and
-`.bbb` fixtures remain in the repository for future reactivation, but they are
-not part of the current build graph, unity translation unit, test registry,
+as it existed before the C-only build consolidation. Its C implementation and
+C test files have been removed; the `.bbb` fixtures and this documentation
+remain as reference material for a future redesign. None of this material is
+part of the current build graph, unity translation unit, test registry,
 benchmarks, packaging, or CI execution.
 
 This is an archival reference, not the active agent instruction file. Follow

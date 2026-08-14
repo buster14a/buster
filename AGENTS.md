@@ -23,14 +23,14 @@ C source -> preprocessing/parsing/semantic analysis -> canonical IR
 
 The experimental custom-language frontend, its semantic model, its
 source-level interpreter/JIT entrypoints, the editor model built around it,
-their tests, and the `.bbb` fixture corpus are retained as dormant source for
-future work. They are intentionally absent from the generated build graph,
-unity translation unit, test registration, benchmarks, and CI execution, so
-preserving them adds no compiler or test-time cost. Detailed former guidance
-is preserved in `DORMANT_CUSTOM_COMPILER.md`. Shared active facilities remain:
-the canonical IR, optimizers, machine selection and scheduling, register
-allocators, x86-64 and AArch64 encoders, debug emitters, object formats,
-linker, generic object JIT, assembler, and Wasm64 backend.
+and their C implementation and test files are intentionally removed. The
+`.bbb` fixture corpus and detailed former guidance remain as preservation
+material for a future redesign, but are absent from the generated build graph,
+unity translation unit, test registration, benchmarks, packaging, and CI.
+Shared active facilities remain: the canonical IR, optimizers, machine
+selection and scheduling, register allocators, x86-64 and AArch64 encoders,
+debug emitters, object formats, linker, generic object JIT, assembler, and
+Wasm64 backend. See `DORMANT_CUSTOM_COMPILER.md` for the historical reference.
 
 ## Current compiler priority
 
