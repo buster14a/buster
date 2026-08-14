@@ -10329,6 +10329,92 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                                                  BUSTER_ARRAY_LENGTH(wildcard), tile_bytes,
                                                                  BUSTER_ARRAY_LENGTH(tile_bytes)));
 
+        // The standard VEX AMX tile-memory rows omit XED's displacement
+        // field annotation, but still use the ordinary ModRM/SIB MOD=01/10
+        // address encoding.  Keep nonzero displacement and forced-SIB
+        // queries on the canonical VEX rows rather than falling through to
+        // the feature-gated APX/EVEX siblings.
+        BusterX86MetadataPhysicalOperand tileloadd_disp_memory =
+            x86_64_metadata_test_physical_mem_base(13, 32, 32);
+        tileloadd_disp_memory.memory.has_index = true;
+        tileloadd_disp_memory.memory.index =
+            (BusterX86MetadataPhysicalRegister){.index = 14, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR};
+        tileloadd_disp_memory.memory.scale = 2;
+        BusterX86MetadataPhysicalOperand tileloadd_disp_operands[2] = {tile_operands[0], tileloadd_disp_memory};
+        u8 tileloadd_disp_bytes[] = {0xc4, 0x82, 0x7b, 0x4b, 0x44, 0x75, 0x20};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("TILELOADD"), 483, tileloadd_disp_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), tileloadd_disp_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(tileloadd_disp_bytes)));
+        BusterX86MetadataPhysicalQuery tileloadd_disp_query = x86_64_metadata_test_physical_query(
+            S8("TILELOADD"), tileloadd_disp_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard));
+        tileloadd_disp_query.source_semantics = true;
+        BusterX86MetadataSelectResult tileloadd_disp_selection = buster_x86_metadata_select_form(tileloadd_disp_query);
+        u8 tileloadd_disp_output[16] = {0};
+        BusterX86MetadataEmitResult tileloadd_disp_encode = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = tileloadd_disp_query, .output = tileloadd_disp_output,
+                                           .output_capacity = BUSTER_ARRAY_LENGTH(tileloadd_disp_output)});
+        BUSTER_TEST(arguments, tileloadd_disp_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   tileloadd_disp_selection.form_id == 483 && tileloadd_disp_encode.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   tileloadd_disp_encode.form_id == 483 &&
+                                   x86_64_metadata_test_bytes_equal(tileloadd_disp_output, tileloadd_disp_encode.byte_count,
+                                                                     tileloadd_disp_bytes, BUSTER_ARRAY_LENGTH(tileloadd_disp_bytes)));
+
+        BusterX86MetadataPhysicalOperand tileloaddt1_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_TMM, 1, 1024),
+            x86_64_metadata_test_physical_mem_base(15, 32, 64),
+        };
+        u8 tileloaddt1_bytes[] = {0xc4, 0xc2, 0x79, 0x4b, 0x4c, 0x27, 0x40};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("TILELOADDT1"), 484, tileloaddt1_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), tileloaddt1_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(tileloaddt1_bytes)));
+        BusterX86MetadataPhysicalQuery tileloaddt1_query = x86_64_metadata_test_physical_query(
+            S8("TILELOADDT1"), tileloaddt1_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard));
+        tileloaddt1_query.source_semantics = true;
+        BusterX86MetadataSelectResult tileloaddt1_selection = buster_x86_metadata_select_form(tileloaddt1_query);
+        u8 tileloaddt1_output[16] = {0};
+        BusterX86MetadataEmitResult tileloaddt1_encode = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = tileloaddt1_query, .output = tileloaddt1_output,
+                                           .output_capacity = BUSTER_ARRAY_LENGTH(tileloaddt1_output)});
+        BUSTER_TEST(arguments, tileloaddt1_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   tileloaddt1_selection.form_id == 484 && tileloaddt1_encode.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   tileloaddt1_encode.form_id == 484 &&
+                                   x86_64_metadata_test_bytes_equal(tileloaddt1_output, tileloaddt1_encode.byte_count,
+                                                                     tileloaddt1_bytes, BUSTER_ARRAY_LENGTH(tileloaddt1_bytes)));
+
+        BusterX86MetadataPhysicalOperand tilestored_disp_memory =
+            x86_64_metadata_test_physical_mem_base(12, 32, 128);
+        tilestored_disp_memory.memory.has_index = true;
+        tilestored_disp_memory.memory.index =
+            (BusterX86MetadataPhysicalRegister){.index = 13, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR};
+        tilestored_disp_memory.memory.scale = 4;
+        BusterX86MetadataPhysicalOperand tilestored_disp_operands[2] = {
+            tilestored_disp_memory,
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_TMM, 2, 1024),
+        };
+        u8 tilestored_disp_bytes[] = {0xc4, 0x82, 0x7a, 0x4b, 0x94, 0xac, 0x80, 0x00, 0x00, 0x00};
+        BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("TILESTORED"), 486, tilestored_disp_operands, 2,
+                                                                 (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+                                                                 BUSTER_ARRAY_LENGTH(wildcard), tilestored_disp_bytes,
+                                                                 BUSTER_ARRAY_LENGTH(tilestored_disp_bytes)));
+        BusterX86MetadataPhysicalQuery tilestored_query = x86_64_metadata_test_physical_query(
+            S8("TILESTORED"), tilestored_disp_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard,
+            BUSTER_ARRAY_LENGTH(wildcard));
+        tilestored_query.source_semantics = true;
+        BusterX86MetadataSelectResult tilestored_selection = buster_x86_metadata_select_form(tilestored_query);
+        u8 tilestored_output[16] = {0};
+        BusterX86MetadataEmitResult tilestored_encode = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = tilestored_query, .output = tilestored_output,
+                                           .output_capacity = BUSTER_ARRAY_LENGTH(tilestored_output)});
+        BUSTER_TEST(arguments, tilestored_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   tilestored_selection.form_id == 486 && tilestored_encode.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   tilestored_encode.form_id == 486 &&
+                                   x86_64_metadata_test_bytes_equal(tilestored_output, tilestored_encode.byte_count,
+                                                                     tilestored_disp_bytes, BUSTER_ARRAY_LENGTH(tilestored_disp_bytes)));
+
         // These exact byte oracles exercise EVEX memory extension, APX width
         // selection, VSIB V' routing, tuple displacement compression, and
         // the XOP/APX families without relying on a host assembler.

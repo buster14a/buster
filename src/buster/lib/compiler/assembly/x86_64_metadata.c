@@ -4801,6 +4801,26 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     BusterX86MetadataPatternSemantics pattern_storage = {0};
     BusterX86MetadataPatternSemantics const* pattern_view = plan ? plan->pattern : &pattern_storage;
     bool pattern_valid = plan ? (pattern_view != 0) : buster_x86_metadata_emit_parse_pattern(form, &pattern_storage);
+    // The standard VEX AMX tile-memory rows predate XED's displacement field
+    // annotation.  Their ModRM/SIB schema is still the ordinary x86 memory
+    // topology: a nonzero displacement selects MOD=01/10 while the SIB is
+    // retained for the tile address form.  Keep this narrowly scoped to
+    // standard AMX tile-memory rows and relax only the stale fixed-MOD token;
+    // address range, SIB, and all other pattern controls remain authoritative.
+    BusterX86MetadataPatternSemantics amx_standard_pattern = {0};
+    if (pattern_valid && form.encoder_family == BUSTER_X86_METADATA_ENCODER_AMX &&
+        form.prefix_kind == BUSTER_X86_METADATA_PREFIX_VEX &&
+        (form.amx_flags & BUSTER_X86_METADATA_AMX_TILE_MEMORY) &&
+        (form.field_flags & (BUSTER_X86_METADATA_FIELD_MODRM | BUSTER_X86_METADATA_FIELD_SIB |
+                             BUSTER_X86_METADATA_FIELD_MEMORY)) ==
+            (BUSTER_X86_METADATA_FIELD_MODRM | BUSTER_X86_METADATA_FIELD_SIB |
+             BUSTER_X86_METADATA_FIELD_MEMORY) &&
+        !(form.field_flags & BUSTER_X86_METADATA_FIELD_DISPLACEMENT))
+    {
+        amx_standard_pattern = *pattern_view;
+        amx_standard_pattern.mod_kind = BUSTER_X86_METADATA_PATTERN_MOD_ANY;
+        pattern_view = &amx_standard_pattern;
+    }
     // Prepared exact plans borrow their immutable parsed pattern.  The only
     // former mutation (dynamic SRM opcode materialization) is emitted through
     // a local override below, so the worker path no longer copies the whole
