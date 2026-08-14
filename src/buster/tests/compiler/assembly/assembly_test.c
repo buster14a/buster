@@ -11316,6 +11316,113 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                    metadata_vsib_missing.bytes.length == 0 && metadata_vsib_missing.symbol_count == 0 &&
                                    metadata_vsib_missing.relocation_count == 0);
 
+        // The bounded EVEX VSIB source bridge is exercised independently of
+        // the completion census: gather masks stay on the vector destination,
+        // while scatter masks stay on the leading VSIB memory operand after
+        // AT&T reversal.  Both dialects must reproduce the direct bytes.
+        u8 expected_evex_gather_vsib[] = {0x62, 0xf2, 0xfd, 0x09, 0x92, 0x04, 0x08};
+        AssemblyEncodeResult metadata_evex_gather_intel = assembly_encode(
+            arguments->arena, S8("vgatherdpd xmm0 {k1}, qword ptr [rax + xmm1*1]\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_evex_gather_att = assembly_encode(
+            arguments->arena, S8("vgatherdpd 0(%rax,%xmm1,1), %xmm0{%k1}\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_evex_gather_intel.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(metadata_evex_gather_intel.bytes, expected_evex_gather_vsib,
+                                                              sizeof(expected_evex_gather_vsib)));
+        BUSTER_TEST(arguments, metadata_evex_gather_att.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(metadata_evex_gather_att.bytes, expected_evex_gather_vsib,
+                                                              sizeof(expected_evex_gather_vsib)));
+
+        // AVX2 keeps the legacy mask operand explicit: Intel writes
+        // destination, memory, mask, while AT&T reverses that order to mask,
+        // memory, destination.  Pin both spellings to the VEX bytes.
+        u8 expected_avx2_gather_vsib[] = {0xc4, 0xe2, 0x6d, 0x93, 0x1c, 0x08};
+        AssemblyEncodeResult metadata_avx2_gather_intel = assembly_encode(
+            arguments->arena, S8("vgatherqps xmm3, dword ptr [rax + ymm1*1], xmm2\n"),
+            (AssemblyEncodeOptions){.target = gather_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_avx2_gather_att = assembly_encode(
+            arguments->arena, S8("vgatherqps %xmm2, 0(%rax,%ymm1,1), %xmm3\n"),
+            (AssemblyEncodeOptions){.target = gather_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_avx2_gather_intel.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(metadata_avx2_gather_intel.bytes, expected_avx2_gather_vsib,
+                                                              sizeof(expected_avx2_gather_vsib)));
+        BUSTER_TEST(arguments, metadata_avx2_gather_att.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(metadata_avx2_gather_att.bytes, expected_avx2_gather_vsib,
+                                                              sizeof(expected_avx2_gather_vsib)));
+
+        u8 expected_evex_scatter_vsib[] = {0x62, 0xf2, 0x7d, 0x09, 0xa0, 0x04, 0x08};
+        AssemblyEncodeResult metadata_evex_scatter_intel = assembly_encode(
+            arguments->arena, S8("vpscatterdd dword ptr [rax + xmm1*1] {k1}, xmm0\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_evex_scatter_att = assembly_encode(
+            arguments->arena, S8("vpscatterdd %xmm0, 0(%rax,%xmm1,1){%k1}\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_evex_scatter_intel.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(metadata_evex_scatter_intel.bytes, expected_evex_scatter_vsib,
+                                                              sizeof(expected_evex_scatter_vsib)));
+        BUSTER_TEST(arguments, metadata_evex_scatter_att.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(metadata_evex_scatter_att.bytes, expected_evex_scatter_vsib,
+                                                              sizeof(expected_evex_scatter_vsib)));
+
+        // High vector registers, r15 base, and tuple-scaled displacement keep
+        // the source bridge honest at the EVEX addressing boundaries.
+        u8 expected_evex_scatter_high[] = {0x62, 0x02, 0x7d, 0x47, 0xa0, 0x7c, 0x37, 0x10};
+        AssemblyEncodeResult metadata_evex_scatter_high_intel = assembly_encode(
+            arguments->arena, S8("vpscatterdd dword ptr [r15 + zmm30*1 + 64] {k7}, zmm31\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_evex_scatter_high_att = assembly_encode(
+            arguments->arena, S8("vpscatterdd %zmm31, 64(%r15,%zmm30,1){%k7}\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_evex_scatter_high_intel.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(metadata_evex_scatter_high_intel.bytes, expected_evex_scatter_high,
+                                                              sizeof(expected_evex_scatter_high)));
+        BUSTER_TEST(arguments, metadata_evex_scatter_high_att.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(metadata_evex_scatter_high_att.bytes, expected_evex_scatter_high,
+                                                              sizeof(expected_evex_scatter_high)));
+
+        // AVX512PF remains a target-feature policy row: no bytes are emitted
+        // when the feature is absent, in either dialect.
+        AssemblyEncodeResult metadata_pf_intel = assembly_encode(
+            arguments->arena, S8("vgatherpf0dps dword ptr [rax + zmm1*1] {k1}\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_pf_att = assembly_encode(
+            arguments->arena, S8("vgatherpf0dps 0(%rax,%zmm1,1){%k1}\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, metadata_pf_intel.diagnostic_count == 1 &&
+                                   metadata_pf_intel.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   metadata_pf_intel.bytes.length == 0);
+        BUSTER_TEST(arguments, metadata_pf_att.diagnostic_count == 1 &&
+                                   metadata_pf_att.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   metadata_pf_att.bytes.length == 0);
+
+        // Malformed decorators must not widen the ordinary-memory rule or
+        // permit zeroing/SAE on a VSIB memory destination.
+        AssemblyEncodeResult metadata_vsib_mask_wrong_operand = assembly_encode(
+            arguments->arena, S8("vgatherdpd xmm0, qword ptr [rax + xmm1*1]{k1}\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_vsib_zeroing_memory = assembly_encode(
+            arguments->arena, S8("vpscatterdd dword ptr [rax + xmm1*1] {k1}{z}, xmm0\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        AssemblyEncodeResult metadata_vsib_zeroing_memory_att = assembly_encode(
+            arguments->arena, S8("vpscatterdd %xmm0, 0(%rax,%xmm1,1){%k1}{z}\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        AssemblyEncodeResult metadata_ordinary_memory_mask = assembly_encode(
+            arguments->arena, S8("vaddps zmm0, zmm1, zmmword ptr [rax]{k1}\n"),
+            (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, metadata_vsib_mask_wrong_operand.diagnostic_count == 1 &&
+                                   metadata_vsib_mask_wrong_operand.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   metadata_vsib_mask_wrong_operand.bytes.length == 0);
+        BUSTER_TEST(arguments, metadata_vsib_zeroing_memory.diagnostic_count == 1 &&
+                                   metadata_vsib_zeroing_memory.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   metadata_vsib_zeroing_memory.bytes.length == 0);
+        BUSTER_TEST(arguments, metadata_vsib_zeroing_memory_att.diagnostic_count == 1 &&
+                                   metadata_vsib_zeroing_memory_att.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   metadata_vsib_zeroing_memory_att.bytes.length == 0);
+        BUSTER_TEST(arguments, metadata_ordinary_memory_mask.diagnostic_count == 1 &&
+                                   metadata_ordinary_memory_mask.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                                   metadata_ordinary_memory_mask.bytes.length == 0);
+
         u8 expected_evex[] = {0x62, 0xf2, 0x6d, 0x49, 0x65, 0xc3};
         AssemblyEncodeResult metadata_evex_intel = assembly_encode(
             arguments->arena, S8("vblendmps zmm0 {k1}, zmm2, zmm3\n"),

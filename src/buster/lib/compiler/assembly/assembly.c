@@ -10918,11 +10918,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_operand_decorators(BusterX86Metad
     for (u32 index = 0; index < operand_count; index += 1)
     {
         AssemblyOperand operand = operands[index];
+        bool vsib_memory_mask = index == 0 && operand.has_mask && operand.kind == ASSEMBLY_OPERAND_MEMORY && operand.memory.vsib;
         if ((operand.has_mask || operand.zeroing || operand.rounding || operand.sae) &&
-            (index != 0 || operand.kind != ASSEMBLY_OPERAND_REGISTER))
+            !((index == 0 && operand.kind == ASSEMBLY_OPERAND_REGISTER) || vsib_memory_mask))
         {
             return false;
         }
+        if (vsib_memory_mask && (operand.zeroing || operand.rounding || operand.sae)) return false;
         if (operand.zeroing && !operand.has_mask)
         {
             return false;

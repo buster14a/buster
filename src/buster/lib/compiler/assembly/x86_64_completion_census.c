@@ -186,15 +186,16 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_typed_decorator(BusterX86Metad
 
 // The public decorator bridge is intentionally narrower than the metadata
 // decorator bit.  A MASKmskw topology proves that a mask slot is part of the
-// form; the memory path then accepts only ordinary 64-bit memory, while SAE
-// and rounding are limited to register-only vector forms.  This keeps legacy,
-// VSIB, segmented, APX, and alternate-address rows on their existing census
-// paths.
+// form; ordinary memory remains limited to 64-bit unsegmented addressing,
+// while the bounded VSIB memory topology admits gather/scatter masks.  SAE
+// and rounding remain limited to register-only vector forms, keeping legacy,
+// segmented, APX, and alternate-address rows on their existing census paths.
 BUSTER_GLOBAL_LOCAL bool buster_x86_completion_typed_decorator_shape(BusterX86MetadataForm form,
                                                                       BusterX86MetadataPhysicalQuery query)
 {
     bool mask_slot = false;
     bool has_memory = false;
+    bool has_vsib_memory = false;
     u32 memory_count = 0;
     u32 ordinary_memory_count = 0;
     u32 vector_register_count = 0;
@@ -228,6 +229,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_completion_typed_decorator_shape(BusterX86Me
         if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
         {
             has_memory = true;
+            has_vsib_memory |= operand.memory.vsib;
             memory_count += 1;
             if (!operand.memory.vsib && !operand.memory.has_segment &&
                 (!operand.memory.address_size || operand.memory.address_size == 64))
@@ -245,6 +247,45 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_completion_typed_decorator_shape(BusterX86Me
                query.attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_NONE;
     if (query.attributes.sae || query.attributes.rounding_mode)
         return !has_memory && vector_register_count >= 2;
+    // Gather/scatter forms carry the mask decorator in metadata order around
+    // one VSIB memory operand and one visible vector register.  The vector
+    // index nested inside the memory operand is not a separate binding, so
+    // requiring a visible vector register keeps prefetch-only VSIB rows out
+    // of this source path.  This is a topology rule, independent of mnemonic
+    // and generated form identity.
+    if ((form.field_flags & BUSTER_X86_METADATA_FIELD_VSIB) && mask_slot &&
+        !(query.attributes.decorator_flags & (BUSTER_X86_METADATA_DECORATOR_ZEROING |
+                                               BUSTER_X86_METADATA_DECORATOR_BROADCAST |
+                                               BUSTER_X86_METADATA_DECORATOR_ROUNDING |
+                                               BUSTER_X86_METADATA_DECORATOR_SAE)) &&
+        has_vsib_memory && memory_count == 1 && vector_register_count >= 1)
+        return true;
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_completion_typed_mask_attaches_memory(
+    BusterX86MetadataForm form, BusterX86MetadataPhysicalQuery query)
+{
+    bool previous_memory = false;
+    u32 physical_index = 0;
+    u32 visible_index = 0;
+    u32 metadata_index = 0;
+    for (; metadata_index < form.operand_count; metadata_index += 1)
+    {
+        BusterX86MetadataOperand metadata = {0};
+        if (!buster_x86_metadata_operand(form.id, metadata_index, &metadata)) return false;
+        if (!metadata.visible) continue;
+        if (buster_x86_completion_mask_decorator(form, visible_index++))
+        {
+            if (physical_index >= query.operand_count ||
+                !buster_x86_completion_is_mask_register(query.operands[physical_index]))
+                return false;
+            return previous_memory;
+        }
+        if (physical_index >= query.operand_count) return false;
+        previous_memory = query.operands[physical_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY;
+        physical_index += 1;
+    }
     return false;
 }
 
@@ -464,6 +505,40 @@ BUSTER_GLOBAL_LOCAL void buster_x86_completion_normalize_query(BusterX86Metadata
             operands[physical_index].has_symbol = false;
         }
         physical_index += 1;
+    }
+    if (form.field_flags & BUSTER_X86_METADATA_FIELD_VSIB)
+    {
+        bool has_bound_vsib_memory = false;
+        u32 operand_index = 0;
+        for (; operand_index < query.operand_count; operand_index += 1)
+        {
+            BusterX86MetadataPhysicalOperand* operand = operands + operand_index;
+            if (operand->kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && operand->memory.vsib)
+            {
+                has_bound_vsib_memory = true;
+                // The canonical witness uses a zero displacement to exercise
+                // the form's DISP8_GSCAT schema.  Public source syntax cannot
+                // preserve an explicit zero disp8, so use the equivalent
+                // no-displacement address shape for the source/byte proof.
+                if (operand->memory.has_displacement && !operand->memory.has_symbol && operand->memory.displacement == 0)
+                    operand->memory.has_displacement = false;
+                // Keep the data register and VSIB index distinct in the
+                // canonical source witness.  The physical index remains the
+                // vector class/width selected by metadata.
+                operand->memory.index.index = 1;
+            }
+        }
+        if (has_bound_vsib_memory)
+        {
+            u32 mask_operand_index = 0;
+            for (; mask_operand_index < query.operand_count; mask_operand_index += 1)
+            {
+                BusterX86MetadataPhysicalOperand* operand = operands + mask_operand_index;
+                if (operand->kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                    operand->reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK && operand->reg.index == 0)
+                    operand->reg.index = 1;
+            }
+        }
     }
 }
 
@@ -767,12 +842,26 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_typed_source(
     String8 decorator = buster_x86_completion_typed_decorator(query.attributes);
     bool wrote = false;
     bool source_has_mask = query.attributes.has_mask_register;
+    bool mask_attaches_memory = buster_x86_completion_typed_mask_attaches_memory(form, query);
     u8 source_mask = query.attributes.mask_register;
     u32 metadata_index = 0;
     u32 physical_index = 0;
     u32 visible_index = 0;
     BusterX86MetadataPhysicalOperand operand = {0};
     if (!source.length) return (String8){0};
+    if (!source_has_mask)
+    {
+        u32 operand_index = 0;
+        for (; operand_index < query.operand_count; operand_index += 1)
+            if (query.operands[operand_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                query.operands[operand_index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK &&
+                query.operands[operand_index].reg.index != 0)
+            {
+                source_has_mask = true;
+                source_mask = (u8)query.operands[operand_index].reg.index;
+                break;
+            }
+    }
     for (; metadata_index < form.operand_count; metadata_index += 1)
     {
         BusterX86MetadataOperand metadata = {0};
@@ -819,8 +908,10 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_typed_source(
         }
         source = wrote ? string_format(arena, S8("{S8}, {S8}"), source, spelling)
                        : string_format(arena, S8("{S8} {S8}"), source, spelling);
-        if (!wrote && source_has_mask && operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
-            operand.reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK)
+        if (!wrote && source_has_mask &&
+            ((operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+              operand.reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK) ||
+             (mask_attaches_memory && operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)))
         {
             source = string_format(arena, S8("{S8} {{k{u8}}}"), source, source_mask);
             if (query.attributes.zeroing) source = string_format(arena, S8("{S8} {{z}}"), source);
@@ -864,7 +955,7 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
     bool mask_decorator = false;
     BusterX86MetadataPhysicalOperand operand = {0};
     String8 spelling = {0};
-    if (query.attributes.decorator_flags && buster_x86_completion_typed_decorator_shape(form, query))
+    if (buster_x86_completion_typed_decorator_shape(form, query))
         return buster_x86_completion_intel_typed_source(arena, form, query, reason);
     source = buster_x86_completion_mnemonic(form);
     if (!source.length)
@@ -1011,6 +1102,7 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_typed_source(
     String8 spelling = {0};
     String8 decorator = buster_x86_completion_typed_decorator(query.attributes);
     bool source_has_mask = query.attributes.has_mask_register;
+    bool mask_attaches_memory = buster_x86_completion_typed_mask_attaches_memory(form, query);
     bool has_immediate = false;
     u8 source_mask = query.attributes.mask_register;
     u32 source_operand_count = 0;
@@ -1096,8 +1188,10 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_typed_source(
         if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE &&
             (query.attributes.sae || query.attributes.rounding_mode))
             spelling = string_format(arena, S8("{S8}, {{{S8}}}"), spelling, decorator);
-        if (index == 0 && source_has_mask && operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
-            operand.reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK)
+        if (index == 0 && source_has_mask &&
+            ((operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+              operand.reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK) ||
+             (mask_attaches_memory && operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)))
         {
             spelling = string_format(arena, S8("{S8}{{%k{u8}}}"), spelling, source_mask);
             if (query.attributes.zeroing) spelling = string_format(arena, S8("{S8}{{z}}"), spelling);
@@ -1124,10 +1218,11 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_source(Arena* arena, Buste
     String8 spelling = {0};
     String8 source = {0};
     // The AT&T bridge starts with the proven scalar/register and plain-memory
-    // cohort.  Decorated EVEX, APX role controls, and hidden operands remain
-    // explicitly unresolved until their dialect grammar is generalized.
+    // cohort; the bounded VSIB typed path is handled above.  Other decorated
+    // EVEX, APX role controls, and hidden operands remain explicitly unresolved
+    // until their dialect grammar is generalized.
     bool apx_amx_witness = buster_x86_completion_apx_amx_memory_witness(form);
-    if (query.attributes.decorator_flags && buster_x86_completion_typed_decorator_shape(form, query))
+    if (buster_x86_completion_typed_decorator_shape(form, query))
         return buster_x86_completion_att_typed_source(arena, form, query, reason);
     if (query.attributes.decorator_flags)
     {
@@ -1194,7 +1289,7 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_att_source(Arena* arena, Buste
     }
     for (index = 0; index < source_operand_count; index += 1)
         if (source_operands[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
-            (source_operands[index].memory.vsib || source_operands[index].memory.has_segment))
+            source_operands[index].memory.has_segment)
         {
             buster_x86_completion_source_reason_set(reason, BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY);
             return (String8){0};

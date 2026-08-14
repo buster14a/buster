@@ -216,8 +216,9 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                                                               inventory_mnemonic_buffer));
             String8 hash_text = string_format(arguments->arena, S8("{u32} 0x{u64:x,width=[0,16],no_prefix}\n"),
                                               inventory_form_id, inventory_key.stable_hash);
-            BUSTER_TEST(arguments,
-                        control_inventory_hash_length + hash_text.length <= sizeof(control_inventory_hash_text));
+            bool control_hash_fits = control_inventory_hash_length + hash_text.length <= sizeof(control_inventory_hash_text);
+            BUSTER_TEST(arguments, control_hash_fits);
+            if (!control_hash_fits) continue;
             memcpy(control_inventory_hash_text + control_inventory_hash_length, hash_text.pointer, hash_text.length);
             control_inventory_hash_length += (u32)hash_text.length;
             control_inventory_count += 1;
@@ -245,16 +246,16 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     link_sha256(arguments->arena, avx10_family_hash_text, avx10_family_hash_length, avx10_family_digest);
     link_sha256(arguments->arena, control_inventory_hash_text, control_inventory_hash_length, control_inventory_digest);
     static u8 const expected_typed_inventory_digest[32] = {
-        0x4c, 0x89, 0xd4, 0x39, 0x9e, 0xfa, 0x5b, 0xc6, 0x37, 0x1b, 0x97, 0x9e, 0x3c, 0x6e, 0x07, 0x58,
-        0x73, 0xf9, 0xd9, 0x4c, 0x2d, 0xe6, 0x4b, 0x37, 0xd4, 0x51, 0x4b, 0xef, 0xf1, 0xe9, 0x5c, 0x04,
+        0x4a, 0x25, 0x3c, 0x4e, 0x2e, 0x9a, 0x06, 0xd7, 0x69, 0xa9, 0x4f, 0x36, 0xb2, 0x6f, 0xd3, 0x85,
+        0x7e, 0x46, 0x86, 0x27, 0xae, 0x66, 0xce, 0x00, 0x19, 0x07, 0xc8, 0xe6, 0x95, 0xa0, 0xf8, 0xfa,
     };
     static u8 const expected_standalone_inventory_digest[32] = {
         0x15, 0x3b, 0xe7, 0x5e, 0x44, 0xdf, 0x30, 0x41, 0xe0, 0x4e, 0x2f, 0xe7, 0xa6, 0x86, 0xc0, 0xbf,
         0xfd, 0x53, 0x3c, 0x94, 0x0e, 0x63, 0xbe, 0x8c, 0xbb, 0x9e, 0x8a, 0x4b, 0x26, 0x8e, 0xf8, 0xbc,
     };
     static u8 const expected_typed_inventory_hash_digest[32] = {
-        0xb2, 0xe5, 0x9b, 0x71, 0xed, 0xa5, 0x19, 0x8c, 0xc2, 0x1d, 0xbb, 0xdb, 0xcd, 0xed, 0xa3, 0xd5,
-        0xfb, 0x03, 0xa7, 0xa3, 0x02, 0x49, 0xc6, 0xfd, 0x25, 0xd8, 0xc4, 0x32, 0x54, 0xcf, 0x86, 0xd5,
+        0x25, 0x77, 0x72, 0xc7, 0xd1, 0x80, 0xce, 0x72, 0x8d, 0xb4, 0xba, 0x54, 0x2a, 0x67, 0xce, 0x4f,
+        0x7a, 0x93, 0xaa, 0xa5, 0xe1, 0x89, 0x65, 0xbd, 0x0c, 0xd2, 0x77, 0x2b, 0x91, 0x2b, 0x5b, 0x7d,
     };
     static u8 const expected_standalone_inventory_hash_digest[32] = {
         0x15, 0x1f, 0x9e, 0xda, 0x2f, 0xfa, 0xb2, 0x20, 0x0e, 0xf6, 0xd4, 0x87, 0x7d, 0xe1, 0x82, 0x9d,
@@ -268,7 +269,7 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
         0xfd, 0x7b, 0x2a, 0x6b, 0x29, 0xd7, 0x98, 0x59, 0x0e, 0x70, 0x92, 0xe1, 0x3f, 0xd4, 0x12, 0xfe,
         0xac, 0x68, 0x9f, 0x39, 0x01, 0x57, 0xbb, 0x28, 0xcf, 0x37, 0x4b, 0xd3, 0x16, 0x7b, 0x25, 0x85,
     };
-    BUSTER_TEST(arguments, typed_inventory_count == 1410);
+    BUSTER_TEST(arguments, typed_inventory_count == 1458);
     BUSTER_TEST(arguments, standalone_inventory_count == 32);
     BUSTER_TEST(arguments, memcmp(typed_inventory_digest, expected_typed_inventory_digest, sizeof(typed_inventory_digest)) == 0);
     BUSTER_TEST(arguments, memcmp(standalone_inventory_digest, expected_standalone_inventory_digest,
@@ -285,6 +286,133 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                              control_inventory_counts[3] == 4);
     BUSTER_TEST(arguments, memcmp(control_inventory_digest, expected_control_inventory_digest,
                                   sizeof(control_inventory_digest)) == 0);
+
+    // The VSIB source cohort is mechanically exhaustive: every normalized
+    // form whose canonical physical query binds one VSIB memory operand is
+    // classified from metadata topology and ISA family, then pinned by a
+    // dense (form id, stable hash) digest.  No mnemonic or hand-maintained
+    // row list participates in the inventory.
+    u8 vsib_inventory_hash_text[80 * 64] = {0};
+    u8 vsib_inventory_digest[32] = {0};
+    u32 vsib_inventory_hash_length = 0;
+    u32 vsib_total = 0;
+    u32 vsib_evex_gather_count = 0;
+    u32 vsib_evex_scatter_count = 0;
+    u32 vsib_avx2_gather_count = 0;
+    u32 vsib_prefetch_count = 0;
+    u32 vsib_index_width_counts[3] = {0};
+    u32 vsib_intel_exact_count = 0;
+    u32 vsib_att_exact_count = 0;
+    u32 vsib_intel_policy_count = 0;
+    u32 vsib_att_policy_count = 0;
+    for (u32 vsib_form_id = 0; vsib_form_id < form_count; vsib_form_id += 1)
+    {
+        BusterX86MetadataForm vsib_form = {0};
+        BusterX86MetadataPhysicalQuery vsib_query = {0};
+        BusterX86MetadataPhysicalOperand vsib_operands[16] = {0};
+        String8 vsib_features[1] = {0};
+        char8 vsib_mnemonic[128] = {0};
+        BusterX86MetadataFormKey vsib_key = {0};
+        u32 vsib_memory_index = UINT32_MAX;
+        u32 vsib_memory_count = 0;
+        u32 vsib_mask_count = 0;
+        u32 vsib_mask_index = UINT32_MAX;
+        bool form_ok = buster_x86_metadata_form(vsib_form_id, &vsib_form);
+        bool vsib_form_flagged = form_ok && (vsib_form.field_flags & BUSTER_X86_METADATA_FIELD_VSIB) != 0;
+        bool query_ok = form_ok && buster_x86_completion_census_test_query(vsib_form_id, &vsib_query, vsib_operands,
+                                                                            vsib_features, vsib_mnemonic);
+        BUSTER_TEST(arguments, !vsib_form_flagged || query_ok);
+        if (!query_ok) continue;
+        bool vsib_operand_capacity_ok = vsib_query.operand_count <= BUSTER_ARRAY_LENGTH(vsib_operands);
+        BUSTER_TEST(arguments, vsib_operand_capacity_ok);
+        if (!vsib_operand_capacity_ok) continue;
+        u32 operand_index = 0;
+        for (; operand_index < vsib_query.operand_count; operand_index += 1)
+        {
+            if (vsib_operands[operand_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+                vsib_operands[operand_index].memory.vsib)
+            {
+                vsib_memory_index = operand_index;
+                vsib_memory_count += 1;
+            }
+            if (vsib_operands[operand_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                vsib_operands[operand_index].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK)
+            {
+                vsib_mask_count += 1;
+                vsib_mask_index = operand_index;
+            }
+        }
+        if (!vsib_form_flagged && !vsib_memory_count) continue;
+        bool vsib_shape_ok = vsib_form_flagged && query_ok && vsib_memory_count == 1 &&
+                             vsib_memory_index != UINT32_MAX && vsib_memory_index < vsib_query.operand_count;
+        BUSTER_TEST(arguments, vsib_shape_ok);
+        if (!vsib_shape_ok) continue;
+        bool vsib_key_ok = buster_x86_metadata_form_key(vsib_form_id, &vsib_key);
+        BUSTER_TEST(arguments, vsib_key_ok);
+        if (!vsib_key_ok) continue;
+        String8 vsib_hash_text = string_format(arguments->arena, S8("{u32} 0x{u64:x,width=[0,16],no_prefix}\n"),
+                                                vsib_form_id, vsib_key.stable_hash);
+        bool vsib_hash_fits = vsib_inventory_hash_length + vsib_hash_text.length <= sizeof(vsib_inventory_hash_text);
+        BUSTER_TEST(arguments, vsib_hash_fits);
+        if (!vsib_hash_fits) continue;
+        memcpy(vsib_inventory_hash_text + vsib_inventory_hash_length, vsib_hash_text.pointer, vsib_hash_text.length);
+        vsib_inventory_hash_length += (u32)vsib_hash_text.length;
+        vsib_total += 1;
+        BusterX86MetadataPhysicalOperand vsib_memory = vsib_operands[vsib_memory_index];
+        BUSTER_TEST(arguments, vsib_memory.memory.has_index && vsib_memory.memory.vsib &&
+                                 vsib_memory.memory.index.index == 1 &&
+                                 (vsib_memory.memory.index.width == 128 || vsib_memory.memory.index.width == 256 ||
+                                  vsib_memory.memory.index.width == 512));
+        if (vsib_memory.memory.index.width == 128) vsib_index_width_counts[0] += 1;
+        else if (vsib_memory.memory.index.width == 256) vsib_index_width_counts[1] += 1;
+        else if (vsib_memory.memory.index.width == 512) vsib_index_width_counts[2] += 1;
+        String8 vsib_category = buster_x86_metadata_string_span(vsib_form.category);
+        String8 vsib_extension = buster_x86_metadata_string_span(vsib_form.extension);
+        String8 vsib_isa_set = buster_x86_metadata_string_span(vsib_form.isa_set);
+        bool vsib_prefetch = string_starts_with_sequence(vsib_isa_set, S8("AVX512PF_"));
+        bool vsib_avx2 = string_equal(vsib_extension, S8("AVX2GATHER"));
+        bool vsib_evex = vsib_form.encoder_family == BUSTER_X86_METADATA_ENCODER_EVEX;
+        if (vsib_prefetch)
+        {
+            vsib_prefetch_count += 1;
+            BUSTER_TEST(arguments, vsib_mask_count == 1 && vsib_memory_index == 0);
+            BUSTER_TEST(arguments, records[vsib_form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                                     records[vsib_form_id].intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE &&
+                                     records[vsib_form_id].att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                                     records[vsib_form_id].att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE);
+            vsib_intel_policy_count += records[vsib_form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED;
+            vsib_att_policy_count += records[vsib_form_id].att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED;
+        }
+        else
+        {
+            if (vsib_evex && string_equal(vsib_category, S8("GATHER"))) vsib_evex_gather_count += 1;
+            else if (vsib_evex && string_equal(vsib_category, S8("SCATTER"))) vsib_evex_scatter_count += 1;
+            else if (vsib_avx2 && string_equal(vsib_category, S8("AVX2GATHER"))) vsib_avx2_gather_count += 1;
+            else BUSTER_TEST(arguments, false);
+            BUSTER_TEST(arguments, records[vsib_form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                     records[vsib_form_id].att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT &&
+                                     records[vsib_form_id].intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                     records[vsib_form_id].att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
+            vsib_intel_exact_count += records[vsib_form_id].intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT;
+            vsib_att_exact_count += records[vsib_form_id].att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT;
+            if (vsib_evex) BUSTER_TEST(arguments, vsib_mask_count == 1 && vsib_mask_index != UINT32_MAX &&
+                                      vsib_operands[vsib_mask_index].reg.index == 1);
+            if (vsib_avx2) BUSTER_TEST(arguments, vsib_mask_count == 0);
+        }
+    }
+    link_sha256(arguments->arena, vsib_inventory_hash_text, vsib_inventory_hash_length, vsib_inventory_digest);
+    static u8 const expected_vsib_inventory_digest[32] = {
+        0xbd, 0x12, 0x09, 0xab, 0x3a, 0x27, 0x9d, 0x42, 0xd0, 0xaf, 0xdf, 0xd6, 0xee, 0x3e, 0x99, 0x87,
+        0xdb, 0xde, 0x9a, 0x99, 0x17, 0x1b, 0xc2, 0x69, 0x70, 0x3e, 0x76, 0x5a, 0x5c, 0xe4, 0x77, 0x42,
+    };
+    BUSTER_TEST(arguments, vsib_total == 80 && vsib_evex_gather_count == 24 && vsib_evex_scatter_count == 24 &&
+                             vsib_avx2_gather_count == 16 && vsib_prefetch_count == 16);
+    BUSTER_TEST(arguments, vsib_index_width_counts[0] == 30 && vsib_index_width_counts[1] == 26 &&
+                             vsib_index_width_counts[2] == 24);
+    BUSTER_TEST(arguments, vsib_intel_exact_count == 64 && vsib_att_exact_count == 64 &&
+                             vsib_intel_policy_count == 16 && vsib_att_policy_count == 16);
+    BUSTER_TEST(arguments, memcmp(vsib_inventory_digest, expected_vsib_inventory_digest,
+                                  sizeof(vsib_inventory_digest)) == 0);
     // These six rows were already Intel-exact before the cohort landed. Keep
     // them explicit so the aggregate +68 Intel delta cannot hide a regression.
     static u32 const preexisting_intel_control_ids[] = {9483, 9484, 9487, 9488, 9833, 9836};
@@ -328,9 +456,9 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     for (u32 intel_class = 0; intel_class < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT; intel_class += 1)
         for (u32 att_class = 0; att_class < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT; att_class += 1)
             typed_pair_total += typed_pair_matrix[intel_class][att_class];
-    BUSTER_TEST(arguments, typed_pair_total == 1410);
+    BUSTER_TEST(arguments, typed_pair_total == 1458);
     BUSTER_TEST(arguments, typed_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT]
-                             [BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT] == 1394);
+                             [BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT] == 1442);
     BUSTER_TEST(arguments, typed_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT]
                              [BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED] == 0);
     BUSTER_TEST(arguments, typed_pair_matrix[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]
@@ -405,32 +533,32 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, source.intel_source_partition_count == 10607 && source.att_source_partition_count == 10607);
     BUSTER_TEST(arguments, source.intel_attempted_count == 10607 && source.att_attempted_count == 10607);
     BUSTER_TEST(arguments, intel_reason_total == source.intel_attempted_count && att_reason_total == source.att_attempted_count);
-    BUSTER_TEST(arguments, source.intel_exact_count == 4775 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 190 && source.intel_unresolved_count == 4610 &&
+    BUSTER_TEST(arguments, source.intel_exact_count == 4823 && source.intel_normalized_relocation_count == 28 &&
+                             source.intel_alias_equivalent_count == 190 && source.intel_unresolved_count == 4562 &&
                              source.intel_byte_mismatch_count == 1004 && source.intel_relocation_mismatch_count == 0 &&
                              source.intel_policy_rejected_count == 716 && source.intel_different_encoding_count == 17);
-    BUSTER_TEST(arguments, source.att_exact_count == 5202 && source.att_normalized_relocation_count == 26 &&
-                             source.att_alias_equivalent_count == 42 && source.att_unresolved_count == 4233 &&
+    BUSTER_TEST(arguments, source.att_exact_count == 5266 && source.att_normalized_relocation_count == 26 &&
+                             source.att_alias_equivalent_count == 42 && source.att_unresolved_count == 4169 &&
                              source.att_byte_mismatch_count == 1104 && source.att_relocation_mismatch_count == 0 &&
-                             source.att_policy_rejected_count == 694 && source.att_different_encoding_count == 17);
+                             source.att_policy_rejected_count == 710 && source.att_different_encoding_count == 17);
     BUSTER_TEST(arguments, intel_reason_non_none == source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6014 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3741 &&
+    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6062 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3693 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 716);
-    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6391 &&
+    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6455 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL] == 1915 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY] == 84 &&
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY] == 4 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR] == 60 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 1426 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 37 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 694);
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 710);
 
     // Every baseline POLICY_FEATURE row must become byte-exact when the
     // target explicitly enables the complete x86 feature vocabulary.  This
@@ -548,8 +676,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
              BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE},
             {497, UINT64_C(0x6a04e34774497f64), 1, BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE,
              BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL},
-            {5507, UINT64_C(0x5bb4c576ce0a124f), 1, BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE,
-             BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY},
+            {5507, UINT64_C(0x5bb4c576ce0a124f), 1, BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
+             BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE},
             {3801, UINT64_C(0x142ac9c2f91af56c), 1, BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT,
              BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE},
             {0, UINT64_C(0xc07fcd97af562be9), 1, BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED,

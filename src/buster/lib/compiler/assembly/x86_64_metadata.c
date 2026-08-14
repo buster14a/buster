@@ -4053,6 +4053,38 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_semantics(BusterX
     u32 data_width_count = 0;
     u16 lwpins_width[2] = {0};
     u32 lwpins_width_count = 0;
+    // Memory bindings can precede the vector register they semantically
+    // depend on (EVEX scatter is the canonical example).  Establish this
+    // order-independent fact only for a bound VSIB memory operand; ordinary
+    // unsized scalar memory retains the existing source-order validation.
+    bool has_bound_vsib_memory = false;
+    u32 vsib_memory_index = 0;
+    for (; vsib_memory_index < binding_count; vsib_memory_index += 1)
+    {
+        BusterX86MetadataPhysicalBinding binding = bindings[vsib_memory_index];
+        if (binding.physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+            binding.physical.memory.vsib)
+        {
+            has_bound_vsib_memory = true;
+            break;
+        }
+    }
+    if (has_bound_vsib_memory)
+    {
+        u32 vsib_vector_index = 0;
+        for (; vsib_vector_index < binding_count; vsib_vector_index += 1)
+        {
+            BusterX86MetadataPhysicalBinding binding = bindings[vsib_vector_index];
+            if (binding.physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                (binding.physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM ||
+                 binding.physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM ||
+                 binding.physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM))
+            {
+                has_vector_register = true;
+                break;
+            }
+        }
+    }
     for (u32 index = 0; index < binding_count; index += 1)
     {
         BusterX86MetadataPhysicalBinding binding = bindings[index];
