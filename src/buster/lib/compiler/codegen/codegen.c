@@ -9598,65 +9598,126 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             C_X64_LOAD_FLOAT(0, instruction->operands[0], width);
                             C_X64_LOAD_FLOAT(1, instruction->operands[1], width);
                             IrBinaryOperation operation = instruction->binary_operation;
+                            String8 feature_names[] = {S8("sse"), S8("sse2")};
                             if (operation >= IR_BINARY_FLOAT_ADD && operation <= IR_BINARY_FLOAT_DIVIDE)
                             {
-                                codegen_emit_u8(&buffer, width == 32 ? 0xf3 : 0xf2);
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, operation == IR_BINARY_FLOAT_ADD        ? 0x58
-                                                         : operation == IR_BINARY_FLOAT_SUBTRACT ? 0x5c
-                                                         : operation == IR_BINARY_FLOAT_MULTIPLY ? 0x59
-                                                                                                 : 0x5e);
-                                codegen_emit_u8(&buffer, 0xc1);
-                                codegen_emit_u8(&buffer, width == 32 ? 0xf3 : 0xf2);
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x11);
-                                codegen_emit_u8(&buffer, 0x85);
-                                codegen_emit_u32(&buffer, (u32)result_displacement);
-                                C_X64_RECORD_FLOAT_STORE(width);
+                                String8 mnemonic = operation == IR_BINARY_FLOAT_ADD        ? (width == 32 ? S8("ADDSS") : S8("ADDSD"))
+                                                   : operation == IR_BINARY_FLOAT_SUBTRACT   ? (width == 32 ? S8("SUBSS") : S8("SUBSD"))
+                                                   : operation == IR_BINARY_FLOAT_MULTIPLY   ? (width == 32 ? S8("MULSS") : S8("MULSD"))
+                                                                                             : (width == 32 ? S8("DIVSS") : S8("DIVSD"));
+                                BusterX86MetadataPhysicalOperand arithmetic_operands[2] = {
+                                    codegen_canonical_x64_metadata_vector(0, (u16)width),
+                                    codegen_canonical_x64_metadata_vector(1, (u16)width),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit_features(
+                                        &buffer, mnemonic, arithmetic_operands, BUSTER_ARRAY_LENGTH(arithmetic_operands),
+                                        (BusterX86MetadataFeatureInput){.names = feature_names, .count = BUSTER_ARRAY_LENGTH(feature_names)}))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                BusterX86MetadataPhysicalOperand store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)width, result_displacement),
+                                    codegen_canonical_x64_metadata_vector(0, (u16)width),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit_features(
+                                        &buffer, width == 32 ? S8("MOVSS") : S8("MOVSD"), store_operands,
+                                        BUSTER_ARRAY_LENGTH(store_operands),
+                                        (BusterX86MetadataFeatureInput){.names = feature_names, .count = BUSTER_ARRAY_LENGTH(feature_names)}))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                             }
                             else
                             {
-                                if (width == 64)
+                                String8 compare_mnemonic = width == 32 ? S8("UCOMISS") : S8("UCOMISD");
+                                BusterX86MetadataPhysicalOperand compare_operands[2] = {
+                                    codegen_canonical_x64_metadata_vector(0, (u16)width),
+                                    codegen_canonical_x64_metadata_vector(1, (u16)width),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit_features(
+                                        &buffer, compare_mnemonic, compare_operands, BUSTER_ARRAY_LENGTH(compare_operands),
+                                        (BusterX86MetadataFeatureInput){.names = feature_names, .count = BUSTER_ARRAY_LENGTH(feature_names)}))
                                 {
-                                    codegen_emit_u8(&buffer, 0x66);
+                                    result.error = buffer.error;
+                                    return result;
                                 }
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x2e);
-                                codegen_emit_u8(&buffer, 0xc1);
-                                u8 condition = operation == IR_BINARY_FLOAT_EQUAL           ? 0x94
-                                               : operation == IR_BINARY_FLOAT_NOT_EQUAL     ? 0x95
-                                               : operation == IR_BINARY_FLOAT_LESS          ? 0x92
-                                               : operation == IR_BINARY_FLOAT_LESS_EQUAL    ? 0x96
-                                               : operation == IR_BINARY_FLOAT_GREATER       ? 0x97
-                                               : operation == IR_BINARY_FLOAT_GREATER_EQUAL ? 0x93
-                                                                                            : 0;
-                                if (!condition)
+                                String8 condition_mnemonic = operation == IR_BINARY_FLOAT_EQUAL           ? S8("SETZ")
+                                                             : operation == IR_BINARY_FLOAT_NOT_EQUAL     ? S8("SETNZ")
+                                                             : operation == IR_BINARY_FLOAT_LESS          ? S8("SETB")
+                                                             : operation == IR_BINARY_FLOAT_LESS_EQUAL    ? S8("SETBE")
+                                                             : operation == IR_BINARY_FLOAT_GREATER       ? S8("SETNBE")
+                                                             : operation == IR_BINARY_FLOAT_GREATER_EQUAL ? S8("SETNB")
+                                                                                                            : (String8){0};
+                                if (!condition_mnemonic.length)
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                     return result;
                                 }
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, condition);
-                                codegen_emit_u8(&buffer, 0xc0);
+                                BusterX86MetadataPhysicalOperand set_operands[] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 8),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, condition_mnemonic, set_operands,
+                                                                           BUSTER_ARRAY_LENGTH(set_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 if (operation == IR_BINARY_FLOAT_EQUAL || operation == IR_BINARY_FLOAT_LESS || operation == IR_BINARY_FLOAT_LESS_EQUAL)
                                 {
-                                    codegen_emit_u8(&buffer, 0x0f);
-                                    codegen_emit_u8(&buffer, 0x9b);
-                                    codegen_emit_u8(&buffer, 0xc2);
-                                    codegen_emit_u8(&buffer, 0x20);
-                                    codegen_emit_u8(&buffer, 0xd0);
+                                    BusterX86MetadataPhysicalOperand ordered_operands[] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 8),
+                                    };
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("SETNP"), ordered_operands,
+                                                                               BUSTER_ARRAY_LENGTH(ordered_operands)))
+                                    {
+                                        result.error = buffer.error;
+                                        return result;
+                                    }
+                                    BusterX86MetadataPhysicalOperand and_operands[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 8),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 8),
+                                    };
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), and_operands,
+                                                                               BUSTER_ARRAY_LENGTH(and_operands)))
+                                    {
+                                        result.error = buffer.error;
+                                        return result;
+                                    }
                                 }
                                 else if (operation == IR_BINARY_FLOAT_NOT_EQUAL)
                                 {
-                                    codegen_emit_u8(&buffer, 0x0f);
-                                    codegen_emit_u8(&buffer, 0x9a);
-                                    codegen_emit_u8(&buffer, 0xc2);
-                                    codegen_emit_u8(&buffer, 0x08);
-                                    codegen_emit_u8(&buffer, 0xd0);
+                                    BusterX86MetadataPhysicalOperand unordered_operands[] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 8),
+                                    };
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("SETP"), unordered_operands,
+                                                                               BUSTER_ARRAY_LENGTH(unordered_operands)))
+                                    {
+                                        result.error = buffer.error;
+                                        return result;
+                                    }
+                                    BusterX86MetadataPhysicalOperand or_operands[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 8),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 8),
+                                    };
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("OR"), or_operands,
+                                                                               BUSTER_ARRAY_LENGTH(or_operands)))
+                                    {
+                                        result.error = buffer.error;
+                                        return result;
+                                    }
                                 }
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0xb6);
-                                codegen_emit_u8(&buffer, 0xc0);
+                                BusterX86MetadataPhysicalOperand widen_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 8),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOVZX"), widen_operands,
+                                                                           BUSTER_ARRAY_LENGTH(widen_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                                 C_X64_STORE_RESULT();
                             }
                             instruction_id = instruction->next;
@@ -10053,127 +10114,135 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         bool wide = codegen_canonical_register_is_64_bit(program, operand_type);
                         C_X64_LOAD(0x85, instruction->operands[0]);
                         C_X64_LOAD(0x8d, instruction->operands[1]);
+                        if (buffer.error != CODEGEN_ERROR_NONE)
+                        {
+                            result.error = buffer.error;
+                            return result;
+                        }
+                        u16 scalar_width = wide ? 64 : 32;
+                        BusterX86MetadataPhysicalOperand scalar_operands[2] = {
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, scalar_width),
+                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, scalar_width),
+                        };
                         switch (instruction->binary_operation)
                         {
                         case IR_BINARY_INTEGER_ADD:
-                            if (wide)
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), scalar_operands,
+                                                                      BUSTER_ARRAY_LENGTH(scalar_operands)))
                             {
-                                codegen_emit_u8(&buffer, 0x48);
+                                result.error = buffer.error;
+                                return result;
                             }
-                            codegen_emit_u8(&buffer, 0x01);
-                            codegen_emit_u8(&buffer, 0xc8);
                             break;
                         case IR_BINARY_INTEGER_SUBTRACT:
-                            if (wide)
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), scalar_operands,
+                                                                      BUSTER_ARRAY_LENGTH(scalar_operands)))
                             {
-                                codegen_emit_u8(&buffer, 0x48);
+                                result.error = buffer.error;
+                                return result;
                             }
-                            codegen_emit_u8(&buffer, 0x29);
-                            codegen_emit_u8(&buffer, 0xc8);
                             break;
                         case IR_BINARY_INTEGER_MULTIPLY:
-                            if (wide)
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("IMUL"), scalar_operands,
+                                                                      BUSTER_ARRAY_LENGTH(scalar_operands)))
                             {
-                                codegen_emit_u8(&buffer, 0x48);
+                                result.error = buffer.error;
+                                return result;
                             }
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0xaf);
-                            codegen_emit_u8(&buffer, 0xc1);
                             break;
                         case IR_BINARY_SIGNED_DIVIDE:
                         case IR_BINARY_SIGNED_REMAINDER:
-                            if (wide)
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, wide ? S8("CQO") : S8("CDQ"), 0, 0) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("IDIV"), &scalar_operands[1], 1))
                             {
-                                codegen_emit_u8(&buffer, 0x48);
+                                result.error = buffer.error;
+                                return result;
                             }
-                            codegen_emit_u8(&buffer, 0x99);
-                            if (wide)
-                            {
-                                codegen_emit_u8(&buffer, 0x48);
-                            }
-                            codegen_emit_u8(&buffer, 0xf7);
-                            codegen_emit_u8(&buffer, 0xf9);
                             if (instruction->binary_operation == IR_BINARY_SIGNED_REMAINDER)
                             {
-                                if (wide)
+                                BusterX86MetadataPhysicalOperand remainder_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, scalar_width),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, scalar_width),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), remainder_operands,
+                                                                          BUSTER_ARRAY_LENGTH(remainder_operands)))
                                 {
-                                    codegen_emit_u8(&buffer, 0x48);
+                                    result.error = buffer.error;
+                                    return result;
                                 }
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, 0xd0);
                             }
                             break;
                         case IR_BINARY_UNSIGNED_DIVIDE:
                         case IR_BINARY_UNSIGNED_REMAINDER:
-                            if (wide)
                             {
-                                codegen_emit_u8(&buffer, 0x48);
-                            }
-                            codegen_emit_u8(&buffer, 0x31);
-                            codegen_emit_u8(&buffer, 0xd2);
-                            if (wide)
-                            {
-                                codegen_emit_u8(&buffer, 0x48);
-                            }
-                            codegen_emit_u8(&buffer, 0xf7);
-                            codegen_emit_u8(&buffer, 0xf1);
-                            if (instruction->binary_operation == IR_BINARY_UNSIGNED_REMAINDER)
-                            {
-                                if (wide)
+                                BusterX86MetadataPhysicalOperand zero_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, scalar_width),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, scalar_width),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), zero_operands,
+                                                                          BUSTER_ARRAY_LENGTH(zero_operands)) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("DIV"), &scalar_operands[1], 1))
                                 {
-                                    codegen_emit_u8(&buffer, 0x48);
+                                    result.error = buffer.error;
+                                    return result;
                                 }
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, 0xd0);
+                                if (instruction->binary_operation == IR_BINARY_UNSIGNED_REMAINDER)
+                                {
+                                    BusterX86MetadataPhysicalOperand remainder_operands[2] = {
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, scalar_width),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, scalar_width),
+                                    };
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), remainder_operands,
+                                                                              BUSTER_ARRAY_LENGTH(remainder_operands)))
+                                    {
+                                        result.error = buffer.error;
+                                        return result;
+                                    }
+                                }
                             }
                             break;
                         case IR_BINARY_SHIFT_LEFT:
-                            if (wide)
-                            {
-                                codegen_emit_u8(&buffer, 0x48);
-                            }
-                            codegen_emit_u8(&buffer, 0xd3);
-                            codegen_emit_u8(&buffer, 0xe0);
-                            break;
                         case IR_BINARY_SIGNED_SHIFT_RIGHT:
-                            if (wide)
-                            {
-                                codegen_emit_u8(&buffer, 0x48);
-                            }
-                            codegen_emit_u8(&buffer, 0xd3);
-                            codegen_emit_u8(&buffer, 0xf8);
-                            break;
                         case IR_BINARY_UNSIGNED_SHIFT_RIGHT:
-                            if (wide)
                             {
-                                codegen_emit_u8(&buffer, 0x48);
+                                BusterX86MetadataPhysicalOperand shift_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, scalar_width),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 8),
+                                };
+                                String8 shift_mnemonic = instruction->binary_operation == IR_BINARY_SHIFT_LEFT ? S8("SHL")
+                                                      : instruction->binary_operation == IR_BINARY_SIGNED_SHIFT_RIGHT ? S8("SAR")
+                                                                                                                       : S8("SHR");
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, shift_mnemonic, shift_operands,
+                                                                          BUSTER_ARRAY_LENGTH(shift_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                             }
-                            codegen_emit_u8(&buffer, 0xd3);
-                            codegen_emit_u8(&buffer, 0xe8);
                             break;
                         case IR_BINARY_INTEGER_BITWISE_AND:
-                            if (wide)
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), scalar_operands,
+                                                                      BUSTER_ARRAY_LENGTH(scalar_operands)))
                             {
-                                codegen_emit_u8(&buffer, 0x48);
+                                result.error = buffer.error;
+                                return result;
                             }
-                            codegen_emit_u8(&buffer, 0x21);
-                            codegen_emit_u8(&buffer, 0xc8);
                             break;
                         case IR_BINARY_INTEGER_BITWISE_OR:
-                            if (wide)
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("OR"), scalar_operands,
+                                                                      BUSTER_ARRAY_LENGTH(scalar_operands)))
                             {
-                                codegen_emit_u8(&buffer, 0x48);
+                                result.error = buffer.error;
+                                return result;
                             }
-                            codegen_emit_u8(&buffer, 0x09);
-                            codegen_emit_u8(&buffer, 0xc8);
                             break;
                         case IR_BINARY_INTEGER_BITWISE_XOR:
-                            if (wide)
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), scalar_operands,
+                                                                      BUSTER_ARRAY_LENGTH(scalar_operands)))
                             {
-                                codegen_emit_u8(&buffer, 0x48);
+                                result.error = buffer.error;
+                                return result;
                             }
-                            codegen_emit_u8(&buffer, 0x31);
-                            codegen_emit_u8(&buffer, 0xc8);
                             break;
                         case IR_BINARY_INTEGER_EQUAL:
                         case IR_BINARY_POINTER_EQUAL:
@@ -10188,56 +10257,37 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         case IR_BINARY_UNSIGNED_GREATER:
                         case IR_BINARY_UNSIGNED_GREATER_EQUAL:
                         {
-                            u8 condition = 0;
-                            switch (instruction->binary_operation)
+                            String8 condition_mnemonic = instruction->binary_operation == IR_BINARY_INTEGER_EQUAL ||
+                                                                  instruction->binary_operation == IR_BINARY_POINTER_EQUAL ? S8("SETZ")
+                                      : instruction->binary_operation == IR_BINARY_INTEGER_NOT_EQUAL ||
+                                                instruction->binary_operation == IR_BINARY_POINTER_NOT_EQUAL ? S8("SETNZ")
+                                      : instruction->binary_operation == IR_BINARY_SIGNED_LESS ? S8("SETL")
+                                      : instruction->binary_operation == IR_BINARY_SIGNED_LESS_EQUAL ? S8("SETLE")
+                                      : instruction->binary_operation == IR_BINARY_SIGNED_GREATER ? S8("SETNLE")
+                                      : instruction->binary_operation == IR_BINARY_SIGNED_GREATER_EQUAL ? S8("SETNL")
+                                      : instruction->binary_operation == IR_BINARY_UNSIGNED_LESS ? S8("SETB")
+                                      : instruction->binary_operation == IR_BINARY_UNSIGNED_LESS_EQUAL ? S8("SETBE")
+                                      : instruction->binary_operation == IR_BINARY_UNSIGNED_GREATER ? S8("SETNBE")
+                                      : instruction->binary_operation == IR_BINARY_UNSIGNED_GREATER_EQUAL ? S8("SETNB")
+                                                                                                           : (String8){0};
+                            BusterX86MetadataPhysicalOperand set_operands[] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 8),
+                            };
+                            BusterX86MetadataPhysicalOperand widen_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 8),
+                            };
+                            if (!condition_mnemonic.length ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("CMP"), scalar_operands,
+                                                                      BUSTER_ARRAY_LENGTH(scalar_operands)) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, condition_mnemonic, set_operands,
+                                                                      BUSTER_ARRAY_LENGTH(set_operands)) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("MOVZX"), widen_operands,
+                                                                      BUSTER_ARRAY_LENGTH(widen_operands)))
                             {
-                            case IR_BINARY_INTEGER_EQUAL:
-                            case IR_BINARY_POINTER_EQUAL:
-                                condition = 0x94;
-                                break;
-                            case IR_BINARY_INTEGER_NOT_EQUAL:
-                            case IR_BINARY_POINTER_NOT_EQUAL:
-                                condition = 0x95;
-                                break;
-                            case IR_BINARY_SIGNED_LESS:
-                                condition = 0x9c;
-                                break;
-                            case IR_BINARY_SIGNED_LESS_EQUAL:
-                                condition = 0x9e;
-                                break;
-                            case IR_BINARY_SIGNED_GREATER:
-                                condition = 0x9f;
-                                break;
-                            case IR_BINARY_SIGNED_GREATER_EQUAL:
-                                condition = 0x9d;
-                                break;
-                            case IR_BINARY_UNSIGNED_LESS:
-                                condition = 0x92;
-                                break;
-                            case IR_BINARY_UNSIGNED_LESS_EQUAL:
-                                condition = 0x96;
-                                break;
-                            case IR_BINARY_UNSIGNED_GREATER:
-                                condition = 0x97;
-                                break;
-                            case IR_BINARY_UNSIGNED_GREATER_EQUAL:
-                                condition = 0x93;
-                                break;
-                            default:
-                                BUSTER_UNREACHABLE();
+                                result.error = buffer.error ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
                             }
-                            if (wide)
-                            {
-                                codegen_emit_u8(&buffer, 0x48);
-                            }
-                            codegen_emit_u8(&buffer, 0x39);
-                            codegen_emit_u8(&buffer, 0xc8);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, condition);
-                            codegen_emit_u8(&buffer, 0xc0);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0xb6);
-                            codegen_emit_u8(&buffer, 0xc0);
                             break;
                         }
                         default:
