@@ -4195,6 +4195,9 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BusterX86MetadataPhysicalQuery fsave_query = fnstcw_query;
         fsave_query.mnemonic = S8("FSAVE");
         fsave_query.operands = &x87_mem94;
+        BusterX86MetadataPhysicalOperand x87_mem14_r8 = x86_64_metadata_test_physical_mem_base(8, 112, 0);
+        BusterX86MetadataPhysicalQuery fstenv_r8_query = fstenv_query;
+        fstenv_r8_query.operands = &x87_mem14_r8;
         BusterX86MetadataPhysicalQuery ffreep_query = fnstcw_query;
         ffreep_query.mnemonic = S8("FFREEP");
         ffreep_query.operands = &x87_st4;
@@ -4206,6 +4209,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         u8 fnstsw_ax_bytes[8] = {0};
         u8 fstsw_ax_bytes[8] = {0};
         u8 fstenv_bytes[8] = {0};
+        u8 fstenv_r8_bytes[8] = {0};
         u8 fsave_bytes[8] = {0};
         u8 ffreep_bytes[8] = {0};
         BusterX86MetadataEmitResult fldcw = buster_x86_metadata_encode(
@@ -4224,6 +4228,8 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             (BusterX86MetadataEncodeQuery){.physical = fstsw_ax_query, .output = fstsw_ax_bytes, .output_capacity = sizeof(fstsw_ax_bytes)});
         BusterX86MetadataEmitResult fstenv = buster_x86_metadata_encode(
             (BusterX86MetadataEncodeQuery){.physical = fstenv_query, .output = fstenv_bytes, .output_capacity = sizeof(fstenv_bytes)});
+        BusterX86MetadataEmitResult fstenv_r8 = buster_x86_metadata_encode(
+            (BusterX86MetadataEncodeQuery){.physical = fstenv_r8_query, .output = fstenv_r8_bytes, .output_capacity = sizeof(fstenv_r8_bytes)});
         BusterX86MetadataEmitResult fsave = buster_x86_metadata_encode(
             (BusterX86MetadataEncodeQuery){.physical = fsave_query, .output = fsave_bytes, .output_capacity = sizeof(fsave_bytes)});
         BusterX86MetadataEmitResult ffreep = buster_x86_metadata_encode(
@@ -4246,6 +4252,9 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                    fstenv_bytes[0] == 0xd9 && fstenv_bytes[1] == 0x30 && fsave_bytes[0] == 0xdd && fsave_bytes[1] == 0x30 &&
                                    ffreep.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && ffreep.byte_count == 2 && ffreep.form_id == 9241 &&
                                    ffreep_bytes[0] == 0xdf && ffreep_bytes[1] == 0xc4);
+        BUSTER_TEST(arguments, fstenv_r8.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && fstenv_r8.form_id == 9120 &&
+                                   fstenv_r8.byte_count == 3 && fstenv_r8_bytes[0] == 0x41 && fstenv_r8_bytes[1] == 0xd9 &&
+                                   fstenv_r8_bytes[2] == 0x30);
     }
 
     {

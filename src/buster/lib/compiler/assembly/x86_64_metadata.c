@@ -6392,6 +6392,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
             break;
         }
     }
+    bool x87_form = buster_x86_metadata_string_input_equal(form.extension.offset, S8("X87"));
     bool rex_w = plan->pattern->w != 0;
     bool needs_low_byte_rex = false;
     bool has_r = false;
@@ -6399,7 +6400,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
     for (u32 register_index = 0; register_index < plan->machine_fast_register_count; register_index += 1)
     {
         BusterX86MetadataPhysicalOperand physical = query.operands[plan->machine_fast_register_bindings[register_index]];
-        if (plan->pattern->has_modrm && physical.reg.width == 64) rex_w = true;
+        if (plan->pattern->has_modrm && physical.reg.width == 64 && !x87_form) rex_w = true;
         if (physical.reg.width == 8 && !physical.reg.high_byte && physical.reg.index >= 4 && physical.reg.index < 8)
             needs_low_byte_rex = true;
     }
@@ -6413,7 +6414,6 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
     else if (rm_binding && rm_binding->kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER) has_b = (rm_binding->reg.index & 8) != 0;
     bool needs_rex = rex_w || has_r || has_b || needs_low_byte_rex;
     u8 mandatory_prefix = plan->pattern->mandatory_prefix ? plan->pattern->mandatory_prefix : form.mandatory_prefix;
-    bool x87_form = buster_x86_metadata_string_input_equal(form.extension.offset, S8("X87"));
     bool operand_size_override = data_width == 16 && mandatory_prefix != 0x66 && !x87_form &&
                                  (form.prefix_kind == BUSTER_X86_METADATA_PREFIX_LEGACY || form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX);
 
@@ -7065,6 +7065,7 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
     BusterX86MetadataForm first_failure_form = {0};
     bool first_failure_form_recorded = false;
     bool selected_implicit_one = false;
+    bool selected_x87_no_rexw = false;
     for (u32 position = 0; position < candidates.count; position += 1)
     {
         u32 form_id = 0;
@@ -7189,13 +7190,20 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
         BusterX86MetadataPatternSemantics candidate_pattern = {0};
         bool candidate_implicit_one = buster_x86_metadata_emit_parse_pattern(form, &candidate_pattern) && candidate_pattern.has_implicit_one;
         bool prefer_implicit_one = scratch.byte_count == result.selected_byte_count && candidate_implicit_one && !selected_implicit_one;
+        bool candidate_x87_no_rexw = buster_x86_metadata_string_input_equal(form.extension.offset, S8("X87")) &&
+                                     candidate_pattern.has_modrm && !candidate_pattern.w;
+        bool prefer_x87_no_rexw = scratch.byte_count == result.selected_byte_count && candidate_x87_no_rexw &&
+                                 !selected_x87_no_rexw;
         if (result.form_id == UINT32_MAX || scratch.byte_count < result.selected_byte_count || prefer_implicit_one ||
-            (scratch.byte_count == result.selected_byte_count && candidate_implicit_one == selected_implicit_one && form_id < result.form_id))
+            prefer_x87_no_rexw ||
+            (scratch.byte_count == result.selected_byte_count && candidate_implicit_one == selected_implicit_one &&
+             candidate_x87_no_rexw == selected_x87_no_rexw && form_id < result.form_id))
         {
             result.form_id = form_id;
             result.stable_hash = form.stable_hash;
             result.selected_byte_count = scratch.byte_count;
             selected_implicit_one = candidate_implicit_one;
+            selected_x87_no_rexw = candidate_x87_no_rexw;
             result.selected_memory_width = 0;
             result.selected_memory_operand = UINT8_MAX;
             if (inferred_memory_width)
