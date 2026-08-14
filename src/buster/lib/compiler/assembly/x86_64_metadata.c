@@ -5186,6 +5186,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
                                       pattern.ubit_value == 1 && pattern.immediate_width == 4));
     bool rex_w = pattern.w != 0;
     bool has_mmx_operand = false;
+    bool has_xmm_operand = false;
     for (u32 index = 0; index < binding_count; index += 1)
     {
         BusterX86MetadataPhysicalOperand physical = bindings[index].physical;
@@ -5193,8 +5194,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
             physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MMX)
         {
             has_mmx_operand = true;
-            break;
         }
+        if (physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+            physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM)
+            has_xmm_operand = true;
     }
     // MOVSXD's XED row carries `norexw_prefix` even though its GPRz
     // destination still requires REX.W when selected at 64-bit width.  The
@@ -5227,7 +5230,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
                                          form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX;
         if ((pattern.has_modrm || pattern.has_dynamic_opcode || moffs_form) &&
             physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !pattern.has_w && !apx_evex_fixed_width_no_w &&
-            !has_mmx_operand && !x87_form && scalar_memory_width_rex_w)
+            !has_mmx_operand && !has_xmm_operand && !x87_form && scalar_memory_width_rex_w)
         {
             u16 memory_width = physical.width ? physical.width : physical.memory.source_width;
             if (memory_width == 64) rex_w = true;
@@ -6851,6 +6854,45 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_is_undocumented_shift_alias(BusterX
            (pattern.has_implicit_one || (pattern.opcode_count && (pattern.opcode[0] == 0xd2 || pattern.opcode[0] == 0xd3)));
 }
 
+// XED exposes XCHG's accumulator opcode+rd spellings with only the
+// non-accumulator register visible; the accumulator is the hidden OrAX
+// operand.  The checked physical interface, however, normally receives both
+// source operands.  Project a two-register pair onto that one visible
+// operand whenever exactly one side is the accumulator so selection and
+// emission can use the architectural shortest form (90+rd).  Byte XCHG has
+// no opcode+rd spelling and intentionally remains on the generic ModRM form.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_xchg_accumulator_projection(
+    BusterX86MetadataPhysicalQuery query, BusterX86MetadataPhysicalOperand* projected_operand,
+    BusterX86MetadataPhysicalQuery* projected_query)
+{
+    if (!projected_operand || !projected_query || query.operand_count != 2 || query.include_implicit) return false;
+    if (query.attributes.lock || query.attributes.rep || query.attributes.repne || query.attributes.has_mask_register ||
+        query.attributes.decorator_flags || query.attributes.apx_flags || query.attributes.amx_flags || query.attributes.has_dfv ||
+        query.attributes.implicit_segment != BUSTER_X86_METADATA_SEGMENT_NONE || query.attributes.branch_hint != BUSTER_X86_METADATA_BRANCH_HINT_NONE ||
+        query.attributes.notrack || query.attributes.sae || query.attributes.rounding_mode != BUSTER_X86_METADATA_ROUNDING_NONE)
+        return false;
+    if (!buster_x86_metadata_input_string_equal(query.mnemonic, S8("XCHG"))) return false;
+    BusterX86MetadataPhysicalOperand first = query.operands[0];
+    BusterX86MetadataPhysicalOperand second = query.operands[1];
+    if (first.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
+        second.kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
+        first.reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR ||
+        second.reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR ||
+        first.reg.high_byte || second.reg.high_byte)
+        return false;
+    u16 first_width = first.width ? first.width : first.reg.width;
+    u16 second_width = second.width ? second.width : second.reg.width;
+    if (first_width != second_width || (first_width != 16 && first_width != 32 && first_width != 64)) return false;
+    bool first_accumulator = first.reg.index == 0;
+    bool second_accumulator = second.reg.index == 0;
+    if (first_accumulator == second_accumulator) return false;
+    *projected_operand = first_accumulator ? second : first;
+    *projected_query = query;
+    projected_query->operands = projected_operand;
+    projected_query->operand_count = 1;
+    return true;
+}
+
 BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataPhysicalQuery query)
 {
     BusterX86MetadataSelectResult result = {
@@ -6860,6 +6902,13 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
         .selected_memory_operand = UINT8_MAX,
     };
     if (!buster_x86_metadata_emit_physical_query_valid(query)) return result;
+    BusterX86MetadataPhysicalOperand projected_operand = {0};
+    BusterX86MetadataPhysicalQuery projected_query = {0};
+    if (buster_x86_metadata_xchg_accumulator_projection(query, &projected_operand, &projected_query))
+    {
+        BusterX86MetadataSelectResult projected = buster_x86_metadata_select_form(projected_query);
+        if (projected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS) return projected;
+    }
     result.status = BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC;
     BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(query.mnemonic);
     if (!candidates.count) return result;
@@ -7071,6 +7120,11 @@ BusterX86MetadataEmitResult buster_x86_metadata_encode(BusterX86MetadataEncodeQu
         operands[selection.selected_memory_operand].width = selection.selected_memory_width;
         physical.operands = operands;
     }
+    BusterX86MetadataPhysicalOperand projected_operand = {0};
+    BusterX86MetadataPhysicalQuery projected_query = {0};
+    if (selection.form_id != UINT32_MAX &&
+        buster_x86_metadata_xchg_accumulator_projection(physical, &projected_operand, &projected_query))
+        physical = projected_query;
     BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
         .physical = physical,
         .form_id = selection.form_id,

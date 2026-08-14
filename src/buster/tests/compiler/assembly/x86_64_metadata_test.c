@@ -3464,6 +3464,128 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     }
 
     {
+        // Scalar SSE memory width is an element-size selector, not a REX.W
+        // request.  MOVSD's qword load/store therefore retain the canonical
+        // F2 0F 10/11 spelling even though the physical memory operand is
+        // 64 bits wide.
+        String8 wildcard_features[1] = {S8("*")};
+        BusterX86MetadataPhysicalOperand load_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 0, 64),
+            x86_64_metadata_test_physical_mem_base(5, 64, 8),
+        };
+        BusterX86MetadataPhysicalOperand store_operands[2] = {
+            load_operands[1],
+            load_operands[0],
+        };
+        BusterX86MetadataPhysicalQuery load_query = x86_64_metadata_test_physical_query(
+            S8("MOVSD"), load_operands, BUSTER_ARRAY_LENGTH(load_operands), (BusterX86MetadataPhysicalAttributes){0},
+            wildcard_features, BUSTER_ARRAY_LENGTH(wildcard_features));
+        BusterX86MetadataPhysicalQuery store_query = x86_64_metadata_test_physical_query(
+            S8("MOVSD"), store_operands, BUSTER_ARRAY_LENGTH(store_operands), (BusterX86MetadataPhysicalAttributes){0},
+            wildcard_features, BUSTER_ARRAY_LENGTH(wildcard_features));
+        u8 load_output[16] = {0};
+        u8 store_output[16] = {0};
+        BusterX86MetadataSelectResult load_selected = buster_x86_metadata_select_form(load_query);
+        BusterX86MetadataSelectResult store_selected = buster_x86_metadata_select_form(store_query);
+        BusterX86MetadataEmitResult load_emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = load_query, .output = load_output, .output_capacity = BUSTER_ARRAY_LENGTH(load_output)});
+        BusterX86MetadataEmitResult store_emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = store_query, .output = store_output, .output_capacity = BUSTER_ARRAY_LENGTH(store_output)});
+        static u8 const expected_load[] = {0xf2, 0x0f, 0x10, 0x45, 0x08};
+        static u8 const expected_store[] = {0xf2, 0x0f, 0x11, 0x45, 0x08};
+        bool movsd_memory = load_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                            store_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                            load_emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                            store_emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                            load_emitted.byte_count == BUSTER_ARRAY_LENGTH(expected_load) &&
+                            store_emitted.byte_count == BUSTER_ARRAY_LENGTH(expected_store) &&
+                            memcmp(load_output, expected_load, BUSTER_ARRAY_LENGTH(expected_load)) == 0 &&
+                            memcmp(store_output, expected_store, BUSTER_ARRAY_LENGTH(expected_store)) == 0;
+        BUSTER_TEST(arguments, movsd_memory);
+    }
+
+    {
+        // XCHG's accumulator opcode+rd forms expose only the non-accumulator
+        // register in XED.  The checked selector projects a two-register
+        // source pair onto that hidden-accumulator form and keeps generic
+        // ModRM bytes for non-accumulator pairs (and for byte XCHG).
+        String8 wildcard_features[1] = {S8("*")};
+        BusterX86MetadataPhysicalOperand operands[2] = {0};
+        BusterX86MetadataPhysicalQuery query = {0};
+        u8 output[16] = {0};
+        BusterX86MetadataEmitResult emitted = {0};
+        BusterX86MetadataSelectResult selected = {0};
+        static u8 const expected_ax_cx[] = {0x66, 0x91};
+        static u8 const expected_eax_ebx[] = {0x93};
+        static u8 const expected_rax_r8[] = {0x49, 0x90};
+        static u8 const expected_rcx_rdx[] = {0x48, 0x87, 0xca};
+        operands[0] = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 16);
+        operands[1] = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 16);
+        query = x86_64_metadata_test_physical_query(S8("XCHG"), operands, 2,
+                                                    (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+                                                    BUSTER_ARRAY_LENGTH(wildcard_features));
+        selected = buster_x86_metadata_select_form(query);
+        emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = query, .output = output, .output_capacity = BUSTER_ARRAY_LENGTH(output)});
+        bool xchg_ax_cx = selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                          emitted.byte_count == BUSTER_ARRAY_LENGTH(expected_ax_cx) &&
+                          memcmp(output, expected_ax_cx, BUSTER_ARRAY_LENGTH(expected_ax_cx)) == 0;
+        BUSTER_TEST(arguments, xchg_ax_cx);
+
+        operands[0] = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 16);
+        operands[1] = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 16);
+        query = x86_64_metadata_test_physical_query(S8("XCHG"), operands, 2,
+                                                    (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+                                                    BUSTER_ARRAY_LENGTH(wildcard_features));
+        selected = buster_x86_metadata_select_form(query);
+        emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = query, .output = output, .output_capacity = BUSTER_ARRAY_LENGTH(output)});
+        bool xchg_cx_ax = selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                          emitted.byte_count == BUSTER_ARRAY_LENGTH(expected_ax_cx) &&
+                          memcmp(output, expected_ax_cx, BUSTER_ARRAY_LENGTH(expected_ax_cx)) == 0;
+        BUSTER_TEST(arguments, xchg_cx_ax);
+
+        operands[0] = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 32);
+        operands[1] = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 3, 32);
+        query = x86_64_metadata_test_physical_query(S8("XCHG"), operands, 2,
+                                                    (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+                                                    BUSTER_ARRAY_LENGTH(wildcard_features));
+        selected = buster_x86_metadata_select_form(query);
+        emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = query, .output = output, .output_capacity = BUSTER_ARRAY_LENGTH(output)});
+        bool xchg_eax_ebx = selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                            emitted.byte_count == BUSTER_ARRAY_LENGTH(expected_eax_ebx) &&
+                            memcmp(output, expected_eax_ebx, BUSTER_ARRAY_LENGTH(expected_eax_ebx)) == 0;
+        BUSTER_TEST(arguments, xchg_eax_ebx);
+
+        operands[0] = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 64);
+        operands[1] = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 8, 64);
+        query = x86_64_metadata_test_physical_query(S8("XCHG"), operands, 2,
+                                                    (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+                                                    BUSTER_ARRAY_LENGTH(wildcard_features));
+        selected = buster_x86_metadata_select_form(query);
+        emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = query, .output = output, .output_capacity = BUSTER_ARRAY_LENGTH(output)});
+        bool xchg_rax_r8 = selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                           emitted.byte_count == BUSTER_ARRAY_LENGTH(expected_rax_r8) &&
+                           memcmp(output, expected_rax_r8, BUSTER_ARRAY_LENGTH(expected_rax_r8)) == 0;
+        BUSTER_TEST(arguments, xchg_rax_r8);
+
+        operands[0] = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 64);
+        operands[1] = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 2, 64);
+        query = x86_64_metadata_test_physical_query(S8("XCHG"), operands, 2,
+                                                    (BusterX86MetadataPhysicalAttributes){0}, wildcard_features,
+                                                    BUSTER_ARRAY_LENGTH(wildcard_features));
+        selected = buster_x86_metadata_select_form(query);
+        emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = query, .output = output, .output_capacity = BUSTER_ARRAY_LENGTH(output)});
+        bool xchg_generic = selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                            emitted.byte_count == BUSTER_ARRAY_LENGTH(expected_rcx_rdx) &&
+                            memcmp(output, expected_rcx_rdx, BUSTER_ARRAY_LENGTH(expected_rcx_rdx)) == 0;
+        BUSTER_TEST(arguments, xchg_generic);
+    }
+
+    {
         // A non-sign-extended 64-bit literal must select MOV's B8+rd
         // immediate form instead of failing the shorter C7 imm32 row.
         BusterX86MetadataPhysicalOperand operands[2] = {
