@@ -83,6 +83,7 @@ struct CompilerDriverInvocation
     String8* linker_arguments;
     String8* gpu_arguments;
     String8 output_path;
+    String8 entry_symbol;
     String8 sysroot;
     // Where to write the source measurement as key=value text. `-v` prints the
     // same numbers as a table for a human; this is the form another program

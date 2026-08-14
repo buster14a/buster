@@ -285,6 +285,18 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_set_assembly_syntax(Arena* arena, Compi
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_entry_symbol(Target target)
+{
+    return target.os == OPERATING_SYSTEM_UEFI ? S8("UefiMain") : S8("main");
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_executable_path(Target target)
+{
+    return target.os == OPERATING_SYSTEM_UEFI      ? S8("a.efi")
+           : target.os == OPERATING_SYSTEM_WINDOWS ? S8("a.exe")
+                                                   : S8("a.out");
+}
+
 CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments)
 {
     CompilerDriverInvocation invocation = {
@@ -407,7 +419,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.save_gpu_temporaries = true;
             continue;
         }
-        if (string_equal(argument, S8("-o")) || string_equal(argument, S8("-I")) || string_equal(argument, S8("-isystem")) ||
+        if (string_equal(argument, S8("-o")) || string_equal(argument, S8("-e")) || string_equal(argument, S8("--entry")) ||
+            string_equal(argument, S8("-I")) || string_equal(argument, S8("-isystem")) ||
             string_equal(argument, S8("-D")) || string_equal(argument, S8("-U")) || string_equal(argument, S8("-L")) || string_equal(argument, S8("-l")) ||
             string_equal(argument, S8("-F")) || string_equal(argument, S8("-framework")) || string_equal(argument, S8("-x")) ||
             string_equal(argument, S8("-target")) || string_equal(argument, S8("--target")) || string_equal(argument, S8("-march")) ||
@@ -429,6 +442,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             if (string_equal(argument, S8("-o")))
             {
                 invocation.output_path = value;
+            }
+            else if (string_equal(argument, S8("-e")) || string_equal(argument, S8("--entry")))
+            {
+                invocation.entry_symbol = value;
             }
             else if (string_equal(argument, S8("-I")))
             {
@@ -707,6 +724,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (value.length)
         {
             invocation.gpu_arguments[invocation.gpu_argument_count++] = value;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("--entry="));
+        if (value.length)
+        {
+            invocation.entry_symbol = value;
             continue;
         }
         value = compiler_driver_option_value(argument, S8("-fsource-metrics="));
@@ -1146,7 +1169,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         invocation.diagnostic = S8("-emit-llvm emits binary bitcode and cannot be combined with -E, -S, or -fsyntax-only");
         return invocation;
     }
-    if (!invocation.no_standard_includes && !invocation.has_gpu_target)
+    if (!invocation.no_standard_includes && !invocation.has_gpu_target && invocation.target.os != OPERATING_SYSTEM_UEFI)
     {
 #if defined(BUSTER_HOST_C_RESOURCE_INCLUDE)
         if (sizeof(BUSTER_HOST_C_RESOURCE_INCLUDE) > 1)
@@ -1202,7 +1225,19 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
 #endif
         }
     }
-    if (!invocation.has_gpu_target && invocation.framework_count && invocation.target.os != OPERATING_SYSTEM_MACOS && invocation.target.os != OPERATING_SYSTEM_IOS)
+    if (!invocation.has_gpu_target && invocation.target.os == OPERATING_SYSTEM_UEFI &&
+        invocation.target.cpu_arch != CPU_ARCH_X86_64 && invocation.target.cpu_arch != CPU_ARCH_AARCH64)
+    {
+        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation.diagnostic = S8("UEFI output is supported only for x86_64 and aarch64 targets");
+    }
+    else if (!invocation.has_gpu_target && invocation.target.os == OPERATING_SYSTEM_UEFI && invocation.linker_argument_count)
+    {
+        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation.diagnostic = S8("raw linker arguments are not supported for UEFI targets");
+    }
+    else if (!invocation.has_gpu_target && invocation.framework_count && invocation.target.os != OPERATING_SYSTEM_MACOS &&
+             invocation.target.os != OPERATING_SYSTEM_IOS)
     {
         invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         invocation.diagnostic = S8("-framework is only supported for Apple targets");
@@ -1611,6 +1646,16 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_target_dynamic_libraries(Arena* arena, CompilerDriverInvocation invocation,
+                                                                                              bool* static_libraries)
+{
+    if (invocation.target.os == OPERATING_SYSTEM_UEFI)
+    {
+        return (CompilerDriverDynamicLibraries){0};
+    }
+    return compiler_driver_dynamic_libraries(arena, invocation, static_libraries);
+}
+
 BUSTER_GLOBAL_LOCAL CPreprocessorDefinition compiler_driver_c_definition(String8 definition)
 {
     for (u64 index = 0; index < definition.length; index += 1)
@@ -1652,7 +1697,7 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
     for (u32 path_index = 0; path_index < invocation.library_path_count; path_index += 1)
     {
         String8 root = invocation.library_paths[path_index];
-        if (!exact_archive)
+        if (!exact_archive && invocation.target.os != OPERATING_SYSTEM_UEFI)
         {
             String8 shared_name = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? string_format(arena, S8("{S8}.dll"), requested)
                                   : invocation.target.os == OPERATING_SYSTEM_MACOS || invocation.target.os == OPERATING_SYSTEM_IOS
@@ -2270,17 +2315,13 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.diagnostic = string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
         goto end;
     }
-    String8 output = invocation.output_path.length ? invocation.output_path :
-#if BUSTER_WINDOWS
-                                                   S8("a.exe");
-#else
-                                                   S8("a.out");
-#endif
-    CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_dynamic_libraries(arena, invocation, 0);
+    String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
+    CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, 0);
     result.native_link = link_native_executable(arena, &linked.object,
                                                 (NativeExecutableLinkOptions){
                                                     .output_path = output,
-                                                    .entry_symbol = S8("main"),
+                                                    .entry_symbol = invocation.entry_symbol.length ? invocation.entry_symbol
+                                                                                                   : compiler_driver_default_entry_symbol(invocation.target),
                                                     .sysroot = invocation.sysroot,
                                                     .library_paths = invocation.library_paths,
                                                     .framework_paths = invocation.framework_paths,
@@ -2553,6 +2594,12 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         ObjectArchive archive = compiler_driver_library_archive(arena, invocation, invocation.libraries[library_index], &found, &archive_path);
         if (!found)
         {
+            if (invocation.target.os == OPERATING_SYSTEM_UEFI)
+            {
+                result.error = COMPILER_DRIVER_ERROR_FILE_READ;
+                result.diagnostic = string_format(arena, S8("could not find static UEFI library {S8}"), invocation.libraries[library_index]);
+                goto finish;
+            }
             continue;
         }
         static_libraries[library_index] = true;
@@ -2824,17 +2871,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     }
     result.object = linked.object;
     result.has_object = true;
-    String8 output = invocation.output_path.length ? invocation.output_path :
-#if BUSTER_WINDOWS
-                                                   S8("a.exe");
-#else
-                                                   S8("a.out");
-#endif
-    CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_dynamic_libraries(arena, invocation, static_libraries);
+    String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
+    CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, static_libraries);
     result.native_link = link_native_executable(arena, &linked.object,
                                                 (NativeExecutableLinkOptions){
                                                     .output_path = output,
-                                                    .entry_symbol = S8("main"),
+                                                    .entry_symbol = invocation.entry_symbol.length ? invocation.entry_symbol
+                                                                                                   : compiler_driver_default_entry_symbol(invocation.target),
                                                     .sysroot = invocation.sysroot,
                                                     .library_paths = invocation.library_paths,
                                                     .framework_paths = invocation.framework_paths,

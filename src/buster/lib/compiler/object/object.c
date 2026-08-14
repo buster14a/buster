@@ -7740,7 +7740,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     };
     object_metadata_sections_initialize(&result);
     ObjectWindowsUnwindResult windows_unwind = {0};
-    if (target.os == OPERATING_SYSTEM_WINDOWS && (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64))
+    if (target_uses_pe_unwind(target))
     {
         windows_unwind = target.cpu_arch == CPU_ARCH_X86_64 ? object_windows_x64_unwind_build(arena, module->functions, module->function_count)
                                                              : object_windows_arm64_unwind_build(arena, module->functions, module->function_count);
@@ -7845,7 +7845,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                 .column = entry.column,
             };
         }
-        if (target.os == OPERATING_SYSTEM_WINDOWS)
+        if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI)
         {
             DebugModel debug_model = debug_model_build(arena, (DebugModelInput){
                                                                    .program = program,

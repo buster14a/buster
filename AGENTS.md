@@ -12,6 +12,8 @@ tool; the target name is retained for build-script compatibility. The `ide cc`
 driver also orchestrates optional external shader toolchains for SPIR-V,
 NVPTX/PTX, AMDGCN/HSA code objects, Metal AIR/metallib, and DXIL; these
 pipelines add no linked or vendored dependency to the executable.
+Native outputs include freestanding PE32+ UEFI applications for x86-64 and
+AArch64 alongside the hosted desktop and mobile targets.
 
 The compiler pipeline is:
 
@@ -765,6 +767,7 @@ Top level:
 | `PERFORMANCE_AUDITS.md` | Append-only measurement history; older entries may describe components that no longer exist. |
 | `WASM64.md` | Direct core Wasm64 target contract and usage. |
 | `LLVM_BITCODE.md` | Direct LLVM bitcode output, driver usage, emitter API, validation, and current limitations. |
+| `docs/uefi-target.md` | Freestanding UEFI target contract, driver usage, firmware ABI, image layout, relocations, and limitations. |
 | `build/` | Generated output. Never edit or archive it as source. |
 
 Compiler (`src/buster/lib/compiler/`):
@@ -783,12 +786,12 @@ Compiler (`src/buster/lib/compiler/`):
 | `codegen/codegen.{c,h}` | Canonical-IR-to-native-code orchestration and codegen statistics. |
 | `debug/`, `dwarf/`, `codeview/`, `pdb/` | Canonical debug model and platform debug-format emitters. |
 | `object/object.{c,h}` | Format-neutral object model plus ELF64, COFF, and Mach-O readers/writers. |
-| `link/link.{c,h}` | Section merging, symbol resolution, and native executable linking. |
+| `link/link.{c,h}` | Section merging, symbol resolution, hosted native executable linking, and imports-free PE32+ UEFI application output. |
 | `jit/jit.{c,h}` | Host-native in-process object loader with explicit imports and W^X finalization. |
 | `wasm/wasm.{c,h}` | Direct canonical-IR-to-core-Wasm64 emitter using Memory64. |
 | `gpu/gpu.{c,h}` | Target parsing, deterministic command planning/execution, tool discovery, temporary ownership, and artifact validation for external SPIR-V, NVPTX/PTX, AMDGCN/HSA, Metal AIR/metallib, and DXIL pipelines. |
 | `llvm/bitcode.{c,h}` | Dependency-free canonical typed-IR to binary LLVM bitcode emitter. It writes the bitstream directly, preserves deterministic value numbering, records target metadata, and diagnoses unsupported IR instead of routing through textual LLVM IR. |
-| `driver/driver.{c,h}` | Clang-like C command-line parsing and end-to-end preprocess/compile/assemble/object/link dispatch, plus direct LLVM bitcode output and isolated external GPU-pipeline orchestration. |
+| `driver/driver.{c,h}` | Clang-like C command-line parsing and end-to-end preprocess/compile/assemble/object/link dispatch, including hosted and freestanding UEFI links, plus direct LLVM bitcode output and isolated external GPU-pipeline orchestration. |
 
 Applications:
 

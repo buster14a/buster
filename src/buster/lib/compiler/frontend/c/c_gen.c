@@ -5966,9 +5966,9 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
     }
     else if (encoding == C_IR_STRING_ENCODING_WIDE)
     {
-        bool windows = target.os == OPERATING_SYSTEM_WINDOWS;
-        width = windows ? 2 : 4;
-        element_kind = windows ? C_TYPE_UNSIGNED_SHORT : C_TYPE_INT;
+        bool short_wchar = target_uses_16_bit_wchar(target);
+        width = short_wchar ? 2 : 4;
+        element_kind = short_wchar ? C_TYPE_UNSIGNED_SHORT : C_TYPE_INT;
     }
     u32 fragment_count = end - start;
     ByteSlice* fragments = arena_allocate(arena, ByteSlice, fragment_count);
@@ -6066,8 +6066,8 @@ BUSTER_C_SHARED bool c_ir_decode_character_value(Arena* arena, char8 const* spel
         kind = C_TYPE_UNSIGNED_INT;
         break;
     case 'L':
-        width = target.os == OPERATING_SYSTEM_WINDOWS ? 2 : 4;
-        kind = target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_UNSIGNED_SHORT : C_TYPE_INT;
+        width = target_uses_16_bit_wchar(target) ? 2 : 4;
+        kind = target_uses_16_bit_wchar(target) ? C_TYPE_UNSIGNED_SHORT : C_TYPE_INT;
         break;
     default:
         return false;
@@ -14575,8 +14575,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
         {
             kind = c_token_spelling(builder->preprocess.spelling_base, first).pointer[0] == 'u'                 ? C_TYPE_UNSIGNED_SHORT
                    : c_token_spelling(builder->preprocess.spelling_base, first).pointer[0] == 'U'               ? C_TYPE_UNSIGNED_INT
-                   : builder->target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_UNSIGNED_SHORT
-                                                                    : C_TYPE_INT;
+                   : target_uses_16_bit_wchar(builder->target) ? C_TYPE_UNSIGNED_SHORT
+                                                               : C_TYPE_INT;
         }
         *type_out = builder->scalar_types[kind];
         return true;
@@ -17937,8 +17937,8 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
             {
                 kind = c_token_spelling(builder->preprocess.spelling_base, token).pointer[0] == 'u'                 ? C_TYPE_UNSIGNED_SHORT
                        : c_token_spelling(builder->preprocess.spelling_base, token).pointer[0] == 'U'               ? C_TYPE_UNSIGNED_INT
-                       : builder->target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_UNSIGNED_SHORT
-                                                                        : C_TYPE_INT;
+                       : target_uses_16_bit_wchar(builder->target) ? C_TYPE_UNSIGNED_SHORT
+                                                                   : C_TYPE_INT;
             }
             result = builder->scalar_types[kind];
             continue;
@@ -20868,7 +20868,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_valid(CIntegerIrBuilder* bui
     }
     if (builder->target.cpu_arch == CPU_ARCH_X86_64)
     {
-        if (builder->target.os == OPERATING_SYSTEM_WINDOWS &&
+        if (target_uses_llp64_data_model(builder->target) &&
             (string_equal(clobber, S8("rsi")) || string_equal(clobber, S8("esi")) || string_equal(clobber, S8("si")) ||
              string_equal(clobber, S8("sil")) || string_equal(clobber, S8("rdi")) || string_equal(clobber, S8("edi")) ||
              string_equal(clobber, S8("di")) || string_equal(clobber, S8("dil"))))

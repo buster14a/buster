@@ -5356,6 +5356,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     }
     TargetDataLayout layout = options.data_layout;
     bool windows_target = options.target.os == OPERATING_SYSTEM_WINDOWS;
+    bool llp64_target = target_uses_llp64_data_model(options.target);
+    bool short_wchar_target = target_uses_16_bit_wchar(options.target);
     String8 signed_pointer_type = layout.long_integer.size == layout.pointer.size ? S8("long") : S8("long long");
     String8 unsigned_pointer_type = layout.unsigned_long_integer.size == layout.pointer.size ? S8("unsigned long") : S8("unsigned long long");
 #define C_DEFINE_TYPE_MACRO(name, replacement) c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8(name), (replacement))
@@ -5373,8 +5375,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__UINT32_TYPE__", S8("unsigned int"));
     C_DEFINE_TYPE_MACRO("__INT64_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", unsigned_pointer_type);
-    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", windows_target ? S8("unsigned short") : S8("int"));
-    C_DEFINE_TYPE_MACRO("__WINT_TYPE__", S8("unsigned int"));
+    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__WINT_TYPE__", options.target.os == OPERATING_SYSTEM_UEFI ? S8("unsigned short") : S8("unsigned int"));
     C_DEFINE_TYPE_MACRO("__CHAR8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__CHAR16_TYPE__", S8("unsigned short"));
     C_DEFINE_TYPE_MACRO("__CHAR32_TYPE__", S8("unsigned int"));
@@ -5399,7 +5401,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__SIZEOF_LONG_DOUBLE__", string_format(arena, S8("{u32}"), layout.long_double_type.size));
     C_DEFINE_TYPE_MACRO("__SIZEOF_VA_LIST__", string_format(arena, S8("{u32}"), layout.va_list.size));
     C_DEFINE_TYPE_MACRO("__LONG_DOUBLE_WIDTH__", string_format(arena, S8("{u32}"), layout.long_double_type.bit_width));
-    C_DEFINE_TYPE_MACRO("__WCHAR_WIDTH__", windows_target ? S8("16") : S8("32"));
+    C_DEFINE_TYPE_MACRO("__WCHAR_WIDTH__", short_wchar_target ? S8("16") : S8("32"));
     C_DEFINE_TYPE_MACRO("__ORDER_LITTLE_ENDIAN__", S8("1234"));
     C_DEFINE_TYPE_MACRO("__ORDER_BIG_ENDIAN__", S8("4321"));
     C_DEFINE_TYPE_MACRO("__BYTE_ORDER__", layout.endianness == TARGET_ENDIAN_LITTLE ? S8("__ORDER_LITTLE_ENDIAN__") : S8("__ORDER_BIG_ENDIAN__"));
@@ -5434,7 +5436,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             C_DEFINE_TYPE_MACRO("_M_ARM64", S8("1"));
         }
     }
-    else
+    if (!llp64_target)
     {
         C_DEFINE_TYPE_MACRO("__LP64__", S8("1"));
         C_DEFINE_TYPE_MACRO("_LP64", S8("1"));
@@ -5452,6 +5454,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     case OPERATING_SYSTEM_WINDOWS:
     {
         operating_system_macros[operating_system_macro_count++] = S8("_WIN32");
+    }
+    break;
+    case OPERATING_SYSTEM_UEFI:
+    {
+        operating_system_macros[operating_system_macro_count++] = S8("__UEFI__");
     }
     break;
     case OPERATING_SYSTEM_MACOS:
@@ -5487,7 +5494,6 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         operating_system_macros[operating_system_macro_count++] = S8("__ELF__");
     }
     break;
-    case OPERATING_SYSTEM_UEFI:
     case OPERATING_SYSTEM_FREESTANDING:
     case OPERATING_SYSTEM_COUNT:
     {
@@ -5529,7 +5535,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         }
     }
     CToken hosted_replacement = standard_replacement[0];
-    if (options.target.os == OPERATING_SYSTEM_FREESTANDING)
+    if (options.target.os == OPERATING_SYSTEM_FREESTANDING || options.target.os == OPERATING_SYSTEM_UEFI)
     {
         hosted_replacement.offset = C_SPELLING_ZERO;
     }

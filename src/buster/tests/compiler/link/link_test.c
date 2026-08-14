@@ -1088,6 +1088,256 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk(UnitTestArgument
     return result;
 }
 
+
+typedef struct LinkTestUefiPeSection LinkTestUefiPeSection;
+struct LinkTestUefiPeSection
+{
+    u32 virtual_size;
+    u32 virtual_address;
+    u32 raw_size;
+    u32 raw_offset;
+    u32 characteristics;
+};
+
+BUSTER_GLOBAL_LOCAL u16 link_test_uefi_read_u16(ByteSlice image, u64 offset)
+{
+    u16 value = 0;
+    if (offset <= image.length && sizeof(value) <= image.length - offset)
+    {
+        memcpy(&value, image.pointer + offset, sizeof(value));
+    }
+    return value;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_test_uefi_pe_section_find(ByteSlice image, String8 name, LinkTestUefiPeSection* result)
+{
+    if (!result || image.length < 0x40 || image.pointer[0] != 'M' || image.pointer[1] != 'Z')
+    {
+        return false;
+    }
+    u32 pe_offset = link_read_u32(image.pointer, 0x3c);
+    if (pe_offset > image.length || 24 > image.length - pe_offset || memcmp(image.pointer + pe_offset, "PE\0\0", 4) != 0)
+    {
+        return false;
+    }
+    u16 section_count = link_test_uefi_read_u16(image, pe_offset + 6);
+    u16 optional_size = link_test_uefi_read_u16(image, pe_offset + 20);
+    u64 section_table = (u64)pe_offset + 24 + optional_size;
+    if (section_table > image.length || (u64)section_count > (image.length - section_table) / 40)
+    {
+        return false;
+    }
+    for (u32 section_index = 0; section_index < section_count; section_index += 1)
+    {
+        u64 header = section_table + (u64)section_index * 40;
+        String8 candidate = {.pointer = (char8*)image.pointer + header};
+        while (candidate.length < 8 && candidate.pointer[candidate.length])
+        {
+            candidate.length += 1;
+        }
+        if (string_equal(candidate, name))
+        {
+            *result = (LinkTestUefiPeSection){
+                .virtual_size = link_read_u32(image.pointer, header + 8),
+                .virtual_address = link_read_u32(image.pointer, header + 12),
+                .raw_size = link_read_u32(image.pointer, header + 16),
+                .raw_offset = link_read_u32(image.pointer, header + 20),
+                .characteristics = link_read_u32(image.pointer, header + 36),
+            };
+            return result->raw_offset <= image.length && result->raw_size <= image.length - result->raw_offset;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_uefi_pe64(UnitTestArguments* arguments, CpuArch architecture)
+{
+    UnitTestResult result = {0};
+    bool aarch64 = architecture == CPU_ARCH_AARCH64;
+    Target target = {
+        .cpu_arch = architecture,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_UEFI,
+    };
+    u8 x64_text[] = {0xc3};
+    u8 aarch64_text[] = {0xc0, 0x03, 0x5f, 0xd6};
+    ByteSlice text = aarch64 ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(aarch64_text) : (ByteSlice)BUSTER_ARRAY_TO_SLICE(x64_text);
+    u8 data[8] = {0};
+    u8 pdata[12] = {0};
+    u8 xdata[4] = {1, 0, 0, 0};
+    ObjectSymbol symbols[] = {
+        {
+            .name = S8("UefiMain"),
+            .size = text.length,
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+        {
+            .name = S8(".Luefi_xdata"),
+            .size = sizeof(xdata),
+            .section = OBJECT_SECTION_WINDOWS_XDATA,
+            .kind = OBJECT_SYMBOL_DATA,
+        },
+    };
+    ObjectRelocation relocations[4] = {
+        {
+            .offset = 0,
+            .section = OBJECT_SECTION_DATA,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_ABSOLUTE64,
+        },
+        {
+            .offset = 0,
+            .section = OBJECT_SECTION_WINDOWS_PDATA,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+        },
+        {
+            .addend = aarch64 ? 0 : (s64)text.length,
+            .offset = 4,
+            .section = OBJECT_SECTION_WINDOWS_PDATA,
+            .symbol = aarch64 ? 1 : 0,
+            .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+        },
+        {
+            .offset = 8,
+            .section = OBJECT_SECTION_WINDOWS_PDATA,
+            .symbol = 1,
+            .kind = OBJECT_RELOCATION_COFF_ADDR32NB,
+        },
+    };
+    u32 relocation_count = aarch64 ? 3 : 4;
+    if (aarch64)
+    {
+        relocations[2].addend = 0;
+        relocations[2].symbol = 1;
+    }
+    ObjectFile object = link_test_object_make(arguments->arena, target, text, symbols, BUSTER_ARRAY_LENGTH(symbols), relocations, relocation_count);
+    object.sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data);
+    object.sections[OBJECT_SECTION_DATA].virtual_size = sizeof(data);
+    object.sections[OBJECT_SECTION_WINDOWS_PDATA].data = (ByteSlice){.pointer = pdata, .length = aarch64 ? 8 : sizeof(pdata)};
+    object.sections[OBJECT_SECTION_WINDOWS_PDATA].virtual_size = object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length;
+    object.sections[OBJECT_SECTION_WINDOWS_XDATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(xdata);
+    object.sections[OBJECT_SECTION_WINDOWS_XDATA].virtual_size = sizeof(xdata);
+
+    NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &object, (NativeExecutableLinkOptions){0});
+    BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
+    bool pe_valid = linked.executable.length >= 0x80 && linked.executable.pointer[0] == 'M' && linked.executable.pointer[1] == 'Z';
+    BUSTER_TEST(arguments, pe_valid);
+    if (pe_valid)
+    {
+        u32 pe_offset = link_read_u32(linked.executable.pointer, 0x3c);
+        pe_valid = pe_offset <= linked.executable.length && 24 + 240 <= linked.executable.length - pe_offset &&
+                   memcmp(linked.executable.pointer + pe_offset, "PE\0\0", 4) == 0;
+        BUSTER_TEST(arguments, pe_valid);
+        if (pe_valid)
+        {
+            u64 optional = (u64)pe_offset + 24;
+            u16 expected_machine = aarch64 ? 0xaa64 : 0x8664;
+            BUSTER_TEST(arguments, link_test_uefi_read_u16(linked.executable, pe_offset + 4) == expected_machine);
+            BUSTER_TEST(arguments, link_test_uefi_read_u16(linked.executable, optional) == 0x20b);
+            BUSTER_TEST(arguments, link_test_uefi_read_u16(linked.executable, optional + 68) == 10);
+            BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, optional + 108) == 16);
+            BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, optional + 120) == 0);
+            BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, optional + 124) == 0);
+            u32 entry_rva = link_read_u32(linked.executable.pointer, optional + 16);
+            u64 image_base = link_read_u64(linked.executable.pointer, optional + 24);
+            BUSTER_TEST(arguments, entry_rva != 0 && image_base == UINT64_C(0x140000000));
+
+            LinkTestUefiPeSection text_section = {0};
+            LinkTestUefiPeSection data_section = {0};
+            LinkTestUefiPeSection pdata_section = {0};
+            LinkTestUefiPeSection xdata_section = {0};
+            LinkTestUefiPeSection relocation_section = {0};
+            bool sections_valid = link_test_uefi_pe_section_find(linked.executable, S8(".text"), &text_section) &&
+                                  link_test_uefi_pe_section_find(linked.executable, S8(".data"), &data_section) &&
+                                  link_test_uefi_pe_section_find(linked.executable, S8(".pdata"), &pdata_section) &&
+                                  link_test_uefi_pe_section_find(linked.executable, S8(".xdata"), &xdata_section) &&
+                                  link_test_uefi_pe_section_find(linked.executable, S8(".reloc"), &relocation_section);
+            BUSTER_TEST(arguments, sections_valid);
+            if (sections_valid)
+            {
+                BUSTER_TEST(arguments, entry_rva == text_section.virtual_address);
+                BUSTER_TEST(arguments, link_read_u64(linked.executable.pointer, data_section.raw_offset) == image_base + entry_rva);
+                BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, optional + 136) == pdata_section.virtual_address);
+                BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, optional + 140) == pdata_section.virtual_size);
+                BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, optional + 152) == relocation_section.virtual_address);
+                BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, optional + 156) == relocation_section.virtual_size);
+                BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, pdata_section.raw_offset) == text_section.virtual_address);
+                if (aarch64)
+                {
+                    BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, pdata_section.raw_offset + 4) == xdata_section.virtual_address);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments,
+                                link_read_u32(linked.executable.pointer, pdata_section.raw_offset + 4) == text_section.virtual_address + text.length);
+                    BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, pdata_section.raw_offset + 8) == xdata_section.virtual_address);
+                }
+                u32 relocation_page = link_read_u32(linked.executable.pointer, relocation_section.raw_offset);
+                u32 relocation_block_size = link_read_u32(linked.executable.pointer, relocation_section.raw_offset + 4);
+                u16 relocation_entry = link_test_uefi_read_u16(linked.executable, relocation_section.raw_offset + 8);
+                BUSTER_TEST(arguments, relocation_page == (data_section.virtual_address & ~UINT32_C(0xfff)));
+                BUSTER_TEST(arguments, relocation_block_size == 12);
+                BUSTER_TEST(arguments, (relocation_entry >> 12) == 10);
+                BUSTER_TEST(arguments, (relocation_entry & 0xfff) == (data_section.virtual_address & 0xfff));
+            }
+        }
+    }
+
+    NativeExecutableLinkResult missing_entry =
+        link_native_executable(arguments->arena, &object, (NativeExecutableLinkOptions){.entry_symbol = S8("MissingEntry")});
+    BUSTER_TEST(arguments, missing_entry.error == LINK_ERROR_ENTRY_SYMBOL);
+
+    ObjectSymbol unresolved_symbols[3];
+    memcpy(unresolved_symbols, symbols, sizeof(symbols));
+    unresolved_symbols[2] = (ObjectSymbol){
+        .name = S8("FirmwareImport"),
+        .section = OBJECT_SECTION_UNDEFINED,
+        .kind = OBJECT_SYMBOL_DATA,
+        .global = true,
+    };
+    ObjectRelocation unresolved_relocations[4];
+    memcpy(unresolved_relocations, relocations, sizeof(relocations));
+    unresolved_relocations[0].symbol = 2;
+    ObjectFile unresolved_object = object;
+    unresolved_object.symbols = unresolved_symbols;
+    unresolved_object.symbol_count = BUSTER_ARRAY_LENGTH(unresolved_symbols);
+    unresolved_object.relocations = unresolved_relocations;
+    NativeExecutableLinkResult unresolved = link_native_executable(arguments->arena, &unresolved_object, (NativeExecutableLinkOptions){0});
+    BUSTER_TEST(arguments, unresolved.error == LINK_ERROR_UNRESOLVED_SYMBOL);
+
+    u8 tls_byte = 0;
+    ObjectSection tls_sections[OBJECT_SECTION_COUNT];
+    memcpy(tls_sections, object.sections, sizeof(tls_sections));
+    tls_sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data = (ByteSlice){.pointer = &tls_byte, .length = 1};
+    tls_sections[OBJECT_SECTION_THREAD_LOCAL_DATA].virtual_size = 1;
+    ObjectFile tls_object = object;
+    tls_object.sections = tls_sections;
+    NativeExecutableLinkResult tls = link_native_executable(arguments->arena, &tls_object, (NativeExecutableLinkOptions){0});
+    BUSTER_TEST(arguments, tls.error == LINK_ERROR_UNSUPPORTED_FEATURE);
+
+    u8 bss_byte = 0;
+    ObjectSection bss_sections[OBJECT_SECTION_COUNT];
+    memcpy(bss_sections, object.sections, sizeof(bss_sections));
+    bss_sections[OBJECT_SECTION_ZERO].data = (ByteSlice){.pointer = &bss_byte, .length = 1};
+    bss_sections[OBJECT_SECTION_ZERO].virtual_size = 1;
+    ObjectFile invalid_bss_object = object;
+    invalid_bss_object.sections = bss_sections;
+    NativeExecutableLinkResult invalid_bss = link_native_executable(arguments->arena, &invalid_bss_object, (NativeExecutableLinkOptions){0});
+    BUSTER_TEST(arguments, invalid_bss.error == LINK_ERROR_INVALID_INPUT);
+
+    NativeDynamicLibrary dynamic_library = {0};
+    NativeExecutableLinkResult dynamic = link_native_executable(arguments->arena, &object,
+                                                                (NativeExecutableLinkOptions){
+                                                                    .dynamic_libraries = &dynamic_library,
+                                                                    .dynamic_library_count = 1,
+                                                                });
+    BUSTER_TEST(arguments, dynamic.error == LINK_ERROR_UNSUPPORTED_FEATURE);
+    return result;
+}
+
 UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1098,6 +1348,12 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     u8 sha256_result[32] = {0};
     link_sha256(arguments->arena, (u8 const*)"abc", 3, sha256_result);
     BUSTER_TEST(arguments, memcmp(sha256_result, sha256_abc, sizeof(sha256_abc)) == 0);
+    UnitTestResult uefi_x64 = link_test_uefi_pe64(arguments, CPU_ARCH_X86_64);
+    result.succeeded_test_count += uefi_x64.succeeded_test_count;
+    result.test_count += uefi_x64.test_count;
+    UnitTestResult uefi_aarch64 = link_test_uefi_pe64(arguments, CPU_ARCH_AARCH64);
+    result.succeeded_test_count += uefi_aarch64.succeeded_test_count;
+    result.test_count += uefi_aarch64.test_count;
     {
         ObjectSectionKind symbol_sections[] = {
             OBJECT_SECTION_TEXT,

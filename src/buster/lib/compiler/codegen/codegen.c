@@ -5086,7 +5086,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             result.error = CODEGEN_ERROR_INVALID_IR;
             return result;
         }
-        bool windows_aarch64 = target.cpu_arch == CPU_ARCH_AARCH64 && target.os == OPERATING_SYSTEM_WINDOWS;
+        bool windows_aarch64 = target.cpu_arch == CPU_ARCH_AARCH64 && target_uses_pe_unwind(target);
         bool windows_dynamic_stack = false;
         if (target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_WINDOWS)
         {
@@ -5401,14 +5401,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // back to the canonical path below and is counted. The machine
         // prologue byte-for-byte matches the canonical plain prologue of
         // its architecture, so the descriptor's unwind actions keep their
-        // exact meaning. Windows on ARM stays canonical: its unwind data
-        // wants the packed-epilogue and probe-NOP shapes the machine
+        // exact meaning. PE-unwind AArch64 targets stay canonical: their
+        // unwind data wants the packed-epilogue and probe-NOP shapes the machine
         // wiring does not model yet.
         bool machine_function_emitted = false;
         if ((options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_MIR_STACK || options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST ||
              options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY) &&
             ((target.cpu_arch == CPU_ARCH_X86_64 && result.abi == CODEGEN_ABI_X86_64_SYSTEM_V) ||
-             (target.cpu_arch == CPU_ARCH_AARCH64 && result.abi != CODEGEN_ABI_AARCH64_WINDOWS)))
+             (target.cpu_arch == CPU_ARCH_AARCH64 && !target_uses_pe_unwind(target))))
         {
             bool label_address_target = false;
             for (u32 side_index = 0; side_index < label_address_relocation_count; side_index += 1)
@@ -5730,7 +5730,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             if (windows_dynamic_stack)
             {
                 codegen_canonical_x64_adjust_stack_described(&buffer, frame_size, true, descriptor, unwind_action_capacity,
-                                                             target.os == OPERATING_SYSTEM_WINDOWS);
+                                                             target_uses_pe_unwind(target));
                 codegen_emit_u8(&buffer, 0x48);
                 codegen_emit_u8(&buffer, 0x89);
                 codegen_emit_u8(&buffer, 0xe5);
@@ -5749,7 +5749,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                             CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, X64_REGISTER_RBP, 0) &&
                                unwind_valid;
                 codegen_canonical_x64_adjust_stack_described(&buffer, frame_size, true, descriptor, unwind_action_capacity,
-                                                             target.os == OPERATING_SYSTEM_WINDOWS);
+                                                             target_uses_pe_unwind(target));
             }
             if (x64_save_rbx)
             {

@@ -634,6 +634,16 @@ BUSTER_GLOBAL_LOCAL bool link_u64_add(u64 left, u64 right, u64* result)
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool link_u64_align_forward(u64 value, u64 alignment, u64* result)
+{
+    if (!result || !alignment || !BUSTER_IS_POWER_OF_TWO(alignment) || value > UINT64_MAX - (alignment - 1))
+    {
+        return false;
+    }
+    *result = align_forward(value, alignment);
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool link_aarch64_page21_instruction_valid(u32 instruction)
 {
     return (instruction & UINT32_C(0xffffffe0)) == UINT32_C(0x90000000);
@@ -3682,6 +3692,850 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     return result;
 }
 
+typedef struct LinkUefiPeSection LinkUefiPeSection;
+struct LinkUefiPeSection
+{
+    u64 virtual_size;
+    u64 raw_size;
+    u32 virtual_address;
+    u32 raw_offset;
+    u32 characteristics;
+    u32 output_index;
+    bool present;
+    u8 reserved[3];
+};
+
+BUSTER_GLOBAL_LOCAL void link_u32_shell_sort(u32* values, u32 count)
+{
+    for (u32 gap = count / 2; gap; gap /= 2)
+    {
+        for (u32 index = gap; index < count; index += 1)
+        {
+            u32 value = values[index];
+            u32 cursor = index;
+            while (cursor >= gap && values[cursor - gap] > value)
+            {
+                values[cursor] = values[cursor - gap];
+                cursor -= gap;
+            }
+            values[cursor] = value;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool link_uefi_relocation_is_tls(ObjectRelocationKind kind)
+{
+    return kind == OBJECT_RELOCATION_X86_64_TPOFF32 || kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
+           kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
+           kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+           kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 || kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12;
+}
+
+BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(Arena* arena, ObjectFile* object,
+                                                                                 NativeExecutableLinkOptions options)
+{
+    NativeExecutableLinkResult result = {0};
+    enum
+    {
+        PE_OFFSET = 0x80,
+        PE_COFF_HEADER_SIZE = 20,
+        PE_OPTIONAL_HEADER_SIZE = 240,
+        PE_SECTION_HEADER_SIZE = 40,
+        PE_FILE_ALIGNMENT = 0x200,
+        PE_SECTION_ALIGNMENT = 0x1000,
+        PE_SECTION_TEXT = 0,
+        PE_SECTION_READ_ONLY_DATA,
+        PE_SECTION_DATA,
+        PE_SECTION_ZERO,
+        PE_SECTION_PDATA,
+        PE_SECTION_XDATA,
+        PE_SECTION_RELOCATION,
+        PE_SECTION_DEBUG,
+        PE_SECTION_KIND_COUNT,
+    };
+    static char const* const section_header_names[PE_SECTION_KIND_COUNT] = {
+        ".text\0\0\0", ".rdata\0\0", ".data\0\0\0", ".bss\0\0\0\0", ".pdata\0\0", ".xdata\0\0", ".reloc\0\0", ".debug\0\0",
+    };
+    static String8 const section_names[PE_SECTION_KIND_COUNT] = {
+        S8_INITIALIZER(".text"),  S8_INITIALIZER(".rdata"), S8_INITIALIZER(".data"),  S8_INITIALIZER(".bss"),
+        S8_INITIALIZER(".pdata"), S8_INITIALIZER(".xdata"), S8_INITIALIZER(".reloc"), S8_INITIALIZER(".debug"),
+    };
+    static u32 const section_characteristics[PE_SECTION_KIND_COUNT] = {
+        0x60000020, 0x40000040, 0xc0000040, 0xc0000080, 0x40000040, 0x40000040, 0x42000040, 0x42000040,
+    };
+    bool aarch64 = object->target.cpu_arch == CPU_ARCH_AARCH64;
+    if (object->target.os != OPERATING_SYSTEM_UEFI || (object->target.cpu_arch != CPU_ARCH_X86_64 && !aarch64) ||
+        object->section_count < OBJECT_SECTION_COUNT || !object->sections || (object->symbol_count && !object->symbols) ||
+        (object->relocation_count && !object->relocations) || (object->debug_module_count && !object->debug_modules) ||
+        (options.output_path.length && !options.output_path.pointer) || (options.entry_symbol.length && !options.entry_symbol.pointer) ||
+        (options.dynamic_library_count && !options.dynamic_libraries) ||
+        (options.runtime_exported_symbol_count && !options.runtime_exported_symbols))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    if (options.dynamic_library_count || options.runtime_exported_symbol_count || options.framework_path_count || options.framework_count ||
+        options.linker_argument_count)
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+        result.symbol = S8("UEFI dynamic linking and host linker options");
+        return result;
+    }
+    if (object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
+        object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].virtual_size || object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].data.length ||
+        object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size)
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+        result.symbol = S8("UEFI thread-local storage");
+        return result;
+    }
+    if (object->sections[OBJECT_SECTION_UNWIND].data.length || object->sections[OBJECT_SECTION_UNWIND].virtual_size)
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+        result.symbol = S8("DWARF unwind data in a UEFI image");
+        return result;
+    }
+    for (u32 section_index = 0; section_index < OBJECT_SECTION_COUNT; section_index += 1)
+    {
+        ObjectSection* section = object->sections + section_index;
+        if (section->kind != (ObjectSectionKind)section_index || !section->alignment || !BUSTER_IS_POWER_OF_TWO(section->alignment) ||
+            section->alignment > PE_SECTION_ALIGNMENT ||
+            (section->data.length && !section->data.pointer))
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+    }
+    if (object->sections[OBJECT_SECTION_ZERO].data.length)
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + symbol_index;
+        if ((symbol->name.length && !symbol->name.pointer) || symbol->kind >= OBJECT_SYMBOL_COUNT)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+        if (symbol->section == OBJECT_SECTION_UNDEFINED)
+        {
+            if (symbol->value || symbol->size)
+            {
+                result.error = LINK_ERROR_INVALID_INPUT;
+                return result;
+            }
+            continue;
+        }
+        if (symbol->section >= OBJECT_SECTION_COUNT)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+        ObjectSection* section = object->sections + symbol->section;
+        u64 section_size = BUSTER_MAX(section->data.length, section->virtual_size);
+        if (symbol->value > section_size || symbol->size > section_size - symbol->value)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+    }
+    String8 entry_name = options.entry_symbol.length ? options.entry_symbol : S8("UefiMain");
+    u32 entry_symbol_index = link_symbol_find(object, entry_name);
+    if (entry_symbol_index == UINT32_MAX || object->symbols[entry_symbol_index].section != OBJECT_SECTION_TEXT ||
+        object->symbols[entry_symbol_index].kind != OBJECT_SYMBOL_FUNCTION)
+    {
+        result.error = LINK_ERROR_ENTRY_SYMBOL;
+        result.symbol = entry_name;
+        return result;
+    }
+    bool emit_debug = options.debug_info && object->debug_module_count && object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.length;
+    if (emit_debug && !object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.pointer &&
+        object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length)
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    String8 pdb_path = emit_debug ? link_pe_pdb_path(arena, options.output_path) : (String8){0};
+    u64 debug_virtual_size = 0;
+    if (emit_debug && (!link_u64_add(28 + 24 + 1, pdb_path.length, &debug_virtual_size) || debug_virtual_size > UINT32_MAX))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+
+    u32* object_pe_section_kinds = arena_allocate(arena, u32, OBJECT_SECTION_COUNT);
+    u32* object_output_sections = arena_allocate(arena, u32, OBJECT_SECTION_COUNT);
+    u64* object_section_offsets = arena_allocate(arena, u64, OBJECT_SECTION_COUNT);
+    memset(object_pe_section_kinds, 0xff, sizeof(*object_pe_section_kinds) * OBJECT_SECTION_COUNT);
+    memset(object_output_sections, 0xff, sizeof(*object_output_sections) * OBJECT_SECTION_COUNT);
+    memset(object_section_offsets, 0, sizeof(*object_section_offsets) * OBJECT_SECTION_COUNT);
+    object_pe_section_kinds[OBJECT_SECTION_TEXT] = PE_SECTION_TEXT;
+    object_pe_section_kinds[OBJECT_SECTION_READ_ONLY_DATA] = PE_SECTION_READ_ONLY_DATA;
+    object_pe_section_kinds[OBJECT_SECTION_DATA] = PE_SECTION_DATA;
+    object_pe_section_kinds[OBJECT_SECTION_ZERO] = PE_SECTION_ZERO;
+    object_pe_section_kinds[OBJECT_SECTION_WINDOWS_PDATA] = PE_SECTION_PDATA;
+    object_pe_section_kinds[OBJECT_SECTION_WINDOWS_XDATA] = PE_SECTION_XDATA;
+
+    LinkUefiPeSection sections[PE_SECTION_KIND_COUNT] = {0};
+    for (u32 section_kind = 0; section_kind < PE_SECTION_KIND_COUNT; section_kind += 1)
+    {
+        sections[section_kind].characteristics = section_characteristics[section_kind];
+        sections[section_kind].output_index = UINT32_MAX;
+    }
+    sections[PE_SECTION_TEXT].virtual_size =
+        BUSTER_MAX(object->sections[OBJECT_SECTION_TEXT].data.length, object->sections[OBJECT_SECTION_TEXT].virtual_size);
+    sections[PE_SECTION_READ_ONLY_DATA].virtual_size = BUSTER_MAX(object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length,
+                                                                  object->sections[OBJECT_SECTION_READ_ONLY_DATA].virtual_size);
+    sections[PE_SECTION_DATA].virtual_size =
+        BUSTER_MAX(object->sections[OBJECT_SECTION_DATA].data.length, object->sections[OBJECT_SECTION_DATA].virtual_size);
+    sections[PE_SECTION_ZERO].virtual_size = object->sections[OBJECT_SECTION_ZERO].virtual_size;
+    sections[PE_SECTION_PDATA].virtual_size = BUSTER_MAX(object->sections[OBJECT_SECTION_WINDOWS_PDATA].data.length,
+                                                         object->sections[OBJECT_SECTION_WINDOWS_PDATA].virtual_size);
+    sections[PE_SECTION_XDATA].virtual_size = BUSTER_MAX(object->sections[OBJECT_SECTION_WINDOWS_XDATA].data.length,
+                                                         object->sections[OBJECT_SECTION_WINDOWS_XDATA].virtual_size);
+    sections[PE_SECTION_DEBUG].virtual_size = debug_virtual_size;
+    for (u32 section_kind = 0; section_kind < PE_SECTION_KIND_COUNT; section_kind += 1)
+    {
+        if (sections[section_kind].virtual_size > UINT32_MAX)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+    }
+    if (!sections[PE_SECTION_TEXT].virtual_size || object->symbols[entry_symbol_index].value >= sections[PE_SECTION_TEXT].virtual_size)
+    {
+        result.error = LINK_ERROR_ENTRY_SYMBOL;
+        result.symbol = entry_name;
+        return result;
+    }
+    sections[PE_SECTION_TEXT].present = true;
+    sections[PE_SECTION_READ_ONLY_DATA].present = sections[PE_SECTION_READ_ONLY_DATA].virtual_size != 0;
+    sections[PE_SECTION_DATA].present = sections[PE_SECTION_DATA].virtual_size != 0;
+    sections[PE_SECTION_ZERO].present = sections[PE_SECTION_ZERO].virtual_size != 0;
+    sections[PE_SECTION_PDATA].present = sections[PE_SECTION_PDATA].virtual_size != 0;
+    sections[PE_SECTION_XDATA].present = sections[PE_SECTION_XDATA].virtual_size != 0;
+    sections[PE_SECTION_DEBUG].present = emit_debug;
+
+    u32 base_relocation_count = 0;
+    for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + relocation_index;
+        if (relocation->section >= OBJECT_SECTION_COUNT || relocation->symbol >= object->symbol_count ||
+            relocation->kind >= OBJECT_RELOCATION_COUNT)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+        if (object_section_kind_is_debug((ObjectSectionKind)relocation->section))
+        {
+            continue;
+        }
+        if (link_uefi_relocation_is_tls(relocation->kind))
+        {
+            result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+            result.symbol = S8("UEFI thread-local storage relocation");
+            return result;
+        }
+        if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
+        {
+            if (object_pe_section_kinds[relocation->section] == UINT32_MAX)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            base_relocation_count += 1;
+        }
+    }
+    sections[PE_SECTION_RELOCATION].present = base_relocation_count != 0;
+
+    u32 pe_section_count = 0;
+    for (u32 section_kind = 0; section_kind < PE_SECTION_KIND_COUNT; section_kind += 1)
+    {
+        if (sections[section_kind].present)
+        {
+            sections[section_kind].output_index = pe_section_count++;
+        }
+    }
+    u64 header_size = 0;
+    u64 header_unaligned_size = PE_OFFSET + 4 + PE_COFF_HEADER_SIZE + PE_OPTIONAL_HEADER_SIZE +
+                                (u64)pe_section_count * PE_SECTION_HEADER_SIZE;
+    if (!link_u64_align_forward(header_unaligned_size, PE_FILE_ALIGNMENT, &header_size) || header_size > UINT32_MAX)
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    u64 virtual_cursor = PE_SECTION_ALIGNMENT;
+    u64 raw_cursor = header_size;
+    for (u32 section_kind = PE_SECTION_TEXT; section_kind < PE_SECTION_RELOCATION; section_kind += 1)
+    {
+        LinkUefiPeSection* section = sections + section_kind;
+        if (!section->present)
+        {
+            continue;
+        }
+        if (!link_u64_align_forward(virtual_cursor, PE_SECTION_ALIGNMENT, &virtual_cursor) || virtual_cursor > UINT32_MAX)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+        section->virtual_address = (u32)virtual_cursor;
+        if (section_kind != PE_SECTION_ZERO)
+        {
+            if (!link_u64_align_forward(section->virtual_size, PE_FILE_ALIGNMENT, &section->raw_size) || raw_cursor > UINT32_MAX ||
+                section->raw_size > UINT32_MAX)
+            {
+                result.error = LINK_ERROR_INVALID_INPUT;
+                return result;
+            }
+            section->raw_offset = (u32)raw_cursor;
+            if (!link_u64_add(raw_cursor, section->raw_size, &raw_cursor))
+            {
+                result.error = LINK_ERROR_INVALID_INPUT;
+                return result;
+            }
+        }
+        if (!link_u64_add(virtual_cursor, BUSTER_MAX(section->virtual_size, 1), &virtual_cursor))
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+    }
+    for (u32 object_section = 0; object_section < OBJECT_SECTION_COUNT; object_section += 1)
+    {
+        u32 pe_kind = object_pe_section_kinds[object_section];
+        if (pe_kind != UINT32_MAX && sections[pe_kind].present)
+        {
+            object_output_sections[object_section] = sections[pe_kind].output_index;
+        }
+    }
+
+    u32* base_relocation_rvas = arena_allocate(arena, u32, base_relocation_count);
+    u32 base_relocation_cursor = 0;
+    for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + relocation_index;
+        if (relocation->kind != OBJECT_RELOCATION_ABSOLUTE64 || object_section_kind_is_debug((ObjectSectionKind)relocation->section))
+        {
+            continue;
+        }
+        u32 pe_kind = object_pe_section_kinds[relocation->section];
+        ObjectSection* source = object->sections + relocation->section;
+        if (pe_kind == UINT32_MAX || !sections[pe_kind].present || pe_kind == PE_SECTION_ZERO || relocation->offset > source->data.length ||
+            source->data.length - relocation->offset < sizeof(u64))
+        {
+            result.error = LINK_ERROR_RELOCATION;
+            return result;
+        }
+        u64 rva = 0;
+        if (!link_u64_add(sections[pe_kind].virtual_address, object_section_offsets[relocation->section], &rva) ||
+            !link_u64_add(rva, relocation->offset, &rva) || rva > UINT32_MAX)
+        {
+            result.error = LINK_ERROR_RELOCATION;
+            return result;
+        }
+        base_relocation_rvas[base_relocation_cursor++] = (u32)rva;
+    }
+    if (base_relocation_cursor != base_relocation_count)
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    link_u32_shell_sort(base_relocation_rvas, base_relocation_count);
+    u64 relocation_virtual_size = 0;
+    for (u32 index = 0; index < base_relocation_count;)
+    {
+        if (index && base_relocation_rvas[index] == base_relocation_rvas[index - 1])
+        {
+            result.error = LINK_ERROR_RELOCATION;
+            return result;
+        }
+        u32 page = base_relocation_rvas[index] & ~UINT32_C(0xfff);
+        u32 end = index + 1;
+        while (end < base_relocation_count && (base_relocation_rvas[end] & ~UINT32_C(0xfff)) == page)
+        {
+            if (base_relocation_rvas[end] == base_relocation_rvas[end - 1])
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            end += 1;
+        }
+        u64 block_unaligned_size = 0;
+        u64 block_size = 0;
+        if (!link_u64_add(8, (u64)(end - index) * sizeof(u16), &block_unaligned_size) ||
+            !link_u64_align_forward(block_unaligned_size, 4, &block_size) || block_size > UINT32_MAX ||
+            !link_u64_add(relocation_virtual_size, block_size, &relocation_virtual_size))
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+        index = end;
+    }
+    if (sections[PE_SECTION_RELOCATION].present)
+    {
+        LinkUefiPeSection* section = sections + PE_SECTION_RELOCATION;
+        section->virtual_size = relocation_virtual_size;
+        if (!link_u64_align_forward(relocation_virtual_size, PE_FILE_ALIGNMENT, &section->raw_size) ||
+            !link_u64_align_forward(virtual_cursor, PE_SECTION_ALIGNMENT, &virtual_cursor) || virtual_cursor > UINT32_MAX ||
+            raw_cursor > UINT32_MAX || section->raw_size > UINT32_MAX)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+        section->virtual_address = (u32)virtual_cursor;
+        section->raw_offset = (u32)raw_cursor;
+        if (!link_u64_add(virtual_cursor, BUSTER_MAX(section->virtual_size, 1), &virtual_cursor) ||
+            !link_u64_add(raw_cursor, section->raw_size, &raw_cursor))
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+    }
+    u64 base_file_size = raw_cursor;
+    if (sections[PE_SECTION_DEBUG].present)
+    {
+        LinkUefiPeSection* section = sections + PE_SECTION_DEBUG;
+        if (!link_u64_align_forward(section->virtual_size, PE_FILE_ALIGNMENT, &section->raw_size) ||
+            !link_u64_align_forward(virtual_cursor, PE_SECTION_ALIGNMENT, &virtual_cursor) || virtual_cursor > UINT32_MAX ||
+            raw_cursor > UINT32_MAX || section->raw_size > UINT32_MAX)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+        section->virtual_address = (u32)virtual_cursor;
+        section->raw_offset = (u32)raw_cursor;
+        if (!link_u64_add(virtual_cursor, BUSTER_MAX(section->virtual_size, 1), &virtual_cursor) ||
+            !link_u64_add(raw_cursor, section->raw_size, &raw_cursor))
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+    }
+    u64 image_size = 0;
+    u64 file_size = raw_cursor;
+    if (!link_u64_align_forward(virtual_cursor, PE_SECTION_ALIGNMENT, &image_size) || image_size > UINT32_MAX || file_size > UINT32_MAX)
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    result.executable = (ByteSlice){
+        .pointer = arena_allocate(arena, u8, file_size),
+        .length = file_size,
+    };
+    u8* bytes = result.executable.pointer;
+    memset(bytes, 0, file_size);
+    for (u32 object_section = 0; object_section < OBJECT_SECTION_COUNT; object_section += 1)
+    {
+        u32 pe_kind = object_pe_section_kinds[object_section];
+        if (pe_kind == UINT32_MAX || !sections[pe_kind].present || pe_kind == PE_SECTION_ZERO)
+        {
+            continue;
+        }
+        ByteSlice data = object->sections[object_section].data;
+        if (data.length)
+        {
+            u64 output_offset = 0;
+            if (!link_u64_add(sections[pe_kind].raw_offset, object_section_offsets[object_section], &output_offset) ||
+                output_offset > file_size || data.length > file_size - output_offset)
+            {
+                result.error = LINK_ERROR_INVALID_INPUT;
+                return result;
+            }
+            memcpy(bytes + output_offset, data.pointer, data.length);
+        }
+    }
+
+    u64 image_base = UINT64_C(0x140000000);
+    for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + relocation_index;
+        if (object_section_kind_is_debug((ObjectSectionKind)relocation->section))
+        {
+            continue;
+        }
+        if (relocation->symbol >= object->symbol_count)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+        ObjectSymbol* symbol = object->symbols + relocation->symbol;
+        if (symbol->section == OBJECT_SECTION_UNDEFINED)
+        {
+            result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
+            result.symbol = symbol->name;
+            return result;
+        }
+        if (symbol->section >= OBJECT_SECTION_COUNT || object_pe_section_kinds[symbol->section] == UINT32_MAX ||
+            !sections[object_pe_section_kinds[symbol->section]].present)
+        {
+            result.error = LINK_ERROR_RELOCATION;
+            result.symbol = symbol->name;
+            return result;
+        }
+        u32 source_pe_kind = object_pe_section_kinds[relocation->section];
+        if (source_pe_kind == UINT32_MAX || !sections[source_pe_kind].present || source_pe_kind == PE_SECTION_ZERO)
+        {
+            result.error = LINK_ERROR_RELOCATION;
+            result.symbol = symbol->name;
+            return result;
+        }
+        u32 symbol_pe_kind = object_pe_section_kinds[symbol->section];
+        ObjectSection* source = object->sections + relocation->section;
+        u64 symbol_rva = 0;
+        u64 place_rva = 0;
+        u64 output_offset = 0;
+        if (!link_u64_add(sections[symbol_pe_kind].virtual_address, object_section_offsets[symbol->section], &symbol_rva) ||
+            !link_u64_add(symbol_rva, symbol->value, &symbol_rva) ||
+            !link_u64_add(sections[source_pe_kind].virtual_address, object_section_offsets[relocation->section], &place_rva) ||
+            !link_u64_add(place_rva, relocation->offset, &place_rva) ||
+            !link_u64_add(sections[source_pe_kind].raw_offset, object_section_offsets[relocation->section], &output_offset) ||
+            !link_u64_add(output_offset, relocation->offset, &output_offset) || symbol_rva > UINT32_MAX || place_rva > UINT32_MAX ||
+            output_offset > file_size)
+        {
+            result.error = LINK_ERROR_RELOCATION;
+            result.symbol = symbol->name;
+            return result;
+        }
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
+        {
+            s64 value = 0;
+            if (aarch64 || relocation->offset > source->data.length || source->data.length - relocation->offset < sizeof(u32) ||
+                output_offset > file_size || sizeof(u32) > file_size - output_offset ||
+                !link_address_difference(symbol_rva, place_rva, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, (u32)(s32)value);
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26)
+        {
+            s64 value = 0;
+            u32 patched = 0;
+            u32 instruction = 0;
+            if (!aarch64 || relocation->offset > source->data.length || source->data.length - relocation->offset < sizeof(u32) ||
+                output_offset > file_size || sizeof(u32) > file_size - output_offset ||
+                !link_address_difference(symbol_rva, place_rva, relocation->addend, &value))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            instruction = link_read_u32(source->data.pointer, relocation->offset);
+            if (!link_aarch64_branch_relocate(relocation->kind, instruction, value, &patched))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, patched);
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
+        {
+            s64 value = 0;
+            if (!aarch64 || relocation->offset > source->data.length || source->data.length - relocation->offset < sizeof(u32) ||
+                output_offset > file_size || sizeof(u32) > file_size - output_offset ||
+                !link_address_difference(symbol_rva, place_rva, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, (u32)(s32)value);
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
+        {
+            u64 address = 0;
+            if (relocation->offset > source->data.length || source->data.length - relocation->offset < sizeof(u64) ||
+                output_offset > file_size || sizeof(u64) > file_size - output_offset || !link_u64_add(image_base, symbol_rva, &address) ||
+                !link_address_addend(address, relocation->addend, &address))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            link_write_u64(bytes, output_offset, address);
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_COFF_ADDR32NB)
+        {
+            u64 address = 0;
+            if (relocation->offset > source->data.length || source->data.length - relocation->offset < sizeof(u32) ||
+                output_offset > file_size || sizeof(u32) > file_size - output_offset ||
+                !link_address_addend(symbol_rva, relocation->addend, &address) || address > UINT32_MAX)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, (u32)address);
+        }
+        else
+        {
+            result.error = link_uefi_relocation_is_tls(relocation->kind) ? LINK_ERROR_UNSUPPORTED_FEATURE : LINK_ERROR_RELOCATION;
+            result.symbol = symbol->name;
+            return result;
+        }
+    }
+
+    if (sections[PE_SECTION_RELOCATION].present)
+    {
+        u64 output = sections[PE_SECTION_RELOCATION].raw_offset;
+        u64 relocation_data_end = 0;
+        if (!link_u64_add(output, sections[PE_SECTION_RELOCATION].virtual_size, &relocation_data_end) || relocation_data_end > file_size)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+        for (u32 index = 0; index < base_relocation_count;)
+        {
+            u32 page = base_relocation_rvas[index] & ~UINT32_C(0xfff);
+            u32 end = index + 1;
+            while (end < base_relocation_count && (base_relocation_rvas[end] & ~UINT32_C(0xfff)) == page)
+            {
+                end += 1;
+            }
+            u64 block_unaligned_size = 0;
+            u64 block_size_u64 = 0;
+            if (!link_u64_add(8, (u64)(end - index) * sizeof(u16), &block_unaligned_size) ||
+                !link_u64_align_forward(block_unaligned_size, 4, &block_size_u64) || block_size_u64 > UINT32_MAX ||
+                output > relocation_data_end || block_size_u64 > relocation_data_end - output)
+            {
+                result.error = LINK_ERROR_INVALID_INPUT;
+                return result;
+            }
+            u32 block_size = (u32)block_size_u64;
+            link_write_u32(bytes, output, page);
+            link_write_u32(bytes, output + 4, block_size);
+            u64 entry_output = output + 8;
+            for (u32 relocation = index; relocation < end; relocation += 1)
+            {
+                u16 entry = (u16)((10u << 12) | (base_relocation_rvas[relocation] - page));
+                link_write_u16(bytes, entry_output, entry);
+                entry_output += sizeof(u16);
+            }
+            if (!link_u64_add(output, block_size, &output))
+            {
+                result.error = LINK_ERROR_INVALID_INPUT;
+                return result;
+            }
+            index = end;
+        }
+        if (output != relocation_data_end)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            return result;
+        }
+    }
+
+    bytes[0] = 'M';
+    bytes[1] = 'Z';
+    link_write_u32(bytes, 0x3c, PE_OFFSET);
+    memcpy(bytes + PE_OFFSET, "PE\0\0", 4);
+    u64 coff = PE_OFFSET + 4;
+    link_write_u16(bytes, coff, aarch64 ? 0xaa64 : 0x8664);
+    link_write_u16(bytes, coff + 2, (u16)pe_section_count);
+    link_write_u16(bytes, coff + 16, PE_OPTIONAL_HEADER_SIZE);
+    link_write_u16(bytes, coff + 18, 0x22);
+    u64 optional = coff + PE_COFF_HEADER_SIZE;
+    link_write_u16(bytes, optional, 0x20b);
+    bytes[optional + 2] = 14;
+    link_write_u32(bytes, optional + 4, (u32)sections[PE_SECTION_TEXT].raw_size);
+    u64 initialized_data_size = 0;
+    for (u32 section_kind = PE_SECTION_READ_ONLY_DATA; section_kind < PE_SECTION_KIND_COUNT; section_kind += 1)
+    {
+        if (section_kind != PE_SECTION_ZERO && sections[section_kind].present)
+        {
+            if (!link_u64_add(initialized_data_size, sections[section_kind].raw_size, &initialized_data_size))
+            {
+                result.error = LINK_ERROR_INVALID_INPUT;
+                return result;
+            }
+        }
+    }
+    if (initialized_data_size > UINT32_MAX || sections[PE_SECTION_ZERO].virtual_size > UINT32_MAX)
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    link_write_u32(bytes, optional + 8, (u32)initialized_data_size);
+    link_write_u32(bytes, optional + 12, (u32)sections[PE_SECTION_ZERO].virtual_size);
+    u64 entry_rva = 0;
+    if (!link_u64_add(sections[PE_SECTION_TEXT].virtual_address, object->symbols[entry_symbol_index].value, &entry_rva) ||
+        entry_rva > UINT32_MAX)
+    {
+        result.error = LINK_ERROR_ENTRY_SYMBOL;
+        result.symbol = entry_name;
+        return result;
+    }
+    link_write_u32(bytes, optional + 16, (u32)entry_rva);
+    link_write_u32(bytes, optional + 20, sections[PE_SECTION_TEXT].virtual_address);
+    link_write_u64(bytes, optional + 24, image_base);
+    link_write_u32(bytes, optional + 32, PE_SECTION_ALIGNMENT);
+    link_write_u32(bytes, optional + 36, PE_FILE_ALIGNMENT);
+    link_write_u16(bytes, optional + 40, 6);
+    link_write_u16(bytes, optional + 48, 6);
+    link_write_u32(bytes, optional + 56, (u32)image_size);
+    link_write_u32(bytes, optional + 60, (u32)header_size);
+    link_write_u16(bytes, optional + 68, 10);
+    link_write_u16(bytes, optional + 70, 0x8160);
+    link_write_u64(bytes, optional + 72, 1024 * 1024);
+    link_write_u64(bytes, optional + 80, 4096);
+    link_write_u64(bytes, optional + 88, 1024 * 1024);
+    link_write_u64(bytes, optional + 96, 4096);
+    link_write_u32(bytes, optional + 108, 16);
+    if (sections[PE_SECTION_PDATA].present)
+    {
+        link_write_u32(bytes, optional + 136, sections[PE_SECTION_PDATA].virtual_address);
+        link_write_u32(bytes, optional + 140, (u32)sections[PE_SECTION_PDATA].virtual_size);
+    }
+    if (sections[PE_SECTION_RELOCATION].present)
+    {
+        link_write_u32(bytes, optional + 152, sections[PE_SECTION_RELOCATION].virtual_address);
+        link_write_u32(bytes, optional + 156, (u32)sections[PE_SECTION_RELOCATION].virtual_size);
+    }
+    if (sections[PE_SECTION_DEBUG].present)
+    {
+        link_write_u32(bytes, optional + 160, sections[PE_SECTION_DEBUG].virtual_address);
+        link_write_u32(bytes, optional + 164, 28);
+    }
+    u64 section_header = optional + PE_OPTIONAL_HEADER_SIZE;
+    for (u32 section_kind = 0; section_kind < PE_SECTION_KIND_COUNT; section_kind += 1)
+    {
+        LinkUefiPeSection* section = sections + section_kind;
+        if (!section->present)
+        {
+            continue;
+        }
+        link_pe_section_header(bytes, section_header + (u64)section->output_index * PE_SECTION_HEADER_SIZE, section_header_names[section_kind],
+                               (u32)section->virtual_size, section->virtual_address, (u32)section->raw_size,
+                               section_kind == PE_SECTION_ZERO ? 0 : section->raw_offset, section->characteristics);
+    }
+
+    if (emit_debug)
+    {
+        PdbSection* pdb_sections = arena_allocate(arena, PdbSection, pe_section_count);
+        for (u32 section_kind = 0; section_kind < PE_SECTION_KIND_COUNT; section_kind += 1)
+        {
+            LinkUefiPeSection* section = sections + section_kind;
+            if (!section->present)
+            {
+                continue;
+            }
+            pdb_sections[section->output_index] = (PdbSection){
+                .name = section_names[section_kind],
+                .virtual_address = section->virtual_address,
+                .virtual_size = (u32)section->virtual_size,
+                .raw_size = (u32)section->raw_size,
+                .raw_offset = section_kind == PE_SECTION_ZERO ? 0 : section->raw_offset,
+                .characteristics = section->characteristics,
+            };
+        }
+        PdbModule* pdb_modules = arena_allocate(arena, PdbModule, object->debug_module_count);
+        u64 identity_size = base_file_size;
+        for (u32 module_index = 0; module_index < object->debug_module_count; module_index += 1)
+        {
+            ObjectDebugModule* source = object->debug_modules + module_index;
+            ByteSlice symbols =
+                link_pe_resolved_codeview(arena, object, source, object_output_sections, object_section_offsets, pe_section_count);
+            u64 module_identity_size = 0;
+            if (!symbols.pointer || source->types_offset > object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length ||
+                source->types_size > object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length - source->types_offset ||
+                source->code_offset > UINT32_MAX || source->code_size > UINT32_MAX ||
+                (source->name.length && !source->name.pointer) || source->code_offset > sections[PE_SECTION_TEXT].virtual_size ||
+                source->code_size > sections[PE_SECTION_TEXT].virtual_size - source->code_offset ||
+                !link_u64_add(source->name.length, symbols.length, &module_identity_size) ||
+                !link_u64_add(module_identity_size, source->types_size, &module_identity_size) ||
+                !link_u64_add(module_identity_size, 8, &module_identity_size) ||
+                !link_u64_add(identity_size, module_identity_size, &identity_size))
+            {
+                result.error = LINK_ERROR_OBJECT_WRITE;
+                return result;
+            }
+            u8* types = arena_allocate(arena, u8, source->types_size);
+            if (source->types_size)
+            {
+                memcpy(types, object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.pointer + source->types_offset, source->types_size);
+            }
+            pdb_modules[module_index] = (PdbModule){
+                .name = source->name,
+                .codeview_symbols = symbols,
+                .codeview_types = (ByteSlice){.pointer = types, .length = source->types_size},
+                .code_offset = (u32)source->code_offset,
+                .code_size = (u32)source->code_size,
+                .code_section = sections[PE_SECTION_TEXT].output_index + 1,
+            };
+        }
+        u8* identity = arena_allocate(arena, u8, identity_size);
+        memcpy(identity, bytes, base_file_size);
+        u64 identity_cursor = base_file_size;
+        for (u32 module_index = 0; module_index < object->debug_module_count; module_index += 1)
+        {
+            PdbModule* module = pdb_modules + module_index;
+            memcpy(identity + identity_cursor, module->name.pointer, module->name.length);
+            identity_cursor += module->name.length;
+            memcpy(identity + identity_cursor, module->codeview_symbols.pointer, module->codeview_symbols.length);
+            identity_cursor += module->codeview_symbols.length;
+            memcpy(identity + identity_cursor, module->codeview_types.pointer, module->codeview_types.length);
+            identity_cursor += module->codeview_types.length;
+            link_write_u32(identity, identity_cursor, module->code_offset);
+            identity_cursor += 4;
+            link_write_u32(identity, identity_cursor, module->code_size);
+            identity_cursor += 4;
+        }
+        u8* digest = arena_allocate(arena, u8, 32);
+        memset(digest, 0, 32);
+        link_sha256(arena, identity, identity_cursor, digest);
+        PdbInput pdb_input = {
+            .sections = pdb_sections,
+            .section_count = pe_section_count,
+            .age = 1,
+            .machine = aarch64 ? 0xaa64 : 0x8664,
+            .modules = pdb_modules,
+            .module_count = object->debug_module_count,
+        };
+        memcpy(pdb_input.guid, digest, sizeof(pdb_input.guid));
+        PdbResult pdb = pdb_build(arena, pdb_input);
+        if (!pdb.valid)
+        {
+            result.error = LINK_ERROR_OBJECT_WRITE;
+            return result;
+        }
+        result.pdb = pdb.bytes;
+        result.pdb_path = pdb_path;
+        u64 debug_raw = sections[PE_SECTION_DEBUG].raw_offset;
+        u64 rsds_size_u64 = 0;
+        if (!link_u64_add(24 + 1, pdb_path.length, &rsds_size_u64) || rsds_size_u64 > UINT32_MAX ||
+            debug_raw > file_size || sections[PE_SECTION_DEBUG].virtual_size > file_size - debug_raw)
+        {
+            result.error = LINK_ERROR_OBJECT_WRITE;
+            return result;
+        }
+        u32 rsds_size = (u32)rsds_size_u64;
+        link_write_u32(bytes, debug_raw + 12, 2);
+        link_write_u32(bytes, debug_raw + 16, rsds_size);
+        link_write_u32(bytes, debug_raw + 20, sections[PE_SECTION_DEBUG].virtual_address + 28);
+        link_write_u32(bytes, debug_raw + 24, (u32)(debug_raw + 28));
+        memcpy(bytes + debug_raw + 28, "RSDS", 4);
+        memcpy(bytes + debug_raw + 32, pdb_input.guid, sizeof(pdb_input.guid));
+        link_write_u32(bytes, debug_raw + 48, 1);
+        memcpy(bytes + debug_raw + 52, pdb_path.pointer, pdb_path.length);
+        bytes[debug_raw + 52 + pdb_path.length] = 0;
+    }
+    if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable))
+    {
+        result.error = LINK_ERROR_FILE_WRITE;
+    }
+    else if (emit_debug && options.output_path.length && !link_write_executable_file(result.pdb_path, result.pdb))
+    {
+        result.error = LINK_ERROR_FILE_WRITE;
+    }
+    return result;
+}
+
+
 BUSTER_GLOBAL_LOCAL void link_mach_name_write(u8* bytes, u64 offset, char const* name)
 {
     u64 length = strlen(name);
@@ -4769,6 +5623,10 @@ NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* obje
     if (object->target.os == OPERATING_SYSTEM_WINDOWS && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
         return link_native_executable_pe64(arena, object, options);
+    }
+    if (object->target.os == OPERATING_SYSTEM_UEFI && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
+    {
+        return link_native_executable_uefi_pe64(arena, object, options);
     }
     if ((object->target.os == OPERATING_SYSTEM_MACOS || object->target.os == OPERATING_SYSTEM_IOS) &&
         (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))

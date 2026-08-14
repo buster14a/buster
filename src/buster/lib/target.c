@@ -174,17 +174,35 @@ TargetCpuFeatures target_cpu_features_from_array(TargetCpuFeature const* feature
     return result;
 }
 
+bool target_uses_llp64_data_model(Target target)
+{
+    return target.os == OPERATING_SYSTEM_WINDOWS ||
+           (target.os == OPERATING_SYSTEM_UEFI && target.cpu_arch == CPU_ARCH_X86_64);
+}
+
+bool target_uses_16_bit_wchar(Target target)
+{
+    return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI;
+}
+
+bool target_uses_pe_unwind(Target target)
+{
+    return (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI) &&
+           (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64);
+}
+
 TargetDataLayout target_data_layout(Target target)
 {
     bool windows = target.os == OPERATING_SYSTEM_WINDOWS;
+    bool llp64 = target_uses_llp64_data_model(target);
     bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
     bool wasm64 = target.cpu_arch == CPU_ARCH_WASM64;
     bool arm_plain_char_unsigned = target.cpu_arch == CPU_ARCH_AARCH64 && !apple && !windows;
-    u32 long_size = windows ? 4 : 8;
-    bool double_long_double = windows || wasm64 || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
+    u32 long_size = llp64 ? 4 : 8;
+    bool double_long_double = llp64 || wasm64 || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
     u32 long_double_size = double_long_double ? 8 : 16;
     u32 long_double_bits = double_long_double ? 64 : target.cpu_arch == CPU_ARCH_X86_64 ? 80 : 128;
-    u32 va_list_size = windows || wasm64 ? 8 : target.cpu_arch == CPU_ARCH_X86_64 ? 32 : 32;
+    u32 va_list_size = llp64 || wasm64 ? 8 : target.cpu_arch == CPU_ARCH_X86_64 ? 32 : 32;
 
     TargetDataLayout layout = {
         .boolean = {.size = 1, .alignment = 1, .bit_width = 1},

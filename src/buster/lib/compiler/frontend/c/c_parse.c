@@ -1747,7 +1747,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
         if ((string_equal(c_token_spelling(preprocess.spelling_base, first), S8("sizeof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Alignof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("alignof"))) &&
             start + 1 < end)
         {
-            return c_parse_expression_scalar_type(result, preprocess.target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG);
+            return c_parse_expression_scalar_type(result,
+                                                  target_uses_llp64_data_model(preprocess.target) ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG);
         }
         if (c_preprocess_dialect_is_c23(preprocess.dialect) && (string_equal(c_token_spelling(preprocess.spelling_base, first), S8("true")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("false"))) &&
             end == start + 1)
@@ -2089,7 +2090,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             }
             else if (left_type->kind == C_TYPE_POINTER && right_type->kind == C_TYPE_POINTER && c_token_is_punctuator(&operation, C_PUNCTUATOR_MINUS))
             {
-                last = c_parse_expression_scalar_type(result, preprocess.target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_LONG_LONG : C_TYPE_LONG);
+                last = c_parse_expression_scalar_type(result, target_uses_llp64_data_model(preprocess.target) ? C_TYPE_LONG_LONG : C_TYPE_LONG);
             }
             else
             {

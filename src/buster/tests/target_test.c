@@ -52,6 +52,11 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
             OPERATING_SYSTEM_UEFI,
         },
         {
+            S8("aarch64-unknown-uefi"),
+            CPU_ARCH_AARCH64,
+            OPERATING_SYSTEM_UEFI,
+        },
+        {
             S8("aarch64-none-elf"),
             CPU_ARCH_AARCH64,
             OPERATING_SYSTEM_FREESTANDING,
@@ -127,6 +132,33 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, target_vector_register_size(wasm64_target) == 0);
     BUSTER_STRING_TEST(arguments, cpu_arch_to_string_os(CPU_ARCH_WASM64), S8("wasm64"));
     BUSTER_TEST(arguments, target_cpu_features_are_valid(wasm64_target));
+    Target x64_uefi_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_UEFI,
+    };
+    TargetDataLayout x64_uefi_layout = target_data_layout(x64_uefi_target);
+    BUSTER_TEST(arguments, target_data_layout_is_valid(x64_uefi_layout));
+    BUSTER_TEST(arguments, x64_uefi_layout.pointer.size == 8 && x64_uefi_layout.long_integer.size == 4);
+    BUSTER_TEST(arguments, x64_uefi_layout.long_double_type.size == 8 && x64_uefi_layout.long_double_type.bit_width == 64);
+    BUSTER_TEST(arguments, x64_uefi_layout.va_list.size == 8);
+    BUSTER_TEST(arguments, target_uses_llp64_data_model(x64_uefi_target));
+    BUSTER_TEST(arguments, target_uses_16_bit_wchar(x64_uefi_target));
+    BUSTER_TEST(arguments, target_uses_pe_unwind(x64_uefi_target));
+    Target aarch64_uefi_target = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_UEFI,
+    };
+    TargetDataLayout aarch64_uefi_layout = target_data_layout(aarch64_uefi_target);
+    BUSTER_TEST(arguments, target_data_layout_is_valid(aarch64_uefi_layout));
+    BUSTER_TEST(arguments, aarch64_uefi_layout.pointer.size == 8 && aarch64_uefi_layout.long_integer.size == 8);
+    BUSTER_TEST(arguments, aarch64_uefi_layout.long_double_type.size == 16 && aarch64_uefi_layout.long_double_type.bit_width == 128);
+    BUSTER_TEST(arguments, aarch64_uefi_layout.va_list.size == 32 && !aarch64_uefi_layout.plain_char_is_signed);
+    BUSTER_TEST(arguments, !target_uses_llp64_data_model(aarch64_uefi_target));
+    BUSTER_TEST(arguments, target_uses_16_bit_wchar(aarch64_uefi_target));
+    BUSTER_TEST(arguments, target_uses_pe_unwind(aarch64_uefi_target));
+    BUSTER_TEST(arguments, !target_uses_pe_unwind(wasm64_target));
     TargetCpuFeatures rocketlake_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_ROCKETLAKE);
     TargetCpuFeatures rocketlake_avx512 = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512CD, TARGET_CPU_FEATURE_X86_AVX512DQ, TARGET_CPU_FEATURE_X86_AVX512IFMA, TARGET_CPU_FEATURE_X86_AVX512VBMI, TARGET_CPU_FEATURE_X86_AVX512VBMI2, TARGET_CPU_FEATURE_X86_AVX512VNNI, TARGET_CPU_FEATURE_X86_AVX512BITALG, TARGET_CPU_FEATURE_X86_AES, TARGET_CPU_FEATURE_X86_PCLMUL, TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ, TARGET_CPU_FEATURE_X86_GFNI, TARGET_CPU_FEATURE_X86_VAES, TARGET_CPU_FEATURE_X86_VPCLMULQDQ}, 16);
     BUSTER_TEST(arguments, target_cpu_features_subset(rocketlake_avx512, rocketlake_features));
