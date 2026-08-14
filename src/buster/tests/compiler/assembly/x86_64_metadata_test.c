@@ -7999,6 +7999,11 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 
         BusterX86MetadataPhysicalOperand push_imm32 = x86_64_metadata_test_physical_imm(0x12345678, 32);
         BusterX86MetadataPhysicalOperand push_imm8 = x86_64_metadata_test_physical_imm(0x7f, 8);
+        BusterX86MetadataPhysicalOperand push_symbol32 = push_imm32;
+        push_symbol32.value = 0;
+        push_symbol32.has_value = false;
+        push_symbol32.symbol = S8("push_target");
+        push_symbol32.has_symbol = true;
         BusterX86MetadataPhysicalOperand ret_imm16 = x86_64_metadata_test_physical_imm_u64(0x1234, 16);
         BusterX86MetadataPhysicalOperand io_imm8 = x86_64_metadata_test_physical_imm_u64(0x7f, 8);
         BusterX86MetadataPhysicalOperand loop_disp8 = x86_64_metadata_test_physical_relative(0, 8);
@@ -8008,6 +8013,23 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("PUSH"), 9746, &push_imm8, 1,
                                                                  (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
                                                                  (u8 const[]){0x6a, 0x7f}, 2));
+        BusterX86MetadataPhysicalQuery push_symbol_query = x86_64_metadata_test_physical_query(
+            S8("PUSH"), &push_symbol32, 1, (BusterX86MetadataPhysicalAttributes){0}, (String8[1]){S8("*")}, 1);
+        u8 push_symbol_bytes[8] = {0};
+        BusterX86MetadataRelocation push_symbol_relocations[2] = {0};
+        BusterX86MetadataSelectResult push_symbol_select = buster_x86_metadata_select_form(push_symbol_query);
+        BusterX86MetadataEmitResult push_symbol_emit = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = push_symbol_query,
+            .output = push_symbol_bytes,
+            .output_capacity = sizeof(push_symbol_bytes),
+            .relocations = push_symbol_relocations,
+            .relocation_capacity = BUSTER_ARRAY_LENGTH(push_symbol_relocations),
+        });
+        BUSTER_TEST(arguments, push_symbol_select.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && push_symbol_select.form_id == 9743 &&
+                                   push_symbol_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && push_symbol_emit.form_id == 9743 &&
+                                   push_symbol_emit.byte_count == 5 && push_symbol_emit.relocation_count == 1 &&
+                                   push_symbol_relocations[0].offset == 1 && push_symbol_relocations[0].width == 4 &&
+                                   push_symbol_relocations[0].kind == BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32);
         BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("RET_NEAR"), 10019, &ret_imm16, 1,
                                                                  (BusterX86MetadataPhysicalAttributes){0}, 0, 0,
                                                                  (u8 const[]){0xc2, 0x34, 0x12}, 3));

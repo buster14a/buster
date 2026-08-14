@@ -2881,6 +2881,17 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_operand_matches(BusterX86Metad
     // element qualifier with the physical k-register width.
     bool architectural_mask_register = physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
                                        physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK;
+    // A symbolic immediate carries an explicit requested field width.  Keep
+    // that width authoritative during source selection: otherwise PUSH's
+    // imm32 spelling is indistinguishable from its shorter imm8 sibling and
+    // the shortest-form tie breaker silently truncates the relocation field.
+    // Numeric immediates remain variable-width so value fitting can select the
+    // canonical shortest encoding.
+    if (metadata.kind == BUSTER_X86_METADATA_OPERAND_IMMEDIATE && physical.has_symbol && width &&
+        metadata.physical_width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN &&
+        metadata.physical_width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_ANY &&
+        !(metadata.physical_width_flags & buster_x86_metadata_emit_width_flags(width)))
+        return false;
     if (architectural_mask_register && width && width != 64) return false;
     if (!address_generator && !architectural_mask_register && !vector_register && !variable_encoded_width && width && metadata.physical_width_flags &&
         metadata.physical_width_flags != BUSTER_X86_METADATA_PHYSICAL_WIDTH_UNKNOWN &&
