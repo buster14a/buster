@@ -9117,100 +9117,218 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (split_system_v_aggregate && split_float_count)
                         {
-                            u32 overflow_patches[2] = {0};
-                            u32 overflow_patch_count = 0;
+                            u32 overflow_branch_offsets[2] = {0};
+                            u32 overflow_branch_sizes[2] = {0};
+                            u32 overflow_branch_count = 0;
                             if (split_integer_count)
                             {
-                                codegen_emit_u8(&buffer, 0x8b);
-                                codegen_emit_u8(&buffer, 0x08);
-                                codegen_emit_u8(&buffer, 0x81);
-                                codegen_emit_u8(&buffer, 0xf9);
-                                codegen_emit_u32(&buffer, 48 - split_integer_count * 8);
-                                codegen_emit_u8(&buffer, 0x0f);
-                                codegen_emit_u8(&buffer, 0x87);
-                                overflow_patches[overflow_patch_count++] = (u32)buffer.count;
-                                codegen_emit_u32(&buffer, 0);
+                                BusterX86MetadataPhysicalOperand gp_offset_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 32),
+                                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RAX, 32, 0),
+                                };
+                                BusterX86MetadataPhysicalOperand gp_offset_compare_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 32),
+                                    codegen_canonical_x64_metadata_immediate(48 - split_integer_count * 8, 32),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), gp_offset_load_operands,
+                                                                           BUSTER_ARRAY_LENGTH(gp_offset_load_operands)) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("CMP"), gp_offset_compare_operands,
+                                                                           BUSTER_ARRAY_LENGTH(gp_offset_compare_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                u32 branch_offset = (u32)buffer.count;
+                                BusterX86MetadataPhysicalOperand overflow_branch_operand = codegen_canonical_x64_metadata_relative(0, 32);
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JNBE"), &overflow_branch_operand, 1))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                u32 branch_size = (u32)buffer.count - branch_offset;
+                                if (branch_size < 4 || overflow_branch_count >= BUSTER_ARRAY_LENGTH(overflow_branch_offsets))
+                                {
+                                    result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                    return result;
+                                }
+                                overflow_branch_offsets[overflow_branch_count] = branch_offset;
+                                overflow_branch_sizes[overflow_branch_count] = branch_size;
+                                overflow_branch_count += 1;
                             }
-                            codegen_emit_u8(&buffer, 0x44);
-                            codegen_emit_u8(&buffer, 0x8b);
-                            codegen_emit_u8(&buffer, 0x40);
-                            codegen_emit_u8(&buffer, 4);
-                            codegen_emit_u8(&buffer, 0x41);
-                            codegen_emit_u8(&buffer, 0x81);
-                            codegen_emit_u8(&buffer, 0xf8);
-                            codegen_emit_u32(&buffer, 176 - split_float_count * 16);
-                            codegen_emit_u8(&buffer, 0x0f);
-                            codegen_emit_u8(&buffer, 0x87);
-                            overflow_patches[overflow_patch_count++] = (u32)buffer.count;
-                            codegen_emit_u32(&buffer, 0);
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x8b);
-                            codegen_emit_u8(&buffer, 0x50);
-                            codegen_emit_u8(&buffer, 16);
+                            BusterX86MetadataPhysicalOperand fp_offset_load_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 32),
+                                codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RAX, 32, 4),
+                            };
+                            BusterX86MetadataPhysicalOperand fp_offset_compare_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 32),
+                                codegen_canonical_x64_metadata_immediate(176 - split_float_count * 16, 32),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), fp_offset_load_operands,
+                                                                       BUSTER_ARRAY_LENGTH(fp_offset_load_operands)) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("CMP"), fp_offset_compare_operands,
+                                                                       BUSTER_ARRAY_LENGTH(fp_offset_compare_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
+                            u32 fp_branch_offset = (u32)buffer.count;
+                            BusterX86MetadataPhysicalOperand fp_overflow_branch_operand = codegen_canonical_x64_metadata_relative(0, 32);
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JNBE"), &fp_overflow_branch_operand, 1))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
+                            u32 fp_branch_size = (u32)buffer.count - fp_branch_offset;
+                            if (fp_branch_size < 4 || overflow_branch_count >= BUSTER_ARRAY_LENGTH(overflow_branch_offsets))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            overflow_branch_offsets[overflow_branch_count] = fp_branch_offset;
+                            overflow_branch_sizes[overflow_branch_count] = fp_branch_size;
+                            overflow_branch_count += 1;
+
+                            BusterX86MetadataPhysicalOperand register_save_area_load_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RAX, 64, 16),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), register_save_area_load_operands,
+                                                                       BUSTER_ARRAY_LENGTH(register_save_area_load_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                             u32 integer_part = 0;
                             u32 float_part = 0;
                             for (u32 part = 0; part < aggregate_abi.part_count; part += 1)
                             {
                                 bool part_float = codegen_canonical_abi_part_is_float(aggregate_abi.parts[part].abi_class);
                                 u32 part_offset = part_float ? float_part++ * 16 : integer_part++ * 8;
-                                codegen_emit_u8(&buffer, part_float ? 0x4e : 0x4c);
-                                codegen_emit_u8(&buffer, 0x8b);
-                                codegen_emit_u8(&buffer, part_offset ? 0x4c : 0x0c);
-                                codegen_emit_u8(&buffer, part_float ? 0x02 : 0x0a);
-                                if (part_offset)
+                                X64Register index_register = part_float ? X64_REGISTER_R8 : X64_REGISTER_RCX;
+                                BusterX86MetadataPhysicalOperand part_memory =
+                                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RDX, 64, part_offset);
+                                part_memory.memory.has_index = true;
+                                part_memory.memory.index = codegen_canonical_x64_metadata_gpr(index_register, 64).reg;
+                                part_memory.memory.scale = 1;
+                                BusterX86MetadataPhysicalOperand part_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 64),
+                                    part_memory,
+                                };
+                                BusterX86MetadataPhysicalOperand part_store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(
+                                        X64_REGISTER_RBP, 64,
+                                        (s64)result_displacement + (s64)aggregate_abi.parts[part].value_offset),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 64),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), part_load_operands,
+                                                                           BUSTER_ARRAY_LENGTH(part_load_operands)) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), part_store_operands,
+                                                                           BUSTER_ARRAY_LENGTH(part_store_operands)))
                                 {
-                                    codegen_emit_u8(&buffer, (u8)part_offset);
+                                    result.error = buffer.error;
+                                    return result;
                                 }
-                                codegen_emit_u8(&buffer, 0x4c);
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, 0x8d);
-                                codegen_emit_u32(&buffer, (u32)(result_displacement + (s32)aggregate_abi.parts[part].value_offset));
                             }
                             if (split_integer_count)
                             {
-                                codegen_emit_u8(&buffer, 0x83);
-                                codegen_emit_u8(&buffer, 0x00);
-                                codegen_emit_u8(&buffer, (u8)(split_integer_count * 8));
+                                BusterX86MetadataPhysicalOperand gp_offset_advance_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RAX, 32, 0),
+                                    codegen_canonical_x64_metadata_immediate(split_integer_count * 8, 8),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), gp_offset_advance_operands,
+                                                                           BUSTER_ARRAY_LENGTH(gp_offset_advance_operands)))
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
                             }
-                            codegen_emit_u8(&buffer, 0x83);
-                            codegen_emit_u8(&buffer, 0x40);
-                            codegen_emit_u8(&buffer, 4);
-                            codegen_emit_u8(&buffer, (u8)(split_float_count * 16));
-                            codegen_emit_u8(&buffer, 0xe9);
-                            u32 end_patch = (u32)buffer.count;
-                            codegen_emit_u32(&buffer, 0);
-                            u32 overflow_offset = (u32)buffer.count;
-                            for (u32 patch = 0; patch < overflow_patch_count; patch += 1)
+                            BusterX86MetadataPhysicalOperand fp_offset_advance_operands[2] = {
+                                codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RAX, 32, 4),
+                                codegen_canonical_x64_metadata_immediate(split_float_count * 16, 8),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), fp_offset_advance_operands,
+                                                                       BUSTER_ARRAY_LENGTH(fp_offset_advance_operands)))
                             {
-                                s32 delta = (s32)(overflow_offset - (overflow_patches[patch] + 4));
-                                memcpy(buffer.bytes + overflow_patches[patch], &delta, sizeof(delta));
+                                result.error = buffer.error;
+                                return result;
                             }
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x8b);
-                            codegen_emit_u8(&buffer, 0x50);
-                            codegen_emit_u8(&buffer, 8);
-                            codegen_emit_u8(&buffer, 0x48);
-                            codegen_emit_u8(&buffer, 0x81);
-                            codegen_emit_u8(&buffer, 0x40);
-                            codegen_emit_u8(&buffer, 8);
-                            codegen_emit_u32(&buffer, (u32)((value_type->layout.size + 7) & ~(u64)7));
+                            u32 end_branch_offset = (u32)buffer.count;
+                            BusterX86MetadataPhysicalOperand end_branch_operand = codegen_canonical_x64_metadata_relative(0, 32);
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("JMP"), &end_branch_operand, 1))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
+                            u32 end_branch_size = (u32)buffer.count - end_branch_offset;
+                            if (end_branch_size < 4)
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            u32 overflow_offset = (u32)buffer.count;
+                            BusterX86MetadataPhysicalOperand overflow_area_load_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RAX, 64, 8),
+                            };
+                            u32 stack_size = (u32)((value_type->layout.size + 7) & ~(u64)7);
+                            BusterX86MetadataPhysicalOperand overflow_area_advance_operands[2] = {
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RAX, 64, 8),
+                                codegen_canonical_x64_metadata_immediate((s64)stack_size, 32),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), overflow_area_load_operands,
+                                                                       BUSTER_ARRAY_LENGTH(overflow_area_load_operands)) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), overflow_area_advance_operands,
+                                                                       BUSTER_ARRAY_LENGTH(overflow_area_advance_operands)))
+                            {
+                                result.error = buffer.error;
+                                return result;
+                            }
                             for (u32 part = 0; part < aggregate_abi.part_count; part += 1)
                             {
-                                codegen_emit_u8(&buffer, 0x4c);
-                                codegen_emit_u8(&buffer, 0x8b);
-                                codegen_emit_u8(&buffer, aggregate_abi.parts[part].value_offset ? 0x4a : 0x0a);
-                                if (aggregate_abi.parts[part].value_offset)
+                                u32 part_offset = part * 8;
+                                BusterX86MetadataPhysicalOperand overflow_part_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 64),
+                                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RDX, 64, part_offset),
+                                };
+                                BusterX86MetadataPhysicalOperand overflow_part_store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(
+                                        X64_REGISTER_RBP, 64,
+                                        (s64)result_displacement + (s64)aggregate_abi.parts[part].value_offset),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 64),
+                                };
+                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), overflow_part_load_operands,
+                                                                           BUSTER_ARRAY_LENGTH(overflow_part_load_operands)) ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), overflow_part_store_operands,
+                                                                           BUSTER_ARRAY_LENGTH(overflow_part_store_operands)))
                                 {
-                                    codegen_emit_u8(&buffer, (u8)aggregate_abi.parts[part].value_offset);
+                                    result.error = buffer.error;
+                                    return result;
                                 }
-                                codegen_emit_u8(&buffer, 0x4c);
-                                codegen_emit_u8(&buffer, 0x89);
-                                codegen_emit_u8(&buffer, 0x8d);
-                                codegen_emit_u32(&buffer, (u32)(result_displacement + (s32)aggregate_abi.parts[part].value_offset));
                             }
                             u32 end_offset = (u32)buffer.count;
-                            s32 end_delta = (s32)(end_offset - (end_patch + 4));
-                            memcpy(buffer.bytes + end_patch, &end_delta, sizeof(end_delta));
+                            for (u32 branch = 0; branch < overflow_branch_count; branch += 1)
+                            {
+                                u32 branch_offset = overflow_branch_offsets[branch];
+                                u32 branch_size = overflow_branch_sizes[branch];
+                                u32 field_offset = branch_offset + branch_size - 4;
+                                s64 delta = (s64)overflow_offset - ((s64)branch_offset + branch_size);
+                                if (delta < INT32_MIN || delta > INT32_MAX || field_offset + sizeof(s32) > buffer.count)
+                                {
+                                    result.error = CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
+                                s32 displacement = (s32)delta;
+                                memcpy(buffer.bytes + field_offset, &displacement, sizeof(displacement));
+                            }
+                            u32 end_field_offset = end_branch_offset + end_branch_size - 4;
+                            s64 end_delta = (s64)end_offset - ((s64)end_branch_offset + end_branch_size);
+                            if (end_delta < INT32_MIN || end_delta > INT32_MAX || end_field_offset + sizeof(s32) > buffer.count)
+                            {
+                                result.error = CODEGEN_ERROR_CAPACITY;
+                                return result;
+                            }
+                            s32 end_displacement = (s32)end_delta;
+                            memcpy(buffer.bytes + end_field_offset, &end_displacement, sizeof(end_displacement));
                             instruction_id = instruction->next;
                             continue;
                         }
