@@ -4640,6 +4640,7 @@ enum
     MACHINE_X64_LEA_SYMBOL_EXACT_FORM_ID = 9849u,
     MACHINE_X64_MOVQ_TO_XMM_EXACT_FORM_ID = 10574u,
     MACHINE_X64_MOVQ_FROM_XMM_EXACT_FORM_ID = 10575u,
+    MACHINE_X64_LOAD_INCOMING_EXACT_FORM_ID = 9845u,
     MACHINE_X64_PUSH_REGISTER_EXACT_FORM_ID = 9722u,
     MACHINE_X64_ADD_RSP_EXACT_FORM_ID = 9270u,
 };
@@ -4657,6 +4658,7 @@ enum
     MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP = 1u << 0,
     MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP = 1u << 1,
     MACHINE_X64_EXACT_RECIPE_FLAG_CALL_SITE = 1u << 2,
+    MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32 = 1u << 3,
 };
 
 typedef enum MachineX64ExactOperandProjection
@@ -4667,6 +4669,7 @@ typedef enum MachineX64ExactOperandProjection
     MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD,
     MACHINE_X64_EXACT_OPERAND_RELATIVE_ZERO,
     MACHINE_X64_EXACT_OPERAND_RIP_MEMORY_ZERO,
+    MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_PAYLOAD,
     MACHINE_X64_EXACT_OPERAND_PROJECTION_COUNT,
 } MachineX64ExactOperandProjection;
 
@@ -4706,6 +4709,7 @@ typedef enum MachineX64ExactPlanId
     MACHINE_X64_EXACT_PLAN_TEST,
     MACHINE_X64_EXACT_PLAN_MFENCE,
     MACHINE_X64_EXACT_PLAN_INT3,
+    MACHINE_X64_EXACT_PLAN_LOAD_INCOMING,
     MACHINE_X64_EXACT_PLAN_COUNT,
     MACHINE_X64_EXACT_PLAN_INVALID = UINT8_MAX,
 } MachineX64ExactPlanId;
@@ -4935,6 +4939,14 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_exact_recipe_table[M
         .operand_count = 2, .operand_slots = {0, 0},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_XMM_PAYLOAD}, .operand_widths = {64, 128},
     },
+    [42] = {
+        .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 42),
+        .key = {MACHINE_X64_LOAD_INCOMING_EXACT_FORM_ID, UINT64_C(0xca30e68cfa1406bc)},
+        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32,
+        .operand_slots = {0, 0},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_PAYLOAD},
+        .operand_widths = {64, 64},
+    },
     [43] = {
         .recipe = MACHINE_EMIT_RECIPE_MAKE(MACHINE_EMIT_RECIPE_CATEGORY_DIRECT, 43),
         .key = {MACHINE_X64_PUSH_REGISTER_EXACT_FORM_ID, UINT64_C(0x849cc7557c589605)},
@@ -4972,9 +4984,10 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_exact_recipe_table[M
     },
 };
 
-// DIRECT recipe index -> compact unique exact-plan identity.  Index 42 is
-// LOAD_INCOMING, intentionally still LEGACY_RAW, and therefore has no plan.
-// The table is immutable; the plan values themselves are published only by
+// DIRECT recipe index -> compact unique exact-plan identity.  Width variants
+// and projection variants share a plan; LOAD_INCOMING has its own plan because
+// its memory operand is a distinct metadata form.  The table is immutable;
+// the plan values themselves are published only by
 // machine_x86_64_exact_prewarm() after every selected key has prepared.
 BUSTER_GLOBAL_LOCAL u8 const machine_x64_exact_plan_id_by_recipe[MACHINE_X86_64_EMIT_REGISTRY_DIRECT_COUNT] = {
     [0] = MACHINE_X64_EXACT_PLAN_MOV,
@@ -5019,7 +5032,7 @@ BUSTER_GLOBAL_LOCAL u8 const machine_x64_exact_plan_id_by_recipe[MACHINE_X86_64_
     [39] = MACHINE_X64_EXACT_PLAN_LEA_SYMBOL,
     [40] = MACHINE_X64_EXACT_PLAN_MOVQ_TO_XMM,
     [41] = MACHINE_X64_EXACT_PLAN_MOVQ_FROM_XMM,
-    [42] = MACHINE_X64_EXACT_PLAN_INVALID,
+    [42] = MACHINE_X64_EXACT_PLAN_LOAD_INCOMING,
     [43] = MACHINE_X64_EXACT_PLAN_PUSH,
     [44] = MACHINE_X64_EXACT_PLAN_ADD_RSP,
     [45] = MACHINE_X64_EXACT_PLAN_MFENCE,
@@ -5240,9 +5253,30 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_rip_memor
     };
 }
 
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand machine_x64_exact_rbp_memory_operand(u32 displacement)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+        .width = 64,
+        .memory = {
+            .base = {
+                .index = MACHINE_X64_RBP,
+                .width = 64,
+                .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR,
+            },
+            .displacement = displacement,
+            .address_size = 64,
+            .scale = 1,
+            .has_base = true,
+            .has_displacement = true,
+        },
+    };
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_form(MachineX64Encoder* encoder,
                                                      BusterX86MetadataMachineExactToken metadata_token,
                                                      BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+                                                     bool force_disp32,
                                                      MachineX64ExactEmitCounters* counters)
 {
     if (counters) counters->attempts += 1;
@@ -5250,6 +5284,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_form(MachineX64Encoder* encoder,
     BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_exact_machine(metadata_token, (BusterX86MetadataMachineExactQuery){
         .operands = operands,
         .operand_count = operand_count,
+        .force_disp32 = force_disp32,
         .output = exact_bytes,
         .output_capacity = sizeof(exact_bytes),
         .relocations = 0,
@@ -5296,6 +5331,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
     // Every active descriptor slot is populated by the projection loop before
     // the metadata query; no inactive slot is consumed by the exact API.
     BusterX86MetadataPhysicalOperand operands[2];
+    bool force_disp32 = (descriptor->flags & MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32) != 0;
     for (u32 operand_index = 0; operand_index < descriptor->operand_count; operand_index += 1)
     {
         u16 width = descriptor->operand_widths[operand_index];
@@ -5320,13 +5356,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
         case MACHINE_X64_EXACT_OPERAND_RIP_MEMORY_ZERO:
             operands[operand_index] = machine_x64_exact_rip_memory_operand();
             break;
+        case MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_PAYLOAD:
+            operands[operand_index] = machine_x64_exact_rbp_memory_operand(16u + payload);
+            break;
         default:
             if (counters) counters->attempts += 1;
             if (counters) counters->fallbacks += 1;
             return false;
         }
     }
-    return machine_x64_emit_exact_form(encoder, entry->metadata_token, operands, descriptor->operand_count, counters);
+    return machine_x64_emit_exact_form(encoder, entry->metadata_token, operands, descriptor->operand_count, force_disp32, counters);
 }
 
 typedef struct MachineX64BranchFixup MachineX64BranchFixup;
@@ -6570,17 +6609,6 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 machine_x64_emit8(&encoder, 0x0f);
                 machine_x64_emit8(&encoder, 0x2c);
                 machine_x64_emit8(&encoder, machine_x64_modrm_register(operand_registers[0], 0));
-            }
-            break;
-            case MACHINE_X64_LOAD_INCOMING:
-            {
-                // The incoming argument area sits past the saved frame base
-                // and return address.
-                u32 destination = operand_registers[0];
-                machine_x64_emit8(&encoder, (u8)(0x48 | (destination >= 8 ? 0x04 : 0)));
-                machine_x64_emit8(&encoder, 0x8b);
-                machine_x64_emit8(&encoder, (u8)(0x85 | ((destination & 7) << 3)));
-                machine_x64_emit32(&encoder, 16 + instruction->payload);
             }
             break;
             case MACHINE_X64_VA_SAVE:

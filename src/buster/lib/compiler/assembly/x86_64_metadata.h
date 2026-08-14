@@ -871,6 +871,13 @@ struct BusterX86MetadataMachineExactQuery
 {
     BusterX86MetadataPhysicalOperand const* operands;
     u32 operand_count;
+    // Machine-only addressing policy used by the legacy incoming-argument
+    // bridge.  When set, a base-address ModRM operand is emitted with a
+    // disp32 field even when the displacement would fit the canonical
+    // disp8 relaxation.  The checked/prevalidated exact APIs do not expose
+    // this policy and retain their ordinary relaxation rules.
+    bool force_disp32;
+    u8 reserved[3];
     u8* output;
     u32 output_capacity;
     BusterX86MetadataRelocation* relocations;

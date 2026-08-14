@@ -313,6 +313,39 @@ BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_exact_second_register_fun
     return function;
 }
 
+// LOAD_INCOMING is the final direct recipe migrated to metadata.  Keep the
+// incoming offsets at the legacy producer's boundary values: payload 0 gives
+// the ordinary positive disp32, 112 reaches the disp8/disp32 boundary after
+// the fixed frame prefix, and 128 exercises a larger displacement.  R9/R10
+// make the REX.R destination projection observable alongside RAX.
+BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_exact_load_incoming_function(Arena* arena)
+{
+#define MACHINE_TEST_LOAD_INCOMING_PHYSICAL(reg) machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, (reg))
+    MachineFunctionBuilder builder = machine_function_builder_begin(arena);
+    machine_builder_block_begin(&builder);
+    machine_builder_instruction(&builder, (MachineInstruction){
+                                                      .opcode = MACHINE_X64_LOAD_INCOMING,
+                                                      .payload = 0,
+                                                      .operands = {MACHINE_TEST_LOAD_INCOMING_PHYSICAL(MACHINE_X64_RAX)},
+                                                  });
+    machine_builder_instruction(&builder, (MachineInstruction){
+                                                      .opcode = MACHINE_X64_LOAD_INCOMING,
+                                                      .payload = 112,
+                                                      .operands = {MACHINE_TEST_LOAD_INCOMING_PHYSICAL(MACHINE_X64_R9)},
+                                                  });
+    machine_builder_instruction(&builder, (MachineInstruction){
+                                                      .opcode = MACHINE_X64_LOAD_INCOMING,
+                                                      .payload = 128,
+                                                      .operands = {MACHINE_TEST_LOAD_INCOMING_PHYSICAL(MACHINE_X64_R10)},
+                                                  });
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&builder, (MachineBlock){0});
+    MachineFunction function = machine_function_builder_finish(arena, &builder);
+    function.target = machine_target_x86_64();
+#undef MACHINE_TEST_LOAD_INCOMING_PHYSICAL
+    return function;
+}
+
 // Relative/symbolic DIRECT rows keep their canonical fixup streams: JMP is
 // queried with a neutral rel32 and patched to its block, while LEA_SYMBOL is
 // queried with a neutral RIP-relative AGEN and retained as a call-site row.
@@ -509,9 +542,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             // x86 enum interleaves family and expansion rows between direct
             // rows.  Keeping the expected recipe index beside each cohort
             // catches a reordered row as well as a stale status token.
-            // LOAD_INCOMING (direct index 42) intentionally remains legacy:
-            // its fixed disp32 producer is not a strict metadata-exact form
-            // for every payload (the compact disp8 form changes by offset).
+            // LOAD_INCOMING (direct index 42) uses an explicit machine-only
+            // disp32 policy so its metadata projection preserves the legacy
+            // spelling at every incoming-argument offset.
             bool expected_exact = false;
             u16 expected_exact_index = 0;
             if (entry->opcode >= MACHINE_X64_MOV_RR && entry->opcode <= MACHINE_X64_NOT64)
@@ -553,6 +586,11 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             {
                 expected_exact = true;
                 expected_exact_index = (u16)(40 + (entry->opcode - MACHINE_X64_MOVQ_TO_XMM));
+            }
+            else if (entry->opcode == MACHINE_X64_LOAD_INCOMING)
+            {
+                expected_exact = true;
+                expected_exact_index = 42;
             }
             else if (entry->opcode == MACHINE_X64_PUSH_REGISTER || entry->opcode == MACHINE_X64_ADD_RSP)
             {
@@ -2653,6 +2691,51 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_second_encoded.exact_failures == 0);
     BUSTER_TEST(arguments, exact_second_encoded.exact_attempts ==
                                    exact_second_encoded.exact_successes + exact_second_encoded.exact_failures);
+
+    MachineFunction exact_load_incoming_function = machine_test_build_exact_load_incoming_function(arguments->arena);
+    BUSTER_TEST(arguments, machine_verify_function(&exact_load_incoming_function).error == MACHINE_VERIFY_NONE);
+    MachineStackPlacement exact_load_incoming_placement =
+        machine_stack_placement_build(arguments->arena, &exact_load_incoming_function);
+    BUSTER_TEST(arguments, exact_load_incoming_placement.valid && exact_load_incoming_placement.edit_count == 0);
+    MachineEncodeResult exact_load_incoming_encoded =
+        machine_encode_x86_64(arguments->arena, &exact_load_incoming_function, &exact_load_incoming_placement);
+    bool exact_load_incoming_bytes = exact_load_incoming_encoded.valid;
+    if (exact_load_incoming_bytes)
+    {
+        u32 rax_load = exact_load_incoming_encoded.row_offsets[0];
+        u32 r9_load = exact_load_incoming_encoded.row_offsets[1];
+        u32 r10_load = exact_load_incoming_encoded.row_offsets[2];
+        // All three rows retain the old seven-byte [RBP+disp32] spelling,
+        // including the offsets that metadata would otherwise relax to
+        // disp8.  The final two rows also verify REX.R for extended regs.
+        exact_load_incoming_bytes &= exact_load_incoming_encoded.bytes[rax_load + 0] == 0x48 &&
+                                     exact_load_incoming_encoded.bytes[rax_load + 1] == 0x8b &&
+                                     exact_load_incoming_encoded.bytes[rax_load + 2] == 0x85 &&
+                                     exact_load_incoming_encoded.bytes[rax_load + 3] == 0x10 &&
+                                     exact_load_incoming_encoded.bytes[rax_load + 4] == 0x00 &&
+                                     exact_load_incoming_encoded.bytes[rax_load + 5] == 0x00 &&
+                                     exact_load_incoming_encoded.bytes[rax_load + 6] == 0x00;
+        exact_load_incoming_bytes &= exact_load_incoming_encoded.bytes[r9_load + 0] == 0x4c &&
+                                     exact_load_incoming_encoded.bytes[r9_load + 1] == 0x8b &&
+                                     exact_load_incoming_encoded.bytes[r9_load + 2] == 0x8d &&
+                                     exact_load_incoming_encoded.bytes[r9_load + 3] == 0x80 &&
+                                     exact_load_incoming_encoded.bytes[r9_load + 4] == 0x00 &&
+                                     exact_load_incoming_encoded.bytes[r9_load + 5] == 0x00 &&
+                                     exact_load_incoming_encoded.bytes[r9_load + 6] == 0x00;
+        exact_load_incoming_bytes &= exact_load_incoming_encoded.bytes[r10_load + 0] == 0x4c &&
+                                     exact_load_incoming_encoded.bytes[r10_load + 1] == 0x8b &&
+                                     exact_load_incoming_encoded.bytes[r10_load + 2] == 0x95 &&
+                                     exact_load_incoming_encoded.bytes[r10_load + 3] == 0x90 &&
+                                     exact_load_incoming_encoded.bytes[r10_load + 4] == 0x00 &&
+                                     exact_load_incoming_encoded.bytes[r10_load + 5] == 0x00 &&
+                                     exact_load_incoming_encoded.bytes[r10_load + 6] == 0x00;
+    }
+    BUSTER_TEST(arguments, exact_load_incoming_encoded.valid && exact_load_incoming_bytes);
+    BUSTER_TEST(arguments, exact_load_incoming_encoded.exact_attempts == 3);
+    BUSTER_TEST(arguments, exact_load_incoming_encoded.exact_successes == 3);
+    BUSTER_TEST(arguments, exact_load_incoming_encoded.exact_failures == 0);
+    BUSTER_TEST(arguments, exact_load_incoming_encoded.exact_attempts ==
+                                   exact_load_incoming_encoded.exact_successes + exact_load_incoming_encoded.exact_failures);
 
     MachineFunction exact_relative_function = machine_test_build_exact_relative_function(arguments->arena);
     BUSTER_TEST(arguments, machine_verify_function(&exact_relative_function).error == MACHINE_VERIFY_NONE);

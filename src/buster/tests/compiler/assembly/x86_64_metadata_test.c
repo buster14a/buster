@@ -728,6 +728,123 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_lookup_stress(u32 reque
     for (u32 index = 0; index < thread_count; index += 1) created &= os_thread_join(threads[index]);
     return created && thread_count == requested_thread_count && !atomic_u64_add(&state.failed, 0);
 }
+
+typedef struct X86_64MetadataConcurrentExactState X86_64MetadataConcurrentExactState;
+struct X86_64MetadataConcurrentExactState
+{
+    AtomicU64 start;
+    AtomicU64 failed;
+    BusterX86MetadataMachineExactToken token;
+    BusterX86MetadataPhysicalOperand const* operands;
+    u32 operand_count;
+    u8 expected_bytes[16];
+    u32 expected_byte_count;
+    BusterX86MetadataEncodeStatus expected_status;
+};
+
+BUSTER_GLOBAL_LOCAL void x86_64_metadata_test_concurrent_exact_emit(void* argument)
+{
+    X86_64MetadataConcurrentExactState* state = (X86_64MetadataConcurrentExactState*)argument;
+    while (!atomic_u64_add(&state->start, 0))
+    {
+    }
+    for (u32 iteration = 0; iteration < 96; iteration += 1)
+    {
+        u8 output[16] = {0};
+        BusterX86MetadataEmitResult result = buster_x86_metadata_emit_exact_machine(
+            state->token, (BusterX86MetadataMachineExactQuery){
+                              .operands = state->operands,
+                              .operand_count = state->operand_count,
+                              .output = output,
+                              .output_capacity = BUSTER_ARRAY_LENGTH(output),
+                          });
+        if (result.status != state->expected_status || result.byte_count != state->expected_byte_count ||
+            (result.byte_count && memcmp(output, state->expected_bytes, result.byte_count) != 0))
+        {
+            atomic_u64_increment(&state->failed);
+            return;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_exact_emit_stress(u32 requested_thread_count)
+{
+    // MOV r64,r64 is a compact representative of the migrated DIRECT
+    // cohort.  The checked result is captured before the gang starts; every
+    // worker then exercises the immutable token/binding plan only.
+    BusterX86MetadataFormKey key = {.form_id = 9842u, .stable_hash = UINT64_C(0x3ab69ab9d0d06329)};
+    BusterX86MetadataExactPlan plan = {0};
+    String8 wildcard_features[1] = {S8("*")};
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        {
+            .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+            .width = 64,
+            .reg = {.index = 0, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+        },
+        {
+            .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+            .width = 64,
+            .reg = {.index = 1, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+        },
+    };
+    if (!buster_x86_metadata_exact_plan_for_key(key, &plan)) return false;
+    BusterX86MetadataMachineExactToken token = {0};
+    if (!buster_x86_metadata_machine_exact_token_for_plan(
+            plan, (BusterX86MetadataFeatureInput){.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)}, &token))
+        return false;
+    u8 checked_bytes[16] = {0};
+    BusterX86MetadataEmitResult checked = buster_x86_metadata_emit_exact_query((BusterX86MetadataExactQuery){
+        .key = key,
+        .operands = operands,
+        .operand_count = BUSTER_ARRAY_LENGTH(operands),
+        .features = {.names = wildcard_features, .count = BUSTER_ARRAY_LENGTH(wildcard_features)},
+        .address_size = 64,
+        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+        .output = checked_bytes,
+        .output_capacity = BUSTER_ARRAY_LENGTH(checked_bytes),
+    });
+    u8 machine_bytes[16] = {0};
+    BusterX86MetadataEmitResult machine = buster_x86_metadata_emit_exact_machine(
+        token, (BusterX86MetadataMachineExactQuery){
+                   .operands = operands,
+                   .operand_count = BUSTER_ARRAY_LENGTH(operands),
+                   .output = machine_bytes,
+                   .output_capacity = BUSTER_ARRAY_LENGTH(machine_bytes),
+               });
+    if (checked.status != BUSTER_X86_METADATA_ENCODE_SUCCESS ||
+        machine.status != checked.status || machine.byte_count != checked.byte_count ||
+        memcmp(machine_bytes, checked_bytes, checked.byte_count) != 0)
+        return false;
+
+    X86_64MetadataConcurrentExactState state = {
+        .token = token,
+        .operands = operands,
+        .operand_count = BUSTER_ARRAY_LENGTH(operands),
+        .expected_byte_count = checked.byte_count,
+        .expected_status = checked.status,
+    };
+    memcpy(state.expected_bytes, checked_bytes, checked.byte_count);
+    OsThreadHandle* threads[X86_64_METADATA_TEST_MAX_THREAD_COUNT] = {0};
+    u32 thread_count = 0;
+    bool created = true;
+    BUSTER_CHECK(requested_thread_count && requested_thread_count <= BUSTER_ARRAY_LENGTH(threads));
+    for (u32 index = 0; index < requested_thread_count; index += 1)
+    {
+        threads[index] = os_thread_create((ThreadCreateOptions){
+            .callback = &x86_64_metadata_test_concurrent_exact_emit,
+            .argument = &state,
+        });
+        if (!threads[index])
+        {
+            created = false;
+            break;
+        }
+        thread_count += 1;
+    }
+    atomic_u64_increment(&state.start);
+    for (u32 index = 0; index < thread_count; index += 1) created &= os_thread_join(threads[index]);
+    return created && thread_count == requested_thread_count && !atomic_u64_add(&state.failed, 0);
+}
 #endif
 
 BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand x86_64_metadata_test_physical_reg(u8 physical_class, u16 index, u16 width)
@@ -3895,6 +4012,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 #if !BUSTER_SINGLE_THREADED
     u64 metadata_worker_count = buster_test_worker_count(X86_64_METADATA_TEST_MAX_THREAD_COUNT);
     BUSTER_TEST(arguments, x86_64_metadata_test_concurrent_lookup_stress((u32)metadata_worker_count));
+    BUSTER_TEST(arguments, x86_64_metadata_test_concurrent_exact_emit_stress((u32)metadata_worker_count));
 #endif
 
     BusterX86MetadataCandidateRange mov = buster_x86_metadata_lookup_mnemonic(S8("MOV"));
